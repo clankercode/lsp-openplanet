@@ -210,10 +210,10 @@ pub enum ExprKind {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IsTarget {
     Null,
-    Type,
+    Type(TypeExpr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

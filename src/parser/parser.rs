@@ -1096,6 +1096,28 @@ impl<'a> Parser<'a> {
     /// Parse assignment expressions: lhs [assign-op] rhs (right-associative).
     /// Also handles handle assignment: `@x = @y`.
     fn parse_assignment_expr(&mut self) -> Result<Expr, ParseError> {
+        // Handle `@lhs = @rhs` (handle assignment)
+        if self.at(TokenKind::At) {
+            let start = self.current_span().start;
+            self.advance(); // eat @
+            let lhs = self.parse_ternary_expr()?;
+            if self.at(TokenKind::Eq) {
+                self.advance(); // eat =
+                // Eat optional @ on rhs
+                self.eat(TokenKind::At);
+                let rhs = self.parse_assignment_expr()?;
+                return Ok(Expr {
+                    span: Span::new(start, rhs.span.end),
+                    kind: ExprKind::HandleAssign {
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
+                });
+            }
+            // @ without assignment — just return the inner expression
+            return Ok(lhs);
+        }
+
         let expr = self.parse_ternary_expr()?;
         // Check for assignment operators
         if matches!(
@@ -1312,11 +1334,11 @@ impl<'a> Parser<'a> {
                 TokenKind::KwIs => {
                     // `expr is null` or `expr is Type`
                     self.advance(); // eat `is`
-                    let (target, negated) = if self.at(TokenKind::KwNull) {
+                    let target = if self.at(TokenKind::KwNull) {
                         self.advance();
-                        (IsTarget::Null, false)
+                        IsTarget::Null
                     } else {
-                        (IsTarget::Type, false)
+                        IsTarget::Type(self.parse_type_expr()?)
                     };
                     let span = self.span_from(lhs.span.start);
                     lhs = Expr {
@@ -1324,7 +1346,7 @@ impl<'a> Parser<'a> {
                         kind: ExprKind::Is {
                             expr: Box::new(lhs),
                             target,
-                            negated,
+                            negated: false,
                         },
                     };
                 }
@@ -1332,11 +1354,11 @@ impl<'a> Parser<'a> {
                     // `expr !is null` or `expr !is Type`
                     self.advance(); // eat `!`
                     self.advance(); // eat `is`
-                    let (target, _) = if self.at(TokenKind::KwNull) {
+                    let target = if self.at(TokenKind::KwNull) {
                         self.advance();
-                        (IsTarget::Null, true)
+                        IsTarget::Null
                     } else {
-                        (IsTarget::Type, true)
+                        IsTarget::Type(self.parse_type_expr()?)
                     };
                     let span = self.span_from(lhs.span.start);
                     lhs = Expr {
@@ -2189,23 +2211,6 @@ impl<'a> Parser<'a> {
         self.peek_ahead(i) == TokenKind::Ident
     }
 
-    /// Error recovery: skip tokens until we find `;` or `{`/`}`.
-    #[allow(dead_code)]
-    fn synchronize_to_semi_or_brace(&mut self) {
-        loop {
-            match self.peek() {
-                TokenKind::Semi => {
-                    self.advance();
-                    return;
-                }
-                TokenKind::LBrace | TokenKind::RBrace => return,
-                TokenKind::Eof => return,
-                _ => {
-                    self.advance();
-                }
-            }
-        }
-    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -2721,5 +2726,43 @@ ForcePadType Setting_General_ForcePadType = ForcePadType::None;"#;
         let mut p = Parser::new(&tokens, src);
         let _file = p.parse_file();
         assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_handle_assignment() {
+        let src = "void f() { @editor = @GetApp().Editor; }";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_is_type() {
+        let src = "void f() { if (obj is CGameCtnChallenge) {} }";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_precedence_mul_before_add() {
+        // 1 + 2 * 3 should parse as Add(1, Mul(2, 3))
+        let src = "int x = 1 + 2 * 3;";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+        // Verify structure: the init expr should be Binary(Add, 1, Binary(Mul, 2, 3))
+        if let Item::VarDecl(v) = &file.items[0] {
+            let init = v.declarators[0].init.as_ref().unwrap();
+            if let ExprKind::Binary { op, rhs, .. } = &init.kind {
+                assert_eq!(*op, BinOp::Add);
+                assert!(matches!(&rhs.kind, ExprKind::Binary { op: BinOp::Mul, .. }));
+            } else {
+                panic!("expected Binary expr, got {:?}", init.kind);
+            }
+        }
     }
 }
