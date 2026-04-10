@@ -72,13 +72,19 @@ pub enum TypeSource {
     Nadeo,
 }
 
-impl TypeIndex {
-    pub fn new() -> Self {
+impl Default for TypeIndex {
+    fn default() -> Self {
         Self {
             types: HashMap::new(),
             functions: HashMap::new(),
             enums: HashMap::new(),
         }
+    }
+}
+
+impl TypeIndex {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn load(core_path: &Path, nadeo_path: &Path) -> Result<Self, String> {
@@ -209,7 +215,7 @@ impl TypeIndex {
                             });
                         }
                         NadeoMemberKind::Enum => {
-                            // Nested enum — add as enum type
+                            // TODO: extract nested Nadeo enums into self.enums
                         }
                     }
                 }
@@ -223,7 +229,8 @@ impl TypeIndex {
                     doc: None,
                     source: TypeSource::Nadeo,
                 };
-                self.types.insert(qname, info);
+                // Don't overwrite Core types — they have richer metadata
+                self.types.entry(qname).or_insert(info);
             }
         }
     }
@@ -244,28 +251,30 @@ impl TypeIndex {
 
     /// Get all member names for namespace completion (e.g., after "UI::")
     pub fn namespace_members(&self, namespace: &str) -> Vec<String> {
-        let mut members = Vec::new();
-        for (qname, _) in &self.types {
-            if let Some(name) = qname.strip_prefix(namespace).and_then(|s| s.strip_prefix("::")) {
+        let mut seen = std::collections::HashSet::new();
+        let prefix = format!("{}::", namespace);
+        for qname in self.types.keys() {
+            if let Some(name) = qname.strip_prefix(&prefix) {
                 if !name.contains("::") {
-                    members.push(name.to_string());
+                    seen.insert(name.to_string());
                 }
             }
         }
-        for (qname, _) in &self.functions {
-            if let Some(name) = qname.strip_prefix(namespace).and_then(|s| s.strip_prefix("::")) {
-                if !name.contains("::") && !members.contains(&name.to_string()) {
-                    members.push(name.to_string());
+        for qname in self.functions.keys() {
+            if let Some(name) = qname.strip_prefix(&prefix) {
+                if !name.contains("::") {
+                    seen.insert(name.to_string());
                 }
             }
         }
-        for (qname, _) in &self.enums {
-            if let Some(name) = qname.strip_prefix(namespace).and_then(|s| s.strip_prefix("::")) {
-                if !name.contains("::") && !members.contains(&name.to_string()) {
-                    members.push(name.to_string());
+        for qname in self.enums.keys() {
+            if let Some(name) = qname.strip_prefix(&prefix) {
+                if !name.contains("::") {
+                    seen.insert(name.to_string());
                 }
             }
         }
+        let mut members: Vec<_> = seen.into_iter().collect();
         members.sort();
         members
     }
@@ -273,16 +282,21 @@ impl TypeIndex {
     /// Get all known namespaces
     pub fn namespaces(&self) -> Vec<String> {
         let mut nss: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (_, info) in &self.types {
+        for info in self.types.values() {
             if let Some(ns) = &info.namespace {
                 nss.insert(ns.clone());
             }
         }
-        for (_, fns) in &self.functions {
+        for fns in self.functions.values() {
             for f in fns {
                 if let Some(ns) = &f.namespace {
                     nss.insert(ns.clone());
                 }
+            }
+        }
+        for en in self.enums.values() {
+            if let Some(ns) = &en.namespace {
+                nss.insert(ns.clone());
             }
         }
         let mut result: Vec<_> = nss.into_iter().collect();
