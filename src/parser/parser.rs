@@ -376,6 +376,13 @@ impl<'a> Parser<'a> {
         // Collect attributes
         let attrs = self.parse_attributes()?;
 
+        // File-scope visibility: AngelScript allows `private` (and rarely
+        // `protected`) on top-level functions/variables to limit them to the
+        // current file/namespace. Currently parsed but not propagated to the
+        // declaration; the parser just consumes it so the declaration parses.
+        let _ = self.eat(TokenKind::KwPrivate);
+        let _ = self.eat(TokenKind::KwProtected);
+
         // Check for modifiers: shared, mixin, abstract
         let is_shared = self.eat(TokenKind::KwShared);
         let is_mixin = self.eat(TokenKind::KwMixin);
@@ -543,7 +550,8 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        // Otherwise: parse type, then name, then determine if method or field
+        // Otherwise: parse type, then name, then determine if method, property, or field
+        let type_start = self.current_span().start;
         let type_expr = self.parse_type_expr()?;
         let member_name = self.expect_ident()?;
 
@@ -552,6 +560,10 @@ impl<'a> Parser<'a> {
             let decl =
                 self.parse_function_rest(attrs, type_expr, member_name, is_private, is_protected)?;
             Ok(ClassMember::Method(decl))
+        } else if self.at(TokenKind::LBrace) {
+            // Property accessor block: `Type name { get { ... } [set { ... }] }`
+            let prop = self.parse_property_accessor_block(type_start, type_expr, member_name)?;
+            Ok(ClassMember::Property(prop))
         } else {
             // It's a field
             let decl = self.parse_var_decl_rest(attrs, type_expr, member_name)?;
@@ -908,6 +920,7 @@ impl<'a> Parser<'a> {
     /// Parse a top-level function or variable declaration.
     /// We've already determined this looks like a type start.
     fn parse_func_or_var_item(&mut self, attrs: Vec<Attribute>) -> Result<Item, ParseError> {
+        let type_start = self.current_span().start;
         let type_expr = self.parse_type_expr()?;
         let name = self.expect_ident()?;
 
@@ -915,11 +928,76 @@ impl<'a> Parser<'a> {
             // Function declaration
             let decl = self.parse_function_rest(attrs, type_expr, name, false, false)?;
             Ok(Item::Function(decl))
+        } else if self.at(TokenKind::LBrace) {
+            // Top-level property accessor: `[const] Type name { get { ... } }`
+            let prop = self.parse_property_accessor_block(type_start, type_expr, name)?;
+            Ok(Item::Property(prop))
         } else {
             // Variable declaration
             let decl = self.parse_var_decl_rest(attrs, type_expr, name)?;
             Ok(Item::VarDecl(decl))
         }
+    }
+
+    /// Parse a property accessor block following `Type name`. Caller has
+    /// already consumed the type and name; current token is `{`.
+    fn parse_property_accessor_block(
+        &mut self,
+        type_start: u32,
+        type_expr: TypeExpr,
+        name: Ident,
+    ) -> Result<PropertyDecl, ParseError> {
+        self.expect(TokenKind::LBrace)?;
+        let mut getter: Option<FunctionBody> = None;
+        let mut setter: Option<(Ident, FunctionBody)> = None;
+        while !self.at(TokenKind::RBrace) && !self.at_end() {
+            let pos_before = self.pos;
+            let _ = self.eat(TokenKind::KwConst);
+            match self.peek() {
+                TokenKind::KwGet => {
+                    self.advance();
+                    let _ = self.eat(TokenKind::KwConst);
+                    if self.at(TokenKind::LBrace) {
+                        getter = Some(self.parse_function_body()?);
+                    } else {
+                        // abstract accessor: `get;`
+                        self.expect(TokenKind::Semi)?;
+                    }
+                }
+                TokenKind::KwSet => {
+                    let set_tok = self.advance();
+                    let set_ident = Ident { span: set_tok.span };
+                    let _ = self.eat(TokenKind::KwConst);
+                    if self.at(TokenKind::LBrace) {
+                        let body = self.parse_function_body()?;
+                        setter = Some((set_ident, body));
+                    } else {
+                        self.expect(TokenKind::Semi)?;
+                    }
+                }
+                _ => {
+                    self.error(ParseError {
+                        span: self.current_span(),
+                        kind: ParseErrorKind::ExpectedIdent {
+                            found: self.peek(),
+                        },
+                    });
+                    self.synchronize();
+                }
+            }
+            if self.pos == pos_before {
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        let span = self.span_from(type_start);
+        Ok(PropertyDecl {
+            span,
+            type_expr,
+            name,
+            getter,
+            setter,
+        })
     }
 
     /// Parse the rest of a function: `(params) [const] [override] [final] body_or_semi`
@@ -1770,6 +1848,71 @@ impl<'a> Parser<'a> {
                     kind: ExprKind::Ident(Ident { span: tok.span }),
                 })
             }
+            // Anonymous function literal: `function(params) { body }`
+            TokenKind::KwFunction => {
+                let start = self.current_span().start;
+                self.advance(); // eat `function`
+                let params = self.parse_param_list()?;
+                let body = self.parse_function_body()?;
+                let span = self.span_from(start);
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::Lambda { params, body },
+                })
+            }
+            // Type-construction expressions: `int(x)`, `uint64(n)`, `string(x)`,
+            // `array<int>(size)`, `dictionary()`, etc. A primitive type keyword
+            // (or `array`/`dictionary`) appearing in expression position can be
+            // either a type-construction call OR the start of a namespace path
+            // like `string::Join(...)` (AngelScript reuses `string` as a
+            // namespace for string utility functions).
+            kind if is_primitive_keyword(kind)
+                || kind == TokenKind::KwArray
+                || kind == TokenKind::KwDictionary =>
+            {
+                // Disambiguate by lookahead: `::` means namespace access.
+                if self.peek_ahead(1) == TokenKind::ColonColon {
+                    // Treat the keyword as the first segment of a qualified
+                    // name and fall back to NamespaceAccess.
+                    let kw_tok = self.advance();
+                    let mut segments = vec![Ident { span: kw_tok.span }];
+                    while self.at(TokenKind::ColonColon)
+                        && self.peek_ahead(1) == TokenKind::Ident
+                    {
+                        self.advance(); // eat ::
+                        let ident = self.expect_ident()?;
+                        segments.push(ident);
+                    }
+                    let span = Span::new(
+                        kw_tok.span.start,
+                        segments.last().map(|s| s.span.end).unwrap_or(kw_tok.span.end),
+                    );
+                    let qname = QualifiedName { span, segments };
+                    return Ok(Expr {
+                        span,
+                        kind: ExprKind::NamespaceAccess { path: qname },
+                    });
+                }
+                let start = self.current_span().start;
+                let target_type = self.parse_base_type()?;
+                self.expect(TokenKind::LParen)?;
+                let mut args = Vec::new();
+                if !self.at(TokenKind::RParen) {
+                    args.push(self.parse_expr()?);
+                    while self.eat(TokenKind::Comma) {
+                        if self.at(TokenKind::RParen) {
+                            break;
+                        }
+                        args.push(self.parse_expr()?);
+                    }
+                }
+                let end = self.expect(TokenKind::RParen)?;
+                let span = Span::new(start, end.span.end);
+                Ok(Expr {
+                    span,
+                    kind: ExprKind::TypeConstruct { target_type, args },
+                })
+            }
             TokenKind::LParen => {
                 self.advance();
                 let expr = self.parse_expr()?;
@@ -2609,6 +2752,143 @@ mod tests {
     #[test]
     fn test_parse_cast() {
         let src = "auto app = cast<CTrackMania>(GetApp());";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_type_construct_int() {
+        let src = "int x = int(3.14);";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_type_construct_string() {
+        let src = "string s = string(resp[\"x\"]);";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_type_construct_uint64() {
+        let src = "uint64 n = uint64(x);";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_type_construct_array() {
+        let src = "auto a = array<int>(5);";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_type_construct_dictionary_empty() {
+        let src = "auto d = dictionary();";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_type_construct_in_argument() {
+        let src = "void f() { Print(int(x)); }";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_type_construct_expression_stmt() {
+        // Discard-result type-construction: `int(x);` as an expression statement.
+        let src = "void f() { int(x); }";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_anonymous_function_literal() {
+        // Anonymous function passed as a callback argument.
+        let src = "void main() { Call(function() { Print(\"hi\"); }); }";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_anonymous_function_with_params() {
+        let src = "void main() { Map(arr, function(int x) { return x * 2; }); }";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_trailing_dot_float_param() {
+        // Default parameter value with a trailing-dot float literal.
+        let src = "void f(float radius = 25.) { }";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_property_get_only() {
+        let src = r#"
+class X {
+    int Foo { get { return 42; } }
+}
+"#;
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_property_get_set() {
+        let src = r#"
+class X {
+    int _x;
+    int Value {
+        get { return _x; }
+        set { _x = value; }
+    }
+}
+"#;
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    #[test]
+    fn test_parse_property_handle_type() {
+        let src = r#"
+class X {
+    CMwNod@ nod;
+    CGameUserManagerScript@ userMgr { get { return cast<CGameUserManagerScript>(nod); } }
+}
+"#;
         let tokens = tokenize_filtered(src);
         let mut p = Parser::new(&tokens, src);
         let _file = p.parse_file();

@@ -193,6 +193,16 @@ impl SymbolTable {
                     });
                 }
             }
+            ast::Item::Property(prop) => {
+                let name = qualify(prop.name.text(source));
+                out.push(Symbol {
+                    name,
+                    kind: SymbolKind::Variable { type_name: String::new() },
+                    span: prop.span,
+                    file_id,
+                    doc: None,
+                });
+            }
             ast::Item::Import(_) | ast::Item::Error(_) => {}
         }
     }

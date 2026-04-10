@@ -30,6 +30,10 @@ impl<'a> Lexer<'a> {
         self.src.get(self.pos + 1).copied()
     }
 
+    fn peek3(&self) -> Option<u8> {
+        self.src.get(self.pos + 2).copied()
+    }
+
     fn bump(&mut self) -> u8 {
         let b = self.src[self.pos];
         self.pos += 1;
@@ -236,7 +240,30 @@ impl<'a> Lexer<'a> {
     }
 
     /// Scan a string literal starting after the opening quote `q`.
+    /// AngelScript also supports triple-quoted multi-line strings: `"""..."""`.
+    /// (Triple-quoted variant only applies to `"`, not `'`.)
     fn scan_string(&mut self, start: usize, q: u8) -> Token {
+        // Triple-quoted string detection: opening `"` followed by `""`.
+        // After bump consumed the first `"`, peek/peek2 are the next two chars.
+        if q == b'"' && self.peek() == Some(b'"') && self.peek2() == Some(b'"') {
+            self.pos += 2; // consume the other two `"`
+            // Scan until we see `"""`
+            loop {
+                if self.at_end() {
+                    break; // unterminated triple-string
+                }
+                if self.peek() == Some(b'"')
+                    && self.peek2() == Some(b'"')
+                    && self.peek3() == Some(b'"')
+                {
+                    self.pos += 3; // consume closing `"""`
+                    break;
+                }
+                self.pos += 1;
+            }
+            return self.make_token(TokenKind::StringLit, start);
+        }
+
         loop {
             match self.peek() {
                 None => break, // unterminated string
@@ -248,6 +275,12 @@ impl<'a> Lexer<'a> {
                 }
                 Some(c) if c == q => {
                     self.pos += 1; // consume closing quote
+                    break;
+                }
+                Some(b'\n') => {
+                    // Single-quoted strings shouldn't span lines; bail out
+                    // here so we don't eat the rest of the file on an
+                    // unterminated string.
                     break;
                 }
                 _ => { self.pos += 1; }
@@ -268,12 +301,41 @@ impl<'a> Lexer<'a> {
         // Consume remaining integer digits
         self.skip_while(|c| c.is_ascii_digit());
 
-        // Check for float: decimal part
+        // Check for float: decimal point. Accept these forms:
+        //   25.5    (digit after dot)
+        //   25.5e2  (digit after dot, then exponent below)
+        //   25.f    (lone f/F suffix after dot)
+        //   25.     (trailing dot, followed by non-identifier char like `,` `)` `;`)
+        // Reject `25.foo()` (treat as int + dot + ident → member access).
+        // Disambiguating `25.f` vs. `25.foo`: peek3 must NOT be ident-continue
+        // for the `f`/`F` to be a suffix.
         let mut is_float = false;
-        if self.peek() == Some(b'.') && self.peek2().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-            is_float = true;
-            self.pos += 1; // consume '.'
-            self.skip_while(|c| c.is_ascii_digit());
+        if self.peek() == Some(b'.') {
+            let after = self.peek2();
+            let after_is_digit = after.map(|c| c.is_ascii_digit()).unwrap_or(false);
+            let after_is_exp = after.map(|c| matches!(c, b'e' | b'E')).unwrap_or(false);
+            let after_is_f_suffix = after.map(|c| matches!(c, b'f' | b'F')).unwrap_or(false);
+            let after_is_ident = after
+                .map(|c| c.is_ascii_alphabetic() || c == b'_')
+                .unwrap_or(false);
+
+            // peek3 — what comes after `f`/`F`. If it's ident-continue, then
+            // the `f` is part of an identifier (`25.foo`), not a suffix.
+            let after_after_is_ident_continue = self
+                .peek3()
+                .map(|c| c.is_ascii_alphanumeric() || c == b'_')
+                .unwrap_or(false);
+            let f_is_real_suffix = after_is_f_suffix && !after_after_is_ident_continue;
+
+            let starts_decimal = after_is_digit || after_is_exp || f_is_real_suffix;
+            // Trailing-dot float: only when peek2 is NOT an ident continue at all.
+            let trailing_dot = !after_is_ident;
+
+            if starts_decimal || trailing_dot {
+                is_float = true;
+                self.pos += 1; // consume '.'
+                self.skip_while(|c| c.is_ascii_digit());
+            }
         }
 
         // Scientific notation: e/E [+/-] digits
@@ -455,6 +517,72 @@ mod tests {
                 TokenKind::FloatLit,
                 TokenKind::FloatLit,
                 TokenKind::FloatLit,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_trailing_dot_float() {
+        // `25.` is a valid float (commonly used as a default-param value).
+        let tokens = tokenize_filtered("25.");
+        assert_eq!(kinds(&tokens), vec![TokenKind::FloatLit, TokenKind::Eof]);
+
+        // `25.,` and `25.)` should both lex `25.` as a float, then the punctuation.
+        let tokens = tokenize_filtered("25.,");
+        assert_eq!(
+            kinds(&tokens),
+            vec![TokenKind::FloatLit, TokenKind::Comma, TokenKind::Eof]
+        );
+        let tokens = tokenize_filtered("25.)");
+        assert_eq!(
+            kinds(&tokens),
+            vec![TokenKind::FloatLit, TokenKind::RParen, TokenKind::Eof]
+        );
+
+        // `25.f` is float-with-f-suffix.
+        let tokens = tokenize_filtered("25.f");
+        assert_eq!(kinds(&tokens), vec![TokenKind::FloatLit, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_triple_quoted_string() {
+        // Triple-quoted multi-line string literal: `"""..."""`
+        let src = "string s = \"\"\"line1\nline2\nline3\"\"\";";
+        let tokens = tokenize_filtered(src);
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::KwString,
+                TokenKind::Ident,
+                TokenKind::Eq,
+                TokenKind::StringLit,
+                TokenKind::Semi,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_triple_quoted_with_embedded_quotes() {
+        // Single `"` and `""` inside a triple-quoted string don't terminate it
+        let src = "\"\"\"a \"b\" c\"\"\"";
+        let tokens = tokenize_filtered(src);
+        assert_eq!(kinds(&tokens), vec![TokenKind::StringLit, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_int_dot_member_access() {
+        // `25.foo` must remain Int + Dot + Ident — this is a (nonsensical but
+        // legal-syntax) member access on an integer literal. The lexer must
+        // not greedily eat the `.foo` part as a float.
+        let tokens = tokenize_filtered("25.foo");
+        assert_eq!(
+            kinds(&tokens),
+            vec![
+                TokenKind::IntLit,
+                TokenKind::Dot,
+                TokenKind::Ident,
                 TokenKind::Eof,
             ]
         );

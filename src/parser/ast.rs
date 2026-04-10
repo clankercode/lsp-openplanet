@@ -183,6 +183,13 @@ pub enum ExprKind {
         target_type: TypeExpr,
         expr: Box<Expr>,
     },
+    /// Type-construction expression: `int(x)`, `uint64(n)`, `string(x)`,
+    /// `array<int>(size)`, `dictionary()`. AngelScript allows calling a type
+    /// like a function for conversion/construction.
+    TypeConstruct {
+        target_type: TypeExpr,
+        args: Vec<Expr>,
+    },
     Is {
         expr: Box<Expr>,
         target: IsTarget,
@@ -469,6 +476,7 @@ pub enum Item {
     Funcdef(FuncdefDecl),
     Function(FunctionDecl),
     VarDecl(VarDeclStmt),
+    Property(PropertyDecl),
     Import(ImportDecl),
     Error(Span),
 }
