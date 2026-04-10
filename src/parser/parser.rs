@@ -352,6 +352,7 @@ impl<'a> Parser<'a> {
     pub fn parse_file(&mut self) -> SourceFile {
         let mut items = Vec::new();
         while !self.at_end() {
+            let pos_before = self.pos;
             match self.parse_item() {
                 Ok(item) => items.push(item),
                 Err(err) => {
@@ -360,6 +361,11 @@ impl<'a> Parser<'a> {
                     items.push(Item::Error(span));
                     self.synchronize();
                 }
+            }
+            // Guarantee forward progress: if nothing was consumed this
+            // iteration, force-advance to prevent infinite error loops.
+            if self.pos == pos_before {
+                self.advance();
             }
         }
         SourceFile { items }
@@ -431,12 +437,16 @@ impl<'a> Parser<'a> {
         // Parse class members
         let mut members = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_end() {
+            let pos_before = self.pos;
             match self.parse_class_member(&name) {
                 Ok(member) => members.push(member),
                 Err(err) => {
                     self.error(err);
                     self.synchronize();
                 }
+            }
+            if self.pos == pos_before {
+                self.advance();
             }
         }
 
@@ -568,12 +578,16 @@ impl<'a> Parser<'a> {
 
         let mut methods = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_end() {
+            let pos_before = self.pos;
             match self.parse_interface_method() {
                 Ok(method) => methods.push(method),
                 Err(err) => {
                     self.error(err);
                     self.synchronize();
                 }
+            }
+            if self.pos == pos_before {
+                self.advance();
             }
         }
 
@@ -658,6 +672,7 @@ impl<'a> Parser<'a> {
 
         let mut items = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_end() {
+            let pos_before = self.pos;
             match self.parse_item() {
                 Ok(item) => items.push(item),
                 Err(err) => {
@@ -666,6 +681,9 @@ impl<'a> Parser<'a> {
                     items.push(Item::Error(span));
                     self.synchronize();
                 }
+            }
+            if self.pos == pos_before {
+                self.advance();
             }
         }
 
@@ -953,6 +971,7 @@ impl<'a> Parser<'a> {
 
         let mut stmts = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_end() {
+            let pos_before = self.pos;
             match self.parse_stmt() {
                 Ok(stmt) => stmts.push(stmt),
                 Err(err) => {
@@ -960,6 +979,9 @@ impl<'a> Parser<'a> {
                     // Skip to next ; or }
                     self.synchronize();
                 }
+            }
+            if self.pos == pos_before {
+                self.advance();
             }
         }
 
@@ -1858,12 +1880,16 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LBrace)?;
         let mut stmts = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at_end() {
+            let pos_before = self.pos;
             match self.parse_stmt() {
                 Ok(s) => stmts.push(s),
                 Err(e) => {
                     self.error(e);
                     self.synchronize();
                 }
+            }
+            if self.pos == pos_before {
+                self.advance();
             }
         }
         self.expect(TokenKind::RBrace)?;
@@ -2018,12 +2044,16 @@ impl<'a> Parser<'a> {
                 && !self.at(TokenKind::RBrace)
                 && !self.at_end()
             {
+                let pos_before = self.pos;
                 match self.parse_stmt() {
                     Ok(s) => stmts.push(s),
                     Err(e) => {
                         self.error(e);
                         self.synchronize();
                     }
+                }
+                if self.pos == pos_before {
+                    self.advance();
                 }
             }
 

@@ -1,0 +1,21 @@
+[meta]
+name     = "Dips++"
+author   = "XertroV"
+category = "Deep Dip 2"
+version  = "0.5.9"
+siteid   = 519
+
+[script]
+#__DEFINES__
+dependencies = ["VehicleState", "Camera"]
+optional_dependencies = [
+    # to draw over other loading screens (since ours is motivated by events)
+    "betterloadingscreen", "customloadingscreen", "static-loading-screen",
+    # for magic spectate
+    "MLHook",
+    # for storing custom map metadata and other editor utilities
+    # "Editor", # NOTE: will add this in a future update
+]
+module = "DipsPP"
+exports = ["Ex/FunctionImports.as"]
+shared_exports = ["Ex/Shared.as"]

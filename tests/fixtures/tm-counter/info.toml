@@ -1,0 +1,8 @@
+[meta]
+name     = "Counter"
+author   = "XertroV"
+category = "Utilities"
+version  = "0.2.2"
+
+[script]
+#__DEFINES__
