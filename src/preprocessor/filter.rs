@@ -78,7 +78,7 @@ fn parse_directive(trimmed: &str) -> Option<Directive<'_>> {
 /// Each masked character is replaced with a space so that byte offsets of
 /// active content are preserved exactly.
 pub fn preprocess(source: &str, defines: &HashSet<String>) -> PreprocessResult {
-    let mut masked = source.to_string();
+    let mut masked = source.as_bytes().to_vec();
     let mut errors: Vec<PreprocError> = Vec::new();
 
     // Stack entries: (parent_was_active, branch_already_taken)
@@ -170,41 +170,24 @@ pub fn preprocess(source: &str, defines: &HashSet<String>) -> PreprocessResult {
         });
     }
 
+    // Safe: mask_range only replaces non-newline bytes with 0x20 (space),
+    // which is valid UTF-8. The original source was valid UTF-8, and we only
+    // replace individual bytes with a valid single-byte ASCII character.
+    let masked_source = String::from_utf8(masked)
+        .expect("masking preserved valid UTF-8");
+
     PreprocessResult {
-        masked_source: masked,
+        masked_source,
         errors,
     }
 }
 
 /// Replace every non-newline byte in `masked[start..end]` with a space,
 /// preserving newlines so line numbers remain correct.
-fn mask_range(masked: &mut String, start: usize, end: usize) {
-    // Safety: we only replace ASCII-safe bytes (non-newline bytes with 0x20)
-    // within valid UTF-8. Spaces and newlines are both single-byte ASCII, so
-    // replacing any non-newline byte with 0x20 keeps the string valid UTF-8
-    // only when the replaced bytes are themselves single-byte (ASCII).
-    //
-    // For correctness we iterate over characters. We rebuild the relevant
-    // slice by operating on bytes directly for multi-byte chars: we replace
-    // every byte that is not part of a newline with 0x20.  This is valid
-    // because 0x20 (space) is a single ASCII byte, and any multi-byte UTF-8
-    // sequence's continuation bytes all have the high bit set (>= 0x80), so
-    // they cannot be confused with ASCII.  Replacing them with 0x20 reduces
-    // a multi-byte char to a single-byte space—changing length would break
-    // offsets.  Instead, we must preserve length: replace every byte with
-    // 0x20 except newline bytes (0x0A).
-    //
-    // Replacing continuation bytes (0x80–0xBF) and leading bytes with 0x20
-    // would break UTF-8.  However the source is known ASCII-compatible
-    // AngelScript, so non-ASCII chars should not appear in directive lines or
-    // code we wish to mask except inside string literals.  For now we do a
-    // byte-level replacement preserving length.
-    unsafe {
-        let bytes = masked.as_bytes_mut();
-        for b in bytes[start..end].iter_mut() {
-            if *b != b'\n' && *b != b'\r' {
-                *b = b' ';
-            }
+fn mask_range(masked: &mut Vec<u8>, start: usize, end: usize) {
+    for b in masked[start..end].iter_mut() {
+        if *b != b'\n' && *b != b'\r' {
+            *b = b' ';
         }
     }
 }
@@ -329,6 +312,37 @@ mod tests {
         let result = preprocess(src, &def(&["TMNEXT"]));
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.errors[0].kind, PreprocErrorKind::MissingEndif);
+    }
+
+    #[test]
+    fn elif_selects_when_if_false() {
+        let src = "#if MP4\nint a;\n#elif TMNEXT\nint b;\n#endif\n";
+        let result = preprocess(src, &def(&["TMNEXT"]));
+        assert!(result.errors.is_empty());
+        let lines: Vec<&str> = result.masked_source.lines().collect();
+        assert!(lines[1].chars().all(|c| c == ' '), "#if branch should be masked");
+        assert_eq!(lines[3], "int b;");
+    }
+
+    #[test]
+    fn elif_skipped_when_if_true() {
+        let src = "#if TMNEXT\nint a;\n#elif MP4\nint b;\n#endif\n";
+        let result = preprocess(src, &def(&["TMNEXT", "MP4"]));
+        assert!(result.errors.is_empty());
+        let lines: Vec<&str> = result.masked_source.lines().collect();
+        assert_eq!(lines[1], "int a;");
+        assert!(lines[3].chars().all(|c| c == ' '), "#elif branch should be masked when #if was true");
+    }
+
+    #[test]
+    fn elif_false_falls_to_else() {
+        let src = "#if MP4\nint a;\n#elif TURBO\nint b;\n#else\nint c;\n#endif\n";
+        let result = preprocess(src, &def(&["TMNEXT"]));
+        assert!(result.errors.is_empty());
+        let lines: Vec<&str> = result.masked_source.lines().collect();
+        assert!(lines[1].chars().all(|c| c == ' '), "#if branch should be masked");
+        assert!(lines[3].chars().all(|c| c == ' '), "#elif branch should be masked");
+        assert_eq!(lines[5], "int c;");
     }
 
     #[test]

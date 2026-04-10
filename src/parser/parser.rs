@@ -1004,13 +1004,23 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Extract modifier from the type expression if it's a reference type
+        let modifier = match &type_expr.kind {
+            TypeExprKind::Reference(_, m) => *m,
+            TypeExprKind::Const(inner) => match &inner.kind {
+                TypeExprKind::Reference(_, m) => *m,
+                _ => ParamModifier::None,
+            },
+            _ => ParamModifier::None,
+        };
+
         let span = self.span_from(start);
         Ok(Param {
             span,
             type_expr,
             name,
             default_value,
-            modifier: ParamModifier::None,
+            modifier,
         })
     }
 

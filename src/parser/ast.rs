@@ -38,7 +38,7 @@ impl StringLiteral {
     }
 }
 
-/// A dot-separated qualified name, e.g. `Foo::Bar`.
+/// A `::` separated qualified name, e.g. `Foo::Bar`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualifiedName {
     pub span: Span,
