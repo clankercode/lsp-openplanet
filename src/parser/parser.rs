@@ -1857,4 +1857,78 @@ mod tests {
         }
     }
 
+    // ── Task 7: Function / variable tests ────────────────────────────
+
+    #[test]
+    fn test_func_void_main() {
+        let source = "void Main() { }";
+        let (file, errors) = parse_file(source);
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(file.items.len(), 1);
+        match &file.items[0] {
+            Item::Function(decl) => {
+                assert_eq!(decl.name.text(source), "Main");
+                assert!(decl.body.is_some());
+                assert!(decl.params.is_empty());
+            }
+            _ => panic!("expected Function item"),
+        }
+    }
+
+    #[test]
+    fn test_func_with_params() {
+        let source = "UI::InputBlocking OnKeyPress(bool down, VirtualKey key) { return UI::InputBlocking::DoNothing; }";
+        let (file, errors) = parse_file(source);
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(file.items.len(), 1);
+        match &file.items[0] {
+            Item::Function(decl) => {
+                assert_eq!(decl.name.text(source), "OnKeyPress");
+                assert_eq!(decl.params.len(), 2);
+                assert_eq!(
+                    decl.params[0].name.as_ref().unwrap().text(source),
+                    "down"
+                );
+                assert_eq!(
+                    decl.params[1].name.as_ref().unwrap().text(source),
+                    "key"
+                );
+            }
+            _ => panic!("expected Function item"),
+        }
+    }
+
+    #[test]
+    fn test_var_decl() {
+        let source = "int g_Counter = 0;";
+        let (file, errors) = parse_file(source);
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(file.items.len(), 1);
+        match &file.items[0] {
+            Item::VarDecl(decl) => {
+                assert_eq!(decl.declarators.len(), 1);
+                assert_eq!(decl.declarators[0].name.text(source), "g_Counter");
+                assert!(decl.declarators[0].init.is_some());
+            }
+            _ => panic!("expected VarDecl item"),
+        }
+    }
+
+    #[test]
+    fn test_var_decl_const() {
+        let source = "const string PluginIcon = Icons::Calculator;";
+        let (file, errors) = parse_file(source);
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(file.items.len(), 1);
+        match &file.items[0] {
+            Item::VarDecl(decl) => {
+                assert_eq!(decl.declarators.len(), 1);
+                assert_eq!(decl.declarators[0].name.text(source), "PluginIcon");
+                assert!(decl.declarators[0].init.is_some());
+                // The type should be const string
+                assert!(matches!(decl.type_expr.kind, TypeExprKind::Const(_)));
+            }
+            _ => panic!("expected VarDecl item"),
+        }
+    }
 }
