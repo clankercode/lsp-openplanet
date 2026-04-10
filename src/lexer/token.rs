@@ -76,7 +76,6 @@ pub enum TokenKind {
     KwShared,
     KwAbstract,
     KwImport,
-    KwFrom,
 
     // ── Control flow keywords ────────────────────────────────────────────────
     KwIf,
@@ -119,6 +118,7 @@ pub enum TokenKind {
     Plus,       // +
     Minus,      // -
     Star,       // *
+    StarStar,   // ** (power)
     Slash,      // /
     Percent,    // %
     Eq,         // =
@@ -134,6 +134,7 @@ pub enum TokenKind {
     Amp,        // &
     Pipe,       // |
     Caret,      // ^
+    CaretCaret, // ^^ (logical XOR)
     Tilde,      // ~
     LtLt,       // <<
     GtGt,       // >>
@@ -213,7 +214,9 @@ pub fn keyword_lookup(text: &str) -> TokenKind {
         "shared" => TokenKind::KwShared,
         "abstract" => TokenKind::KwAbstract,
         "import" => TokenKind::KwImport,
-        "from" => TokenKind::KwFrom,
+        // `from` is contextual: it's only special after an `import` declaration's
+        // signature. Treating it as a keyword breaks code that uses it as a
+        // parameter or local name.
         // Control flow keywords
         "if" => TokenKind::KwIf,
         "else" => TokenKind::KwElse,
@@ -249,6 +252,11 @@ pub fn keyword_lookup(text: &str) -> TokenKind {
         "super" => TokenKind::KwSuper,
         "array" => TokenKind::KwArray,
         "dictionary" => TokenKind::KwDictionary,
+        // Word-form logical operators (AS aliases for the symbol forms)
+        "and" => TokenKind::AmpAmp,
+        "or" => TokenKind::PipePipe,
+        "not" => TokenKind::Bang,
+        "xor" => TokenKind::CaretCaret,
         // Anything else is an identifier
         _ => TokenKind::Ident,
     }

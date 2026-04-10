@@ -141,6 +141,7 @@ impl<'a> Lexer<'a> {
             },
             b'*' => match self.peek() {
                 Some(b'=') => { self.pos += 1; self.make_token(TokenKind::StarEq, start) }
+                Some(b'*') => { self.pos += 1; self.make_token(TokenKind::StarStar, start) }
                 _ => self.make_token(TokenKind::Star, start),
             },
             b'%' => match self.peek() {
@@ -193,6 +194,7 @@ impl<'a> Lexer<'a> {
             },
             b'^' => match self.peek() {
                 Some(b'=') => { self.pos += 1; self.make_token(TokenKind::CaretEq, start) }
+                Some(b'^') => { self.pos += 1; self.make_token(TokenKind::CaretCaret, start) }
                 _ => self.make_token(TokenKind::Caret, start),
             },
             b'~' => self.make_token(TokenKind::Tilde, start),
@@ -291,11 +293,23 @@ impl<'a> Lexer<'a> {
 
     /// Scan a number literal. `first` is the first digit already consumed.
     fn scan_number(&mut self, start: usize, first: u8) -> Token {
-        // Check for hex literal: 0x...
+        // Hex literal: 0x...
         if first == b'0' && self.peek().map(|c| c == b'x' || c == b'X').unwrap_or(false) {
             self.pos += 1; // consume 'x'
-            self.skip_while(|c| c.is_ascii_hexdigit());
+            self.skip_while(|c| c.is_ascii_hexdigit() || c == b'_');
             return self.make_token(TokenKind::HexLit, start);
+        }
+        // Binary literal: 0b...
+        if first == b'0' && self.peek().map(|c| c == b'b' || c == b'B').unwrap_or(false) {
+            self.pos += 1; // consume 'b'
+            self.skip_while(|c| c == b'0' || c == b'1' || c == b'_');
+            return self.make_token(TokenKind::IntLit, start);
+        }
+        // Octal literal: 0o...
+        if first == b'0' && self.peek().map(|c| c == b'o' || c == b'O').unwrap_or(false) {
+            self.pos += 1; // consume 'o'
+            self.skip_while(|c| (b'0'..=b'7').contains(&c) || c == b'_');
+            return self.make_token(TokenKind::IntLit, start);
         }
 
         // Consume remaining integer digits

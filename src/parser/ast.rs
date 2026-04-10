@@ -221,6 +221,10 @@ pub enum ExprKind {
 pub enum IsTarget {
     Null,
     Type(TypeExpr),
+    /// Arbitrary right-hand-side expression: `a is b`, `a is this`,
+    /// `a is g_Game.currMS`. AngelScript's `is` does handle equality,
+    /// so any handle expression is valid on the RHS.
+    Expr(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +234,8 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    /// Power: `a ** b`
+    Pow,
     Eq,
     NotEq,
     Lt,
@@ -238,6 +244,8 @@ pub enum BinOp {
     GtEq,
     And,
     Or,
+    /// Logical XOR `^^`
+    Xor,
     BitAnd,
     BitOr,
     BitXor,
