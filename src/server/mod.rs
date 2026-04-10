@@ -1,11 +1,17 @@
+pub mod code_actions;
 pub mod completion;
 pub mod definition;
 pub mod diagnostics;
+pub mod formatter;
 pub mod hover;
+pub mod navigation;
 pub mod references;
+pub mod scope_query;
+pub mod semantic_tokens;
 pub mod signature;
 pub mod symbols;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -45,9 +51,47 @@ impl Backend {
         }
     }
 
+    /// Build an ad-hoc workspace snapshot from the currently open documents.
+    ///
+    /// Each open document is preprocessed, parsed, and its symbols extracted
+    /// into a fresh `SymbolTable`. The returned map carries `file_id → (uri,
+    /// source)` so callers can translate cross-file spans into concrete
+    /// `Location`s.
+    async fn build_workspace(&self) -> (SymbolTable, HashMap<usize, (Url, String)>) {
+        let defines = {
+            let config = self.config.read().await;
+            config.defines.clone()
+        };
+        let mut table = SymbolTable::new();
+        let mut files = HashMap::new();
+        for entry in self.documents.iter() {
+            let uri = entry.key().clone();
+            let source = entry.value().clone();
+            let pp = crate::preprocessor::preprocess(&source, &defines);
+            let tokens = crate::lexer::tokenize_filtered(&pp.masked_source);
+            let mut parser = crate::parser::Parser::new(&tokens, &pp.masked_source);
+            let file = parser.parse_file();
+            let fid = table.allocate_file_id();
+            let symbols = SymbolTable::extract_symbols(fid, &pp.masked_source, &file);
+            table.set_file_symbols(fid, symbols);
+            files.insert(fid, (uri, source));
+        }
+        (table, files)
+    }
+
     async fn on_change(&self, uri: &Url, text: &str) {
+        let (workspace, _files) = self.build_workspace().await;
         let config = self.config.read().await;
-        let diags = diagnostics::compute_diagnostics(uri, text, &config);
+        let type_index = self.type_index.read().await;
+        let diags = diagnostics::compute_diagnostics(
+            uri,
+            text,
+            &config,
+            type_index.as_deref(),
+            Some(&workspace),
+        );
+        drop(type_index);
+        drop(config);
         self.client
             .publish_diagnostics(uri.clone(), diags, None)
             .await;
@@ -98,6 +142,19 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec!["(".into(), ",".into()]),
                     ..Default::default()
                 }),
+                rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: semantic_tokens::legend(),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: None,
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
             ..Default::default()
@@ -134,31 +191,60 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
-        let doc = self.documents.get(uri);
-        let source = doc.as_ref().map(|d| d.value().as_str()).unwrap_or("");
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => String::new(),
+        };
         let type_index = self.type_index.read().await;
-        let items = completion::complete(source, pos, type_index.as_deref());
+        let (table, _files) = self.build_workspace().await;
+        let items = completion::complete(&source, pos, type_index.as_deref(), Some(&table));
         Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        let doc = self.documents.get(uri);
-        let source = doc.as_ref().map(|d| d.value().as_str()).unwrap_or("");
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => String::new(),
+        };
         let type_index = self.type_index.read().await;
-        Ok(hover::hover(source, pos, type_index.as_deref()))
+        let (table, _files) = self.build_workspace().await;
+        Ok(hover::hover(&source, pos, type_index.as_deref(), Some(&table)))
     }
 
     async fn goto_definition(
         &self,
-        _params: GotoDefinitionParams,
+        params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        Ok(None) // Task 16
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let (table, files) = self.build_workspace().await;
+        let workspace_files = navigation::WorkspaceFiles { files: &files };
+        Ok(navigation::goto_definition(&source, pos, &table, &workspace_files)
+            .map(GotoDefinitionResponse::Scalar))
     }
 
-    async fn references(&self, _params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        Ok(None) // Task 16
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let (_table, files) = self.build_workspace().await;
+        let workspace_files = navigation::WorkspaceFiles { files: &files };
+        let refs = navigation::find_references(
+            &source,
+            pos,
+            &workspace_files,
+            params.context.include_declaration,
+        );
+        Ok(Some(refs))
     }
 
     async fn signature_help(&self, _params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
@@ -173,6 +259,95 @@ impl LanguageServer for Backend {
         let doc = self.documents.get(uri);
         let source = doc.as_ref().map(|d| d.value().as_str()).unwrap_or("");
         Ok(symbols::document_symbols(source))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let (table, files) = self.build_workspace().await;
+        Ok(Some(symbols::workspace_symbols(
+            &params.query,
+            &table,
+            &files,
+        )))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let (_table, files) = self.build_workspace().await;
+        let workspace_files = navigation::WorkspaceFiles { files: &files };
+        Ok(navigation::rename(
+            &source,
+            pos,
+            &params.new_name,
+            &workspace_files,
+        ))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let tokens = semantic_tokens::semantic_tokens(&source);
+        Ok(Some(SemanticTokensResult::Tokens(tokens)))
+    }
+
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = &params.text_document.uri;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let formatted = formatter::format_source(&source);
+        if formatted == source {
+            return Ok(Some(vec![]));
+        }
+        let line_count = source.lines().count() as u32;
+        let last_line_len = source.lines().last().map(|l| l.len() as u32).unwrap_or(0);
+        Ok(Some(vec![TextEdit {
+            range: Range::new(
+                Position::new(0, 0),
+                Position::new(line_count, last_line_len),
+            ),
+            new_text: formatted,
+        }]))
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        let uri = &params.text_document.uri;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let (workspace, _files) = self.build_workspace().await;
+        let type_index_guard = self.type_index.read().await;
+        let type_index = type_index_guard.as_deref();
+        let actions = code_actions::code_actions(
+            uri,
+            &source,
+            params.range,
+            &params.context.diagnostics,
+            &workspace,
+            type_index,
+        );
+        Ok(Some(actions))
     }
 }
 

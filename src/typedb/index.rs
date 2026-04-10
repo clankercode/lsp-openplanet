@@ -12,6 +12,11 @@ pub struct TypeIndex {
     functions: HashMap<String, Vec<FunctionInfo>>,
     /// Enums keyed by qualified name
     enums: HashMap<String, EnumInfo>,
+    /// Short-name → list of fully qualified names that end with `::<short>`
+    /// (or exactly match `<short>`). Built lazily by `ensure_short_index`.
+    /// Covers types and enums — functions are keyed differently and this
+    /// map is only consulted when resolving a referenced *type* name.
+    short_type_index: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +83,7 @@ impl Default for TypeIndex {
             types: HashMap::new(),
             functions: HashMap::new(),
             enums: HashMap::new(),
+            short_type_index: HashMap::new(),
         }
     }
 }
@@ -93,7 +99,51 @@ impl TypeIndex {
         index.add_core(&core);
         let nadeo = NadeoDatabase::load_from_file(nadeo_path)?;
         index.add_nadeo(&nadeo);
+        index.build_short_type_index();
         Ok(index)
+    }
+
+    /// Rebuild the short-name → FQN index. Must be called after every
+    /// `add_*` path once all insertions are done.
+    fn build_short_type_index(&mut self) {
+        self.short_type_index.clear();
+        for qname in self.types.keys() {
+            let short = qname.rsplit("::").next().unwrap_or(qname).to_string();
+            self.short_type_index
+                .entry(short)
+                .or_default()
+                .push(qname.clone());
+        }
+        for qname in self.enums.keys() {
+            let short = qname.rsplit("::").next().unwrap_or(qname).to_string();
+            self.short_type_index
+                .entry(short)
+                .or_default()
+                .push(qname.clone());
+        }
+    }
+
+    /// Return all fully qualified names of types/enums whose tail segment
+    /// matches `short`. Used as a last-resort fallback when an unqualified
+    /// reference fails to resolve under any active namespace prefix.
+    ///
+    /// The slice is empty when the short name is unknown. Callers should
+    /// prefer the first match (stable insertion order is not guaranteed
+    /// because of `HashMap`, but duplicate short names in the Nadeo DB are
+    /// vanishingly rare — see tests).
+    pub fn find_by_short_name(&self, short: &str) -> &[String] {
+        self.short_type_index
+            .get(short)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Return every short name registered in the type/enum short-name index.
+    ///
+    /// Used by "did you mean" quick-fixes to enumerate known external type and
+    /// enum names for distance comparisons. Does not include global functions.
+    pub fn all_short_names(&self) -> Vec<String> {
+        self.short_type_index.keys().cloned().collect()
     }
 
     fn qualify(ns: &Option<String>, name: &str) -> String {
@@ -215,8 +265,38 @@ impl TypeIndex {
                             });
                         }
                         NadeoMemberKind::Enum => {
-                            // TODO: extract nested Nadeo enums into self.enums
+                            // Per-member enum reference (usually just names a
+                            // shared nested enum). The full nested-enum decl
+                            // lives in `nadeo_type.e` and is registered below.
                         }
+                    }
+                }
+
+                // Register nested enums declared on this type. Both
+                // `CGamePlaygroundUIConfig::EUISequence` (qualified) and
+                // the short name `EUISequence` are resolvable downstream
+                // via the short-name index.
+                if let Some(enums) = &nadeo_type.e {
+                    for en in enums {
+                        let nested_qname =
+                            format!("{}::{}::{}", ns_name, type_name, en.n);
+                        let values: Vec<(String, i64)> = en
+                            .v
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| (v.clone(), i as i64))
+                            .collect();
+                        // Don't overwrite an existing entry (the Core
+                        // database is more authoritative when both have
+                        // the same enum).
+                        self.enums
+                            .entry(nested_qname)
+                            .or_insert(EnumInfo {
+                                name: en.n.clone(),
+                                namespace: Some(format!("{}::{}", ns_name, type_name)),
+                                values,
+                                source: TypeSource::Nadeo,
+                            });
                     }
                 }
 
@@ -247,6 +327,11 @@ impl TypeIndex {
 
     pub fn lookup_enum(&self, qualified_name: &str) -> Option<&EnumInfo> {
         self.enums.get(qualified_name)
+    }
+
+    /// Iterate all known enums by qualified name.
+    pub fn enums_iter(&self) -> impl Iterator<Item = (&String, &EnumInfo)> {
+        self.enums.iter()
     }
 
     /// Get all member names for namespace completion (e.g., after "UI::")
@@ -348,6 +433,49 @@ mod tests {
         let index = TypeIndex::load(&cp, &np).unwrap();
         let ui_members = index.namespace_members("UI");
         assert!(!ui_members.is_empty(), "expected UI namespace members");
+    }
+
+    #[test]
+    fn test_find_by_short_name_nadeo_class() {
+        let cp = core_path();
+        let np = next_path();
+        if !cp.exists() || !np.exists() { return; }
+        let index = TypeIndex::load(&cp, &np).unwrap();
+        let hits = index.find_by_short_name("CMwNod");
+        assert!(
+            hits.iter().any(|h| h.ends_with("::CMwNod")),
+            "expected a ::CMwNod match, got {:?}",
+            hits
+        );
+    }
+
+    #[test]
+    fn test_find_by_short_name_editor_free() {
+        let cp = core_path();
+        let np = next_path();
+        if !cp.exists() || !np.exists() { return; }
+        let index = TypeIndex::load(&cp, &np).unwrap();
+        let hits = index.find_by_short_name("CGameCtnEditorFree");
+        assert!(
+            !hits.is_empty(),
+            "expected at least one match for CGameCtnEditorFree"
+        );
+    }
+
+    #[test]
+    fn test_nested_nadeo_enum_registered() {
+        // `CGamePlaygroundUIConfig::EUISequence` is declared as a nested
+        // enum in the Nadeo JSON. Make sure the loader registers it.
+        let cp = core_path();
+        let np = next_path();
+        if !cp.exists() || !np.exists() { return; }
+        let index = TypeIndex::load(&cp, &np).unwrap();
+        let hits = index.find_by_short_name("EUISequence");
+        assert!(
+            hits.iter().any(|h| h.ends_with("::EUISequence")),
+            "expected EUISequence to be registered as a nested enum, got {:?}",
+            hits
+        );
     }
 
     #[test]

@@ -6,7 +6,11 @@ use openplanet_lsp::config::LspConfig;
 use openplanet_lsp::lexer;
 use openplanet_lsp::parser::Parser;
 use openplanet_lsp::preprocessor;
+use openplanet_lsp::server::diagnostics;
+use openplanet_lsp::typecheck::build_plugin_symbol_table;
+use openplanet_lsp::typedb::TypeIndex;
 use openplanet_lsp::workspace::project;
+use tower_lsp::lsp_types::Url;
 
 // Soft memory cap: 1 GiB. When a test's heap growth would cross this, we
 // print a backtrace from inside the allocator (at which point the cap is
@@ -342,6 +346,63 @@ fn test_dump_file_errors() {
 }
 
 #[test]
+fn test_lsp_diagnostics_cross_document_workspace() {
+    // Regression for the iter 7 production-wiring gap: when a workspace
+    // symbol table containing declarations from a sibling document is fed
+    // to compute_diagnostics, references to those declarations must not
+    // flag as unknown-type / undefined-identifier.
+    use openplanet_lsp::parser::Parser as AsParser;
+    use openplanet_lsp::symbols::SymbolTable;
+
+    let src_a = "class Foo { int x; }";
+    let src_b = "void use() { Foo f; f.x = 1; }";
+
+    // Build a pooled workspace table over both files.
+    let mut table = SymbolTable::new();
+    for src in [src_a, src_b] {
+        let tokens = lexer::tokenize_filtered(src);
+        let mut parser = AsParser::new(&tokens, src);
+        let file = parser.parse_file();
+        let fid = table.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, src, &file);
+        table.set_file_symbols(fid, syms);
+    }
+
+    let uri = Url::parse("file:///tmp/b.as").unwrap();
+    let diags =
+        diagnostics::compute_diagnostics(&uri, src_b, &LspConfig::default(), None, Some(&table));
+    let offenders: Vec<&str> = diags
+        .iter()
+        .map(|d| d.message.as_str())
+        .filter(|m| m.contains("Foo"))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "cross-document Foo reference should resolve, got: {:?}",
+        offenders
+    );
+}
+
+#[test]
+fn test_lsp_diagnostics_emit_type_errors() {
+    let uri = Url::parse("file:///tmp/fake.as").expect("parse url");
+    let diags = diagnostics::compute_diagnostics(
+        &uri,
+        "NotAType x;",
+        &LspConfig::default(),
+        None,
+        None,
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("unknown type")),
+        "expected an unknown-type diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
 fn test_corpus_parse_histogram() {
     let Ok(root) = std::env::var("OPENPLANET_PLUGINS_DIR") else {
         eprintln!("OPENPLANET_PLUGINS_DIR not set — skipping corpus test");
@@ -412,4 +473,296 @@ fn test_corpus_parse_histogram() {
     let _ = std::fs::write(&summary_path, summary);
     eprintln!();
     eprintln!("Histogram summary written to {}", summary_path.display());
+}
+
+/// Normalize a type-checker diagnostic message down to a coarse "kind" bucket.
+/// Uses the same general approach as `error_kind_key` — strip identifier/number
+/// content so that messages sharing a template collapse into a single bucket.
+fn diag_kind_key(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut chars = msg.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            // Backtick-quoted content is usually a user name/type — fold it.
+            out.push('`');
+            while let Some(&nc) = chars.peek() {
+                chars.next();
+                if nc == '`' {
+                    out.push_str("X`");
+                    break;
+                }
+            }
+        } else if c.is_ascii_digit() {
+            out.push_str("<N>");
+            while chars.peek().map_or(false, |c| c.is_ascii_digit()) {
+                chars.next();
+            }
+        } else if c == '"' {
+            out.push_str("<str>");
+            while let Some(&nc) = chars.peek() {
+                chars.next();
+                if nc == '"' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn test_corpus_type_diagnostic_histogram() {
+    // Gate: require both the plugin corpus and the typedb dir.
+    let Some(plugins_root) = std::env::var_os("OPENPLANET_PLUGINS") else {
+        eprintln!("OPENPLANET_PLUGINS not set — skipping type-diag corpus test");
+        return;
+    };
+    let Some(typedb_dir) = std::env::var_os("OPENPLANET_TYPEDB_DIR") else {
+        eprintln!("OPENPLANET_TYPEDB_DIR not set — skipping type-diag corpus test");
+        return;
+    };
+    let plugins_root = PathBuf::from(plugins_root);
+    let typedb_dir = PathBuf::from(typedb_dir);
+    let core_path = typedb_dir.join("OpenplanetCore.json");
+    let next_path = typedb_dir.join("OpenplanetNext.json");
+
+    let index = match TypeIndex::load(&core_path, &next_path) {
+        Ok(idx) => idx,
+        Err(e) => {
+            panic!(
+                "failed to load TypeIndex from {} / {}: {}",
+                core_path.display(),
+                next_path.display(),
+                e
+            );
+        }
+    };
+    assert!(
+        index.type_count() > 0,
+        "TypeIndex loaded no types — harness is broken"
+    );
+    eprintln!(
+        "Loaded TypeIndex with {} types from {}",
+        index.type_count(),
+        typedb_dir.display()
+    );
+
+    let plugin_dirs = discover_plugin_dirs(&plugins_root);
+    eprintln!("Corpus root: {}", plugins_root.display());
+    eprintln!("Discovered {} plugins", plugin_dirs.len());
+
+    let cfg = LspConfig::default();
+    let mut plugins = 0usize;
+    let mut files = 0usize;
+    let mut files_with_diag = 0usize;
+    let mut total_diagnostics: usize = 0;
+    let mut kind_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut per_file: Vec<(usize, PathBuf)> = Vec::new();
+    // Optional: collect the actual unknown-type identifiers when
+    // DUMP_UNKNOWN_TYPES is set, so investigation can see raw names.
+    let dump_unknown = std::env::var_os("DUMP_UNKNOWN_TYPES").is_some();
+    let mut unknown_type_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut undefined_ident_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut undefined_member_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    for plugin_dir in &plugin_dirs {
+        plugins += 1;
+        let source_files = project::discover_source_files(plugin_dir);
+
+        // Slurp every .as file in this plugin up-front so we can pool their
+        // symbols into a single workspace table. Each file is then checked
+        // against that pooled table below.
+        let loaded: Vec<(PathBuf, String)> = source_files
+            .iter()
+            .filter_map(|p| {
+                std::fs::read_to_string(p).ok().map(|s| (p.clone(), s))
+            })
+            .collect();
+
+        let workspace = build_plugin_symbol_table(&loaded, &cfg);
+
+        for (file_path, source) in &loaded {
+            files += 1;
+            // Build a plausible file:// URL so compute_diagnostics doesn't treat
+            // it as info.toml.
+            let url = match Url::from_file_path(file_path) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let diags = diagnostics::compute_diagnostics(
+                &url,
+                source,
+                &cfg,
+                Some(&index),
+                Some(&workspace),
+            );
+            if diags.is_empty() {
+                continue;
+            }
+            files_with_diag += 1;
+            total_diagnostics += diags.len();
+            per_file.push((diags.len(), file_path.clone()));
+            for d in &diags {
+                let key = diag_kind_key(&d.message);
+                *kind_counts.entry(key).or_insert(0) += 1;
+                if dump_unknown {
+                    // Extract the name from messages like `unknown type `Foo``.
+                    if let Some(rest) = d.message.strip_prefix("unknown type `") {
+                        if let Some(name) = rest.strip_suffix('`') {
+                            *unknown_type_counts
+                                .entry(name.to_string())
+                                .or_insert(0) += 1;
+                        }
+                    }
+                    if let Some(rest) = d.message.strip_prefix("undefined identifier `") {
+                        if let Some(name) = rest.strip_suffix('`') {
+                            *undefined_ident_counts
+                                .entry(name.to_string())
+                                .or_insert(0) += 1;
+                        }
+                    }
+                    // `type `Foo` has no member `bar``
+                    if let Some(rest) = d.message.strip_prefix("type `") {
+                        if let Some(after_ty) = rest.find("` has no member `") {
+                            let ty = &rest[..after_ty];
+                            let tail = &rest[after_ty + "` has no member `".len()..];
+                            if let Some(member) = tail.strip_suffix('`') {
+                                let key = format!("{}::{}", ty, member);
+                                *undefined_member_counts
+                                    .entry(key)
+                                    .or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!();
+    eprintln!("=== CORPUS TYPE-DIAGNOSTIC HISTOGRAM ===");
+    eprintln!("plugins           : {}", plugins);
+    eprintln!("files             : {}", files);
+    eprintln!("files_with_diag   : {}", files_with_diag);
+    eprintln!("total_diagnostics : {}", total_diagnostics);
+    eprintln!();
+
+    let mut kinds: Vec<_> = kind_counts.iter().collect();
+    kinds.sort_by(|a, b| b.1.cmp(a.1));
+    eprintln!("--- Top type-diag kinds ---");
+    for (i, (kind, count)) in kinds.iter().take(20).enumerate() {
+        eprintln!("{:3}. [{:>6}] {}", i + 1, count, kind);
+    }
+
+    per_file.sort_by(|a, b| b.0.cmp(&a.0));
+    eprintln!();
+    eprintln!("--- Worst files by diag count ---");
+    for (count, path) in per_file.iter().take(15) {
+        let rel = path.strip_prefix(&plugins_root).unwrap_or(path);
+        eprintln!("  {:>6}  {}", count, rel.display());
+    }
+
+    // Machine-readable summary for the goal loop.
+    let summary_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".goal-loops/type-diag-histogram.txt");
+    if let Some(parent) = summary_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut summary = String::new();
+    summary.push_str(&format!(
+        "plugins={} files={} files_with_diag={} total_diagnostics={}\n\n",
+        plugins, files, files_with_diag, total_diagnostics,
+    ));
+    summary.push_str("# top 50 kinds\n");
+    for (kind, count) in kinds.iter().take(50) {
+        summary.push_str(&format!("{:>6}  {}\n", count, kind));
+    }
+    summary.push_str("\n# top 30 worst files\n");
+    for (count, path) in per_file.iter().take(30) {
+        let rel = path.strip_prefix(&plugins_root).unwrap_or(path);
+        summary.push_str(&format!("{:>6}  {}\n", count, rel.display()));
+    }
+    let _ = std::fs::write(&summary_path, summary);
+    eprintln!();
+    eprintln!(
+        "Type-diag histogram summary written to {}",
+        summary_path.display()
+    );
+
+    if dump_unknown {
+        let mut utc: Vec<_> = unknown_type_counts.iter().collect();
+        utc.sort_by(|a, b| b.1.cmp(a.1));
+        let unk_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".goal-loops/unknown-types.txt");
+        let mut u = String::new();
+        for (name, count) in utc.iter().take(60) {
+            u.push_str(&format!("{:>6}  {}\n", count, name));
+        }
+        let _ = std::fs::write(&unk_path, u);
+        eprintln!("Unknown-type names dumped to {}", unk_path.display());
+
+        let mut uic: Vec<_> = undefined_ident_counts.iter().collect();
+        uic.sort_by(|a, b| b.1.cmp(a.1));
+        let ui_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".goal-loops/undefined-idents.txt");
+        let mut u = String::new();
+        for (name, count) in uic.iter().take(60) {
+            u.push_str(&format!("{:>6}  {}\n", count, name));
+        }
+        let _ = std::fs::write(&ui_path, u);
+        eprintln!("Undefined-ident names dumped to {}", ui_path.display());
+
+        let mut umc: Vec<_> = undefined_member_counts.iter().collect();
+        umc.sort_by(|a, b| b.1.cmp(a.1));
+        let um_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".goal-loops/undefined-members.txt");
+        let mut u = String::new();
+        for (name, count) in umc.iter().take(60) {
+            u.push_str(&format!("{:>6}  {}\n", count, name));
+        }
+        let _ = std::fs::write(&um_path, u);
+        eprintln!("Undefined-member names dumped to {}", um_path.display());
+    }
+
+    // Sanity check only — not a pass/fail gate.
+    assert!(index.type_count() > 0);
+}
+
+/// Debug dump: emit per-diagnostic details for the file named in
+/// `OPENPLANET_DEBUG_FILE` (absolute path). Used to investigate
+/// false-positive categories without rerunning the whole corpus.
+#[test]
+fn test_debug_single_file_diagnostics() {
+    let Some(typedb_dir) = std::env::var_os("OPENPLANET_TYPEDB_DIR") else {
+        return;
+    };
+    let Some(file_path) = std::env::var_os("OPENPLANET_DEBUG_FILE") else {
+        return;
+    };
+    let typedb_dir = PathBuf::from(typedb_dir);
+    let core_path = typedb_dir.join("OpenplanetCore.json");
+    let next_path = typedb_dir.join("OpenplanetNext.json");
+    let index = TypeIndex::load(&core_path, &next_path).unwrap();
+    let file_path = PathBuf::from(file_path);
+    let source = std::fs::read_to_string(&file_path).unwrap();
+    let url = Url::from_file_path(&file_path).unwrap();
+    let cfg = LspConfig::default();
+    let diags = diagnostics::compute_diagnostics(&url, &source, &cfg, Some(&index), None);
+    eprintln!("total diagnostics: {}", diags.len());
+    let mut buckets: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for d in &diags {
+        *buckets.entry(d.message.clone()).or_insert(0) += 1;
+    }
+    let mut sorted: Vec<_> = buckets.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(a.1));
+    for (msg, count) in sorted.iter() {
+        eprintln!("  {:>4}  {}", count, msg);
+    }
 }

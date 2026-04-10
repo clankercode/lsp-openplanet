@@ -3,6 +3,27 @@ use std::collections::HashMap;
 use super::scope::{Symbol, SymbolKind};
 use crate::parser::ast;
 
+/// Extract `(params, min_args)` from an AST parameter list. `params` is a
+/// `Vec<(name, type_text)>` using source text for the type expression. `min_args`
+/// counts parameters with no default value (AngelScript, like C++, requires
+/// defaults be contiguous at the tail of the list).
+fn extract_params(source: &str, params: &[ast::Param]) -> (Vec<(String, String)>, usize) {
+    let out: Vec<(String, String)> = params
+        .iter()
+        .map(|p| {
+            let name = p
+                .name
+                .as_ref()
+                .map(|i| i.text(source).to_string())
+                .unwrap_or_default();
+            let type_text = p.type_expr.span.text(source).to_string();
+            (name, type_text)
+        })
+        .collect();
+    let min_args = params.iter().filter(|p| p.default_value.is_none()).count();
+    (out, min_args)
+}
+
 /// Per-file symbol contributions
 #[derive(Debug, Default)]
 pub struct FileSymbols {
@@ -98,9 +119,9 @@ impl SymbolTable {
 
         match item {
             ast::Item::Class(cls) => {
-                let name = qualify(cls.name.text(source));
+                let class_name = qualify(cls.name.text(source));
                 out.push(Symbol {
-                    name,
+                    name: class_name.clone(),
                     kind: SymbolKind::Class {
                         parent: None, // resolve later
                         members: Vec::new(),
@@ -109,6 +130,94 @@ impl SymbolTable {
                     file_id,
                     doc: None,
                 });
+                // Descend into class members. Each gets a qualified name like
+                // "ClassName::member" (or "Ns::ClassName::member").
+                for member in &cls.members {
+                    match member {
+                        ast::ClassMember::Field(var) => {
+                            for decl in &var.declarators {
+                                let mname =
+                                    format!("{}::{}", class_name, decl.name.text(source));
+                                out.push(Symbol {
+                                    name: mname,
+                                    kind: SymbolKind::Variable {
+                                        type_name: String::new(),
+                                    },
+                                    span: var.span,
+                                    file_id,
+                                    doc: None,
+                                });
+                            }
+                        }
+                        ast::ClassMember::Method(func) => {
+                            let mname =
+                                format!("{}::{}", class_name, func.name.text(source));
+                            let (params, min_args) = extract_params(source, &func.params);
+                            out.push(Symbol {
+                                name: mname,
+                                kind: SymbolKind::Function {
+                                    return_type: String::new(),
+                                    params,
+                                    min_args,
+                                },
+                                span: func.span,
+                                file_id,
+                                doc: None,
+                            });
+                        }
+                        ast::ClassMember::Constructor(func) => {
+                            // Qualify as ClassName::ClassName — the simple
+                            // unqualified class tail, not the namespace one.
+                            let simple = cls.name.text(source);
+                            let mname = format!("{}::{}", class_name, simple);
+                            let (params, min_args) = extract_params(source, &func.params);
+                            out.push(Symbol {
+                                name: mname,
+                                kind: SymbolKind::Function {
+                                    return_type: String::new(),
+                                    params,
+                                    min_args,
+                                },
+                                span: func.span,
+                                file_id,
+                                doc: None,
+                            });
+                        }
+                        ast::ClassMember::Destructor(func) => {
+                            // Destructor name in source is ~ClassName
+                            let mname = format!(
+                                "{}::{}",
+                                class_name,
+                                func.name.text(source)
+                            );
+                            let (params, min_args) = extract_params(source, &func.params);
+                            out.push(Symbol {
+                                name: mname,
+                                kind: SymbolKind::Function {
+                                    return_type: String::new(),
+                                    params,
+                                    min_args,
+                                },
+                                span: func.span,
+                                file_id,
+                                doc: None,
+                            });
+                        }
+                        ast::ClassMember::Property(prop) => {
+                            let mname =
+                                format!("{}::{}", class_name, prop.name.text(source));
+                            out.push(Symbol {
+                                name: mname,
+                                kind: SymbolKind::Variable {
+                                    type_name: String::new(),
+                                },
+                                span: prop.span,
+                                file_id,
+                                doc: None,
+                            });
+                        }
+                    }
+                }
             }
             ast::Item::Interface(iface) => {
                 let name = qualify(iface.name.text(source));
@@ -170,11 +279,13 @@ impl SymbolTable {
             }
             ast::Item::Function(func) => {
                 let name = qualify(func.name.text(source));
+                let (params, min_args) = extract_params(source, &func.params);
                 out.push(Symbol {
                     name,
                     kind: SymbolKind::Function {
                         return_type: String::new(),
-                        params: Vec::new(),
+                        params,
+                        min_args,
                     },
                     span: func.span,
                     file_id,
@@ -241,13 +352,46 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_class_methods_and_fields() {
+        let src = "class Foo { int x; void bar() {} }";
+        let tokens = lexer::tokenize_filtered(src);
+        let mut parser = Parser::new(&tokens, src);
+        let file = parser.parse_file();
+        let symbols = SymbolTable::extract_symbols(0, src, &file);
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Foo"), "missing Foo in {:?}", names);
+        assert!(names.contains(&"Foo::x"), "missing Foo::x in {:?}", names);
+        assert!(names.contains(&"Foo::bar"), "missing Foo::bar in {:?}", names);
+    }
+
+    #[test]
+    fn test_extract_class_in_namespace() {
+        let src = "namespace Ns { class Foo { int x; } }";
+        let tokens = lexer::tokenize_filtered(src);
+        let mut parser = Parser::new(&tokens, src);
+        let file = parser.parse_file();
+        let symbols = SymbolTable::extract_symbols(0, src, &file);
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Ns::Foo"), "missing Ns::Foo in {:?}", names);
+        assert!(
+            names.contains(&"Ns::Foo::x"),
+            "missing Ns::Foo::x in {:?}",
+            names
+        );
+    }
+
+    #[test]
     fn test_symbol_table_lookup() {
         let mut table = SymbolTable::new();
         let fid = table.allocate_file_id();
         table.set_file_symbols(fid, vec![
             Symbol {
                 name: "Main".to_string(),
-                kind: SymbolKind::Function { return_type: "void".into(), params: vec![] },
+                kind: SymbolKind::Function {
+                    return_type: "void".into(),
+                    params: vec![],
+                    min_args: 0,
+                },
                 span: Span::new(0, 4),
                 file_id: fid,
                 doc: None,

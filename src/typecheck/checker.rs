@@ -1,0 +1,1807 @@
+//! Expression / statement walker that produces type diagnostics.
+//!
+//! This is the "first real" type-checker pass: it walks a `SourceFile`,
+//! keeps a stack of lexical scopes for locals, runs a `TypeResolver` on
+//! every declared `TypeExpr` (reporting unknown-type diagnostics), and
+//! reports undefined identifiers encountered in expressions.
+//!
+//! YAGNI: no overload resolution, no implicit conversions, no
+//! member-access lookup, no real expression type inference beyond
+//! literals and identifier lookup. Those are later iterations.
+
+use super::builtins;
+use super::global_scope::GlobalScope;
+use super::repr::{PrimitiveType, TypeRepr};
+use super::resolver::TypeResolver;
+use crate::lexer::Span;
+use crate::parser::ast::*;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeDiagnosticKind {
+    UnknownType(String),
+    UndefinedIdentifier(String),
+    UndefinedMember {
+        object_type: String,
+        member: String,
+    },
+    MissingReturn {
+        function_name: String,
+    },
+    ArgCountMismatch {
+        function_name: String,
+        expected_min: usize,
+        expected_max: usize,
+        got: usize,
+    },
+    InvalidAssignmentTarget,
+    ReturnTypeMismatch {
+        expected: String,
+        got: String,
+    },
+    ArgTypeMismatch {
+        function_name: String,
+        param_index: usize,
+        expected: String,
+        got: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeDiagnostic {
+    pub span: Span,
+    pub kind: TypeDiagnosticKind,
+}
+
+impl TypeDiagnostic {
+    pub fn message(&self) -> String {
+        match &self.kind {
+            TypeDiagnosticKind::UnknownType(n) => format!("unknown type `{}`", n),
+            TypeDiagnosticKind::UndefinedIdentifier(n) => format!("undefined identifier `{}`", n),
+            TypeDiagnosticKind::UndefinedMember {
+                object_type,
+                member,
+            } => format!("type `{}` has no member `{}`", object_type, member),
+            TypeDiagnosticKind::MissingReturn { function_name } => {
+                format!("function `{}` must return a value", function_name)
+            }
+            TypeDiagnosticKind::ArgCountMismatch {
+                function_name,
+                expected_min,
+                expected_max,
+                got,
+            } => {
+                if expected_min == expected_max {
+                    format!(
+                        "function `{}` expects {} args, got {}",
+                        function_name, expected_min, got
+                    )
+                } else {
+                    format!(
+                        "function `{}` expects {}..={} args, got {}",
+                        function_name, expected_min, expected_max, got
+                    )
+                }
+            }
+            TypeDiagnosticKind::InvalidAssignmentTarget => {
+                "invalid left-hand side in assignment".to_string()
+            }
+            TypeDiagnosticKind::ReturnTypeMismatch { expected, got } => format!(
+                "return type mismatch: function returns `{}`, got `{}`",
+                expected, got
+            ),
+            TypeDiagnosticKind::ArgTypeMismatch {
+                function_name,
+                param_index,
+                expected,
+                got,
+            } => format!(
+                "argument {} of `{}`: expected `{}`, got `{}`",
+                param_index + 1,
+                function_name,
+                expected,
+                got
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Local {
+    name: String,
+    ty: TypeRepr,
+    #[allow(dead_code)]
+    span: Span,
+}
+
+#[derive(Debug, Default)]
+struct ScopeFrame {
+    locals: Vec<Local>,
+}
+
+/// The in-scope class context for methods/fields. Built when the walker
+/// descends into a class declaration and popped when it leaves.
+#[derive(Debug, Clone)]
+struct ClassCtx {
+    name: String,
+    /// (member_name, resolved_type) — one entry per declarator. For
+    /// methods we store the return type as a reasonable approximation
+    /// (used so `this.foo()` or bare `foo` in a method doesn't false-
+    /// positive; the real call/return-type semantics come in a later
+    /// iteration).
+    members: Vec<(String, TypeRepr)>,
+}
+
+pub struct Checker<'a> {
+    source: &'a str,
+    scope: &'a GlobalScope<'a>,
+    frames: Vec<ScopeFrame>,
+    class_stack: Vec<ClassCtx>,
+    namespace_stack: Vec<String>,
+    /// Map of fully-qualified workspace class names declared in this file
+    /// to `(parent_name, members)`. Used so implicit-this member lookups
+    /// can walk the parent chain for cross-method resolution within the
+    /// same file.
+    file_classes: std::collections::HashMap<String, (Option<String>, Vec<(String, TypeRepr)>)>,
+    return_type_stack: Vec<TypeRepr>,
+    pub diagnostics: Vec<TypeDiagnostic>,
+}
+
+impl<'a> Checker<'a> {
+    pub fn new(source: &'a str, scope: &'a GlobalScope<'a>) -> Self {
+        Self {
+            source,
+            scope,
+            frames: Vec::new(),
+            class_stack: Vec::new(),
+            namespace_stack: Vec::new(),
+            file_classes: std::collections::HashMap::new(),
+            return_type_stack: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub fn check_file(&mut self, file: &SourceFile) {
+        // Build an in-file class index up front so `class_stack`
+        // lookups can walk same-file parent chains for implicit-this
+        // member resolution.
+        self.index_file_classes(&file.items, None);
+        for item in &file.items {
+            self.check_item(item);
+        }
+    }
+
+    fn index_file_classes(&mut self, items: &[Item], ns: Option<&str>) {
+        for item in items {
+            match item {
+                Item::Class(cls) => {
+                    let simple = cls.name.text(self.source).to_string();
+                    let qual = match ns {
+                        Some(n) => format!("{}::{}", n, simple),
+                        None => simple.clone(),
+                    };
+                    let parent = cls.base_classes.first().map(|b| {
+                        // Use a throwaway resolver purely for the display
+                        // string so we get the same qualified form other
+                        // lookups use — discard diagnostics.
+                        let mut r = TypeResolver::new(self.scope, self.source)
+                            .with_namespace_stack(
+                                ns.map(|n| n.split("::").map(|s| s.to_string()).collect())
+                                    .unwrap_or_default(),
+                            );
+                        let repr = r.resolve(b);
+                        let _ = r.take_diagnostics();
+                        match repr.unwrap_const().unwrap_handle() {
+                            TypeRepr::Named(n) => n.clone(),
+                            TypeRepr::Error(n) => n.clone(),
+                            other => other.display(),
+                        }
+                    });
+                    let mut members: Vec<(String, TypeRepr)> = Vec::new();
+                    for m in &cls.members {
+                        match m {
+                            ClassMember::Field(var) => {
+                                let ty = {
+                                    let mut r = TypeResolver::new(self.scope, self.source)
+                                        .with_namespace_stack(
+                                            ns.map(|n| {
+                                                n.split("::").map(|s| s.to_string()).collect()
+                                            })
+                                            .unwrap_or_default(),
+                                        );
+                                    let repr = r.resolve(&var.type_expr);
+                                    let _ = r.take_diagnostics();
+                                    repr
+                                };
+                                for d in &var.declarators {
+                                    members.push((
+                                        d.name.text(self.source).to_string(),
+                                        ty.clone(),
+                                    ));
+                                }
+                            }
+                            ClassMember::Property(prop) => {
+                                let ty = {
+                                    let mut r = TypeResolver::new(self.scope, self.source)
+                                        .with_namespace_stack(
+                                            ns.map(|n| {
+                                                n.split("::").map(|s| s.to_string()).collect()
+                                            })
+                                            .unwrap_or_default(),
+                                        );
+                                    let repr = r.resolve(&prop.type_expr);
+                                    let _ = r.take_diagnostics();
+                                    repr
+                                };
+                                members.push((
+                                    prop.name.text(self.source).to_string(),
+                                    ty,
+                                ));
+                            }
+                            ClassMember::Method(func) => {
+                                let ret = {
+                                    let mut r = TypeResolver::new(self.scope, self.source)
+                                        .with_namespace_stack(
+                                            ns.map(|n| {
+                                                n.split("::").map(|s| s.to_string()).collect()
+                                            })
+                                            .unwrap_or_default(),
+                                        );
+                                    let repr = r.resolve(&func.return_type);
+                                    let _ = r.take_diagnostics();
+                                    repr
+                                };
+                                members.push((
+                                    func.name.text(self.source).to_string(),
+                                    ret,
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.file_classes.insert(qual, (parent, members));
+                }
+                Item::Namespace(n) => {
+                    let sub_ns = match ns {
+                        Some(prefix) => format!("{}::{}", prefix, n.name.text(self.source)),
+                        None => n.name.text(self.source).to_string(),
+                    };
+                    self.index_file_classes(&n.items, Some(&sub_ns));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // ── Scope helpers ───────────────────────────────────────────────────────
+
+    fn push_frame(&mut self) {
+        self.frames.push(ScopeFrame::default());
+    }
+
+    fn pop_frame(&mut self) {
+        self.frames.pop();
+    }
+
+    fn define_local(&mut self, name: String, ty: TypeRepr, span: Span) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.locals.push(Local { name, ty, span });
+        }
+    }
+
+    fn lookup_local(&self, name: &str) -> Option<&Local> {
+        for frame in self.frames.iter().rev() {
+            for local in frame.locals.iter().rev() {
+                if local.name == name {
+                    return Some(local);
+                }
+            }
+        }
+        None
+    }
+
+    // ── Class context helpers ───────────────────────────────────────────────
+
+    fn push_class(&mut self, ctx: ClassCtx) {
+        self.class_stack.push(ctx);
+    }
+
+    fn pop_class(&mut self) {
+        self.class_stack.pop();
+    }
+
+    fn current_class(&self) -> Option<&ClassCtx> {
+        self.class_stack.last()
+    }
+
+    /// Walks the class stack innermost-first and returns the first member
+    /// whose name matches. For nested-class methods (rare in AngelScript)
+    /// the innermost class wins. Also walks the parent-class chain via
+    /// the file-local class index.
+    ///
+    /// Also honors AngelScript's virtual-property convention: a reference
+    /// to `foo` will match a member named `get_foo` or `set_foo`. This is
+    /// critical for `this.windowOpen`-style accesses where the class only
+    /// declares `get_windowOpen()` / `set_windowOpen(bool)`.
+    fn lookup_class_member(&self, name: &str) -> Option<TypeRepr> {
+        let getter = format!("get_{}", name);
+        let setter = format!("set_{}", name);
+        let matches = |mname: &str| -> bool {
+            mname == name || mname == getter || mname == setter
+        };
+        for cls in self.class_stack.iter().rev() {
+            for (mname, ty) in &cls.members {
+                if matches(mname) {
+                    return Some(ty.clone());
+                }
+            }
+            // Walk the parent chain for this class, if the base class
+            // is declared in the same file.
+            if let Some((parent, _)) = self.file_classes.get(&cls.name) {
+                let mut current = parent.clone();
+                let mut hops = 0usize;
+                while let Some(pname) = current {
+                    hops += 1;
+                    if hops > 32 {
+                        break;
+                    }
+                    if let Some((pp, pmembers)) = self.file_classes.get(&pname) {
+                        for (mname, ty) in pmembers {
+                            if matches(mname) {
+                                return Some(ty.clone());
+                            }
+                        }
+                        current = pp.clone();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // ── Namespace context helpers ───────────────────────────────────────────
+
+    /// Joined form of the current namespace stack (e.g. "Outer::Inner").
+    #[allow(dead_code)]
+    fn current_namespace_qualified(&self) -> Option<String> {
+        if self.namespace_stack.is_empty() {
+            None
+        } else {
+            Some(self.namespace_stack.join("::"))
+        }
+    }
+
+    // ── Type resolution shim ────────────────────────────────────────────────
+
+    fn resolve_type_expr(&mut self, ty: &TypeExpr) -> TypeRepr {
+        let mut resolver = TypeResolver::new(self.scope, self.source)
+            .with_namespace_stack(self.namespace_stack.clone());
+        let repr = resolver.resolve(ty);
+        for diag in resolver.take_diagnostics() {
+            self.diagnostics.push(TypeDiagnostic {
+                span: diag.span,
+                kind: TypeDiagnosticKind::UnknownType(diag.unknown_name),
+            });
+        }
+        repr
+    }
+
+    // ── Item walker ─────────────────────────────────────────────────────────
+
+    fn check_item(&mut self, item: &Item) {
+        match item {
+            Item::Function(func) => self.check_function_decl(func, true),
+            Item::Class(cls) => self.check_class_decl(cls),
+            Item::Interface(iface) => self.check_interface_decl(iface),
+            Item::Enum(_) => {
+                // Enum values: underlying type is int; nothing to resolve
+                // structurally right now.
+            }
+            Item::Namespace(ns) => {
+                let ns_name = ns.name.text(self.source).to_string();
+                self.namespace_stack.push(ns_name);
+                for sub in &ns.items {
+                    self.check_item(sub);
+                }
+                self.namespace_stack.pop();
+            }
+            Item::Funcdef(fd) => {
+                let _ = self.resolve_type_expr(&fd.return_type);
+                for p in &fd.params {
+                    let _ = self.resolve_type_expr(&p.type_expr);
+                }
+            }
+            Item::VarDecl(var) => self.check_var_decl_global(var),
+            Item::Property(prop) => {
+                let _ = self.resolve_type_expr(&prop.type_expr);
+                if let Some(body) = &prop.getter {
+                    self.push_frame();
+                    self.check_function_body(body);
+                    self.pop_frame();
+                }
+                if let Some((_, body)) = &prop.setter {
+                    self.push_frame();
+                    self.check_function_body(body);
+                    self.pop_frame();
+                }
+            }
+            Item::Import(_) | Item::Error(_) => {}
+        }
+    }
+
+    fn check_class_decl(&mut self, cls: &ClassDecl) {
+        for base in &cls.base_classes {
+            let _ = self.resolve_type_expr(base);
+        }
+
+        // Build the class context up front so every method sees the full
+        // set of sibling members (including ones declared after it).
+        let class_name = cls.name.text(self.source).to_string();
+        let mut members: Vec<(String, TypeRepr)> = Vec::new();
+        for member in &cls.members {
+            match member {
+                ClassMember::Field(var) => {
+                    // Resolve the type once per field block — but don't emit
+                    // diagnostics here; those come when we actually visit
+                    // the member below. Use a throwaway resolver that drops
+                    // its diagnostics.
+                    let ty = {
+                        let mut resolver = TypeResolver::new(self.scope, self.source)
+                            .with_namespace_stack(self.namespace_stack.clone());
+                        let repr = resolver.resolve(&var.type_expr);
+                        // Intentionally discard diagnostics; visiting the
+                        // field via `check_class_member` will re-emit them.
+                        let _ = resolver.take_diagnostics();
+                        repr
+                    };
+                    for d in &var.declarators {
+                        members.push((d.name.text(self.source).to_string(), ty.clone()));
+                    }
+                }
+                ClassMember::Property(prop) => {
+                    let ty = {
+                        let mut resolver = TypeResolver::new(self.scope, self.source)
+                            .with_namespace_stack(self.namespace_stack.clone());
+                        let repr = resolver.resolve(&prop.type_expr);
+                        let _ = resolver.take_diagnostics();
+                        repr
+                    };
+                    members.push((prop.name.text(self.source).to_string(), ty));
+                }
+                ClassMember::Method(func) => {
+                    let ret = {
+                        let mut resolver = TypeResolver::new(self.scope, self.source)
+                            .with_namespace_stack(self.namespace_stack.clone());
+                        let repr = resolver.resolve(&func.return_type);
+                        let _ = resolver.take_diagnostics();
+                        repr
+                    };
+                    members.push((func.name.text(self.source).to_string(), ret));
+                }
+                ClassMember::Constructor(_) | ClassMember::Destructor(_) => {
+                    // Not addressable by bare name inside the class body.
+                }
+            }
+        }
+
+        self.push_class(ClassCtx {
+            name: class_name,
+            members,
+        });
+
+        for member in &cls.members {
+            self.check_class_member(member);
+        }
+
+        self.pop_class();
+    }
+
+    fn check_interface_decl(&mut self, iface: &InterfaceDecl) {
+        for base in &iface.bases {
+            let _ = self.resolve_type_expr(base);
+        }
+        for method in &iface.methods {
+            // Interface methods have no body — nothing to enforce.
+            self.check_function_decl(method, false);
+        }
+    }
+
+    fn check_class_member(&mut self, member: &ClassMember) {
+        match member {
+            ClassMember::Field(var) => {
+                // A field does not get scope-tracked as a local; just
+                // resolve its declared type and check any initializer expr.
+                let _ = self.resolve_type_expr(&var.type_expr);
+                for d in &var.declarators {
+                    if let Some(init) = &d.init {
+                        let _ = self.expr_type(init);
+                    }
+                }
+            }
+            ClassMember::Method(f) => {
+                self.check_function_decl(f, true);
+            }
+            ClassMember::Constructor(f) | ClassMember::Destructor(f) => {
+                // Ctors / dtors implicitly return; don't enforce return value.
+                self.check_function_decl(f, false);
+            }
+            ClassMember::Property(prop) => {
+                let _ = self.resolve_type_expr(&prop.type_expr);
+                if let Some(body) = &prop.getter {
+                    self.push_frame();
+                    self.check_function_body(body);
+                    self.pop_frame();
+                }
+                if let Some((_, body)) = &prop.setter {
+                    self.push_frame();
+                    self.check_function_body(body);
+                    self.pop_frame();
+                }
+            }
+        }
+    }
+
+    fn check_function_decl(&mut self, func: &FunctionDecl, enforce_return: bool) {
+        let ret_ty = self.resolve_type_expr(&func.return_type);
+        self.return_type_stack.push(ret_ty.clone());
+        self.push_frame();
+        for p in &func.params {
+            let ty = self.resolve_type_expr(&p.type_expr);
+            if let Some(name) = &p.name {
+                self.define_local(name.text(self.source).to_string(), ty, name.span);
+            }
+            if let Some(dv) = &p.default_value {
+                let _ = self.expr_type(dv);
+            }
+        }
+        if let Some(body) = &func.body {
+            self.check_function_body(body);
+            if enforce_return
+                && !matches!(ret_ty, TypeRepr::Void)
+                && !self.stmts_terminate(&body.stmts)
+            {
+                self.diagnostics.push(TypeDiagnostic {
+                    span: func.name.span,
+                    kind: TypeDiagnosticKind::MissingReturn {
+                        function_name: func.name.text(self.source).to_string(),
+                    },
+                });
+            }
+        }
+        self.pop_frame();
+        self.return_type_stack.pop();
+    }
+
+    /// Conservative "does the last statement of this slice definitely
+    /// return?" check. Used for the MissingReturn diagnostic.
+    fn stmts_terminate(&self, stmts: &[Stmt]) -> bool {
+        let Some(last) = stmts.last() else {
+            return false;
+        };
+        self.stmt_terminates(last)
+    }
+
+    fn stmt_terminates(&self, stmt: &Stmt) -> bool {
+        match &stmt.kind {
+            StmtKind::Return(_) => true,
+            StmtKind::Block(inner) => self.stmts_terminate(inner),
+            StmtKind::If {
+                then_branch,
+                else_branch: Some(eb),
+                ..
+            } => self.stmt_terminates(then_branch) && self.stmt_terminates(eb),
+            StmtKind::Switch { cases, .. } => {
+                let has_default =
+                    cases.iter().any(|c| matches!(c.label, SwitchLabel::Default));
+                has_default
+                    && cases
+                        .iter()
+                        .all(|c| self.stmts_terminate(&c.stmts))
+            }
+            _ => false,
+        }
+    }
+
+    fn check_function_body(&mut self, body: &FunctionBody) {
+        for stmt in &body.stmts {
+            self.check_stmt(stmt);
+        }
+    }
+
+    // ── Var decl (global / local split) ─────────────────────────────────────
+
+    fn check_var_decl_global(&mut self, var: &VarDeclStmt) {
+        let _ = self.resolve_type_expr(&var.type_expr);
+        for d in &var.declarators {
+            if let Some(init) = &d.init {
+                let _ = self.expr_type(init);
+            }
+        }
+    }
+
+    fn check_var_decl_local(&mut self, var: &VarDeclStmt) {
+        let is_auto = matches!(var.type_expr.kind, TypeExprKind::Auto);
+        let declared_ty = self.resolve_type_expr(&var.type_expr);
+        for d in &var.declarators {
+            // For `auto`, the local's type comes from the initializer.
+            let local_ty = if is_auto {
+                match &d.init {
+                    Some(init) => {
+                        let inferred = self.expr_type(init);
+                        if inferred.is_error() {
+                            TypeRepr::Error(String::new())
+                        } else {
+                            inferred
+                        }
+                    }
+                    None => TypeRepr::Error(String::new()),
+                }
+            } else {
+                if let Some(init) = &d.init {
+                    let _ = self.expr_type(init);
+                }
+                declared_ty.clone()
+            };
+            self.define_local(
+                d.name.text(self.source).to_string(),
+                local_ty,
+                d.name.span,
+            );
+        }
+    }
+
+    // ── Statement walker ────────────────────────────────────────────────────
+
+    fn check_stmt(&mut self, stmt: &Stmt) {
+        match &stmt.kind {
+            StmtKind::Expr(e) => {
+                let _ = self.expr_type(e);
+            }
+            StmtKind::VarDecl(var) => self.check_var_decl_local(var),
+            StmtKind::Block(stmts) => {
+                self.push_frame();
+                for s in stmts {
+                    self.check_stmt(s);
+                }
+                self.pop_frame();
+            }
+            StmtKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let _ = self.expr_type(condition);
+                self.push_frame();
+                self.check_stmt(then_branch);
+                self.pop_frame();
+                if let Some(eb) = else_branch {
+                    self.push_frame();
+                    self.check_stmt(eb);
+                    self.pop_frame();
+                }
+            }
+            StmtKind::For {
+                init,
+                condition,
+                step,
+                body,
+            } => {
+                // For-loop init may declare a variable whose scope covers
+                // the condition/step/body — push a frame around the whole
+                // loop.
+                self.push_frame();
+                if let Some(init_stmt) = init {
+                    self.check_stmt(init_stmt);
+                }
+                if let Some(c) = condition {
+                    let _ = self.expr_type(c);
+                }
+                for s in step {
+                    let _ = self.expr_type(s);
+                }
+                self.check_stmt(body);
+                self.pop_frame();
+            }
+            StmtKind::While { condition, body } => {
+                let _ = self.expr_type(condition);
+                self.push_frame();
+                self.check_stmt(body);
+                self.pop_frame();
+            }
+            StmtKind::DoWhile { body, condition } => {
+                self.push_frame();
+                self.check_stmt(body);
+                self.pop_frame();
+                let _ = self.expr_type(condition);
+            }
+            StmtKind::Switch { expr, cases } => {
+                let _ = self.expr_type(expr);
+                for case in cases {
+                    if let SwitchLabel::Case(e) = &case.label {
+                        let _ = self.expr_type(e);
+                    }
+                    self.push_frame();
+                    for s in &case.stmts {
+                        self.check_stmt(s);
+                    }
+                    self.pop_frame();
+                }
+            }
+            StmtKind::Return(Some(e)) => {
+                let got_ty = self.expr_type(e);
+                if let Some(expected) = self.return_type_stack.last() {
+                    if let (TypeRepr::Primitive(exp_p), TypeRepr::Primitive(got_p)) =
+                        (expected, &got_ty)
+                    {
+                        if exp_p != got_p {
+                            self.diagnostics.push(TypeDiagnostic {
+                                span: e.span,
+                                kind: TypeDiagnosticKind::ReturnTypeMismatch {
+                                    expected: exp_p.as_str().to_string(),
+                                    got: got_p.as_str().to_string(),
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+            StmtKind::TryCatch {
+                try_body,
+                catch_body,
+            } => {
+                self.check_stmt(try_body);
+                self.check_stmt(catch_body);
+            }
+            StmtKind::Return(None)
+            | StmtKind::Break
+            | StmtKind::Continue
+            | StmtKind::Empty
+            | StmtKind::Error => {}
+        }
+    }
+
+    // ── Member / call helpers ───────────────────────────────────────────────
+
+    /// If `ty` is (after unwrapping `Const`/`Handle`/`Array`) a named type
+    /// or a generic base, return the base name suitable for type-index
+    /// lookup. Otherwise return None.
+    fn base_type_name(ty: &TypeRepr) -> Option<String> {
+        let inner = ty.unwrap_const().unwrap_handle();
+        match inner {
+            TypeRepr::Named(n) => {
+                // `auto` is a placeholder for "type inference needed";
+                // treat it as unknown so member access stays silent.
+                if n == "auto" {
+                    None
+                } else {
+                    Some(n.clone())
+                }
+            }
+            TypeRepr::Generic { base, .. } => Some(base.clone()),
+            TypeRepr::Array(_) => Some("array".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Derive the type of `obj.member`, emitting an `UndefinedMember` if
+    /// the lookup fails against a known (non-error) object type. When the
+    /// object type is `Error(_)` we silently propagate `Error` so we don't
+    /// double-report the same root cause.
+    fn member_access_type(
+        &mut self,
+        obj_ty: &TypeRepr,
+        member: &Ident,
+        span: Span,
+    ) -> TypeRepr {
+        // Propagate error without re-reporting.
+        if obj_ty.is_error() {
+            return TypeRepr::Error(String::new());
+        }
+        let member_name = member.text(self.source).to_string();
+        let Some(type_name) = Self::base_type_name(obj_ty) else {
+            // Primitive / Null / Void / Funcdef — not a class, no members.
+            // Stay quiet for now (later iterations may add primitive .op
+            // overloads etc.).
+            return TypeRepr::Error(String::new());
+        };
+        if let Some(t) = self.scope.lookup_member_type(&type_name, &member_name) {
+            return t;
+        }
+        // Also try: if this is a workspace-local class, check its in-memory
+        // ClassCtx members. Handles `this.foo` transitively via explicit
+        // receiver with the correct class name.
+        for cls in &self.class_stack {
+            if cls.name == type_name {
+                for (mname, t) in &cls.members {
+                    if mname == &member_name {
+                        return t.clone();
+                    }
+                }
+            }
+        }
+        // Workspace classes currently don't track parent chains or all
+        // members across files, so emitting UndefinedMember against one
+        // would be noisy false-positive territory. Only emit when the
+        // type is a known external type (where we trust the method /
+        // property list). Unknown names (e.g. tail-matched class field
+        // identifiers fabricated into `Named(name)` by the Ident walker)
+        // are also silenced — we can't trust the object type.
+        if !self.scope.is_external_type(&type_name) {
+            return TypeRepr::Error(String::new());
+        }
+        // Nadeo-sourced types have partial member metadata (return types
+        // and many property types are empty because the Nadeo format uses
+        // type IDs rather than type-name strings), so a failed lookup can
+        // mean the DB is incomplete rather than the member is actually
+        // missing. Suppress the diagnostic.
+        if self.scope.is_nadeo_type(&type_name) {
+            return TypeRepr::Error(String::new());
+        }
+        self.diagnostics.push(TypeDiagnostic {
+            span,
+            kind: TypeDiagnosticKind::UndefinedMember {
+                object_type: type_name,
+                member: member_name,
+            },
+        });
+        TypeRepr::Error(String::new())
+    }
+
+    /// If `qualified_name` names a unique workspace free function, emit an
+    /// `ArgCountMismatch` diagnostic when `got` is outside that function's
+    /// `min..=max` parameter range. Overloaded names (2+ matches) are
+    /// conservatively skipped — see `GlobalScope::lookup_function_signature`.
+    /// `display_name` is the bare name shown in the diagnostic message.
+    fn check_arg_count(
+        &mut self,
+        display_name: &str,
+        qualified_name: &str,
+        got: usize,
+        span: Span,
+    ) {
+        let Some((min_args, max_args)) = self.scope.lookup_function_signature(qualified_name)
+        else {
+            return;
+        };
+        if got < min_args || got > max_args {
+            self.diagnostics.push(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::ArgCountMismatch {
+                    function_name: display_name.to_string(),
+                    expected_min: min_args,
+                    expected_max: max_args,
+                    got,
+                },
+            });
+        }
+    }
+
+    /// Walk each argument expression exactly once, typing them for side
+    /// effects (diagnostics) and discarding the results. Used by call-site
+    /// dispatch branches that don't need arg types.
+    fn walk_args(&mut self, args: &[Expr]) {
+        for a in args {
+            let _ = self.expr_type(a);
+        }
+    }
+
+    /// Walk each argument expression and, for primitive-typed args whose
+    /// corresponding declared parameter type is also a primitive, emit an
+    /// `ArgTypeMismatch` when they differ. Non-primitive arg types, unknown
+    /// param types (non-primitive text), and error types are all silently
+    /// skipped — this is deliberately conservative, mirroring
+    /// `ReturnTypeMismatch`'s primitive-only strategy.
+    ///
+    /// Walks each arg exactly once so callers must NOT pre-walk.
+    fn walk_args_and_check_types(
+        &mut self,
+        display_name: &str,
+        args: &[Expr],
+        param_types: &[String],
+    ) {
+        for (i, arg) in args.iter().enumerate() {
+            let arg_ty = self.expr_type(arg);
+            let Some(param_text) = param_types.get(i) else {
+                continue;
+            };
+            let TypeRepr::Primitive(arg_p) = arg_ty else {
+                continue;
+            };
+            let Some(param_p) = PrimitiveType::from_name(param_text.trim()) else {
+                continue;
+            };
+            if arg_p != param_p {
+                self.diagnostics.push(TypeDiagnostic {
+                    span: arg.span,
+                    kind: TypeDiagnosticKind::ArgTypeMismatch {
+                        function_name: display_name.to_string(),
+                        param_index: i,
+                        expected: param_p.as_str().to_string(),
+                        got: arg_p.as_str().to_string(),
+                    },
+                });
+            }
+        }
+    }
+
+    /// Derive the type of a call expression's result. Takes the raw `args`
+    /// slice and is responsible for walking each arg expression exactly
+    /// once via `expr_type`. Callers must NOT pre-walk `args`.
+    fn call_type(&mut self, callee: &Expr, args: &[Expr]) -> TypeRepr {
+        match &callee.kind {
+            ExprKind::Ident(ident) => {
+                let name = ident.text(self.source).to_string();
+                // 1. Local (function-typed variable) — treat as unknown.
+                if self.lookup_local(&name).is_some() {
+                    self.walk_args(args);
+                    return TypeRepr::Error(String::new());
+                }
+                // 2. Implicit `this.method()` — find on current class.
+                if self.lookup_class_member(&name).is_some() {
+                    self.walk_args(args);
+                    return TypeRepr::Error(String::new());
+                }
+                // 3. Namespace-scoped lookups (inside a namespace block).
+                //    Try function return type first (for a real typed
+                //    return); fall back to any-kind qualified lookup so
+                //    type constructors and other callables within the
+                //    current namespace stay silent.
+                for depth in (1..=self.namespace_stack.len()).rev() {
+                    let ns = self.namespace_stack[..depth].join("::");
+                    let qualified = format!("{}::{}", ns, name);
+                    if let Some(t) = self.scope.lookup_function_return(&qualified) {
+                        self.check_arg_count(&name, &qualified, args.len(), callee.span);
+                        if let Some(param_types) =
+                            self.scope.lookup_function_param_types(&qualified)
+                        {
+                            self.walk_args_and_check_types(&name, args, &param_types);
+                        } else {
+                            self.walk_args(args);
+                        }
+                        return t;
+                    }
+                    if self.scope.has_type(&qualified) {
+                        self.walk_args(args);
+                        return TypeRepr::Named(qualified);
+                    }
+                    if self.scope.has_global_ident(&qualified) {
+                        self.walk_args(args);
+                        return TypeRepr::Error(String::new());
+                    }
+                }
+                // 4. Top-level function.
+                if let Some(t) = self.scope.lookup_function_return(&name) {
+                    self.check_arg_count(&name, &name, args.len(), callee.span);
+                    if let Some(param_types) = self.scope.lookup_function_param_types(&name) {
+                        self.walk_args_and_check_types(&name, args, &param_types);
+                    } else {
+                        self.walk_args(args);
+                    }
+                    return t;
+                }
+                // 5. Maybe it's a type-constructor form that slipped in
+                //    as an Ident — surface the type when possible so
+                //    chained `.member` access off a constructor can
+                //    still resolve. Otherwise just silence.
+                if self.scope.has_type(&name) {
+                    self.walk_args(args);
+                    return TypeRepr::Named(name);
+                }
+                if self.scope.has_global_ident(&name) {
+                    self.walk_args(args);
+                    return TypeRepr::Error(String::new());
+                }
+                // 6. AngelScript / Openplanet hardcoded builtins
+                //    (e.g. `CoroutineFunc(X)` constructor).
+                if builtins::is_builtin_type(&name) || builtins::is_builtin_global(&name) {
+                    self.walk_args(args);
+                    return TypeRepr::Error(String::new());
+                }
+                // Emit an undefined-ident diagnostic on the callee span.
+                self.diagnostics.push(TypeDiagnostic {
+                    span: callee.span,
+                    kind: TypeDiagnosticKind::UndefinedIdentifier(name.clone()),
+                });
+                self.walk_args(args);
+                TypeRepr::Error(name)
+            }
+            ExprKind::Member { object, member } => {
+                let obj_ty = self.expr_type(object);
+                self.walk_args(args);
+                if obj_ty.is_error() {
+                    return TypeRepr::Error(String::new());
+                }
+                let member_name = member.text(self.source).to_string();
+                let Some(type_name) = Self::base_type_name(&obj_ty) else {
+                    return TypeRepr::Error(String::new());
+                };
+                if let Some(t) = self
+                    .scope
+                    .lookup_method_return(&type_name, &member_name)
+                {
+                    return t;
+                }
+                // Workspace-local class: any member is fine — silence.
+                for cls in &self.class_stack {
+                    if cls.name == type_name
+                        && cls.members.iter().any(|(n, _)| n == &member_name)
+                    {
+                        return TypeRepr::Error(String::new());
+                    }
+                }
+                if !self.scope.is_external_type(&type_name) {
+                    return TypeRepr::Error(String::new());
+                }
+                if self.scope.is_nadeo_type(&type_name) {
+                    return TypeRepr::Error(String::new());
+                }
+                self.diagnostics.push(TypeDiagnostic {
+                    span: callee.span,
+                    kind: TypeDiagnosticKind::UndefinedMember {
+                        object_type: type_name,
+                        member: member_name,
+                    },
+                });
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::NamespaceAccess { path } => {
+                let qual = path.to_string(self.source);
+                self.walk_args(args);
+                if let Some(t) = self.scope.lookup_function_return(&qual) {
+                    return t;
+                }
+                if self.scope.has_type(&qual) {
+                    return TypeRepr::Named(qual);
+                }
+                if self.scope.has_global_ident(&qual) {
+                    return TypeRepr::Error(String::new());
+                }
+                // Fully qualified call-like path (`UX::SmallButton(...)`) —
+                // stay silent; we can't reliably distinguish user helper
+                // namespaces from external APIs yet.
+                TypeRepr::Error(String::new())
+            }
+            _ => {
+                let _ = self.expr_type(callee);
+                self.walk_args(args);
+                TypeRepr::Error(String::new())
+            }
+        }
+    }
+
+    // ── Expression walker / minimal type derivation ─────────────────────────
+
+    fn expr_type(&mut self, expr: &Expr) -> TypeRepr {
+        match &expr.kind {
+            ExprKind::IntLit(_) | ExprKind::HexLit(_) => TypeRepr::Primitive(PrimitiveType::Int),
+            ExprKind::FloatLit(_) => TypeRepr::Primitive(PrimitiveType::Float),
+            ExprKind::StringLit => TypeRepr::Primitive(PrimitiveType::String),
+            ExprKind::BoolLit(_) => TypeRepr::Primitive(PrimitiveType::Bool),
+            ExprKind::Null => TypeRepr::Null,
+            ExprKind::This | ExprKind::Super => {
+                if let Some(cls) = self.current_class() {
+                    TypeRepr::Named(cls.name.clone())
+                } else {
+                    TypeRepr::Error("this".into())
+                }
+            }
+            ExprKind::Ident(ident) => {
+                let name = ident.text(self.source).to_string();
+                if let Some(local) = self.lookup_local(&name) {
+                    return local.ty.clone();
+                }
+                // 2. Class member (implicit `this.`).
+                if let Some(ty) = self.lookup_class_member(&name) {
+                    return ty;
+                }
+                // 3. Namespace-scoped global: try progressively shorter
+                //    namespace prefixes.  Inside Ns "Outer::Inner", try
+                //    "Outer::Inner::name" first, then "Outer::name".
+                for depth in (1..=self.namespace_stack.len()).rev() {
+                    let ns = self.namespace_stack[..depth].join("::");
+                    let qualified = format!("{}::{}", ns, name);
+                    if self.scope.has_global_ident(&qualified) {
+                        return TypeRepr::Named(qualified);
+                    }
+                }
+                // 4. Global top-level lookup.
+                if self.scope.has_global_ident(&name) {
+                    return TypeRepr::Named(name);
+                }
+                // 5. AngelScript / Openplanet hardcoded builtins — silent.
+                if builtins::is_builtin_type(&name) || builtins::is_builtin_global(&name) {
+                    return TypeRepr::Error(String::new());
+                }
+                // 6. Undefined.
+                self.diagnostics.push(TypeDiagnostic {
+                    span: expr.span,
+                    kind: TypeDiagnosticKind::UndefinedIdentifier(name.clone()),
+                });
+                TypeRepr::Error(name)
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                let _ = self.expr_type(lhs);
+                let _ = self.expr_type(rhs);
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::Unary { expr, .. } | ExprKind::Postfix { expr, .. } => self.expr_type(expr),
+            ExprKind::Call { callee, args } => {
+                // `call_type` is responsible for walking each `args` entry
+                // exactly once via `expr_type`. Do NOT pre-walk here — the
+                // Ident arm needs raw arg exprs to do arg-type checking
+                // without double-emitting diagnostics.
+                self.call_type(callee, args)
+            }
+            ExprKind::Member { object, member } => {
+                let obj_ty = self.expr_type(object);
+                self.member_access_type(&obj_ty, member, expr.span)
+            }
+            ExprKind::Index { object, index } => {
+                let _ = self.expr_type(object);
+                let _ = self.expr_type(index);
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::Cast { target_type, expr: inner } => {
+                let _ = self.resolve_type_expr(target_type);
+                let _ = self.expr_type(inner);
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::TypeConstruct { target_type, args } => {
+                let _ = self.resolve_type_expr(target_type);
+                for a in args {
+                    let _ = self.expr_type(a);
+                }
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::ArrayInit(items) => {
+                for i in items {
+                    let _ = self.expr_type(i);
+                }
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::Assign { lhs, rhs, .. } | ExprKind::HandleAssign { lhs, rhs } => {
+                if !matches!(
+                    lhs.kind,
+                    ExprKind::Ident(_)
+                        | ExprKind::Member { .. }
+                        | ExprKind::Index { .. }
+                        | ExprKind::NamespaceAccess { .. }
+                ) {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: lhs.span,
+                        kind: TypeDiagnosticKind::InvalidAssignmentTarget,
+                    });
+                }
+                let _ = self.expr_type(lhs);
+                let _ = self.expr_type(rhs);
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let _ = self.expr_type(condition);
+                let _ = self.expr_type(then_expr);
+                let _ = self.expr_type(else_expr);
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::Is {
+                expr: inner,
+                target,
+                ..
+            } => {
+                let _ = self.expr_type(inner);
+                match target {
+                    IsTarget::Type(t) => {
+                        let _ = self.resolve_type_expr(t);
+                    }
+                    IsTarget::Expr(e) => {
+                        let _ = self.expr_type(e);
+                    }
+                    IsTarget::Null => {}
+                }
+                TypeRepr::Primitive(PrimitiveType::Bool)
+            }
+            ExprKind::NamespaceAccess { path } => {
+                let qual = path.to_string(self.source);
+                if self.scope.has_type(&qual) {
+                    TypeRepr::Named(qual)
+                } else {
+                    TypeRepr::Error(String::new())
+                }
+            }
+            ExprKind::Lambda { params, body } => {
+                // Push an Error sentinel onto the return-type stack so
+                // the outer function's expected return type doesn't leak
+                // into `return` statements inside the lambda body.
+                self.return_type_stack.push(TypeRepr::Error(String::new()));
+                self.push_frame();
+                for p in params {
+                    let ty = self.resolve_type_expr(&p.type_expr);
+                    if let Some(name) = &p.name {
+                        self.define_local(
+                            name.text(self.source).to_string(),
+                            ty,
+                            name.span,
+                        );
+                    }
+                }
+                self.check_function_body(body);
+                self.pop_frame();
+                self.return_type_stack.pop();
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::Error => TypeRepr::Error(String::new()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::tokenize_filtered;
+    use crate::parser::Parser;
+    use crate::symbols::SymbolTable;
+
+    fn check(source: &str) -> Vec<TypeDiagnostic> {
+        let tokens = tokenize_filtered(source);
+        let mut parser = Parser::new(&tokens, source);
+        let file = parser.parse_file();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, source, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, None);
+        let mut checker = Checker::new(source, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    #[test]
+    fn unknown_type_in_vardecl() {
+        let diags = check("NotAType x;");
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got {:?}", diags);
+        assert_eq!(
+            diags[0].kind,
+            TypeDiagnosticKind::UnknownType("NotAType".into())
+        );
+    }
+
+    #[test]
+    fn undefined_ident_in_expr() {
+        let diags = check("void f() { int x = y; }");
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got {:?}", diags);
+        assert_eq!(
+            diags[0].kind,
+            TypeDiagnosticKind::UndefinedIdentifier("y".into())
+        );
+    }
+
+    #[test]
+    fn local_shadows_nothing() {
+        let diags = check("void f() { int x = 5; int y = x; }");
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    #[test]
+    fn function_param_is_local() {
+        let diags = check("void f(int x) { int y = x; }");
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    #[test]
+    fn class_member_unknown_type() {
+        let diags = check("class C { NotAType field; }");
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got {:?}", diags);
+        assert_eq!(
+            diags[0].kind,
+            TypeDiagnosticKind::UnknownType("NotAType".into())
+        );
+    }
+
+    #[test]
+    fn nested_block_scope() {
+        let diags = check("void f() { if (true) { int x = 5; } int y = x; }");
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got {:?}", diags);
+        assert_eq!(
+            diags[0].kind,
+            TypeDiagnosticKind::UndefinedIdentifier("x".into())
+        );
+    }
+
+    #[test]
+    fn namespace_items_are_checked() {
+        let diags = check("namespace Foo { NotAType g; }");
+        assert_eq!(diags.len(), 1, "expected 1 diagnostic, got {:?}", diags);
+        assert_eq!(
+            diags[0].kind,
+            TypeDiagnosticKind::UnknownType("NotAType".into())
+        );
+    }
+
+    #[test]
+    fn this_resolves_to_class_type() {
+        let diags = check("class C { void f() { C@ x = this; } }");
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    #[test]
+    fn implicit_this_member_resolves() {
+        let diags = check("class C { int x; void f() { int y = x; } }");
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    #[test]
+    fn namespace_scoped_ident_resolves() {
+        let diags =
+            check("namespace Ns { class Foo {} void f() { Foo@ x; } }");
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    #[test]
+    fn member_access_workspace_class_silenced() {
+        // Using `this.field` inside a method resolves through
+        // `base_type_name(this) → current class` + the in-memory
+        // ClassCtx members, so `this.x` should not emit a diagnostic.
+        let diags = check("class C { int x; void f() { int y = this.x; } }");
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn member_access_unknown_on_workspace_class_is_silent() {
+        // Workspace classes don't carry full member / parent-chain
+        // information across files yet, so a missing member on a
+        // workspace class should NOT emit UndefinedMember — it would
+        // produce pervasive false positives against real user code
+        // that inherits from unresolved base classes. Emission is
+        // reserved for external (typedb-backed) types.
+        let diags = check("class C { int x; void f() { int y = this.bogus; } }");
+        let undef_member: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            undef_member.is_empty(),
+            "expected no UndefinedMember diag, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn member_access_on_error_is_silent() {
+        // Calling `.foo` on an unknown-type value should only emit the
+        // UnknownType diagnostic, not an UndefinedMember cascade.
+        let diags = check("void f() { NotAType x; int y = x.foo; }");
+        let undef_member: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            undef_member.is_empty(),
+            "expected no UndefinedMember diag, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn coroutine_func_builtin_is_silent() {
+        // `CoroutineFunc` is an engine-registered funcdef that isn't in
+        // the loaded type DB. Treat it as a known builtin rather than
+        // emitting undefined-ident.
+        let diags = check("void worker() {} void f() { CoroutineFunc(worker); }");
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n.starts_with("CoroutineFunc")))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no undefined-ident for CoroutineFunc, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn implicit_this_virtual_property_resolves() {
+        // `windowOpen` is declared only via `get_windowOpen` / `set_windowOpen`.
+        // Bare `windowOpen` inside a method should match the getter/setter.
+        let source = r#"
+            class C {
+                bool tabOpen;
+                bool get_windowOpen() { return !tabOpen; }
+                void set_windowOpen(bool value) { tabOpen = !value; }
+                void f() {
+                    windowOpen = !windowOpen;
+                }
+            }
+        "#;
+        let diags = check(source);
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "windowOpen"))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no undefined-ident for windowOpen, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn auto_local_inferred_from_int_literal() {
+        let diags = check("void f() { auto x = 42; int y = x; }");
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    #[test]
+    fn auto_local_inferred_from_member_access() {
+        let diags = check("class Foo { int bar; } void f() { Foo@ foo; auto b = foo.bar; }");
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    #[test]
+    fn missing_return_on_nonvoid_function_fires() {
+        let diags = check("int f() { }");
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
+            .collect();
+        assert_eq!(missing.len(), 1, "expected 1 MissingReturn, got {:?}", diags);
+        assert_eq!(
+            missing[0].kind,
+            TypeDiagnosticKind::MissingReturn {
+                function_name: "f".into()
+            }
+        );
+    }
+
+    #[test]
+    fn return_in_all_if_branches_suppresses_missing_return() {
+        let diags = check("int f() { if (true) { return 1; } else { return 2; } }");
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
+            .collect();
+        assert!(missing.is_empty(), "expected no MissingReturn, got {:?}", diags);
+    }
+
+    #[test]
+    fn void_function_without_return_ok() {
+        let diags = check("void f() { }");
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
+            .collect();
+        assert!(missing.is_empty(), "expected no MissingReturn, got {:?}", diags);
+    }
+
+    #[test]
+    fn return_in_single_branch_if_does_not_suppress() {
+        let diags = check("int f() { if (true) { return 1; } }");
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
+            .collect();
+        assert_eq!(missing.len(), 1, "expected 1 MissingReturn, got {:?}", diags);
+    }
+
+    #[test]
+    fn arg_count_match_ok() {
+        let diags = check("void f(int a, int b) {} void main() { f(1, 2); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert!(bad.is_empty(), "expected no ArgCountMismatch, got {:?}", diags);
+    }
+
+    #[test]
+    fn arg_count_too_few_fires() {
+        let diags = check("void f(int a, int b) {} void main() { f(1); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 ArgCountMismatch, got {:?}", diags);
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgCountMismatch {
+                function_name: "f".into(),
+                expected_min: 2,
+                expected_max: 2,
+                got: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn arg_count_too_many_fires() {
+        let diags = check("void f(int a) {} void main() { f(1, 2); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 ArgCountMismatch, got {:?}", diags);
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgCountMismatch {
+                function_name: "f".into(),
+                expected_min: 1,
+                expected_max: 1,
+                got: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn arg_count_optional_params_respected() {
+        let diags = check("void f(int a, int b = 3) {} void main() { f(1); f(1, 2); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert!(bad.is_empty(), "expected no ArgCountMismatch, got {:?}", diags);
+    }
+
+    #[test]
+    fn arg_count_overloaded_suppressed() {
+        let diags = check("void f(int a) {} void f(int a, int b) {} void main() { f(); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgCountMismatch for overloaded call, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn super_resolves_in_class() {
+        let diags = check("class C { void f() { auto x = super; } }");
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "super"))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no undefined-ident for super, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn assign_to_ident_ok() {
+        let diags = check("void f() { int x = 1; x = 2; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::InvalidAssignmentTarget))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no InvalidAssignmentTarget, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn assign_to_member_ok() {
+        let diags = check("class C { int x; } void f() { C@ c; c.x = 1; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::InvalidAssignmentTarget))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no InvalidAssignmentTarget, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn assign_to_index_ok() {
+        let diags = check("void f() { array<int> a; a[0] = 1; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::InvalidAssignmentTarget))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no InvalidAssignmentTarget, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn assign_to_literal_fires() {
+        let diags = check("void f() { 1 = 2; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::InvalidAssignmentTarget))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 InvalidAssignmentTarget, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn assign_to_call_fires() {
+        let diags = check("int g() { return 0; } void f() { g() = 1; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::InvalidAssignmentTarget))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 InvalidAssignmentTarget, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn assign_to_binary_fires() {
+        let diags = check("void f() { int a=1; int b=2; (a + b) = 3; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::InvalidAssignmentTarget))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 InvalidAssignmentTarget, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn return_int_from_int_ok() {
+        let diags = check("int f() { return 1; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ReturnTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ReturnTypeMismatch, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn return_string_from_int_fires() {
+        let diags = check("int f() { return \"hello\"; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ReturnTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ReturnTypeMismatch, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn return_ident_preserves_silence() {
+        let diags = check("int f() { return undefined_name; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ReturnTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ReturnTypeMismatch, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn return_from_void_ok() {
+        let diags = check("void f() { return; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ReturnTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ReturnTypeMismatch, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn return_null_from_handle_suppressed() {
+        let diags = check("class C {} C@ f() { return null; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ReturnTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ReturnTypeMismatch, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn arg_type_primitive_match_ok() {
+        let diags = check("void f(int a) {} void main() { f(1); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(bad.is_empty(), "expected no ArgTypeMismatch, got {:?}", diags);
+    }
+
+    #[test]
+    fn arg_type_primitive_mismatch_fires() {
+        let diags = check("void f(int a) {} void main() { f(\"x\"); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 ArgTypeMismatch, got {:?}", diags);
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgTypeMismatch {
+                function_name: "f".into(),
+                param_index: 0,
+                expected: "int".into(),
+                got: "string".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn arg_type_non_primitive_suppressed() {
+        let diags = check("class C {} void f(C@ c) {} void main() { f(null); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch on non-primitive param, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn arg_type_error_type_suppressed() {
+        let diags = check("void f(int a) {} void main() { f(undefined_name); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch when arg is error-typed, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn arg_type_overloaded_suppressed() {
+        let diags = check("void f(int a) {} void f(string a) {} void main() { f(1); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for overloaded call, got {:?}",
+            diags
+        );
+    }
+}

@@ -4,9 +4,24 @@ use crate::config::LspConfig;
 use crate::lexer;
 use crate::parser::Parser;
 use crate::preprocessor;
+use crate::symbols::SymbolTable;
+use crate::typecheck::{Checker, GlobalScope};
+use crate::typedb::TypeIndex;
 
 /// Compute diagnostics for a single file.
-pub fn compute_diagnostics(uri: &Url, source: &str, config: &LspConfig) -> Vec<Diagnostic> {
+///
+/// If `workspace_symbols` is `Some`, the supplied pooled [`SymbolTable`] is
+/// used as the workspace for name resolution (so sibling-file declarations
+/// are visible). If `None`, a single-file symbol table is built on the fly
+/// from `source` alone — this is the current production behavior; multi-file
+/// wiring for `Backend::on_change` is a separate concern.
+pub fn compute_diagnostics(
+    uri: &Url,
+    source: &str,
+    config: &LspConfig,
+    type_index: Option<&TypeIndex>,
+    workspace_symbols: Option<&SymbolTable>,
+) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Check if this is info.toml
@@ -32,7 +47,7 @@ pub fn compute_diagnostics(uri: &Url, source: &str, config: &LspConfig) -> Vec<D
 
     // Parse
     let mut parser = Parser::new(&tokens, &preprocess_result.masked_source);
-    let _file = parser.parse_file();
+    let file = parser.parse_file();
 
     for err in &parser.errors {
         let range = span_to_range(source, err.span);
@@ -40,6 +55,35 @@ pub fn compute_diagnostics(uri: &Url, source: &str, config: &LspConfig) -> Vec<D
             range,
             severity: Some(DiagnosticSeverity::ERROR),
             message: err.to_string(),
+            source: Some("openplanet-lsp".to_string()),
+            ..Default::default()
+        });
+    }
+
+    // Type-check. Prefer the caller-supplied pooled workspace symbol table
+    // when present; otherwise fall back to a single-file table built from
+    // the current source only.
+    let owned_symbols: Option<SymbolTable> = if workspace_symbols.is_some() {
+        None
+    } else {
+        let mut symbols = SymbolTable::new();
+        let fid = symbols.allocate_file_id();
+        let file_syms =
+            SymbolTable::extract_symbols(fid, &preprocess_result.masked_source, &file);
+        symbols.set_file_symbols(fid, file_syms);
+        Some(symbols)
+    };
+    let symbols_ref: &SymbolTable = workspace_symbols
+        .unwrap_or_else(|| owned_symbols.as_ref().expect("owned symbols built above"));
+    let scope = GlobalScope::new(symbols_ref, type_index);
+    let mut checker = Checker::new(&preprocess_result.masked_source, &scope);
+    checker.check_file(&file);
+    for diag in &checker.diagnostics {
+        let range = span_to_range(source, diag.span);
+        diagnostics.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: diag.message(),
             source: Some("openplanet-lsp".to_string()),
             ..Default::default()
         });

@@ -4,5 +4,6 @@ pub mod parser;
 pub mod preprocessor;
 pub mod server;
 pub mod symbols;
+pub mod typecheck;
 pub mod typedb;
 pub mod workspace;

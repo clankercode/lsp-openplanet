@@ -12,6 +12,22 @@ pub struct LspConfig {
     pub defines: HashSet<String>,
 }
 
+impl Default for LspConfig {
+    /// A minimal config with only the standard set of preprocessor defines
+    /// enabled. Used by tests and by callers that don't care about
+    /// auto-detection or user config files.
+    fn default() -> Self {
+        Self {
+            openplanet_dir: None,
+            plugins_dir: None,
+            core_json: None,
+            game_json: None,
+            game_target: "TMNEXT".to_string(),
+            defines: Self::default_defines(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     openplanet_dir: Option<String>,
