@@ -346,8 +346,10 @@ impl<'a> Checker<'a> {
                     return Some(ty.clone());
                 }
             }
-            // Walk the parent chain for this class, if the base class
-            // is declared in the same file.
+            // Walk the parent chain for this class via the file-local
+            // index first — iter 24 relies on this shortcut so same-file
+            // const-wrapped parent fields retain their `Const(_)` layer
+            // (the workspace walker strips const via type-string parse).
             if let Some((parent, _)) = self.file_classes.get(&cls.name) {
                 let mut current = parent.clone();
                 let mut hops = 0usize;
@@ -364,8 +366,22 @@ impl<'a> Checker<'a> {
                         }
                         current = pp.clone();
                     } else {
+                        // Parent is not in this file — ask the workspace
+                        // walker to continue the chain. It has its own
+                        // HashSet cycle guard so we don't loop.
+                        if let Some(ty) = self.scope.workspace_class_member(&pname, name) {
+                            return Some(ty);
+                        }
                         break;
                     }
+                }
+            } else {
+                // No file-local entry for the current class at all — the
+                // class was declared in a sibling file (implicit-this
+                // through a cross-file class). Fall through to the
+                // workspace walker starting from the class itself.
+                if let Some(ty) = self.scope.workspace_class_member(&cls.name, name) {
+                    return Some(ty);
                 }
             }
         }
@@ -2647,6 +2663,90 @@ mod tests {
             "expected no ArgTypeMismatch when inherited int matches int param, got {:?}",
             diags
         );
+    }
+
+    // ── iter 31: implicit-this cross-file inherited members ─────────────
+
+    #[test]
+    fn method_uses_inherited_field_cross_file() {
+        // Base in file A declares `int counter`. Foo in file B inherits
+        // Base and a method body references `counter` by bare name
+        // (implicit `this.counter`). Must not fire UndefinedIdentifier.
+        let base = "class MFBase { int counter; }";
+        let main = "class MFFoo : MFBase { void inc() { counter = counter + 1; } }";
+        let diags = check_workspace(main, &[base]);
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(_)))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no UndefinedIdentifier on implicit-this inherited field, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn method_uses_inherited_method_cross_file() {
+        // Base has `int get_count()`. Child's own method body calls
+        // `get_count()` bare. Must not fire UndefinedIdentifier on the
+        // callee.
+        let base = "class MMBase { int get_count() { return 0; } }";
+        let main = "class MMChild : MMBase { int wrap() { return get_count(); } }";
+        let diags = check_workspace(main, &[base]);
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(_)))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no UndefinedIdentifier on implicit-this inherited method call, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn method_uses_inherited_field_with_type_flows() {
+        // Base has `int counter`. Child method passes the bare `counter`
+        // to a `string` parameter — must fire ArgTypeMismatch, proving
+        // the inherited field's real type (int) flowed through the
+        // implicit-this lookup into the arg-type check.
+        let base = "class TFBase { int counter; }";
+        let main = "class TFChild : TFBase { void go() { take_str(counter); } } \
+                    void take_str(string s) {}";
+        let diags = check_workspace(main, &[base]);
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(_)))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no UndefinedIdentifier on implicit-this inherited field, got {:?}",
+            diags
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch on int→string via implicit-this inherited field, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn cycle_cross_file_method_terminates() {
+        // Pathological inheritance cycle: CycMA : CycMB, CycMB : CycMA.
+        // A method body references a non-existent member by bare name
+        // (triggers the implicit-this walker). Must terminate via the
+        // cross-file walker's cycle guard.
+        let b = "class CycMB : CycMA { int b_field; }";
+        let main = "class CycMA : CycMB { void touch() { int _ = nonexistent_member; } }";
+        let diags = check_workspace(main, &[b]);
+        // Primary assertion: we got here (no hang / stack-overflow).
+        let _ = diags.len();
     }
 
     #[test]
