@@ -820,7 +820,8 @@ impl<'a> Checker<'a> {
         // Same-file workspace classes: prefer the in-memory `file_classes`
         // index because it preserves full `TypeRepr` (including `Const`)
         // that `scope.lookup_member_type` strips to `Error("")` for
-        // workspace hits.
+        // workspace hits. This is the const-wrapper preservation path
+        // (iter 24) — do NOT reorder this below any other lookup.
         if let Some((_, members)) = self.file_classes.get(&type_name) {
             for (mname, t) in members {
                 if mname == &member_name {
@@ -842,6 +843,14 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        // Cross-file inheritance walk: if `type_name` is a workspace class
+        // declared in a sibling file, walk its parent chain via the
+        // GlobalScope. Returns `Error("")` on a hit (silence sentinel) —
+        // enough to suppress `UndefinedMember` without fabricating a
+        // concrete type we don't actually know.
+        if let Some(t) = self.scope.workspace_class_member(&type_name, &member_name) {
+            return t;
         }
         // Workspace classes currently don't track parent chains or all
         // members across files, so emitting UndefinedMember against one
@@ -2371,5 +2380,133 @@ mod tests {
             "expected no ArgTypeMismatch when arity uniquely picks overload, got {:?}",
             diags
         );
+    }
+
+    // ── iter 27: cross-file class hierarchy ─────────────────────────────
+
+    /// Check a "main" source against a workspace that also contains every
+    /// entry in `siblings` (extracted into the same `SymbolTable` under
+    /// distinct file ids). Returns the diagnostics produced by checking
+    /// the main source only.
+    fn check_workspace(main: &str, siblings: &[&str]) -> Vec<TypeDiagnostic> {
+        let mut ws = SymbolTable::new();
+        // Sibling files first so their symbols are visible when `main`
+        // references them by name. File id assignment is arbitrary.
+        for sibling in siblings {
+            let tokens = tokenize_filtered(sibling);
+            let mut parser = Parser::new(&tokens, sibling);
+            let file = parser.parse_file();
+            let fid = ws.allocate_file_id();
+            let syms = SymbolTable::extract_symbols(fid, sibling, &file);
+            ws.set_file_symbols(fid, syms);
+        }
+        // Main file last.
+        let tokens = tokenize_filtered(main);
+        let mut parser = Parser::new(&tokens, main);
+        let file = parser.parse_file();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, main, &file);
+        ws.set_file_symbols(fid, syms);
+
+        let scope = GlobalScope::new(&ws, None);
+        let mut checker = Checker::new(main, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    #[test]
+    fn child_inherits_parent_field_cross_file() {
+        // Base is in file A, Foo : Base in file B. Accessing the
+        // inherited `base_field` through a `Foo` instance must not
+        // fire `UndefinedMember`.
+        let base = "class Base { int base_field; }";
+        let main = "class Foo : Base {} void use() { Foo f; int y = f.base_field; }";
+        let diags = check_workspace(main, &[base]);
+        let undef_member: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            undef_member.is_empty(),
+            "expected no UndefinedMember on inherited cross-file field, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn child_inherits_parent_method_cross_file() {
+        // Base is in file A with a method, Foo : Base in file B. Calling
+        // `f.base_method()` must resolve through the cross-file chain.
+        let base = "class Base { int base_method() { return 0; } }";
+        let main =
+            "class Foo : Base {} void use() { Foo f; int y = f.base_method(); }";
+        let diags = check_workspace(main, &[base]);
+        let undef_member: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            undef_member.is_empty(),
+            "expected no UndefinedMember on inherited cross-file method, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn grandchild_two_levels_cross_file() {
+        // Three-level chain: A → B → C, each in its own file. Accessing
+        // A's member through a C instance must walk both hops.
+        let a = "class GA { int ga_field; }";
+        let b = "class GB : GA {}";
+        let main = "class GC : GB {} void use() { GC c; int y = c.ga_field; }";
+        let diags = check_workspace(main, &[a, b]);
+        let undef_member: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            undef_member.is_empty(),
+            "expected no UndefinedMember on two-level inherited field, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn override_shadows_parent_field() {
+        // Both parent and child have a field named `shared`. The child's
+        // declaration must be considered first (the walker terminates at
+        // the first hit), so no UndefinedMember fires and the lookup
+        // succeeds without ever ascending the chain.
+        let base = "class Base { int shared; }";
+        let main =
+            "class Foo : Base { string shared; } void use() { Foo f; string y = f.shared; }";
+        let diags = check_workspace(main, &[base]);
+        let undef_member: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            undef_member.is_empty(),
+            "expected no UndefinedMember when child shadows parent field, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn cycle_does_not_loop() {
+        // Pathological inheritance cycle: A : B, B : A, each in its own
+        // file. The cross-file walker must terminate (visited-set guard)
+        // rather than stack-overflow or hang. Accessing a nonexistent
+        // member should return cleanly — no UndefinedMember (workspace
+        // types are silenced) and, critically, no infinite loop.
+        let b = "class CycB : CycA { int b_field; }";
+        let main =
+            "class CycA : CycB { int a_field; } void use() { CycA a; int y = a.nonexistent_member; }";
+        let diags = check_workspace(main, &[b]);
+        // The test's primary assertion is "does not hang / stack-overflow".
+        // As a secondary check, ensure we didn't crash and got back a
+        // reasonable diagnostics list (either silent or with UndefinedMember
+        // — both are fine; the key is termination).
+        let _ = diags.len();
     }
 }

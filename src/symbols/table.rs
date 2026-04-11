@@ -3,6 +3,21 @@ use std::collections::HashMap;
 use super::scope::{Symbol, SymbolKind};
 use crate::parser::ast;
 
+/// Extract a base-class name from a `TypeExpr`. Strips `Handle`, `Const`,
+/// `Reference` wrappers and pulls the underlying `QualifiedName` if present.
+/// Returns `None` for anything that isn't a simple named type — e.g. an
+/// erroneous parse or a primitive (which can't be a base class).
+fn base_class_name(source: &str, ty: &ast::TypeExpr) -> Option<String> {
+    match &ty.kind {
+        ast::TypeExprKind::Named(qn) => Some(qn.to_string(source)),
+        ast::TypeExprKind::Handle(inner)
+        | ast::TypeExprKind::Reference(inner, _)
+        | ast::TypeExprKind::Const(inner) => base_class_name(source, inner),
+        ast::TypeExprKind::Template(qn, _) => Some(qn.to_string(source)),
+        _ => None,
+    }
+}
+
 /// Extract `(params, min_args)` from an AST parameter list. `params` is a
 /// `Vec<(name, type_text)>` using source text for the type expression. `min_args`
 /// counts parameters with no default value (AngelScript, like C++, requires
@@ -120,10 +135,14 @@ impl SymbolTable {
         match item {
             ast::Item::Class(cls) => {
                 let class_name = qualify(cls.name.text(source));
+                let parent = cls
+                    .base_classes
+                    .first()
+                    .and_then(|b| base_class_name(source, b));
                 out.push(Symbol {
                     name: class_name.clone(),
                     kind: SymbolKind::Class {
-                        parent: None, // resolve later
+                        parent,
                         members: Vec::new(),
                     },
                     span: cls.span,

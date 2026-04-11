@@ -456,6 +456,72 @@ impl<'a> GlobalScope<'a> {
         out
     }
 
+    /// Look up the declared parent (base) class of a workspace class by
+    /// fully qualified name. Returns `None` if no workspace class with
+    /// that name exists, or the class has no base class. Only consults
+    /// the workspace symbol table — external (typedb) types use their
+    /// own parent walker via `ext_lookup_member`.
+    pub fn workspace_class_parent(&self, class_name: &str) -> Option<String> {
+        for s in self.workspace.all_symbols() {
+            if s.name != class_name {
+                continue;
+            }
+            if let SymbolKind::Class { parent, .. } = &s.kind {
+                return parent.clone();
+            }
+        }
+        None
+    }
+
+    /// Walk the workspace class inheritance chain starting from
+    /// `class_name`, looking for a field or method named `member`.
+    /// Returns the first match as a `TypeRepr`. Currently the returned
+    /// type is always `TypeRepr::Error(String::new())` — a silence
+    /// sentinel indicating "this member exists but its concrete type is
+    /// not tracked in the workspace symbol table". This is enough to
+    /// suppress `UndefinedMember` diagnostics for cross-file inherited
+    /// members.
+    ///
+    /// Uses a visited-set to prevent infinite loops on cyclic
+    /// inheritance (pathological user code: `A : B, B : A`).
+    pub fn workspace_class_member(
+        &self,
+        class_name: &str,
+        member: &str,
+    ) -> Option<TypeRepr> {
+        let getter = format!("get_{}", member);
+        let setter = format!("set_{}", member);
+        let mut visited: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut current: Option<String> = Some(class_name.to_string());
+        while let Some(name) = current.take() {
+            if !visited.insert(name.clone()) {
+                break;
+            }
+            // Look for `Class::member` / `Class::get_member` / `Class::set_member`
+            // in the workspace symbol table.
+            let qualified = format!("{}::{}", name, member);
+            let qualified_getter = format!("{}::{}", name, getter);
+            let qualified_setter = format!("{}::{}", name, setter);
+            for s in self.workspace.all_symbols() {
+                if s.name == qualified
+                    || s.name == qualified_getter
+                    || s.name == qualified_setter
+                {
+                    if matches!(
+                        s.kind,
+                        SymbolKind::Variable { .. } | SymbolKind::Function { .. }
+                    ) {
+                        return Some(TypeRepr::Error(String::new()));
+                    }
+                }
+            }
+            // Not found on this class — ascend to its parent.
+            current = self.workspace_class_parent(&name);
+        }
+        None
+    }
+
     /// Look up a free function's return type by qualified name.
     pub fn lookup_function_return(&self, qualified: &str) -> Option<TypeRepr> {
         if let Some(ext) = self.external {
