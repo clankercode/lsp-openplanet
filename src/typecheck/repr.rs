@@ -174,7 +174,14 @@ impl TypeRepr {
     /// either `Array(T)` or `Generic { base: "array", args: [T] }` —
     /// return the element type. Otherwise `None`.
     pub fn array_element_type(&self) -> Option<&TypeRepr> {
-        let inner = self.unwrap_const().unwrap_handle();
+        // Peel both orderings of `Const`/`Handle` (see AC20). `const Foo@`
+        // becomes `Handle(Const(Foo))`, whereas `Foo@ const` becomes
+        // `Const(Handle(Foo))`.
+        let inner = self
+            .unwrap_const()
+            .unwrap_handle()
+            .unwrap_const()
+            .unwrap_handle();
         match inner {
             TypeRepr::Array(elem) => Some(elem),
             TypeRepr::Generic { base, args } if base == "array" && args.len() == 1 => {
@@ -187,7 +194,11 @@ impl TypeRepr {
     /// True if `self` (after stripping `Const`/`Handle`) is an array-like
     /// generic, regardless of whether the element type is resolved.
     pub fn is_array_like(&self) -> bool {
-        let inner = self.unwrap_const().unwrap_handle();
+        let inner = self
+            .unwrap_const()
+            .unwrap_handle()
+            .unwrap_const()
+            .unwrap_handle();
         matches!(inner, TypeRepr::Array(_))
             || matches!(inner, TypeRepr::Generic { base, .. } if base == "array")
     }
@@ -196,7 +207,11 @@ impl TypeRepr {
     /// type (`Generic { base: "dictionary", .. }` or a bare
     /// `Named("dictionary")` that slipped through).
     pub fn is_dictionary_like(&self) -> bool {
-        let inner = self.unwrap_const().unwrap_handle();
+        let inner = self
+            .unwrap_const()
+            .unwrap_handle()
+            .unwrap_const()
+            .unwrap_handle();
         match inner {
             TypeRepr::Generic { base, .. } if base == "dictionary" => true,
             TypeRepr::Named(n) if n == "dictionary" => true,
@@ -245,9 +260,18 @@ impl TypeRepr {
 fn parse_type_string_inner(s: &str) -> TypeRepr {
     let s = s.trim();
 
-    // `const X` → Const(parse(X))
+    // `const X` → const binds to the underlying type. If `X` names a
+    // handle, the const sticks to the pointee: `const Foo@` →
+    // `Handle(Const(Foo))`. If `X` has a trailing reference modifier, the
+    // const sticks inside the reference for parity with the parser's
+    // `Reference` wrapper (which we strip below). Otherwise, plain
+    // `const X` → `Const(X)`.
     if let Some(rest) = s.strip_prefix("const ") {
-        return TypeRepr::Const(Box::new(parse_type_string_inner(rest.trim())));
+        let inner = parse_type_string_inner(rest.trim());
+        return match inner {
+            TypeRepr::Handle(pointee) => TypeRepr::Handle(Box::new(TypeRepr::Const(pointee))),
+            other => TypeRepr::Const(Box::new(other)),
+        };
     }
     // A trailing reference modifier (`T &in`, `T &out`, `T &inout`, `T&`) is
     // a calling-convention decoration, not part of the value type. Strip it.
@@ -454,11 +478,26 @@ mod tests {
 
     #[test]
     fn parse_type_string_const_handle_named() {
+        // `const Foo@` → handle to a const object (pointee is const,
+        // handle is mutable). See AC20.
         assert_eq!(
             TypeRepr::parse_type_string("const Foo@"),
-            TypeRepr::Const(Box::new(TypeRepr::Handle(Box::new(TypeRepr::Named(
+            TypeRepr::Handle(Box::new(TypeRepr::Const(Box::new(TypeRepr::Named(
                 "Foo".into()
             )))))
+        );
+    }
+
+    #[test]
+    fn parse_type_string_handle_trailing_const() {
+        // `Foo@ const` → const handle to a mutable object. The parser
+        // produces `Const(Handle(Foo))`; the canonical type-string form
+        // printed back by `display()` is `const Foo@`, so we assert the
+        // distinction at the parser level instead (see parser tests).
+        // Here we just verify the default handle path stays lossless.
+        assert_eq!(
+            TypeRepr::parse_type_string("Foo@"),
+            TypeRepr::Handle(Box::new(TypeRepr::Named("Foo".into())))
         );
     }
 

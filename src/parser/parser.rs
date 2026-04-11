@@ -203,8 +203,11 @@ impl<'a> Parser<'a> {
     pub fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
         let start = self.current_span().start;
 
-        // Leading const
-        let is_const = self.eat(TokenKind::KwConst);
+        // Leading const. We defer wrapping until we know whether a `@`
+        // suffix follows: `const Foo@` is a handle-to-const (pointee is
+        // const) → `Handle(Const(Foo))`, whereas `const Foo` (no handle)
+        // is simply `Const(Foo)`.
+        let mut is_const = self.eat(TokenKind::KwConst);
 
         let mut ty = self.parse_base_type()?;
 
@@ -213,10 +216,19 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 TokenKind::At => {
                     self.advance();
-                    // Optional `const` after `@`: `Type@ const` makes the
-                    // handle itself const (the underlying object is still
-                    // mutable). We just consume it; the AST already wraps in
-                    // Handle, and an outer Const can be added if needed.
+                    // If a leading `const` was seen, it binds to the pointee:
+                    // `const Foo@` → `Handle(Const(Foo))`.
+                    if is_const {
+                        let span = self.span_from(ty.span.start);
+                        ty = TypeExpr {
+                            span,
+                            kind: TypeExprKind::Const(Box::new(ty)),
+                        };
+                        is_const = false;
+                    }
+                    // Optional trailing `const` after `@`: `Foo@ const` makes
+                    // the handle itself const (pointee still mutable) →
+                    // `Const(Handle(Foo))`.
                     let trailing_const = self.eat(TokenKind::KwConst);
                     let span = self.span_from(ty.span.start);
                     ty = TypeExpr {
@@ -2879,6 +2891,10 @@ impl<'a> Parser<'a> {
             match self.peek_ahead(i) {
                 TokenKind::At => {
                     i += 1;
+                    // Optional trailing `const` after `@` (`Foo@ const name`)
+                    if self.peek_ahead(i) == TokenKind::KwConst {
+                        i += 1;
+                    }
                 }
                 TokenKind::LBracket if self.peek_ahead(i + 1) == TokenKind::RBracket => {
                     i += 2;
@@ -2993,6 +3009,71 @@ mod tests {
             },
             _ => panic!("expected Const, got {:?}", ty.kind),
         }
+    }
+
+    #[test]
+    fn parser_const_handle_ordering_leading() {
+        // AC20: `const Foo@` → handle to const (pointee const).
+        let (ty, errors) = parse_type("const Foo@");
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        match ty.kind {
+            TypeExprKind::Handle(inner) => match inner.kind {
+                TypeExprKind::Const(base) => {
+                    assert!(matches!(base.kind, TypeExprKind::Named(_)));
+                }
+                other => panic!(
+                    "expected Const inside Handle for `const Foo@`, got {:?}",
+                    other
+                ),
+            },
+            other => panic!(
+                "expected Handle(Const(_)) for `const Foo@`, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn parser_const_handle_ordering_trailing() {
+        // AC20: `Foo@ const` → const handle to a mutable object.
+        let (ty, errors) = parse_type("Foo@ const");
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        match ty.kind {
+            TypeExprKind::Const(inner) => match inner.kind {
+                TypeExprKind::Handle(base) => {
+                    assert!(matches!(base.kind, TypeExprKind::Named(_)));
+                }
+                other => panic!(
+                    "expected Handle inside Const for `Foo@ const`, got {:?}",
+                    other
+                ),
+            },
+            other => panic!(
+                "expected Const(Handle(_)) for `Foo@ const`, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn const_foo_at_distinct_from_foo_at_const() {
+        // AC20: the two orderings must produce structurally different ASTs.
+        let (lead, _) = parse_type("const Foo@");
+        let (trail, _) = parse_type("Foo@ const");
+        let lead_is_handle_of_const = matches!(
+            &lead.kind,
+            TypeExprKind::Handle(inner) if matches!(inner.kind, TypeExprKind::Const(_))
+        );
+        let trail_is_const_of_handle = matches!(
+            &trail.kind,
+            TypeExprKind::Const(inner) if matches!(inner.kind, TypeExprKind::Handle(_))
+        );
+        assert!(lead_is_handle_of_const, "lead form wrong: {:?}", lead.kind);
+        assert!(
+            trail_is_const_of_handle,
+            "trail form wrong: {:?}",
+            trail.kind
+        );
     }
 
     #[test]

@@ -154,6 +154,12 @@ pub struct Checker<'a> {
     /// can walk the parent chain for cross-method resolution within the
     /// same file.
     file_classes: std::collections::HashMap<String, (Option<String>, Vec<(String, TypeRepr)>)>,
+    /// Set of `(class_qualname, method_name)` for workspace-local methods
+    /// declared with a trailing `const` qualifier. Used by AC19
+    /// (method-call const propagation): when a non-const method is
+    /// invoked on a const receiver, the return type is wrapped in
+    /// `Const(_)`; a const method leaves the return type untouched.
+    file_const_methods: std::collections::HashSet<(String, String)>,
     return_type_stack: Vec<TypeRepr>,
     pub diagnostics: Vec<TypeDiagnostic>,
 }
@@ -167,6 +173,7 @@ impl<'a> Checker<'a> {
             class_stack: Vec::new(),
             namespace_stack: Vec::new(),
             file_classes: std::collections::HashMap::new(),
+            file_const_methods: std::collections::HashSet::new(),
             return_type_stack: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -262,10 +269,18 @@ impl<'a> Checker<'a> {
                                     let _ = r.take_diagnostics();
                                     repr
                                 };
-                                members.push((
-                                    func.name.text(self.source).to_string(),
-                                    ret,
-                                ));
+                                let method_name =
+                                    func.name.text(self.source).to_string();
+                                // AC19: remember whether this method has a
+                                // trailing `const` qualifier so
+                                // `call_type::Member` can skip the
+                                // receiver-const propagation when the
+                                // method promises not to mutate `this`.
+                                if func.is_const {
+                                    self.file_const_methods
+                                        .insert((qual.clone(), method_name.clone()));
+                                }
+                                members.push((method_name, ret));
                             }
                             _ => {}
                         }
@@ -795,7 +810,17 @@ impl<'a> Checker<'a> {
     /// or a generic base, return the base name suitable for type-index
     /// lookup. Otherwise return None.
     fn base_type_name(ty: &TypeRepr) -> Option<String> {
-        let inner = ty.unwrap_const().unwrap_handle();
+        // Peel `Const`/`Handle` wrappers in either order:
+        //   `const Foo@`  → Handle(Const(Foo))
+        //   `Foo@ const`  → Const(Handle(Foo))
+        //   `const Foo`   → Const(Foo)
+        //   `Foo@`        → Handle(Foo)
+        // We apply each peel twice so both orderings land on the base.
+        let inner = ty
+            .unwrap_const()
+            .unwrap_handle()
+            .unwrap_const()
+            .unwrap_handle();
         match inner {
             TypeRepr::Named(n) => {
                 // `auto` is a placeholder for "type inference needed";
@@ -817,35 +842,45 @@ impl<'a> Checker<'a> {
     ///
     /// AngelScript distinguishes `const Foo@` (handle to const object) from
     /// `Foo@ const` (const handle, mutable object). Our parser collapses
-    /// both shapes into `Const(Handle(Foo))`, so we can't fully honor the
-    /// distinction — see iter 32 notes. In practice we treat ANY outer /
-    /// through-handle `Const` wrapper as "contents are const", which
-    /// matches `const Foo@` / `const array<T>@` use-cases in the wild and
-    /// will over-fire on the semantically distinct `Foo@ const` form
-    /// (which is rarer).
+    /// distinction — iter 38 (AC20) fixed that, so this predicate now
+    /// answers only the contents-const question: is the value pointed /
+    /// referred to by `ty` const?
+    ///
+    /// * `Const(T)`          → yes (the value itself is const)
+    /// * `Handle(Const(T))`  → yes (pointee is const — `const Foo@`)
+    /// * `Const(Handle(T))`  → NO  (const handle, mutable pointee —
+    ///   `Foo@ const`)
+    /// * `Handle(T)`         → no
     fn receiver_is_const(ty: &TypeRepr) -> bool {
-        // Outer layer Const (parser output for `const X@`).
-        if matches!(ty, TypeRepr::Const(_)) {
-            return true;
+        match ty {
+            TypeRepr::Handle(inner) => matches!(inner.as_ref(), TypeRepr::Const(_)),
+            TypeRepr::Const(inner) => {
+                // A `Const(Handle(_))` is a const handle to a mutable
+                // pointee: the contents are NOT const.
+                !matches!(inner.as_ref(), TypeRepr::Handle(_))
+            }
+            _ => false,
         }
-        // Handle-peeled Const (semantically-correct `Handle(Const(X))`).
-        if matches!(ty.unwrap_handle(), TypeRepr::Const(_)) {
-            return true;
-        }
-        false
     }
 
-    /// If `receiver_const` is true and `t` isn't already wrapped, wrap
-    /// the field type in `Const(_)` so downstream assignment checks see
-    /// the propagated const. Errors and already-const types pass through.
+    /// If `receiver_const` is true, propagate contents-const into `t`.
+    /// A bare value `T` becomes `Const(T)`; a handle `Handle(T)` becomes
+    /// `Handle(Const(T))` so that the const sticks to the pointee
+    /// (matching AC20 semantics). Errors and already-const types pass
+    /// through unchanged.
     fn apply_receiver_const(t: TypeRepr, receiver_const: bool) -> TypeRepr {
         if !receiver_const {
             return t;
         }
-        if matches!(t, TypeRepr::Const(_) | TypeRepr::Error(_)) {
-            return t;
+        match t {
+            TypeRepr::Error(_) => t,
+            TypeRepr::Const(_) => t,
+            TypeRepr::Handle(inner) => match *inner {
+                TypeRepr::Const(_) => TypeRepr::Handle(inner),
+                inner_ty => TypeRepr::Handle(Box::new(TypeRepr::Const(Box::new(inner_ty)))),
+            },
+            other => TypeRepr::Const(Box::new(other)),
         }
-        TypeRepr::Const(Box::new(t))
     }
 
     /// Derive the type of `obj.member`, emitting an `UndefinedMember` if
@@ -1198,10 +1233,38 @@ impl<'a> Checker<'a> {
                 let Some(type_name) = Self::base_type_name(&obj_ty) else {
                     return TypeRepr::Error(String::new());
                 };
+                // AC19: when the receiver is a const object, a non-const
+                // method's return value inherits `Const(_)` so that
+                // downstream writes (`h.get_arr()[0] = 5`, etc.) fire
+                // `ConstViolation`. A method declared with a trailing
+                // `const` qualifier promises not to mutate `this` — leave
+                // its return type untouched. Only workspace-local methods
+                // have reliable const metadata; external-type returns
+                // pass through unwrapped (follow-up noted below).
+                let receiver_const = Self::receiver_is_const(&obj_ty);
+                let method_is_const = self
+                    .file_const_methods
+                    .contains(&(type_name.clone(), member_name.clone()));
+                // Same-file workspace classes: prefer `file_classes` so
+                // we get the resolved return type AND know whether this
+                // was a method (vs. a field) for const-propagation.
+                if let Some((_, members)) = self.file_classes.get(&type_name) {
+                    for (mname, t) in members {
+                        if mname == &member_name {
+                            let ret = t.clone();
+                            if receiver_const && !method_is_const {
+                                return Self::apply_receiver_const(ret, true);
+                            }
+                            return ret;
+                        }
+                    }
+                }
                 if let Some(t) = self
                     .scope
                     .lookup_method_return(&type_name, &member_name)
                 {
+                    // External types: no const-qualifier metadata yet, so
+                    // don't over-fire — see AC19 deferred follow-up.
                     return t;
                 }
                 // Workspace-local class: any member is fine — silence.
@@ -2316,8 +2379,14 @@ mod tests {
 
     #[test]
     fn handle_assign_to_const_fires() {
+        // `C@ const a` — the handle itself is const, so `@a = null`
+        // reassigning it must fire a ConstViolation. (Iter 38 / AC20
+        // distinguishes this from `const C@` where the pointee is const
+        // but the handle is mutable; see
+        // `const_handle_not_const_contents` and
+        // `handle_assign_to_handle_const_fires` below.)
         let diags =
-            check("class C {} void f() { const C@ a = null; @a = null; }");
+            check("class C {} void f() { C@ const a = null; @a = null; }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
@@ -2325,6 +2394,45 @@ mod tests {
         assert!(
             !bad.is_empty(),
             "expected at least 1 ConstViolation, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_handle_not_const_contents() {
+        // AC20: `Foo@ const h` — the handle itself is const, but the
+        // pointee is mutable. Assigning to a field through it must NOT
+        // fire ConstViolation. Iter 32 dropped this test because the
+        // parser collapsed both orderings; iter 38 reinstates it.
+        let diags = check(
+            "class Foo { int field; } void f() { Foo@ const h = null; h.field = 5; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ConstViolation for `Foo@ const` field write, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_pointee_fires_on_field_write() {
+        // AC20 dual: `const Foo@ h` — the pointee is const, the handle is
+        // mutable. `h.field = 5` MUST fire ConstViolation.
+        let diags = check(
+            "class Foo { int field; } void f() { const Foo@ h = null; h.field = 5; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ConstViolation for `const Foo@` field write, got {:?}",
             diags
         );
     }
@@ -2385,6 +2493,64 @@ mod tests {
             bad.len(),
             1,
             "expected 1 ConstViolation via chained const member access, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_receiver_method_return_is_const() {
+        // AC19: non-const method on a const receiver → return type
+        // inherits `Const`. The method returns a mutable `int[]@`, but
+        // because the receiver is `const Foo@`, the array handle's
+        // contents become const, so `arr[0] = 5` must fire.
+        let src = "class Foo { array<int>@ arr; array<int>@ get_arr() { return arr; } } \
+                   void f() { const Foo@ h = null; h.get_arr()[0] = 5; }";
+        let diags = check(src);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ConstViolation from non-const method on const receiver, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_receiver_const_method_return_not_const() {
+        // AC19: a method declared `const` promises not to mutate `this`,
+        // so its return type does NOT inherit `Const` even when the
+        // receiver is const. `arr[0] = 5` must NOT fire.
+        let src = "class Foo { array<int>@ arr; array<int>@ get_arr() const { return arr; } } \
+                   void f() { const Foo@ h = null; h.get_arr()[0] = 5; }";
+        let diags = check(src);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ConstViolation for const method on const receiver, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn non_const_receiver_method_return_not_const() {
+        // AC19 sanity: with a mutable receiver, a non-const method's
+        // return type stays unwrapped regardless.
+        let src = "class Foo { array<int>@ arr; array<int>@ get_arr() { return arr; } } \
+                   void f() { Foo@ h = null; h.get_arr()[0] = 5; }";
+        let diags = check(src);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ConstViolation on mutable receiver, got {:?}",
             diags
         );
     }
