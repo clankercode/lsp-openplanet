@@ -1,0 +1,5 @@
+plugins=140 files=1603 files_parse_err=0 parse_errors=0 pp_errors=0
+
+# top 50 kinds
+
+# top 30 worst files

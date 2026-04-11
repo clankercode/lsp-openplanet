@@ -1,0 +1,38 @@
+plugins=140 files=1603 files_with_diag=275 total_diagnostics=1525
+
+# top 50 kinds
+   979  undefined identifier `X`
+   430  unknown type `X`
+   116  type `X` has no member `X`
+
+# top 30 worst files
+   173  tm-draw-tests/src/Node.as
+    80  tm-map-together/src/Interface/RoomChoice.as
+    60  tm-mlfeed-race-data/src/Main.as
+    58  tm-editor-plus-plus/src/Components/common/UI_Components.as
+    55  tm-cotd-hud/src/PersistentData.as
+    54  tm-editor-plus-plus/src/Editor/MacroblockManip_Shared.as
+    31  tm-bosslike/src/Game/State/Scores.as
+    27  tm-cotd-buffer-time/src/KoBufferDisplay.as
+    26  tm-map-together/src/YieldWhy.as
+    25  tm-bosslike/src/Game/Maps/Season.as
+    22  tm-buffer-time/src/KoBufferDisplay.as
+    21  tm-draw-tests/src/Node_Vectors.as
+    20  tm-mlfeed-race-data/src/MLFeed_ExportShared.as
+    19  tm-agent/src/ToolAssembler.as
+    18  tm-dipspp-editor/src/Ed/Components/Floors.as
+    18  tm-editor-plus-plus/src/Editor/MacroblockManip.as
+    16  tm-editor-plus-plus/src/DevStructs/Editor/Macroblocks.as
+    15  tm-editor-plus-plus/src/Components/ItemSelection/ItemPlacementToolbar.as
+    14  tm-editor-plus-plus/src/Components/Inventory/Favorites.as
+    13  tm-draw-tests/src/Node_Items.as
+    13  tm-menu-bg-scene-randomizer/src/MenuSceneManagerIntercepts.as
+    12  tm-simple-room-admin/src/Interface.as
+    11  tm-autosave-ghosts/src/Main.as
+    11  tm-dips-plus-plus/src/MenuItem.as
+    11  tm-dipspp-editor/src/Ed/Components/TextTriggers.as
+    11  tm-mlfeed-race-data/src/TeamsFeed.as
+    10  tm-editor-plus-plus/src/Components/ItemEditor/ItemBrowser.as
+    10  tm-list-players-pbs/src/Main.as
+    10  tm-music-mania/src/PackRegistry.as
+    10  tm-rejoin-last-server/src/Main.as
