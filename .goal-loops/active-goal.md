@@ -21,7 +21,7 @@ Implement complete LSP feature support: type errors & full inference, completion
 - [x] **AC11 — Semantic tokens**: full-document provider.
 - [x] **AC12 — Code actions**: Levenshtein-based "did you mean" quick-fixes.
 - [x] **AC13 — Green bar**: 305 unit + 12 integration passing, 0 ignored. Parser corpus 140 plugins / 1603 files / 0 errors. Tower-lsp harness smoke test closed in iter 30.
-- [ ] **AC14 — Signature help**: Active-parameter-aware signature help with overload cycling. Currently `Backend::signature_help` returns `Ok(None)` in `src/server/mod.rs:250` even though `SignatureHelpOptions` is already advertised in capabilities. Tests cover: single overload, multiple overloads with active signature based on arg-count/types, active parameter tracked through trailing comma, nested call at cursor position.
+- [x] **AC14 — Signature help** *(iter 33)*: Active-parameter-aware signature help with overload cycling. `Backend::signature_help` now dispatches to `src/server/signature.rs`, resolving callees via workspace free functions, TypeIndex free functions, type methods, workspace methods with inheritance walk, and implicit-`this`. `find_enclosing_call` walks backwards counting parens with a forward-pass skip-mask for strings/comments.
 - [ ] **AC15 — Inlay hints**: Type hints for `auto` locals, param-name hints on literal arguments, and optionally return-type hints on multi-line lambdas. `textDocument/inlayHint` handler. Tests for each hint kind.
 - [ ] **AC16 — Document highlights**: Highlight every occurrence of the symbol at cursor within the current document (kind = Read/Write where derivable). Reuses the existing navigation reference walker but scoped to one file. Tests for local var, field, method, and type-ref highlights.
 - [ ] **AC17 — Folding ranges**: Collapse regions for function/method bodies, class/namespace blocks, multi-line comments, and `#if`/`#endif` preprocessor blocks. Tests for each kind plus nested folding.
@@ -42,8 +42,8 @@ The following LSP features are intentionally excluded from the current AC list b
 - **Workspace pull-diagnostics** (`workspace/diagnostic`): Newer LSP spec for editor-initiated diagnostic polling instead of server push. Current push-model via `publish_diagnostics` works fine. **Revisit if**: editor clients start preferring pull-model or performance tuning demands it.
 
 ## Current Status
-- **AC1-AC13 + AC21 satisfied** as of iter 32 (2026-04-11). 305 unit + 12 integration green, 0 ignored. Parser corpus untouched.
-- **AC14-AC20 open**: 5 new LSP feature additions (AC14-AC18) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop resumes at iter 33.
+- **AC1-AC14 + AC21 satisfied** as of iter 33 (2026-04-11). 314 unit + 13 integration green, 0 ignored. Parser corpus untouched.
+- **AC15-AC20 open**: 4 new LSP feature additions (AC15-AC18) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop at iter 34 next.
 - **ON_GOAL_COMPLETE_NEXT_STEPS**: Auto-advance enabled by user directive 2026-04-11 ("Resume loop and complete all items"). On AC14-AC20 completion, loop stops and reports — no further phases queued.
 
 ## Iter 3 known gaps (carry forward)
@@ -105,6 +105,39 @@ The following LSP features are intentionally excluded from the current AC list b
 - Iter 24's `Assign`/`HandleAssign` outer-layer Const check needed zero modification — the new propagated types already carry Const through.
 - Parser gap (not fixed): `const Foo@` and `Foo@ const` both parse to `Const(Handle(Foo))`, losing the semantic distinction between const-contents and const-handle. Test for the latter was dropped (AC13 forbids `#[ignore]`); fix belongs in a future parser iteration.
 - 4 new tests: const_array_element_assign_fires, const_array_element_read_is_fine, const_member_chain_fires, non_const_member_receiver_not_const.
+
+## Iter 33 Result (2026-04-11)
+- 314 unit + 13 integration green (+9 unit, +1 integration, 0 ignored). Parser corpus untouched, no new warnings after cleanup.
+- **AC14 signature help closed.** New `src/server/signature.rs` module (the iter 10 placeholder was a zero-byte stub — filled in). `Backend::signature_help` now dispatches to it.
+- **`find_enclosing_call`**: walks backwards from the cursor counting paren/bracket/brace depth. Strings, char literals, line comments, and block comments are masked out via a forward pre-pass (`compute_skip_mask`) so the backwards walker never has to disambiguate `/` or `"`. Bails at unmatched `{` or top-level `;` — returns `None` when the cursor isn't in a call.
+- **`resolve_callee` order**: (1) workspace free functions via `GlobalScope::lookup_function_overloads` including a qualified→tail fallback, (2) `TypeIndex::lookup_function` for Openplanet/Nadeo free functions, (3) `TypeIndex::lookup_type(...).methods` on a member-call receiver, (4) workspace methods with an inheritance walk (`workspace_class_parent`, break at first defining class), (5) implicit-`this` via `find_enclosing_class`, (6) TypeIndex constructor fallback.
+- **Active-parameter tracking**: top-level comma count from the opening `(` to the cursor, masked for strings/comments and gated by paren/bracket/brace depth. Nested calls: innermost `(` wins because the backwards walker hits it first.
+- **Signature label quality (known inconsistency)**: workspace free functions surface `(int, string) -> void` because `OverloadSig::param_types` has no parameter names. Workspace methods and external TypeIndex functions show full `type name` pairs. Logged as a follow-up; not in AC14's scope.
+- **Post-review cleanup**: 5 clippy warnings fixed (`mask[start..i].fill(true)` ×3, `trim_matches(['.', ':'])` ×2). Dead `_pos_unused` + `pos` test helper removed. `pick_active_signature` rustdoc aligned with its actual implementation (no `min_args_required` check).
+- **Iter 32 parser gap carries forward**: `const Foo@` vs `Foo@ const` still collapse to `Const(Handle(Foo))` — AC20 target.
+
+## Iter 34 Plan (next)
+- **Goal**: AC15 inlay hints. Implement `textDocument/inlayHint` to surface inferred `auto` local types, parameter-name hints at call sites, and return-type hints on multi-line lambdas.
+- **Why**: Zero handler exists today (`Backend` does not implement `inlay_hint`). `auto` locals silently hide the resolved type and call sites with many literal args are unreadable — the two complaints the goal doc flags for AC15.
+- **Approach**:
+  1. Advertise `inlay_hint_provider` in `ServerCapabilities`.
+  2. Implement `Backend::inlay_hint` returning `Vec<InlayHint>` for the visible range.
+  3. New `src/server/inlay_hints.rs` module. Walk the parsed `SourceFile` over the requested range. For each `Stmt::Let` with `auto` or no explicit type, resolve the initializer via `Checker::expr_type` (reuse workspace + TypeIndex), emit an `InlayHint` of kind `Type` immediately after the identifier. For each `Expr::Call` with ≥ 1 positional literal arg, look up the callee's parameter names via the same `resolve_callee` paths `signature.rs` uses (factor out a small helper if needed), emit `Parameter` hints before each literal.
+  4. Skip hints whose label matches the source text trivially (e.g. `foo(name)` where `name` is already the param name).
+- **Verify**: new tests in `src/server/inlay_hints.rs` covering: `auto x = f();` → `: int` hint, call with literal gets param-name hints, explicit-typed let is silent, hint suppression when identifier name matches param name. One tower-lsp smoke test exercising the handler end-to-end.
+- **Target**: 320+ unit + 14 integration, 0 ignored, no new clippy warnings.
+
+## Iter 33 Plan (superseded)
+- **Goal**: AC14 signature help. Replace `Backend::signature_help`'s `Ok(None)` stub with a real implementation.
+- **Why**: The capability is advertised (`SignatureHelpOptions` with trigger chars `(` and `,` in `src/server/mod.rs:141`) but the handler is dead code. Active-parameter tracking + overload cycling are the biggest missing editor UX win.
+- **Approach**:
+  1. Find the innermost unclosed call expression at the cursor. Walk backwards counting parens/brackets/braces (skipping strings and comments). When we hit an unmatched `(`, the tokens just before it form the callee expression.
+  2. Resolve the callee via the same paths the checker uses: workspace `GlobalScope::lookup_function_overloads` + `TypeIndex` free functions + method lookup on a receiver's type for `member.call(...)`.
+  3. Build `SignatureInformation` entries — one per overload — with `ParameterInformation` for each param. Pick `active_signature` by matching the current arg count (prefer exact, fall back to closest-fit). Pick `active_parameter` by counting top-level commas between the opening `(` and cursor.
+  4. Return `SignatureHelp { signatures, active_signature, active_parameter }`.
+- **Verify**: new tests in `src/server/signature.rs` (file already exists as a stub — iter 10 placeholder; use it) covering: single overload, 3-overload function with active sig picked by arg count, active parameter tracked through trailing comma + whitespace, nested call (`outer(inner(|)), | = cursor)` returns the inner signature.
+- **Integration**: add one tower-lsp smoke test in `tests/integration_tests.rs` driving `signature_help` directly.
+- **Target**: 310+ unit + 13 integration.
 
 ## Iter 32 Plan (superseded)
 - **Goal**: Const propagation through `Index` and chained `Member` access so `const array<int>@ arr; arr[0] = x;` and `const Foo@ f; f.field = x;` fire ConstViolation.

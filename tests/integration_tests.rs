@@ -13,8 +13,9 @@ use openplanet_lsp::typedb::TypeIndex;
 use openplanet_lsp::workspace::project;
 use tower_lsp::lsp_types::{
     DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
-    InitializeParams, PartialResultParams, Position, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, Url, WorkDoneProgressParams,
+    InitializeParams, PartialResultParams, Position, SignatureHelpParams,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Url,
+    WorkDoneProgressParams,
 };
 use tower_lsp::LanguageServer;
 use tower_lsp::LspService;
@@ -902,4 +903,70 @@ async fn test_tower_lsp_smoke_crossfile_hover() {
             "goto_definition on cross-file `Base` should land in helper.as"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// AC14 smoke test: exercise `textDocument/signatureHelp` through the real
+// tower-lsp `Backend`. Proves the handler wires workspace overload resolution
+// + active-parameter tracking end-to-end, not just via unit tests.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "current_thread")]
+async fn test_tower_lsp_smoke_signature_help() {
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+
+    #[allow(deprecated)]
+    let init_params = InitializeParams::default();
+    let init_result = backend
+        .initialize(init_params)
+        .await
+        .expect("initialize should succeed");
+    assert!(
+        init_result.capabilities.signature_help_provider.is_some(),
+        "server must advertise signature_help capability"
+    );
+
+    let uri = Url::parse("file:///smoke/sig.as").unwrap();
+    // line 0:  "void f(int a, string b) {}"
+    // line 1:  "void main() { f(42, ) }"
+    //                           ^ cursor sits at col 20 — just after the ", "
+    let src = "void f(int a, string b) {}\nvoid main() { f(42, ) }\n";
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "angelscript".to_string(),
+                version: 1,
+                text: src.to_string(),
+            },
+        })
+        .await;
+
+    // "void main() { f(42, ) }"
+    //  0         1         2
+    //  0123456789012345678901
+    // column 20 is the space right after the comma — active_parameter = 1.
+    let params = SignatureHelpParams {
+        context: None,
+        text_document_position_params: text_doc_position(&uri, 1, 20),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+    let help = backend
+        .signature_help(params)
+        .await
+        .expect("signature_help call must not error")
+        .expect("signature_help must return Some");
+    assert!(
+        !help.signatures.is_empty(),
+        "signature help must return at least one signature"
+    );
+    assert_eq!(help.active_parameter, Some(1));
+    // The single overload's label should include both param types.
+    let label = &help.signatures[0].label;
+    assert!(label.contains("int"), "label should mention int, got {:?}", label);
+    assert!(
+        label.contains("string"),
+        "label should mention string, got {:?}",
+        label
+    );
 }

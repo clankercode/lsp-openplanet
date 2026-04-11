@@ -247,8 +247,21 @@ impl LanguageServer for Backend {
         Ok(Some(refs))
     }
 
-    async fn signature_help(&self, _params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
-        Ok(None) // Task 16
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let (table, _files) = self.build_workspace().await;
+        let type_index = self.type_index.read().await;
+        Ok(signature::signature_help(
+            &source,
+            pos,
+            type_index.as_deref(),
+            Some(&table),
+        ))
     }
 
     async fn document_symbol(
