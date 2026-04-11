@@ -190,9 +190,10 @@ impl<'a> GlobalScope<'a> {
     /// type, for method-as-value lookups) if found.
     ///
     /// Precedence: external TypeIndex (walks `parent`), then workspace
-    /// symbols (fallback). For workspace hits we don't know the resolved
-    /// type yet, so we return `TypeRepr::Error(String::new())` — enough to
-    /// silence the "undefined" diagnostic without claiming a specific type.
+    /// symbols (fallback). Workspace hits parse the type text stored by
+    /// the symbol extractor (iter 28) into a real `TypeRepr`. An empty
+    /// stored string parses to `Error("")` — still a valid silence
+    /// sentinel for suppressing `UndefinedMember`.
     pub fn lookup_member_type(&self, type_name: &str, member: &str) -> Option<TypeRepr> {
         // External types first.
         if let Some(ext) = self.external {
@@ -202,14 +203,19 @@ impl<'a> GlobalScope<'a> {
         }
         // Workspace fallback: "TypeName::member" qualified lookup.
         let qual = format!("{}::{}", type_name, member);
-        if self.workspace.all_symbols().any(|s| {
-            s.name == qual
-                && matches!(
-                    s.kind,
-                    SymbolKind::Variable { .. } | SymbolKind::Function { .. }
-                )
-        }) {
-            return Some(TypeRepr::Error(String::new()));
+        for s in self.workspace.all_symbols() {
+            if s.name != qual {
+                continue;
+            }
+            match &s.kind {
+                SymbolKind::Variable { type_name } => {
+                    return Some(TypeRepr::parse_type_string(type_name));
+                }
+                SymbolKind::Function { return_type, .. } => {
+                    return Some(TypeRepr::parse_type_string(return_type));
+                }
+                _ => {}
+            }
         }
         None
     }
@@ -222,12 +228,16 @@ impl<'a> GlobalScope<'a> {
                 return Some(t);
             }
         }
-        // Workspace fallback: qualified method name hit.
+        // Workspace fallback: qualified method name hit. Parse the stored
+        // return-type text (iter 28) into a real `TypeRepr`.
         let qual = format!("{}::{}", type_name, method);
-        if self.workspace.all_symbols().any(|s| {
-            s.name == qual && matches!(s.kind, SymbolKind::Function { .. })
-        }) {
-            return Some(TypeRepr::Error(String::new()));
+        for s in self.workspace.all_symbols() {
+            if s.name != qual {
+                continue;
+            }
+            if let SymbolKind::Function { return_type, .. } = &s.kind {
+                return Some(TypeRepr::parse_type_string(return_type));
+            }
         }
         None
     }
@@ -475,12 +485,11 @@ impl<'a> GlobalScope<'a> {
 
     /// Walk the workspace class inheritance chain starting from
     /// `class_name`, looking for a field or method named `member`.
-    /// Returns the first match as a `TypeRepr`. Currently the returned
-    /// type is always `TypeRepr::Error(String::new())` — a silence
-    /// sentinel indicating "this member exists but its concrete type is
-    /// not tracked in the workspace symbol table". This is enough to
-    /// suppress `UndefinedMember` diagnostics for cross-file inherited
-    /// members.
+    /// Returns the first match as a `TypeRepr`, parsed from the raw
+    /// type-text the symbol table lifted at extraction time (iter 28).
+    /// An empty type-text (destructor, unpopulated) parses to
+    /// `TypeRepr::Error(String::new())` — still a valid silence sentinel
+    /// for suppressing `UndefinedMember`.
     ///
     /// Uses a visited-set to prevent infinite loops on cyclic
     /// inheritance (pathological user code: `A : B, B : A`).
@@ -504,16 +513,20 @@ impl<'a> GlobalScope<'a> {
             let qualified_getter = format!("{}::{}", name, getter);
             let qualified_setter = format!("{}::{}", name, setter);
             for s in self.workspace.all_symbols() {
-                if s.name == qualified
-                    || s.name == qualified_getter
-                    || s.name == qualified_setter
+                if s.name != qualified
+                    && s.name != qualified_getter
+                    && s.name != qualified_setter
                 {
-                    if matches!(
-                        s.kind,
-                        SymbolKind::Variable { .. } | SymbolKind::Function { .. }
-                    ) {
-                        return Some(TypeRepr::Error(String::new()));
+                    continue;
+                }
+                match &s.kind {
+                    SymbolKind::Variable { type_name } => {
+                        return Some(TypeRepr::parse_type_string(type_name));
                     }
+                    SymbolKind::Function { return_type, .. } => {
+                        return Some(TypeRepr::parse_type_string(return_type));
+                    }
+                    _ => {}
                 }
             }
             // Not found on this class — ascend to its parent.

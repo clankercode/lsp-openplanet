@@ -1127,6 +1127,15 @@ impl<'a> Checker<'a> {
                         return TypeRepr::Error(String::new());
                     }
                 }
+                // Cross-file inherited method: walk the workspace class
+                // hierarchy so an inherited method's real return type
+                // (iter 28) flows into downstream arg-type checks.
+                if let Some(t) = self
+                    .scope
+                    .workspace_class_member(&type_name, &member_name)
+                {
+                    return t;
+                }
                 if !self.scope.is_external_type(&type_name) {
                     return TypeRepr::Error(String::new());
                 }
@@ -2508,5 +2517,101 @@ mod tests {
         // reasonable diagnostics list (either silent or with UndefinedMember
         // — both are fine; the key is termination).
         let _ = diags.len();
+    }
+
+    // ── iter 28: inherited types flow through downstream checks ─────────
+
+    #[test]
+    fn cross_file_inherited_field_type_flows_to_arg_check() {
+        // Parent in sibling file declares `int counter`. Child in main
+        // inherits it. Passing `f.counter` (int) to a `string` parameter
+        // must fire ArgTypeMismatch — proves the inherited field's real
+        // type (not `Error("")`) flows through member_access_type into
+        // the arg-type check.
+        let base = "class CBase { int counter; }";
+        let main = "class CFoo : CBase {} void take_str(string s) {} \
+                    void use() { CFoo f; take_str(f.counter); }";
+        let diags = check_workspace(main, &[base]);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch on int→string via inherited field, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn cross_file_inherited_method_return_flows_to_arg_check() {
+        // Parent in sibling file has `int get_count()`. Child inherits.
+        // `child.get_count()` is called and its result (int) passed to a
+        // `string` parameter — must fire ArgTypeMismatch via the return
+        // type of the inherited method.
+        let base = "class MBase { int get_count() { return 0; } }";
+        let main = "class MChild : MBase {} void take_str(string s) {} \
+                    void use() { MChild c; take_str(c.get_count()); }";
+        let diags = check_workspace(main, &[base]);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch on inherited method return, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn cross_file_shadowed_field_keeps_child_type() {
+        // Parent has `int x`, child redeclares `string x`. Accessing
+        // `c.x` must resolve as string (child wins) — pass it to an
+        // `int` parameter to see a string→int ArgTypeMismatch. If the
+        // walker mistakenly returned the parent's int type no mismatch
+        // would fire.
+        //
+        // Note: the child override lives in the *sibling* file so the
+        // `file_classes` in-file fast path cannot shortcut — this
+        // exercises `workspace_class_member`'s first-hit-wins ordering
+        // (child is walked before parent) end-to-end.
+        let base = "class SBase { int x; }";
+        let sibling_child = "class SChild : SBase { string x; }";
+        let main = "void take_int(int n) {} \
+                    void use() { SChild c; take_int(c.x); }";
+        let diags = check_workspace(main, &[base, sibling_child]);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch on shadowed child `string x` → int, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn cross_file_inherited_field_exact_type_still_silent() {
+        // Regression: parent `int counter`, passing `f.counter` to an
+        // int parameter must NOT fire ArgTypeMismatch — the inherited
+        // type should match exactly.
+        let base = "class OBase { int counter; }";
+        let main = "class OFoo : OBase {} void take_int(int n) {} \
+                    void use() { OFoo f; take_int(f.counter); }";
+        let diags = check_workspace(main, &[base]);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch when inherited int matches int param, got {:?}",
+            diags
+        );
     }
 }

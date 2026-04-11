@@ -150,17 +150,23 @@ impl SymbolTable {
                     doc: None,
                 });
                 // Descend into class members. Each gets a qualified name like
-                // "ClassName::member" (or "Ns::ClassName::member").
+                // "ClassName::member" (or "Ns::ClassName::member"). We lift
+                // the raw source text of each member's type expression /
+                // return type into the symbol so cross-file inherited access
+                // (`GlobalScope::workspace_class_member`) can parse it into
+                // a real `TypeRepr` later — see iter 28.
+                let simple_class = cls.name.text(source).to_string();
                 for member in &cls.members {
                     match member {
                         ast::ClassMember::Field(var) => {
+                            let type_text = var.type_expr.span.text(source).to_string();
                             for decl in &var.declarators {
                                 let mname =
                                     format!("{}::{}", class_name, decl.name.text(source));
                                 out.push(Symbol {
                                     name: mname,
                                     kind: SymbolKind::Variable {
-                                        type_name: String::new(),
+                                        type_name: type_text.clone(),
                                     },
                                     span: var.span,
                                     file_id,
@@ -172,10 +178,12 @@ impl SymbolTable {
                             let mname =
                                 format!("{}::{}", class_name, func.name.text(source));
                             let (params, min_args) = extract_params(source, &func.params);
+                            let return_type =
+                                func.return_type.span.text(source).to_string();
                             out.push(Symbol {
                                 name: mname,
                                 kind: SymbolKind::Function {
-                                    return_type: String::new(),
+                                    return_type,
                                     params,
                                     min_args,
                                 },
@@ -187,13 +195,17 @@ impl SymbolTable {
                         ast::ClassMember::Constructor(func) => {
                             // Qualify as ClassName::ClassName — the simple
                             // unqualified class tail, not the namespace one.
-                            let simple = cls.name.text(source);
-                            let mname = format!("{}::{}", class_name, simple);
+                            let mname = format!("{}::{}", class_name, simple_class);
                             let (params, min_args) = extract_params(source, &func.params);
+                            // Constructor "return type" is the class itself
+                            // (as a value). Use the simple class name so a
+                            // caller parsing via `TypeRepr::parse_type_string`
+                            // gets a Named(simple) that downstream lookups
+                            // can reason about.
                             out.push(Symbol {
                                 name: mname,
                                 kind: SymbolKind::Function {
-                                    return_type: String::new(),
+                                    return_type: simple_class.clone(),
                                     params,
                                     min_args,
                                 },
@@ -203,7 +215,9 @@ impl SymbolTable {
                             });
                         }
                         ast::ClassMember::Destructor(func) => {
-                            // Destructor name in source is ~ClassName
+                            // Destructor name in source is ~ClassName.
+                            // Destructors have no return type — leave empty
+                            // (matches the pre-iter-28 behaviour for them).
                             let mname = format!(
                                 "{}::{}",
                                 class_name,
@@ -225,10 +239,11 @@ impl SymbolTable {
                         ast::ClassMember::Property(prop) => {
                             let mname =
                                 format!("{}::{}", class_name, prop.name.text(source));
+                            let type_text = prop.type_expr.span.text(source).to_string();
                             out.push(Symbol {
                                 name: mname,
                                 kind: SymbolKind::Variable {
-                                    type_name: String::new(),
+                                    type_name: type_text,
                                 },
                                 span: prop.span,
                                 file_id,
