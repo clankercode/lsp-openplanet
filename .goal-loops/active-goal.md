@@ -42,8 +42,8 @@ The following LSP features are intentionally excluded from the current AC list b
 - **Workspace pull-diagnostics** (`workspace/diagnostic`): Newer LSP spec for editor-initiated diagnostic polling instead of server push. Current push-model via `publish_diagnostics` works fine. **Revisit if**: editor clients start preferring pull-model or performance tuning demands it.
 
 ## Current Status
-- **AC1-AC15 + AC21 satisfied** as of iter 34 (2026-04-11). 320 unit + 14 integration green, 0 ignored. Parser corpus untouched.
-- **AC16-AC20 open**: 3 new LSP feature additions (AC16-AC18) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop at iter 35 next.
+- **AC1-AC16 + AC21 satisfied** as of iter 35 (2026-04-11). 326 unit + 15 integration green, 0 ignored. Parser corpus untouched.
+- **AC17-AC20 open**: 2 new LSP feature additions (AC17-AC18) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop at iter 36 next.
 - **ON_GOAL_COMPLETE_NEXT_STEPS**: Auto-advance enabled by user directive 2026-04-11 ("Resume loop and complete all items"). On AC14-AC20 completion, loop stops and reports — no further phases queued.
 
 ## Iter 3 known gaps (carry forward)
@@ -125,7 +125,28 @@ The following LSP features are intentionally excluded from the current AC list b
 - **Deferred**: (1) Lambda return-type hints — requires running expression inference *inside* a scoped checker frame for body locals; `Checker::expr_type` is private and wiring it for lambdas touches unrelated helpers. Follow-up iter candidate. (2) Method-call param-name hints (`foo.m(5)`) — would need `scope_query::local_type_at` + workspace class chain walk; missing but never wrong. (3) Binary/unary `auto` inference.
 - **Post-review fix**: `lookup_callee_param_names` originally fell back to bare-tail workspace lookup even for qualified callees, which could display wrong param names when two namespaces shared a function name. Now gated on `!callee.contains("::")`.
 
-## Iter 35 Plan (next)
+## Iter 35 Result (2026-04-11)
+- 326 unit + 15 integration green (+6 unit, +1 integration, 0 ignored). Parser corpus untouched, zero new clippy warnings.
+- **AC16 document highlights closed.** New `src/server/highlights.rs` module. `Backend::document_highlight` wired; `document_highlight_provider: OneOf::Left(true)` advertised.
+- **Identifier-at-cursor**: byte-level backward/forward walk, rejects digit-start and whitespace, clamps to `bytes.len()`. Hardcoded keyword list (duplicates lexer — acknowledged follow-up; could extract to shared helper).
+- **Walker coverage**: `collect_item` handles Namespace/Class/Function/Enum/Interface; `collect_class` handles methods/ctors/dtors/fields/properties; `collect_stmt` covers Block/If/For/While/DoWhile/Switch/TryCatch/Return. `collect_expr_ctx` recurses into Lambda bodies.
+- **READ/WRITE classification**: LHS of `Assign`/`HandleAssign` (including compound op variants — compound-op LHS is classified WRITE-only, not WRITE+READ; documented minor), unary/postfix `Inc`/`Dec`, VarDecl declarators, and top-level declarations (function/class/enum/interface/property names) → WRITE. Everything else → READ.
+- **Scope-naive matcher**: module docstring explicitly flags this; `test_unrelated_name_not_highlighted` asserts the naive over-match and calls out the limitation inline. Follow-up would reuse the reference-resolution pipeline.
+- **Post-review cleanup**: removed a dead `let _ = pos; // sanity` line from the test suite.
+- **Reviewer verdict**: APPROVED. No blocking issues. Non-blockers: (1) keyword-list duplicated with lexer, (2) compound-op LHS classified WRITE-only, (3) scope-naive matching documented.
+
+## Iter 36 Plan (next)
+- **Goal**: AC17 folding ranges. Implement `textDocument/foldingRange` so editors can collapse function bodies, class/namespace blocks, multi-line comments, and `#if`/`#endif` regions.
+- **Why**: No handler today. Folding is a cheap-to-implement editor win with zero type-system dependency.
+- **Approach**:
+  1. Advertise `folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true))` in capabilities.
+  2. Implement `Backend::folding_range`. New module `src/server/folding.rs` with public entry `fn folding_ranges(source: &str) -> Vec<FoldingRange>`.
+  3. Two complementary passes: (a) AST-driven — walk the parsed `SourceFile` and emit ranges for Namespace/Class/Enum/Function/Method bodies, Block statements, and multi-line If/For/While bodies. (b) Lexer/byte-driven — emit ranges for multi-line block comments (`/* ... */`) and preprocessor directive blocks (`#if` ... `#endif`). Preprocessor markers can be found via `src/preprocessor` or a naive byte scan.
+  4. Use `FoldingRangeKind::Comment` for comments, `Region` for `#if`/`#endif`, default (None) for braces.
+- **Verify**: new tests in `src/server/folding.rs`: function body folds at opening brace line → before closing brace line; nested class+method produces two ranges; multi-line block comment folds; single-line braces produce no range; `#if X ... #endif` folds as Region. One tower-lsp smoke test.
+- **Target**: 332+ unit + 16 integration, 0 ignored, no new clippy warnings.
+
+## Iter 35 Plan (superseded)
 - **Goal**: AC16 document highlights. Implement `textDocument/documentHighlight` to surface all occurrences of the symbol under the cursor within the current document, differentiating READ vs WRITE with `DocumentHighlightKind`.
 - **Why**: No handler exists today. This is high-value editor UX (VSCode/Neovim highlight matching identifiers as you move the cursor) and the building blocks are already in place — `navigation::find_references` computes cross-file references, but document highlight is intra-file only and can reuse `scope_query`/`symbols::table`.
 - **Approach**:

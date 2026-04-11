@@ -12,10 +12,11 @@ use openplanet_lsp::typecheck::build_plugin_symbol_table;
 use openplanet_lsp::typedb::TypeIndex;
 use openplanet_lsp::workspace::project;
 use tower_lsp::lsp_types::{
-    DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
-    InitializeParams, InlayHintKind, InlayHintParams, PartialResultParams, Position, Range,
-    SignatureHelpParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    Url, WorkDoneProgressParams,
+    DidOpenTextDocumentParams, DocumentHighlightKind, DocumentHighlightParams,
+    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, InitializeParams, InlayHintKind,
+    InlayHintParams, PartialResultParams, Position, Range, SignatureHelpParams,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Url,
+    WorkDoneProgressParams,
 };
 use tower_lsp::LanguageServer;
 use tower_lsp::LspService;
@@ -1023,5 +1024,66 @@ async fn test_tower_lsp_smoke_inlay_hint() {
         hints.iter().any(|h| h.kind == Some(InlayHintKind::TYPE)),
         "expected a TYPE inlay hint, got {:?}",
         hints
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC16 smoke test: exercise `textDocument/documentHighlight` through the real
+// tower-lsp `Backend`. Proves the handler returns intra-file occurrences with
+// READ/WRITE classification end-to-end.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "current_thread")]
+async fn test_tower_lsp_smoke_document_highlight() {
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+
+    #[allow(deprecated)]
+    let init_params = InitializeParams::default();
+    let init_result = backend
+        .initialize(init_params)
+        .await
+        .expect("initialize should succeed");
+    assert!(
+        init_result.capabilities.document_highlight_provider.is_some(),
+        "server must advertise document_highlight capability"
+    );
+
+    let uri = Url::parse("file:///smoke/highlight.as").unwrap();
+    // `int x = 0; x = 1; g(x);` — three occurrences of `x`.
+    let src = "void f() { int x = 0; x = 1; g(x); }\n";
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "angelscript".to_string(),
+                version: 1,
+                text: src.to_string(),
+            },
+        })
+        .await;
+
+    // Cursor on the declarator `x` at column 15 (0-indexed) of line 0:
+    //   `void f() { int x = 0; x = 1; g(x); }`
+    //                   ^ col 15
+    let params = DocumentHighlightParams {
+        text_document_position_params: text_doc_position(&uri, 0, 15),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    let hs = backend
+        .document_highlight(params)
+        .await
+        .expect("document_highlight must not error")
+        .expect("document_highlight must return Some");
+    assert_eq!(hs.len(), 3, "expected 3 highlights, got {:?}", hs);
+    assert!(
+        hs.iter().any(|h| h.kind == Some(DocumentHighlightKind::WRITE)),
+        "expected at least one WRITE highlight, got {:?}",
+        hs
+    );
+    assert!(
+        hs.iter().any(|h| h.kind == Some(DocumentHighlightKind::READ)),
+        "expected at least one READ highlight, got {:?}",
+        hs
     );
 }

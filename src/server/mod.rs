@@ -3,6 +3,7 @@ pub mod completion;
 pub mod definition;
 pub mod diagnostics;
 pub mod formatter;
+pub mod highlights;
 pub mod hover;
 pub mod inlay_hints;
 pub mod navigation;
@@ -137,6 +138,7 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
@@ -247,6 +249,19 @@ impl LanguageServer for Backend {
             params.context.include_declaration,
         );
         Ok(Some(refs))
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        Ok(highlights::document_highlights(&source, pos))
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
