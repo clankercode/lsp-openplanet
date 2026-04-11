@@ -42,8 +42,8 @@ The following LSP features are intentionally excluded from the current AC list b
 - **Workspace pull-diagnostics** (`workspace/diagnostic`): Newer LSP spec for editor-initiated diagnostic polling instead of server push. Current push-model via `publish_diagnostics` works fine. **Revisit if**: editor clients start preferring pull-model or performance tuning demands it.
 
 ## Current Status
-- **AC1-AC17 + AC21 satisfied** as of iter 36 (2026-04-11). 333 unit + 16 integration green, 0 ignored. Parser corpus untouched.
-- **AC18-AC20 open**: 1 new LSP feature addition (AC18 call hierarchy) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop at iter 37 next.
+- **AC1-AC18 + AC21 satisfied** as of iter 37 (2026-04-11). 341 unit + 17 integration green, 0 ignored. Parser corpus untouched.
+- **AC19-AC20 open**: 2 iter-32 deferrals (method-call const propagation; parser const-handle ordering). Loop at iter 38 next. These are the final two ACs.
 - **ON_GOAL_COMPLETE_NEXT_STEPS**: Auto-advance enabled by user directive 2026-04-11 ("Resume loop and complete all items"). On AC14-AC20 completion, loop stops and reports — no further phases queued.
 
 ## Iter 3 known gaps (carry forward)
@@ -144,7 +144,28 @@ The following LSP features are intentionally excluded from the current AC list b
 - **Deferred**: (1) `#else`/`#elif` per-branch folds — outer `#if...#endif` still folds as one. (2) `#region`/`#endregion` user directives — not standard in Openplanet preprocessor. (3) Single-statement if/for/while bodies without `{}` — no `Stmt::Block` to fold. (4) Lambda bodies — no expression walker. (5) Multi-line global VarDecl initializers.
 - **Reviewer verdict**: APPROVED. No blocking issues. Non-blockers: small wrapper `push_body_fold` used in one hot path; `/* */ #if X` on same line could misread as directive (unlikely in real AS code); switch case-level folding possible future enhancement.
 
-## Iter 37 Plan (next)
+## Iter 37 Result (2026-04-11)
+- 341 unit + 17 integration green (+8 unit, +1 integration, 0 ignored). Parser corpus untouched, zero new clippy warnings.
+- **AC18 call hierarchy closed.** New `src/server/call_hierarchy.rs` (~710 lines) with `prepare`, `incoming`, `outgoing`. Three handlers wired in `Backend`; `call_hierarchy_provider: CallHierarchyServerCapability::Simple(true)` advertised.
+- **`prepare`**: direct workspace lookup (qualified then bare tail) first, then enclosing-call fallback — cursor on a call site resolves to the callee target. `name_at_position` walks left across `::` segments so `Ns::foo` resolves end-to-end.
+- **`incoming`**: `visit_functions_src` covers free functions, namespace-nested functions, class methods, ctors, dtors. `collect_calls` descends every `StmtKind` variant carrying expressions; `collect_calls_in_expr` covers `Call`/`Binary`/`Unary`/`Postfix`/`Member`/`Index`/`Cast`/`TypeConstruct`/`Is`/`Ternary`/`Assign`/`HandleAssign`/`ArrayInit`/`Lambda body`. Groups by `(caller_qname, file_id)` so repeated sites collapse into one `IncomingCall` with multiple `from_ranges`.
+- **`outgoing`**: parses each file until the target body is found (qname or bare tail), then collects calls and groups by resolved target qname. `HashMap` iteration is non-deterministic across runs but duplicate-qname collisions are rare — comment updated post-review.
+- **State**: `CallHierarchyItem.data` carries `{"name": qname}` as `serde_json::Value`, round-tripped via `data_name`.
+- **Deferred**: method resolution is bare-name only (`highlights.rs` shortcut), documented in module header. `TypeConstruct` constructor-syntax calls not tracked. Funcdef-via-handle invocations not tracked. External TypeIndex functions not included (workspace-only).
+- **Reviewer verdict**: APPROVED. No blocking issues. Minor follow-ups: determinism comment (fixed), optional cross-file incoming integration test.
+
+## Iter 38 Plan (next — final iteration)
+- **Goal**: AC19 method-call const propagation AND AC20 parser const-handle ordering. Bundle both because AC20 unblocks AC19's cleanest test.
+- **Why**: These are the last two ACs. AC19 is the iter 32 deferral for method return types inheriting Const from a const receiver unless the method is declared non-const. AC20 is the parser fix that separates `const Foo@` (handle to const object) from `Foo@ const` (const handle to mutable object).
+- **Approach**:
+  1. **AC20 first**: inspect `src/parser/parser.rs` type-expression parsing. Find where `Handle` and `Const` wrap a base type and distinguish by token ordering: `const Foo@` → `Handle(Const(Foo))` (const applies to the pointee); `Foo@ const` → `Const(Handle(Foo))` (const applies to the handle). Re-add the dropped `const_handle_not_const_contents` test from iter 32.
+  2. **AC19 after**: extend `SymbolKind::Method` with an `is_const` bool populated from the parser's method modifier. In `Checker::call_type`'s `Member` branch, when the receiver is `Const(_)` AND the method is NOT declared `const`, the return type inherits `Const(_)`. Also flag a diagnostic on non-const methods invoked on a const receiver (optional — gate behind test pressure).
+  3. Wire `receiver_is_const` (iter 32 helper) into the method path.
+- **Verify**: new tests — `const_foo_at_assign_fires`, `foo_at_const_assign_does_not_fire`, `const_receiver_method_return_is_const`, `non_const_method_on_const_receiver_warns` (or equivalent assertion). Also re-add the dropped iter 32 test.
+- **Target**: 347+ unit, 17 integration, 0 ignored. Parser corpus must stay clean (this is the first parser change in many iters — run `scripts/corpus_histogram.sh` or equivalent).
+- **After completion**: all 21 AC satisfied. Goal loop terminates with summary report.
+
+## Iter 37 Plan (superseded)
 - **Goal**: AC18 call hierarchy. Implement `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, and `callHierarchy/outgoingCalls` so editors can show caller/callee trees.
 - **Why**: No handler today. Call hierarchy is one of the big editor navigation wins; builds directly on the workspace `SymbolTable` + the resolver machinery `signature.rs` and `inlay_hints.rs` already use.
 - **Approach**:

@@ -12,11 +12,12 @@ use openplanet_lsp::typecheck::build_plugin_symbol_table;
 use openplanet_lsp::typedb::TypeIndex;
 use openplanet_lsp::workspace::project;
 use tower_lsp::lsp_types::{
-    DidOpenTextDocumentParams, DocumentHighlightKind, DocumentHighlightParams, FoldingRangeKind,
-    FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
-    InitializeParams, InlayHintKind, InlayHintParams, PartialResultParams, Position, Range,
-    SignatureHelpParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    Url, WorkDoneProgressParams,
+    CallHierarchyIncomingCallsParams, CallHierarchyPrepareParams, DidOpenTextDocumentParams,
+    DocumentHighlightKind, DocumentHighlightParams, FoldingRangeKind, FoldingRangeParams,
+    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, InitializeParams, InlayHintKind,
+    InlayHintParams, PartialResultParams, Position, Range, SignatureHelpParams,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Url,
+    WorkDoneProgressParams,
 };
 use tower_lsp::LanguageServer;
 use tower_lsp::LspService;
@@ -1152,4 +1153,69 @@ class Foo {\n  void m() {\n    int y = 0;\n  }\n}\n\
         "expected at least 2 AST folds for class + method, got {:?}",
         folds
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_tower_lsp_smoke_call_hierarchy() {
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+
+    #[allow(deprecated)]
+    let init_params = InitializeParams::default();
+    let init_result = backend
+        .initialize(init_params)
+        .await
+        .expect("initialize should succeed");
+    assert!(
+        init_result.capabilities.call_hierarchy_provider.is_some(),
+        "server must advertise call_hierarchy capability"
+    );
+
+    let uri = Url::parse("file:///smoke/callh.as").unwrap();
+    // Line 0: `void a() {}`          — target function.
+    // Line 1: `void b() { a(); }`    — caller.
+    let src = "void a() {}\nvoid b() { a(); }\n";
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "angelscript".to_string(),
+                version: 1,
+                text: src.to_string(),
+            },
+        })
+        .await;
+
+    // Prepare on the declaration of `a` (col 5 = 'a').
+    let prep_params = CallHierarchyPrepareParams {
+        text_document_position_params: text_doc_position(&uri, 0, 5),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+    let items = backend
+        .prepare_call_hierarchy(prep_params)
+        .await
+        .expect("prepare must not error")
+        .expect("prepare must return Some");
+    assert_eq!(items.len(), 1, "expected single item, got {:?}", items);
+    assert_eq!(items[0].name, "a");
+
+    // Ask for incoming calls of `a` — expect one caller `b`.
+    let inc_params = CallHierarchyIncomingCallsParams {
+        item: items[0].clone(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    let incomings = backend
+        .incoming_calls(inc_params)
+        .await
+        .expect("incoming must not error")
+        .expect("incoming must return Some");
+    assert_eq!(
+        incomings.len(),
+        1,
+        "expected 1 caller, got {:?}",
+        incomings
+    );
+    assert_eq!(incomings[0].from.name, "b");
+    assert_eq!(incomings[0].from_ranges.len(), 1);
 }

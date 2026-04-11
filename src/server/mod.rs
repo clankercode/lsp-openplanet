@@ -1,3 +1,4 @@
+pub mod call_hierarchy;
 pub mod code_actions;
 pub mod completion;
 pub mod definition;
@@ -151,6 +152,7 @@ impl LanguageServer for Backend {
                 document_formatting_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -389,6 +391,52 @@ impl LanguageServer for Backend {
             Some(&table),
         );
         Ok(Some(hints))
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let (workspace, files) = self.build_workspace().await;
+        let ws_files = navigation::WorkspaceFiles { files: &files };
+        let items = call_hierarchy::prepare(&source, uri, pos, &workspace, &ws_files);
+        if items.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(items))
+        }
+    }
+
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let (workspace, files) = self.build_workspace().await;
+        let ws_files = navigation::WorkspaceFiles { files: &files };
+        Ok(Some(call_hierarchy::incoming(
+            &params.item,
+            &workspace,
+            &ws_files,
+        )))
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let (workspace, files) = self.build_workspace().await;
+        let ws_files = navigation::WorkspaceFiles { files: &files };
+        Ok(Some(call_hierarchy::outgoing(
+            &params.item,
+            &workspace,
+            &ws_files,
+        )))
     }
 
     async fn code_action(
