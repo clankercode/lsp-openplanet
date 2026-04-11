@@ -22,7 +22,7 @@ Implement complete LSP feature support: type errors & full inference, completion
 - [x] **AC12 — Code actions**: Levenshtein-based "did you mean" quick-fixes.
 - [x] **AC13 — Green bar**: 305 unit + 12 integration passing, 0 ignored. Parser corpus 140 plugins / 1603 files / 0 errors. Tower-lsp harness smoke test closed in iter 30.
 - [x] **AC14 — Signature help** *(iter 33)*: Active-parameter-aware signature help with overload cycling. `Backend::signature_help` now dispatches to `src/server/signature.rs`, resolving callees via workspace free functions, TypeIndex free functions, type methods, workspace methods with inheritance walk, and implicit-`this`. `find_enclosing_call` walks backwards counting parens with a forward-pass skip-mask for strings/comments.
-- [ ] **AC15 — Inlay hints**: Type hints for `auto` locals, param-name hints on literal arguments, and optionally return-type hints on multi-line lambdas. `textDocument/inlayHint` handler. Tests for each hint kind.
+- [x] **AC15 — Inlay hints** *(iter 34)*: Type hints for `auto` locals and param-name hints on literal arguments. `textDocument/inlayHint` handler in `src/server/inlay_hints.rs`. Qualified callees go straight to TypeIndex to avoid cross-namespace mis-resolution. Lambda return-type hints deferred.
 - [ ] **AC16 — Document highlights**: Highlight every occurrence of the symbol at cursor within the current document (kind = Read/Write where derivable). Reuses the existing navigation reference walker but scoped to one file. Tests for local var, field, method, and type-ref highlights.
 - [ ] **AC17 — Folding ranges**: Collapse regions for function/method bodies, class/namespace blocks, multi-line comments, and `#if`/`#endif` preprocessor blocks. Tests for each kind plus nested folding.
 - [ ] **AC18 — Call hierarchy**: `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, and `callHierarchy/outgoingCalls`. Backed by the existing workspace SymbolTable + reference index. Tests for incoming/outgoing traversal including cross-file calls.
@@ -42,8 +42,8 @@ The following LSP features are intentionally excluded from the current AC list b
 - **Workspace pull-diagnostics** (`workspace/diagnostic`): Newer LSP spec for editor-initiated diagnostic polling instead of server push. Current push-model via `publish_diagnostics` works fine. **Revisit if**: editor clients start preferring pull-model or performance tuning demands it.
 
 ## Current Status
-- **AC1-AC14 + AC21 satisfied** as of iter 33 (2026-04-11). 314 unit + 13 integration green, 0 ignored. Parser corpus untouched.
-- **AC15-AC20 open**: 4 new LSP feature additions (AC15-AC18) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop at iter 34 next.
+- **AC1-AC15 + AC21 satisfied** as of iter 34 (2026-04-11). 320 unit + 14 integration green, 0 ignored. Parser corpus untouched.
+- **AC16-AC20 open**: 3 new LSP feature additions (AC16-AC18) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop at iter 35 next.
 - **ON_GOAL_COMPLETE_NEXT_STEPS**: Auto-advance enabled by user directive 2026-04-11 ("Resume loop and complete all items"). On AC14-AC20 completion, loop stops and reports — no further phases queued.
 
 ## Iter 3 known gaps (carry forward)
@@ -116,7 +116,28 @@ The following LSP features are intentionally excluded from the current AC list b
 - **Post-review cleanup**: 5 clippy warnings fixed (`mask[start..i].fill(true)` ×3, `trim_matches(['.', ':'])` ×2). Dead `_pos_unused` + `pos` test helper removed. `pick_active_signature` rustdoc aligned with its actual implementation (no `min_args_required` check).
 - **Iter 32 parser gap carries forward**: `const Foo@` vs `Foo@ const` still collapse to `Const(Handle(Foo))` — AC20 target.
 
-## Iter 34 Plan (next)
+## Iter 34 Result (2026-04-11)
+- 320 unit + 14 integration green (+6 unit, +1 integration, 0 ignored). Parser corpus untouched, zero new clippy warnings in new files.
+- **AC15 inlay hints closed.** New `src/server/inlay_hints.rs` module wired through `Backend::inlay_hint`. `inlay_hint_provider: OneOf::Left(true)` advertised in capabilities.
+- **Type hints for `auto` locals**: fires only when `vd.type_expr.kind == TypeExprKind::Auto` (AngelScript's `auto` keyword — the only untyped let form). A narrow `infer_init_type` handles `IntLit`/`HexLit` → `int`, `FloatLit` → `float`, `StringLit` → `string`, `BoolLit` → `bool`, `Cast`/`TypeConstruct` → target type text, and `Call` → workspace/external function return type. Arithmetic/unary/member/index fall through (cheap skip, no wrong hints).
+- **Parameter-name hints**: walks `ExprKind::Call`, extracts dotted/namespaced callee via `Ident`/`NamespaceAccess`/`Member` chain, resolves via `SymbolTable` (workspace function params stored as `(name, type)`) with fallback to `TypeIndex::lookup_function`. Qualified callees bypass workspace lookup (symbol table is bare-name keyed — would otherwise cross-match unrelated `Ns::bar`). Emits `PARAMETER`-kind hints only for literal/null positional args; suppressed when arg is `Ident` whose text matches the param name.
+- **Range filtering**: post-collection via `position_in_range`. Reviewer noted end-boundary inclusivity is slightly off-spec (LSP ranges are end-exclusive); accepted as cosmetic since hint positions sit inside identifiers, not on boundaries.
+- **Deferred**: (1) Lambda return-type hints — requires running expression inference *inside* a scoped checker frame for body locals; `Checker::expr_type` is private and wiring it for lambdas touches unrelated helpers. Follow-up iter candidate. (2) Method-call param-name hints (`foo.m(5)`) — would need `scope_query::local_type_at` + workspace class chain walk; missing but never wrong. (3) Binary/unary `auto` inference.
+- **Post-review fix**: `lookup_callee_param_names` originally fell back to bare-tail workspace lookup even for qualified callees, which could display wrong param names when two namespaces shared a function name. Now gated on `!callee.contains("::")`.
+
+## Iter 35 Plan (next)
+- **Goal**: AC16 document highlights. Implement `textDocument/documentHighlight` to surface all occurrences of the symbol under the cursor within the current document, differentiating READ vs WRITE with `DocumentHighlightKind`.
+- **Why**: No handler exists today. This is high-value editor UX (VSCode/Neovim highlight matching identifiers as you move the cursor) and the building blocks are already in place — `navigation::find_references` computes cross-file references, but document highlight is intra-file only and can reuse `scope_query`/`symbols::table`.
+- **Approach**:
+  1. Advertise `document_highlight_provider: Some(OneOf::Left(true))` in `initialize`.
+  2. Implement `Backend::document_highlight`. Reads the current document text, calls a new `src/server/highlights.rs::document_highlights(source, position)` returning `Vec<DocumentHighlight>`.
+  3. Walk the parsed `SourceFile` collecting every identifier occurrence whose resolved symbol equals the cursor's symbol. Start simple: lexical name match within the same scope (file-level + enclosing function body). For class members, match on `self.field` + bare `field` within methods of the same class.
+  4. Determine READ vs WRITE: WRITE when the occurrence is the LHS of `ExprKind::Assign`/`HandleAssign`, the target of `++`/`--`, or a `Stmt::Let` declarator. Otherwise READ.
+  5. TEXT kind for keyword/literal hits (probably unused for AC16).
+- **Verify**: new tests in `src/server/highlights.rs` covering: single function local highlighted at every use; assignment shows WRITE; shadowing doesn't over-highlight outer scope; class field from method body; cursor on a keyword returns empty. One tower-lsp smoke test.
+- **Target**: 325+ unit + 15 integration, 0 ignored, no new clippy warnings.
+
+## Iter 34 Plan (superseded)
 - **Goal**: AC15 inlay hints. Implement `textDocument/inlayHint` to surface inferred `auto` local types, parameter-name hints at call sites, and return-type hints on multi-line lambdas.
 - **Why**: Zero handler exists today (`Backend` does not implement `inlay_hint`). `auto` locals silently hide the resolved type and call sites with many literal args are unreadable — the two complaints the goal doc flags for AC15.
 - **Approach**:

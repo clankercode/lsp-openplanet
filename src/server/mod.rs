@@ -4,6 +4,7 @@ pub mod definition;
 pub mod diagnostics;
 pub mod formatter;
 pub mod hover;
+pub mod inlay_hints;
 pub mod navigation;
 pub mod references;
 pub mod scope_query;
@@ -145,6 +146,7 @@ impl LanguageServer for Backend {
                 rename_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -338,6 +340,26 @@ impl LanguageServer for Backend {
             ),
             new_text: formatted,
         }]))
+    }
+
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> Result<Option<Vec<InlayHint>>> {
+        let uri = &params.text_document.uri;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let (table, _files) = self.build_workspace().await;
+        let type_index = self.type_index.read().await;
+        let hints = inlay_hints::inlay_hints(
+            &source,
+            params.range,
+            type_index.as_deref(),
+            Some(&table),
+        );
+        Ok(Some(hints))
     }
 
     async fn code_action(
