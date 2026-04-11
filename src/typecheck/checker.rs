@@ -812,6 +812,42 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// True if `ty` represents a "const receiver" — i.e. a value whose
+    /// contents should be treated as immutable for field / index access.
+    ///
+    /// AngelScript distinguishes `const Foo@` (handle to const object) from
+    /// `Foo@ const` (const handle, mutable object). Our parser collapses
+    /// both shapes into `Const(Handle(Foo))`, so we can't fully honor the
+    /// distinction — see iter 32 notes. In practice we treat ANY outer /
+    /// through-handle `Const` wrapper as "contents are const", which
+    /// matches `const Foo@` / `const array<T>@` use-cases in the wild and
+    /// will over-fire on the semantically distinct `Foo@ const` form
+    /// (which is rarer).
+    fn receiver_is_const(ty: &TypeRepr) -> bool {
+        // Outer layer Const (parser output for `const X@`).
+        if matches!(ty, TypeRepr::Const(_)) {
+            return true;
+        }
+        // Handle-peeled Const (semantically-correct `Handle(Const(X))`).
+        if matches!(ty.unwrap_handle(), TypeRepr::Const(_)) {
+            return true;
+        }
+        false
+    }
+
+    /// If `receiver_const` is true and `t` isn't already wrapped, wrap
+    /// the field type in `Const(_)` so downstream assignment checks see
+    /// the propagated const. Errors and already-const types pass through.
+    fn apply_receiver_const(t: TypeRepr, receiver_const: bool) -> TypeRepr {
+        if !receiver_const {
+            return t;
+        }
+        if matches!(t, TypeRepr::Const(_) | TypeRepr::Error(_)) {
+            return t;
+        }
+        TypeRepr::Const(Box::new(t))
+    }
+
     /// Derive the type of `obj.member`, emitting an `UndefinedMember` if
     /// the lookup fails against a known (non-error) object type. When the
     /// object type is `Error(_)` we silently propagate `Error` so we don't
@@ -827,6 +863,14 @@ impl<'a> Checker<'a> {
             return TypeRepr::Error(String::new());
         }
         let member_name = member.text(self.source).to_string();
+        // A const receiver propagates `Const` into field access results
+        // (iter 32). Method access is routed through `call_type::Member`
+        // so this only affects field reads. We do NOT wrap the array /
+        // dictionary special-case return types — those are primitive
+        // rvalues (`uint` / `bool`) that aren't meaningful assignment
+        // targets anyway, and keeping them unwrapped preserves iter 29
+        // arg-type-check behaviour on `a.Length` etc.
+        let receiver_const = Self::receiver_is_const(obj_ty);
         // Built-in generic array members. AngelScript exposes `Length`
         // / `length` as `uint`, `IsEmpty` as `bool`, and a handful of
         // mutating methods that return void. We special-case the
@@ -866,12 +910,12 @@ impl<'a> Checker<'a> {
         if let Some((_, members)) = self.file_classes.get(&type_name) {
             for (mname, t) in members {
                 if mname == &member_name {
-                    return t.clone();
+                    return Self::apply_receiver_const(t.clone(), receiver_const);
                 }
             }
         }
         if let Some(t) = self.scope.lookup_member_type(&type_name, &member_name) {
-            return t;
+            return Self::apply_receiver_const(t, receiver_const);
         }
         // Also try: if this is a workspace-local class, check its in-memory
         // ClassCtx members. Handles `this.foo` transitively via explicit
@@ -880,7 +924,7 @@ impl<'a> Checker<'a> {
             if cls.name == type_name {
                 for (mname, t) in &cls.members {
                     if mname == &member_name {
-                        return t.clone();
+                        return Self::apply_receiver_const(t.clone(), receiver_const);
                     }
                 }
             }
@@ -891,7 +935,7 @@ impl<'a> Checker<'a> {
         // enough to suppress `UndefinedMember` without fabricating a
         // concrete type we don't actually know.
         if let Some(t) = self.scope.workspace_class_member(&type_name, &member_name) {
-            return t;
+            return Self::apply_receiver_const(t, receiver_const);
         }
         // Workspace classes currently don't track parent chains or all
         // members across files, so emitting UndefinedMember against one
@@ -1287,12 +1331,18 @@ impl<'a> Checker<'a> {
             ExprKind::Index { object, index } => {
                 let obj_ty = self.expr_type(object);
                 let _ = self.expr_type(index);
-                // `array<T>[i]` / `T[][i]` → element type. Strip const
-                // wrapper so the result of indexing into a `const array<T>`
-                // is just `T` (AngelScript doesn't propagate const through
-                // indexing in a way we model yet; keeping this permissive
-                // avoids spurious ConstViolations on downstream reads).
+                // `array<T>[i]` / `T[][i]` → element type. If the receiver
+                // is (transitively) const — e.g. `const array<T>@` — wrap
+                // the element type in `Const(_)` so downstream assignment
+                // checks can fire `ConstViolation` (iter 32). Pure reads
+                // of `Const(T)` still type-check fine because iter 24's
+                // const check only fires on assignment LHS.
                 if let Some(elem) = obj_ty.array_element_type() {
+                    if Self::receiver_is_const(&obj_ty)
+                        && !matches!(elem, TypeRepr::Const(_))
+                    {
+                        return TypeRepr::Const(Box::new(elem.clone()));
+                    }
                     return elem.clone();
                 }
                 // Dictionary-like and everything else: stay silent.
@@ -2275,6 +2325,83 @@ mod tests {
         assert!(
             !bad.is_empty(),
             "expected at least 1 ConstViolation, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_array_element_assign_fires() {
+        // `const array<int>@ arr; arr[0] = 5;` — the receiver is const,
+        // so indexing returns a `Const(int)` lvalue. Assigning into it
+        // must fire a ConstViolation (iter 32).
+        let diags = check(
+            "void f() { const array<int>@ arr = null; arr[0] = 5; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ConstViolation, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_array_element_read_is_fine() {
+        // Pure reads of `const array<int>@ arr; int x = arr[0];` must
+        // NOT fire ConstViolation — only assignment through the const
+        // element should. (Iter 32 wraps the read in `Const(int)`, but
+        // iter 24's const check only looks at assignment LHS.)
+        let diags = check(
+            "void f() { const array<int>@ arr = null; int x = arr[0]; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ConstViolation on pure read, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_member_chain_fires() {
+        // `const Foo@ f; f.field = 5;` where `field` is a non-const
+        // `int` must still fire ConstViolation because the receiver is
+        // const — iter 32 propagates that through `member_access_type`.
+        let diags = check(
+            "class Foo { int field; } void f() { const Foo@ x = null; x.field = 5; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ConstViolation via chained const member access, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn non_const_member_receiver_not_const() {
+        // Non-const receiver: `Foo f; f.field = 5;` must NOT fire.
+        let diags = check(
+            "class Foo { int field; } void f() { Foo x; x.field = 5; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ConstViolation on non-const receiver, got {:?}",
             diags
         );
     }
