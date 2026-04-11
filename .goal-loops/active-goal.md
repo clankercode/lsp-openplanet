@@ -21,10 +21,21 @@ Implement complete LSP feature support: type errors & full inference, completion
 - [x] **AC11 — Semantic tokens**: full-document provider.
 - [x] **AC12 — Code actions**: Levenshtein-based "did you mean" quick-fixes.
 - [x] **AC13 — Green bar**: 305 unit + 12 integration passing, 0 ignored. Parser corpus 140 plugins / 1603 files / 0 errors. Tower-lsp harness smoke test closed in iter 30.
+- [ ] **AC14 — Signature help**: Active-parameter-aware signature help with overload cycling. Currently `Backend::signature_help` returns `Ok(None)` in `src/server/mod.rs:250` even though `SignatureHelpOptions` is already advertised in capabilities. Tests cover: single overload, multiple overloads with active signature based on arg-count/types, active parameter tracked through trailing comma, nested call at cursor position.
+- [ ] **AC15 — Inlay hints**: Type hints for `auto` locals, param-name hints on literal arguments, and optionally return-type hints on multi-line lambdas. `textDocument/inlayHint` handler. Tests for each hint kind.
+- [ ] **AC16 — Document highlights**: Highlight every occurrence of the symbol at cursor within the current document (kind = Read/Write where derivable). Reuses the existing navigation reference walker but scoped to one file. Tests for local var, field, method, and type-ref highlights.
+- [ ] **AC17 — Folding ranges**: Collapse regions for function/method bodies, class/namespace blocks, multi-line comments, and `#if`/`#endif` preprocessor blocks. Tests for each kind plus nested folding.
+- [ ] **AC18 — Call hierarchy**: `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, and `callHierarchy/outgoingCalls`. Backed by the existing workspace SymbolTable + reference index. Tests for incoming/outgoing traversal including cross-file calls.
+- [ ] **AC19 — Method-call const propagation**: Iter 32 deferred method-call return-type const inheritance. When a method is invoked on a const receiver, its return type should inherit `Const(_)` unless the method itself is declared non-const. Requires surfacing the `const`-qualifier on method decls through `SymbolKind::Method`. Tests: const-receiver method return flows into downstream assignment check; non-const method on const receiver can be detected as a diagnostic if the method mutates.
+- [ ] **AC20 — Parser const-handle ordering**: Parser currently collapses both `const Foo@` (handle to const object) and `Foo@ const` (const handle to mutable object) into `Const(Handle(Foo))`, losing the semantic distinction. Iter 32's `const_handle_not_const_contents` test was dropped because the parser can't round-trip the difference. Fix: produce `Handle(Const(T))` for `const Foo@` and `Const(Handle(T))` for `Foo@ const`. Update checker helpers accordingly. Re-add the dropped test.
+
+## Features considered but NOT added to AC list
+- **Dictionary value typing**: Investigation (post-iter 32) confirmed corpus has ZERO `dictionary<K,V>` usage across all 140 plugins. Plugins rely exclusively on untyped `dictionary` with runtime casts (`int(dict[key])`). AngelScript semantics don't support typed dictionaries natively, and speculative Set/Get-based value inference would be fragile with no user syntax to anchor. Current iter 29 opaque-silent strategy is the right answer.
+- **Code lens, document color, linked editing, selection range, moniker, workspace pull-diagnostics**: Lower-impact LSP features not commonly expected from a plugin-scope language server. Can be revisited if concrete demand surfaces.
 
 ## Current Status
-- **All AC satisfied** as of iter 32 (2026-04-11). 305 unit + 12 integration green, 0 ignored. Parser corpus untouched. No `ON_GOAL_COMPLETE_NEXT_STEPS` directive present — loop exits per ultra-goal-loop skill procedure.
-- **Deferred (out of scope for the original AC list)**: method-call const propagation (iter 32 deferral), parser distinction between `const Foo@` and `Foo@ const`, full dictionary value typing. These are quality deepenings, not AC gaps.
+- **AC1-AC13 satisfied** as of iter 32 (2026-04-11). 305 unit + 12 integration green, 0 ignored. Parser corpus untouched.
+- **AC14-AC20 open**: 5 new LSP feature additions (AC14-AC18) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop resumes at iter 33.
 
 ## Iter 3 known gaps (carry forward)
 1. No external TypeIndex in `compute_diagnostics` → FPs on every Openplanet type reference.
