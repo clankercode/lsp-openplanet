@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use serde_json::Value;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -153,6 +154,10 @@ impl LanguageServer for Backend {
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec!["openplanet.regenerateTypeDb".into()],
+                    ..Default::default()
+                }),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -460,6 +465,60 @@ impl LanguageServer for Backend {
             type_index,
         );
         Ok(Some(actions))
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<Value>> {
+        match params.command.as_str() {
+            "openplanet.regenerateTypeDb" => Ok(Some(self.regenerate_type_db().await)),
+            other => {
+                tracing::warn!("unknown executeCommand: {}", other);
+                Ok(None)
+            }
+        }
+    }
+}
+
+impl Backend {
+    async fn regenerate_type_db(&self) -> Value {
+        let start = std::time::Instant::now();
+        let (core, game) = {
+            let config = self.config.read().await;
+            (config.core_json.clone(), config.game_json.clone())
+        };
+        let (core, game) = match (core, game) {
+            (Some(c), Some(g)) => (c, g),
+            _ => {
+                return serde_json::json!({
+                    "ok": false,
+                    "message": "type database paths not configured (set openplanet_dir or core_json/game_json)",
+                });
+            }
+        };
+        match TypeIndex::load(&core, &game) {
+            Ok(index) => {
+                let count = index.type_count() + index.function_count() + index.enum_count();
+                *self.type_index.write().await = Some(Arc::new(index));
+                let duration_ms = start.elapsed().as_millis() as u64;
+                tracing::info!(
+                    "type database regenerated: {} entries in {}ms",
+                    count,
+                    duration_ms
+                );
+                serde_json::json!({
+                    "ok": true,
+                    "message": format!("Type database reloaded ({} entries)", count),
+                    "regenerated": count,
+                    "durationMs": duration_ms,
+                })
+            }
+            Err(e) => serde_json::json!({
+                "ok": false,
+                "message": format!("failed to load type database: {}", e),
+            }),
+        }
     }
 }
 
