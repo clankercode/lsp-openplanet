@@ -170,6 +170,40 @@ impl TypeRepr {
         }
     }
 
+    /// If `self` (after stripping `Const`/`Handle`) is an array type —
+    /// either `Array(T)` or `Generic { base: "array", args: [T] }` —
+    /// return the element type. Otherwise `None`.
+    pub fn array_element_type(&self) -> Option<&TypeRepr> {
+        let inner = self.unwrap_const().unwrap_handle();
+        match inner {
+            TypeRepr::Array(elem) => Some(elem),
+            TypeRepr::Generic { base, args } if base == "array" && args.len() == 1 => {
+                Some(&args[0])
+            }
+            _ => None,
+        }
+    }
+
+    /// True if `self` (after stripping `Const`/`Handle`) is an array-like
+    /// generic, regardless of whether the element type is resolved.
+    pub fn is_array_like(&self) -> bool {
+        let inner = self.unwrap_const().unwrap_handle();
+        matches!(inner, TypeRepr::Array(_))
+            || matches!(inner, TypeRepr::Generic { base, .. } if base == "array")
+    }
+
+    /// True if `self` (after stripping `Const`/`Handle`) is a dictionary
+    /// type (`Generic { base: "dictionary", .. }` or a bare
+    /// `Named("dictionary")` that slipped through).
+    pub fn is_dictionary_like(&self) -> bool {
+        let inner = self.unwrap_const().unwrap_handle();
+        match inner {
+            TypeRepr::Generic { base, .. } if base == "dictionary" => true,
+            TypeRepr::Named(n) if n == "dictionary" => true,
+            _ => false,
+        }
+    }
+
     /// True for `Null` and for handles to an errored type. A nullish value
     /// is coercible to any handle slot when filling in holes.
     pub fn is_nullish(&self) -> bool {
@@ -258,6 +292,13 @@ fn parse_type_string_inner(s: &str) -> TypeRepr {
                 args.push(parse_type_string_inner(inner[last..].trim()));
             }
             if !base.is_empty() {
+                // Canonicalize `array<T>` → `Array(T)` so downstream
+                // code only has to handle one shape for the built-in
+                // generic array. `dictionary<K,V>` stays as `Generic`.
+                if base == "array" && args.len() == 1 {
+                    let mut args = args;
+                    return TypeRepr::Array(Box::new(args.remove(0)));
+                }
                 return TypeRepr::Generic { base, args };
             }
         }
@@ -423,13 +464,58 @@ mod tests {
 
     #[test]
     fn parse_type_string_generic_array_int() {
+        // `array<T>` canonicalizes to the dedicated `Array(T)` shape so
+        // downstream consumers only see one form of the built-in generic.
         assert_eq!(
             TypeRepr::parse_type_string("array<int>"),
-            TypeRepr::Generic {
-                base: "array".into(),
-                args: vec![TypeRepr::Primitive(PrimitiveType::Int)],
-            }
+            TypeRepr::Array(Box::new(TypeRepr::Primitive(PrimitiveType::Int)))
         );
+    }
+
+    #[test]
+    fn parse_type_string_nested_array_of_array() {
+        assert_eq!(
+            TypeRepr::parse_type_string("array<array<int>>"),
+            TypeRepr::Array(Box::new(TypeRepr::Array(Box::new(
+                TypeRepr::Primitive(PrimitiveType::Int)
+            ))))
+        );
+    }
+
+    #[test]
+    fn parse_type_string_array_handle() {
+        assert_eq!(
+            TypeRepr::parse_type_string("array<Foo@>"),
+            TypeRepr::Array(Box::new(TypeRepr::Handle(Box::new(TypeRepr::Named(
+                "Foo".into()
+            )))))
+        );
+    }
+
+    #[test]
+    fn array_element_type_accessor() {
+        let arr =
+            TypeRepr::Array(Box::new(TypeRepr::Primitive(PrimitiveType::Int)));
+        assert_eq!(
+            arr.array_element_type(),
+            Some(&TypeRepr::Primitive(PrimitiveType::Int))
+        );
+        let wrapped = TypeRepr::Const(Box::new(arr.clone()));
+        assert_eq!(
+            wrapped.array_element_type(),
+            Some(&TypeRepr::Primitive(PrimitiveType::Int))
+        );
+        let generic = TypeRepr::Generic {
+            base: "array".into(),
+            args: vec![TypeRepr::Primitive(PrimitiveType::String)],
+        };
+        assert_eq!(
+            generic.array_element_type(),
+            Some(&TypeRepr::Primitive(PrimitiveType::String))
+        );
+        assert!(TypeRepr::Primitive(PrimitiveType::Int)
+            .array_element_type()
+            .is_none());
     }
 
     #[test]

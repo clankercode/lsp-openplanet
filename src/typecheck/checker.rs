@@ -811,6 +811,31 @@ impl<'a> Checker<'a> {
             return TypeRepr::Error(String::new());
         }
         let member_name = member.text(self.source).to_string();
+        // Built-in generic array members. AngelScript exposes `Length`
+        // / `length` as `uint`, `IsEmpty` as `bool`, and a handful of
+        // mutating methods that return void. We special-case the
+        // common accessors here so plugin code stops FP'ing on them.
+        if obj_ty.is_array_like() {
+            match member_name.as_str() {
+                "Length" | "length" => {
+                    return TypeRepr::Primitive(PrimitiveType::Uint);
+                }
+                "IsEmpty" | "isEmpty" => {
+                    return TypeRepr::Primitive(PrimitiveType::Bool);
+                }
+                // Everything else on an array: stay silent rather than
+                // firing UndefinedMember. Methods like Add / InsertLast
+                // / SortAsc / Resize do exist but the checker doesn't
+                // consume their return types anywhere, so `Error("")`
+                // is the right placeholder.
+                _ => return TypeRepr::Error(String::new()),
+            }
+        }
+        // Dictionary is opaque: every member access is silently
+        // accepted (no UndefinedMember) until we model its API.
+        if obj_ty.is_dictionary_like() {
+            return TypeRepr::Error(String::new());
+        }
         let Some(type_name) = Self::base_type_name(obj_ty) else {
             // Primitive / Null / Void / Funcdef — not a class, no members.
             // Stay quiet for now (later iterations may add primitive .op
@@ -1244,8 +1269,17 @@ impl<'a> Checker<'a> {
                 self.member_access_type(&obj_ty, member, expr.span)
             }
             ExprKind::Index { object, index } => {
-                let _ = self.expr_type(object);
+                let obj_ty = self.expr_type(object);
                 let _ = self.expr_type(index);
+                // `array<T>[i]` / `T[][i]` → element type. Strip const
+                // wrapper so the result of indexing into a `const array<T>`
+                // is just `T` (AngelScript doesn't propagate const through
+                // indexing in a way we model yet; keeping this permissive
+                // avoids spurious ConstViolations on downstream reads).
+                if let Some(elem) = obj_ty.array_element_type() {
+                    return elem.clone();
+                }
+                // Dictionary-like and everything else: stay silent.
                 TypeRepr::Error(String::new())
             }
             ExprKind::Cast { target_type, expr: inner } => {
@@ -2611,6 +2645,138 @@ mod tests {
         assert!(
             bad.is_empty(),
             "expected no ArgTypeMismatch when inherited int matches int param, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn array_index_returns_element_type() {
+        // `array<int>[0]` feeds an `int` parameter — should not fire
+        // ArgTypeMismatch. Passing it to a `bool` parameter should fire
+        // because the element type is propagating correctly.
+        let diags = check(
+            "void ti(int n) {} void f() { array<int> a; ti(a[0]); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for int elem → int param, got {:?}",
+            diags
+        );
+
+        let diags = check(
+            "void tb(bool b) {} void f() { array<int> a; tb(a[0]); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch for int elem → bool param, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn array_length_is_numeric() {
+        // `arr.Length` must flow as a uint into a uint-expected arg slot
+        // without firing ArgTypeMismatch.
+        let diags = check(
+            "void tu(uint n) {} void f() { array<int> a; tu(a.Length); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for .Length → uint, got {:?}",
+            diags
+        );
+        // And the lowercase variant.
+        let diags = check(
+            "void tu(uint n) {} void f() { array<int> a; tu(a.length); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for .length → uint, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn nested_array_of_handles() {
+        // `array<Foo@>[0]` should resolve to a Foo handle, and accessing
+        // `.x` on it should not fire UndefinedMember.
+        let diags = check(
+            "class Foo { int x; } \
+             void f() { array<Foo@> a; int y = a[0].x; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no UndefinedMember on array<Foo@>[0].x, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn array_shorthand_syntax() {
+        // `int[] arr;` followed by indexing should work identically to
+        // `array<int> arr;`.
+        let diags = check(
+            "void ti(int n) {} void f() { int[] a; ti(a[0]); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::ArgTypeMismatch { .. }
+                        | TypeDiagnosticKind::UndefinedMember { .. }
+                )
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no diagnostics for int[] index, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn dictionary_no_false_positive() {
+        // `dictionary d; d.Set("k", 1);` must not emit UndefinedMember
+        // or any spurious diagnostic — dictionary is opaque for now.
+        let diags = check(
+            "void f() { dictionary d; d.Set(\"k\", 1); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::UndefinedMember { .. }
+                        | TypeDiagnosticKind::ArgTypeMismatch { .. }
+                        | TypeDiagnosticKind::UndefinedIdentifier(_)
+                )
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no diagnostics on dictionary usage, got {:?}",
             diags
         );
     }
