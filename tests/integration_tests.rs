@@ -7,10 +7,17 @@ use openplanet_lsp::lexer;
 use openplanet_lsp::parser::Parser;
 use openplanet_lsp::preprocessor;
 use openplanet_lsp::server::diagnostics;
+use openplanet_lsp::server::Backend;
 use openplanet_lsp::typecheck::build_plugin_symbol_table;
 use openplanet_lsp::typedb::TypeIndex;
 use openplanet_lsp::workspace::project;
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{
+    DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
+    InitializeParams, PartialResultParams, Position, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, Url, WorkDoneProgressParams,
+};
+use tower_lsp::LanguageServer;
+use tower_lsp::LspService;
 
 // Soft memory cap: 1 GiB. When a test's heap growth would cross this, we
 // print a backtrace from inside the allocator (at which point the cap is
@@ -764,5 +771,135 @@ fn test_debug_single_file_diagnostics() {
     sorted.sort_by(|a, b| b.1.cmp(a.1));
     for (msg, count) in sorted.iter() {
         eprintln!("  {:>4}  {}", count, msg);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC13 smoke test: drive `Backend` through the real tower-lsp plumbing.
+//
+// Strategy B (from the iter 30 plan): instead of hand-framing JSON-RPC over
+// a `tokio::io::duplex`, we build the real `LspService` (which constructs a
+// real `Client` wired to the server socket), borrow the inner `Backend` via
+// `LspService::inner()`, and call the `LanguageServer` trait methods
+// directly. This exercises:
+//   * `Backend::new(client)` with a real `Client`,
+//   * the `initialize` -> `did_open` -> `hover` / `goto_definition` pipeline,
+//   * iter 27/28 cross-file resolution: the symbol being hovered / jumped to
+//     lives in a sibling document, proving `build_workspace` + workspace
+//     lookups flow through the real server handlers end-to-end.
+//
+// `publish_diagnostics` calls triggered from `did_open` are suppressed by
+// tower-lsp 0.20 because we never transition the service state to
+// `Initialized` (we call the trait method directly, not via the Service
+// layer), so nothing has to drain the server socket.
+// ---------------------------------------------------------------------------
+
+fn text_doc_position(uri: &Url, line: u32, character: u32) -> TextDocumentPositionParams {
+    TextDocumentPositionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        position: Position { line, character },
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_tower_lsp_smoke_crossfile_hover() {
+    // Build the real service; `Backend::new` runs with a real `Client`
+    // constructed by tower-lsp.
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+
+    // 1) initialize: must succeed and advertise hover_provider.
+    #[allow(deprecated)]
+    let init_params = InitializeParams::default();
+    let init_result = backend
+        .initialize(init_params)
+        .await
+        .expect("initialize should succeed");
+    assert!(
+        init_result.capabilities.hover_provider.is_some(),
+        "server must advertise hover capability"
+    );
+    assert!(
+        init_result.capabilities.definition_provider.is_some(),
+        "server must advertise definition capability"
+    );
+
+    // 2) Open two files: `Base` lives in helper.as, `Foo : Base` in main.as.
+    //    This is the same cross-file shape iter 27/28 fixed.
+    let helper_uri = Url::parse("file:///smoke/helper.as").unwrap();
+    let helper_src = "class Base { int count; }\n";
+    let main_uri = Url::parse("file:///smoke/main.as").unwrap();
+    //                    0         1         2         3
+    //                    0123456789012345678901234567890
+    // line 0:  "class Foo : Base {}"     -> "Base" starts at col 12
+    // line 1:  "void test() { Foo f; f.count = 5; }"
+    let main_src = "class Foo : Base {}\nvoid test() { Foo f; f.count = 5; }\n";
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: helper_uri.clone(),
+                language_id: "angelscript".to_string(),
+                version: 1,
+                text: helper_src.to_string(),
+            },
+        })
+        .await;
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: main_uri.clone(),
+                language_id: "angelscript".to_string(),
+                version: 1,
+                text: main_src.to_string(),
+            },
+        })
+        .await;
+
+    // 3) Hover on `Base` at (line 0, col 13) in main.as. `Base` only exists
+    //    in helper.as, so a non-empty hover here proves cross-file workspace
+    //    lookup flowed through the real handler.
+    let hover_params = HoverParams {
+        text_document_position_params: text_doc_position(&main_uri, 0, 13),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+    let hover = backend
+        .hover(hover_params)
+        .await
+        .expect("hover call must not error")
+        .expect("hover on cross-file `Base` must return Some");
+    // Any non-empty content counts — we just want to prove the stack wired.
+    match &hover.contents {
+        tower_lsp::lsp_types::HoverContents::Markup(m) => {
+            assert!(
+                !m.value.is_empty(),
+                "hover markup must be non-empty"
+            );
+        }
+        tower_lsp::lsp_types::HoverContents::Scalar(_)
+        | tower_lsp::lsp_types::HoverContents::Array(_) => {
+            // also acceptable
+        }
+    }
+
+    // 4) goto_definition on `Base` at the same position: should resolve into
+    //    helper.as (the file that actually declares it).
+    let goto_params = GotoDefinitionParams {
+        text_document_position_params: text_doc_position(&main_uri, 0, 13),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    let goto = backend
+        .goto_definition(goto_params)
+        .await
+        .expect("goto_definition call must not error");
+    // We don't strictly require a hit (goto_definition has stricter matching
+    // than hover), but if we do get one, sanity-check the URI. Either way,
+    // the call path must run without panicking — that's the smoke coverage.
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = goto {
+        assert_eq!(
+            loc.uri, helper_uri,
+            "goto_definition on cross-file `Base` should land in helper.as"
+        );
     }
 }

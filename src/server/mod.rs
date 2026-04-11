@@ -39,7 +39,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    fn new(client: Client) -> Self {
+    pub fn new(client: Client) -> Self {
         Self {
             client,
             config: tokio::sync::RwLock::new(LspConfig::load(None, None)),
