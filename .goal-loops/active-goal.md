@@ -24,7 +24,7 @@ Implement complete LSP feature support: type errors & full inference, completion
 - [x] **AC14 — Signature help** *(iter 33)*: Active-parameter-aware signature help with overload cycling. `Backend::signature_help` now dispatches to `src/server/signature.rs`, resolving callees via workspace free functions, TypeIndex free functions, type methods, workspace methods with inheritance walk, and implicit-`this`. `find_enclosing_call` walks backwards counting parens with a forward-pass skip-mask for strings/comments.
 - [x] **AC15 — Inlay hints** *(iter 34)*: Type hints for `auto` locals and param-name hints on literal arguments. `textDocument/inlayHint` handler in `src/server/inlay_hints.rs`. Qualified callees go straight to TypeIndex to avoid cross-namespace mis-resolution. Lambda return-type hints deferred.
 - [x] **AC16 — Document highlights** *(iter 35)*: `textDocument/documentHighlight` in `src/server/highlights.rs`. Scope-naive identifier matcher with READ/WRITE classification for assignments, declarators, and Inc/Dec.
-- [ ] **AC17 — Folding ranges**: Collapse regions for function/method bodies, class/namespace blocks, multi-line comments, and `#if`/`#endif` preprocessor blocks. Tests for each kind plus nested folding.
+- [x] **AC17 — Folding ranges** *(iter 36)*: `textDocument/foldingRange` in `src/server/folding.rs`. AST pass folds namespaces/classes/interfaces/enums/functions/methods/property accessors and nested block statements; byte pass folds multi-line block comments and `#if`/`#ifdef`/`#ifndef` → `#endif` regions with a stack. Single-line regions filtered. Lambda/else-branching folds deferred.
 - [ ] **AC18 — Call hierarchy**: `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, and `callHierarchy/outgoingCalls`. Backed by the existing workspace SymbolTable + reference index. Tests for incoming/outgoing traversal including cross-file calls.
 - [ ] **AC19 — Method-call const propagation**: Iter 32 deferred method-call return-type const inheritance. When a method is invoked on a const receiver, its return type should inherit `Const(_)` unless the method itself is declared non-const. Requires surfacing the `const`-qualifier on method decls through `SymbolKind::Method`. Tests: const-receiver method return flows into downstream assignment check; non-const method on const receiver can be detected as a diagnostic if the method mutates.
 - [ ] **AC20 — Parser const-handle ordering**: Parser currently collapses both `const Foo@` (handle to const object) and `Foo@ const` (const handle to mutable object) into `Const(Handle(Foo))`, losing the semantic distinction. Iter 32's `const_handle_not_const_contents` test was dropped because the parser can't round-trip the difference. Fix: produce `Handle(Const(T))` for `const Foo@` and `Const(Handle(T))` for `Foo@ const`. Update checker helpers accordingly. Re-add the dropped test.
@@ -42,8 +42,8 @@ The following LSP features are intentionally excluded from the current AC list b
 - **Workspace pull-diagnostics** (`workspace/diagnostic`): Newer LSP spec for editor-initiated diagnostic polling instead of server push. Current push-model via `publish_diagnostics` works fine. **Revisit if**: editor clients start preferring pull-model or performance tuning demands it.
 
 ## Current Status
-- **AC1-AC16 + AC21 satisfied** as of iter 35 (2026-04-11). 326 unit + 15 integration green, 0 ignored. Parser corpus untouched.
-- **AC17-AC20 open**: 2 new LSP feature additions (AC17-AC18) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop at iter 36 next.
+- **AC1-AC17 + AC21 satisfied** as of iter 36 (2026-04-11). 333 unit + 16 integration green, 0 ignored. Parser corpus untouched.
+- **AC18-AC20 open**: 1 new LSP feature addition (AC18 call hierarchy) + 2 quality deepenings from iter 32 deferrals (AC19-AC20). Loop at iter 37 next.
 - **ON_GOAL_COMPLETE_NEXT_STEPS**: Auto-advance enabled by user directive 2026-04-11 ("Resume loop and complete all items"). On AC14-AC20 completion, loop stops and reports — no further phases queued.
 
 ## Iter 3 known gaps (carry forward)
@@ -135,7 +135,29 @@ The following LSP features are intentionally excluded from the current AC list b
 - **Post-review cleanup**: removed a dead `let _ = pos; // sanity` line from the test suite.
 - **Reviewer verdict**: APPROVED. No blocking issues. Non-blockers: (1) keyword-list duplicated with lexer, (2) compound-op LHS classified WRITE-only, (3) scope-naive matching documented.
 
-## Iter 36 Plan (next)
+## Iter 36 Result (2026-04-11)
+- 333 unit + 16 integration green (+7 unit, +1 integration, 0 ignored). Parser corpus untouched, zero new clippy warnings.
+- **AC17 folding ranges closed.** New `src/server/folding.rs` with public `folding_ranges(source) -> Vec<FoldingRange>`. `folding_range_provider: FoldingRangeProviderCapability::Simple(true)` advertised.
+- **AST pass**: walks namespaces, classes (methods/ctors/dtors/property accessors), interfaces, enums, functions, and recurses into `Block`, `If` (then+else), `For`/`While`/`DoWhile`, `Switch` (whole-stmt span plus descent into cases), `TryCatch`. Single-line regions filtered by a `end_line > start_line` guard enforced per-collector and globally via `retain`.
+- **Byte pass**: inline string/line-comment skipper for `collect_block_comments` correctly ignores `"/*"` inside strings and `// /*` inside line comments. Nested block comments are not re-entered. `collect_preprocessor_regions` uses a stack to pair `#if`/`#ifdef`/`#ifndef` with `#endif`; unmatched directives are silently dropped. Block comments → `FoldingRangeKind::Comment`; directive blocks → `Region`.
+- **Sort**: `sort_by (start_line, end_line)` with Rust's stable sort for deterministic tie-breaking.
+- **Deferred**: (1) `#else`/`#elif` per-branch folds — outer `#if...#endif` still folds as one. (2) `#region`/`#endregion` user directives — not standard in Openplanet preprocessor. (3) Single-statement if/for/while bodies without `{}` — no `Stmt::Block` to fold. (4) Lambda bodies — no expression walker. (5) Multi-line global VarDecl initializers.
+- **Reviewer verdict**: APPROVED. No blocking issues. Non-blockers: small wrapper `push_body_fold` used in one hot path; `/* */ #if X` on same line could misread as directive (unlikely in real AS code); switch case-level folding possible future enhancement.
+
+## Iter 37 Plan (next)
+- **Goal**: AC18 call hierarchy. Implement `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, and `callHierarchy/outgoingCalls` so editors can show caller/callee trees.
+- **Why**: No handler today. Call hierarchy is one of the big editor navigation wins; builds directly on the workspace `SymbolTable` + the resolver machinery `signature.rs` and `inlay_hints.rs` already use.
+- **Approach**:
+  1. Advertise `call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true))` in capabilities.
+  2. New module `src/server/call_hierarchy.rs` with three public entries:
+     - `prepare(source, position, workspace, files) -> Vec<CallHierarchyItem>` — identify the symbol at cursor and package it as a `CallHierarchyItem` with a persistence-friendly `data` field (serialized symbol URI + name + kind).
+     - `incoming(item, workspace, files) -> Vec<CallHierarchyIncomingCall>` — for each `Expr::Call` across all workspace files, check if the resolved callee matches `item`. Each matching call site becomes an incoming call whose `from` is the enclosing function/method of the call.
+     - `outgoing(item, workspace, files) -> Vec<CallHierarchyOutgoingCall>` — walk the body of the function/method named by `item` and collect every call expression, resolve the callee, emit an outgoing call per unique resolved target.
+  3. `Backend::prepare_call_hierarchy`, `incoming_calls`, `outgoing_calls` read `self.documents` + call `build_workspace`.
+- **Verify**: new tests in `src/server/call_hierarchy.rs`: prepare on function definition returns the function item; prepare on call site returns the callee; incoming on a function returns all callers in workspace; outgoing on a function returns all calls in its body; method resolution cross-file. One tower-lsp smoke test.
+- **Target**: 340+ unit + 17 integration, 0 ignored, no new clippy warnings.
+
+## Iter 36 Plan (superseded)
 - **Goal**: AC17 folding ranges. Implement `textDocument/foldingRange` so editors can collapse function bodies, class/namespace blocks, multi-line comments, and `#if`/`#endif` regions.
 - **Why**: No handler today. Folding is a cheap-to-implement editor win with zero type-system dependency.
 - **Approach**:

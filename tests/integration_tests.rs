@@ -12,11 +12,11 @@ use openplanet_lsp::typecheck::build_plugin_symbol_table;
 use openplanet_lsp::typedb::TypeIndex;
 use openplanet_lsp::workspace::project;
 use tower_lsp::lsp_types::{
-    DidOpenTextDocumentParams, DocumentHighlightKind, DocumentHighlightParams,
-    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, InitializeParams, InlayHintKind,
-    InlayHintParams, PartialResultParams, Position, Range, SignatureHelpParams,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Url,
-    WorkDoneProgressParams,
+    DidOpenTextDocumentParams, DocumentHighlightKind, DocumentHighlightParams, FoldingRangeKind,
+    FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
+    InitializeParams, InlayHintKind, InlayHintParams, PartialResultParams, Position, Range,
+    SignatureHelpParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    Url, WorkDoneProgressParams,
 };
 use tower_lsp::LanguageServer;
 use tower_lsp::LspService;
@@ -1085,5 +1085,71 @@ async fn test_tower_lsp_smoke_document_highlight() {
         hs.iter().any(|h| h.kind == Some(DocumentHighlightKind::READ)),
         "expected at least one READ highlight, got {:?}",
         hs
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_tower_lsp_smoke_folding_range() {
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+
+    #[allow(deprecated)]
+    let init_params = InitializeParams::default();
+    let init_result = backend
+        .initialize(init_params)
+        .await
+        .expect("initialize should succeed");
+    assert!(
+        init_result.capabilities.folding_range_provider.is_some(),
+        "server must advertise folding_range capability"
+    );
+
+    let uri = Url::parse("file:///smoke/folding.as").unwrap();
+    let src = "\
+/*\n  header comment\n*/\n\
+#if DEBUG\n\
+class Foo {\n  void m() {\n    int y = 0;\n  }\n}\n\
+#endif\n";
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "angelscript".to_string(),
+                version: 1,
+                text: src.to_string(),
+            },
+        })
+        .await;
+
+    let params = FoldingRangeParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+    let folds = backend
+        .folding_range(params)
+        .await
+        .expect("folding_range must not error")
+        .expect("folding_range must return Some");
+    assert!(
+        folds
+            .iter()
+            .any(|f| f.kind == Some(FoldingRangeKind::Comment)),
+        "expected at least one comment fold, got {:?}",
+        folds
+    );
+    assert!(
+        folds
+            .iter()
+            .any(|f| f.kind == Some(FoldingRangeKind::Region)),
+        "expected at least one region fold, got {:?}",
+        folds
+    );
+    // Class body + method body — two AST folds with no kind set.
+    let ast_folds = folds.iter().filter(|f| f.kind.is_none()).count();
+    assert!(
+        ast_folds >= 2,
+        "expected at least 2 AST folds for class + method, got {:?}",
+        folds
     );
 }

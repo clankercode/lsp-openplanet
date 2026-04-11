@@ -2,6 +2,7 @@ pub mod code_actions;
 pub mod completion;
 pub mod definition;
 pub mod diagnostics;
+pub mod folding;
 pub mod formatter;
 pub mod highlights;
 pub mod hover;
@@ -149,6 +150,7 @@ impl LanguageServer for Backend {
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -262,6 +264,18 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         Ok(highlights::document_highlights(&source, pos))
+    }
+
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = &params.text_document.uri;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        Ok(Some(folding::folding_ranges(&source)))
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
