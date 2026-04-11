@@ -1440,7 +1440,10 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::At) {
             let start = self.current_span().start;
             self.advance(); // eat @
-            let lhs = self.parse_assignment_expr()?;
+            // Parse the LHS with `parse_ternary_expr` so the inner call stops
+            // before assignment operators — otherwise `@x = null` is greedily
+            // consumed as a nested `Assign` and HandleAssign is never produced.
+            let lhs = self.parse_ternary_expr()?;
             if self.at(TokenKind::Eq) {
                 self.advance(); // eat =
                 // Eat optional @ on rhs

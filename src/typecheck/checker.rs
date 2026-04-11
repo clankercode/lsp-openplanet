@@ -10,7 +10,7 @@
 //! literals and identifier lookup. Those are later iterations.
 
 use super::builtins;
-use super::global_scope::GlobalScope;
+use super::global_scope::{GlobalScope, OverloadSig};
 use super::repr::{PrimitiveType, TypeRepr};
 use super::resolver::TypeResolver;
 use crate::lexer::Span;
@@ -43,6 +43,12 @@ pub enum TypeDiagnosticKind {
         param_index: usize,
         expected: String,
         got: String,
+    },
+    HandleValueMismatch {
+        detail: String,
+    },
+    ConstViolation {
+        detail: String,
     },
 }
 
@@ -101,6 +107,12 @@ impl TypeDiagnostic {
                 expected,
                 got
             ),
+            TypeDiagnosticKind::HandleValueMismatch { detail } => {
+                format!("handle/value mismatch: {}", detail)
+            }
+            TypeDiagnosticKind::ConstViolation { detail } => {
+                format!("const violation: {}", detail)
+            }
         }
     }
 }
@@ -734,7 +746,7 @@ impl<'a> Checker<'a> {
                     if let (TypeRepr::Primitive(exp_p), TypeRepr::Primitive(got_p)) =
                         (expected, &got_ty)
                     {
-                        if exp_p != got_p {
+                        if !is_convertible(&got_ty, expected) {
                             self.diagnostics.push(TypeDiagnostic {
                                 span: e.span,
                                 kind: TypeDiagnosticKind::ReturnTypeMismatch {
@@ -805,6 +817,17 @@ impl<'a> Checker<'a> {
             // overloads etc.).
             return TypeRepr::Error(String::new());
         };
+        // Same-file workspace classes: prefer the in-memory `file_classes`
+        // index because it preserves full `TypeRepr` (including `Const`)
+        // that `scope.lookup_member_type` strips to `Error("")` for
+        // workspace hits.
+        if let Some((_, members)) = self.file_classes.get(&type_name) {
+            for (mname, t) in members {
+                if mname == &member_name {
+                    return t.clone();
+                }
+            }
+        }
         if let Some(t) = self.scope.lookup_member_type(&type_name, &member_name) {
             return t;
         }
@@ -877,6 +900,69 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Centralised dispatch for "the callee resolved to a workspace free
+    /// function named `qualified`" — handles both the unique-overload case
+    /// (single match: run existing arg-count + primitive arg-type checks)
+    /// and the 2+-overload case (run `resolve_overload` and, on a unique
+    /// winner, use its return type; on `NoMatch` / `Ambiguous`, silently
+    /// fall back to the external return type `fallback_ret`).
+    ///
+    /// `fallback_ret` is whatever `lookup_function_return(qualified)` gave
+    /// us — used verbatim for the unique-overload path (its data comes from
+    /// that same lookup) and as a silent fallback for ambiguous / no-match.
+    fn resolve_workspace_function_call(
+        &mut self,
+        display_name: &str,
+        qualified: &str,
+        args: &[Expr],
+        callee_span: Span,
+        fallback_ret: TypeRepr,
+    ) -> TypeRepr {
+        let overloads = self.scope.lookup_function_overloads(qualified);
+        match overloads.len() {
+            0 => {
+                // Not a workspace function (external-only). Preserve old
+                // silent walk behaviour.
+                self.walk_args(args);
+                fallback_ret
+            }
+            1 => {
+                // Single-overload fast path: identical to iter 19/22
+                // behaviour. Use the legacy helpers so existing tests keep
+                // passing byte-for-byte.
+                self.check_arg_count(display_name, qualified, args.len(), callee_span);
+                if let Some(param_types) = self.scope.lookup_function_param_types(qualified) {
+                    self.walk_args_and_check_types(display_name, args, &param_types);
+                } else {
+                    self.walk_args(args);
+                }
+                fallback_ret
+            }
+            _ => {
+                // 2+ overloads: walk args once, run real resolution.
+                let arg_tys: Vec<TypeRepr> =
+                    args.iter().map(|a| self.expr_type(a)).collect();
+                match resolve_overload(&overloads, &arg_tys) {
+                    OverloadMatch::Unique(sig) => {
+                        // A unique winner means every primitive arg either
+                        // matched exactly or was convertible — no further
+                        // ArgTypeMismatch emission needed. Parse the
+                        // winner's return type.
+                        TypeRepr::parse_type_string(&sig.return_type)
+                    }
+                    OverloadMatch::Ambiguous
+                    | OverloadMatch::NoMatch
+                    | OverloadMatch::NoOverloads => {
+                        // Silent skip — matches iter 19/22 overloaded
+                        // behaviour. Return the lookup fallback so downstream
+                        // `.member` chains still see *some* type.
+                        fallback_ret
+                    }
+                }
+            }
+        }
+    }
+
     /// Walk each argument expression exactly once, typing them for side
     /// effects (diagnostics) and discarding the results. Used by call-site
     /// dispatch branches that don't need arg types.
@@ -905,13 +991,17 @@ impl<'a> Checker<'a> {
             let Some(param_text) = param_types.get(i) else {
                 continue;
             };
-            let TypeRepr::Primitive(arg_p) = arg_ty else {
-                continue;
-            };
             let Some(param_p) = PrimitiveType::from_name(param_text.trim()) else {
                 continue;
             };
-            if arg_p != param_p {
+            let param_ty = TypeRepr::Primitive(param_p);
+            if matches!(arg_ty, TypeRepr::Primitive(_))
+                && matches!(param_ty, TypeRepr::Primitive(_))
+                && !is_convertible(&arg_ty, &param_ty)
+            {
+                let TypeRepr::Primitive(arg_p) = arg_ty else {
+                    continue;
+                };
                 self.diagnostics.push(TypeDiagnostic {
                     span: arg.span,
                     kind: TypeDiagnosticKind::ArgTypeMismatch {
@@ -951,15 +1041,13 @@ impl<'a> Checker<'a> {
                     let ns = self.namespace_stack[..depth].join("::");
                     let qualified = format!("{}::{}", ns, name);
                     if let Some(t) = self.scope.lookup_function_return(&qualified) {
-                        self.check_arg_count(&name, &qualified, args.len(), callee.span);
-                        if let Some(param_types) =
-                            self.scope.lookup_function_param_types(&qualified)
-                        {
-                            self.walk_args_and_check_types(&name, args, &param_types);
-                        } else {
-                            self.walk_args(args);
-                        }
-                        return t;
+                        return self.resolve_workspace_function_call(
+                            &name,
+                            &qualified,
+                            args,
+                            callee.span,
+                            t,
+                        );
                     }
                     if self.scope.has_type(&qualified) {
                         self.walk_args(args);
@@ -972,13 +1060,13 @@ impl<'a> Checker<'a> {
                 }
                 // 4. Top-level function.
                 if let Some(t) = self.scope.lookup_function_return(&name) {
-                    self.check_arg_count(&name, &name, args.len(), callee.span);
-                    if let Some(param_types) = self.scope.lookup_function_param_types(&name) {
-                        self.walk_args_and_check_types(&name, args, &param_types);
-                    } else {
-                        self.walk_args(args);
-                    }
-                    return t;
+                    return self.resolve_workspace_function_call(
+                        &name,
+                        &name,
+                        args,
+                        callee.span,
+                        t,
+                    );
                 }
                 // 5. Maybe it's a type-constructor form that slipped in
                 //    as an Ident — surface the type when possible so
@@ -1160,7 +1248,7 @@ impl<'a> Checker<'a> {
                 }
                 TypeRepr::Error(String::new())
             }
-            ExprKind::Assign { lhs, rhs, .. } | ExprKind::HandleAssign { lhs, rhs } => {
+            ExprKind::Assign { lhs, rhs, .. } => {
                 if !matches!(
                     lhs.kind,
                     ExprKind::Ident(_)
@@ -1173,8 +1261,64 @@ impl<'a> Checker<'a> {
                         kind: TypeDiagnosticKind::InvalidAssignmentTarget,
                     });
                 }
-                let _ = self.expr_type(lhs);
+                let lhs_ty = self.expr_type(lhs);
                 let _ = self.expr_type(rhs);
+                if matches!(lhs_ty, TypeRepr::Const(_)) {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: lhs.span,
+                        kind: TypeDiagnosticKind::ConstViolation {
+                            detail: "cannot assign to const value".to_string(),
+                        },
+                    });
+                }
+                TypeRepr::Error(String::new())
+            }
+            ExprKind::HandleAssign { lhs, rhs } => {
+                if !matches!(
+                    lhs.kind,
+                    ExprKind::Ident(_)
+                        | ExprKind::Member { .. }
+                        | ExprKind::Index { .. }
+                        | ExprKind::NamespaceAccess { .. }
+                ) {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: lhs.span,
+                        kind: TypeDiagnosticKind::InvalidAssignmentTarget,
+                    });
+                }
+                let lhs_ty = self.expr_type(lhs);
+                let rhs_ty = self.expr_type(rhs);
+                // LHS check: only fire when clearly not handle-capable
+                // (Primitive / Void). Named types are ambiguous — a bare
+                // class name can be a handle slot in practice.
+                if matches!(lhs_ty, TypeRepr::Primitive(_) | TypeRepr::Void) {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: lhs.span,
+                        kind: TypeDiagnosticKind::HandleValueMismatch {
+                            detail: "left-hand side of @= is not a handle type"
+                                .to_string(),
+                        },
+                    });
+                }
+                // RHS check: only fire when clearly not handle/null.
+                // Accept Handle, Null, Error, Named (ambiguous).
+                if matches!(rhs_ty, TypeRepr::Primitive(_) | TypeRepr::Void) {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: rhs.span,
+                        kind: TypeDiagnosticKind::HandleValueMismatch {
+                            detail: "right-hand side of @= must be a handle or null"
+                                .to_string(),
+                        },
+                    });
+                }
+                if matches!(lhs_ty, TypeRepr::Const(_)) {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: lhs.span,
+                        kind: TypeDiagnosticKind::ConstViolation {
+                            detail: "cannot assign to const value".to_string(),
+                        },
+                    });
+                }
                 TypeRepr::Error(String::new())
             }
             ExprKind::Ternary {
@@ -1235,6 +1379,135 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Error => TypeRepr::Error(String::new()),
         }
+    }
+}
+
+/// True if `p` is one of the numeric primitive families (signed / unsigned
+/// integers or floating-point). Bool and string are deliberately excluded.
+fn is_numeric_primitive(p: &PrimitiveType) -> bool {
+    matches!(
+        p,
+        PrimitiveType::Int8
+            | PrimitiveType::Int16
+            | PrimitiveType::Int
+            | PrimitiveType::Int64
+            | PrimitiveType::Uint8
+            | PrimitiveType::Uint16
+            | PrimitiveType::Uint
+            | PrimitiveType::Uint64
+            | PrimitiveType::Float
+            | PrimitiveType::Double
+    )
+}
+
+/// Shallow implicit-conversion check used by arg and return type diagnostics.
+///
+/// Rules, evaluated in order:
+/// 1. If either side is an `Error(_)`, return `true` so we don't stack a
+///    type-mismatch on top of an unresolved name.
+/// 2. `Null` converts to any `Handle(_)`.
+/// 3. After stripping `Const` wrappers, structurally equal types convert.
+/// 4. Numeric primitive widening/narrowing is allowed (both sides must be
+///    numeric — bool and string are excluded).
+/// 5. Otherwise, not convertible.
+fn is_convertible(from: &TypeRepr, to: &TypeRepr) -> bool {
+    if matches!(from, TypeRepr::Error(_)) || matches!(to, TypeRepr::Error(_)) {
+        return true;
+    }
+    if matches!(from, TypeRepr::Null) && matches!(to, TypeRepr::Handle(_)) {
+        return true;
+    }
+    let from_s = from.unwrap_const();
+    let to_s = to.unwrap_const();
+    if from_s == to_s {
+        return true;
+    }
+    if let (TypeRepr::Primitive(fp), TypeRepr::Primitive(tp)) = (from_s, to_s) {
+        if is_numeric_primitive(fp) && is_numeric_primitive(tp) {
+            return true;
+        }
+        return false;
+    }
+    false
+}
+
+/// Result of `resolve_overload`. `Unique` is the only variant that lets the
+/// caller use the winning overload's return type / param list. `NoOverloads`
+/// means the name isn't a workspace free function at all — fall through.
+/// `Ambiguous` and `NoMatch` both resolve to silent skip this iter.
+enum OverloadMatch<'a> {
+    Unique(&'a OverloadSig),
+    Ambiguous,
+    NoMatch,
+    NoOverloads,
+}
+
+/// Pick the best workspace-function overload for a call site given its
+/// already-computed argument types.
+///
+/// Scoring (per primitive arg/param pair):
+/// - exact primitive match: +2
+/// - convertible primitive: +1
+/// - mismatched primitive: candidate is rejected entirely
+/// - non-primitive on either side, or Error-typed arg: 0 (neutral)
+///
+/// A candidate must first pass arity (`arg_tys.len() ∈ [min_args, params]`).
+fn resolve_overload<'a>(
+    overloads: &'a [OverloadSig],
+    arg_tys: &[TypeRepr],
+) -> OverloadMatch<'a> {
+    if overloads.is_empty() {
+        return OverloadMatch::NoOverloads;
+    }
+    let mut scored: Vec<(&OverloadSig, i32)> = Vec::new();
+    for sig in overloads {
+        if arg_tys.len() < sig.min_args || arg_tys.len() > sig.param_types.len() {
+            continue;
+        }
+        let mut score: i32 = 0;
+        let mut rejected = false;
+        for (arg_ty, param_text) in arg_tys.iter().zip(sig.param_types.iter()) {
+            let Some(param_p) = PrimitiveType::from_name(param_text.trim()) else {
+                continue;
+            };
+            if matches!(arg_ty, TypeRepr::Error(_)) {
+                continue;
+            }
+            if let TypeRepr::Primitive(arg_p) = arg_ty {
+                if *arg_p == param_p {
+                    score += 2;
+                } else if is_convertible(
+                    &TypeRepr::Primitive(*arg_p),
+                    &TypeRepr::Primitive(param_p),
+                ) {
+                    score += 1;
+                } else {
+                    rejected = true;
+                    break;
+                }
+            }
+            // Non-primitive arg: neutral.
+        }
+        if !rejected {
+            scored.push((sig, score));
+        }
+    }
+    if scored.is_empty() {
+        return OverloadMatch::NoMatch;
+    }
+    if scored.len() == 1 {
+        return OverloadMatch::Unique(scored[0].0);
+    }
+    let max = scored.iter().map(|(_, s)| *s).max().unwrap();
+    let top: Vec<&OverloadSig> = scored
+        .iter()
+        .filter(|(_, s)| *s == max)
+        .map(|(sig, _)| *sig)
+        .collect();
+    if top.len() == 1 {
+        OverloadMatch::Unique(top[0])
+    } else {
+        OverloadMatch::Ambiguous
     }
 }
 
@@ -1801,6 +2074,301 @@ mod tests {
         assert!(
             bad.is_empty(),
             "expected no ArgTypeMismatch for overloaded call, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn handle_assign_both_handles_ok() {
+        let diags = check("class C {} void f() { C@ a; C@ b; @a = b; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::HandleValueMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no HandleValueMismatch, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn handle_assign_null_rhs_ok() {
+        let diags = check("class C {} void f() { C@ a; @a = null; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::HandleValueMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no HandleValueMismatch, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn handle_assign_lhs_primitive_fires() {
+        let diags = check("void f() { int x; @x = null; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::HandleValueMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 HandleValueMismatch, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn handle_assign_rhs_primitive_fires() {
+        let diags = check("class C {} void f() { C@ a; @a = 42; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::HandleValueMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 HandleValueMismatch, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_local_assign_fires() {
+        let diags = check("void f() { const int x = 5; x = 6; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ConstViolation, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn non_const_local_assign_ok() {
+        let diags = check("void f() { int x = 5; x = 6; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ConstViolation, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_field_assign_fires() {
+        let diags =
+            check("class C { const int x; } void f() { C@ c; c.x = 6; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ConstViolation, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_compound_assign_fires() {
+        let diags = check("void f() { const int x = 1; x += 2; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ConstViolation, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn handle_assign_to_const_fires() {
+        let diags =
+            check("class C {} void f() { const C@ a = null; @a = null; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .collect();
+        assert!(
+            !bad.is_empty(),
+            "expected at least 1 ConstViolation, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn arg_type_int_to_float_implicitly_ok() {
+        let diags = check("void f(float a) {} void main() { f(1); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch on int->float, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn arg_type_int_to_bool_fires() {
+        let diags = check("void f(bool a) {} void main() { f(1); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch on int->bool, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn arg_type_string_to_int_still_fires() {
+        let diags = check("void f(int a) {} void main() { f(\"hi\"); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch on string->int, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn return_int_from_double_ok() {
+        let diags = check("double f() { return 1; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ReturnTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ReturnTypeMismatch on int->double, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn return_bool_from_int_fires() {
+        let diags = check("bool f() { return 1; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ReturnTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ReturnTypeMismatch on int->bool, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn overload_exact_match_picked() {
+        let diags = check(
+            "void f(int a) {} void f(string a) {} void main() { f(1); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for exact overload match, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn overload_convertible_match_picked() {
+        let diags = check(
+            "void f(float a) {} void f(string a) {} void main() { f(1); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for convertible overload match, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn overload_no_match_all_fail() {
+        let diags = check(
+            "void f(int a) {} void f(bool a) {} void main() { f(\"hi\"); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch on no-match overload (silent skip), got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn overload_ambiguous_silent() {
+        let diags = check(
+            "void f(int a, float b) {} void f(float a, int b) {} void main() { f(1, 1); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch on ambiguous overload (silent skip), got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn overload_single_via_arg_count() {
+        let diags = check(
+            "void f(int a) {} void f(int a, int b) {} void main() { f(1); }",
+        );
+        let count: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        let tys: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            count.is_empty(),
+            "expected no ArgCountMismatch when arity uniquely picks overload, got {:?}",
+            diags
+        );
+        assert!(
+            tys.is_empty(),
+            "expected no ArgTypeMismatch when arity uniquely picks overload, got {:?}",
             diags
         );
     }

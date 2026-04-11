@@ -18,6 +18,17 @@ pub struct GlobalScope<'a> {
     pub external: Option<&'a TypeIndex>,
 }
 
+/// A single overload candidate for a workspace free function, as returned
+/// by `GlobalScope::lookup_function_overloads`. Stores parameter type text
+/// (caller parses via `PrimitiveType::from_name` / `TypeRepr::parse_type_string`),
+/// the minimum required arg count, and the return type text.
+#[derive(Debug, Clone)]
+pub struct OverloadSig {
+    pub param_types: Vec<String>,
+    pub min_args: usize,
+    pub return_type: String,
+}
+
 impl<'a> GlobalScope<'a> {
     pub fn new(workspace: &'a SymbolTable, external: Option<&'a TypeIndex>) -> Self {
         Self { workspace, external }
@@ -413,6 +424,36 @@ impl<'a> GlobalScope<'a> {
             }
         }
         found
+    }
+
+    /// Return every workspace free-function overload matching `qualified`.
+    /// Unlike `lookup_function_signature` / `lookup_function_param_types`,
+    /// this does NOT suppress the 2+-match case — callers get the full set
+    /// and are expected to run their own overload resolution. Returns an
+    /// empty Vec if no workspace function has that name.
+    ///
+    /// External (typedb) functions are intentionally not consulted here —
+    /// their signature data isn't wired through to the checker yet.
+    pub fn lookup_function_overloads(&self, qualified: &str) -> Vec<OverloadSig> {
+        let mut out = Vec::new();
+        for s in self.workspace.all_symbols() {
+            if s.name != qualified {
+                continue;
+            }
+            if let SymbolKind::Function {
+                return_type,
+                params,
+                min_args,
+            } = &s.kind
+            {
+                out.push(OverloadSig {
+                    param_types: params.iter().map(|(_, ty_text)| ty_text.clone()).collect(),
+                    min_args: *min_args,
+                    return_type: return_type.clone(),
+                });
+            }
+        }
+        out
     }
 
     /// Look up a free function's return type by qualified name.
