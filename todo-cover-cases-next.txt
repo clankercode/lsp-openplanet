@@ -1,0 +1,35 @@
+# Angelscript compile-issue cases the LSP should catch
+# (populated when game-side compilation catches things openplanet-lsp missed)
+
+## 2026-04-20, tm-control-mcp
+
+### Case 1: Empty `} catch { }` block parse error
+Plugin source:
+    try { x = something(); } catch { }
+
+Compiler reports (game-side):
+    ManialinkIntrospection.as (73, 17) : error: expected declaration, found RBrace
+    (cascades for ~40 diagnostics when nested inside a function with control flow)
+
+Workaround: must put at least one token in the catch body, e.g.
+    try { x = something(); } catch { /* swallow */ }
+
+The LSP today does not flag empty catch bodies.
+
+### Case 2: string::IndexOf(string, int) overload does not exist
+Plugin source:
+    int ix = head.IndexOf("name=\"", open);
+
+Compiler reports (game-side):
+    ManialinkIntrospection.as (45, 27) : error: No matching signatures to 'string::IndexOf(const string, int)'
+    Candidates are: int string::IndexOf(const string&in) const
+
+The LSP should either surface the available overloads at the callsite
+or mark this as an error (it compiled cleanly under the LSP but failed
+the actual Angelscript compile).
+
+### Case 3: Function param `string` warning
+The LSP does not surface the "pass string by reference" sanity-check
+warning that the game compiler emits:
+    MCP: Sanity check: Use 'const string &in x' to pass a string by reference
+Would be nice to have parity so iteration avoids extra cycles.
