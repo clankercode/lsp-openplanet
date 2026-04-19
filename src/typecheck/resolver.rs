@@ -82,8 +82,7 @@ impl<'a> TypeResolver<'a> {
 
             TypeExprKind::Template(name, args) => {
                 let base = name.to_string(self.source);
-                let resolved_args: Vec<TypeRepr> =
-                    args.iter().map(|a| self.resolve(a)).collect();
+                let resolved_args: Vec<TypeRepr> = args.iter().map(|a| self.resolve(a)).collect();
                 // Trust template base names — `array` / `dictionary` / etc.
                 // are not looked up in the global scope.
                 TypeRepr::Generic {
@@ -175,6 +174,8 @@ impl<'a> TypeResolver<'a> {
             if let Some(resolved) = self.scope.resolve_unqualified(&qualified) {
                 return TypeRepr::Named(resolved);
             }
+        } else if let Some(resolved) = self.scope.resolve_qualified_suffix(&qualified) {
+            return TypeRepr::Named(resolved);
         }
 
         self.diagnostics.push(ResolveDiagnostic {
@@ -232,7 +233,7 @@ mod tests {
             vec![Symbol {
                 name: name.to_string(),
                 kind: SymbolKind::Class {
-                    parent: None,
+                    parents: vec![],
                     members: vec![],
                 },
                 span: Span::new(0, 0),
@@ -397,7 +398,7 @@ mod tests {
             vec![Symbol {
                 name: "Ns::Foo".to_string(),
                 kind: SymbolKind::Class {
-                    parent: None,
+                    parents: vec![],
                     members: vec![],
                 },
                 span: Span::new(0, 0),
@@ -433,5 +434,36 @@ mod tests {
             }
             other => panic!("unexpected shape: {:?}", other),
         }
+    }
+
+    #[test]
+    fn resolve_qualified_nested_enum_cgame_editor_plugin_map() {
+        use crate::typedb::TypeIndex;
+
+        let source = "CGameEditorPluginMap::ECardinalDirections";
+        let ty = parse_type(source);
+        let ws = SymbolTable::new();
+        let index = TypeIndex::load(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/typedb/OpenplanetCore.json")
+                .as_path(),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/typedb/OpenplanetNext.json")
+                .as_path(),
+        )
+        .expect("failed to load type index");
+        let scope = GlobalScope::new(&ws, Some(&index));
+        let mut r = TypeResolver::new(&scope, source);
+        let out = r.resolve(&ty);
+        let diags = r.take_diagnostics();
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics, got: {:?}",
+            diags
+        );
+        assert_eq!(
+            out,
+            TypeRepr::Named("Game::CGameEditorPluginMap::ECardinalDirections".into())
+        );
     }
 }

@@ -1,5 +1,6 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use openplanet_lsp::config::LspConfig;
@@ -133,6 +134,44 @@ fn parse_fixture(fixture_name: &str) -> Vec<(PathBuf, Vec<String>)> {
     results
 }
 
+fn real_plugins_dir() -> Option<PathBuf> {
+    std::env::var_os("OPENPLANET_REAL_PLUGINS_DIR").map(PathBuf::from)
+}
+
+fn check_real_plugin_if_available(plugin_name: &str) {
+    let Some(plugins_dir) = real_plugins_dir() else {
+        eprintln!("skipping real-plugin check for {plugin_name}: OPENPLANET_REAL_PLUGINS_DIR not set");
+        return;
+    };
+    let plugin = plugins_dir.join(plugin_name);
+    if !plugin.exists() {
+        eprintln!(
+            "skipping real-plugin check for {plugin_name}: missing {}",
+            plugin.display()
+        );
+        return;
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--plugins-dir")
+        .arg(&plugins_dir)
+        .arg(&plugin)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "expected real plugin {plugin_name} to check cleanly; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("0 diagnostics"),
+        "expected clean summary for real plugin {plugin_name}; stdout={stdout:?}"
+    );
+}
+
 #[test]
 fn test_fixture_tm_counter() {
     let results = parse_fixture("tm-counter");
@@ -186,6 +225,31 @@ fn test_fixture_tm_editor_plus_plus() {
     let results = parse_fixture("tm-editor-plus-plus");
     let total_diags: usize = results.iter().map(|(_, d)| d.len()).sum();
     eprintln!("Total diagnostics for tm-editor-plus-plus: {}", total_diags);
+}
+
+#[test]
+fn test_real_plugin_tm_editor_plus_plus_checks_clean_when_available() {
+    check_real_plugin_if_available("tm-editor-plus-plus");
+}
+
+#[test]
+fn test_real_plugin_tm_map_together_checks_clean_when_available() {
+    check_real_plugin_if_available("tm-map-together");
+}
+
+#[test]
+fn test_real_plugin_tm_aiapi_checks_clean_when_available() {
+    check_real_plugin_if_available("tm-aiapi");
+}
+
+#[test]
+fn test_real_plugin_tm_mcptm_checks_clean_when_available() {
+    check_real_plugin_if_available("tm-mcptm");
+}
+
+#[test]
+fn test_real_plugin_tm_agent_checks_clean_when_available() {
+    check_real_plugin_if_available("tm-agent");
 }
 
 // ---------- Corpus-wide parse test ----------

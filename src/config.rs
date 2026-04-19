@@ -2,6 +2,8 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::workspace::manifest::Manifest;
+
 #[derive(Debug, Clone)]
 pub struct LspConfig {
     pub openplanet_dir: Option<PathBuf>,
@@ -40,11 +42,29 @@ impl LspConfig {
     /// Default all-permissive define set (spec Section 4.4)
     pub fn default_defines() -> HashSet<String> {
         [
-            "TMNEXT", "MP4", "MP40", "MP41", "TURBO", "FOREVER",
-            "UNITED_FOREVER", "NATIONS_FOREVER", "UNITED", "MP3",
-            "MANIA64", "MANIA32", "WINDOWS", "WINDOWS_WINE", "LINUX",
-            "SERVER", "LOGS", "HAS_DEV", "DEVELOPER",
-            "SIG_OFFICIAL", "SIG_REGULAR", "SIG_SCHOOL", "SIG_DEVELOPER",
+            "TMNEXT",
+            "MP4",
+            "MP40",
+            "MP41",
+            "TURBO",
+            "FOREVER",
+            "UNITED_FOREVER",
+            "NATIONS_FOREVER",
+            "UNITED",
+            "MP3",
+            "MANIA64",
+            "MANIA32",
+            "WINDOWS",
+            "WINDOWS_WINE",
+            "LINUX",
+            "SERVER",
+            "LOGS",
+            "HAS_DEV",
+            "DEVELOPER",
+            "SIG_OFFICIAL",
+            "SIG_REGULAR",
+            "SIG_SCHOOL",
+            "SIG_DEVELOPER",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -76,23 +96,62 @@ impl LspConfig {
             config.apply_init_options(opts);
         }
 
+        // Layer 4: Workspace manifest-derived defines. These are additive and
+        // model how Openplanet compiles the plugin with dependency and
+        // script-defined preprocessor symbols enabled.
+        if let Some(root) = workspace_root {
+            let manifest_path = root.join("info.toml");
+            if let Ok(manifest) = Manifest::load(&manifest_path) {
+                config.apply_manifest(&manifest);
+            }
+        }
+
         // Derive JSON paths from openplanet_dir if not set explicitly
         if let Some(op_dir) = &config.openplanet_dir {
             if config.core_json.is_none() {
                 let p = op_dir.join("OpenplanetCore.json");
-                if p.exists() { config.core_json = Some(p); }
+                if p.exists() {
+                    config.core_json = Some(p);
+                }
             }
             if config.game_json.is_none() {
                 let p = op_dir.join("OpenplanetNext.json");
-                if p.exists() { config.game_json = Some(p); }
+                if p.exists() {
+                    config.game_json = Some(p);
+                }
             }
             if config.plugins_dir.is_none() {
                 let p = op_dir.join("Plugins");
-                if p.exists() { config.plugins_dir = Some(p); }
+                if p.exists() {
+                    config.plugins_dir = Some(p);
+                }
             }
         }
 
         config
+    }
+
+    pub fn apply_manifest(&mut self, manifest: &Manifest) {
+        let Some(script) = &manifest.script else {
+            return;
+        };
+
+        for define in &script.defines {
+            self.defines.insert(define.clone());
+        }
+        for dep in &script.dependencies {
+            self.defines
+                .insert(format!("DEPENDENCY_{}", dependency_define_suffix(dep)));
+        }
+        for dep in &script.optional_dependencies {
+            self.defines
+                .insert(format!("DEPENDENCY_{}", dependency_define_suffix(dep)));
+        }
+        for dep in &script.export_dependencies {
+            let suffix = dependency_define_suffix(dep);
+            self.defines.insert(format!("DEPENDENCY_{}", suffix));
+            self.defines.insert(format!("EXPORT_DEPENDENCY_{}", suffix));
+        }
     }
 
     fn auto_detect(&mut self) {
@@ -124,8 +183,7 @@ impl LspConfig {
 
     fn load_user_config_file(&mut self) {
         if let Ok(home) = std::env::var("HOME") {
-            let path = PathBuf::from(home)
-                .join(".config/openplanet-lsp/config.toml");
+            let path = PathBuf::from(home).join(".config/openplanet-lsp/config.toml");
             if let Ok(contents) = std::fs::read_to_string(&path) {
                 if let Ok(file_config) = toml::from_str::<ConfigFile>(&contents) {
                     self.apply_config_file(file_config);
@@ -166,6 +224,18 @@ impl LspConfig {
                 .collect();
         }
     }
+}
+
+fn dependency_define_suffix(dep: &str) -> String {
+    dep.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

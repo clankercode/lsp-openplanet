@@ -70,8 +70,12 @@ impl NadeoMember {
 
     /// Parse arguments string "Type1 name1, Type2 name2" into pairs
     pub fn parse_args(&self) -> Vec<(String, String)> {
-        let Some(args_str) = &self.a else { return Vec::new() };
-        if args_str.is_empty() { return Vec::new(); }
+        let Some(args_str) = &self.a else {
+            return Vec::new();
+        };
+        if args_str.is_empty() {
+            return Vec::new();
+        }
         args_str
             .split(',')
             .filter_map(|part| {
@@ -107,13 +111,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn next_json_path() -> PathBuf {
-        PathBuf::from(env!("HOME")).join("src/openplanet/tm-scripts/OpenplanetNext.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/OpenplanetNext.json")
     }
 
     #[test]
     fn test_load_nadeo_json() {
         let path = next_json_path();
-        if !path.exists() { return; } // skip if not available
+        if !path.exists() {
+            panic!("OpenplanetNext.json not found at {:?}", path);
+        }
         let db = NadeoDatabase::load_from_file(&path).unwrap();
         assert!(!db.op.is_empty());
         assert!(!db.ns.is_empty());
@@ -122,9 +128,14 @@ mod tests {
     #[test]
     fn test_nadeo_has_known_types() {
         let path = next_json_path();
-        if !path.exists() { return; }
+        if !path.exists() {
+            panic!("OpenplanetNext.json not found at {:?}", path);
+        }
         let db = NadeoDatabase::load_from_file(&path).unwrap();
-        assert!(db.ns.contains_key("MwFoundations"), "expected MwFoundations namespace");
+        assert!(
+            db.ns.contains_key("MwFoundations"),
+            "expected MwFoundations namespace"
+        );
         let mw = &db.ns["MwFoundations"];
         assert!(mw.contains_key("CMwNod"), "expected CMwNod class");
     }
@@ -132,7 +143,9 @@ mod tests {
     #[test]
     fn test_nadeo_member_discrimination() {
         let path = next_json_path();
-        if !path.exists() { return; }
+        if !path.exists() {
+            panic!("OpenplanetNext.json not found at {:?}", path);
+        }
         let db = NadeoDatabase::load_from_file(&path).unwrap();
         let mw = &db.ns["MwFoundations"];
         let nod = &mw["CMwNod"];

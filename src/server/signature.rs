@@ -27,12 +27,12 @@
 use tower_lsp::lsp_types::*;
 
 use crate::lexer;
-use crate::parser::Parser;
 use crate::parser::ast::SourceFile;
+use crate::parser::Parser;
 use crate::server::diagnostics::position_to_offset;
 use crate::server::scope_query;
-use crate::symbols::SymbolTable;
 use crate::symbols::scope::SymbolKind;
+use crate::symbols::SymbolTable;
 use crate::typecheck::global_scope::{GlobalScope, OverloadSig};
 use crate::typedb::TypeIndex;
 
@@ -89,8 +89,7 @@ pub fn signature_help(
     }
 
     let active_signature = pick_active_signature(&sigs, call.active_param);
-    let signatures: Vec<SignatureInformation> =
-        sigs.iter().map(to_signature_information).collect();
+    let signatures: Vec<SignatureInformation> = sigs.iter().map(to_signature_information).collect();
 
     Some(SignatureHelp {
         signatures,
@@ -242,12 +241,7 @@ fn compute_skip_mask(bytes: &[u8]) -> Vec<bool> {
     mask
 }
 
-fn count_top_level_commas(
-    bytes: &[u8],
-    from: usize,
-    to: usize,
-    skip: &[bool],
-) -> u32 {
+fn count_top_level_commas(bytes: &[u8], from: usize, to: usize, skip: &[bool]) -> u32 {
     let mut depth_paren: i32 = 0;
     let mut depth_bracket: i32 = 0;
     let mut depth_brace: i32 = 0;
@@ -337,7 +331,15 @@ fn resolve_callee(
     if let Some(last_dot) = callee.rfind('.') {
         let receiver = &callee[..last_dot];
         let method = &callee[last_dot + 1..];
-        return resolve_member_call(receiver, method, source, file, cursor_offset, scope, type_index);
+        return resolve_member_call(
+            receiver,
+            method,
+            source,
+            file,
+            cursor_offset,
+            scope,
+            type_index,
+        );
     }
 
     // Free function, bare or qualified (`::` -> namespaced).
@@ -520,7 +522,7 @@ fn collect_workspace_method_overloads(
             // found nothing on the current class.
             return;
         }
-        current = scope.workspace_class_parent(&name);
+        current = scope.workspace_class_parents(&name).into_iter().next();
     }
 }
 
@@ -548,11 +550,7 @@ fn strip_type_decoration(ty: &str) -> String {
 // `OverloadSig` / `FunctionInfo` → `ResolvedSignature` conversion.
 // ---------------------------------------------------------------------------
 
-fn overload_to_signature(
-    name: String,
-    ov: OverloadSig,
-    doc: Option<String>,
-) -> ResolvedSignature {
+fn overload_to_signature(name: String, ov: OverloadSig, doc: Option<String>) -> ResolvedSignature {
     let return_type = if ov.return_type.is_empty() {
         "void".to_string()
     } else {
@@ -563,7 +561,11 @@ fn overload_to_signature(
         return_type,
         // Workspace params come from `OverloadSig` as raw type text only
         // (no names). Use an empty name so the label falls back to "type".
-        params: ov.param_types.into_iter().map(|t| (t, String::new())).collect(),
+        params: ov
+            .param_types
+            .into_iter()
+            .map(|t| (t, String::new()))
+            .collect(),
         doc,
         min_args: ov.min_args,
     }
@@ -686,7 +688,9 @@ mod tests {
         let before = &src[..idx];
         let after = &src[idx + 1..];
         let line = before.matches('\n').count() as u32;
-        let col = before.rfind('\n').map_or(before.len(), |nl| before.len() - nl - 1) as u32;
+        let col = before
+            .rfind('\n')
+            .map_or(before.len(), |nl| before.len() - nl - 1) as u32;
         let mut joined = String::with_capacity(before.len() + after.len());
         joined.push_str(before);
         joined.push_str(after);
@@ -698,8 +702,7 @@ mod tests {
         let src = "void f(int a, string b) {}\nvoid main() { f(| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help =
-            signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.signatures.len(), 1);
         assert_eq!(help.active_signature, Some(0));
         assert_eq!(help.active_parameter, Some(0));
@@ -712,8 +715,7 @@ mod tests {
         let src = "void f(int a, string b) {}\nvoid main() { f(42,| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help =
-            signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.active_parameter, Some(1));
         assert_eq!(help.active_signature, Some(0));
     }
@@ -727,8 +729,7 @@ void f(int a, string b) {}
 void main() { f(1,| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help =
-            signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.signatures.len(), 3);
         assert_eq!(help.active_parameter, Some(1));
         // Only the third overload has 2+ params, so active_signature must be
@@ -750,8 +751,7 @@ void main() { f(1,| }";
         let src = "void f(int a, string b) {}\nvoid main() { f(1, | }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help =
-            signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.active_parameter, Some(1));
     }
 
@@ -763,8 +763,7 @@ void inner(string s) {}
 void main() { outer(inner(| ) }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help =
-            signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
         let active = help.active_signature.unwrap_or(0) as usize;
         assert!(
             help.signatures[active].label.contains("inner"),
@@ -779,7 +778,11 @@ void main() { outer(inner(| ) }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
         let help = signature_help(&source, position, None, Some(&ws));
-        assert!(help.is_none(), "expected None outside a call, got {:?}", help);
+        assert!(
+            help.is_none(),
+            "expected None outside a call, got {:?}",
+            help
+        );
     }
 
     #[test]
@@ -789,8 +792,7 @@ class Foo { void m(int x) {} }
 void main() { Foo f; f.m(| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help =
-            signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.active_parameter, Some(0));
         assert!(
             help.signatures[0].label.contains("int"),
@@ -820,5 +822,4 @@ void main() { f("hello)world", | "#;
         assert_eq!(call.callee_text, "f");
         assert_eq!(call.active_param, 0);
     }
-
 }

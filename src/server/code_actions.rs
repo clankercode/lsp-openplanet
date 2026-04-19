@@ -85,11 +85,7 @@ fn quick_fix_did_you_mean(
     out
 }
 
-fn refactor_wrap_in_try_catch(
-    uri: &Url,
-    source: &str,
-    range: Range,
-) -> Vec<CodeActionOrCommand> {
+fn refactor_wrap_in_try_catch(uri: &Url, source: &str, range: Range) -> Vec<CodeActionOrCommand> {
     let start_off = position_to_offset(source, range.start);
     let end_off = position_to_offset(source, range.end);
     let (start_off, end_off) = if start_off <= end_off {
@@ -101,13 +97,7 @@ fn refactor_wrap_in_try_catch(
     let new_text = format!("try {{\n    {}\n}} catch {{ }}\n", selected);
 
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-    changes.insert(
-        uri.clone(),
-        vec![TextEdit {
-            range,
-            new_text,
-        }],
-    );
+    changes.insert(uri.clone(), vec![TextEdit { range, new_text }]);
     let action = CodeAction {
         title: "Wrap in try/catch".to_string(),
         kind: Some(CodeActionKind::REFACTOR_REWRITE),
@@ -158,9 +148,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i + 1;
         for j in 0..n {
             let cost = if a_chars[i] == b_chars[j] { 0 } else { 1 };
-            curr[j + 1] = (prev[j + 1] + 1)
-                .min(curr[j] + 1)
-                .min(prev[j] + cost);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -178,10 +166,7 @@ fn is_similar(needle: &str, candidate: &str) -> Option<usize> {
     if dist <= 2 {
         return Some(dist);
     }
-    if needle.len() >= 3
-        && candidate.len() >= 3
-        && cand_lower.contains(&needle_lower)
-    {
+    if needle.len() >= 3 && candidate.len() >= 3 && cand_lower.contains(&needle_lower) {
         return Some(dist);
     }
     if common_prefix_len(&needle_lower, &cand_lower) >= 3 {
@@ -256,7 +241,7 @@ mod tests {
         let sym = Symbol {
             name: name.to_string(),
             kind: SymbolKind::Class {
-                parent: None,
+                parents: Vec::new(),
                 members: Vec::new(),
             },
             span: Span { start: 0, end: 0 },
@@ -350,14 +335,7 @@ mod tests {
         let uri = Url::parse("file:///tmp/a.as").unwrap();
         // Empty diagnostics; some arbitrary range over a tiny source.
         let source = "print(x);";
-        let actions = code_actions(
-            &uri,
-            source,
-            mk_range(0, 0, 0, 9),
-            &[],
-            &table,
-            None,
-        );
+        let actions = code_actions(&uri, source, mk_range(0, 0, 0, 9), &[], &table, None);
         let refactors = actions
             .iter()
             .filter_map(|a| match a {

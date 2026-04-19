@@ -31,7 +31,10 @@ pub struct OverloadSig {
 
 impl<'a> GlobalScope<'a> {
     pub fn new(workspace: &'a SymbolTable, external: Option<&'a TypeIndex>) -> Self {
-        Self { workspace, external }
+        Self {
+            workspace,
+            external,
+        }
     }
 
     /// True if the qualified name refers to a type (class / interface /
@@ -142,6 +145,47 @@ impl<'a> GlobalScope<'a> {
         None
     }
 
+    /// Last-resort lookup for a partially qualified path whose fully
+    /// qualified external/workspace name may carry an additional leading
+    /// namespace segment.
+    ///
+    /// Example: user code may write
+    /// `CGameEditorPluginMap::ECardinalDirections` while the typedb stores
+    /// `Game::CGameEditorPluginMap::ECardinalDirections`.
+    pub fn resolve_qualified_suffix(&self, qualified: &str) -> Option<String> {
+        if !qualified.contains("::") {
+            return None;
+        }
+
+        let needle = format!("::{}", qualified);
+        let short = qualified.rsplit("::").next()?;
+
+        if let Some(ext) = self.external {
+            for candidate in ext.find_by_short_name(short) {
+                if candidate.ends_with(&needle) {
+                    return Some(candidate.clone());
+                }
+            }
+        }
+
+        for s in self.workspace.all_symbols() {
+            if !matches!(
+                s.kind,
+                SymbolKind::Class { .. }
+                    | SymbolKind::Interface { .. }
+                    | SymbolKind::Funcdef { .. }
+                    | SymbolKind::Enum { .. }
+            ) {
+                continue;
+            }
+            if s.name.ends_with(&needle) {
+                return Some(s.name.clone());
+            }
+        }
+
+        None
+    }
+
     /// True if `name` refers to any globally visible identifier — a type,
     /// a function, an enum, a top-level variable, or an enum value.
     ///
@@ -154,6 +198,11 @@ impl<'a> GlobalScope<'a> {
     /// than `Color::Red`) are sometimes usable without a qualifier.
     pub fn has_global_ident(&self, name: &str) -> bool {
         if self.has_type(name) || self.has_function(name) || self.has_enum(name) {
+            return true;
+        }
+        let getter = qualified_virtual_name(name, "get_");
+        let setter = qualified_virtual_name(name, "set_");
+        if self.has_function(&getter) || self.has_function(&setter) {
             return true;
         }
         // Exact workspace hit as a Variable or EnumValue (both at top level
@@ -201,23 +250,7 @@ impl<'a> GlobalScope<'a> {
                 return Some(t);
             }
         }
-        // Workspace fallback: "TypeName::member" qualified lookup.
-        let qual = format!("{}::{}", type_name, member);
-        for s in self.workspace.all_symbols() {
-            if s.name != qual {
-                continue;
-            }
-            match &s.kind {
-                SymbolKind::Variable { type_name } => {
-                    return Some(TypeRepr::parse_type_string(type_name));
-                }
-                SymbolKind::Function { return_type, .. } => {
-                    return Some(TypeRepr::parse_type_string(return_type));
-                }
-                _ => {}
-            }
-        }
-        None
+        self.workspace_class_member(type_name, member)
     }
 
     /// Like `lookup_member_type`, but only considers methods and returns
@@ -228,18 +261,7 @@ impl<'a> GlobalScope<'a> {
                 return Some(t);
             }
         }
-        // Workspace fallback: qualified method name hit. Parse the stored
-        // return-type text (iter 28) into a real `TypeRepr`.
-        let qual = format!("{}::{}", type_name, method);
-        for s in self.workspace.all_symbols() {
-            if s.name != qual {
-                continue;
-            }
-            if let SymbolKind::Function { return_type, .. } = &s.kind {
-                return Some(TypeRepr::parse_type_string(return_type));
-            }
-        }
-        None
+        self.workspace_class_member(type_name, method)
     }
 
     fn ext_lookup_member(ext: &TypeIndex, type_name: &str, member: &str) -> Option<TypeRepr> {
@@ -397,20 +419,12 @@ impl<'a> GlobalScope<'a> {
     /// External (typedb) functions are intentionally not consulted here —
     /// their signature data is not yet wired through to the checker.
     pub fn lookup_function_signature(&self, qualified: &str) -> Option<(usize, usize)> {
-        let mut found: Option<(usize, usize)> = None;
-        for s in self.workspace.all_symbols() {
-            if s.name != qualified {
-                continue;
-            }
-            if let SymbolKind::Function { params, min_args, .. } = &s.kind {
-                if found.is_some() {
-                    // 2+ matches — overloaded. Suppress.
-                    return None;
-                }
-                found = Some((*min_args, params.len()));
-            }
-        }
-        found
+        lookup_workspace_function_property(&self.workspace, qualified).map(|s| match &s.kind {
+            SymbolKind::Function {
+                params, min_args, ..
+            } => (*min_args, params.len()),
+            _ => unreachable!(),
+        })
     }
 
     /// Look up a unique workspace free function's parameter type text list
@@ -420,20 +434,12 @@ impl<'a> GlobalScope<'a> {
     /// `type_text` strings as stored in the symbol table; callers are
     /// responsible for parsing them (e.g. via `PrimitiveType::from_name`).
     pub fn lookup_function_param_types(&self, qualified: &str) -> Option<Vec<String>> {
-        let mut found: Option<Vec<String>> = None;
-        for s in self.workspace.all_symbols() {
-            if s.name != qualified {
-                continue;
+        lookup_workspace_function_property(&self.workspace, qualified).map(|s| match &s.kind {
+            SymbolKind::Function { params, .. } => {
+                params.iter().map(|(_, ty_text)| ty_text.clone()).collect()
             }
-            if let SymbolKind::Function { params, .. } = &s.kind {
-                if found.is_some() {
-                    // 2+ matches — overloaded. Suppress.
-                    return None;
-                }
-                found = Some(params.iter().map(|(_, ty_text)| ty_text.clone()).collect());
-            }
-        }
-        found
+            _ => unreachable!(),
+        })
     }
 
     /// Return every workspace free-function overload matching `qualified`.
@@ -446,8 +452,9 @@ impl<'a> GlobalScope<'a> {
     /// their signature data isn't wired through to the checker yet.
     pub fn lookup_function_overloads(&self, qualified: &str) -> Vec<OverloadSig> {
         let mut out = Vec::new();
+        let alt_names = workspace_function_property_candidates(qualified);
         for s in self.workspace.all_symbols() {
-            if s.name != qualified {
+            if !alt_names.iter().any(|name| s.name == *name) {
                 continue;
             }
             if let SymbolKind::Function {
@@ -466,21 +473,21 @@ impl<'a> GlobalScope<'a> {
         out
     }
 
-    /// Look up the declared parent (base) class of a workspace class by
-    /// fully qualified name. Returns `None` if no workspace class with
-    /// that name exists, or the class has no base class. Only consults
+    /// Look up the declared base classes of a workspace class by
+    /// fully qualified name. Returns an empty vec if no workspace class with
+    /// that name exists, or the class has no bases. Only consults
     /// the workspace symbol table — external (typedb) types use their
     /// own parent walker via `ext_lookup_member`.
-    pub fn workspace_class_parent(&self, class_name: &str) -> Option<String> {
+    pub fn workspace_class_parents(&self, class_name: &str) -> Vec<String> {
         for s in self.workspace.all_symbols() {
             if s.name != class_name {
                 continue;
             }
-            if let SymbolKind::Class { parent, .. } = &s.kind {
-                return parent.clone();
+            if let SymbolKind::Class { parents, .. } = &s.kind {
+                return parents.clone();
             }
         }
-        None
+        Vec::new()
     }
 
     /// Walk the workspace class inheritance chain starting from
@@ -493,19 +500,15 @@ impl<'a> GlobalScope<'a> {
     ///
     /// Uses a visited-set to prevent infinite loops on cyclic
     /// inheritance (pathological user code: `A : B, B : A`).
-    pub fn workspace_class_member(
-        &self,
-        class_name: &str,
-        member: &str,
-    ) -> Option<TypeRepr> {
+    pub fn workspace_class_member(&self, class_name: &str, member: &str) -> Option<TypeRepr> {
         let getter = format!("get_{}", member);
         let setter = format!("set_{}", member);
-        let mut visited: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut current: Option<String> = Some(class_name.to_string());
-        while let Some(name) = current.take() {
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue =
+            std::collections::VecDeque::from([self.normalize_workspace_class_name(class_name)]);
+        while let Some(name) = queue.pop_front() {
             if !visited.insert(name.clone()) {
-                break;
+                continue;
             }
             // Look for `Class::member` / `Class::get_member` / `Class::set_member`
             // in the workspace symbol table.
@@ -513,10 +516,7 @@ impl<'a> GlobalScope<'a> {
             let qualified_getter = format!("{}::{}", name, getter);
             let qualified_setter = format!("{}::{}", name, setter);
             for s in self.workspace.all_symbols() {
-                if s.name != qualified
-                    && s.name != qualified_getter
-                    && s.name != qualified_setter
-                {
+                if s.name != qualified && s.name != qualified_getter && s.name != qualified_setter {
                     continue;
                 }
                 match &s.kind {
@@ -529,10 +529,37 @@ impl<'a> GlobalScope<'a> {
                     _ => {}
                 }
             }
-            // Not found on this class — ascend to its parent.
-            current = self.workspace_class_parent(&name);
+            // Not found on this class — ascend to its base classes.
+            for parent in self.workspace_class_parents(&name) {
+                queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &name));
+            }
         }
         None
+    }
+
+    fn normalize_workspace_class_name(&self, name: &str) -> String {
+        self.normalize_workspace_class_name_in_context(name, name)
+    }
+
+    fn normalize_workspace_class_name_in_context(
+        &self,
+        name: &str,
+        context_class_name: &str,
+    ) -> String {
+        if !name.contains("::") {
+            if let Some((ns, _)) = context_class_name.rsplit_once("::") {
+                let candidate = format!("{}::{}", ns, name);
+                if self.workspace.all_symbols().any(|s| s.name == candidate) {
+                    return candidate;
+                }
+            }
+        }
+        if self.workspace.all_symbols().any(|s| s.name == name) {
+            return name.to_string();
+        }
+        self.resolve_qualified_suffix(name)
+            .or_else(|| self.resolve_unqualified(name))
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// Look up a free function's return type by qualified name.
@@ -545,15 +572,48 @@ impl<'a> GlobalScope<'a> {
             }
         }
         // Workspace fallback: just silence with Error.
-        if self
-            .workspace
-            .all_symbols()
-            .any(|s| s.name == qualified && matches!(s.kind, SymbolKind::Function { .. }))
-        {
+        if lookup_workspace_function_property(&self.workspace, qualified).is_some() {
             return Some(TypeRepr::Error(String::new()));
         }
         None
     }
+}
+
+fn workspace_function_property_candidates(name: &str) -> [String; 3] {
+    [
+        name.to_string(),
+        qualified_virtual_name(name, "get_"),
+        qualified_virtual_name(name, "set_"),
+    ]
+}
+
+fn qualified_virtual_name(name: &str, prefix: &str) -> String {
+    if let Some((head, tail)) = name.rsplit_once("::") {
+        format!("{}::{}{}", head, prefix, tail)
+    } else {
+        format!("{}{}", prefix, name)
+    }
+}
+
+fn lookup_workspace_function_property<'a>(
+    workspace: &'a SymbolTable,
+    qualified: &str,
+) -> Option<&'a crate::symbols::scope::Symbol> {
+    let candidates = workspace_function_property_candidates(qualified);
+    let mut found = None;
+    for s in workspace.all_symbols() {
+        if !candidates.iter().any(|name| s.name == *name) {
+            continue;
+        }
+        if !matches!(s.kind, SymbolKind::Function { .. }) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(s);
+    }
+    found
 }
 
 #[cfg(test)]
@@ -595,7 +655,7 @@ mod tests {
             vec![make_symbol(
                 "MyClass",
                 SymbolKind::Class {
-                    parent: None,
+                    parents: vec![],
                     members: vec![],
                 },
             )],
@@ -671,7 +731,7 @@ mod tests {
             vec![make_symbol(
                 "Deep::Ns::Thing",
                 SymbolKind::Class {
-                    parent: None,
+                    parents: vec![],
                     members: vec![],
                 },
             )],
@@ -709,27 +769,18 @@ mod tests {
     fn nadeo_type_recognized_by_is_nadeo_type() {
         // Build a TypeIndex with one Nadeo-sourced type and one Core-sourced
         // type, then verify `is_nadeo_type` discriminates.
-        use crate::typedb::index::{TypeIndex, TypeInfo, TypeSource};
+        use crate::typedb::index::TypeIndex;
         // Reach into the module-internal constructor by way of the load
         // path is awkward; assemble manually via the Default + a private
         // insertion through a small helper. Since `types` is private, we
         // round-trip through the public `load` path in a throwaway test if
         // fixtures exist, but otherwise directly verify the fallback path.
-        let cp = std::path::PathBuf::from(env!("HOME"))
-            .join("src/openplanet/tm-scripts/OpenplanetCore.json");
-        let np = std::path::PathBuf::from(env!("HOME"))
-            .join("src/openplanet/tm-scripts/OpenplanetNext.json");
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
         if !cp.exists() || !np.exists() {
-            // No fixtures — assert the Default constructor at least honours
-            // the empty case.
-            let ws = SymbolTable::new();
-            let scope = GlobalScope::new(&ws, None);
-            assert!(!scope.is_nadeo_type("CGameCtnBlock"));
-            // Just reference the unused type to keep the import above alive.
-            let _ = std::mem::size_of::<TypeInfo>();
-            let _ = TypeSource::Nadeo;
-            let _ = std::mem::size_of::<TypeIndex>();
-            return;
+            panic!("Typedb files not found at {:?} and {:?}", cp, np);
         }
         let idx = TypeIndex::load(&cp, &np).unwrap();
         let ws = SymbolTable::new();
@@ -753,6 +804,24 @@ mod tests {
     }
 
     #[test]
+    fn resolve_qualified_suffix_finds_nested_external_enum() {
+        use crate::typedb::index::TypeIndex;
+
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+
+        assert_eq!(
+            scope.resolve_qualified_suffix("CGameEditorPluginMap::ECardinalDirections"),
+            Some("Game::CGameEditorPluginMap::ECardinalDirections".to_string())
+        );
+    }
+
+    #[test]
     fn workspace_funcdef_counts_as_type() {
         let mut ws = SymbolTable::new();
         let fid = ws.allocate_file_id();
@@ -768,5 +837,92 @@ mod tests {
         );
         let scope = GlobalScope::new(&ws, None);
         assert!(scope.has_type("Callback"));
+    }
+
+    #[test]
+    fn workspace_class_member_normalizes_namespaced_parent_name() {
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![
+                make_symbol(
+                    "Editor::NetworkSerializable",
+                    SymbolKind::Class {
+                        parents: vec![],
+                        members: vec![],
+                    },
+                ),
+                make_symbol(
+                    "Editor::NetworkSerializable::ReadFromNetworkBuffer",
+                    SymbolKind::Function {
+                        return_type: "NetworkSerializable@".into(),
+                        params: vec![("buf".into(), "MemoryBuffer@".into())],
+                        min_args: 1,
+                    },
+                ),
+                make_symbol(
+                    "Editor::Child",
+                    SymbolKind::Class {
+                        parents: vec!["NetworkSerializable".into()],
+                        members: vec![],
+                    },
+                ),
+            ],
+        );
+        let scope = GlobalScope::new(&ws, None);
+        assert!(
+            scope
+                .workspace_class_member("Editor::Child", "ReadFromNetworkBuffer")
+                .is_some(),
+            "expected inherited member lookup to normalize parent names"
+        );
+    }
+
+    #[test]
+    fn workspace_class_member_prefers_parent_in_current_namespace() {
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![
+                make_symbol(
+                    "ItemSpec",
+                    SymbolKind::Class {
+                        parents: vec![],
+                        members: vec![],
+                    },
+                ),
+                make_symbol(
+                    "Editor::ItemSpec",
+                    SymbolKind::Class {
+                        parents: vec![],
+                        members: vec![],
+                    },
+                ),
+                make_symbol(
+                    "Editor::ItemSpec::ReadFromNetworkBuffer",
+                    SymbolKind::Function {
+                        return_type: "NetworkSerializable@".into(),
+                        params: vec![("buf".into(), "MemoryBuffer@".into())],
+                        min_args: 1,
+                    },
+                ),
+                make_symbol(
+                    "Editor::ItemSpecPriv",
+                    SymbolKind::Class {
+                        parents: vec!["ItemSpec".into()],
+                        members: vec![],
+                    },
+                ),
+            ],
+        );
+        let scope = GlobalScope::new(&ws, None);
+        assert!(
+            scope
+                .workspace_class_member("Editor::ItemSpecPriv", "ReadFromNetworkBuffer")
+                .is_some(),
+            "expected namespaced parent lookup to beat global short-name collision"
+        );
     }
 }

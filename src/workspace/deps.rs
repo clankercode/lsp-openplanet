@@ -15,11 +15,12 @@ pub struct ResolvedDependency {
 pub fn resolve_dependency(
     dep_id: &str,
     plugins_dir: &Path,
+    plugin_files_search_paths: &[PathBuf],
 ) -> Option<ResolvedDependency> {
     // Try directory first
     let dir_path = plugins_dir.join(dep_id);
     if dir_path.is_dir() {
-        return resolve_directory_plugin(dep_id, &dir_path);
+        return resolve_directory_plugin(dep_id, &dir_path, plugin_files_search_paths);
     }
 
     // Try .op archive
@@ -28,13 +29,50 @@ pub fn resolve_dependency(
         return resolve_op_archive(dep_id, &op_path);
     }
 
+    resolve_by_manifest_module(dep_id, plugins_dir, plugin_files_search_paths)
+}
+
+fn resolve_by_manifest_module(
+    id: &str,
+    plugins_dir: &Path,
+    plugin_files_search_paths: &[PathBuf],
+) -> Option<ResolvedDependency> {
+    let entries = std::fs::read_dir(plugins_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest_path = path.join("info.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let manifest = Manifest::load(&manifest_path).ok()?;
+        let module = manifest.script.as_ref().and_then(|s| s.module.as_deref());
+        if module != Some(id) {
+            continue;
+        }
+
+        let export_files = collect_export_files(&path, &manifest, plugin_files_search_paths);
+        return Some(ResolvedDependency {
+            id: id.to_string(),
+            root: path,
+            manifest,
+            export_files,
+        });
+    }
+
     None
 }
 
-fn resolve_directory_plugin(id: &str, root: &Path) -> Option<ResolvedDependency> {
+fn resolve_directory_plugin(
+    id: &str,
+    root: &Path,
+    plugin_files_search_paths: &[PathBuf],
+) -> Option<ResolvedDependency> {
     let manifest_path = root.join("info.toml");
     let manifest = Manifest::load(&manifest_path).ok()?;
-    let export_files = collect_export_files(root, &manifest);
+    let export_files = collect_export_files(root, &manifest, plugin_files_search_paths);
     Some(ResolvedDependency {
         id: id.to_string(),
         root: root.to_path_buf(),
@@ -67,21 +105,43 @@ fn resolve_op_archive(id: &str, archive_path: &Path) -> Option<ResolvedDependenc
     })
 }
 
-fn collect_export_files(root: &Path, manifest: &Manifest) -> Vec<PathBuf> {
+fn collect_export_files(
+    root: &Path,
+    manifest: &Manifest,
+    plugin_files_search_paths: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Some(script) = &manifest.script {
         for export in &script.exports {
-            let path = root.join(export);
-            if path.exists() {
+            if let Some(path) = resolve_plugin_file(root, export, plugin_files_search_paths) {
                 files.push(path);
             }
         }
         for export in &script.shared_exports {
-            let path = root.join(export);
-            if path.exists() {
+            if let Some(path) = resolve_plugin_file(root, export, plugin_files_search_paths) {
                 files.push(path);
             }
         }
     }
     files
+}
+
+fn resolve_plugin_file(
+    root: &Path,
+    file: &str,
+    plugin_files_search_paths: &[PathBuf],
+) -> Option<PathBuf> {
+    let direct = root.join(file);
+    if direct.exists() {
+        return Some(direct);
+    }
+
+    for search_root in plugin_files_search_paths {
+        let candidate = root.join(search_root).join(file);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }

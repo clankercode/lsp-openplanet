@@ -14,8 +14,8 @@
 use tower_lsp::lsp_types::*;
 
 use crate::lexer;
-use crate::parser::Parser;
 use crate::parser::ast::SourceFile;
+use crate::parser::Parser;
 use crate::server::diagnostics::position_to_offset;
 use crate::server::navigation;
 use crate::server::scope_query;
@@ -45,11 +45,12 @@ pub fn hover(
     // 1) Local variable / parameter in the enclosing function.
     if !qualified.contains("::") {
         if let Some(ty_text) = scope_query::local_type_at(source, &file, offset, &bare) {
-            let ty_display = if ty_text.is_empty() { "?" } else { ty_text.as_str() };
-            let md = format!(
-                "```angelscript\n(local) {} {}\n```",
-                ty_display, bare
-            );
+            let ty_display = if ty_text.is_empty() {
+                "?"
+            } else {
+                ty_text.as_str()
+            };
+            let md = format!("```angelscript\n(local) {} {}\n```", ty_display, bare);
             return Some(markdown_hover(md));
         }
     }
@@ -109,8 +110,16 @@ fn markdown_hover(value: String) -> Hover {
 
 fn format_workspace_symbol(sym: &crate::symbols::scope::Symbol) -> Option<String> {
     match &sym.kind {
-        SymbolKind::Function { return_type, params, .. } => {
-            let rt = if return_type.is_empty() { "void" } else { return_type.as_str() };
+        SymbolKind::Function {
+            return_type,
+            params,
+            ..
+        } => {
+            let rt = if return_type.is_empty() {
+                "void"
+            } else {
+                return_type.as_str()
+            };
             let params_str: Vec<String> = params
                 .iter()
                 .map(|(ty, name)| format!("{} {}", ty, name))
@@ -119,13 +128,17 @@ fn format_workspace_symbol(sym: &crate::symbols::scope::Symbol) -> Option<String
             Some(format!("```angelscript\n{}\n```", sig))
         }
         SymbolKind::Variable { type_name } => {
-            let ty = if type_name.is_empty() { "?" } else { type_name.as_str() };
+            let ty = if type_name.is_empty() {
+                "?"
+            } else {
+                type_name.as_str()
+            };
             Some(format!("```angelscript\n{} {}\n```", ty, sym.name))
         }
-        SymbolKind::Class { parent, .. } => {
+        SymbolKind::Class { parents, .. } => {
             let mut s = format!("class {}", sym.name);
-            if let Some(p) = parent {
-                s.push_str(&format!(" : {}", p));
+            if !parents.is_empty() {
+                s.push_str(&format!(" : {}", parents.join(", ")));
             }
             Some(format!("```angelscript\n{}\n```", s))
         }
@@ -133,10 +146,7 @@ fn format_workspace_symbol(sym: &crate::symbols::scope::Symbol) -> Option<String
             Some(format!("```angelscript\ninterface {}\n```", sym.name))
         }
         SymbolKind::Enum { values } => {
-            let lines: Vec<String> = values
-                .iter()
-                .map(|(n, _)| format!("  {},", n))
-                .collect();
+            let lines: Vec<String> = values.iter().map(|(n, _)| format!("  {},", n)).collect();
             Some(format!(
                 "```angelscript\nenum {} {{\n{}\n}}\n```",
                 sym.name,
@@ -153,7 +163,10 @@ fn format_workspace_symbol(sym: &crate::symbols::scope::Symbol) -> Option<String
             ))
         }
         SymbolKind::Namespace => Some(format!("```angelscript\nnamespace {}\n```", sym.name)),
-        SymbolKind::Funcdef { return_type, params } => {
+        SymbolKind::Funcdef {
+            return_type,
+            params,
+        } => {
             let params_str: Vec<String> = params
                 .iter()
                 .map(|(ty, name)| format!("{} {}", ty, name))

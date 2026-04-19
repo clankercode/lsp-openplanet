@@ -91,7 +91,12 @@ pub struct CoreEnum {
     pub ns: Option<String>,
     pub name: String,
     #[serde(default)]
-    pub values: HashMap<String, i64>,
+    pub values: HashMap<String, EnumValue>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnumValue {
+    pub v: i64,
 }
 
 impl CoreDatabase {
@@ -109,23 +114,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn core_json_path() -> PathBuf {
-        // Try known locations for the test JSON
-        let paths = [
-            PathBuf::from(env!("HOME")).join("src/openplanet/tm-scripts/OpenplanetCore.json"),
-        ];
-        for p in &paths {
-            if p.exists() {
-                return p.clone();
-            }
-        }
-        panic!("OpenplanetCore.json not found. Looked in: {:?}", paths);
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/OpenplanetCore.json")
     }
 
     #[test]
     fn test_load_core_json() {
-        let path = PathBuf::from(env!("HOME")).join("src/openplanet/tm-scripts/OpenplanetCore.json");
-        if !path.exists() { return; }
         let path = core_json_path();
+        if !path.exists() {
+            panic!("OpenplanetCore.json not found at {:?}", path);
+        }
         let db = CoreDatabase::load_from_file(&path).unwrap();
         assert!(!db.op.is_empty());
         assert!(!db.functions.is_empty(), "expected functions");
@@ -135,8 +132,10 @@ mod tests {
 
     #[test]
     fn test_core_has_known_namespaces() {
-        let path = PathBuf::from(env!("HOME")).join("src/openplanet/tm-scripts/OpenplanetCore.json");
-        if !path.exists() { return; }
+        let path = core_json_path();
+        if !path.exists() {
+            panic!("OpenplanetCore.json not found at {:?}", path);
+        }
         let db = CoreDatabase::load_from_file(&path).unwrap();
         let func_nss: std::collections::HashSet<_> = db
             .functions
@@ -149,12 +148,15 @@ mod tests {
 
     #[test]
     fn test_core_ui_begin() {
-        let path = PathBuf::from(env!("HOME")).join("src/openplanet/tm-scripts/OpenplanetCore.json");
-        if !path.exists() { return; }
+        let path = core_json_path();
+        if !path.exists() {
+            panic!("OpenplanetCore.json not found at {:?}", path);
+        }
         let db = CoreDatabase::load_from_file(&path).unwrap();
-        let ui_begin = db.functions.iter().find(|f| {
-            f.ns.as_deref() == Some("UI") && f.name == "Begin"
-        });
+        let ui_begin = db
+            .functions
+            .iter()
+            .find(|f| f.ns.as_deref() == Some("UI") && f.name == "Begin");
         assert!(ui_begin.is_some(), "expected UI::Begin function");
     }
 }

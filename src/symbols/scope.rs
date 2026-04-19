@@ -13,7 +13,9 @@ pub struct Symbol {
 
 #[derive(Debug, Clone)]
 pub enum SymbolKind {
-    Variable { type_name: String },
+    Variable {
+        type_name: String,
+    },
     Function {
         return_type: String,
         params: Vec<(String, String)>,
@@ -21,12 +23,25 @@ pub enum SymbolKind {
         /// `params.len()`. For arity checking: `min_args..=params.len()`.
         min_args: usize,
     },
-    Class { parent: Option<String>, members: Vec<String> },
-    Interface { methods: Vec<String> },
-    Enum { values: Vec<(String, Option<i64>)> },
+    Class {
+        parents: Vec<String>,
+        members: Vec<String>,
+    },
+    Interface {
+        methods: Vec<String>,
+    },
+    Enum {
+        values: Vec<(String, Option<i64>)>,
+    },
     Namespace,
-    Funcdef { return_type: String, params: Vec<(String, String)> },
-    EnumValue { enum_name: String, value: Option<i64> },
+    Funcdef {
+        return_type: String,
+        params: Vec<(String, String)>,
+    },
+    EnumValue {
+        enum_name: String,
+        value: Option<i64>,
+    },
 }
 
 #[derive(Debug)]

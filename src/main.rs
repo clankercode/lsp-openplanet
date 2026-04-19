@@ -13,10 +13,7 @@ FLAGS:
 
 COMMANDS:
     check            Run workspace diagnostics for an OpenPlanet plugin
-
-CHECK OPTIONS:
-    --typedb-dir DIR Load OpenplanetCore.json and OpenplanetNext.json from DIR
-    --no-typedb      Run without Openplanet/Nadeo type database files
+                     Run `openplanet-lsp check --help` for check-specific options
 
 With no flags, runs as a stdio LSP server (JSON-RPC over stdin/stdout).
 ";

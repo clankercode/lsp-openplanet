@@ -15,6 +15,7 @@ use super::repr::{PrimitiveType, TypeRepr};
 use super::resolver::TypeResolver;
 use crate::lexer::Span;
 use crate::parser::ast::*;
+use crate::symbols::scope::SymbolKind;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeDiagnosticKind {
@@ -135,6 +136,7 @@ struct ScopeFrame {
 #[derive(Debug, Clone)]
 struct ClassCtx {
     name: String,
+    is_mixin: bool,
     /// (member_name, resolved_type) — one entry per declarator. For
     /// methods we store the return type as a reasonable approximation
     /// (used so `this.foo()` or bare `foo` in a method doesn't false-
@@ -150,10 +152,10 @@ pub struct Checker<'a> {
     class_stack: Vec<ClassCtx>,
     namespace_stack: Vec<String>,
     /// Map of fully-qualified workspace class names declared in this file
-    /// to `(parent_name, members)`. Used so implicit-this member lookups
+    /// to `(parent_names, members)`. Used so implicit-this member lookups
     /// can walk the parent chain for cross-method resolution within the
     /// same file.
-    file_classes: std::collections::HashMap<String, (Option<String>, Vec<(String, TypeRepr)>)>,
+    file_classes: std::collections::HashMap<String, (Vec<String>, Vec<(String, TypeRepr)>)>,
     /// Set of `(class_qualname, method_name)` for workspace-local methods
     /// declared with a trailing `const` qualifier. Used by AC19
     /// (method-call const propagation): when a non-const method is
@@ -198,23 +200,27 @@ impl<'a> Checker<'a> {
                         Some(n) => format!("{}::{}", n, simple),
                         None => simple.clone(),
                     };
-                    let parent = cls.base_classes.first().map(|b| {
-                        // Use a throwaway resolver purely for the display
-                        // string so we get the same qualified form other
-                        // lookups use — discard diagnostics.
-                        let mut r = TypeResolver::new(self.scope, self.source)
-                            .with_namespace_stack(
-                                ns.map(|n| n.split("::").map(|s| s.to_string()).collect())
-                                    .unwrap_or_default(),
-                            );
-                        let repr = r.resolve(b);
-                        let _ = r.take_diagnostics();
-                        match repr.unwrap_const().unwrap_handle() {
-                            TypeRepr::Named(n) => n.clone(),
-                            TypeRepr::Error(n) => n.clone(),
-                            other => other.display(),
-                        }
-                    });
+                    let parents = cls
+                        .base_classes
+                        .iter()
+                        .map(|b| {
+                            // Use a throwaway resolver purely for the display
+                            // string so we get the same qualified form other
+                            // lookups use — discard diagnostics.
+                            let mut r = TypeResolver::new(self.scope, self.source)
+                                .with_namespace_stack(
+                                    ns.map(|n| n.split("::").map(|s| s.to_string()).collect())
+                                        .unwrap_or_default(),
+                                );
+                            let repr = r.resolve(b);
+                            let _ = r.take_diagnostics();
+                            match repr.unwrap_const().unwrap_handle() {
+                                TypeRepr::Named(n) => n.clone(),
+                                TypeRepr::Error(n) => n.clone(),
+                                other => other.display(),
+                            }
+                        })
+                        .collect();
                     let mut members: Vec<(String, TypeRepr)> = Vec::new();
                     for m in &cls.members {
                         match m {
@@ -232,10 +238,8 @@ impl<'a> Checker<'a> {
                                     repr
                                 };
                                 for d in &var.declarators {
-                                    members.push((
-                                        d.name.text(self.source).to_string(),
-                                        ty.clone(),
-                                    ));
+                                    members
+                                        .push((d.name.text(self.source).to_string(), ty.clone()));
                                 }
                             }
                             ClassMember::Property(prop) => {
@@ -251,10 +255,7 @@ impl<'a> Checker<'a> {
                                     let _ = r.take_diagnostics();
                                     repr
                                 };
-                                members.push((
-                                    prop.name.text(self.source).to_string(),
-                                    ty,
-                                ));
+                                members.push((prop.name.text(self.source).to_string(), ty));
                             }
                             ClassMember::Method(func) => {
                                 let ret = {
@@ -269,8 +270,7 @@ impl<'a> Checker<'a> {
                                     let _ = r.take_diagnostics();
                                     repr
                                 };
-                                let method_name =
-                                    func.name.text(self.source).to_string();
+                                let method_name = func.name.text(self.source).to_string();
                                 // AC19: remember whether this method has a
                                 // trailing `const` qualifier so
                                 // `call_type::Member` can skip the
@@ -285,7 +285,7 @@ impl<'a> Checker<'a> {
                             _ => {}
                         }
                     }
-                    self.file_classes.insert(qual, (parent, members));
+                    self.file_classes.insert(qual, (parents, members));
                 }
                 Item::Namespace(n) => {
                     let sub_ns = match ns {
@@ -340,6 +340,48 @@ impl<'a> Checker<'a> {
         self.class_stack.last()
     }
 
+    fn collect_workspace_base_members(
+        &self,
+        class_name: &str,
+        out: &mut Vec<(String, TypeRepr)>,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        if !visited.insert(class_name.to_string()) {
+            return;
+        }
+
+        if let Some((_, members)) = self.file_classes.get(class_name) {
+            out.extend(members.clone());
+        } else {
+            let prefix = format!("{}::", class_name);
+            for s in self.scope.workspace.all_symbols() {
+                if !s.name.starts_with(&prefix) {
+                    continue;
+                }
+                let member_name = s.name.strip_prefix(&prefix).unwrap_or(&s.name);
+                match &s.kind {
+                    SymbolKind::Variable { type_name } => {
+                        out.push((
+                            member_name.to_string(),
+                            TypeRepr::parse_type_string(type_name),
+                        ));
+                    }
+                    SymbolKind::Function { return_type, .. } => {
+                        out.push((
+                            member_name.to_string(),
+                            TypeRepr::parse_type_string(return_type),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for parent in self.scope.workspace_class_parents(class_name) {
+            self.collect_workspace_base_members(&parent, out, visited);
+        }
+    }
+
     /// Walks the class stack innermost-first and returns the first member
     /// whose name matches. For nested-class methods (rare in AngelScript)
     /// the innermost class wins. Also walks the parent-class chain via
@@ -352,9 +394,7 @@ impl<'a> Checker<'a> {
     fn lookup_class_member(&self, name: &str) -> Option<TypeRepr> {
         let getter = format!("get_{}", name);
         let setter = format!("set_{}", name);
-        let matches = |mname: &str| -> bool {
-            mname == name || mname == getter || mname == setter
-        };
+        let matches = |mname: &str| -> bool { mname == name || mname == getter || mname == setter };
         for cls in self.class_stack.iter().rev() {
             for (mname, ty) in &cls.members {
                 if matches(mname) {
@@ -365,10 +405,15 @@ impl<'a> Checker<'a> {
             // index first — iter 24 relies on this shortcut so same-file
             // const-wrapped parent fields retain their `Const(_)` layer
             // (the workspace walker strips const via type-string parse).
-            if let Some((parent, _)) = self.file_classes.get(&cls.name) {
-                let mut current = parent.clone();
+            if let Some((parents, _)) = self.file_classes.get(&cls.name) {
+                let mut current: std::collections::VecDeque<String> = parents.clone().into();
+                let mut visited: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 let mut hops = 0usize;
-                while let Some(pname) = current {
+                while let Some(pname) = current.pop_front() {
+                    if !visited.insert(pname.clone()) {
+                        continue;
+                    }
                     hops += 1;
                     if hops > 32 {
                         break;
@@ -379,7 +424,7 @@ impl<'a> Checker<'a> {
                                 return Some(ty.clone());
                             }
                         }
-                        current = pp.clone();
+                        current.extend(pp.iter().cloned());
                     } else {
                         // Parent is not in this file — ask the workspace
                         // walker to continue the chain. It has its own
@@ -457,7 +502,7 @@ impl<'a> Checker<'a> {
             }
             Item::VarDecl(var) => self.check_var_decl_global(var),
             Item::Property(prop) => {
-                let _ = self.resolve_type_expr(&prop.type_expr);
+                let prop_ty = self.resolve_type_expr(&prop.type_expr);
                 if let Some(body) = &prop.getter {
                     self.push_frame();
                     self.check_function_body(body);
@@ -465,6 +510,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Some((_, body)) = &prop.setter {
                     self.push_frame();
+                    self.define_local("value".to_string(), prop_ty.clone(), prop.span);
                     self.check_function_body(body);
                     self.pop_frame();
                 }
@@ -480,7 +526,12 @@ impl<'a> Checker<'a> {
 
         // Build the class context up front so every method sees the full
         // set of sibling members (including ones declared after it).
-        let class_name = cls.name.text(self.source).to_string();
+        let simple_class_name = cls.name.text(self.source).to_string();
+        let class_name = if self.namespace_stack.is_empty() {
+            simple_class_name.clone()
+        } else {
+            format!("{}::{}", self.namespace_stack.join("::"), simple_class_name)
+        };
         let mut members: Vec<(String, TypeRepr)> = Vec::new();
         for member in &cls.members {
             match member {
@@ -528,8 +579,21 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // AngelScript mixin classes contribute members directly to the class
+        // body. Pull those in from the workspace symbol table so bare method
+        // references like `DrawPlayerLabel(...)` resolve inside classes that
+        // inherit `HasPlayerLabelDraw`.
+        for base in &cls.base_classes {
+            let Some(base_name) = Self::base_type_name(&self.resolve_type_expr(base)) else {
+                continue;
+            };
+            let mut visited = std::collections::HashSet::new();
+            self.collect_workspace_base_members(&base_name, &mut members, &mut visited);
+        }
+
         self.push_class(ClassCtx {
             name: class_name,
+            is_mixin: cls.is_mixin,
             members,
         });
 
@@ -570,7 +634,7 @@ impl<'a> Checker<'a> {
                 self.check_function_decl(f, false);
             }
             ClassMember::Property(prop) => {
-                let _ = self.resolve_type_expr(&prop.type_expr);
+                let prop_ty = self.resolve_type_expr(&prop.type_expr);
                 if let Some(body) = &prop.getter {
                     self.push_frame();
                     self.check_function_body(body);
@@ -578,6 +642,7 @@ impl<'a> Checker<'a> {
                 }
                 if let Some((_, body)) = &prop.setter {
                     self.push_frame();
+                    self.define_local("value".to_string(), prop_ty.clone(), prop.span);
                     self.check_function_body(body);
                     self.pop_frame();
                 }
@@ -634,13 +699,23 @@ impl<'a> Checker<'a> {
                 else_branch: Some(eb),
                 ..
             } => self.stmt_terminates(then_branch) && self.stmt_terminates(eb),
+            StmtKind::TryCatch {
+                try_body,
+                catch_body,
+            } => self.stmt_terminates(try_body) && self.stmt_terminates(catch_body),
             StmtKind::Switch { cases, .. } => {
-                let has_default =
-                    cases.iter().any(|c| matches!(c.label, SwitchLabel::Default));
-                has_default
-                    && cases
-                        .iter()
-                        .all(|c| self.stmts_terminate(&c.stmts))
+                let has_default = cases
+                    .iter()
+                    .any(|c| matches!(c.label, SwitchLabel::Default));
+                let mut suffix_terminates = true;
+                for case in cases.iter().rev() {
+                    suffix_terminates = if case.stmts.is_empty() {
+                        suffix_terminates
+                    } else {
+                        self.stmts_terminate(&case.stmts) && suffix_terminates
+                    };
+                }
+                has_default && suffix_terminates
             }
             _ => false,
         }
@@ -686,11 +761,7 @@ impl<'a> Checker<'a> {
                 }
                 declared_ty.clone()
             };
-            self.define_local(
-                d.name.text(self.source).to_string(),
-                local_ty,
-                d.name.span,
-            );
+            self.define_local(d.name.text(self.source).to_string(), local_ty, d.name.span);
         }
     }
 
@@ -887,12 +958,7 @@ impl<'a> Checker<'a> {
     /// the lookup fails against a known (non-error) object type. When the
     /// object type is `Error(_)` we silently propagate `Error` so we don't
     /// double-report the same root cause.
-    fn member_access_type(
-        &mut self,
-        obj_ty: &TypeRepr,
-        member: &Ident,
-        span: Span,
-    ) -> TypeRepr {
+    fn member_access_type(&mut self, obj_ty: &TypeRepr, member: &Ident, span: Span) -> TypeRepr {
         // Propagate error without re-reporting.
         if obj_ty.is_error() {
             return TypeRepr::Error(String::new());
@@ -1069,8 +1135,7 @@ impl<'a> Checker<'a> {
             }
             _ => {
                 // 2+ overloads: walk args once, run real resolution.
-                let arg_tys: Vec<TypeRepr> =
-                    args.iter().map(|a| self.expr_type(a)).collect();
+                let arg_tys: Vec<TypeRepr> = args.iter().map(|a| self.expr_type(a)).collect();
                 match resolve_overload(&overloads, &arg_tys) {
                     OverloadMatch::Unique(sig) => {
                         // A unique winner means every primitive arg either
@@ -1161,6 +1226,14 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Error(String::new());
                 }
+                if self
+                    .current_class()
+                    .and_then(|cls| self.scope.workspace_class_member(&cls.name, &name))
+                    .is_some()
+                {
+                    self.walk_args(args);
+                    return TypeRepr::Error(String::new());
+                }
                 // 3. Namespace-scoped lookups (inside a namespace block).
                 //    Try function return type first (for a real typed
                 //    return); fall back to any-kind qualified lookup so
@@ -1205,6 +1278,18 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Named(name);
                 }
+                if let Some(resolved) = self.scope.resolve_unqualified(&name) {
+                    self.walk_args(args);
+                    return TypeRepr::Named(resolved);
+                }
+                if let Some(ext) = self.scope.external {
+                    if let Some(enum_name) = ext.find_by_short_name(&name).first() {
+                        if ext.lookup_enum(enum_name).is_some() {
+                            self.walk_args(args);
+                            return TypeRepr::Named(enum_name.clone());
+                        }
+                    }
+                }
                 if self.scope.has_global_ident(&name) {
                     self.walk_args(args);
                     return TypeRepr::Error(String::new());
@@ -1212,6 +1297,12 @@ impl<'a> Checker<'a> {
                 // 6. AngelScript / Openplanet hardcoded builtins
                 //    (e.g. `CoroutineFunc(X)` constructor).
                 if builtins::is_builtin_type(&name) || builtins::is_builtin_global(&name) {
+                    self.walk_args(args);
+                    return TypeRepr::Error(String::new());
+                }
+                // Bare unresolved calls inside a mixin class body can be
+                // requirements that the consuming class provides.
+                if self.current_class().is_some_and(|cls| cls.is_mixin) {
                     self.walk_args(args);
                     return TypeRepr::Error(String::new());
                 }
@@ -1259,29 +1350,21 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if let Some(t) = self
-                    .scope
-                    .lookup_method_return(&type_name, &member_name)
-                {
+                if let Some(t) = self.scope.lookup_method_return(&type_name, &member_name) {
                     // External types: no const-qualifier metadata yet, so
                     // don't over-fire — see AC19 deferred follow-up.
                     return t;
                 }
                 // Workspace-local class: any member is fine — silence.
                 for cls in &self.class_stack {
-                    if cls.name == type_name
-                        && cls.members.iter().any(|(n, _)| n == &member_name)
-                    {
+                    if cls.name == type_name && cls.members.iter().any(|(n, _)| n == &member_name) {
                         return TypeRepr::Error(String::new());
                     }
                 }
                 // Cross-file inherited method: walk the workspace class
                 // hierarchy so an inherited method's real return type
                 // (iter 28) flows into downstream arg-type checks.
-                if let Some(t) = self
-                    .scope
-                    .workspace_class_member(&type_name, &member_name)
-                {
+                if let Some(t) = self.scope.workspace_class_member(&type_name, &member_name) {
                     return t;
                 }
                 if !self.scope.is_external_type(&type_name) {
@@ -1349,6 +1432,12 @@ impl<'a> Checker<'a> {
                 if let Some(ty) = self.lookup_class_member(&name) {
                     return ty;
                 }
+                if let Some(ty) = self
+                    .current_class()
+                    .and_then(|cls| self.scope.workspace_class_member(&cls.name, &name))
+                {
+                    return ty;
+                }
                 // 3. Namespace-scoped global: try progressively shorter
                 //    namespace prefixes.  Inside Ns "Outer::Inner", try
                 //    "Outer::Inner::name" first, then "Outer::name".
@@ -1356,11 +1445,19 @@ impl<'a> Checker<'a> {
                     let ns = self.namespace_stack[..depth].join("::");
                     let qualified = format!("{}::{}", ns, name);
                     if self.scope.has_global_ident(&qualified) {
+                        if self.scope.lookup_function_return(&qualified).is_some() {
+                            return TypeRepr::Error(String::new());
+                        }
                         return TypeRepr::Named(qualified);
                     }
                 }
                 // 4. Global top-level lookup.
                 if self.scope.has_global_ident(&name) {
+                    if self.scope.has_function(&format!("get_{}", name))
+                        || self.scope.has_function(&format!("set_{}", name))
+                    {
+                        return TypeRepr::Error(String::new());
+                    }
                     return TypeRepr::Named(name);
                 }
                 // 5. AngelScript / Openplanet hardcoded builtins — silent.
@@ -1401,9 +1498,7 @@ impl<'a> Checker<'a> {
                 // of `Const(T)` still type-check fine because iter 24's
                 // const check only fires on assignment LHS.
                 if let Some(elem) = obj_ty.array_element_type() {
-                    if Self::receiver_is_const(&obj_ty)
-                        && !matches!(elem, TypeRepr::Const(_))
-                    {
+                    if Self::receiver_is_const(&obj_ty) && !matches!(elem, TypeRepr::Const(_)) {
                         return TypeRepr::Const(Box::new(elem.clone()));
                     }
                     return elem.clone();
@@ -1411,7 +1506,10 @@ impl<'a> Checker<'a> {
                 // Dictionary-like and everything else: stay silent.
                 TypeRepr::Error(String::new())
             }
-            ExprKind::Cast { target_type, expr: inner } => {
+            ExprKind::Cast {
+                target_type,
+                expr: inner,
+            } => {
                 let _ = self.resolve_type_expr(target_type);
                 let _ = self.expr_type(inner);
                 TypeRepr::Error(String::new())
@@ -1476,8 +1574,7 @@ impl<'a> Checker<'a> {
                     self.diagnostics.push(TypeDiagnostic {
                         span: lhs.span,
                         kind: TypeDiagnosticKind::HandleValueMismatch {
-                            detail: "left-hand side of @= is not a handle type"
-                                .to_string(),
+                            detail: "left-hand side of @= is not a handle type".to_string(),
                         },
                     });
                 }
@@ -1487,8 +1584,7 @@ impl<'a> Checker<'a> {
                     self.diagnostics.push(TypeDiagnostic {
                         span: rhs.span,
                         kind: TypeDiagnosticKind::HandleValueMismatch {
-                            detail: "right-hand side of @= must be a handle or null"
-                                .to_string(),
+                            detail: "right-hand side of @= must be a handle or null".to_string(),
                         },
                     });
                 }
@@ -1546,11 +1642,7 @@ impl<'a> Checker<'a> {
                 for p in params {
                     let ty = self.resolve_type_expr(&p.type_expr);
                     if let Some(name) = &p.name {
-                        self.define_local(
-                            name.text(self.source).to_string(),
-                            ty,
-                            name.span,
-                        );
+                        self.define_local(name.text(self.source).to_string(), ty, name.span);
                     }
                 }
                 self.check_function_body(body);
@@ -1633,10 +1725,7 @@ enum OverloadMatch<'a> {
 /// - non-primitive on either side, or Error-typed arg: 0 (neutral)
 ///
 /// A candidate must first pass arity (`arg_tys.len() ∈ [min_args, params]`).
-fn resolve_overload<'a>(
-    overloads: &'a [OverloadSig],
-    arg_tys: &[TypeRepr],
-) -> OverloadMatch<'a> {
+fn resolve_overload<'a>(overloads: &'a [OverloadSig], arg_tys: &[TypeRepr]) -> OverloadMatch<'a> {
     if overloads.is_empty() {
         return OverloadMatch::NoOverloads;
     }
@@ -1789,8 +1878,7 @@ mod tests {
 
     #[test]
     fn namespace_scoped_ident_resolves() {
-        let diags =
-            check("namespace Ns { class Foo {} void f() { Foo@ x; } }");
+        let diags = check("namespace Ns { class Foo {} void f() { Foo@ x; } }");
         assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
     }
 
@@ -1800,11 +1888,7 @@ mod tests {
         // `base_type_name(this) → current class` + the in-memory
         // ClassCtx members, so `this.x` should not emit a diagnostic.
         let diags = check("class C { int x; void f() { int y = this.x; } }");
-        assert!(
-            diags.is_empty(),
-            "expected no diagnostics, got {:?}",
-            diags
-        );
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
     }
 
     #[test]
@@ -1887,6 +1971,28 @@ mod tests {
     }
 
     #[test]
+    fn property_setter_has_implicit_value_local() {
+        let source = r#"
+            bool flag {
+                get { return false; }
+                set { bool x = value; }
+            }
+        "#;
+        let diags = check(source);
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(
+                |d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "value"),
+            )
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no undefined-ident for setter value, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn auto_local_inferred_from_int_literal() {
         let diags = check("void f() { auto x = 42; int y = x; }");
         assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
@@ -1905,7 +2011,12 @@ mod tests {
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
             .collect();
-        assert_eq!(missing.len(), 1, "expected 1 MissingReturn, got {:?}", diags);
+        assert_eq!(
+            missing.len(),
+            1,
+            "expected 1 MissingReturn, got {:?}",
+            diags
+        );
         assert_eq!(
             missing[0].kind,
             TypeDiagnosticKind::MissingReturn {
@@ -1921,7 +2032,11 @@ mod tests {
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
             .collect();
-        assert!(missing.is_empty(), "expected no MissingReturn, got {:?}", diags);
+        assert!(
+            missing.is_empty(),
+            "expected no MissingReturn, got {:?}",
+            diags
+        );
     }
 
     #[test]
@@ -1931,7 +2046,11 @@ mod tests {
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
             .collect();
-        assert!(missing.is_empty(), "expected no MissingReturn, got {:?}", diags);
+        assert!(
+            missing.is_empty(),
+            "expected no MissingReturn, got {:?}",
+            diags
+        );
     }
 
     #[test]
@@ -1941,7 +2060,58 @@ mod tests {
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
             .collect();
-        assert_eq!(missing.len(), 1, "expected 1 MissingReturn, got {:?}", diags);
+        assert_eq!(
+            missing.len(),
+            1,
+            "expected 1 MissingReturn, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn try_catch_with_returns_in_both_branches_suppresses_missing_return() {
+        let diags = check("int f() { try { return 1; } catch { return 2; } }");
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "expected no MissingReturn for try/catch with returns, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn switch_with_fallthrough_labels_and_default_terminates() {
+        let diags =
+            check("int f(int x) { switch (x) { case 0: case 1: return 1; default: return 2; } }");
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "expected no MissingReturn for fallthrough switch returns, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn switch_with_non_terminating_middle_case_still_reports_missing_return() {
+        let diags = check(
+            "int f(int x) { switch (x) { case 0: return 1; case 1: break; default: return 2; } }",
+        );
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. }))
+            .collect();
+        assert_eq!(
+            missing.len(),
+            1,
+            "expected MissingReturn when a switch case can break out, got {:?}",
+            diags
+        );
     }
 
     #[test]
@@ -1951,7 +2121,11 @@ mod tests {
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
             .collect();
-        assert!(bad.is_empty(), "expected no ArgCountMismatch, got {:?}", diags);
+        assert!(
+            bad.is_empty(),
+            "expected no ArgCountMismatch, got {:?}",
+            diags
+        );
     }
 
     #[test]
@@ -1999,7 +2173,11 @@ mod tests {
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
             .collect();
-        assert!(bad.is_empty(), "expected no ArgCountMismatch, got {:?}", diags);
+        assert!(
+            bad.is_empty(),
+            "expected no ArgCountMismatch, got {:?}",
+            diags
+        );
     }
 
     #[test]
@@ -2021,7 +2199,9 @@ mod tests {
         let diags = check("class C { void f() { auto x = super; } }");
         let undef: Vec<_> = diags
             .iter()
-            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "super"))
+            .filter(
+                |d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "super"),
+            )
             .collect();
         assert!(
             undef.is_empty(),
@@ -2195,7 +2375,11 @@ mod tests {
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
             .collect();
-        assert!(bad.is_empty(), "expected no ArgTypeMismatch, got {:?}", diags);
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch, got {:?}",
+            diags
+        );
     }
 
     #[test]
@@ -2324,12 +2508,7 @@ mod tests {
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
             .collect();
-        assert_eq!(
-            bad.len(),
-            1,
-            "expected 1 ConstViolation, got {:?}",
-            diags
-        );
+        assert_eq!(bad.len(), 1, "expected 1 ConstViolation, got {:?}", diags);
     }
 
     #[test]
@@ -2348,18 +2527,12 @@ mod tests {
 
     #[test]
     fn const_field_assign_fires() {
-        let diags =
-            check("class C { const int x; } void f() { C@ c; c.x = 6; }");
+        let diags = check("class C { const int x; } void f() { C@ c; c.x = 6; }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
             .collect();
-        assert_eq!(
-            bad.len(),
-            1,
-            "expected 1 ConstViolation, got {:?}",
-            diags
-        );
+        assert_eq!(bad.len(), 1, "expected 1 ConstViolation, got {:?}", diags);
     }
 
     #[test]
@@ -2369,12 +2542,7 @@ mod tests {
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
             .collect();
-        assert_eq!(
-            bad.len(),
-            1,
-            "expected 1 ConstViolation, got {:?}",
-            diags
-        );
+        assert_eq!(bad.len(), 1, "expected 1 ConstViolation, got {:?}", diags);
     }
 
     #[test]
@@ -2385,8 +2553,7 @@ mod tests {
         // but the handle is mutable; see
         // `const_handle_not_const_contents` and
         // `handle_assign_to_handle_const_fires` below.)
-        let diags =
-            check("class C {} void f() { C@ const a = null; @a = null; }");
+        let diags = check("class C {} void f() { C@ const a = null; @a = null; }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
@@ -2404,9 +2571,8 @@ mod tests {
         // pointee is mutable. Assigning to a field through it must NOT
         // fire ConstViolation. Iter 32 dropped this test because the
         // parser collapsed both orderings; iter 38 reinstates it.
-        let diags = check(
-            "class Foo { int field; } void f() { Foo@ const h = null; h.field = 5; }",
-        );
+        let diags =
+            check("class Foo { int field; } void f() { Foo@ const h = null; h.field = 5; }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
@@ -2422,9 +2588,8 @@ mod tests {
     fn const_pointee_fires_on_field_write() {
         // AC20 dual: `const Foo@ h` — the pointee is const, the handle is
         // mutable. `h.field = 5` MUST fire ConstViolation.
-        let diags = check(
-            "class Foo { int field; } void f() { const Foo@ h = null; h.field = 5; }",
-        );
+        let diags =
+            check("class Foo { int field; } void f() { const Foo@ h = null; h.field = 5; }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
@@ -2442,19 +2607,12 @@ mod tests {
         // `const array<int>@ arr; arr[0] = 5;` — the receiver is const,
         // so indexing returns a `Const(int)` lvalue. Assigning into it
         // must fire a ConstViolation (iter 32).
-        let diags = check(
-            "void f() { const array<int>@ arr = null; arr[0] = 5; }",
-        );
+        let diags = check("void f() { const array<int>@ arr = null; arr[0] = 5; }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
             .collect();
-        assert_eq!(
-            bad.len(),
-            1,
-            "expected 1 ConstViolation, got {:?}",
-            diags
-        );
+        assert_eq!(bad.len(), 1, "expected 1 ConstViolation, got {:?}", diags);
     }
 
     #[test]
@@ -2463,9 +2621,7 @@ mod tests {
         // NOT fire ConstViolation — only assignment through the const
         // element should. (Iter 32 wraps the read in `Const(int)`, but
         // iter 24's const check only looks at assignment LHS.)
-        let diags = check(
-            "void f() { const array<int>@ arr = null; int x = arr[0]; }",
-        );
+        let diags = check("void f() { const array<int>@ arr = null; int x = arr[0]; }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
@@ -2482,9 +2638,8 @@ mod tests {
         // `const Foo@ f; f.field = 5;` where `field` is a non-const
         // `int` must still fire ConstViolation because the receiver is
         // const — iter 32 propagates that through `member_access_type`.
-        let diags = check(
-            "class Foo { int field; } void f() { const Foo@ x = null; x.field = 5; }",
-        );
+        let diags =
+            check("class Foo { int field; } void f() { const Foo@ x = null; x.field = 5; }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
@@ -2558,9 +2713,7 @@ mod tests {
     #[test]
     fn non_const_member_receiver_not_const() {
         // Non-const receiver: `Foo f; f.field = 5;` must NOT fire.
-        let diags = check(
-            "class Foo { int field; } void f() { Foo x; x.field = 5; }",
-        );
+        let diags = check("class Foo { int field; } void f() { Foo x; x.field = 5; }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
@@ -2647,9 +2800,7 @@ mod tests {
 
     #[test]
     fn overload_exact_match_picked() {
-        let diags = check(
-            "void f(int a) {} void f(string a) {} void main() { f(1); }",
-        );
+        let diags = check("void f(int a) {} void f(string a) {} void main() { f(1); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
@@ -2663,9 +2814,7 @@ mod tests {
 
     #[test]
     fn overload_convertible_match_picked() {
-        let diags = check(
-            "void f(float a) {} void f(string a) {} void main() { f(1); }",
-        );
+        let diags = check("void f(float a) {} void f(string a) {} void main() { f(1); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
@@ -2679,9 +2828,7 @@ mod tests {
 
     #[test]
     fn overload_no_match_all_fail() {
-        let diags = check(
-            "void f(int a) {} void f(bool a) {} void main() { f(\"hi\"); }",
-        );
+        let diags = check("void f(int a) {} void f(bool a) {} void main() { f(\"hi\"); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
@@ -2695,9 +2842,8 @@ mod tests {
 
     #[test]
     fn overload_ambiguous_silent() {
-        let diags = check(
-            "void f(int a, float b) {} void f(float a, int b) {} void main() { f(1, 1); }",
-        );
+        let diags =
+            check("void f(int a, float b) {} void f(float a, int b) {} void main() { f(1, 1); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
@@ -2711,9 +2857,7 @@ mod tests {
 
     #[test]
     fn overload_single_via_arg_count() {
-        let diags = check(
-            "void f(int a) {} void f(int a, int b) {} void main() { f(1); }",
-        );
+        let diags = check("void f(int a) {} void f(int a, int b) {} void main() { f(1); }");
         let count: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
@@ -2790,8 +2934,7 @@ mod tests {
         // Base is in file A with a method, Foo : Base in file B. Calling
         // `f.base_method()` must resolve through the cross-file chain.
         let base = "class Base { int base_method() { return 0; } }";
-        let main =
-            "class Foo : Base {} void use() { Foo f; int y = f.base_method(); }";
+        let main = "class Foo : Base {} void use() { Foo f; int y = f.base_method(); }";
         let diags = check_workspace(main, &[base]);
         let undef_member: Vec<_> = diags
             .iter()
@@ -2830,8 +2973,7 @@ mod tests {
         // the first hit), so no UndefinedMember fires and the lookup
         // succeeds without ever ascending the chain.
         let base = "class Base { int shared; }";
-        let main =
-            "class Foo : Base { string shared; } void use() { Foo f; string y = f.shared; }";
+        let main = "class Foo : Base { string shared; } void use() { Foo f; string y = f.shared; }";
         let diags = check_workspace(main, &[base]);
         let undef_member: Vec<_> = diags
             .iter()
@@ -2999,6 +3141,85 @@ mod tests {
     }
 
     #[test]
+    fn method_uses_namespaced_inherited_method_cross_file() {
+        let base =
+            "namespace Editor { class NetworkSerializable { int get_count() { return 0; } } }";
+        let main = "namespace Editor { class Child : NetworkSerializable { int wrap() { return get_count(); } } }";
+        let diags = check_workspace(main, &[base]);
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(_)))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no UndefinedIdentifier on namespaced inherited method call, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn method_uses_member_from_second_base_same_file() {
+        let diags = check(
+            "class BaseA {} class BaseB { int get_count() { return 0; } } class Child : BaseA, BaseB { int wrap() { return get_count(); } }",
+        );
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(_)))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no UndefinedIdentifier from second base, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn unresolved_bare_call_inside_mixin_class_is_silent() {
+        let diags = check("mixin class RequiresHook { void Run() { AfterLoadedState(); } }");
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "AfterLoadedState"))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no UndefinedIdentifier for mixin requirement call, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn constructor_uses_inherited_method_cross_file_with_namespace() {
+        let base = "namespace Editor { class NetworkSerializable { NetworkSerializable@ ReadFromNetworkBuffer(MemoryBuffer@ buf) { return this; } } class ItemSpec : NetworkSerializable {} }";
+        let main = "namespace Editor { class ItemSpecPriv : ItemSpec { ItemSpecPriv(MemoryBuffer@ buf) { ReadFromNetworkBuffer(buf); } } }";
+        let diags = check_workspace(main, &[base]);
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "ReadFromNetworkBuffer"))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no UndefinedIdentifier for inherited constructor call, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn constructor_uses_inherited_method_with_realistic_itemspec_shape() {
+        let base = "namespace Editor { shared class NetworkSerializable { NetworkSerializable@ ReadFromNetworkBuffer(MemoryBuffer@ buf) { return this; } } shared class ItemSpec : NetworkSerializable { ItemSpec() {} ItemSpec(MemoryBuffer@ buf) { ReadFromNetworkBuffer(buf); } } }";
+        let main = "namespace Editor { class ItemSpecPriv : ItemSpec { ItemSpecPriv() { super(); } ItemSpecPriv(MemoryBuffer@ buf) { super(); ReadFromNetworkBuffer(buf); } } }";
+        let diags = check_workspace(main, &[base]);
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "ReadFromNetworkBuffer"))
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no UndefinedIdentifier for realistic ItemSpec inheritance, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn method_uses_inherited_field_with_type_flows() {
         // Base has `int counter`. Child method passes the bare `counter`
         // to a `string` parameter — must fire ArgTypeMismatch, proving
@@ -3047,9 +3268,7 @@ mod tests {
         // `array<int>[0]` feeds an `int` parameter — should not fire
         // ArgTypeMismatch. Passing it to a `bool` parameter should fire
         // because the element type is propagating correctly.
-        let diags = check(
-            "void ti(int n) {} void f() { array<int> a; ti(a[0]); }",
-        );
+        let diags = check("void ti(int n) {} void f() { array<int> a; ti(a[0]); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
@@ -3060,9 +3279,7 @@ mod tests {
             diags
         );
 
-        let diags = check(
-            "void tb(bool b) {} void f() { array<int> a; tb(a[0]); }",
-        );
+        let diags = check("void tb(bool b) {} void f() { array<int> a; tb(a[0]); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
@@ -3079,9 +3296,7 @@ mod tests {
     fn array_length_is_numeric() {
         // `arr.Length` must flow as a uint into a uint-expected arg slot
         // without firing ArgTypeMismatch.
-        let diags = check(
-            "void tu(uint n) {} void f() { array<int> a; tu(a.Length); }",
-        );
+        let diags = check("void tu(uint n) {} void f() { array<int> a; tu(a.Length); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
@@ -3092,9 +3307,7 @@ mod tests {
             diags
         );
         // And the lowercase variant.
-        let diags = check(
-            "void tu(uint n) {} void f() { array<int> a; tu(a.length); }",
-        );
+        let diags = check("void tu(uint n) {} void f() { array<int> a; tu(a.length); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
@@ -3129,9 +3342,7 @@ mod tests {
     fn array_shorthand_syntax() {
         // `int[] arr;` followed by indexing should work identically to
         // `array<int> arr;`.
-        let diags = check(
-            "void ti(int n) {} void f() { int[] a; ti(a[0]); }",
-        );
+        let diags = check("void ti(int n) {} void f() { int[] a; ti(a[0]); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| {
@@ -3153,9 +3364,7 @@ mod tests {
     fn dictionary_no_false_positive() {
         // `dictionary d; d.Set("k", 1);` must not emit UndefinedMember
         // or any spurious diagnostic — dictionary is opaque for now.
-        let diags = check(
-            "void f() { dictionary d; d.Set(\"k\", 1); }",
-        );
+        let diags = check("void f() { dictionary d; d.Set(\"k\", 1); }");
         let bad: Vec<_> = diags
             .iter()
             .filter(|d| {

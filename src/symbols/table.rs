@@ -97,9 +97,7 @@ impl SymbolTable {
             .map(|entries| {
                 entries
                     .iter()
-                    .filter_map(|(file_id, idx)| {
-                        self.files.get(file_id)?.symbols.get(*idx)
-                    })
+                    .filter_map(|(file_id, idx)| self.files.get(file_id)?.symbols.get(*idx))
                     .collect()
             })
             .unwrap_or_default()
@@ -135,14 +133,15 @@ impl SymbolTable {
         match item {
             ast::Item::Class(cls) => {
                 let class_name = qualify(cls.name.text(source));
-                let parent = cls
+                let parents = cls
                     .base_classes
-                    .first()
-                    .and_then(|b| base_class_name(source, b));
+                    .iter()
+                    .filter_map(|b| base_class_name(source, b))
+                    .collect();
                 out.push(Symbol {
                     name: class_name.clone(),
                     kind: SymbolKind::Class {
-                        parent,
+                        parents,
                         members: Vec::new(),
                     },
                     span: cls.span,
@@ -161,8 +160,7 @@ impl SymbolTable {
                         ast::ClassMember::Field(var) => {
                             let type_text = var.type_expr.span.text(source).to_string();
                             for decl in &var.declarators {
-                                let mname =
-                                    format!("{}::{}", class_name, decl.name.text(source));
+                                let mname = format!("{}::{}", class_name, decl.name.text(source));
                                 out.push(Symbol {
                                     name: mname,
                                     kind: SymbolKind::Variable {
@@ -175,11 +173,9 @@ impl SymbolTable {
                             }
                         }
                         ast::ClassMember::Method(func) => {
-                            let mname =
-                                format!("{}::{}", class_name, func.name.text(source));
+                            let mname = format!("{}::{}", class_name, func.name.text(source));
                             let (params, min_args) = extract_params(source, &func.params);
-                            let return_type =
-                                func.return_type.span.text(source).to_string();
+                            let return_type = func.return_type.span.text(source).to_string();
                             out.push(Symbol {
                                 name: mname,
                                 kind: SymbolKind::Function {
@@ -218,11 +214,7 @@ impl SymbolTable {
                             // Destructor name in source is ~ClassName.
                             // Destructors have no return type — leave empty
                             // (matches the pre-iter-28 behaviour for them).
-                            let mname = format!(
-                                "{}::{}",
-                                class_name,
-                                func.name.text(source)
-                            );
+                            let mname = format!("{}::{}", class_name, func.name.text(source));
                             let (params, min_args) = extract_params(source, &func.params);
                             out.push(Symbol {
                                 name: mname,
@@ -237,8 +229,7 @@ impl SymbolTable {
                             });
                         }
                         ast::ClassMember::Property(prop) => {
-                            let mname =
-                                format!("{}::{}", class_name, prop.name.text(source));
+                            let mname = format!("{}::{}", class_name, prop.name.text(source));
                             let type_text = prop.type_expr.span.text(source).to_string();
                             out.push(Symbol {
                                 name: mname,
@@ -257,7 +248,9 @@ impl SymbolTable {
                 let name = qualify(iface.name.text(source));
                 out.push(Symbol {
                     name,
-                    kind: SymbolKind::Interface { methods: Vec::new() },
+                    kind: SymbolKind::Interface {
+                        methods: Vec::new(),
+                    },
                     span: iface.span,
                     file_id,
                     doc: None,
@@ -268,7 +261,11 @@ impl SymbolTable {
                 out.push(Symbol {
                     name: enum_name.clone(),
                     kind: SymbolKind::Enum {
-                        values: en.values.iter().map(|v| (v.name.text(source).to_string(), None)).collect(),
+                        values: en
+                            .values
+                            .iter()
+                            .map(|v| (v.name.text(source).to_string(), None))
+                            .collect(),
                     },
                     span: en.span,
                     file_id,
@@ -278,7 +275,10 @@ impl SymbolTable {
                 for val in &en.values {
                     out.push(Symbol {
                         name: format!("{}::{}", enum_name, val.name.text(source)),
-                        kind: SymbolKind::EnumValue { enum_name: enum_name.clone(), value: None },
+                        kind: SymbolKind::EnumValue {
+                            enum_name: enum_name.clone(),
+                            value: None,
+                        },
                         span: val.span,
                         file_id,
                         doc: None,
@@ -326,12 +326,36 @@ impl SymbolTable {
                     doc: None,
                 });
             }
+            ast::Item::Import(import) => match &import.what {
+                ast::ImportTarget::Function {
+                    return_type,
+                    name,
+                    params,
+                } => {
+                    let qualified_name = qualify(name.text(source));
+                    let (params, min_args) = extract_params(source, params);
+                    out.push(Symbol {
+                        name: qualified_name,
+                        kind: SymbolKind::Function {
+                            return_type: return_type.span.text(source).to_string(),
+                            params,
+                            min_args,
+                        },
+                        span: import.span,
+                        file_id,
+                        doc: None,
+                    });
+                }
+                ast::ImportTarget::Module { .. } => {}
+            },
             ast::Item::VarDecl(var) => {
                 for decl in &var.declarators {
                     let name = qualify(decl.name.text(source));
                     out.push(Symbol {
                         name,
-                        kind: SymbolKind::Variable { type_name: String::new() },
+                        kind: SymbolKind::Variable {
+                            type_name: String::new(),
+                        },
                         span: var.span,
                         file_id,
                         doc: None,
@@ -342,13 +366,15 @@ impl SymbolTable {
                 let name = qualify(prop.name.text(source));
                 out.push(Symbol {
                     name,
-                    kind: SymbolKind::Variable { type_name: String::new() },
+                    kind: SymbolKind::Variable {
+                        type_name: String::new(),
+                    },
                     span: prop.span,
                     file_id,
                     doc: None,
                 });
             }
-            ast::Item::Import(_) | ast::Item::Error(_) => {}
+            ast::Item::Error(_) => {}
         }
     }
 }
@@ -395,7 +421,11 @@ mod tests {
         let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Foo"), "missing Foo in {:?}", names);
         assert!(names.contains(&"Foo::x"), "missing Foo::x in {:?}", names);
-        assert!(names.contains(&"Foo::bar"), "missing Foo::bar in {:?}", names);
+        assert!(
+            names.contains(&"Foo::bar"),
+            "missing Foo::bar in {:?}",
+            names
+        );
     }
 
     #[test]
@@ -418,8 +448,9 @@ mod tests {
     fn test_symbol_table_lookup() {
         let mut table = SymbolTable::new();
         let fid = table.allocate_file_id();
-        table.set_file_symbols(fid, vec![
-            Symbol {
+        table.set_file_symbols(
+            fid,
+            vec![Symbol {
                 name: "Main".to_string(),
                 kind: SymbolKind::Function {
                     return_type: "void".into(),
@@ -429,8 +460,8 @@ mod tests {
                 span: Span::new(0, 4),
                 file_id: fid,
                 doc: None,
-            },
-        ]);
+            }],
+        );
         let results = table.lookup("Main");
         assert_eq!(results.len(), 1);
     }

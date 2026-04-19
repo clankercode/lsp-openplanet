@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::core_format::{CoreDatabase};
-use super::nadeo_format::{NadeoDatabase, NadeoMemberKind};
+use super::core_format::CoreDatabase;
+use super::nadeo_format::{NadeoDatabase, NadeoEnumEntry, NadeoMemberKind, NadeoType};
 
 /// Merged type index combining Core API and Nadeo game engine types.
 pub struct TypeIndex {
@@ -217,7 +217,7 @@ impl TypeIndex {
 
         for en in &db.enums {
             let qname = Self::qualify(&en.ns, &en.name);
-            let mut values: Vec<_> = en.values.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let mut values: Vec<_> = en.values.iter().map(|(k, v)| (k.clone(), v.v)).collect();
             values.sort_by_key(|(_, v)| *v);
             self.enums.insert(
                 qname,
@@ -265,9 +265,15 @@ impl TypeIndex {
                             });
                         }
                         NadeoMemberKind::Enum => {
-                            // Per-member enum reference (usually just names a
-                            // shared nested enum). The full nested-enum decl
-                            // lives in `nadeo_type.e` and is registered below.
+                            if let (Some(type_name), Some(values)) = (
+                                member.type_name(),
+                                member_inline_enum_values(member.e.as_ref()),
+                            ) {
+                                self.register_nadeo_enum(
+                                    qualify_nadeo_member_type_name(&db.ns, ns_name, type_name),
+                                    values,
+                                );
+                            }
                         }
                     }
                 }
@@ -278,25 +284,14 @@ impl TypeIndex {
                 // via the short-name index.
                 if let Some(enums) = &nadeo_type.e {
                     for en in enums {
-                        let nested_qname =
-                            format!("{}::{}::{}", ns_name, type_name, en.n);
-                        let values: Vec<(String, i64)> = en
-                            .v
-                            .iter()
-                            .enumerate()
-                            .map(|(i, v)| (v.clone(), i as i64))
-                            .collect();
-                        // Don't overwrite an existing entry (the Core
-                        // database is more authoritative when both have
-                        // the same enum).
-                        self.enums
-                            .entry(nested_qname)
-                            .or_insert(EnumInfo {
-                                name: en.n.clone(),
-                                namespace: Some(format!("{}::{}", ns_name, type_name)),
-                                values,
-                                source: TypeSource::Nadeo,
-                            });
+                        let nested_qname = format!("{}::{}::{}", ns_name, type_name, en.n);
+                        self.register_nadeo_enum(
+                            nested_qname,
+                            en.v.iter()
+                                .enumerate()
+                                .map(|(i, v)| (v.clone(), i as i64))
+                                .collect(),
+                        );
                     }
                 }
 
@@ -313,6 +308,20 @@ impl TypeIndex {
                 self.types.entry(qname).or_insert(info);
             }
         }
+        self.build_short_type_index();
+    }
+
+    fn register_nadeo_enum(&mut self, qualified_name: String, values: Vec<(String, i64)>) {
+        let (namespace, name) = match qualified_name.rsplit_once("::") {
+            Some((ns, tail)) => (Some(ns.to_string()), tail.to_string()),
+            None => (None, qualified_name.clone()),
+        };
+        self.enums.entry(qualified_name).or_insert(EnumInfo {
+            name,
+            namespace,
+            values,
+            source: TypeSource::Nadeo,
+        });
     }
 
     // === Query API ===
@@ -402,34 +411,71 @@ impl TypeIndex {
     }
 }
 
+fn member_inline_enum_values(raw: Option<&serde_json::Value>) -> Option<Vec<(String, i64)>> {
+    let first: NadeoEnumEntry = serde_json::from_value(raw?.clone()).ok()?;
+    Some(
+        first
+            .v
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v.clone(), i as i64))
+            .collect(),
+    )
+}
+
+fn qualify_nadeo_member_type_name(
+    namespaces: &std::collections::HashMap<String, std::collections::HashMap<String, NadeoType>>,
+    current_namespace: &str,
+    type_name: &str,
+) -> String {
+    if let Some((head, _)) = type_name.split_once("::") {
+        if namespaces.contains_key(head) {
+            return type_name.to_string();
+        }
+    }
+    format!("{}::{}", current_namespace, type_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
     fn core_path() -> PathBuf {
-        PathBuf::from(env!("HOME")).join("src/openplanet/tm-scripts/OpenplanetCore.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/OpenplanetCore.json")
     }
 
     fn next_path() -> PathBuf {
-        PathBuf::from(env!("HOME")).join("src/openplanet/tm-scripts/OpenplanetNext.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/OpenplanetNext.json")
     }
 
     #[test]
     fn test_merged_index() {
         let cp = core_path();
         let np = next_path();
-        if !cp.exists() || !np.exists() { return; }
+        if !cp.exists() || !np.exists() {
+            panic!("Typedb files not found at {:?} and {:?}", cp, np);
+        }
         let index = TypeIndex::load(&cp, &np).unwrap();
-        assert!(index.type_count() > 100, "expected many types, got {}", index.type_count());
-        assert!(index.function_count() > 50, "expected many functions, got {}", index.function_count());
+        assert!(
+            index.type_count() > 100,
+            "expected many types, got {}",
+            index.type_count()
+        );
+        assert!(
+            index.function_count() > 50,
+            "expected many functions, got {}",
+            index.function_count()
+        );
     }
 
     #[test]
     fn test_namespace_members_ui() {
         let cp = core_path();
         let np = next_path();
-        if !cp.exists() || !np.exists() { return; }
+        if !cp.exists() || !np.exists() {
+            panic!("Typedb files not found at {:?} and {:?}", cp, np);
+        }
         let index = TypeIndex::load(&cp, &np).unwrap();
         let ui_members = index.namespace_members("UI");
         assert!(!ui_members.is_empty(), "expected UI namespace members");
@@ -439,7 +485,9 @@ mod tests {
     fn test_find_by_short_name_nadeo_class() {
         let cp = core_path();
         let np = next_path();
-        if !cp.exists() || !np.exists() { return; }
+        if !cp.exists() || !np.exists() {
+            panic!("Typedb files not found at {:?} and {:?}", cp, np);
+        }
         let index = TypeIndex::load(&cp, &np).unwrap();
         let hits = index.find_by_short_name("CMwNod");
         assert!(
@@ -453,7 +501,9 @@ mod tests {
     fn test_find_by_short_name_editor_free() {
         let cp = core_path();
         let np = next_path();
-        if !cp.exists() || !np.exists() { return; }
+        if !cp.exists() || !np.exists() {
+            panic!("Typedb files not found at {:?} and {:?}", cp, np);
+        }
         let index = TypeIndex::load(&cp, &np).unwrap();
         let hits = index.find_by_short_name("CGameCtnEditorFree");
         assert!(
@@ -464,11 +514,11 @@ mod tests {
 
     #[test]
     fn test_nested_nadeo_enum_registered() {
-        // `CGamePlaygroundUIConfig::EUISequence` is declared as a nested
-        // enum in the Nadeo JSON. Make sure the loader registers it.
         let cp = core_path();
         let np = next_path();
-        if !cp.exists() || !np.exists() { return; }
+        if !cp.exists() || !np.exists() {
+            panic!("Typedb files not found at {:?} and {:?}", cp, np);
+        }
         let index = TypeIndex::load(&cp, &np).unwrap();
         let hits = index.find_by_short_name("EUISequence");
         assert!(
@@ -479,10 +529,77 @@ mod tests {
     }
 
     #[test]
+    fn test_nested_enums_cgame_editor_plugin_map() {
+        let cp = core_path();
+        let np = next_path();
+        if !cp.exists() || !np.exists() {
+            panic!("Typedb files not found at {:?} and {:?}", cp, np);
+        }
+        let index = TypeIndex::load(&cp, &np).unwrap();
+
+        let nested_enums = [
+            "ECardinalDirections",
+            "ECardinalDirections8",
+            "ERelativeDirections",
+            "EPlaceMode",
+            "EditMode",
+            "EShadowsQuality",
+            "EValidationStatus",
+            "EMapElemColor",
+            "EPhaseOffset",
+            "EMapElemLightmapQuality",
+            "EMapElemColorPalette",
+        ];
+
+        for enum_name in nested_enums {
+            let hits = index.find_by_short_name(enum_name);
+            let has_qualified = hits.iter().any(|h| h.contains("CGameEditorPluginMap"));
+            assert!(
+                has_qualified,
+                "expected {} to be found as CGameEditorPluginMap::{}, got {:?}",
+                enum_name, enum_name, hits
+            );
+        }
+    }
+
+    #[test]
+    fn test_inline_member_enums_are_registered() {
+        let cp = core_path();
+        let np = next_path();
+        if !cp.exists() || !np.exists() {
+            panic!("Typedb files not found at {:?} and {:?}", cp, np);
+        }
+        let index = TypeIndex::load(&cp, &np).unwrap();
+
+        let direct = [
+            "EPlugSurfaceMaterialId",
+            "EPlugSurfaceGameplayId",
+            "EGameItemWaypointType",
+            "EGmSurfType",
+            "NPlugDyna::EAxis",
+            "CGxLightFrustum::EApply",
+            "CGxLightFrustum::ETechnique",
+        ];
+
+        for enum_name in direct {
+            assert!(
+                index.lookup_enum(enum_name).is_some()
+                    || !index.find_by_short_name(enum_name).is_empty()
+                    || index.enums_iter().any(|(qname, _)| qname == enum_name
+                        || qname.ends_with(&format!("::{}", enum_name))),
+                "expected inline enum `{}` to be registered",
+                enum_name
+            );
+        }
+    }
+
+    #[test]
     fn test_lookup_cmwnod() {
         let cp = core_path();
         let np = next_path();
-        if !cp.exists() || !np.exists() { return; }
+        if !cp.exists() || !np.exists() {
+            panic!("Typedb files not found at {:?} and {:?}", cp, np);
+        }
         let index = TypeIndex::load(&cp, &np).unwrap();
         let nod = index.lookup_type("MwFoundations::CMwNod");
         assert!(nod.is_some(), "expected CMwNod type");
