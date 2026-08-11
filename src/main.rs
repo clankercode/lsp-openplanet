@@ -1,24 +1,34 @@
-use openplanet_lsp::{cli, server, update};
+use std::path::PathBuf;
+
+use openplanet_lsp::{cli, entrypoint, server, update};
 
 const HELP: &str = "\
 openplanet-lsp - Language Server Protocol for OpenPlanet AngelScript
 
 USAGE:
     openplanet-lsp [FLAGS]
-    openplanet-lsp check [OPTIONS] <PATH>
+    openplanet-lsp check [OPTIONS] [PATH]
     openplanet-lsp update [OPTIONS]
+    openplanet-lsp lsp
+    openplanet-lsp --lsp
 
 FLAGS:
     -h, --help       Print this help and exit
     -V, --version    Print version and exit
+    --lsp            Force language server on stdio (even on a TTY)
 
 COMMANDS:
-    check            Run workspace diagnostics for an OpenPlanet plugin
-                     Run `openplanet-lsp check --help` for check-specific options
-    update           Check for / apply self-updates via the detected install method
-                     Run `openplanet-lsp update --help` for update-specific options
+    check            Run workspace diagnostics (or --watch for live TUI)
+                     Run `openplanet-lsp check --help` for options
+    update           Check for / apply self-updates
+                     Run `openplanet-lsp update --help` for options
+    lsp              Same as --lsp (language server on stdio)
 
-With no flags, runs as a stdio LSP server (JSON-RPC over stdin/stdout).
+DEFAULT (no command):
+    • non-TTY (editors)  → language server
+    • TTY + plugin root  → watch TUI (config: default_mode = \"tui\"|\"lsp\")
+    • TTY + no plugin    → short help (exit 2)
+
 ";
 
 const UPDATE_HELP: &str = "\
@@ -84,6 +94,11 @@ fn handle_early_args(args: &[String]) -> Option<i32> {
             print!("{}", HELP);
             Some(0)
         }
+        Some("--lsp") | Some("lsp") => {
+            // Fall through to LSP after this function returns None... but we need
+            // to skip other args handling. Signal with a dedicated path.
+            Some(run_lsp_marker())
+        }
         Some("check") => Some(run_check_command(&args[1..])),
         Some("update") => Some(run_update_command(&args[1..])),
         Some(arg) if arg.starts_with('-') => {
@@ -100,15 +115,32 @@ fn handle_early_args(args: &[String]) -> Option<i32> {
     }
 }
 
+/// Sentinel: handle_early_args cannot start async LSP; main treats 0x4C53_50 as "run LSP now".
+const RUN_LSP_CODE: i32 = 0x4c_53_50; // 'LSP' bytes-ish
+
+fn run_lsp_marker() -> i32 {
+    RUN_LSP_CODE
+}
+
 fn run_check_command(args: &[String]) -> i32 {
     let options = match cli::parse_check_args(args) {
         Ok(options) => options,
         Err(err) => {
             eprintln!("{err}");
-            eprintln!("Run `openplanet-lsp --help` for usage.");
+            eprintln!("Run `openplanet-lsp check --help` for usage.");
             return 2;
         }
     };
+
+    if options.watch {
+        return match cli::watch::run_watch(options) {
+            Ok(()) => 0,
+            Err(err) => {
+                eprintln!("{err}");
+                2
+            }
+        };
+    }
 
     match cli::run_check(&options) {
         Ok(report) => {
@@ -119,8 +151,6 @@ fn run_check_command(args: &[String]) -> i32 {
                 "{}",
                 cli::format_check_report_for(&report, options.format)
             );
-            // Warnings (e.g. B004 bare-string params) are reported but do not
-            // fail the check command; only errors produce a non-zero exit.
             let has_errors = report.diagnostics.iter().any(|item| {
                 !matches!(
                     item.diagnostic.severity,
@@ -216,11 +246,32 @@ fn run_update_command(args: &[String]) -> i32 {
     }
 }
 
+fn bare_launch_exit() -> Option<i32> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let prefs = openplanet_lsp::config::UserPrefs::load(Some(&cwd));
+    match entrypoint::decide_bare_launch(entrypoint::stdin_is_tty(), &cwd, &prefs) {
+        entrypoint::LaunchAction::Lsp => None,
+        entrypoint::LaunchAction::WatchTui { path } => Some(entrypoint::run_watch_path(path)),
+        entrypoint::LaunchAction::HelpNoPlugin => {
+            eprint!("{}", entrypoint::no_plugin_help_message());
+            Some(2)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = handle_early_args(&args) {
-        std::process::exit(code);
+        if code == RUN_LSP_CODE {
+            // fall through to LSP
+        } else {
+            std::process::exit(code);
+        }
+    } else if args.is_empty() {
+        if let Some(code) = bare_launch_exit() {
+            std::process::exit(code);
+        }
     }
 
     tracing_subscriber::fmt()

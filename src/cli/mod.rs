@@ -14,28 +14,31 @@ use crate::workspace::manifest::Manifest;
 use crate::workspace::project;
 
 mod pretty;
+pub mod watch;
 
 const CHECK_HELP: &str = "\
 openplanet-lsp check - Run workspace diagnostics for an OpenPlanet plugin
 
 USAGE:
-    openplanet-lsp check [OPTIONS] <PATH>
+    openplanet-lsp check [OPTIONS] [PATH]
+    openplanet-lsp check --watch [OPTIONS] [PATH]
+
+ARGS:
+    PATH                Plugin root or a file inside a plugin (walks up for
+                        info.toml). Defaults to the current directory.
 
 OPTIONS:
     -h, --help          Show this help message
-    --format FMT        Output format: plain | pretty | auto (default: auto)
+    --watch             Live TUI: re-check on file changes (q quit, j/k scroll, r refresh)
+    --format FMT        One-shot output only: plain | pretty | auto (default: auto)
                         auto → pretty when stdout is color-capable, else plain
                         plain → gcc-style path:line:col: severity: message
-                        pretty → source excerpt + carets (see module docs)
+                        pretty → source excerpt + carets
+                        Ignored with --watch (TUI owns presentation)
     --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
     --no-typedb         Run without Openplanet/Nadeo type database files
     --plugins-dir DIR   Directory to search for plugin dependencies
-                        (may be specified multiple times; supports both directories
-                        and .op archives; looks for plugins by ID / module name)
-                        Required dependencies from info.toml are loaded into the
-                        symbol table (exports + shared_exports). Optional deps are
-                        loaded when found. Missing required deps are reported on
-                        info.toml.
+                        (may be specified multiple times)
     --plugin-files-search-path DIR
                         Additional relative search root for plugin export files
                         (may be specified multiple times; defaults to: src)
@@ -43,9 +46,9 @@ OPTIONS:
 EXAMPLES:
     openplanet-lsp check ~/plugins/tm-agent
     openplanet-lsp check --format pretty ~/plugins/tm-agent
-    openplanet-lsp check --plugins-dir ~/openplanet/plugins --plugins-dir ~/openplanet/my-plugins ~/plugins/tm-agent
-    openplanet-lsp check --plugin-files-search-path src --plugin-files-search-path generated .
+    openplanet-lsp check --watch .
     openplanet-lsp check --typedb-dir /path/to/typedb --plugins-dir ~/openplanet/my-plugins .
+
 
 ";
 
@@ -91,6 +94,8 @@ pub struct CheckOptions {
     pub plugins_dirs: Vec<PathBuf>,
     pub plugin_files_search_paths: Vec<PathBuf>,
     pub format: CheckFormat,
+    /// Live TUI mode (`check --watch`).
+    pub watch: bool,
 }
 
 #[derive(Debug)]
@@ -137,6 +142,10 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
             }
             "--no-typedb" => {
                 options.no_typedb = true;
+                i += 1;
+            }
+            "--watch" => {
+                options.watch = true;
                 i += 1;
             }
             "--format" => {
@@ -244,11 +253,13 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
             options.path = path.clone();
             Ok(options)
         }
-        [] => Err(CliError::Usage(
-            "check requires a plugin path or a file inside a plugin".to_string(),
-        )),
+        [] => {
+            // Default to cwd; resolve_workspace_root / watch walk up for info.toml.
+            options.path = PathBuf::from(".");
+            Ok(options)
+        }
         _ => Err(CliError::Usage(
-            "check accepts exactly one plugin path".to_string(),
+            "check accepts at most one plugin path".to_string(),
         )),
     }
 }
@@ -512,7 +523,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_check_args_format_flag() {
+    fn parse_check_args_watch_flag() {
+        let opts = parse_check_args(&["--watch".into(), ".".into()]).unwrap();
+        assert!(opts.watch);
+        assert_eq!(opts.path, PathBuf::from("."));
+
+        let opts = parse_check_args(&["--watch".into()]).unwrap();
+        assert!(opts.watch);
+        assert_eq!(opts.path, PathBuf::from("."));
+    }
+
+    #[test]
+    fn fn parse_check_args_format_flag() {
         let opts = parse_check_args(&[
             "--format".into(),
             "pretty".into(),

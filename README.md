@@ -27,9 +27,24 @@ openplanet-lsp --help
 
 ## Use as an LSP (editor)
 
-`openplanet-lsp` speaks **JSON-RPC over stdio**. With no subcommand it starts
-the language server (stdin/stdout). Point your editor’s AngelScript / OpenPlanet
-language client at the binary.
+`openplanet-lsp` speaks **JSON-RPC over stdio**.
+
+| How you launch | What you get |
+|----------------|--------------|
+| Editor / non-TTY stdio (no args) | Language server |
+| TTY, inside a plugin (`info.toml`) | Watch TUI (default) |
+| `openplanet-lsp --lsp` or `lsp` | Force language server |
+| TTY, no plugin nearby | Short help (exit 2) |
+
+Config (`~/.config/openplanet-lsp/config.toml` or workspace `.openplanet-lsp.toml`):
+
+```toml
+# bare TTY default when no subcommand is given
+default_mode = "tui"   # or "lsp"
+```
+
+Point your editor’s AngelScript / OpenPlanet language client at the binary
+(stdio, **no args** — editors attach pipes, so bare launch stays LSP).
 
 ### Generic LSP client settings
 
@@ -108,8 +123,10 @@ notification when a newer release is available.
 ## CLI
 
 ```text
-openplanet-lsp [FLAGS]           # start LSP on stdio
-openplanet-lsp check [OPTIONS] <PATH>
+openplanet-lsp [FLAGS]              # bare: TTY+plugin → watch TUI; else LSP
+openplanet-lsp --lsp | lsp          # force language server
+openplanet-lsp check [OPTIONS] [PATH]
+openplanet-lsp check --watch [PATH] # live diagnostics TUI
 openplanet-lsp update [OPTIONS]
 ```
 
@@ -118,16 +135,24 @@ openplanet-lsp update [OPTIONS]
 Typecheck / lint an OpenPlanet plugin tree without an editor:
 
 ```bash
-# PATH = plugin root (directory with info.toml) or a single .as file
-openplanet-lsp check .
-openplanet-lsp check ./MyPlugin
+# one-shot (pretty on TTY; plain when piped / NO_COLOR)
+openplanet-lsp check /path/to/plugin
+openplanet-lsp check --format plain ./tests/fixtures/showcase-diags
+openplanet-lsp check .                  # PATH = plugin root or a .as file
 openplanet-lsp check --help
+
+# live watch TUI (re-checks on *.as / info.toml changes)
+openplanet-lsp check --watch .
+# or, from inside a plugin directory on a TTY:
+openplanet-lsp
 ```
 
 Useful options (see `--help` for the full list):
 
 | Flag | Meaning |
 |------|---------|
+| `--watch` | Live TUI; re-check on file changes |
+| `--format plain\|pretty\|auto` | One-shot output style (ignored with `--watch`) |
 | `--typedb-dir <DIR>` | Load OpenPlanet type database from DIR |
 | `--no-typedb` | Skip type DB (parse-only / limited checks) |
 | `--plugins-dir <DIR>` | Extra OpenPlanet plugins dir for dependency exports |

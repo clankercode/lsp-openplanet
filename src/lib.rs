@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod cli;
 pub mod config;
+pub mod entrypoint;
 pub mod lexer;
 pub mod parser;
 pub mod preprocessor;

@@ -36,6 +36,69 @@ struct ConfigFile {
     plugins_dir: Option<String>,
     game_target: Option<String>,
     defines: Option<Vec<String>>,
+    /// Bare-TTY default: `"tui"` (default) or `"lsp"`.
+    default_mode: Option<String>,
+}
+
+/// How bare TTY launches behave when no subcommand is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DefaultMode {
+    #[default]
+    Tui,
+    Lsp,
+}
+
+impl DefaultMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "tui" | "watch" | "check" => Some(Self::Tui),
+            "lsp" | "server" | "stdio" => Some(Self::Lsp),
+            _ => None,
+        }
+    }
+}
+
+/// User/workspace preferences that affect CLI entrypoints (not LSP typecheck).
+#[derive(Debug, Clone, Default)]
+pub struct UserPrefs {
+    pub default_mode: DefaultMode,
+}
+
+impl UserPrefs {
+    /// Load `default_mode` from workspace `.openplanet-lsp.toml` then
+    /// `~/.config/openplanet-lsp/config.toml` (later wins? workspace should win).
+    /// Order: user global first, workspace overrides.
+    pub fn load(workspace_root: Option<&Path>) -> Self {
+        let mut prefs = Self::default();
+        prefs.apply_user_config();
+        if let Some(root) = workspace_root {
+            prefs.apply_workspace_config(root);
+        }
+        prefs
+    }
+
+    fn apply_user_config(&mut self) {
+        if let Ok(home) = std::env::var("HOME") {
+            let path = PathBuf::from(home).join(".config/openplanet-lsp/config.toml");
+            self.apply_file(&path);
+        }
+    }
+
+    fn apply_workspace_config(&mut self, root: &Path) {
+        self.apply_file(&root.join(".openplanet-lsp.toml"));
+    }
+
+    fn apply_file(&mut self, path: &Path) {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(cfg) = toml::from_str::<ConfigFile>(&contents) else {
+            return;
+        };
+        if let Some(mode) = cfg.default_mode.as_deref().and_then(DefaultMode::parse) {
+            self.default_mode = mode;
+        }
+    }
 }
 
 impl LspConfig {
