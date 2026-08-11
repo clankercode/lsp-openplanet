@@ -1,4 +1,7 @@
 ---
+claimed_at: "2026-08-11T16:04:59Z"
+claimed_by: cli-user
+completed_at: null
 complexity: high
 created_at: "2026-08-11T15:53:17Z"
 depends_on:
@@ -6,13 +9,11 @@ depends_on:
 estimate_hours: 8
 id: B010
 priority: high
-status: pending
-tags:
-    - architecture
-    - sequence
-    - gh-7
+started_at: "2026-08-11T16:04:59Z"
+status: in_progress
+tags: []
 title: 'I2+I3: Deepen call-site checking (+ GlobalScope callable query)'
-updated_at: "2026-08-11T15:53:17Z"
+updated_at: "2026-08-11T16:04:59Z"
 ---
 GitHub: https://github.com/clankercode/lsp-openplanet/issues/7
 
