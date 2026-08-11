@@ -1,17 +1,18 @@
 ---
+claimed_at: "2026-08-11T15:56:11Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-11T15:53:10Z"
 depends_on: []
 estimate_hours: 4
 id: B008
 priority: high
-status: pending
-tags:
-    - architecture
-    - sequence
-    - gh-5
+started_at: "2026-08-11T15:56:11Z"
+status: in_progress
+tags: []
 title: 'I7: Wire check + analysis through info.toml dependency exports'
-updated_at: "2026-08-11T15:53:10Z"
+updated_at: "2026-08-11T15:56:11Z"
 ---
 GitHub: https://github.com/clankercode/lsp-openplanet/issues/5
 
