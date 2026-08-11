@@ -46,3 +46,5 @@ ImGui upstream has Selectable(..., size); Openplanet bindings do not.
 
 ## Notes
 Same systemic gap as IndexOf: member/namespace calls skip arity checks. Prefer shared external arity path over one-off Selectable handling.
+
+Fixed by B003 external arity work. Regression tests on master: external_ui_selectable_four_arg_fires, external_ui_selectable_valid_arity_ok.
