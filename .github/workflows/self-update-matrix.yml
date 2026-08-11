@@ -116,7 +116,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       # Local updater fallback when the installed registry build predates
@@ -133,17 +133,21 @@ jobs:
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             powershell -NoProfile -Command "irm bun.sh/install.ps1 | iex" || true
             echo "${USERPROFILE}\\.bun\\bin" >> "${GITHUB_PATH}"
+            export PATH="${USERPROFILE}/.bun/bin:${PATH}"
           else
             curl -fsSL https://bun.sh/install | bash
             echo "${HOME}/.bun/bin" >> "${GITHUB_PATH}"
+            export PATH="${HOME}/.bun/bin:${PATH}"
           fi
           echo "${HOME}/.local/share/pnpm" >> "${GITHUB_PATH}"
+          export PATH="${HOME}/.local/share/pnpm:${PATH}"
           hash -r || true
           node -v
           npm -v
           pnpm -v
           yarn -v
-          command -v bun && bun -v
+          command -v bun
+          bun -v
 
       - name: Registry multi-PM self-update smoke
         shell: bash
