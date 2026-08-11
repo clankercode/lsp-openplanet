@@ -23,7 +23,7 @@ One git tag (`vX.Y.Z`) drives both channels via
 |------------------|-----------------------------|-----------------------------|-----------|
 | ubuntu-22.04     | x86_64-unknown-linux-gnu    | openplanet-lsp-linux-x64    | `.tar.gz` |
 | ubuntu-24.04-arm | aarch64-unknown-linux-gnu   | openplanet-lsp-linux-arm64  | `.tar.gz` |
-| macos-13         | x86_64-apple-darwin         | openplanet-lsp-darwin-x64   | `.tar.gz` |
+| macos-14         | x86_64-apple-darwin (cross) | openplanet-lsp-darwin-x64   | `.tar.gz` |
 | macos-14         | aarch64-apple-darwin        | openplanet-lsp-darwin-arm64 | `.tar.gz` |
 | windows-latest   | x86_64-pc-windows-msvc      | openplanet-lsp-win32-x64    | `.zip`    |
 | windows-11-arm   | aarch64-pc-windows-msvc     | openplanet-lsp-win32-arm64  | `.zip`    |
