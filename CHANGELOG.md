@@ -13,6 +13,18 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-12
+
+### Added
+- **Standalone self-update** (shipped): non-npm/cargo installs download the matching GitHub Release archive and atomically replace the running binary.
+- **`update --source npm|crate|github`**: choose which channel to query for the latest version (default: npm).
+- Status UX: `current: X.Y.Z (install type: standalone)` and `latest: X.Y.Z (source checked: npm)`.
+- **crates.io** packaging metadata, dual Unlicense OR CC0-1.0, and CI publish via Trusted Publishing (OIDC) on release tags.
+
+### Changed
+- Cargo self-update install no longer passes `--locked`.
+
+
 ## [0.2.9] - 2026-08-12
 
 ### Added

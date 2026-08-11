@@ -1,6 +1,6 @@
 {
   "name": "openplanet-lsp",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "Language Server Protocol implementation for OpenPlanet AngelScript",
   "keywords": [
     "openplanet",
@@ -37,11 +37,11 @@
     "postinstall": "node ./lib/check-platform.js"
   },
   "optionalDependencies": {
-    "openplanet-lsp-darwin-arm64": "0.2.9",
-    "openplanet-lsp-darwin-x64": "0.2.9",
-    "openplanet-lsp-linux-arm64": "0.2.9",
-    "openplanet-lsp-linux-x64": "0.2.9",
-    "openplanet-lsp-win32-arm64": "0.2.9",
-    "openplanet-lsp-win32-x64": "0.2.9"
+    "openplanet-lsp-darwin-arm64": "0.3.0",
+    "openplanet-lsp-darwin-x64": "0.3.0",
+    "openplanet-lsp-linux-arm64": "0.3.0",
+    "openplanet-lsp-linux-x64": "0.3.0",
+    "openplanet-lsp-win32-arm64": "0.3.0",
+    "openplanet-lsp-win32-x64": "0.3.0"
   }
 }

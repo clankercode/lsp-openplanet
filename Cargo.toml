@@ -1,6 +1,6 @@
 [package]
 name = "openplanet-lsp"
-version = "0.2.9"
+version = "0.3.0"
 edition = "2021"
 description = "Language Server Protocol implementation for OpenPlanet AngelScript"
 license = "Unlicense OR CC0-1.0"
