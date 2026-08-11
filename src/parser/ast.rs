@@ -140,6 +140,16 @@ pub struct Expr {
     pub kind: ExprKind,
 }
 
+/// A single call-site argument. AngelScript allows named arguments
+/// (`name: value`); when present, `name` is the parameter identifier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallArg {
+    /// Span covering `name: value` when named, otherwise just `value`.
+    pub span: Span,
+    pub name: Option<Ident>,
+    pub value: Expr,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     IntLit(i64),
@@ -166,7 +176,7 @@ pub enum ExprKind {
     },
     Call {
         callee: Box<Expr>,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
     },
     Member {
         object: Box<Expr>,

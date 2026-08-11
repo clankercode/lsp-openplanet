@@ -1109,7 +1109,7 @@ impl<'a> Checker<'a> {
         &mut self,
         display_name: &str,
         qualified: &str,
-        args: &[Expr],
+        args: &[CallArg],
         callee_span: Span,
         fallback_ret: TypeRepr,
     ) -> TypeRepr {
@@ -1126,8 +1126,8 @@ impl<'a> Checker<'a> {
                 // behaviour. Use the legacy helpers so existing tests keep
                 // passing byte-for-byte.
                 self.check_arg_count(display_name, qualified, args.len(), callee_span);
-                if let Some(param_types) = self.scope.lookup_function_param_types(qualified) {
-                    self.walk_args_and_check_types(display_name, args, &param_types);
+                if let Some(params) = self.scope.lookup_function_params(qualified) {
+                    self.walk_args_and_check_types(display_name, args, &params);
                 } else {
                     self.walk_args(args);
                 }
@@ -1135,7 +1135,12 @@ impl<'a> Checker<'a> {
             }
             _ => {
                 // 2+ overloads: walk args once, run real resolution.
-                let arg_tys: Vec<TypeRepr> = args.iter().map(|a| self.expr_type(a)).collect();
+                // Named-arg overload resolution is not implemented yet —
+                // bind types in call order (positional) for matching.
+                let arg_tys: Vec<TypeRepr> = args
+                    .iter()
+                    .map(|a| self.expr_type(&a.value))
+                    .collect();
                 match resolve_overload(&overloads, &arg_tys) {
                     OverloadMatch::Unique(sig) => {
                         // A unique winner means every primitive arg either
@@ -1160,9 +1165,9 @@ impl<'a> Checker<'a> {
     /// Walk each argument expression exactly once, typing them for side
     /// effects (diagnostics) and discarding the results. Used by call-site
     /// dispatch branches that don't need arg types.
-    fn walk_args(&mut self, args: &[Expr]) {
+    fn walk_args(&mut self, args: &[CallArg]) {
         for a in args {
-            let _ = self.expr_type(a);
+            let _ = self.expr_type(&a.value);
         }
     }
 
@@ -1173,16 +1178,39 @@ impl<'a> Checker<'a> {
     /// skipped — this is deliberately conservative, mirroring
     /// `ReturnTypeMismatch`'s primitive-only strategy.
     ///
+    /// Binding rules (AngelScript):
+    /// - Unnamed (positional) args bind left-to-right to successive parameters.
+    /// - Named args (`name: value`) bind to the matching parameter by name and
+    ///   may skip optional/defaulted parameters.
+    ///
     /// Walks each arg exactly once so callers must NOT pre-walk.
     fn walk_args_and_check_types(
         &mut self,
         display_name: &str,
-        args: &[Expr],
-        param_types: &[String],
+        args: &[CallArg],
+        params: &[(String, String)],
     ) {
-        for (i, arg) in args.iter().enumerate() {
-            let arg_ty = self.expr_type(arg);
-            let Some(param_text) = param_types.get(i) else {
+        let mut next_positional = 0usize;
+        for arg in args {
+            let param_index = if let Some(name_ident) = &arg.name {
+                let name = name_ident.text(self.source);
+                match params.iter().position(|(n, _)| n == name) {
+                    Some(idx) => idx,
+                    None => {
+                        // Unknown parameter name — still type the value for
+                        // nested diagnostics, but don't emit ArgTypeMismatch.
+                        let _ = self.expr_type(&arg.value);
+                        continue;
+                    }
+                }
+            } else {
+                let idx = next_positional;
+                next_positional += 1;
+                idx
+            };
+
+            let arg_ty = self.expr_type(&arg.value);
+            let Some((_, param_text)) = params.get(param_index) else {
                 continue;
             };
             let Some(param_p) = PrimitiveType::from_name(param_text.trim()) else {
@@ -1197,10 +1225,10 @@ impl<'a> Checker<'a> {
                     continue;
                 };
                 self.diagnostics.push(TypeDiagnostic {
-                    span: arg.span,
+                    span: arg.value.span,
                     kind: TypeDiagnosticKind::ArgTypeMismatch {
                         function_name: display_name.to_string(),
-                        param_index: i,
+                        param_index,
                         expected: param_p.as_str().to_string(),
                         got: arg_p.as_str().to_string(),
                     },
@@ -1212,7 +1240,7 @@ impl<'a> Checker<'a> {
     /// Derive the type of a call expression's result. Takes the raw `args`
     /// slice and is responsible for walking each arg expression exactly
     /// once via `expr_type`. Callers must NOT pre-walk `args`.
-    fn call_type(&mut self, callee: &Expr, args: &[Expr]) -> TypeRepr {
+    fn call_type(&mut self, callee: &Expr, args: &[CallArg]) -> TypeRepr {
         match &callee.kind {
             ExprKind::Ident(ident) => {
                 let name = ident.text(self.source).to_string();
@@ -2440,6 +2468,88 @@ mod tests {
             bad.is_empty(),
             "expected no ArgTypeMismatch for overloaded call, got {:?}",
             diags
+        );
+    }
+
+    /// B001: named args must bind by parameter name, not position.
+    /// `AddIndentedTooltip("x", w: 20.0)` skips the defaulted `pushFont`
+    /// bool and should not produce ArgTypeMismatch(expected bool, got float).
+    #[test]
+    fn named_arg_skips_defaulted_param_ok() {
+        let diags = check(
+            r#"
+            void AddIndentedTooltip(const string &in msg, bool pushFont = false, float w = -1.0) {}
+            void Main() { AddIndentedTooltip("x", w: 20.0); }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "B001: named arg w: should bind to float param, got {:?}",
+            diags
+        );
+    }
+
+    /// B001: named arg with wrong type still errors against the named param.
+    #[test]
+    fn named_arg_type_mismatch_still_fires() {
+        let diags = check(
+            r#"
+            void AddIndentedTooltip(const string &in msg, bool pushFont = false, float w = -1.0) {}
+            void Main() { AddIndentedTooltip("x", w: true); }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch for wrong named-arg type, got {:?}",
+            diags
+        );
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgTypeMismatch {
+                function_name: "AddIndentedTooltip".into(),
+                param_index: 2,
+                expected: "float".into(),
+                got: "bool".into(),
+            }
+        );
+    }
+
+    /// B001: pure positional binding still works after CallArg change.
+    #[test]
+    fn named_arg_all_positional_still_checked() {
+        let diags = check(
+            r#"
+            void AddIndentedTooltip(const string &in msg, bool pushFont = false, float w = -1.0) {}
+            void Main() { AddIndentedTooltip("x", 20.0); }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "positional float into bool should still mismatch, got {:?}",
+            diags
+        );
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgTypeMismatch {
+                function_name: "AddIndentedTooltip".into(),
+                param_index: 1,
+                expected: "bool".into(),
+                got: "float".into(),
+            }
         );
     }
 

@@ -315,7 +315,7 @@ impl IdentClassifier {
             ExprKind::Call { callee, args } => {
                 self.classify_expr(callee);
                 for a in args {
-                    self.classify_expr(a);
+                    self.classify_expr(&a.value);
                 }
             }
             ExprKind::Member { object, .. } => {
