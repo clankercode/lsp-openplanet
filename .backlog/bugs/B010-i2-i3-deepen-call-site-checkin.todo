@@ -1,0 +1,20 @@
+---
+complexity: high
+created_at: "2026-08-11T15:53:17Z"
+depends_on:
+    - B009
+estimate_hours: 8
+id: B010
+priority: high
+status: pending
+tags:
+    - architecture
+    - sequence
+    - gh-7
+title: 'I2+I3: Deepen call-site checking (+ GlobalScope callable query)'
+updated_at: "2026-08-11T15:53:17Z"
+---
+GitHub: https://github.com/clankercode/lsp-openplanet/issues/7
+
+Sequence 3/3. Depends on I1 (B009). CallSite module + fold I3 callables_for into it.
+Signature help should share callable truth. B001–B007 tests stay green.

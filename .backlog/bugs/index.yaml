@@ -8,3 +8,4 @@ bugs:
     - file: B007-distinct-enum-types-treated-as.todo
     - file: B008-i7-wire-check-analysis-through.todo
     - file: B009-i1-deepen-document-analysis-in.todo
+    - file: B010-i2-i3-deepen-call-site-checkin.todo
