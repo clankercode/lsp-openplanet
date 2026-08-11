@@ -233,9 +233,9 @@ impl TypeRepr {
     pub fn is_error(&self) -> bool {
         match self {
             TypeRepr::Error(_) => true,
-            TypeRepr::Handle(inner) | TypeRepr::Const(inner) | TypeRepr::Array(inner) => {
-                inner.is_error()
-            }
+            TypeRepr::Handle(inner)
+            | TypeRepr::Const(inner)
+            | TypeRepr::Array(inner) => inner.is_error(),
             TypeRepr::Generic { args, .. } => args.iter().any(|a| a.is_error()),
             _ => false,
         }
@@ -515,9 +515,9 @@ mod tests {
     fn parse_type_string_nested_array_of_array() {
         assert_eq!(
             TypeRepr::parse_type_string("array<array<int>>"),
-            TypeRepr::Array(Box::new(TypeRepr::Array(Box::new(TypeRepr::Primitive(
-                PrimitiveType::Int
-            )))))
+            TypeRepr::Array(Box::new(TypeRepr::Array(Box::new(
+                TypeRepr::Primitive(PrimitiveType::Int)
+            ))))
         );
     }
 
@@ -533,7 +533,8 @@ mod tests {
 
     #[test]
     fn array_element_type_accessor() {
-        let arr = TypeRepr::Array(Box::new(TypeRepr::Primitive(PrimitiveType::Int)));
+        let arr =
+            TypeRepr::Array(Box::new(TypeRepr::Primitive(PrimitiveType::Int)));
         assert_eq!(
             arr.array_element_type(),
             Some(&TypeRepr::Primitive(PrimitiveType::Int))
