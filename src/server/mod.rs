@@ -57,30 +57,63 @@ impl Backend {
         }
     }
 
-    /// Build an ad-hoc workspace snapshot from the currently open documents.
-    ///
-    /// Each open document is preprocessed, parsed, and its symbols extracted
-    /// into a fresh `SymbolTable`. The returned map carries `file_id → (uri,
-    /// source)` so callers can translate cross-file spans into concrete
-    /// `Location`s.
+    /// Build a workspace symbol table: open documents + on-disk plugin sources
+    /// and dependency export files (shared path with CLI `check`).
     async fn build_workspace(&self) -> (SymbolTable, HashMap<usize, (Url, String)>) {
-        let defines = {
-            let config = self.config.read().await;
-            config.defines.clone()
-        };
-        let mut table = SymbolTable::new();
-        let mut files = HashMap::new();
+        let config = self.config.read().await;
+        let root = self.workspace_root.read().await.clone();
+
+        let mut open: Vec<(PathBuf, String)> = Vec::new();
+        let mut open_uris: HashMap<PathBuf, Url> = HashMap::new();
         for entry in self.documents.iter() {
             let uri = entry.key().clone();
             let source = entry.value().clone();
-            let pp = crate::preprocessor::preprocess(&source, &defines);
-            let tokens = crate::lexer::tokenize_filtered(&pp.masked_source);
-            let mut parser = crate::parser::Parser::new(&tokens, &pp.masked_source);
-            let file = parser.parse_file();
-            let fid = table.allocate_file_id();
-            let symbols = SymbolTable::extract_symbols(fid, &pp.masked_source, &file);
-            table.set_file_symbols(fid, symbols);
-            files.insert(fid, (uri, source));
+            if let Ok(path) = uri.to_file_path() {
+                open_uris.insert(path.clone(), uri);
+                open.push((path, source));
+            }
+        }
+
+        // Stable ordered list of (path, source, optional uri for navigation).
+        let mut ordered: Vec<(PathBuf, String, Option<Url>)> = Vec::new();
+
+        if let Some(root) = root.as_ref() {
+            let search = crate::workspace::load::DependencySearch::with_defaults()
+                .finalize_with_config(&config);
+            if let Ok(disk) = crate::workspace::load::load_plugin_workspace(root, &search) {
+                let merged = crate::workspace::load::merge_open_documents(&disk, &open);
+                for f in merged.files {
+                    let uri = open_uris
+                        .get(&f.path)
+                        .cloned()
+                        .or_else(|| Url::from_file_path(&f.path).ok());
+                    ordered.push((f.path, f.source, uri));
+                }
+            }
+        }
+
+        if ordered.is_empty() {
+            for (path, source) in &open {
+                ordered.push((
+                    path.clone(),
+                    source.clone(),
+                    open_uris.get(path).cloned(),
+                ));
+            }
+        }
+
+        let inputs: Vec<_> = ordered
+            .iter()
+            .map(|(p, s, _)| (p.clone(), s.clone()))
+            .collect();
+        let table = crate::typecheck::build_plugin_symbol_table(&inputs, &config);
+
+        // file_id in SymbolTable is allocated 0..n-1 in input order.
+        let mut files = HashMap::new();
+        for (i, (_path, source, uri)) in ordered.iter().enumerate() {
+            if let Some(uri) = uri {
+                files.insert(i, (uri.clone(), source.clone()));
+            }
         }
         (table, files)
     }
