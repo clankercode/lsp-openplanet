@@ -1,9 +1,13 @@
 # openplanet-lsp
 
-Language Server Protocol implementation for OpenPlanet AngelScript.
+Language Server Protocol implementation for **OpenPlanet AngelScript**
+(Trackmania / OpenPlanet plugins).
 
 This npm package installs a small Node launcher plus an optional
 platform-specific native binary (`openplanet-lsp-*`).
+
+<!-- Screenshot: drop docs/images/cli-demo.png here after capturing (see repo README) -->
+<!-- ![CLI demo](https://raw.githubusercontent.com/clankercode/lsp-openplanet/master/docs/images/cli-demo.png) -->
 
 ## Install
 
@@ -13,34 +17,77 @@ npm install -g openplanet-lsp
 npm install --save-dev openplanet-lsp
 ```
 
-## Usage
+```bash
+openplanet-lsp --version
+openplanet-lsp --help
+```
+
+## Use as an LSP
+
+Runs as a **stdio** language server (no args):
 
 ```bash
-openplanet-lsp              # stdio LSP server
-openplanet-lsp --version
-openplanet-lsp check <path>
+openplanet-lsp
+```
+
+Point your editor’s LSP client at the `openplanet-lsp` binary. Workspace root
+should be the plugin directory (the folder with `info.toml`).
+
+**Neovim** (sketch):
+
+```lua
+vim.lsp.start({
+  name = "openplanet-lsp",
+  cmd = { "openplanet-lsp" },
+  root_dir = vim.fs.root(0, { "info.toml", ".git" }),
+})
+```
+
+**Helix** (`languages.toml` sketch):
+
+```toml
+[language-server.openplanet-lsp]
+command = "openplanet-lsp"
+```
+
+See the [full README on GitHub](https://github.com/clankercode/lsp-openplanet#use-as-an-lsp-editor)
+for VS Code–style settings and more.
+
+## CLI
+
+```bash
+# Diagnostics for a plugin tree (offline)
+openplanet-lsp check .
+openplanet-lsp check ./MyPlugin
+
+# Self-update
 openplanet-lsp update --check
+openplanet-lsp update --check --source github   # or: crate | npm
+openplanet-lsp update --status
 openplanet-lsp update
 ```
 
-`update` reads the latest version from the npm registry, writes status to
-`~/.config/openplanet-lsp/update-status.json`, and (without `--check`) runs the
-install-method-specific upgrade command when one is known (npm / pnpm / yarn /
-bun global or local, or cargo).
+Status looks like:
+
+```text
+current:  0.3.0 (install type: npm-global)
+latest:   0.3.0 (source checked: npm)
+status:   up to date
+```
 
 ## Supported platforms
 
-| Platform package                 | OS      | Arch  |
-|----------------------------------|---------|-------|
-| `openplanet-lsp-linux-x64`       | Linux   | x64   |
-| `openplanet-lsp-linux-arm64`     | Linux   | arm64 |
-| `openplanet-lsp-darwin-x64`      | macOS   | x64   |
-| `openplanet-lsp-darwin-arm64`    | macOS   | arm64 |
-| `openplanet-lsp-win32-x64`       | Windows | x64   |
-| `openplanet-lsp-win32-arm64`     | Windows | arm64 |
+| Platform package             | OS      | Arch  |
+|-----------------------------|---------|-------|
+| `openplanet-lsp-linux-x64`  | Linux   | x64   |
+| `openplanet-lsp-linux-arm64`| Linux   | arm64 |
+| `openplanet-lsp-darwin-x64` | macOS   | x64   |
+| `openplanet-lsp-darwin-arm64` | macOS | arm64 |
+| `openplanet-lsp-win32-x64`  | Windows | x64   |
+| `openplanet-lsp-win32-arm64`| Windows | arm64 |
 
-GitHub release archives (same binaries) are also published at:
-https://github.com/clankercode/lsp-openplanet/releases
+Also: [GitHub Releases](https://github.com/clankercode/lsp-openplanet/releases) ·
+[crates.io](https://crates.io/crates/openplanet-lsp)
 
 ## Programmatic
 
@@ -48,3 +95,7 @@ https://github.com/clankercode/lsp-openplanet/releases
 const { resolveBinaryPath } = require("openplanet-lsp");
 console.log(resolveBinaryPath());
 ```
+
+## License
+
+Unlicense OR CC0-1.0 (public domain dedication).

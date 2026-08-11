@@ -18,7 +18,7 @@
   "bugs": {
     "url": "https://github.com/clankercode/lsp-openplanet/issues"
   },
-  "license": "MIT",
+  "license": "Unlicense OR CC0-1.0",
   "author": "clankercode",
   "type": "commonjs",
   "bin": {

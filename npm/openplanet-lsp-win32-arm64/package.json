@@ -2,7 +2,7 @@
   "name": "openplanet-lsp-win32-arm64",
   "version": "0.3.0",
   "description": "openplanet-lsp native binary for win32-arm64",
-  "license": "MIT",
+  "license": "Unlicense OR CC0-1.0",
   "homepage": "https://github.com/clankercode/lsp-openplanet",
   "repository": {
     "type": "git",
