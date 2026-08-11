@@ -416,15 +416,93 @@ impl<'a> GlobalScope<'a> {
     /// zero matches *or* two-plus matches (the overloaded case — callers
     /// conservatively suppress arity checking when overloads exist).
     ///
-    /// External (typedb) functions are intentionally not consulted here —
-    /// their signature data is not yet wired through to the checker.
+    /// When no workspace function matches, falls back to a unique external
+    /// (typedb) free-function signature. Multi-overload external names still
+    /// return `None` here — use `lookup_external_function_arity_ranges` for
+    /// the "no overload accepts this arity" check.
     pub fn lookup_function_signature(&self, qualified: &str) -> Option<(usize, usize)> {
-        lookup_workspace_function_property(&self.workspace, qualified).map(|s| match &s.kind {
-            SymbolKind::Function {
-                params, min_args, ..
-            } => (*min_args, params.len()),
-            _ => unreachable!(),
-        })
+        if let Some(s) = lookup_workspace_function_property(&self.workspace, qualified) {
+            return match &s.kind {
+                SymbolKind::Function {
+                    params, min_args, ..
+                } => Some((*min_args, params.len())),
+                _ => unreachable!(),
+            };
+        }
+        let ranges = self.lookup_external_function_arity_ranges(qualified)?;
+        if ranges.len() == 1 {
+            Some(ranges[0])
+        } else {
+            None
+        }
+    }
+
+    /// Return every external (typedb) free-function overload's
+    /// `(min_args, max_args)` range for `qualified`. Empty/`None` when the
+    /// name is not an external function. Defaults (params with `default`
+    /// set) lower `min_args`.
+    pub fn lookup_external_function_arity_ranges(
+        &self,
+        qualified: &str,
+    ) -> Option<Vec<(usize, usize)>> {
+        let ext = self.external?;
+        let fns = ext.lookup_function(qualified)?;
+        if fns.is_empty() {
+            return None;
+        }
+        Some(
+            fns.iter()
+                .map(|f| {
+                    let min_args = f.params.iter().filter(|p| p.default.is_none()).count();
+                    (min_args, f.params.len())
+                })
+                .collect(),
+        )
+    }
+
+    /// Return every external method overload's `(min_args, max_args)` range
+    /// for `type_name::method`, walking parent classes. Stops at the first
+    /// class in the chain that defines the method (override semantics).
+    ///
+    /// Returns `None` when the type/method is unknown or the type is
+    /// Nadeo-sourced (member metadata is incomplete there).
+    pub fn lookup_external_method_arity_ranges(
+        &self,
+        type_name: &str,
+        method: &str,
+    ) -> Option<Vec<(usize, usize)>> {
+        if self.is_nadeo_type(type_name) {
+            return None;
+        }
+        let ext = self.external?;
+        let mut ranges = Vec::new();
+        let mut current: Option<String> = Some(type_name.to_string());
+        let mut hops = 0usize;
+        while let Some(name) = current.take() {
+            hops += 1;
+            if hops > 32 {
+                break;
+            }
+            let info = ext.lookup_type(&name)?;
+            let mut found_on_this = false;
+            for m in &info.methods {
+                if m.name != method {
+                    continue;
+                }
+                found_on_this = true;
+                let min_args = m.params.iter().filter(|p| p.default.is_none()).count();
+                ranges.push((min_args, m.params.len()));
+            }
+            if found_on_this {
+                break;
+            }
+            current = info.parent.clone();
+        }
+        if ranges.is_empty() {
+            None
+        } else {
+            Some(ranges)
+        }
     }
 
     /// Look up a unique workspace free function's parameter list
@@ -930,6 +1008,38 @@ mod tests {
                 .workspace_class_member("Editor::ItemSpecPriv", "ReadFromNetworkBuffer")
                 .is_some(),
             "expected namespaced parent lookup to beat global short-name collision"
+        );
+    }
+
+    #[test]
+    fn external_method_arity_ranges_indexof_and_selectable() {
+        use crate::typedb::index::TypeIndex;
+
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+
+        assert_eq!(
+            scope.lookup_external_method_arity_ranges("string", "IndexOf"),
+            Some(vec![(1, 1)])
+        );
+        // SubStr is overloaded 1-arg / 2-arg.
+        let substr = scope
+            .lookup_external_method_arity_ranges("string", "SubStr")
+            .expect("SubStr");
+        assert!(substr.contains(&(1, 1)) && substr.contains(&(2, 2)));
+
+        assert_eq!(
+            scope.lookup_external_function_arity_ranges("UI::Selectable"),
+            Some(vec![(2, 3)])
+        );
+        assert_eq!(
+            scope.lookup_function_signature("UI::Selectable"),
+            Some((2, 3))
         );
     }
 }
