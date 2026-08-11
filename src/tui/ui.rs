@@ -190,10 +190,12 @@ impl App {
                 .max()
                 .unwrap_or(16)
                 .min(40);
+            let selected = self.list_state.selected();
             self.snapshot
                 .diagnostics
                 .iter()
-                .map(|d| list_item_for(d, self.density, loc_w))
+                .enumerate()
+                .map(|(i, d)| list_item_for(d, self.density, loc_w, selected == Some(i)))
                 .collect()
         };
 
@@ -313,17 +315,34 @@ fn detail_box_height(selected: Option<&DiagItem>) -> u16 {
     (inner + 2) as u16
 }
 
-fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'static> {
+fn list_item_for(
+    d: &DiagItem,
+    density: ListDensity,
+    loc_w: usize,
+    selected: bool,
+) -> ListItem<'static> {
     let glyph = d.severity.glyph();
     let loc = format_location(d, loc_w);
     let style = severity_style(d.severity);
+    let msg_style = if selected {
+        style
+    } else {
+        style.add_modifier(Modifier::DIM)
+    };
+    let loc_style = if selected {
+        Style::default()
+            .fg(ratatui::style::Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ratatui::style::Color::Cyan)
+    };
     match density {
         ListDensity::Compact => {
             let row = Line::from(vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
-                Span::styled(loc, Style::default().fg(ratatui::style::Color::Cyan)),
+                Span::styled(loc, loc_style),
                 Span::raw("  "),
-                Span::styled(d.message.clone(), style),
+                Span::styled(d.message.clone(), msg_style),
             ]);
             ListItem::new(row)
         }
@@ -332,7 +351,7 @@ fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'
             // Keep padded `loc` (trailing spaces) so `› frag ‹` shares one column.
             let mut head_spans = vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
-                Span::styled(loc, Style::default().fg(ratatui::style::Color::Cyan)),
+                Span::styled(loc, loc_style),
             ];
             if let Some(frag) = code_fragment(d) {
                 // Fixed-width field: `› frag ‹` then trailing pad (spaces outside brackets).
@@ -352,7 +371,7 @@ fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'
                 head_spans.extend(paint_fragment_field(&field, style));
             }
             let head = Line::from(head_spans);
-            let msg = Line::from(Span::styled(format!("   {}", d.message), style));
+            let msg = Line::from(Span::styled(format!("   {}", d.message), msg_style));
             ListItem::new(vec![head, msg])
         }
     }
@@ -492,7 +511,12 @@ fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
     let sev_style = severity_style(d.severity).add_modifier(Modifier::BOLD);
 
     let mut lines = vec![Line::from(vec![
-        Span::styled(path, Style::default().fg(ratatui::style::Color::Cyan)),
+        Span::styled(
+            path,
+            Style::default()
+                .fg(ratatui::style::Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(format!(":{}:{}: ", d.line, d.col)),
         Span::styled(sev.to_string(), sev_style),
     ])];
