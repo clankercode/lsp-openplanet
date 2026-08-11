@@ -59,7 +59,13 @@ impl Backend {
 
     /// Build a workspace symbol table: open documents + on-disk plugin sources
     /// and dependency export files (shared path with CLI `check`).
-    async fn build_workspace(&self) -> (SymbolTable, HashMap<usize, (Url, String)>) {
+    async fn build_workspace(
+        &self,
+    ) -> (
+        SymbolTable,
+        HashMap<usize, (Url, String)>,
+        Vec<String>,
+    ) {
         let config = self.config.read().await;
         let root = self.workspace_root.read().await.clone();
 
@@ -76,11 +82,13 @@ impl Backend {
 
         // Stable ordered list of (path, source, optional uri for navigation).
         let mut ordered: Vec<(PathBuf, String, Option<Url>)> = Vec::new();
+        let mut missing_required_dependencies = Vec::new();
 
         if let Some(root) = root.as_ref() {
             let search = crate::workspace::load::DependencySearch::with_defaults()
                 .finalize_with_config(&config);
             if let Ok(disk) = crate::workspace::load::load_plugin_workspace(root, &search) {
+                missing_required_dependencies = disk.missing_required_dependencies.clone();
                 let merged = crate::workspace::load::merge_open_documents(&disk, &open);
                 for f in merged.files {
                     let uri = open_uris
@@ -115,25 +123,75 @@ impl Backend {
                 files.insert(i, (uri.clone(), source.clone()));
             }
         }
-        (table, files)
+        (table, files, missing_required_dependencies)
     }
 
     async fn on_change(&self, uri: &Url, text: &str) {
-        let (workspace, _files) = self.build_workspace().await;
+        let (workspace, _files, missing_required_dependencies) = self.build_workspace().await;
         let config = self.config.read().await;
         let type_index = self.type_index.read().await;
-        let diags = diagnostics::compute_diagnostics(
+        let mut diags = diagnostics::compute_diagnostics(
             uri,
             text,
             &config,
             type_index.as_deref(),
             Some(&workspace),
         );
+        if uri.path().ends_with("info.toml") {
+            diags.extend(diagnostics::missing_required_dependency_diagnostics(
+                &missing_required_dependencies,
+            ));
+        }
+
+        let manifest_diagnostics = if uri.path().ends_with("info.toml") {
+            None
+        } else {
+            let manifest_uri = self
+                .workspace_root
+                .read()
+                .await
+                .as_ref()
+                .and_then(|root| {
+                    let manifest_path = root.join("info.toml");
+                    Url::from_file_path(&manifest_path)
+                        .ok()
+                        .map(|manifest_uri| (manifest_uri, manifest_path))
+                });
+            manifest_uri.map(|(manifest_uri, manifest_path)| {
+                let manifest_source = self
+                    .documents
+                    .get(&manifest_uri)
+                    .map(|document| document.value().clone())
+                    .or_else(|| std::fs::read_to_string(manifest_path).ok());
+                let diagnostics = manifest_source
+                    .as_deref()
+                    .map(|source| {
+                        diagnostics::compute_manifest_diagnostics(
+                            &manifest_uri,
+                            source,
+                            &config,
+                            &missing_required_dependencies,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        diagnostics::missing_required_dependency_diagnostics(
+                            &missing_required_dependencies,
+                        )
+                    });
+                (manifest_uri, diagnostics)
+            })
+        };
         drop(type_index);
         drop(config);
         self.client
             .publish_diagnostics(uri.clone(), diags, None)
             .await;
+
+        if let Some((manifest_uri, manifest_diagnostics)) = manifest_diagnostics {
+            self.client
+                .publish_diagnostics(manifest_uri, manifest_diagnostics, None)
+                .await;
+        }
     }
 }
 
@@ -244,7 +302,7 @@ impl LanguageServer for Backend {
             None => String::new(),
         };
         let type_index = self.type_index.read().await;
-        let (table, _files) = self.build_workspace().await;
+        let (table, _files, _missing_required_dependencies) = self.build_workspace().await;
         let items = completion::complete(&source, pos, type_index.as_deref(), Some(&table));
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -257,7 +315,7 @@ impl LanguageServer for Backend {
             None => String::new(),
         };
         let type_index = self.type_index.read().await;
-        let (table, _files) = self.build_workspace().await;
+        let (table, _files, _missing_required_dependencies) = self.build_workspace().await;
         Ok(hover::hover(&source, pos, type_index.as_deref(), Some(&table)))
     }
 
@@ -271,7 +329,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (table, files) = self.build_workspace().await;
+        let (table, files, _missing_required_dependencies) = self.build_workspace().await;
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         Ok(navigation::goto_definition(&source, pos, &table, &workspace_files)
             .map(GotoDefinitionResponse::Scalar))
@@ -284,7 +342,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (_table, files) = self.build_workspace().await;
+        let (_table, files, _missing_required_dependencies) = self.build_workspace().await;
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let refs = navigation::find_references(
             &source,
@@ -327,7 +385,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (table, _files) = self.build_workspace().await;
+        let (table, _files, _missing_required_dependencies) = self.build_workspace().await;
         let type_index = self.type_index.read().await;
         Ok(signature::signature_help(
             &source,
@@ -351,7 +409,7 @@ impl LanguageServer for Backend {
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
-        let (table, files) = self.build_workspace().await;
+        let (table, files, _missing_required_dependencies) = self.build_workspace().await;
         Ok(Some(symbols::workspace_symbols(
             &params.query,
             &table,
@@ -366,7 +424,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (_table, files) = self.build_workspace().await;
+        let (_table, files, _missing_required_dependencies) = self.build_workspace().await;
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         Ok(navigation::rename(
             &source,
@@ -422,7 +480,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (table, _files) = self.build_workspace().await;
+        let (table, _files, _missing_required_dependencies) = self.build_workspace().await;
         let type_index = self.type_index.read().await;
         let hints = inlay_hints::inlay_hints(
             &source,
@@ -443,7 +501,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (workspace, files) = self.build_workspace().await;
+        let (workspace, files, _missing_required_dependencies) = self.build_workspace().await;
         let ws_files = navigation::WorkspaceFiles { files: &files };
         let items = call_hierarchy::prepare(&source, uri, pos, &workspace, &ws_files);
         if items.is_empty() {
@@ -457,7 +515,7 @@ impl LanguageServer for Backend {
         &self,
         params: CallHierarchyIncomingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
-        let (workspace, files) = self.build_workspace().await;
+        let (workspace, files, _missing_required_dependencies) = self.build_workspace().await;
         let ws_files = navigation::WorkspaceFiles { files: &files };
         Ok(Some(call_hierarchy::incoming(
             &params.item,
@@ -470,7 +528,7 @@ impl LanguageServer for Backend {
         &self,
         params: CallHierarchyOutgoingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
-        let (workspace, files) = self.build_workspace().await;
+        let (workspace, files, _missing_required_dependencies) = self.build_workspace().await;
         let ws_files = navigation::WorkspaceFiles { files: &files };
         Ok(Some(call_hierarchy::outgoing(
             &params.item,
@@ -488,7 +546,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (workspace, _files) = self.build_workspace().await;
+        let (workspace, _files, _missing_required_dependencies) = self.build_workspace().await;
         let type_index_guard = self.type_index.read().await;
         let type_index = type_index_guard.as_deref();
         let actions = code_actions::code_actions(

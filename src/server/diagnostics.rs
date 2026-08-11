@@ -23,6 +23,40 @@ pub fn compute_diagnostics(
     compute_diagnostics_from_analysis(uri, &analysis, config, type_index, workspace_symbols)
 }
 
+/// Diagnostics for required plugin dependencies that were not resolved by the
+/// shared workspace loader. These are attached to `info.toml` by the CLI and
+/// LSP backend alike.
+pub fn missing_required_dependency_diagnostics(dependencies: &[String]) -> Vec<Diagnostic> {
+    dependencies
+        .iter()
+        .map(|dep_id| Diagnostic {
+            range: Range::default(),
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: format!(
+                "dependency `{}` not found in any configured plugin directory",
+                dep_id
+            ),
+            source: Some("openplanet-lsp".to_string()),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Manifest diagnostics, including unresolved required plugin dependencies.
+/// Kept together so replacing the LSP diagnostic set never drops TOML errors.
+pub fn compute_manifest_diagnostics(
+    uri: &Url,
+    source: &str,
+    config: &LspConfig,
+    missing_required_dependencies: &[String],
+) -> Vec<Diagnostic> {
+    let mut diagnostics = compute_diagnostics(uri, source, config, None, None);
+    diagnostics.extend(missing_required_dependency_diagnostics(
+        missing_required_dependencies,
+    ));
+    diagnostics
+}
+
 /// Diagnostics from an existing [`DocumentAnalysis`] (shared pipeline).
 pub fn compute_diagnostics_from_analysis(
     uri: &Url,
@@ -159,4 +193,35 @@ pub fn position_to_offset(source: &str, pos: Position) -> usize {
         offset += ch.len_utf8();
     }
     offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_required_dependency_diagnostic_is_an_error_at_manifest_start() {
+        let diagnostics = missing_required_dependency_diagnostics(&["MissingDep".to_string()]);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].range, Range::default());
+        assert_eq!(diagnostics[0].severity, Some(DiagnosticSeverity::ERROR));
+        assert!(diagnostics[0].message.contains("MissingDep"));
+    }
+
+    #[test]
+    fn manifest_diagnostics_preserve_toml_and_missing_dependency_errors() {
+        let uri = Url::parse("file:///tmp/info.toml").unwrap();
+        let diagnostics = compute_manifest_diagnostics(
+            &uri,
+            "[meta]\nname = \"Missing Version\"\n",
+            &LspConfig::default(),
+            &["MissingDep".to_string()],
+        );
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("[meta].version")));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("MissingDep")));
+    }
 }

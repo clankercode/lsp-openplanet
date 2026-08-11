@@ -170,7 +170,7 @@ fn load_dependency_exports(
 ) -> Result<DepLoad, String> {
     let mut result = DepLoad::default();
     let manifest_path = root.join("info.toml");
-    if plugins_dirs.is_empty() || !manifest_path.exists() {
+    if !manifest_path.exists() {
         return Ok(result);
     }
 
@@ -388,6 +388,32 @@ dependencies = ["NoSuchPlugin"]
         };
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         assert_eq!(load.missing_required_dependencies, vec!["NoSuchPlugin"]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn required_dependency_missing_without_plugin_dirs_is_reported() {
+        let base = temp_tree("miss-no-dirs");
+        fs::create_dir_all(base.join("consumer/src")).unwrap();
+        fs::write(
+            base.join("consumer/info.toml"),
+            r#"
+[meta]
+name = "Consumer"
+version = "0.1.0"
+[script]
+dependencies = ["NoSearchPath"]
+"#,
+        )
+        .unwrap();
+        fs::write(base.join("consumer/src/Main.as"), "void Main() {}\n").unwrap();
+
+        let load = load_plugin_workspace(
+            &base.join("consumer"),
+            &DependencySearch::with_defaults(),
+        )
+        .unwrap();
+        assert_eq!(load.missing_required_dependencies, vec!["NoSearchPath"]);
         let _ = fs::remove_dir_all(base);
     }
 }

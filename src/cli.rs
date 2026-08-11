@@ -217,19 +217,12 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
 
     if !load.missing_required_dependencies.is_empty() {
         let manifest_path = load.root.join("info.toml");
-        for dep_id in &load.missing_required_dependencies {
+        for diagnostic in diagnostics::missing_required_dependency_diagnostics(
+            &load.missing_required_dependencies,
+        ) {
             cli_diagnostics.push(CliDiagnostic {
                 path: manifest_path.clone(),
-                diagnostic: Diagnostic {
-                    range: lsp_zero_range(),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: format!(
-                        "dependency `{}` not found in any configured plugin directory",
-                        dep_id
-                    ),
-                    source: Some("openplanet-lsp".to_string()),
-                    ..Default::default()
-                },
+                diagnostic,
             });
         }
     }
@@ -351,13 +344,6 @@ fn load_type_index(config: &LspConfig, no_typedb: bool) -> Result<Option<TypeInd
     TypeIndex::load(core, game)
         .map(Some)
         .map_err(|e| CliError::Check(format!("failed to load type database: {e}")))
-}
-
-fn lsp_zero_range() -> tower_lsp::lsp_types::Range {
-    tower_lsp::lsp_types::Range::new(
-        tower_lsp::lsp_types::Position::new(0, 0),
-        tower_lsp::lsp_types::Position::new(0, 0),
-    )
 }
 
 fn severity_label(severity: Option<DiagnosticSeverity>) -> &'static str {
