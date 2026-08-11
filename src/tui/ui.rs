@@ -126,20 +126,21 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
-                Constraint::Min(5),
-                Constraint::Length(3),
+                Constraint::Min(6),
+                Constraint::Length(2), // thinner footer
             ])
             .split(f.area());
 
         self.draw_header(f, chunks[0]);
 
-        // List + detail: give detail more room when a pretty excerpt is shown.
-        let detail_pct = if self.selected_diag().and_then(|d| d.source_line.as_ref()).is_some() {
-            48
-        } else {
-            38
+        // Prefer detail for pretty excerpts; list stays scannable.
+        let n = self.snapshot.diagnostics.len();
+        let (list_pct, detail_pct) = match (self.density, n) {
+            (_, 0) => (40u16, 60u16),
+            (ListDensity::Relaxed, _) => (55, 45),
+            (ListDensity::Compact, n) if n <= 6 => (42, 58),
+            (ListDensity::Compact, _) => (50, 50),
         };
-        let list_pct = 100 - detail_pct;
         let mid = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -159,8 +160,9 @@ impl App {
         let w = self.snapshot.warning_count();
         let title = " openplanet-lsp · watch ";
         let body = format!(
-            " {}  ·  {n} diagnostics ({e} errors · {w} warnings)  ·  {}  ·  list: {} ",
+            " {}  ·  {}  ·  {}  ·  list: {} ",
             self.snapshot.root_label,
+            diag_counts_phrase(n, e, w),
             self.snapshot.status.label(),
             self.density.label(),
         );
@@ -180,18 +182,30 @@ impl App {
                 Style::default().add_modifier(Modifier::DIM),
             )))]
         } else {
+            let loc_w = self
+                .snapshot
+                .diagnostics
+                .iter()
+                .map(|d| location_text(d).chars().count())
+                .max()
+                .unwrap_or(12)
+                .min(36);
             self.snapshot
                 .diagnostics
                 .iter()
-                .map(|d| list_item_for(d, self.density))
+                .map(|d| list_item_for(d, self.density, loc_w))
                 .collect()
         };
 
         let title = format!(" diagnostics · {} ", self.density.label());
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-            .highlight_symbol("› ");
+            .highlight_style(
+                Style::default()
+                    .bg(ratatui::style::Color::Rgb(45, 45, 55))
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▌ ");
 
         f.render_stateful_widget(list, area, &mut self.list_state);
     }
@@ -205,10 +219,7 @@ impl App {
                     Style::default().add_modifier(Modifier::DIM),
                 ))],
             ),
-            Some(d) => {
-                let title = format!(" detail · {} ", d.severity.label());
-                (title, pretty_detail_lines(d))
-            }
+            Some(d) => (" detail ".to_string(), pretty_detail_lines(d)),
         };
 
         let block = Block::default().borders(Borders::ALL).title(title);
@@ -222,58 +233,101 @@ impl App {
 
     fn draw_footer(&self, f: &mut Frame<'_>, area: Rect) {
         let density_hint = match self.density {
-            ListDensity::Compact => "c relaxed",
-            ListDensity::Relaxed => "c compact",
+            ListDensity::Compact => "c density",
+            ListDensity::Relaxed => "c density",
         };
+        // Single muted line — no heavy box title competing with content.
         let hints = Paragraph::new(format!(
-            " q quit  ·  j/k ↑↓  ·  PgUp/PgDn  ·  g/G  ·  r refresh  ·  {density_hint} "
+            " j/k move · PgUp/Dn page · g/G top/end · r refresh · {density_hint} · q quit "
         ))
-        .block(Block::default().borders(Borders::ALL).title(" keys "));
+        .style(Style::default().add_modifier(Modifier::DIM))
+        .block(Block::default().borders(Borders::TOP));
         f.render_widget(hints, area);
     }
 }
 
-fn list_item_for(d: &DiagItem, density: ListDensity) -> ListItem<'static> {
+fn diag_counts_phrase(n: usize, e: usize, w: usize) -> String {
+    let d = plural(n, "diagnostic", "diagnostics");
+    let mut parts = Vec::new();
+    if e > 0 {
+        parts.push(plural(e, "error", "errors"));
+    }
+    if w > 0 {
+        parts.push(plural(w, "warning", "warnings"));
+    }
+    if parts.is_empty() {
+        format!("{d}")
+    } else {
+        format!("{d} ({})", parts.join(" · "))
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+fn location_text(d: &DiagItem) -> String {
+    format!("{}:{}:{}", short_path(&d.path), d.line, d.col)
+}
+
+fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'static> {
     let glyph = d.severity.glyph();
-    let path = short_path(&d.path);
+    let loc = location_text(d);
     let style = severity_style(d.severity);
+    let loc_pad = format!("{loc:<loc_w$}");
     match density {
         ListDensity::Compact => {
-            let row = format!(" {glyph}  {path}:{}:{}  {}", d.line, d.col, d.message);
-            ListItem::new(Line::from(Span::styled(row, style)))
+            // Columns: sev | location | message
+            let row = Line::from(vec![
+                Span::styled(
+                    format!(" {glyph} "),
+                    style.add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    loc_pad,
+                    Style::default().fg(ratatui::style::Color::Cyan),
+                ),
+                Span::raw("  "),
+                Span::styled(d.message.clone(), style),
+            ]);
+            ListItem::new(row)
         }
         ListDensity::Relaxed => {
             let head = Line::from(vec![
                 Span::styled(
-                    format!(" {glyph}  "),
+                    format!(" {glyph} "),
                     style.add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!("{path}:{}:{}", d.line, d.col),
-                    Style::default().fg(ratatui::style::Color::Cyan),
-                ),
+                Span::styled(loc, Style::default().fg(ratatui::style::Color::Cyan)),
             ]);
+            // Indent message under location column (sev col ≈ 3 chars).
             let msg = Line::from(Span::styled(
-                format!("     {}", d.message),
+                format!("    {}", d.message),
                 style,
             ));
-            // Trailing blank line separates relaxed rows visually.
-            ListItem::new(vec![head, msg, Line::from("")])
+            ListItem::new(vec![head, msg])
         }
     }
 }
 
-/// Pretty detail block matching CLI pretty check layout (ratatui spans).
+/// Pretty detail: header, source line, caret-only line, then message.
 fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
     let path = d.path.display().to_string();
     let sev = d.severity.label();
     let sev_style = severity_style(d.severity).add_modifier(Modifier::BOLD);
 
-    let mut lines = vec![Line::from(vec![
-        Span::styled(path, Style::default().fg(ratatui::style::Color::Cyan)),
-        Span::raw(format!(":{}:{}: ", d.line, d.col)),
-        Span::styled(sev.to_string(), sev_style),
-    ])];
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(path, Style::default().fg(ratatui::style::Color::Cyan)),
+            Span::raw(format!(":{}:{}: ", d.line, d.col)),
+            Span::styled(sev.to_string(), sev_style),
+        ]),
+        Line::from(""),
+    ];
 
     if let Some(src) = d.source_line.as_ref() {
         let gutter_w = d.line.to_string().len().max(2);
@@ -281,6 +335,7 @@ fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
         let blank = " ".repeat(gutter_w);
         let pipe = Style::default().add_modifier(Modifier::DIM);
 
+        // Source line
         lines.push(Line::from(vec![
             Span::raw(format!("  {gutter} ")),
             Span::styled("│".to_string(), pipe),
@@ -293,18 +348,27 @@ fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
         let pad = " ".repeat(start);
         let carets = "^".repeat((end - start).max(1));
 
+        // Caret-only line (message on next line — CLI pretty puts message inline,
+        // but TUI detail has room and vision review preferred separation).
         lines.push(Line::from(vec![
             Span::raw(format!("  {blank} ")),
             Span::styled("│".to_string(), pipe),
             Span::raw(format!(" {pad}")),
-            Span::styled(carets, severity_style(d.severity).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                carets,
+                severity_style(d.severity).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {blank} ")),
+            Span::styled("│".to_string(), pipe),
             Span::raw(" "),
             Span::styled(d.message.clone(), severity_style(d.severity)),
         ]));
     } else {
-        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            d.message.clone(),
+            format!("  {}", d.message),
             severity_style(d.severity),
         )));
     }
@@ -321,7 +385,6 @@ fn severity_style(sev: Severity) -> Style {
     }
 }
 
-/// Prefer a short relative-looking path for list rows.
 fn short_path(path: &std::path::Path) -> String {
     let s = path.display().to_string();
     let parts: Vec<&str> = s.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
@@ -334,8 +397,8 @@ fn short_path(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::mock::canned_snapshot;
+    use super::*;
 
     #[test]
     fn scroll_clamps() {
@@ -378,11 +441,10 @@ mod tests {
     }
 
     #[test]
-    fn pretty_detail_includes_caret_when_source_present() {
+    fn pretty_detail_separates_carets_and_message() {
         let d = &canned_snapshot().diagnostics[0];
-        assert!(d.source_line.is_some());
         let lines = pretty_detail_lines(d);
-        let joined: String = lines
+        let rows: Vec<String> = lines
             .iter()
             .map(|l| {
                 l.spans
@@ -390,11 +452,25 @@ mod tests {
                     .map(|s| s.content.as_ref())
                     .collect::<String>()
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        let joined = rows.join("\n");
         assert!(joined.contains('│'), "{joined}");
         assert!(joined.contains('^'), "{joined}");
-        assert!(joined.contains("MakeTint") || joined.contains("Foo") || joined.contains("true"), "{joined}");
+        // Caret line should not also contain the full message.
+        let caret_row = rows.iter().find(|r| r.contains('^')).expect("caret row");
+        assert!(
+            !caret_row.contains("expected"),
+            "caret row should not include message: {caret_row}"
+        );
+        assert!(joined.contains("expected"), "{joined}");
+    }
+
+    #[test]
+    fn plural_grammar() {
+        assert_eq!(plural(1, "warning", "warnings"), "1 warning");
+        assert_eq!(plural(2, "warning", "warnings"), "2 warnings");
+        assert!(diag_counts_phrase(3, 2, 1).contains("1 warning"));
+        assert!(!diag_counts_phrase(3, 2, 1).contains("1 warnings"));
     }
 
     #[test]
