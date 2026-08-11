@@ -48,32 +48,34 @@ changelog and update the release body** — see [Post-CI](#5-post-ci--changelog-
 ### crates.io
 
 1. Create a crates.io account linked to GitHub if needed: https://crates.io
-2. **First publish is manual** (claims the crate name under your account):
+2. **First publish is manual** (claims the crate name under your account) — already
+   done for `0.2.8`. Subsequent versions can be CI-published.
 
-   ```bash
-   cargo login   # paste API token from https://crates.io/settings/tokens
-   cargo publish --dry-run
-   cargo publish
-   ```
+3. **Trusted Publishing (preferred, no long-lived token)**  
+   On https://crates.io/crates/openplanet-lsp → Settings → Trusted Publishing:
 
-3. For **CI auto-publish on tags**, add a crates.io API token as the repo
-   secret **`CARGO_REGISTRY_TOKEN`**
-   (`gh secret set CARGO_REGISTRY_TOKEN`). The `publish` job runs
-   `cargo publish --locked --no-verify` after npm; if the secret is missing
-   the step warns and skips (does not fail the release).
+   | Field | Value |
+   |-------|--------|
+   | Repository | `clankercode/lsp-openplanet` |
+   | Workflow filename | `release.yml` |
 
-4. `Cargo.toml` must keep publish metadata current: `license`, `repository`,
-   `readme`, `description`, `authors` (see package section).
+   The release `publish` job already has `permissions.id-token: write`. On tag
+   pushes it runs `cargo publish --locked --no-verify` using OIDC.
 
-5. After crates.io is live, cargo installs can use:
+4. **Optional fallback:** repo secret `CARGO_REGISTRY_TOKEN` (crates.io API
+   token). If set, CI uses the token instead of OIDC.
+
+5. `Cargo.toml` must keep publish metadata current: `license`, `repository`,
+   `readme`, `description`, `authors`.
+
+6. Install from crates.io:
 
    ```bash
    cargo install openplanet-lsp --force
    ```
 
-   Self-update currently still runs `cargo install --git … --force` so it
-   works before/without crates.io; switch to registry install in a follow-up
-   once the crate is published.
+   Self-update for cargo installs still uses `cargo install --git … --force`
+   until switched to the registry path (planned around 0.3.0).
 
 ### npm — GitHub OIDC trusted publishing (preferred; no long-lived token)
 

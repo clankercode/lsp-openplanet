@@ -418,20 +418,32 @@ jobs:
       - name: Publish crate to crates.io
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
         env:
+          # Optional fallback if trusted publishing is not configured yet.
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
-            echo "::warning::CARGO_REGISTRY_TOKEN secret not set — skipping crates.io publish"
-            echo "Add a crates.io API token as repo secret CARGO_REGISTRY_TOKEN to enable."
-            exit 0
-          fi
-          # Publish job is Node-centric for npm; install a minimal Rust toolchain here.
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          # Publish job is Node-centric for npm; install a minimal Rust toolchain.
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          # shellcheck source=/dev/null
           source "$HOME/.cargo/env"
           rustc -V
           cargo -V
+
+          # Preferred: crates.io Trusted Publishing (GitHub OIDC).
+          # Configure at https://crates.io/crates/openplanet-lsp/settings/new-trusted-publisher
+          #   repository: clankercode/lsp-openplanet
+          #   workflow: release.yml
+          # Job already has permissions.id-token: write.
+          #
+          # Fallback: long-lived CARGO_REGISTRY_TOKEN secret.
+          if [[ -n "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "Publishing with CARGO_REGISTRY_TOKEN (API token fallback)"
+          else
+            echo "Publishing with crates.io Trusted Publishing (OIDC id-token)"
+            unset CARGO_REGISTRY_TOKEN || true
+          fi
           cargo publish --locked --no-verify
           # --no-verify: full build already done in the matrix; keep this step light.
 
