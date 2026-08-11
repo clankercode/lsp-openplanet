@@ -49,21 +49,41 @@ changelog and update the release body** — see [Post-CI](#5-post-ci--changelog-
 
 1. Create a crates.io account linked to GitHub if needed: https://crates.io
 2. **First publish is manual** (claims the crate name under your account) — already
-   done for `0.2.8`. Subsequent versions can be CI-published.
+   done for `0.2.8`. Subsequent versions are CI-published via Trusted Publishing.
 
 3. **Trusted Publishing (preferred, no long-lived token)**  
+   Docs: https://crates.io/docs/trusted-publishing  
+   Action: https://github.com/rust-lang/crates-io-auth-action  
+
    On https://crates.io/crates/openplanet-lsp → Settings → Trusted Publishing:
 
    | Field | Value |
    |-------|--------|
    | Repository | `clankercode/lsp-openplanet` |
    | Workflow filename | `release.yml` |
+   | Environment | _(leave empty unless the job sets `environment:`)_ |
 
-   The release `publish` job already has `permissions.id-token: write`. On tag
-   pushes it runs `cargo publish --locked --no-verify` using OIDC.
+   Owner ID for this org/user is informational (e.g. `269201082`).
 
-4. **Optional fallback:** repo secret `CARGO_REGISTRY_TOKEN` (crates.io API
-   token). If set, CI uses the token instead of OIDC.
+   The `publish-crates` job in `release.yml`:
+
+   ```yaml
+   permissions:
+     id-token: write
+   steps:
+     - uses: rust-lang/crates-io-auth-action@v1
+       id: crates-io-auth
+     - run: cargo publish --locked --no-verify
+       env:
+         CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+   ```
+
+   **Important:** `cargo publish` does **not** speak OIDC by itself. The
+   auth action exchanges the GitHub OIDC JWT for a short-lived crates.io
+   token and injects it as `CARGO_REGISTRY_TOKEN`.
+
+4. **Optional fallback:** long-lived `CARGO_REGISTRY_TOKEN` secret is no longer
+   required when Trusted Publishing is configured.
 
 5. `Cargo.toml` must keep publish metadata current: `license`, `repository`,
    `readme`, `description`, `authors`.
@@ -75,7 +95,7 @@ changelog and update the release body** — see [Post-CI](#5-post-ci--changelog-
    ```
 
    Self-update for cargo installs still uses `cargo install --git … --force`
-   until switched to the registry path (planned around 0.3.0).
+   until switched to the registry path.
 
 ### npm — GitHub OIDC trusted publishing (preferred; no long-lived token)
 

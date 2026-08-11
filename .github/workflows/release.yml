@@ -415,39 +415,34 @@ jobs:
           echo "Dry run complete. Artifacts staged but not published."
           ls -lh release-assets npm-tgz
 
-      - name: Publish crate to crates.io
-        # Soft-fail: npm + GH assets are primary; crates OIDC may still need tuning.
-        continue-on-error: true
-        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
-        env:
-          # Optional fallback if trusted publishing is not configured yet.
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Publish job is Node-centric for npm; install a minimal Rust toolchain.
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --default-toolchain stable --profile minimal
-          # shellcheck source=/dev/null
-          source "$HOME/.cargo/env"
-          rustc -V
-          cargo -V
+  # crates.io Trusted Publishing (OIDC) — separate job so npm/GH release
+  # success is not blocked if crates auth fails.
+  # Docs: https://crates.io/docs/trusted-publishing
+  # Action: https://github.com/rust-lang/crates-io-auth-action
+  # Configure on crates.io: repo clankercode/lsp-openplanet, workflow release.yml
+  # (no GitHub Environment unless you also pin one here).
+  publish-crates:
+    needs: [version, publish]
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
 
-          # Preferred: crates.io Trusted Publishing (GitHub OIDC).
-          # Configure at https://crates.io/crates/openplanet-lsp/settings
-          #   repository: clankercode/lsp-openplanet
-          #   workflow: release.yml
-          # Job already has permissions.id-token: write.
-          #
-          # Fallback: long-lived CARGO_REGISTRY_TOKEN secret.
-          if [[ -n "${CARGO_REGISTRY_TOKEN:-}" ]]; then
-            echo "Publishing with CARGO_REGISTRY_TOKEN (API token fallback)"
-          else
-            echo "Publishing with crates.io Trusted Publishing (OIDC id-token)"
-            unset CARGO_REGISTRY_TOKEN || true
-          fi
-          cargo publish --locked --no-verify
-          # --no-verify: full build already done in the matrix; keep this step light.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Authenticate to crates.io (Trusted Publishing OIDC)
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: cargo publish --locked --no-verify
+        # --no-verify: matrix already built the crate; keep token lifetime short.
 
   # After a real tag publish: multi-PM registry self-update (npm/pnpm/yarn/bun).
   # Manual re-runs: Actions → "self-update-matrix" → Run workflow.
