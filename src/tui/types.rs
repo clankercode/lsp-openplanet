@@ -21,6 +21,41 @@ impl Severity {
             Severity::Hint => 'H',
         }
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+            Severity::Hint => "hint",
+        }
+    }
+}
+
+/// List density for the diagnostics pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListDensity {
+    /// One row per diagnostic (default).
+    #[default]
+    Compact,
+    /// Multi-line rows with path and message separated.
+    Relaxed,
+}
+
+impl ListDensity {
+    pub fn toggle(self) -> Self {
+        match self {
+            ListDensity::Compact => ListDensity::Relaxed,
+            ListDensity::Relaxed => ListDensity::Compact,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ListDensity::Compact => "compact",
+            ListDensity::Relaxed => "relaxed",
+        }
+    }
 }
 
 /// One row in the watch list (CLI view model — not LSP wire types).
@@ -31,9 +66,32 @@ pub struct DiagItem {
     pub path: PathBuf,
     /// 1-based for display.
     pub line: u32,
-    /// 1-based for display.
+    /// 1-based for display (start column).
     pub col: u32,
+    /// 1-based exclusive end column on the start line (for carets).
+    /// When equal to `col`, a single `^` is shown.
+    pub end_col: u32,
     pub message: String,
+    /// Expanded source line (tabs → spaces) for pretty detail; `None` if unread.
+    pub source_line: Option<String>,
+}
+
+impl DiagItem {
+    /// 0-based start column on the expanded source line.
+    pub fn start_col0(&self) -> usize {
+        self.col.saturating_sub(1) as usize
+    }
+
+    /// 0-based exclusive end column for carets (at least one cell).
+    pub fn end_col0(&self) -> usize {
+        let start = self.start_col0();
+        let end = self.end_col.saturating_sub(1) as usize;
+        if end <= start {
+            start + 1
+        } else {
+            end
+        }
+    }
 }
 
 /// Status of the last / current check run.

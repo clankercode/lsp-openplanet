@@ -44,3 +44,11 @@ fn render_once_from_mock_matches_populated() {
     render_once(&mut terminal, &mut source, "./MyPlugin").expect("render");
     insta::assert_snapshot!("render_once_mock_80x24", terminal.backend());
 }
+
+#[test]
+fn snapshot_relaxed_80x24() {
+    let mut app = App::from_snapshot(canned_snapshot());
+    app.toggle_density();
+    let terminal = draw_app(&mut app);
+    insta::assert_snapshot!("relaxed_80x24", terminal.backend());
+}

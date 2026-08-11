@@ -66,31 +66,37 @@ impl TuiDataSource for MockSource {
     }
 }
 
-/// Sample snapshot matching the research write-up UI sketch.
+/// Sample snapshot with source excerpts for pretty detail demos.
 pub fn canned_snapshot() -> Snapshot {
     Snapshot {
         root_label: "./MyPlugin".into(),
         diagnostics: vec![
             DiagItem {
                 severity: Severity::Error,
-                path: PathBuf::from("src/Main.as"),
-                line: 42,
-                col: 5,
-                message: "Undefined member 'Foo'".into(),
+                path: PathBuf::from("src/Overlay.as"),
+                line: 23,
+                col: 26,
+                end_col: 30,
+                message: "argument 1 of `MakeTint`: expected `int`, got `bool`".into(),
+                source_line: Some("    vec4 tint = MakeTint(true);".into()),
             },
             DiagItem {
                 severity: Severity::Warning,
-                path: PathBuf::from("src/Main.as"),
-                line: 10,
-                col: 1,
-                message: "Use 'const string &in x' to pass a string by reference".into(),
+                path: PathBuf::from("src/Helpers.as"),
+                line: 4,
+                col: 24,
+                end_col: 27,
+                message: "Use 'const string &in msg' to pass a string by reference".into(),
+                source_line: Some("void ShowStatus(string msg) {".into()),
             },
             DiagItem {
                 severity: Severity::Error,
-                path: PathBuf::from("src/Helper.as"),
-                line: 7,
-                col: 12,
-                message: "No matching signatures to 'Bar(int)'".into(),
+                path: PathBuf::from("src/Overlay.as"),
+                line: 36,
+                col: 5,
+                end_col: 21,
+                message: "unknown type `FakeVehicleState`".into(),
+                source_line: Some("    FakeVehicleState@ st;".into()),
             },
         ],
         status: RunStatus::Ready {
@@ -125,5 +131,11 @@ mod tests {
             source.try_recv(),
             Some(SourceEvent::Diagnostics(_))
         ));
+    }
+
+    #[test]
+    fn canned_has_source_excerpts() {
+        let snap = canned_snapshot();
+        assert!(snap.diagnostics.iter().all(|d| d.source_line.is_some()));
     }
 }

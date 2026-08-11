@@ -12,5 +12,7 @@ mod ui;
 
 pub use app::{render_once, run, run_with_backend, RunOptions};
 pub use mock::{canned_snapshot, MockSource};
-pub use types::{DiagItem, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource};
+pub use types::{
+    DiagItem, ListDensity, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource,
+};
 pub use ui::App;

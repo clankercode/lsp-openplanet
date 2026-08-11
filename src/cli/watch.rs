@@ -177,6 +177,9 @@ pub fn is_interesting_path(path: &Path) -> bool {
 }
 
 pub fn report_to_snapshot(report: &CheckReport, root_label: &str, elapsed: Duration) -> Snapshot {
+    let mut source_cache: std::collections::HashMap<PathBuf, Option<String>> =
+        std::collections::HashMap::new();
+
     let diagnostics = report
         .diagnostics
         .iter()
@@ -187,12 +190,34 @@ pub fn report_to_snapshot(report: &CheckReport, root_label: &str, elapsed: Durat
                 .unwrap_or(&item.path)
                 .to_path_buf();
             let range = item.diagnostic.range;
+            let line_idx = range.start.line as usize;
+            let source_line = source_cache
+                .entry(item.path.clone())
+                .or_insert_with(|| std::fs::read_to_string(&item.path).ok())
+                .as_ref()
+                .and_then(|src| {
+                    src.lines()
+                        .nth(line_idx)
+                        .map(|l| expand_tabs(l.trim_end_matches('\r'), 4))
+                });
+
+            let start_col = range.start.character + 1;
+            let end_col = if range.end.line == range.start.line
+                && range.end.character > range.start.character
+            {
+                range.end.character + 1
+            } else {
+                start_col
+            };
+
             DiagItem {
                 severity: map_severity(item.diagnostic.severity),
                 path: rel,
                 line: range.start.line + 1,
-                col: range.start.character + 1,
+                col: start_col,
+                end_col,
                 message: item.diagnostic.message.clone(),
+                source_line,
             }
         })
         .collect();
@@ -202,6 +227,24 @@ pub fn report_to_snapshot(report: &CheckReport, root_label: &str, elapsed: Durat
         diagnostics,
         status: RunStatus::Ready { duration: elapsed },
     }
+}
+
+fn expand_tabs(line: &str, tab_width: usize) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut col = 0usize;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let spaces = tab_width - (col % tab_width);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    out
 }
 
 fn map_severity(sev: Option<DiagnosticSeverity>) -> Severity {
