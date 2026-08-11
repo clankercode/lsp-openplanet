@@ -6,3 +6,4 @@ bugs:
     - file: B005-ui-selectable-4-arg-size-overl.todo
     - file: B006-unknown-member-on-nadeo-type-n.todo
     - file: B007-distinct-enum-types-treated-as.todo
+    - file: B008-i7-wire-check-analysis-through.todo
