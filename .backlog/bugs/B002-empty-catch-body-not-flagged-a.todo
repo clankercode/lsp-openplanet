@@ -1,18 +1,18 @@
 ---
+claimed_at: "2026-08-11T11:55:52Z"
+claimed_by: cli-user
+completed_at: null
 complexity: low
 created_at: "2026-08-11T11:53:37Z"
 depends_on: []
 estimate_hours: 2
 id: B002
 priority: medium
-status: pending
-tags:
-    - false-negative
-    - parser
-    - try-catch
-    - tm-control-mcp
+started_at: "2026-08-11T11:55:52Z"
+status: in_progress
+tags: []
 title: Empty catch body not flagged as parse/compile error
-updated_at: "2026-08-11T11:53:37Z"
+updated_at: "2026-08-11T11:55:52Z"
 ---
 ## Goal
 Flag empty `catch { }` bodies the same way the game-side compiler does.
