@@ -1,11 +1,11 @@
 # RELEASE.md — openplanet-lsp release procedure
 
-**Agents and humans: keep this file accurate.**  
+**Agents and humans: keep this file accurate.**
 If you change `.github/workflows/release.yml`, npm package layout, version
 bump scripts, supported targets, secrets, or any step below, update this
 document in the **same PR/commit**. Stale release docs are a bug.
 
-Canonical location: repository root `RELEASE.md`  
+Canonical location: repository root `RELEASE.md`
 (Also linked from `docs/RELEASE.md` and `README.md`.)
 
 ---
@@ -40,26 +40,82 @@ changelog and update the release body** — see [Post-CI](#5-post-ci--changelog-
 
 - Push access to `clankercode/lsp-openplanet`
 - Actions allowed to create releases (`contents: write` on the workflow is enough for `GITHUB_TOKEN`)
+- Workflow must grant `id-token: write` for npm OIDC (already set in `release.yml`)
 - `gh` CLI authenticated (`gh auth status`)
 
-### npm
+### npm — GitHub OIDC trusted publishing (preferred; no long-lived token)
 
-1. Create an [npm Automation token](https://www.npmjs.com/settings/~/tokens)
-   (or granular publish on the package names below).
-2. Store it as a repo secret:
-   ```bash
-   gh secret set NPM_TOKEN
-   ```
-3. First publish reserves these unscoped names (workflow publishes them):
-   - `openplanet-lsp`
-   - `openplanet-lsp-linux-x64`
-   - `openplanet-lsp-linux-arm64`
-   - `openplanet-lsp-darwin-x64`
-   - `openplanet-lsp-darwin-arm64`
-   - `openplanet-lsp-win32-x64`
-   - `openplanet-lsp-win32-arm64`
+Releases publish with **OpenID Connect** from GitHub Actions. There is **no
+`NPM_TOKEN` secret**. Docs: https://docs.npmjs.com/trusted-publishers
 
----
+#### Packages (must already exist on the registry)
+
+| Package |
+|---------|
+| `openplanet-lsp` |
+| `openplanet-lsp-linux-x64` |
+| `openplanet-lsp-linux-arm64` |
+| `openplanet-lsp-darwin-x64` |
+| `openplanet-lsp-darwin-arm64` |
+| `openplanet-lsp-win32-x64` |
+| `openplanet-lsp-win32-arm64` |
+
+First-time claim: publish each package once from a maintainer machine (we
+already did this for `0.2.0`). After that, CI owns subsequent versions via OIDC.
+
+#### Configure trusted publisher (CLI)
+
+Requires **npm ≥ 11.15**, account **2FA**, and write access on each package.
+
+```bash
+# One package:
+npm trust github openplanet-lsp \
+  --file release.yml \
+  --repo clankercode/lsp-openplanet \
+  --allow-publish -y
+
+# All packages (2s pause avoids rate limits; first call may prompt 2FA —
+# enable “skip 2FA for 5 minutes” on the npm site if bulk-configuring):
+for p in openplanet-lsp \
+  openplanet-lsp-linux-x64 openplanet-lsp-linux-arm64 \
+  openplanet-lsp-darwin-x64 openplanet-lsp-darwin-arm64 \
+  openplanet-lsp-win32-x64 openplanet-lsp-win32-arm64
+do
+  npm trust github "$p" \
+    --file release.yml \
+    --repo clankercode/lsp-openplanet \
+    --allow-publish -y
+  sleep 2
+done
+
+# Verify:
+npm trust list openplanet-lsp
+```
+
+Expected trust config per package:
+
+| Field | Value |
+|-------|--------|
+| type | `github` |
+| repository | `clankercode/lsp-openplanet` |
+| file | `release.yml` (filename only) |
+| permissions | `publish` |
+
+UI equivalent: each package → **Settings → Trusted Publisher → GitHub Actions**.
+
+#### Optional hardening
+
+After OIDC works end-to-end:
+
+- Package **Settings → Publishing access** → require 2FA and **disallow tokens**
+- Do **not** add an `NPM_TOKEN` Actions secret (the workflow refuses token auth)
+
+#### CI requirements (already in `release.yml`)
+
+- `permissions.id-token: write` (and `contents: write` for GH Release assets)
+- Publish job: Node **24**, `registry-url: https://registry.npmjs.org`
+- `npm publish … --access public --provenance` with **no** `NODE_AUTH_TOKEN`
+- Workflow file name on disk must stay **`release.yml`** (trusted publisher match)
 
 ## Version lockstep (required)
 
@@ -71,7 +127,8 @@ These **must** match before tagging:
 | every `npm/*/package.json`     | `0.3.0`   |
 | git tag                        | `v0.3.0`  |
 
-The release workflow **fails** if `Cargo.toml` ≠ tag version.
+The release workflow **fails** unless `Cargo.toml`, every npm package version,
+every meta-package optional-dependency pin, and the tag version all match.
 
 Use the helper:
 
@@ -88,7 +145,7 @@ Use the helper:
 - [ ] On a clean branch that will become the release tip (usually `master`)
 - [ ] `cargo test` green (or CI green on the commit you will tag)
 - [ ] Optional local smoke: `./scripts/release/smoke-local.sh`
-- [ ] `NPM_TOKEN` secret present for real publishes
+- [ ] npm trusted publishers configured for all 7 packages (`npm trust list …`)
 - [ ] You know the previous tag for the changelog range:
   ```bash
   git describe --tags --abbrev=0
@@ -298,8 +355,10 @@ Use this to validate the matrix before a real tag when the workflow changed.
 ./scripts/release/smoke-local.sh
 ```
 
-Builds `--release`, packs host platform + meta npm tarballs into a temp
-prefix, runs `openplanet-lsp --version` through the Node launcher.
+Builds `--release`, verifies source manifest lockstep, stages and packs the host
+platform + meta npm tarballs in a temporary directory, then runs
+`openplanet-lsp --version` through the Node launcher. It does not rewrite or
+stage files in the source npm package directories.
 
 ---
 
@@ -359,7 +418,7 @@ Do **not** treat CI’s auto-generated release notes as the finished product.
 | Symptom | Fix |
 |---------|-----|
 | Release job: Cargo version ≠ tag | `bump-version.sh`, retag / new patch |
-| `npm publish` 401/403 | Check `NPM_TOKEN`; package name ownership |
+| `npm publish` ENEEDAUTH / 401 | Trusted publisher missing/wrong: `npm trust list <pkg>`; workflow file must be `release.yml`; repo `clankercode/lsp-openplanet`; job needs `id-token: write` + Node 24 |
 | Optional platform package missing after install | Install `openplanet-lsp-<platform>@x.y.z` or use GH binary |
 | `windows-11-arm` runner unavailable | Adjust matrix in `release.yml` **and this doc** |
 | Release body still auto-generated only | You skipped step 5 — run `gh release edit` |
@@ -369,11 +428,12 @@ Do **not** treat CI’s auto-generated release notes as the finished product.
 
 ## First publish checklist
 
-- [ ] `NPM_TOKEN` secret set
-- [ ] Package names free on npm
+- [ ] Packages claimed on npm (one-time maintainer publish)
+- [ ] Trusted publishers set (`npm trust github … --file release.yml --repo clankercode/lsp-openplanet --allow-publish`)
 - [ ] `CHANGELOG.md` created with first version section
 - [ ] `Cargo.toml` version matches intended tag
 - [ ] `./scripts/release/smoke-local.sh` passes
 - [ ] Tag pushed; `release.yml` green
 - [ ] GitHub Release notes updated via `gh release edit`
 - [ ] `npm view openplanet-lsp version` correct
+- [ ] No `NPM_TOKEN` secret required (OIDC only)

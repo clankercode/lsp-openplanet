@@ -9,6 +9,33 @@ cd "$ROOT"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 echo "version=${VERSION}"
 
+# Do not paper over a missed bump: the release workflow requires these source
+# manifests and all meta-package platform pins to already be in lockstep.
+node - "${VERSION}" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const version = process.argv[2];
+const errors = [];
+const manifests = fs.readdirSync('npm')
+  .map((dir) => path.join('npm', dir, 'package.json'))
+  .filter((file) => fs.existsSync(file))
+  .map((file) => ({ file, manifest: JSON.parse(fs.readFileSync(file, 'utf8')) }));
+for (const { file, manifest } of manifests) {
+  if (manifest.version !== version) {
+    errors.push(`${file} version (${manifest.version}) != Cargo.toml (${version})`);
+  }
+}
+const meta = manifests.find(({ manifest }) => manifest.name === 'openplanet-lsp');
+if (!meta) errors.push('npm/openplanet-lsp meta package is missing');
+for (const [packageName, pin] of Object.entries(meta?.manifest.optionalDependencies || {})) {
+  if (pin !== version) errors.push(`${packageName} pin (${pin}) != Cargo.toml (${version})`);
+}
+if (errors.length > 0) {
+  console.error(errors.join('\n'));
+  process.exit(1);
+}
+NODE
+
 echo "== cargo build --release =="
 cargo build --release --locked
 
@@ -19,45 +46,37 @@ fi
 test -f "${HOST_BIN}"
 
 # Map host → npm package slug
-case "$(uname -s)-$(uname -m)" in
+HOST="$(uname -s)-$(uname -m)"
+case "${HOST}" in
   Linux-x86_64)   SLUG=linux-x64; BIN_NAME=openplanet-lsp ;;
   Linux-aarch64)  SLUG=linux-arm64; BIN_NAME=openplanet-lsp ;;
   Darwin-x86_64)  SLUG=darwin-x64; BIN_NAME=openplanet-lsp ;;
   Darwin-arm64)   SLUG=darwin-arm64; BIN_NAME=openplanet-lsp ;;
-  MINGW*|MSYS*|CYGWIN*) SLUG=win32-x64; BIN_NAME=openplanet-lsp.exe ;;
+  MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64)
+    SLUG=win32-x64; BIN_NAME=openplanet-lsp.exe ;;
+  MINGW*-aarch64|MSYS*-aarch64|CYGWIN*-aarch64|MINGW*-arm64|MSYS*-arm64|CYGWIN*-arm64)
+    SLUG=win32-arm64; BIN_NAME=openplanet-lsp.exe ;;
   *)
-    echo "Unsupported host for local smoke: $(uname -s)-$(uname -m)" >&2
+    echo "Unsupported host for local smoke: ${HOST}" >&2
     exit 1
     ;;
 esac
 
-PKG_DIR="npm/openplanet-lsp-${SLUG}"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+STAGE_ROOT="${TMP}/npm"
+mkdir -p "${STAGE_ROOT}"
+cp -R "npm/openplanet-lsp-${SLUG}" "${STAGE_ROOT}/"
+cp -R npm/openplanet-lsp "${STAGE_ROOT}/"
+
+PKG_DIR="${STAGE_ROOT}/openplanet-lsp-${SLUG}"
 mkdir -p "${PKG_DIR}/bin"
 cp "${HOST_BIN}" "${PKG_DIR}/bin/${BIN_NAME}"
 chmod +x "${PKG_DIR}/bin/${BIN_NAME}" || true
 
-# Pin versions
-node <<NODE
-const fs = require('fs');
-const version = '${VERSION}';
-for (const dir of fs.readdirSync('npm')) {
-  const p = \`npm/\${dir}/package.json\`;
-  if (!fs.existsSync(p)) continue;
-  const j = JSON.parse(fs.readFileSync(p, 'utf8'));
-  j.version = version;
-  if (j.optionalDependencies) {
-    for (const k of Object.keys(j.optionalDependencies)) j.optionalDependencies[k] = version;
-  }
-  fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
-}
-NODE
-
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
-
 echo "== npm pack platform + meta =="
-(cd npm && npm pack "./openplanet-lsp-${SLUG}" --pack-destination "$TMP")
-(cd npm && npm pack ./openplanet-lsp --pack-destination "$TMP")
+(cd "${STAGE_ROOT}" && npm pack "./openplanet-lsp-${SLUG}" --pack-destination "$TMP")
+(cd "${STAGE_ROOT}" && npm pack ./openplanet-lsp --pack-destination "$TMP")
 ls -lh "$TMP"
 
 echo "== install into temp prefix =="
