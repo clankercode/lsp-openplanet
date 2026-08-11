@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn fn parse_check_args_format_flag() {
+    fn parse_check_args_format_flag() {
         let opts = parse_check_args(&[
             "--format".into(),
             "pretty".into(),
