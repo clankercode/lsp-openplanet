@@ -902,6 +902,10 @@ impl<'a> Checker<'a> {
                     Some(n.clone())
                 }
             }
+            // Core API registers `string` (and similar) as classes with
+            // methods — map primitives to their keyword so `s.IndexOf(...)`
+            // can resolve against the typedb (B003).
+            TypeRepr::Primitive(p) => Some(p.as_str().to_string()),
             TypeRepr::Generic { base, .. } => Some(base.clone()),
             TypeRepr::Array(_) => Some("array".to_string()),
             _ => None,
@@ -1095,6 +1099,39 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Emit `ArgCountMismatch` when `got` falls outside every overload's
+    /// `(min, max)` range. If any overload accepts `got`, stay silent
+    /// (multi-overload: conservative — type resolution may still pick a
+    /// winner later). Used for external method/free-function arity.
+    fn check_arity_against_ranges(
+        &mut self,
+        display_name: &str,
+        ranges: &[(usize, usize)],
+        got: usize,
+        span: Span,
+    ) {
+        if ranges.is_empty() {
+            return;
+        }
+        if ranges
+            .iter()
+            .any(|(min_args, max_args)| got >= *min_args && got <= *max_args)
+        {
+            return;
+        }
+        let expected_min = ranges.iter().map(|(m, _)| *m).min().unwrap_or(0);
+        let expected_max = ranges.iter().map(|(_, m)| *m).max().unwrap_or(0);
+        self.diagnostics.push(TypeDiagnostic {
+            span,
+            kind: TypeDiagnosticKind::ArgCountMismatch {
+                function_name: display_name.to_string(),
+                expected_min,
+                expected_max,
+                got,
+            },
+        });
+    }
+
     /// Centralised dispatch for "the callee resolved to a workspace free
     /// function named `qualified`" — handles both the unique-overload case
     /// (single match: run existing arg-count + primitive arg-type checks)
@@ -1116,8 +1153,12 @@ impl<'a> Checker<'a> {
         let overloads = self.scope.lookup_function_overloads(qualified);
         match overloads.len() {
             0 => {
-                // Not a workspace function (external-only). Preserve old
-                // silent walk behaviour.
+                // Not a workspace function (external-only). Check external
+                // free-function arity when typedb signatures are available
+                // (B003/B005), then walk args.
+                if let Some(ranges) = self.scope.lookup_external_function_arity_ranges(qualified) {
+                    self.check_arity_against_ranges(display_name, &ranges, args.len(), callee_span);
+                }
                 self.walk_args(args);
                 fallback_ret
             }
@@ -1316,14 +1357,23 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Member { object, member } => {
                 let obj_ty = self.expr_type(object);
-                self.walk_args(args);
                 if obj_ty.is_error() {
+                    self.walk_args(args);
                     return TypeRepr::Error(String::new());
                 }
                 let member_name = member.text(self.source).to_string();
                 let Some(type_name) = Self::base_type_name(&obj_ty) else {
+                    self.walk_args(args);
                     return TypeRepr::Error(String::new());
                 };
+                // B003: external method arity (unique + multi with no match).
+                if let Some(ranges) = self
+                    .scope
+                    .lookup_external_method_arity_ranges(&type_name, &member_name)
+                {
+                    self.check_arity_against_ranges(&member_name, &ranges, args.len(), callee.span);
+                }
+                self.walk_args(args);
                 // AC19: when the receiver is a const object, a non-const
                 // method's return value inherits `Const(_)` so that
                 // downstream writes (`h.get_arr()[0] = 5`, etc.) fire
@@ -1384,10 +1434,27 @@ impl<'a> Checker<'a> {
             }
             ExprKind::NamespaceAccess { path } => {
                 let qual = path.to_string(self.source);
-                self.walk_args(args);
+                let display = qual.rsplit("::").next().unwrap_or(qual.as_str());
                 if let Some(t) = self.scope.lookup_function_return(&qual) {
+                    // Workspace free functions: reuse the shared resolver
+                    // (arg-count + overload path). External-only names fall
+                    // through its 0-overload branch which checks typedb arity.
+                    if !self.scope.lookup_function_overloads(&qual).is_empty() {
+                        return self.resolve_workspace_function_call(
+                            display,
+                            &qual,
+                            args,
+                            callee.span,
+                            t,
+                        );
+                    }
+                    if let Some(ranges) = self.scope.lookup_external_function_arity_ranges(&qual) {
+                        self.check_arity_against_ranges(display, &ranges, args.len(), callee.span);
+                    }
+                    self.walk_args(args);
                     return t;
                 }
+                self.walk_args(args);
                 if self.scope.has_type(&qual) {
                     return TypeRepr::Named(qual);
                 }
@@ -1797,6 +1864,28 @@ mod tests {
         let syms = SymbolTable::extract_symbols(fid, source, &file);
         ws.set_file_symbols(fid, syms);
         let scope = GlobalScope::new(&ws, None);
+        let mut checker = Checker::new(source, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    /// Like `check`, but loads the Openplanet Core + Nadeo fixtures so
+    /// external method/free-function arity is exercised (B003).
+    fn check_with_typedb(source: &str) -> Vec<TypeDiagnostic> {
+        use crate::typedb::TypeIndex;
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).expect("typedb fixtures must load");
+        let tokens = tokenize_filtered(source);
+        let mut parser = Parser::new(&tokens, source);
+        let file = parser.parse_file();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, source, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, Some(&idx));
         let mut checker = Checker::new(source, &scope);
         checker.check_file(&file);
         checker.diagnostics
@@ -3380,6 +3469,150 @@ mod tests {
             bad.is_empty(),
             "expected no diagnostics on dictionary usage, got {:?}",
             diags
+        );
+    }
+
+    // ── B003: external method / free-function arity ──────────────────────
+
+    #[test]
+    fn external_string_indexof_one_arg_ok() {
+        let diags = check_with_typedb(
+            r#"void f() { string head; int open = 0; int ix = head.IndexOf("name="); }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgCountMismatch for 1-arg IndexOf, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn external_string_indexof_two_arg_fires() {
+        // Game rejects string::IndexOf(string, int) — only the 1-arg form exists.
+        let diags = check_with_typedb(
+            r#"void f() { string head; int open = 0; int ix = head.IndexOf("name=", open); }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgCountMismatch for 2-arg IndexOf, got {:?}",
+            diags
+        );
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgCountMismatch {
+                function_name: "IndexOf".into(),
+                expected_min: 1,
+                expected_max: 1,
+                got: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn external_string_indexof_literal_receiver_two_arg_fires() {
+        let diags = check_with_typedb(r#"void f() { int ix = "abc".IndexOf("a", 0); }"#);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected ArgCountMismatch on string-literal IndexOf, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn external_string_substr_overloads_accept_one_and_two_args() {
+        // SubStr has 1-arg and 2-arg overloads — both must stay silent.
+        let diags = check_with_typedb(
+            r#"void f() { string s; string a = s.SubStr(0); string b = s.SubStr(0, 1); }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgCountMismatch for SubStr overloads, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn external_string_substr_zero_args_fires() {
+        let diags = check_with_typedb(r#"void f() { string s; string a = s.SubStr(); }"#);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected ArgCountMismatch for 0-arg SubStr, got {:?}",
+            diags
+        );
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgCountMismatch {
+                function_name: "SubStr".into(),
+                expected_min: 1,
+                expected_max: 2,
+                got: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn external_ui_selectable_valid_arity_ok() {
+        // UI::Selectable(label, selected, flags = ...) — 2 or 3 args OK.
+        let diags = check_with_typedb(
+            r#"void f() { bool a = UI::Selectable("x", true); bool b = UI::Selectable("x", true, 0); }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgCountMismatch for valid Selectable arity, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn external_ui_selectable_four_arg_fires() {
+        // B005 foundation: 4-arg Selectable does not exist in Core.
+        let diags =
+            check_with_typedb(r#"void f() { bool a = UI::Selectable("x", true, 0, false); }"#);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected ArgCountMismatch for 4-arg Selectable, got {:?}",
+            diags
+        );
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgCountMismatch {
+                function_name: "Selectable".into(),
+                expected_min: 2,
+                expected_max: 3,
+                got: 4,
+            }
         );
     }
 }
