@@ -1,24 +1,24 @@
 ---
-source: crates/openplanet-lsp-tui/tests/snapshots.rs
+source: tests/tui_snapshots.rs
 expression: terminal.backend()
 ---
 "┌ openplanet-lsp · watch ──────────────────────────────────────────────────────┐"
-"│ ./MyPlugin  ·  0 diagnostics (0 errors · 0 warnings)  ·  idle                │"
+"│ ./MyPlugin  ·  3 diagnostics (2 errors · 1 warnings)  ·  last: 120ms         │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "┌ diagnostics ─────────────────────────────────────────────────────────────────┐"
-"│  (no diagnostics — edit a .as file or press r)                               │"
-"│                                                                              │"
-"│                                                                              │"
+"│›  E  src/Main.as:42:5  Undefined member 'Foo'                                │"
+"│   W  src/Main.as:10:1  Use 'const string &in x' to pass a string by reference│"
+"│   E  src/Helper.as:7:12  No matching signatures to 'Bar(int)'                │"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-"┌ detail ──────────────────────────────────────────────────────────────────────┐"
-"│  Select a diagnostic to inspect.                                             │"
+"┌ detail · error ──────────────────────────────────────────────────────────────┐"
+"│ E src/Main.as:42:5                                                           │"
 "│                                                                              │"
-"│                                                                              │"
+"│Undefined member 'Foo'                                                        │"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"

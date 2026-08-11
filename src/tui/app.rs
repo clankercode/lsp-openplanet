@@ -8,8 +8,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 
-use crate::types::{SourceEvent, TuiDataSource};
-use crate::ui::App;
+use super::types::{SourceEvent, TuiDataSource};
+use super::ui::App;
 
 /// Options for the run loop.
 #[derive(Debug, Clone)]

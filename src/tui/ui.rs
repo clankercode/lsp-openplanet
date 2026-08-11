@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::types::{DiagItem, RunStatus, Severity, Snapshot};
+use super::types::{DiagItem, RunStatus, Severity, Snapshot};
 
 /// Watch-list application state.
 #[derive(Debug)]
@@ -263,7 +263,7 @@ fn short_path(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock::canned_snapshot;
+    use super::super::mock::canned_snapshot;
 
     #[test]
     fn scroll_clamps() {

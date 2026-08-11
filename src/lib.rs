@@ -8,6 +8,7 @@ pub mod preprocessor;
 pub mod server;
 pub mod symbols;
 pub mod term;
+pub mod tui;
 pub mod typecheck;
 pub mod typedb;
 pub mod update;

@@ -13,17 +13,25 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-12
+
+### Fixed
+- **crates.io**: fold the watch TUI into the main `openplanet-lsp` package
+  (`src/tui/`) so Trusted Publishing does not need a separate first-time crate
+  create. `cargo publish` dry-run clean.
+
+### Changed
+- Removed workspace crate `openplanet-lsp-tui` (code lives under `src/tui/`).
+
+
 ## [0.3.2] - 2026-08-12
 
 ### Fixed
-- **crates.io publish**: path-only `openplanet-lsp-tui` blocked `cargo publish`.
-  The TUI crate is now a publishable package; CI publishes **tui then main**.
-  `openplanet-lsp` depends on `openplanet-lsp-tui` with an explicit version.
+- Attempted crates.io packaging for the watch TUI as a path dependency (incomplete —
+  Trusted Publishing cannot create a new crate name). Superseded by **0.3.3**.
 
 ### Notes
-- GitHub Release + npm already shipped **0.3.1** (pretty check, watch TUI,
-  bare-TTY entrypoints, showcase fixture, README hero). 0.3.2 is the crates.io
-  packaging fix for those same features.
+- GitHub Release + npm for **0.3.2** match 0.3.1 feature set; crates.io needs **0.3.3**.
 
 
 ## [0.3.1] - 2026-08-12

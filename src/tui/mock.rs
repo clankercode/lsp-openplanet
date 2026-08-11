@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::types::{DiagItem, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource};
+use super::types::{DiagItem, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource};
 
 /// Queue-backed mock. Can seed a snapshot delivered on the first poll.
 #[derive(Debug, Default)]

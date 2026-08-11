@@ -1,6 +1,6 @@
 //! `check --watch` adapter: file events → re-check → TUI events.
 //!
-//! Watching lives here (main crate), not in `openplanet-lsp-tui`.
+//! Watching lives here (main crate), not in the TUI module.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent};
-use openplanet_lsp_tui::{DiagItem, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource};
+use crate::tui::{DiagItem, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource};
 use tower_lsp::lsp_types::DiagnosticSeverity;
 
 use super::{run_check, CheckOptions, CheckReport, CliError};
@@ -217,9 +217,8 @@ fn map_severity(sev: Option<DiagnosticSeverity>) -> Severity {
 /// Run the interactive watch TUI until quit.
 pub fn run_watch(options: CheckOptions) -> Result<(), CliError> {
     let source = WatchDataSource::new(options)?;
-    openplanet_lsp_tui::run(source, openplanet_lsp_tui::RunOptions::default()).map_err(|e| {
-        CliError::Check(format!("watch TUI failed: {e}"))
-    })
+    crate::tui::run(source, crate::tui::RunOptions::default())
+        .map_err(|e| CliError::Check(format!("watch TUI failed: {e}")))
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Watch-mode diagnostics TUI for openplanet-lsp.
 //!
 //! Mock-first: production adapters live in the main binary and implement
-//! [`TuiDataSource`]. This crate owns presentation + the event loop only.
+//! [`TuiDataSource`]. This module owns presentation + the event loop only.
 //!
 //! File watching and typechecking are out of scope here.
 

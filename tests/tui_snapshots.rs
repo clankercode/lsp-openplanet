@@ -1,6 +1,6 @@
-//! Headless render snapshots via `TestBackend` + `insta`.
+//! Headless TUI render snapshots via `TestBackend` + `insta`.
 
-use openplanet_lsp_tui::{canned_snapshot, render_once, App, MockSource, Snapshot, TuiDataSource};
+use openplanet_lsp::tui::{canned_snapshot, render_once, App, MockSource, Snapshot, TuiDataSource};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
