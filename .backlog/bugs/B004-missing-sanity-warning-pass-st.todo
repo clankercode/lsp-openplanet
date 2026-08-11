@@ -1,0 +1,32 @@
+---
+complexity: low
+created_at: "2026-08-11T11:53:37Z"
+depends_on: []
+estimate_hours: 2
+id: B004
+priority: low
+status: pending
+tags:
+    - false-negative
+    - warning
+    - style
+    - tm-control-mcp
+title: 'Missing sanity warning: pass string by const string &in'
+updated_at: "2026-08-11T11:53:37Z"
+---
+## Goal
+Surface the game compiler's string-by-reference sanity-check warning for parity.
+
+## Source
+todo-cover-cases-next.txt — Case 3 (2026-04-20, tm-control-mcp)
+
+## Compiler (game-side)
+`MCP: Sanity check: Use 'const string &in x' to pass a string by reference`
+
+## Acceptance
+- [ ] Function params typed as bare `string` (by value) emit a warning suggesting `const string &in`
+- [ ] Params already `const string &in` / `string &in` are silent
+- [ ] Warning severity (not error) so it does not fail check exit codes unless configured
+
+## Notes
+Nice-to-have parity so iteration avoids extra game-compile cycles. Lower priority than real type errors.

@@ -1,0 +1,22 @@
+# Angelscript LSP false positives
+# (LSP reports errors that the game-side compiler accepts cleanly)
+
+## 2026-04-20, tm-draw-tests
+
+### Case 1: Named argument resolves to wrong parameter when skipping positional args
+Plugin source (src/GraphTab.as:261, 266, 271, 276):
+    void AddIndentedTooltip(const string &in msg, bool pushFont = false, float w = -1.0) { ... }
+
+    AddIndentedTooltip("...", w: 20.0);
+
+LSP reports:
+    src/GraphTab.as:261:132: error: argument 2 of `AddIndentedTooltip`: expected `bool`, got `float`
+
+Reality:
+    Game-side Angelscript compiler accepts `w: 20.0` as a named argument
+    for the third parameter and compiles cleanly.
+
+The LSP appears to be binding named arguments positionally — it maps the
+named arg to the next unfilled slot (argument 2, `pushFont: bool`) instead
+of matching by parameter name. Named arguments should skip over intermediate
+defaulted parameters.

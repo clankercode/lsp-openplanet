@@ -1,0 +1,8 @@
+bugs:
+    - file: B001-named-arguments-bind-positiona.todo
+    - file: B002-empty-catch-body-not-flagged-a.todo
+    - file: B003-string-indexof-string-int-over.todo
+    - file: B004-missing-sanity-warning-pass-st.todo
+    - file: B005-ui-selectable-4-arg-size-overl.todo
+    - file: B006-unknown-member-on-nadeo-type-n.todo
+    - file: B007-distinct-enum-types-treated-as.todo

@@ -1,0 +1,46 @@
+---
+completed_at: null
+complexity: medium
+created_at: "2026-08-11T11:53:37Z"
+depends_on:
+    - B003
+estimate_hours: 3
+id: B005
+priority: high
+started_at: null
+status: pending
+tags: []
+title: UI::Selectable 4-arg size overload accepted but does not exist
+updated_at: "2026-08-11T11:53:37Z"
+---
+## Goal
+Reject UI::Selectable(label, selected, flags, size) — Openplanet only exposes the 3-arg form.
+
+## Source
+todo-cover-cases-next.txt — Case 4 (2026-04-20, tm-agent)
+
+## Repro
+```angelscript
+if (UI::Selectable(hitLabel, msg.expanded, 0, vec2(availW, rowH))) { ... }
+```
+
+## Compiler (game-side)
+```
+ChatUI.as (826, 13) : error: No matching signatures to
+    'UI::Selectable(string, bool&, const int, vec2)'
+Candidates are:
+    bool UI::Selectable(const string&in label, bool selected,
+                        int flags = UI::SelectableFlags::None)
+```
+
+## Workaround
+Use `UI::InvisibleButton(id, vec2)` for custom-drawn clickable rows.
+ImGui upstream has Selectable(..., size); Openplanet bindings do not.
+
+## Acceptance
+- [ ] 4-arg UI::Selectable diagnosed
+- [ ] Valid 2- and 3-arg forms silent
+- [ ] Regression test
+
+## Notes
+Same systemic gap as IndexOf: member/namespace calls skip arity checks. Prefer shared external arity path over one-off Selectable handling.

@@ -1,0 +1,41 @@
+---
+complexity: low
+created_at: "2026-08-11T11:53:37Z"
+depends_on: []
+estimate_hours: 2
+id: B002
+priority: medium
+status: pending
+tags:
+    - false-negative
+    - parser
+    - try-catch
+    - tm-control-mcp
+title: Empty catch body not flagged as parse/compile error
+updated_at: "2026-08-11T11:53:37Z"
+---
+## Goal
+Flag empty `catch { }` bodies the same way the game-side compiler does.
+
+## Source
+todo-cover-cases-next.txt — Case 1 (2026-04-20, tm-control-mcp)
+
+## Repro
+```angelscript
+try { x = something(); } catch { }
+```
+
+## Compiler (game-side)
+`ManialinkIntrospection.as (73, 17) : error: expected declaration, found RBrace`
+(cascades for ~40 diagnostics when nested inside control flow)
+
+## Workaround
+Put at least one token in the catch body, e.g. `catch { /* swallow */ }`
+
+## Acceptance
+- [ ] Empty catch body emits a diagnostic
+- [ ] Non-empty catch (stmt or comment-only if AS requires a real stmt) behaves correctly
+- [ ] Regression test for empty catch
+
+## Notes
+LSP today does not flag empty catch bodies.

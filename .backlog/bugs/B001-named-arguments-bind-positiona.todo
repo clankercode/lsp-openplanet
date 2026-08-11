@@ -1,0 +1,46 @@
+---
+completed_at: null
+complexity: medium
+created_at: "2026-08-11T11:53:37Z"
+depends_on: []
+estimate_hours: 3
+id: B001
+priority: high
+started_at: null
+status: pending
+tags: []
+title: Named arguments bind positionally instead of by name
+updated_at: "2026-08-11T11:53:37Z"
+---
+## Goal
+Fix false-positive ArgTypeMismatch when callers skip defaulted params via named arguments.
+
+## Source
+todo-false-positives.txt — Case 1 (2026-04-20, tm-draw-tests)
+
+## Repro
+```angelscript
+void AddIndentedTooltip(const string &in msg, bool pushFont = false, float w = -1.0) { ... }
+
+AddIndentedTooltip("...", w: 20.0);
+```
+
+## LSP today
+`src/GraphTab.as:261:132: error: argument 2 of AddIndentedTooltip: expected bool, got float`
+
+## Reality
+Game-side AngelScript accepts `w: 20.0` as the third parameter and compiles cleanly.
+
+## Root cause
+- Parser drops names in `parse_call_argument` (name is eaten, only value kept; AST has no slot).
+- `walk_args_and_check_types` binds args positionally.
+- Param names already exist in `SymbolKind::Function { params: Vec<(name, type_text)> }`.
+
+## Acceptance
+- [ ] Call args preserve optional parameter name in AST
+- [ ] Named args map to the matching parameter (skip intermediate defaults)
+- [ ] Regression test for `f(msg, w: 20.0)` with signature `(string, bool=false, float=-1.0)` produces 0 ArgTypeMismatch
+- [ ] Mixed positional + named still works; unknown name is diagnosed (or silently skipped if AS does)
+
+## Notes
+Highest-trust fix: false positives train users to ignore the LSP.

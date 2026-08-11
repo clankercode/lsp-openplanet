@@ -1,0 +1,49 @@
+---
+complexity: high
+created_at: "2026-08-11T11:53:37Z"
+depends_on: []
+estimate_hours: 4
+id: B006
+priority: medium
+status: pending
+tags:
+    - false-negative
+    - typecheck
+    - nadeo
+    - members
+    - tm-editor-plus-plus
+title: Unknown member on Nadeo type not flagged (CGameCtnCollection.CollectionName)
+updated_at: "2026-08-11T11:53:37Z"
+---
+## Goal
+Flag invalid member access on nested Nod/Collection types when the member is known absent.
+
+## Source
+todo-cover-cases-next.txt — Case 5 (2026-04-20, tm-editor-plus-plus)
+
+## Repro
+```angelscript
+auto map = GetApp().RootMap;
+string collName = string(map.Collection.CollectionName);
+```
+
+## Compiler (game-side)
+`Editor/Map.as (506, 48) : ERR : 'CollectionName' is not a member of 'CGameCtnCollection'`
+
+## Reality
+Name lives on `CGameCtnChallenge` (`map.CollectionName`), not on nested `CGameCtnCollection`.
+
+## Workaround
+`string collName = string(map.CollectionName);`
+
+## LSP today
+0 diagnostics. Nadeo types intentionally suppress UndefinedMember via `is_nadeo_type` because member metadata is incomplete.
+
+## Acceptance
+- [ ] Strategy chosen: improve Nadeo member completeness and/or selectively enable UndefinedMember when property lists are trusted
+- [ ] `CGameCtnCollection.CollectionName` diagnosed when type DB lacks the member
+- [ ] Does not flood false UndefinedMember on incomplete Nadeo types
+- [ ] Regression test for this chain
+
+## Notes
+Blocked more by typedb completeness policy than by a missing if-statement.

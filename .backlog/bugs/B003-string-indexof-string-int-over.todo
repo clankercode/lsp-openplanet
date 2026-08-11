@@ -1,0 +1,42 @@
+---
+completed_at: null
+complexity: medium
+created_at: "2026-08-11T11:53:37Z"
+depends_on: []
+estimate_hours: 3
+id: B003
+priority: high
+started_at: null
+status: pending
+tags: []
+title: string::IndexOf(string, int) overload accepted but does not exist
+updated_at: "2026-08-11T11:53:37Z"
+---
+## Goal
+Reject calls to non-existent external method overloads (e.g. 2-arg string::IndexOf).
+
+## Source
+todo-cover-cases-next.txt — Case 2 (2026-04-20, tm-control-mcp)
+
+## Repro
+```angelscript
+int ix = head.IndexOf("name=\"", open);
+```
+
+## Compiler (game-side)
+```
+ManialinkIntrospection.as (45, 27) : error: No matching signatures to 'string::IndexOf(const string, int)'
+Candidates are: int string::IndexOf(const string&in) const
+```
+
+## LSP today
+Compiles cleanly (0 diagnostics). Member calls only `walk_args` — no external arity/type check.
+
+## Acceptance
+- [ ] Unique external method with known max arity rejects excess args
+- [ ] `string.IndexOf(str, int)` reports no-matching-signature / ArgCountMismatch
+- [ ] Valid 1-arg IndexOf still silent
+- [ ] Regression test
+
+## Notes
+Part of broader gap: external method signature checking not wired through checker.

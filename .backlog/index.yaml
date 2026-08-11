@@ -1,0 +1,4 @@
+project: "openplanet-lsp"
+description: "AngelScript/Openplanet LSP — compiler parity bugs and false positives from real plugin dogfooding"
+timeline_weeks: 12
+phases: []

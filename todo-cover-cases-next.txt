@@ -33,3 +33,63 @@ The LSP does not surface the "pass string by reference" sanity-check
 warning that the game compiler emits:
     MCP: Sanity check: Use 'const string &in x' to pass a string by reference
 Would be nice to have parity so iteration avoids extra cycles.
+
+## 2026-04-20, tm-agent
+
+### Case 4: UI::Selectable size-arg overload does not exist
+Plugin source:
+    if (UI::Selectable(hitLabel, msg.expanded, 0, vec2(availW, rowH))) { ... }
+
+Compiler reports (game-side):
+    ChatUI.as (826, 13) : error: No matching signatures to
+        'UI::Selectable(string, bool&, const int, vec2)'
+    Candidates are:
+        bool UI::Selectable(const string&in label, bool selected,
+                            int flags = UI::SelectableFlags::None)
+
+LSP accepted this call (0 diagnostics) but it crashed the game-side compile.
+Workaround: use UI::InvisibleButton(id, vec2) for custom-drawn clickable rows.
+ImGui upstream has a `Selectable(label, selected, flags, size)` signature;
+Openplanet's bindings only expose the 3-arg form.
+
+The LSP today does not flag the missing 4-arg overload.
+
+## 2026-04-20, tm-editor-plus-plus
+
+### Case 5: CGameCtnCollection has no `CollectionName` member
+Plugin source:
+    auto map = GetApp().RootMap;
+    string collName = string(map.Collection.CollectionName);
+
+Compiler reports (game-side):
+    Editor/Map.as (506, 48) : ERR : 'CollectionName' is not a member of 'CGameCtnCollection'
+
+The name actually lives on `CGameCtnChallenge` (use `map.CollectionName`),
+not on the nested `CGameCtnCollection` object. LSP accepted the invalid
+access chain with 0 diagnostics.
+
+Workaround / fix:
+    string collName = string(map.CollectionName);
+
+The LSP today does not flag unknown members on nested Nod/Collection types.
+
+## 2026-08-11, tm-editor-plus-plus
+
+### Case 6: Distinct enum types not interchangeable at call sites
+Plugin source (Gizmo.as):
+    pmt.RemoveBlockSafe(targetBlock.BlockInfo, coord, targetBlock.Direction);
+
+Compiler reports (game-side):
+    Components/Cursor/Gizmo.as (544, 39) : ERR : No matching signatures to
+    'CGameEditorPluginMapMapType::RemoveBlockSafe(CGameCtnBlockInfo@, int3,
+     const CGameCtnBlock::ECardinalDirections)'
+
+Expected signature uses `CGameEditorPluginMap::ECardinalDirections`, not
+`CGameCtnBlock::ECardinalDirections`. Values are int-compatible but the
+AngelScript binder treats them as distinct types.
+
+LSP accepted the call with 0 diagnostics (openplanet-lsp did not catch it;
+only the in-game compile failed).
+
+Workaround / fix:
+    CGameEditorPluginMap::ECardinalDirections(int(targetBlock.Direction))

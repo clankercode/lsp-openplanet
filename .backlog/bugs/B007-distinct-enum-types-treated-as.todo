@@ -1,0 +1,49 @@
+---
+completed_at: null
+complexity: high
+created_at: "2026-08-11T11:53:37Z"
+depends_on:
+    - B003
+estimate_hours: 5
+id: B007
+priority: high
+started_at: null
+status: pending
+tags: []
+title: Distinct enum types treated as interchangeable at call sites
+updated_at: "2026-08-11T11:53:37Z"
+---
+## Goal
+Reject passing one enum type where another distinct enum is required (even if int-compatible).
+
+## Source
+todo-cover-cases-next.txt — Case 6 (2026-08-11, tm-editor-plus-plus)
+
+## Repro
+```angelscript
+pmt.RemoveBlockSafe(targetBlock.BlockInfo, coord, targetBlock.Direction);
+```
+
+## Compiler (game-side)
+```
+Components/Cursor/Gizmo.as (544, 39) : ERR : No matching signatures to
+'CGameEditorPluginMapMapType::RemoveBlockSafe(CGameCtnBlockInfo@, int3,
+ const CGameCtnBlock::ECardinalDirections)'
+```
+Expected: `CGameEditorPluginMap::ECardinalDirections`, not `CGameCtnBlock::ECardinalDirections`.
+
+## Workaround
+`CGameEditorPluginMap::ECardinalDirections(int(targetBlock.Direction))`
+
+## LSP today
+0 diagnostics. External method args are not type-checked; `is_convertible` only equates Named types structurally when equal.
+
+## Acceptance
+- [ ] External method param types consulted at call sites
+- [ ] Distinct Named enum types are not convertible without explicit cast
+- [ ] This RemoveBlockSafe callsite diagnoses
+- [ ] Valid same-enum calls remain silent
+- [ ] Regression test
+
+## Notes
+Depends on wiring external signatures into checker (shared with IndexOf / Selectable arity work). Enum distinctness is the type-matching layer on top.
