@@ -1,6 +1,6 @@
 //! Pretty check-report renderer (source excerpts + carets).
 //!
-//! # Provisional rules (issue #12 not fully locked — parent map #8 / issue #14)
+//! # Rules (locked on map #8 / issue #12)
 //!
 //! 1. **When pretty:** `format == Pretty`, or `format == Auto` and the caller's
 //!    color capability is on (`color_stdout()`-equivalent). `format == Plain`
@@ -14,9 +14,7 @@
 //!    single `^` under the start column (or column 1).
 //! 4. Tab width is 4. Column math uses `chars().count` (crude; does **not**
 //!    implement full Unicode width / LSP UTF-16 — acceptable for v1).
-//! 5. Optional light unicode frame around the whole report when color is on
-//!    (TTY-ish) **and** there are ≤ 40 diagnostics. Skip the frame for plain,
-//!    no-color, or many diagnostics.
+//! 5. **No outer unicode box frame** in CLI v1 — framing is the watch TUI's job.
 //! 6. Summary footer: `✗ N diagnostics · E errors · W warnings · root`
 //!    (or `✓ 0 diagnostics · root` when clean).
 //! 7. CLI: `--format plain|pretty|auto` (default `auto`).
@@ -27,15 +25,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use tower_lsp::lsp_types::{DiagnosticSeverity, Range};
 #[cfg(test)]
 use tower_lsp::lsp_types::Position;
+use tower_lsp::lsp_types::{DiagnosticSeverity, Range};
 
 use super::{severity_label, CheckReport, CliDiagnostic};
 use crate::term;
-
-/// Max diagnostics for the optional outer unicode frame.
-const FRAME_DIAG_LIMIT: usize = 40;
 
 /// Tab stops when expanding source lines for display / column math.
 const TAB_WIDTH: usize = 4;
@@ -70,10 +65,7 @@ pub(super) fn format_pretty(report: &CheckReport, color: bool) -> String {
 
     let summary = format_pretty_summary(report, color, n_err, n_warn, n_other);
 
-    let use_frame = color && report.diagnostics.len() <= FRAME_DIAG_LIMIT;
-    if use_frame {
-        frame_report(&body, &summary, color)
-    } else if body.is_empty() {
+    if body.is_empty() {
         format!("{summary}\n")
     } else {
         format!("{body}\n{summary}\n")
@@ -130,38 +122,6 @@ fn format_pretty_summary(
     parts.push(root);
 
     format!("{mark} {}", parts.join(" · "))
-}
-
-fn frame_report(body: &str, summary: &str, color: bool) -> String {
-    let content = if body.is_empty() {
-        summary.to_string()
-    } else {
-        format!("{body}\n{summary}")
-    };
-
-    let width = content
-        .lines()
-        .map(|l| display_width(&strip_ansi(l)))
-        .max()
-        .unwrap_or(40)
-        .max(8)
-        .min(100);
-
-    let top = term::dim(color, format!("╭{}╮", "─".repeat(width + 2)));
-    let bot = term::dim(color, format!("╰{}╯", "─".repeat(width + 2)));
-    let bar = term::dim(color, "│");
-
-    let mut out = String::new();
-    out.push_str(&top);
-    out.push('\n');
-    for line in content.lines() {
-        let plain_w = display_width(&strip_ansi(line));
-        let pad = width.saturating_sub(plain_w);
-        out.push_str(&format!("{bar} {line}{:pad$} {bar}\n", ""));
-    }
-    out.push_str(&bot);
-    out.push('\n');
-    out
 }
 
 fn format_diagnostic_block(
@@ -281,31 +241,6 @@ fn line_at(source: &str, line_idx: usize) -> Option<&str> {
         .lines()
         .nth(line_idx)
         .map(|l| l.trim_end_matches('\r'))
-}
-
-/// Crude display width: char count after ANSI strip (v1 limitation).
-fn display_width(s: &str) -> usize {
-    s.chars().count()
-}
-
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for c2 in chars.by_ref() {
-                    if c2.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// Build a synthetic diagnostic for unit tests.
@@ -455,10 +390,10 @@ mod tests {
             out.contains("✗") && out.contains("1 diagnostic") && out.contains("1 error"),
             "expected pretty summary: {out:?}"
         );
-        // no frame when color=false
+        // no outer box frame in CLI pretty v1
         assert!(
-            !out.contains('╭'),
-            "frame should be skipped without color: {out:?}"
+            !out.contains('╭') && !out.contains('╰'),
+            "CLI pretty must not box-frame: {out:?}"
         );
 
         let _ = fs::remove_dir_all(root);
@@ -493,10 +428,9 @@ mod tests {
             prettyish.contains('│') && prettyish.contains('^'),
             "auto+color → pretty: {prettyish:?}"
         );
-        // frame when color and few diags
         assert!(
-            prettyish.contains('╭') && prettyish.contains('╰'),
-            "expected light frame: {prettyish:?}"
+            !prettyish.contains('╭') && !prettyish.contains('╰'),
+            "no CLI box frame even with color: {prettyish:?}"
         );
 
         let _ = fs::remove_dir_all(root);
@@ -515,30 +449,6 @@ mod tests {
             out.contains("✓ 0 diagnostics"),
             "clean pretty summary: {out:?}"
         );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn many_diags_skip_frame() {
-        let root = temp_plugin("many");
-        let path = root.join("src/Main.as");
-        let mut lines = String::new();
-        for i in 0..45 {
-            lines.push_str(&format!("int x{i} = 1;\n"));
-        }
-        fs::write(&path, &lines).unwrap();
-
-        let diags: Vec<_> = (0..45)
-            .map(|i| test_diag(&path, i, 0, 3, Some(DiagnosticSeverity::ERROR), "err"))
-            .collect();
-        let report = CheckReport {
-            root: root.clone(),
-            diagnostics: diags,
-            type_database_loaded: false,
-        };
-        let out = format_check_report_with(&report, true, CheckFormat::Pretty);
-        assert!(!out.contains('╭'), "frame skipped when >40 diags: {out:?}");
-        assert!(out.contains('│'), "still pretty gutters: {out:?}");
         let _ = fs::remove_dir_all(root);
     }
 }
