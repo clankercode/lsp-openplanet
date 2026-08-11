@@ -56,7 +56,14 @@ Dev/CI can pretend to be another version without rebuilding:
 | `OPENPLANET_LSP_PACKAGE_MANAGER` | Force `npm` / `pnpm` / `yarn` / `bun` |
 | `OPENPLANET_LSP_EXE` | Fake binary path for install-method detection |
 
-Local smoke: `./scripts/release/smoke-self-update.sh`
+Local smoke: `./scripts/release/smoke-self-update.sh`  
+Registry multi-PM smoke (manual / post-release):
+
+```bash
+FROM_VERSION=latest TARGET_VERSION=latest \
+  ./scripts/release/smoke-self-update-registry.sh
+# or Actions → "self-update-matrix" (inputs: from_version, target_version, os)
+```
 
 ## Release / distribution
 

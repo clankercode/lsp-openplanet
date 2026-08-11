@@ -1,0 +1,159 @@
+name: self-update-matrix
+
+# Multi package-manager registry self-update checks.
+# NOT on every PR — only:
+#   - workflow_dispatch (manual)
+#   - workflow_call from release.yml after a real npm publish
+#
+# Loops npm → pnpm → yarn → bun on each OS runner:
+#   install FROM_VERSION → pretend older → update → verify → uninstall.
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_version:
+        description: "Version to install before update (e.g. 0.2.5 or latest)"
+        type: string
+        default: "latest"
+      target_version:
+        description: "Update target (latest or X.Y.Z)"
+        type: string
+        default: "latest"
+      package_managers:
+        description: "Space-separated PMs to test"
+        type: string
+        default: "npm pnpm yarn bun"
+      os:
+        description: "Runner set"
+        type: choice
+        options:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+          - ubuntu+macos
+          - all
+        default: ubuntu-latest
+  workflow_call:
+    inputs:
+      from_version:
+        description: "Version to install before update"
+        type: string
+        default: "latest"
+      target_version:
+        description: "Update target"
+        type: string
+        default: "latest"
+      package_managers:
+        type: string
+        default: "npm pnpm yarn bun"
+      # Comma-separated runner labels for the matrix.
+      runners:
+        type: string
+        default: "ubuntu-latest"
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      runners: ${{ steps.set.outputs.runners }}
+      from_version: ${{ steps.set.outputs.from_version }}
+      target_version: ${{ steps.set.outputs.target_version }}
+      package_managers: ${{ steps.set.outputs.package_managers }}
+    steps:
+      - id: set
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_FROM: ${{ inputs.from_version }}
+          DISPATCH_TARGET: ${{ inputs.target_version }}
+          DISPATCH_PMS: ${{ inputs.package_managers }}
+          DISPATCH_OS: ${{ inputs.os }}
+          CALL_FROM: ${{ inputs.from_version }}
+          CALL_TARGET: ${{ inputs.target_version }}
+          CALL_PMS: ${{ inputs.package_managers }}
+          CALL_RUNNERS: ${{ inputs.runners }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            FROM="${DISPATCH_FROM:-latest}"
+            TARGET="${DISPATCH_TARGET:-latest}"
+            PMS="${DISPATCH_PMS:-npm pnpm yarn bun}"
+            case "${DISPATCH_OS:-ubuntu-latest}" in
+              ubuntu-latest) RUNNERS='["ubuntu-latest"]' ;;
+              macos-latest) RUNNERS='["macos-latest"]' ;;
+              windows-latest) RUNNERS='["windows-latest"]' ;;
+              ubuntu+macos) RUNNERS='["ubuntu-latest","macos-latest"]' ;;
+              all) RUNNERS='["ubuntu-latest","macos-latest","windows-latest"]' ;;
+              *) echo "unknown os input: ${DISPATCH_OS}"; exit 1 ;;
+            esac
+          else
+            FROM="${CALL_FROM:-latest}"
+            TARGET="${CALL_TARGET:-latest}"
+            PMS="${CALL_PMS:-npm pnpm yarn bun}"
+            RAW="${CALL_RUNNERS:-ubuntu-latest}"
+            RUNNERS="$(printf '%s' "${RAW}" | python3 -c 'import json,sys; parts=[p.strip() for p in sys.stdin.read().split(",") if p.strip()]; print(json.dumps(parts or ["ubuntu-latest"]))')"
+          fi
+          {
+            echo "from_version=${FROM}"
+            echo "target_version=${TARGET}"
+            echo "package_managers=${PMS}"
+            echo "runners=${RUNNERS}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "matrix runners=${RUNNERS} from=${FROM} target=${TARGET} pms=${PMS}"
+
+  self-update:
+    needs: resolve-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.resolve-matrix.outputs.runners) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # Local updater fallback when the installed registry build predates
+      # OPENPLANET_LSP_VERSION / multi-PM apply (or for FROM < latest with old bins).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install package managers
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Classic yarn for `yarn global add` compatibility.
+          npm install -g yarn@1.22.22 pnpm@9
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            powershell -NoProfile -Command "irm bun.sh/install.ps1 | iex" || true
+            echo "${USERPROFILE}\\.bun\\bin" >> "${GITHUB_PATH}"
+          else
+            curl -fsSL https://bun.sh/install | bash
+            echo "${HOME}/.bun/bin" >> "${GITHUB_PATH}"
+          fi
+          echo "${HOME}/.local/share/pnpm" >> "${GITHUB_PATH}"
+          hash -r || true
+          node -v
+          npm -v
+          pnpm -v
+          yarn -v
+          command -v bun && bun -v
+
+      - name: Registry multi-PM self-update smoke
+        shell: bash
+        env:
+          FROM_VERSION: ${{ needs.resolve-matrix.outputs.from_version }}
+          TARGET_VERSION: ${{ needs.resolve-matrix.outputs.target_version }}
+          PACKAGE_MANAGERS: ${{ needs.resolve-matrix.outputs.package_managers }}
+          WAIT_FOR_VERSION: ${{ needs.resolve-matrix.outputs.target_version }}
+        run: |
+          set -euo pipefail
+          unset NODE_AUTH_TOKEN NPM_TOKEN || true
+          chmod +x ./scripts/release/smoke-self-update-registry.sh
+          ./scripts/release/smoke-self-update-registry.sh

@@ -145,7 +145,9 @@ Use the helper:
 - [ ] On a clean branch that will become the release tip (usually `master`)
 - [ ] `cargo test` green (or CI green on the commit you will tag)
 - [ ] Optional local smoke: `./scripts/release/smoke-local.sh`
-- [ ] Optional self-update smoke: `./scripts/release/smoke-self-update.sh`
+- [ ] Optional local self-update smoke: `./scripts/release/smoke-self-update.sh`
+- [ ] Optional registry multi-PM smoke: `./scripts/release/smoke-self-update-registry.sh`
+      (or Actions → self-update-matrix; also runs after tag release publish)
 - [ ] npm trusted publishers configured for all 7 packages (`npm trust list …`)
 - [ ] You know the previous tag for the changelog range:
   ```bash
@@ -396,10 +398,12 @@ scripts/release/
   bump-version.sh                 # Cargo.toml + all npm versions
   smoke-local.sh                  # host-only pack + run
   smoke-self-update.sh            # pack + pretend-old + update + still runs
+  smoke-self-update-registry.sh   # npm/pnpm/yarn/bun registry multi-PM loop
 .github/workflows/
-  ci.yml                          # PR/main tests + npm manifest + self-update smoke
+  ci.yml                          # PR/main tests + npm manifest smoke
   release.yml                     # tag → binaries + GH release + npm publish +
-                                  # post-publish self-update smoke
+                                  # post-publish multi-PM self-update matrix
+  self-update-matrix.yml          # manual/registry multi-PM self-update
 ```
 
 ---

@@ -19,6 +19,8 @@ GitHub Release body to match this section (gh release edit).
   `OPENPLANET_LSP_PACKAGE_MANAGER`
 - `scripts/release/smoke-self-update.sh` + CI/release self-update smoke jobs
 - Self-update supports **pnpm / yarn / bun** (global + local) in addition to npm
+- Registry multi-PM self-update CI (`self-update-matrix` workflow + `smoke-self-update-registry.sh`);
+  manual/`workflow_dispatch` + post-tag-release only (not every PR)
 
 ### Fixed
 - Self-update status truthfulness after apply (`pending_restart` /
