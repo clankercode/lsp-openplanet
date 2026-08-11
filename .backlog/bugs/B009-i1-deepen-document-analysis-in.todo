@@ -1,4 +1,7 @@
 ---
+claimed_at: "2026-08-11T16:00:55Z"
+claimed_by: cli-user
+completed_at: null
 complexity: high
 created_at: "2026-08-11T15:53:11Z"
 depends_on:
@@ -6,13 +9,11 @@ depends_on:
 estimate_hours: 8
 id: B009
 priority: high
-status: pending
-tags:
-    - architecture
-    - sequence
-    - gh-6
+started_at: "2026-08-11T16:00:55Z"
+status: in_progress
+tags: []
 title: 'I1: Deepen document analysis into one AnalysisSnapshot module'
-updated_at: "2026-08-11T15:53:11Z"
+updated_at: "2026-08-11T16:00:55Z"
 ---
 GitHub: https://github.com/clankercode/lsp-openplanet/issues/6
 
