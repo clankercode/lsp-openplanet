@@ -29,9 +29,11 @@ Or download platform archives from
 
 ## Release / distribution
 
-See **[docs/RELEASE.md](docs/RELEASE.md)** for:
+See **[RELEASE.md](RELEASE.md)** for the full procedure (keep it up to date when
+release tooling changes):
 
 - multi-platform GitHub Release binaries (Linux / macOS / Windows, x64 + arm64)
 - npm publish of `openplanet-lsp` + platform packages
 - version bump + tag procedure
+- **changelog writing + post-CI `gh release edit`**
 - local smoke test (`scripts/release/smoke-local.sh`)

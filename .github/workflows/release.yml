@@ -5,11 +5,14 @@ name: release
 #
 # Trigger:
 #   - push tag matching v* (e.g. v0.2.0)
-#   - workflow_dispatch with tag input (must already exist, or will be created
-#     only if you also push the tag yourself)
+#   - workflow_dispatch with dry_run (build/pack only)
 #
 # Required repo secrets:
 #   NPM_TOKEN  — npm automation token with publish rights for openplanet-lsp*
+#
+# After this workflow succeeds, an agent/human MUST finalize the release:
+#   write/update CHANGELOG.md and `gh release edit` with real notes.
+# Full procedure: RELEASE.md (keep that file in sync if this workflow changes).
 
 on:
   push:
