@@ -23,7 +23,7 @@ use tower_lsp::lsp_types::*;
 use crate::lexer;
 use crate::parser::Parser;
 use crate::parser::ast::{
-    ClassMember, Expr, ExprKind, FunctionBody, FunctionDecl, Item, NamespaceDecl,
+    CallArg, ClassMember, Expr, ExprKind, FunctionBody, FunctionDecl, Item, NamespaceDecl,
     SourceFile, Stmt, StmtKind, TypeExpr, TypeExprKind, VarDeclStmt,
 };
 use crate::server::diagnostics::offset_to_position;
@@ -201,7 +201,7 @@ fn collect_from_expr(
         ExprKind::Call { callee, args } => {
             collect_from_expr(callee, source, workspace, type_index, out);
             for a in args {
-                collect_from_expr(a, source, workspace, type_index, out);
+                collect_from_expr(&a.value, source, workspace, type_index, out);
             }
             collect_param_name_hints(callee, args, source, workspace, type_index, out);
         }
@@ -335,7 +335,7 @@ fn type_expr_text(ty: &TypeExpr, source: &str) -> String {
 
 fn collect_param_name_hints(
     callee: &Expr,
-    args: &[Expr],
+    args: &[CallArg],
     source: &str,
     workspace: Option<&SymbolTable>,
     type_index: Option<&TypeIndex>,
@@ -347,22 +347,28 @@ fn collect_param_name_hints(
     let Some(param_names) = lookup_callee_param_names(&callee_text, workspace, type_index) else {
         return;
     };
-    for (idx, arg) in args.iter().enumerate() {
-        let Some(name) = param_names.get(idx) else {
+    // Positional args bind left-to-right; named args already show the name.
+    let mut next_pos = 0usize;
+    for arg in args {
+        if arg.name.is_some() {
+            continue;
+        }
+        let Some(name) = param_names.get(next_pos) else {
             break;
         };
+        next_pos += 1;
         if name.is_empty() {
             continue;
         }
-        if !is_literal_or_null(&arg.kind) {
+        if !is_literal_or_null(&arg.value.kind) {
             continue;
         }
-        if let ExprKind::Ident(id) = &arg.kind {
+        if let ExprKind::Ident(id) = &arg.value.kind {
             if id.text(source) == name {
                 continue;
             }
         }
-        let pos = offset_to_position(source, arg.span.start as usize);
+        let pos = offset_to_position(source, arg.value.span.start as usize);
         out.push(InlayHint {
             position: pos,
             label: InlayHintLabel::String(format!("{}:", name)),

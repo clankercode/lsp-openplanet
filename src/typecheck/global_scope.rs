@@ -427,6 +427,17 @@ impl<'a> GlobalScope<'a> {
         })
     }
 
+    /// Look up a unique workspace free function's parameter list
+    /// `(name, type_text)` by qualified name. Returns `None` if the name has
+    /// zero matches *or* two-plus matches (the overloaded case — callers
+    /// conservatively suppress type checking when overloads exist).
+    pub fn lookup_function_params(&self, qualified: &str) -> Option<Vec<(String, String)>> {
+        lookup_workspace_function_property(&self.workspace, qualified).map(|s| match &s.kind {
+            SymbolKind::Function { params, .. } => params.clone(),
+            _ => unreachable!(),
+        })
+    }
+
     /// Look up a unique workspace free function's parameter type text list
     /// by qualified name. Returns `None` if the name has zero matches *or*
     /// two-plus matches (the overloaded case — callers conservatively
@@ -434,12 +445,8 @@ impl<'a> GlobalScope<'a> {
     /// `type_text` strings as stored in the symbol table; callers are
     /// responsible for parsing them (e.g. via `PrimitiveType::from_name`).
     pub fn lookup_function_param_types(&self, qualified: &str) -> Option<Vec<String>> {
-        lookup_workspace_function_property(&self.workspace, qualified).map(|s| match &s.kind {
-            SymbolKind::Function { params, .. } => {
-                params.iter().map(|(_, ty_text)| ty_text.clone()).collect()
-            }
-            _ => unreachable!(),
-        })
+        self.lookup_function_params(qualified)
+            .map(|params| params.into_iter().map(|(_, ty_text)| ty_text).collect())
     }
 
     /// Return every workspace free-function overload matching `qualified`.

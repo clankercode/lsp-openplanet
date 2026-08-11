@@ -435,7 +435,7 @@ fn collect_expr_ctx(
         ExprKind::Call { callee, args } => {
             collect_expr_ctx(callee, source, name, out, false);
             for a in args {
-                collect_expr(a, source, name, out);
+                collect_expr(&a.value, source, name, out);
             }
         }
         ExprKind::Binary { lhs, rhs, .. } => {

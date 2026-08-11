@@ -2103,7 +2103,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a comma-separated argument list (without the surrounding parens).
-    fn parse_arg_list(&mut self) -> Result<Vec<Expr>, ParseError> {
+    fn parse_arg_list(&mut self) -> Result<Vec<CallArg>, ParseError> {
         let mut args = Vec::new();
         if !self.at(TokenKind::RParen) {
             args.push(self.parse_call_argument()?);
@@ -2115,15 +2115,29 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a single call argument. Supports AngelScript named arguments:
-    /// `name: value`. The name is currently dropped (the AST has no slot for
-    /// it); only the value is returned. Future work could record names for
-    /// signature-help and overload resolution.
-    fn parse_call_argument(&mut self) -> Result<Expr, ParseError> {
+    /// `name: value`. The optional name is retained on [`CallArg`] so the
+    /// type checker can bind by parameter name rather than position.
+    fn parse_call_argument(&mut self) -> Result<CallArg, ParseError> {
         if self.at(TokenKind::Ident) && self.peek_ahead(1) == TokenKind::Colon {
-            self.advance(); // eat name
+            let name_tok = self.advance(); // eat name
+            let name = Ident {
+                span: name_tok.span,
+            };
             self.advance(); // eat :
+            let value = self.parse_expr()?;
+            let span = Span::new(name.span.start, value.span.end);
+            return Ok(CallArg {
+                span,
+                name: Some(name),
+                value,
+            });
         }
-        self.parse_expr()
+        let value = self.parse_expr()?;
+        Ok(CallArg {
+            span: value.span,
+            name: None,
+            value,
+        })
     }
 
     /// Parse a primary expression: literals, identifiers, cast, parenthesized, array init.

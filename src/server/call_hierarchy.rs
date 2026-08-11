@@ -480,7 +480,7 @@ fn collect_calls_in_expr(expr: &Expr, source: &str, out: &mut Vec<(String, Span)
             // Recurse into callee (for nested calls on the receiver) and args.
             collect_calls_in_expr(callee, source, out);
             for a in args {
-                collect_calls_in_expr(a, source, out);
+                collect_calls_in_expr(&a.value, source, out);
             }
         }
         ExprKind::Binary { lhs, rhs, .. } => {
@@ -708,7 +708,7 @@ fn walk_expr<F: FnMut(&Expr)>(expr: &Expr, f: &mut F) {
         ExprKind::Call { callee, args } => {
             walk_expr(callee, f);
             for a in args {
-                walk_expr(a, f);
+                walk_expr(&a.value, f);
             }
         }
         ExprKind::Binary { lhs, rhs, .. }
