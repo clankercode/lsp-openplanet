@@ -377,10 +377,11 @@ jobs:
           shopt -s nullglob
           # Platform tarballs look like: openplanet-lsp-linux-x64-0.2.0.tgz
           # Meta tarball looks like:     openplanet-lsp-0.2.0.tgz
+          # IMPORTANT: use ./ prefix so npm treats paths as files, not git specs.
           platforms=(
-            npm-tgz/openplanet-lsp-linux-*.tgz
-            npm-tgz/openplanet-lsp-darwin-*.tgz
-            npm-tgz/openplanet-lsp-win32-*.tgz
+            ./npm-tgz/openplanet-lsp-linux-*.tgz
+            ./npm-tgz/openplanet-lsp-darwin-*.tgz
+            ./npm-tgz/openplanet-lsp-win32-*.tgz
           )
           if [[ ${#platforms[@]} -eq 0 ]]; then
             echo "No platform tarballs found"
@@ -391,7 +392,7 @@ jobs:
             echo "Publishing platform ${tgz} (OIDC)"
             npm publish "${tgz}" --access public --provenance
           done
-          META_TGZ="npm-tgz/openplanet-lsp-${VERSION}.tgz"
+          META_TGZ="./npm-tgz/openplanet-lsp-${VERSION}.tgz"
           if [[ ! -f "${META_TGZ}" ]]; then
             echo "Meta tarball missing: ${META_TGZ}"
             ls -la npm-tgz

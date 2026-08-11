@@ -13,6 +13,15 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-08-12
+
+### Fixed
+- npm publish tarball paths use `./` so CLI does not treat them as git URLs
+
+### Distribution
+- Multi-platform GitHub Release + npm OIDC publish
+
+
 ### Added
 - Self-update CLI: `openplanet-lsp update` / `update --check` / `update --status`
   - Latest version from the npm registry (no GitHub API)
