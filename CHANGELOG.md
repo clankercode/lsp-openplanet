@@ -13,6 +13,17 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-11
+
+### Distribution
+- First automated multi-platform release via GitHub Actions + npm OIDC trusted publishing
+- Binaries for Linux/macOS/Windows (x64 + arm64) on GitHub Releases
+- npm packages: `openplanet-lsp` + platform optional dependencies
+
+### Fixed
+- Compiler-parity batch B001–B007 and external named-arg binding (included from master)
+
+
 ### Added
 
 - Multi-platform distribution: GitHub Release binaries and npm packages
