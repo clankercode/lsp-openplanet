@@ -1155,11 +1155,26 @@ impl<'a> Checker<'a> {
             0 => {
                 // Not a workspace function (external-only). Check external
                 // free-function arity when typedb signatures are available
-                // (B003/B005), then walk args.
-                if let Some(ranges) = self.scope.lookup_external_function_arity_ranges(qualified) {
+                // (B003/B005), then type-check args when a unique overload
+                // matches (B007).
+                if let Some(overloads) = self
+                    .scope
+                    .lookup_external_function_param_overloads(qualified)
+                {
+                    let ranges: Vec<(usize, usize)> = overloads
+                        .iter()
+                        .map(|s| (s.min_args, s.param_types.len()))
+                        .collect();
                     self.check_arity_against_ranges(display_name, &ranges, args.len(), callee_span);
+                    self.check_external_call_arg_types(display_name, args, &overloads);
+                } else if let Some(ranges) =
+                    self.scope.lookup_external_function_arity_ranges(qualified)
+                {
+                    self.check_arity_against_ranges(display_name, &ranges, args.len(), callee_span);
+                    self.walk_args(args);
+                } else {
+                    self.walk_args(args);
                 }
-                self.walk_args(args);
                 fallback_ret
             }
             1 => {
@@ -1178,10 +1193,8 @@ impl<'a> Checker<'a> {
                 // 2+ overloads: walk args once, run real resolution.
                 // Named-arg overload resolution is not implemented yet —
                 // bind types in call order (positional) for matching.
-                let arg_tys: Vec<TypeRepr> = args
-                    .iter()
-                    .map(|a| self.expr_type(&a.value))
-                    .collect();
+                let arg_tys: Vec<TypeRepr> =
+                    args.iter().map(|a| self.expr_type(&a.value)).collect();
                 match resolve_overload(&overloads, &arg_tys) {
                     OverloadMatch::Unique(sig) => {
                         // A unique winner means every primitive arg either
@@ -1209,6 +1222,111 @@ impl<'a> Checker<'a> {
     fn walk_args(&mut self, args: &[CallArg]) {
         for a in args {
             let _ = self.expr_type(&a.value);
+        }
+    }
+
+    /// Peel `Const` / `Handle` wrappers (either order) down to the value type.
+    fn peel_const_handle(ty: &TypeRepr) -> &TypeRepr {
+        ty.unwrap_const()
+            .unwrap_handle()
+            .unwrap_const()
+            .unwrap_handle()
+    }
+
+    /// True when two Named type strings refer to the same type/enum after
+    /// typedb suffix / short-name canonicalization (B007).
+    fn named_types_equivalent(&self, a: &str, b: &str) -> bool {
+        if a == b {
+            return true;
+        }
+        self.scope.canonicalize_type_name(a) == self.scope.canonicalize_type_name(b)
+    }
+
+    /// After arity is known OK for a unique external overload, walk args and
+    /// emit `ArgTypeMismatch` for primitive mismatches and distinct Named
+    /// types (enums). Conservative skips:
+    /// - error-typed args
+    /// - incomplete/empty param types
+    /// - non-primitive / non-Named cores (e.g. generics) — leave silent
+    /// - multi-overload / arity-ambiguous sets (caller must pass a unique sig)
+    ///
+    /// Does **not** coerce distinct int-backed enums to each other.
+    fn walk_args_and_check_external_param_types(
+        &mut self,
+        display_name: &str,
+        args: &[CallArg],
+        param_types: &[String],
+    ) {
+        for (param_index, arg) in args.iter().enumerate() {
+            let arg_ty = self.expr_type(&arg.value);
+            let Some(param_text) = param_types.get(param_index) else {
+                continue;
+            };
+            let param_ty = TypeRepr::parse_type_string(param_text.trim());
+            if matches!(param_ty, TypeRepr::Error(_)) {
+                continue;
+            }
+            if matches!(arg_ty, TypeRepr::Error(_)) {
+                continue;
+            }
+
+            let arg_core = Self::peel_const_handle(&arg_ty);
+            let param_core = Self::peel_const_handle(&param_ty);
+
+            match (arg_core, param_core) {
+                (TypeRepr::Primitive(arg_p), TypeRepr::Primitive(param_p)) => {
+                    if !is_convertible(arg_core, param_core) {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: arg.value.span,
+                            kind: TypeDiagnosticKind::ArgTypeMismatch {
+                                function_name: display_name.to_string(),
+                                param_index,
+                                expected: param_p.as_str().to_string(),
+                                got: arg_p.as_str().to_string(),
+                            },
+                        });
+                    }
+                }
+                (TypeRepr::Named(arg_n), TypeRepr::Named(param_n)) => {
+                    if !self.named_types_equivalent(arg_n, param_n) {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: arg.value.span,
+                            kind: TypeDiagnosticKind::ArgTypeMismatch {
+                                function_name: display_name.to_string(),
+                                param_index,
+                                expected: param_n.clone(),
+                                got: arg_n.clone(),
+                            },
+                        });
+                    }
+                }
+                // Mixed / unknown shapes: stay silent (conservative).
+                _ => {}
+            }
+        }
+    }
+
+    /// Pick the unique external overload whose arity accepts `argc`, then
+    /// run Named/primitive arg type checks. Multi-match or no-match stays
+    /// silent on types (arity diagnostics are handled separately).
+    fn check_external_call_arg_types(
+        &mut self,
+        display_name: &str,
+        args: &[CallArg],
+        overloads: &[OverloadSig],
+    ) {
+        let matching: Vec<&OverloadSig> = overloads
+            .iter()
+            .filter(|sig| args.len() >= sig.min_args && args.len() <= sig.param_types.len())
+            .collect();
+        if matching.len() == 1 {
+            self.walk_args_and_check_external_param_types(
+                display_name,
+                args,
+                &matching[0].param_types,
+            );
+        } else {
+            self.walk_args(args);
         }
     }
 
@@ -1395,13 +1513,27 @@ impl<'a> Checker<'a> {
                     return TypeRepr::Error(String::new());
                 };
                 // B003: external method arity (unique + multi with no match).
-                if let Some(ranges) = self
+                // B007: after arity OK, type-check Named/primitive args against
+                // the unique matching overload's param types (incl. Nadeo).
+                if let Some(overloads) = self
+                    .scope
+                    .lookup_external_method_param_overloads(&type_name, &member_name)
+                {
+                    let ranges: Vec<(usize, usize)> = overloads
+                        .iter()
+                        .map(|s| (s.min_args, s.param_types.len()))
+                        .collect();
+                    self.check_arity_against_ranges(&member_name, &ranges, args.len(), callee.span);
+                    self.check_external_call_arg_types(&member_name, args, &overloads);
+                } else if let Some(ranges) = self
                     .scope
                     .lookup_external_method_arity_ranges(&type_name, &member_name)
                 {
                     self.check_arity_against_ranges(&member_name, &ranges, args.len(), callee.span);
+                    self.walk_args(args);
+                } else {
+                    self.walk_args(args);
                 }
-                self.walk_args(args);
                 // AC19: when the receiver is a const object, a non-const
                 // method's return value inherits `Const(_)` so that
                 // downstream writes (`h.get_arr()[0] = 5`, etc.) fire
@@ -1475,6 +1607,17 @@ impl<'a> Checker<'a> {
                             callee.span,
                             t,
                         );
+                    }
+                    if let Some(overloads) =
+                        self.scope.lookup_external_function_param_overloads(&qual)
+                    {
+                        let ranges: Vec<(usize, usize)> = overloads
+                            .iter()
+                            .map(|s| (s.min_args, s.param_types.len()))
+                            .collect();
+                        self.check_arity_against_ranges(display, &ranges, args.len(), callee.span);
+                        self.check_external_call_arg_types(display, args, &overloads);
+                        return t;
                     }
                     if let Some(ranges) = self.scope.lookup_external_function_arity_ranges(&qual) {
                         self.check_arity_against_ranges(display, &ranges, args.len(), callee.span);
@@ -3723,6 +3866,145 @@ mod tests {
                 expected_max: 3,
                 got: 4,
             }
+        );
+    }
+
+    // ── B007: distinct enum types at external call sites ─────────────────
+
+    #[test]
+    fn is_convertible_distinct_named_enums_false() {
+        // Distinct Named types are not interchangeable even if both are
+        // int-backed enums in the game. is_convertible only equates equals.
+        let a = TypeRepr::Named("CGameCtnBlock::ECardinalDirections".into());
+        let b = TypeRepr::Named("CGameEditorPluginMap::ECardinalDirections".into());
+        assert!(!is_convertible(&a, &b));
+        assert!(is_convertible(&a, &a));
+        // Numeric↔numeric still allowed.
+        assert!(is_convertible(
+            &TypeRepr::Primitive(PrimitiveType::Int),
+            &TypeRepr::Primitive(PrimitiveType::Float)
+        ));
+    }
+
+    #[test]
+    fn external_remove_block_safe_cross_enum_fires() {
+        // Real typedb case (Gizmo.as / B007): RemoveBlockSafe wants
+        // CGameEditorPluginMap::ECardinalDirections, but CGameCtnBlock::Direction
+        // is CGameCtnBlock::ECardinalDirections.
+        let diags = check_with_typedb(
+            r#"
+            void f() {
+                CGameEditorPluginMapMapType@ pmt;
+                CGameCtnBlock@ targetBlock;
+                int3 coord;
+                pmt.RemoveBlockSafe(targetBlock.BlockInfo, coord, targetBlock.Direction);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch for cross-enum Direction, got {:?}",
+            diags
+        );
+        match &bad[0].kind {
+            TypeDiagnosticKind::ArgTypeMismatch {
+                function_name,
+                param_index,
+                expected,
+                got,
+            } => {
+                assert_eq!(function_name, "RemoveBlockSafe");
+                assert_eq!(*param_index, 2);
+                assert!(
+                    expected.contains("CGameEditorPluginMap")
+                        && expected.contains("ECardinalDirections"),
+                    "expected plugin-map enum, got {expected}"
+                );
+                assert!(
+                    got.contains("CGameCtnBlock") && got.contains("ECardinalDirections"),
+                    "expected block enum, got {got}"
+                );
+            }
+            other => panic!("unexpected kind: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn external_remove_block_safe_cross_enum_local_fires() {
+        // Synthetic: typed locals with distinct enum types (no property path).
+        let diags = check_with_typedb(
+            r#"
+            void f() {
+                CGameEditorPluginMap@ pmt;
+                CGameCtnBlockInfo@ info;
+                int3 coord;
+                CGameCtnBlock::ECardinalDirections wrong;
+                pmt.RemoveBlockSafe(info, coord, wrong);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch for cross-enum local, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn external_remove_block_safe_same_enum_silent() {
+        // CGameCtnBlock::Dir is already CGameEditorPluginMap::ECardinalDirections.
+        let diags = check_with_typedb(
+            r#"
+            void f() {
+                CGameEditorPluginMapMapType@ pmt;
+                CGameCtnBlock@ targetBlock;
+                int3 coord;
+                pmt.RemoveBlockSafe(targetBlock.BlockInfo, coord, targetBlock.Dir);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for same-enum Dir, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn external_remove_block_safe_matching_local_enum_silent() {
+        let diags = check_with_typedb(
+            r#"
+            void f() {
+                CGameEditorPluginMap@ pmt;
+                CGameCtnBlockInfo@ info;
+                int3 coord;
+                CGameEditorPluginMap::ECardinalDirections dir;
+                pmt.RemoveBlockSafe(info, coord, dir);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for matching local enum, got {:?}",
+            diags
         );
     }
 }

@@ -265,6 +265,10 @@ impl TypeIndex {
                             });
                         }
                         NadeoMemberKind::Enum => {
+                            // Members with an inline `e` block are enum-typed
+                            // *properties* (e.g. `CGameCtnBlock::Direction`).
+                            // Register the enum for name resolution AND keep
+                            // the property so member access returns the enum type.
                             if let (Some(type_name), Some(values)) = (
                                 member.type_name(),
                                 member_inline_enum_values(member.e.as_ref()),
@@ -273,6 +277,13 @@ impl TypeIndex {
                                     qualify_nadeo_member_type_name(&db.ns, ns_name, type_name),
                                     values,
                                 );
+                            }
+                            if let Some(type_name) = member.type_name() {
+                                properties.push(PropertyInfo {
+                                    name: member.n.clone(),
+                                    type_name: type_name.to_string(),
+                                    doc: None,
+                                });
                             }
                         }
                     }

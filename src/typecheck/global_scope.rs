@@ -505,6 +505,116 @@ impl<'a> GlobalScope<'a> {
         }
     }
 
+    /// Resolve `name` to a key that `TypeIndex::lookup_type` accepts.
+    /// Accepts already-FQN names, bare short names (`CGameCtnBlock`), and
+    /// partially-qualified suffixes (`CGameEditorPluginMap::ECardinalDirections`
+    /// is not a type key — only class-level names are expected here).
+    fn resolve_external_type_key(&self, name: &str) -> Option<String> {
+        let ext = self.external?;
+        if ext.lookup_type(name).is_some() {
+            return Some(name.to_string());
+        }
+        if name.contains("::") {
+            self.resolve_qualified_suffix(name)
+        } else {
+            self.resolve_unqualified(name)
+        }
+    }
+
+    /// Canonical FQN for a type/enum name used in equality checks.
+    /// Leaves the input unchanged when nothing in the index matches.
+    pub fn canonicalize_type_name(&self, name: &str) -> String {
+        if self.has_type(name) || self.has_enum(name) {
+            return name.to_string();
+        }
+        if let Some(resolved) = self.resolve_qualified_suffix(name) {
+            return resolved;
+        }
+        if !name.contains("::") {
+            if let Some(resolved) = self.resolve_unqualified(name) {
+                return resolved;
+            }
+        }
+        name.to_string()
+    }
+
+    /// External method overloads with param type strings (B007).
+    ///
+    /// Unlike `lookup_external_method_arity_ranges`, this does **not** skip
+    /// Nadeo-sourced types: Nadeo method `a` fields carry usable parameter
+    /// type text (e.g. `RemoveBlockSafe`'s distinct enum params). Parent
+    /// names stored bare in the Nadeo dump are re-resolved via short-name
+    /// lookup so inherited methods on `CGameEditorPluginMapMapType` are found.
+    ///
+    /// Returns `None` when the type/method is unknown.
+    pub fn lookup_external_method_param_overloads(
+        &self,
+        type_name: &str,
+        method: &str,
+    ) -> Option<Vec<OverloadSig>> {
+        let ext = self.external?;
+        let mut out = Vec::new();
+        let mut current = self.resolve_external_type_key(type_name);
+        let mut hops = 0usize;
+        while let Some(name) = current.take() {
+            hops += 1;
+            if hops > 32 {
+                break;
+            }
+            let info = ext.lookup_type(&name)?;
+            let mut found_on_this = false;
+            for m in &info.methods {
+                if m.name != method {
+                    continue;
+                }
+                found_on_this = true;
+                let min_args = m.params.iter().filter(|p| p.default.is_none()).count();
+                out.push(OverloadSig {
+                    param_types: m.params.iter().map(|p| p.type_name.clone()).collect(),
+                    min_args,
+                    return_type: m.return_type.clone(),
+                });
+            }
+            if found_on_this {
+                break;
+            }
+            current = info
+                .parent
+                .as_ref()
+                .and_then(|p| self.resolve_external_type_key(p));
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// External free-function overloads with param type strings (B007).
+    /// Returns `None` when `qualified` is not an external function.
+    pub fn lookup_external_function_param_overloads(
+        &self,
+        qualified: &str,
+    ) -> Option<Vec<OverloadSig>> {
+        let ext = self.external?;
+        let fns = ext.lookup_function(qualified)?;
+        if fns.is_empty() {
+            return None;
+        }
+        Some(
+            fns.iter()
+                .map(|f| {
+                    let min_args = f.params.iter().filter(|p| p.default.is_none()).count();
+                    OverloadSig {
+                        param_types: f.params.iter().map(|p| p.type_name.clone()).collect(),
+                        min_args,
+                        return_type: f.return_type.clone(),
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// Look up a unique workspace free function's parameter list
     /// `(name, type_text)` by qualified name. Returns `None` if the name has
     /// zero matches *or* two-plus matches (the overloaded case — callers
@@ -1040,6 +1150,49 @@ mod tests {
         assert_eq!(
             scope.lookup_function_signature("UI::Selectable"),
             Some((2, 3))
+        );
+    }
+
+    #[test]
+    fn external_method_param_overloads_remove_block_safe() {
+        use crate::typedb::index::TypeIndex;
+
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+
+        // Direct declaring type.
+        let overloads = scope
+            .lookup_external_method_param_overloads("CGameEditorPluginMap", "RemoveBlockSafe")
+            .expect("RemoveBlockSafe on CGameEditorPluginMap");
+        assert_eq!(overloads.len(), 1);
+        assert_eq!(overloads[0].min_args, 3);
+        assert_eq!(overloads[0].param_types.len(), 3);
+        assert_eq!(
+            overloads[0].param_types[2],
+            "CGameEditorPluginMap::ECardinalDirections"
+        );
+
+        // Inherited via MapType subclass (bare parent walk + short-name resolve).
+        let inherited = scope
+            .lookup_external_method_param_overloads(
+                "CGameEditorPluginMapMapType",
+                "RemoveBlockSafe",
+            )
+            .expect("RemoveBlockSafe on MapType");
+        assert_eq!(inherited[0].param_types[2], overloads[0].param_types[2]);
+
+        assert_eq!(
+            scope.canonicalize_type_name("CGameCtnBlock::ECardinalDirections"),
+            "Game::CGameCtnBlock::ECardinalDirections"
+        );
+        assert_eq!(
+            scope.canonicalize_type_name("CGameEditorPluginMap::ECardinalDirections"),
+            "Game::CGameEditorPluginMap::ECardinalDirections"
         );
     }
 }
