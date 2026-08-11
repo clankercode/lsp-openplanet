@@ -2681,6 +2681,22 @@ impl<'a> Parser<'a> {
         let try_body = Box::new(self.parse_block_stmt()?);
         self.expect(TokenKind::KwCatch)?;
         let catch_body = Box::new(self.parse_block_stmt()?);
+
+        // Empty catch bodies are illegal. The game compiler reports
+        // `expected declaration, found RBrace` at the closing `}` (comment-only
+        // bodies are still empty AST-wise and must diagnose).
+        if let StmtKind::Block(stmts) = &catch_body.kind {
+            if stmts.is_empty() {
+                let rbrace_start = catch_body.span.end.saturating_sub(1);
+                self.error(ParseError {
+                    span: Span::new(rbrace_start, catch_body.span.end),
+                    kind: ParseErrorKind::ExpectedItem {
+                        found: TokenKind::RBrace,
+                    },
+                });
+            }
+        }
+
         let span = self.span_from(start);
         Ok(Stmt {
             span,
@@ -3618,11 +3634,42 @@ ForcePadType Setting_General_ForcePadType = ForcePadType::None;"#;
 
     #[test]
     fn test_parse_try_catch() {
-        let src = "void f() { try { x(); } catch { } }";
+        let src = "void f() { try { x(); } catch { y(); } }";
         let tokens = tokenize_filtered(src);
         let mut p = Parser::new(&tokens, src);
         let _file = p.parse_file();
         assert!(p.errors.is_empty(), "errors: {:?}", p.errors);
+    }
+
+    /// B002: empty catch body must be diagnosed (game: expected declaration, found RBrace).
+    #[test]
+    fn test_empty_catch_body_diagnosed() {
+        let src = "void Main() { try { int x = 1; } catch { } }";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(
+            !p.errors.is_empty(),
+            "expected diagnostic for empty catch body"
+        );
+        let msg = p.errors[0].to_string();
+        assert!(
+            msg.contains("expected declaration") && msg.contains("RBrace"),
+            "unexpected diagnostic message: {msg}"
+        );
+    }
+
+    /// B002: comment-only catch body is still empty AST-wise and must diagnose.
+    #[test]
+    fn test_comment_only_catch_body_diagnosed() {
+        let src = "void Main() { try { int x = 1; } catch { /* noop */ } }";
+        let tokens = tokenize_filtered(src);
+        let mut p = Parser::new(&tokens, src);
+        let _file = p.parse_file();
+        assert!(
+            !p.errors.is_empty(),
+            "expected diagnostic for comment-only catch body"
+        );
     }
 
     #[test]
