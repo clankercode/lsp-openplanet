@@ -221,7 +221,7 @@ impl App {
                     .bg(ratatui::style::Color::Rgb(45, 45, 55))
                     .add_modifier(Modifier::BOLD),
             )
-            .highlight_symbol("▌ ");
+            .highlight_symbol("");
 
         f.render_stateful_widget(list, area, &mut self.list_state);
     }
@@ -235,7 +235,10 @@ impl App {
                     Style::default().add_modifier(Modifier::DIM),
                 ))],
             ),
-            Some(d) => (" detail ".to_string(), pretty_detail_lines(d)),
+            Some(d) => (
+                format!(" detail · {} ", d.severity.label()),
+                pretty_detail_lines(d),
+            ),
         };
 
         let block = Block::default().borders(Borders::ALL).title(title);
@@ -286,14 +289,10 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
-fn location_text(d: &DiagItem) -> String {
-    format!("{}:{}:{}", short_path(&d.path), d.line, d.col)
-}
-
 fn format_location(d: &DiagItem, path_w: usize, line_w: usize, col_w: usize) -> String {
     let path = short_path(&d.path);
     format!(
-        "{path:<path_w$}:{line:>line_w$}:{col:<col_w$}",
+        "{path:<path_w$}:{line:0>line_w$}:{col:<col_w$}",
         path = path,
         line = d.line,
         col = d.col,
@@ -351,18 +350,33 @@ fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
         let blank = " ".repeat(gutter_w);
         let pipe = Style::default().add_modifier(Modifier::DIM);
 
-        // Source line
-        lines.push(Line::from(vec![
-            Span::raw(format!("  {gutter} ")),
-            Span::styled("│".to_string(), pipe),
-            Span::raw(format!(" {src}")),
-        ]));
-
         let start = d.start_col0().min(src.chars().count());
         let end = d.end_col0().max(start + 1);
         let end = end.min(src.chars().count().max(start + 1));
         let pad = " ".repeat(start);
         let carets = "^".repeat((end - start).max(1));
+
+        // Source line with the underlined span emphasized.
+        let chars: Vec<char> = src.chars().collect();
+        let before: String = chars[..start.min(chars.len())].iter().collect();
+        let mid: String = if start < chars.len() {
+            chars[start..end.min(chars.len())].iter().collect()
+        } else {
+            String::new()
+        };
+        let after: String = if end < chars.len() {
+            chars[end..].iter().collect()
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {gutter} ")),
+            Span::styled("│".to_string(), pipe),
+            Span::raw(" "),
+            Span::raw(before),
+            Span::styled(mid, severity_style(d.severity).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::raw(after),
+        ]));
 
         // Caret-only line (message on next line — CLI pretty puts message inline,
         // but TUI detail has room and vision review preferred separation).
