@@ -29,17 +29,25 @@ USAGE:
 
 OPTIONS:
     -h, --help       Show this help message
-    --check          Query npm for the latest version and write the status file
-                     (do not install)
+    --check          Query the version source for the latest version and write
+                     the status file (do not install)
     --status         Print the last saved status without contacting the network
     --force          Re-run the install command even if already on the latest
                      reported version
+    --source <SRC>   Where to check for the latest version:
+                       npm     (default) registry.npmjs.org
+                       crate   crates.io
+                       github  latest GitHub Release tag
+                     Aliases: crates, cargo, gh, git
 
 BEHAVIOR:
-    Latest version is read from the npm registry (registry.npmjs.org), not the
-    GitHub API. The running binary path is classified as npm/pnpm/yarn/bun
-    (global or local), cargo, development, or standalone, and the matching
-    upgrade command is used.
+    Latest version is read from the chosen source (default: npm). The running
+    binary path is classified as npm/pnpm/yarn/bun (global or local), cargo,
+    development, or standalone, and the matching upgrade path is used.
+
+    Status lines look like:
+      current:  0.2.9 (install type: standalone)
+      latest:   0.2.9 (source checked: npm)
 
     Status is written to:
       $OPENPLANET_LSP_CONFIG_DIR/update-status.json
@@ -55,11 +63,15 @@ DEV / CI OVERRIDES (optional):
     OPENPLANET_LSP_PACKAGE_MANAGER  Force js pm: npm | pnpm | yarn | bun
     OPENPLANET_LSP_EXE              Pretend this is the running binary path
                                     (install-method detection)
+    OPENPLANET_LSP_RELEASE_ARCHIVE  Local .tar.gz/.zip for standalone apply tests
 
 EXAMPLES:
     openplanet-lsp update --check
+    openplanet-lsp update --check --source github
+    openplanet-lsp update --check --source crate
     openplanet-lsp update --status
     openplanet-lsp update
+
 ";
 
 fn handle_early_args(args: &[String]) -> Option<i32> {
@@ -146,6 +158,17 @@ fn parse_update_args(args: &[String]) -> Result<update::UpdateOptions, String> {
             }
             "--force" => {
                 options.force_install = true;
+                i += 1;
+            }
+            "--source" => {
+                let val = args.get(i + 1).ok_or_else(|| {
+                    "--source requires a value (npm, crate, or github)".to_string()
+                })?;
+                options.version_source = update::VersionSource::parse(val)?;
+                i += 2;
+            }
+            other if let Some(rest) = other.strip_prefix("--source=") => {
+                options.version_source = update::VersionSource::parse(rest)?;
                 i += 1;
             }
             other if other.starts_with('-') => {

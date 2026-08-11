@@ -158,6 +158,47 @@ pub struct UpdateStatus {
     /// Version that was installed on disk (when known).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installed_version: Option<String>,
+    /// Where `latest_version` was resolved (`npm`, `crate`, `github`).
+    #[serde(default = "default_version_source_label")]
+    pub version_source: String,
+}
+
+fn default_version_source_label() -> String {
+    VersionSource::Npm.as_str().to_string()
+}
+
+/// Which channel to query for the latest published version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VersionSource {
+    /// npm registry (`registry.npmjs.org/openplanet-lsp/latest`). Default.
+    #[default]
+    Npm,
+    /// crates.io crate max version.
+    Crate,
+    /// Latest GitHub Release tag for this repo.
+    Github,
+}
+
+impl VersionSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VersionSource::Npm => "npm",
+            VersionSource::Crate => "crate",
+            VersionSource::Github => "github",
+        }
+    }
+
+    /// Parse CLI / config labels: `npm`, `crate`/`crates`/`cargo`, `github`/`gh`.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "npm" => Ok(VersionSource::Npm),
+            "crate" | "crates" | "crates.io" | "cargo" => Ok(VersionSource::Crate),
+            "github" | "gh" | "git" => Ok(VersionSource::Github),
+            other => Err(format!(
+                "unknown version source: {other:?} (expected npm, crate, or github)"
+            )),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -190,6 +231,8 @@ pub struct UpdateOptions {
     pub status_only: bool,
     /// Reinstall even when already on the latest reported version.
     pub force_install: bool,
+    /// Channel used to resolve the latest version (default: npm).
+    pub version_source: VersionSource,
 }
 
 /// CLI/run outcome: text plus process exit code.
@@ -385,10 +428,15 @@ pub fn is_update_available(current: &str, latest: &str) -> bool {
     )
 }
 
-/// Fetch the latest published version from the npm registry.
+/// Fetch the latest published version from the chosen channel.
 ///
 /// Override with `OPENPLANET_LSP_LATEST_VERSION` to skip the network (CI/dev).
 pub fn fetch_latest_version() -> Result<String, UpdateError> {
+    fetch_latest_version_from(VersionSource::Npm)
+}
+
+/// Fetch latest version from `source` (`npm` / `crate` / `github`).
+pub fn fetch_latest_version_from(source: VersionSource) -> Result<String, UpdateError> {
     if let Some(v) = env_nonempty("OPENPLANET_LSP_LATEST_VERSION") {
         if parse_version(&v).is_none() {
             return Err(UpdateError::msg(format!(
@@ -397,6 +445,14 @@ pub fn fetch_latest_version() -> Result<String, UpdateError> {
         }
         return Ok(v);
     }
+    match source {
+        VersionSource::Npm => fetch_latest_npm(),
+        VersionSource::Crate => fetch_latest_crate(),
+        VersionSource::Github => fetch_latest_github(),
+    }
+}
+
+fn fetch_latest_npm() -> Result<String, UpdateError> {
     if let Ok(v) = fetch_latest_via_curl() {
         return Ok(v);
     }
@@ -408,15 +464,80 @@ pub fn fetch_latest_version() -> Result<String, UpdateError> {
     ))
 }
 
-/// Run a version check, always writing the status file.
+fn fetch_latest_crate() -> Result<String, UpdateError> {
+    let url = format!("https://crates.io/api/v1/crates/{PACKAGE_NAME}");
+    let body = curl_json_get(&url)?;
+    let value: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| UpdateError::msg(format!("invalid crates.io JSON: {e}")))?;
+    let version = value
+        .pointer("/crate/max_version")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.pointer("/crate/newest_version").and_then(|v| v.as_str()))
+        .ok_or_else(|| UpdateError::msg("crates.io JSON missing crate.max_version"))?;
+    if parse_version(version).is_none() {
+        return Err(UpdateError::msg(format!(
+            "crates.io version not semver-like: {version}"
+        )));
+    }
+    Ok(version.to_string())
+}
+
+fn fetch_latest_github() -> Result<String, UpdateError> {
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let body = curl_json_get(&url)?;
+    let value: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| UpdateError::msg(format!("invalid GitHub releases JSON: {e}")))?;
+    let tag = value
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| UpdateError::msg("GitHub releases JSON missing tag_name"))?;
+    let version = tag.trim().trim_start_matches('v');
+    if parse_version(version).is_none() {
+        return Err(UpdateError::msg(format!(
+            "GitHub release tag not semver-like: {tag}"
+        )));
+    }
+    Ok(version.to_string())
+}
+
+fn curl_json_get(url: &str) -> Result<Vec<u8>, UpdateError> {
+    let output = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--max-time",
+            "15",
+            "-H",
+            "Accept: application/json",
+            "-A",
+            "openplanet-lsp-update/1.0 (https://github.com/clankercode/lsp-openplanet)",
+            url,
+        ])
+        .output()
+        .map_err(|e| UpdateError::msg(format!("curl failed: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(UpdateError::msg(format!(
+            "curl exited {} for {url}: {stderr}",
+            output.status
+        )));
+    }
+    Ok(output.stdout)
+}
+
+/// Run a version check, always writing the status file (npm channel).
 pub fn check_for_update() -> Result<UpdateStatus, UpdateError> {
+    check_for_update_from(VersionSource::Npm)
+}
+
+/// Run a version check against `source`, always writing the status file.
+pub fn check_for_update_from(source: VersionSource) -> Result<UpdateStatus, UpdateError> {
     let current = current_version();
     let method = detect_install_method();
     let exe = resolve_exe_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "unknown".into());
 
-    let (latest, error) = match fetch_latest_version() {
+    let (latest, error) = match fetch_latest_version_from(source) {
         Ok(v) => (Some(v), None),
         Err(e) => (None, Some(e.to_string())),
     };
@@ -439,6 +560,7 @@ pub fn check_for_update() -> Result<UpdateStatus, UpdateError> {
         error,
         pending_restart: false,
         installed_version: None,
+        version_source: source.as_str().to_string(),
     };
     save_status(&status)?;
     Ok(status)
@@ -539,6 +661,7 @@ pub fn apply_update_with_status(
         error: None,
         pending_restart: true,
         installed_version: Some(installed),
+        version_source: status.version_source.clone(),
     };
     save_status(&after)?;
     Ok(after)
@@ -547,9 +670,19 @@ pub fn apply_update_with_status(
 /// Format a human-readable status report.
 pub fn format_status(status: &UpdateStatus) -> String {
     let mut out = String::new();
-    out.push_str(&format!("current:  {}\n", status.current_version));
+    out.push_str(&format!(
+        "current:  {} (install type: {})\n",
+        status.current_version, status.install_method
+    ));
     match &status.latest_version {
-        Some(v) => out.push_str(&format!("latest:   {v} (npm)\n")),
+        Some(v) => {
+            let src = if status.version_source.is_empty() {
+                "npm"
+            } else {
+                status.version_source.as_str()
+            };
+            out.push_str(&format!("latest:   {v} (source checked: {src})\n"));
+        }
         None => out.push_str("latest:   (unavailable)\n"),
     }
     if let Some(inst) = &status.installed_version {
@@ -595,7 +728,7 @@ pub fn run_update(options: &UpdateOptions) -> Result<UpdateReport, UpdateError> 
     }
 
     if options.check_only {
-        let status = check_for_update()?;
+        let status = check_for_update_from(options.version_source)?;
         return Ok(UpdateReport {
             text: format_status(&status),
             exit_code: 0,
@@ -604,7 +737,7 @@ pub fn run_update(options: &UpdateOptions) -> Result<UpdateReport, UpdateError> 
 
     // Full update path
     let method = detect_install_method();
-    let before = check_for_update()?;
+    let before = check_for_update_from(options.version_source)?;
     if let Some(err) = &before.error {
         return Err(UpdateError::msg(err.clone()));
     }
@@ -1759,6 +1892,7 @@ mod tests {
             error: None,
             pending_restart: false,
             installed_version: None,
+            version_source: "npm".into(),
         };
         let path = save_status(&status).unwrap();
         assert!(path.ends_with(STATUS_FILE_NAME));
@@ -1785,6 +1919,7 @@ mod tests {
             error: None,
             pending_restart: false,
             installed_version: None,
+            version_source: "npm".into(),
         };
         // Running binary is newer than last recorded current → recheck.
         assert_ne!(current_version(), "0.1.0");
@@ -1810,6 +1945,7 @@ mod tests {
             error: None,
             pending_restart: false,
             installed_version: None,
+            version_source: "npm".into(),
         };
         assert!(!should_auto_check(
             Some(&fresh),
@@ -1841,6 +1977,7 @@ mod tests {
             error: None,
             pending_restart: true,
             installed_version: Some("0.2.6".into()),
+            version_source: "npm".into(),
         };
         let text = format_status(&status);
         assert!(text.contains("installed — restart required"));
@@ -1939,10 +2076,45 @@ mod tests {
             error: None,
             pending_restart: false,
             installed_version: None,
+            version_source: "npm".into(),
         };
         let text = format_status(&status);
         assert!(text.contains("update available"));
         assert!(text.contains("0.2.4"));
+        assert!(text.contains("current:  0.2.0 (install type: npm-global)"));
+        assert!(text.contains("latest:   0.2.4 (source checked: npm)"));
+    }
+
+    #[test]
+    fn version_source_parse_aliases() {
+        assert_eq!(VersionSource::parse("npm").unwrap(), VersionSource::Npm);
+        assert_eq!(VersionSource::parse("crate").unwrap(), VersionSource::Crate);
+        assert_eq!(VersionSource::parse("crates").unwrap(), VersionSource::Crate);
+        assert_eq!(VersionSource::parse("github").unwrap(), VersionSource::Github);
+        assert_eq!(VersionSource::parse("gh").unwrap(), VersionSource::Github);
+        assert!(VersionSource::parse("ftp").is_err());
+    }
+
+    #[test]
+    fn format_status_up_to_date_shows_install_type() {
+        let status = UpdateStatus {
+            checked_at: 0,
+            checked_at_rfc3339: "1970-01-01T00:00:00Z".into(),
+            current_version: "0.2.9".into(),
+            latest_version: Some("0.2.9".into()),
+            update_available: false,
+            install_method: "standalone".into(),
+            exe_path: "/home/x/.local/bin/openplanet-lsp".into(),
+            update_command: Some("openplanet-lsp update".into()),
+            error: None,
+            pending_restart: false,
+            installed_version: None,
+            version_source: "github".into(),
+        };
+        let text = format_status(&status);
+        assert!(text.contains("current:  0.2.9 (install type: standalone)"));
+        assert!(text.contains("latest:   0.2.9 (source checked: github)"));
+        assert!(text.contains("status:   up to date"));
     }
 
     #[test]
