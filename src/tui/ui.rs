@@ -138,8 +138,8 @@ impl App {
         let (list_pct, detail_pct) = match (self.density, n) {
             (_, 0) => (40u16, 60u16),
             (ListDensity::Relaxed, _) => (55, 45),
-            (ListDensity::Compact, n) if n <= 6 => (42, 58),
-            (ListDensity::Compact, _) => (50, 50),
+            (ListDensity::Compact, n) if n <= 8 => (38, 62),
+            (ListDensity::Compact, _) => (48, 52),
         };
         let mid = Layout::default()
             .direction(Direction::Vertical)
@@ -177,10 +177,16 @@ impl App {
 
     fn draw_list(&mut self, f: &mut Frame<'_>, area: Rect) {
         let items: Vec<ListItem<'_>> = if self.snapshot.diagnostics.is_empty() {
-            vec![ListItem::new(Line::from(Span::styled(
-                "  (no diagnostics — edit a .as file or press r)",
-                Style::default().add_modifier(Modifier::DIM),
-            )))]
+            vec![
+                ListItem::new(Line::from(Span::styled(
+                    "  ✓  No diagnostics",
+                    Style::default().fg(ratatui::style::Color::Green),
+                ))),
+                ListItem::new(Line::from(Span::styled(
+                    "     Edit a .as file or press r to recheck.",
+                    Style::default().add_modifier(Modifier::DIM),
+                ))),
+            ]
         } else {
             let path_w = self
                 .snapshot
@@ -230,10 +236,16 @@ impl App {
         let (title, lines): (String, Vec<Line<'_>>) = match self.selected_diag() {
             None => (
                 " detail ".to_string(),
-                vec![Line::from(Span::styled(
-                    "  Select a diagnostic to inspect.",
-                    Style::default().add_modifier(Modifier::DIM),
-                ))],
+                vec![
+                    Line::from(Span::styled(
+                        "  Nothing selected.",
+                        Style::default().add_modifier(Modifier::DIM),
+                    )),
+                    Line::from(Span::styled(
+                        "  j/k moves the list · Enter is not required.",
+                        Style::default().add_modifier(Modifier::DIM),
+                    )),
+                ],
             ),
             Some(d) => (
                 format!(" detail · {} ", d.severity.label()),
@@ -292,7 +304,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 fn format_location(d: &DiagItem, path_w: usize, line_w: usize, col_w: usize) -> String {
     let path = short_path(&d.path);
     format!(
-        "{path:<path_w$}:{line:0>line_w$}:{col:<col_w$}",
+        "{path:<path_w$}:{line:>line_w$}:{col:>col_w$}",
         path = path,
         line = d.line,
         col = d.col,
