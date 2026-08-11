@@ -3,7 +3,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use super::types::{DiagItem, ListDensity, RunStatus, Severity, Snapshot};
@@ -127,7 +127,7 @@ impl App {
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(6),
-                Constraint::Length(2), // thinner footer
+                Constraint::Length(1), // dim hint line
             ])
             .split(f.area());
 
@@ -144,8 +144,8 @@ impl App {
         let mid = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(list_pct),
-                Constraint::Percentage(detail_pct),
+                Constraint::Ratio(u32::from(list_pct), 100),
+                Constraint::Ratio(u32::from(detail_pct), 100),
             ])
             .split(chunks[1]);
         self.draw_list(f, mid[0]);
@@ -160,11 +160,10 @@ impl App {
         let w = self.snapshot.warning_count();
         let title = " openplanet-lsp · watch ";
         let body = format!(
-            " {}  ·  {}  ·  {}  ·  list: {} ",
+            " {}  ·  {}  ·  {} ",
             self.snapshot.root_label,
             diag_counts_phrase(n, e, w),
             self.snapshot.status.label(),
-            self.density.label(),
         );
         let block = Block::default()
             .borders(Borders::ALL)
@@ -208,7 +207,7 @@ impl App {
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(
                 Style::default()
-                    .bg(ratatui::style::Color::Rgb(45, 45, 55))
+                    .bg(ratatui::style::Color::Rgb(55, 58, 78))
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("");
@@ -238,12 +237,8 @@ impl App {
         };
 
         let block = Block::default().borders(Borders::ALL).title(title);
-        f.render_widget(
-            Paragraph::new(lines)
-                .block(block)
-                .wrap(Wrap { trim: false }),
-            area,
-        );
+        // No wrap: source + caret lines must stay column-aligned.
+        f.render_widget(Paragraph::new(lines).block(block), area);
     }
 
     fn draw_footer(&self, f: &mut Frame<'_>, area: Rect) {
@@ -255,8 +250,7 @@ impl App {
         let hints = Paragraph::new(format!(
             " j/k move · PgUp/Dn page · g/G top/end · r refresh · {density_hint} · q quit "
         ))
-        .style(Style::default().add_modifier(Modifier::DIM))
-        .block(Block::default().borders(Borders::TOP));
+        .style(Style::default().add_modifier(Modifier::DIM));
         f.render_widget(hints, area);
     }
 }
@@ -290,7 +284,15 @@ fn bare_location(d: &DiagItem) -> String {
 }
 
 fn format_location(d: &DiagItem, loc_w: usize) -> String {
-    format!("{:<loc_w$}", bare_location(d))
+    let bare = bare_location(d);
+    let truncated = if bare.chars().count() > loc_w {
+        // Keep the tail (file:line:col) when truncating long paths.
+        let tail: String = bare.chars().rev().take(loc_w.saturating_sub(1)).collect::<String>().chars().rev().collect();
+        format!("…{tail}")
+    } else {
+        bare
+    };
+    format!("{:<loc_w$}", truncated)
 }
 
 fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'static> {
@@ -312,7 +314,7 @@ fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
                 Span::styled(loc.trim_end().to_string(), Style::default().fg(ratatui::style::Color::Cyan)),
             ]);
-            let msg = Line::from(Span::styled(format!("    {}", d.message), style));
+            let msg = Line::from(Span::styled(format!("   {}", d.message), style));
             ListItem::new(vec![head, msg])
         }
     }

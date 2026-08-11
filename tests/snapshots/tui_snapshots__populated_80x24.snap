@@ -3,12 +3,13 @@ source: tests/tui_snapshots.rs
 expression: terminal.backend()
 ---
 "┌ openplanet-lsp · watch ──────────────────────────────────────────────────────┐"
-"│ ./MyPlugin  ·  3 diagnostics (2 errors · 1 warning)  ·  last: 120ms  ·  list:│"
+"│ ./MyPlugin  ·  3 diagnostics (2 errors · 1 warning)  ·  last: 120ms          │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "┌ diagnostics · compact ───────────────────────────────────────────────────────┐"
 "│ E src/Overlay.as:23:26  argument 1 of `MakeTint`: expected `int`, got `bool` │"
 "│ W src/Helpers.as:4:24   Use 'const string &in msg' to pass a string by refere│"
 "│ E src/Overlay.as:36:5   unknown type `FakeVehicleState`                      │"
+"│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
@@ -24,5 +25,4 @@ expression: terminal.backend()
 "│                                                                              │"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-"────────────────────────────────────────────────────────────────────────────────"
 " j/k move · PgUp/Dn page · g/G top/end · r refresh · c density · q quit         "

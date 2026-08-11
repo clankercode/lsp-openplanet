@@ -3,7 +3,7 @@ source: tests/tui_snapshots.rs
 expression: terminal.backend()
 ---
 "┌ openplanet-lsp · watch ──────────────────────────────────────────────────────┐"
-"│ ./MyPlugin  ·  0 diagnostics  ·  idle  ·  list: compact                      │"
+"│ ./MyPlugin  ·  0 diagnostics  ·  idle                                        │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "┌ diagnostics · compact ───────────────────────────────────────────────────────┐"
 "│  ✓  No diagnostics                                                           │"
@@ -23,6 +23,6 @@ expression: terminal.backend()
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
+"│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-"────────────────────────────────────────────────────────────────────────────────"
 " j/k move · PgUp/Dn page · g/G top/end · r refresh · c density · q quit         "

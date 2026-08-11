@@ -191,23 +191,46 @@ pub fn report_to_snapshot(report: &CheckReport, root_label: &str, elapsed: Durat
                 .to_path_buf();
             let range = item.diagnostic.range;
             let line_idx = range.start.line as usize;
-            let source_line = source_cache
+            let raw_line = source_cache
                 .entry(item.path.clone())
                 .or_insert_with(|| std::fs::read_to_string(&item.path).ok())
                 .as_ref()
                 .and_then(|src| {
                     src.lines()
                         .nth(line_idx)
-                        .map(|l| expand_tabs(l.trim_end_matches('\r'), 4))
+                        .map(|l| l.trim_end_matches('\r').to_string())
                 });
 
-            let start_col = range.start.character + 1;
-            let end_col = if range.end.line == range.start.line
-                && range.end.character > range.start.character
-            {
-                range.end.character + 1
-            } else {
-                start_col
+            // Expand tabs for display; map LSP cols through the same expand.
+            let (source_line, start_col, end_col) = match raw_line.as_deref() {
+                Some(raw) => {
+                    let expanded = expand_tabs(raw, 4);
+                    let start_d = lsp_col_to_display(raw, range.start.character as usize, 4);
+                    let end_d = if range.end.line == range.start.line {
+                        let e = lsp_col_to_display(raw, range.end.character as usize, 4);
+                        if e <= start_d { start_d + 1 } else { e }
+                    } else {
+                        // Multi-line: carets through end of start line (CLI pretty parity).
+                        expanded.chars().count().max(start_d + 1)
+                    };
+                    // Store 1-based exclusive end for DiagItem.
+                    (
+                        Some(expanded),
+                        (start_d as u32) + 1,
+                        (end_d as u32) + 1,
+                    )
+                }
+                None => {
+                    let start_col = range.start.character + 1;
+                    let end_col = if range.end.line == range.start.line
+                        && range.end.character > range.start.character
+                    {
+                        range.end.character + 1
+                    } else {
+                        start_col
+                    };
+                    (None, start_col, end_col)
+                }
             };
 
             DiagItem {
@@ -227,6 +250,29 @@ pub fn report_to_snapshot(report: &CheckReport, root_label: &str, elapsed: Durat
         diagnostics,
         status: RunStatus::Ready { duration: elapsed },
     }
+}
+
+
+/// Map a 0-based character index on a raw line to a display column after tab expand.
+fn lsp_col_to_display(raw_line: &str, lsp_col: usize, tab_width: usize) -> usize {
+    let mut display = 0usize;
+    let mut i = 0usize;
+    for ch in raw_line.chars() {
+        if i >= lsp_col {
+            break;
+        }
+        if ch == '\t' {
+            display += tab_width - (display % tab_width);
+        } else {
+            display += 1;
+        }
+        i += 1;
+    }
+    // If lsp_col is past the end, pad.
+    if i < lsp_col {
+        display += lsp_col - i;
+    }
+    display
 }
 
 fn expand_tabs(line: &str, tab_width: usize) -> String {
@@ -276,5 +322,13 @@ mod tests {
         assert!(!is_interesting_path(Path::new(".git/config")));
         assert!(!is_interesting_path(Path::new("target/debug/x")));
         assert!(!is_interesting_path(Path::new("src/Main.as~")));
+    }
+
+    #[test]
+    fn lsp_col_to_display_tabs() {
+        // "\tx" — col 0 at start, col 1 after tab char index maps to display 4
+        assert_eq!(lsp_col_to_display("\tx", 0, 4), 0);
+        assert_eq!(lsp_col_to_display("\tx", 1, 4), 4);
+        assert_eq!(lsp_col_to_display("a\tb", 2, 4), 4); // after 'a' and tab
     }
 }
