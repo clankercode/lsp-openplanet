@@ -1,19 +1,20 @@
 ---
 claimed_at: "2026-08-11T11:55:52Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-11T12:08:06Z"
 complexity: medium
 created_at: "2026-08-11T11:53:37Z"
 depends_on:
     - B003
+duration_minutes: 12.249977722133334
 estimate_hours: 3
 id: B005
 priority: high
 started_at: "2026-08-11T11:55:52Z"
-status: in_progress
+status: done
 tags: []
 title: UI::Selectable 4-arg size overload accepted but does not exist
-updated_at: "2026-08-11T11:55:52Z"
+updated_at: "2026-08-11T12:08:06Z"
 ---
 ## Goal
 Reject UI::Selectable(label, selected, flags, size) — Openplanet only exposes the 3-arg form.
