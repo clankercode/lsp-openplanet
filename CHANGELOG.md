@@ -13,6 +13,20 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-08-12
+
+### Architecture (I7 → I1 → I2+I3)
+
+- **Shared plugin workspace load** (`workspace::load`): CLI `check` and LSP Backend share one path for plugin sources + dependency exports; required/`export_dependencies` load export symbols; optional deps when present; missing required deps reported even without configured plugin dirs.
+- **DocumentAnalysis** seam: single preprocess→lex→parse module consumed by diagnostics and key handlers.
+- **CallSite + callables**: `typecheck::call_site` owns arg bind and unique-arity pick; `GlobalScope::callables_free` / `callables_method` shared by checker and signature help.
+- Review hardening: consistent unresolved-dependency reporting; shared workspace symbol pipeline.
+
+### Notes
+
+- Builds on 0.2.7 self-update work; no release-pipeline change required.
+
+
 ## [0.2.7] - 2026-08-12
 
 ### Added
