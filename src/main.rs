@@ -1,4 +1,4 @@
-use openplanet_lsp::{cli, server};
+use openplanet_lsp::{cli, server, update};
 
 const HELP: &str = "\
 openplanet-lsp - Language Server Protocol for OpenPlanet AngelScript
@@ -6,6 +6,7 @@ openplanet-lsp - Language Server Protocol for OpenPlanet AngelScript
 USAGE:
     openplanet-lsp [FLAGS]
     openplanet-lsp check [OPTIONS] <PATH>
+    openplanet-lsp update [OPTIONS]
 
 FLAGS:
     -h, --help       Print this help and exit
@@ -14,8 +15,39 @@ FLAGS:
 COMMANDS:
     check            Run workspace diagnostics for an OpenPlanet plugin
                      Run `openplanet-lsp check --help` for check-specific options
+    update           Check for / apply self-updates via the detected install method
+                     Run `openplanet-lsp update --help` for update-specific options
 
 With no flags, runs as a stdio LSP server (JSON-RPC over stdin/stdout).
+";
+
+const UPDATE_HELP: &str = "\
+openplanet-lsp update - Check for and apply self-updates
+
+USAGE:
+    openplanet-lsp update [OPTIONS]
+
+OPTIONS:
+    -h, --help       Show this help message
+    --check          Query npm for the latest version and write the status file
+                     (do not install)
+    --status         Print the last saved status without contacting the network
+    --force          Re-run the install command even if already on the latest
+                     reported version
+
+BEHAVIOR:
+    Latest version is read from the npm registry (registry.npmjs.org), not the
+    GitHub API. The running binary path is classified as npm-global, npm-local,
+    cargo, development, or standalone, and the matching upgrade command is used.
+
+    Status is written to:
+      $OPENPLANET_LSP_CONFIG_DIR/update-status.json
+      (default: ~/.config/openplanet-lsp/update-status.json)
+
+EXAMPLES:
+    openplanet-lsp update --check
+    openplanet-lsp update --status
+    openplanet-lsp update
 ";
 
 fn handle_early_args(args: &[String]) -> Option<i32> {
@@ -29,6 +61,7 @@ fn handle_early_args(args: &[String]) -> Option<i32> {
             Some(0)
         }
         Some("check") => Some(run_check_command(&args[1..])),
+        Some("update") => Some(run_update_command(&args[1..])),
         Some(arg) if arg.starts_with('-') => {
             eprintln!("unknown option: {arg}");
             eprintln!("Run `openplanet-lsp --help` for usage.");
@@ -78,6 +111,72 @@ fn run_check_command(args: &[String]) -> i32 {
         Err(err) => {
             eprintln!("{err}");
             2
+        }
+    }
+}
+
+fn parse_update_args(args: &[String]) -> Result<update::UpdateOptions, String> {
+    let mut options = update::UpdateOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print!("{}", UPDATE_HELP);
+                std::process::exit(0);
+            }
+            "--check" => {
+                options.check_only = true;
+                i += 1;
+            }
+            "--status" => {
+                options.status_only = true;
+                i += 1;
+            }
+            "--force" => {
+                options.force_install = true;
+                options.force_check = true;
+                i += 1;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!(
+                    "unknown update option: {other}\nRun `openplanet-lsp update --help` for usage."
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "unexpected argument: {other}\nRun `openplanet-lsp update --help` for usage."
+                ));
+            }
+        }
+    }
+    if options.check_only && options.status_only {
+        return Err("--check and --status cannot be combined".into());
+    }
+    if options.force_install && options.status_only {
+        return Err("--force and --status cannot be combined".into());
+    }
+    Ok(options)
+}
+
+fn run_update_command(args: &[String]) -> i32 {
+    let options = match parse_update_args(args) {
+        Ok(options) => options,
+        Err(err) => {
+            eprintln!("{err}");
+            return 2;
+        }
+    };
+
+    match update::run_update(&options) {
+        Ok(report) => {
+            print!("{report}");
+            // Exit 0 when check/status succeeds. If an update is available on
+            // --check, still 0 (informational); scripts can parse the status file.
+            0
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            1
         }
     }
 }

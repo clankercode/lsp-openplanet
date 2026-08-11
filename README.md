@@ -27,6 +27,25 @@ openplanet-lsp --version
 Or download platform archives from
 [GitHub Releases](https://github.com/clankercode/lsp-openplanet/releases).
 
+## Update
+
+```bash
+openplanet-lsp update --check   # query npm + write status file
+openplanet-lsp update --status  # print last saved status (offline)
+openplanet-lsp update           # apply update via detected install method
+```
+
+Latest version is read from the **npm registry** (not the GitHub API). The
+binary path is classified as `npm-global`, `npm-local`, `cargo`, `development`,
+or `standalone`, and the matching upgrade command is used when possible
+(`npm install -g …`, project-local `npm install …`, or
+`cargo install --git …`).
+
+Status is written to `~/.config/openplanet-lsp/update-status.json`
+(override with `OPENPLANET_LSP_CONFIG_DIR`). The language server also probes
+in the background about once per day and shows an editor info message when a
+newer release is available.
+
 ## Release / distribution
 
 See **[RELEASE.md](RELEASE.md)** for the full procedure (keep it up to date when

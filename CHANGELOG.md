@@ -13,6 +13,14 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Added
+- Self-update CLI: `openplanet-lsp update` / `update --check` / `update --status`
+  - Latest version from the npm registry (no GitHub API)
+  - Detects npm-global, npm-local, cargo, development, and standalone installs
+  - Writes `~/.config/openplanet-lsp/update-status.json` (override via
+    `OPENPLANET_LSP_CONFIG_DIR`)
+  - Language server background check (≈daily) with editor info notification
+
 ## [0.2.5] - 2026-08-12
 
 ### Fixed

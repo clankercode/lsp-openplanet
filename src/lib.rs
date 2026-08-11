@@ -7,4 +7,5 @@ pub mod server;
 pub mod symbols;
 pub mod typecheck;
 pub mod typedb;
+pub mod update;
 pub mod workspace;

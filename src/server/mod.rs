@@ -28,6 +28,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use crate::config::LspConfig;
 use crate::symbols::SymbolTable;
 use crate::typedb::TypeIndex;
+use crate::update;
 
 pub struct Backend {
     client: Client,
@@ -176,6 +177,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         tracing::info!("OpenPlanet LSP initialized");
+        self.spawn_update_check();
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -482,6 +484,59 @@ impl LanguageServer for Backend {
 }
 
 impl Backend {
+    /// Non-blocking update probe: writes `~/.config/openplanet-lsp/update-status.json`
+    /// at most once per 24h and surfaces an info message when a newer npm release exists.
+    fn spawn_update_check(&self) {
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(|| {
+                let last = update::load_status().ok().flatten();
+                if !update::should_auto_check(last.as_ref(), update::default_check_interval()) {
+                    return last;
+                }
+                match update::check_for_update() {
+                    Ok(status) => Some(status),
+                    Err(err) => {
+                        tracing::debug!("update check failed: {err}");
+                        None
+                    }
+                }
+            })
+            .await;
+
+            let status = match result {
+                Ok(status) => status,
+                Err(err) => {
+                    tracing::debug!("update check task join error: {err}");
+                    return;
+                }
+            };
+
+            if let Some(status) = status {
+                if status.update_available {
+                    let latest = status
+                        .latest_version
+                        .clone()
+                        .unwrap_or_else(|| "?".into());
+                    let cmd = status
+                        .update_command
+                        .clone()
+                        .unwrap_or_else(|| "openplanet-lsp update".into());
+                    let msg = format!(
+                        "openplanet-lsp {latest} is available (current {}). Run `{cmd}` or `openplanet-lsp update`.",
+                        status.current_version
+                    );
+                    tracing::info!("{msg}");
+                    client
+                        .show_message(MessageType::INFO, msg)
+                        .await;
+                } else if let Some(err) = status.error {
+                    tracing::debug!("update check error recorded: {err}");
+                }
+            }
+        });
+    }
+
     async fn regenerate_type_db(&self) -> Value {
         let start = std::time::Instant::now();
         let (core, game) = {

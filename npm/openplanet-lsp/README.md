@@ -19,7 +19,13 @@ npm install --save-dev openplanet-lsp
 openplanet-lsp              # stdio LSP server
 openplanet-lsp --version
 openplanet-lsp check <path>
+openplanet-lsp update --check
+openplanet-lsp update
 ```
+
+`update` reads the latest version from the npm registry, writes status to
+`~/.config/openplanet-lsp/update-status.json`, and (without `--check`) runs the
+install-method-specific upgrade command when one is known.
 
 ## Supported platforms
 
