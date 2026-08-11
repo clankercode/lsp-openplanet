@@ -13,6 +13,43 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-12
+
+### Added
+- **Pretty `check` output** (`--format plain|pretty|auto`): source excerpts with
+  gutter line numbers and caret spans under the diagnostic range. Auto uses
+  pretty when stdout is color-capable; plain stays gcc-style for pipes/CI.
+  No outer box frame in the CLI (chrome lives in the watch TUI).
+- **`check --watch`**: live diagnostics TUI (ratatui). Re-checks the plugin on
+  `*.as` / `info.toml` changes (notify + debounce). Keys: `q` quit, `j`/`k`
+  scroll, `PgUp`/`PgDn`, `g`/`G` top/end, `r` refresh. Detail pane for the
+  selected diagnostic.
+- **Bare TTY entrypoints**: with no subcommand, a TTY inside a plugin root
+  (`info.toml`) starts the watch TUI; non-TTY (editors) still starts the LSP.
+  Force the server with `openplanet-lsp --lsp` or `openplanet-lsp lsp`. No
+  plugin nearby → short help (exit 2). Optional path for `check` defaults to `.`.
+- **Config `default_mode`**: `tui` (default) or `lsp` in
+  `~/.config/openplanet-lsp/config.toml` or workspace `.openplanet-lsp.toml`.
+- **Showcase fixture** `tests/fixtures/showcase-diags/`: curated multi-file
+  typecheck diagnostics for screenshots and CI (~11 diags).
+- **Workspace crate** `crates/openplanet-lsp-tui`: mock `TuiDataSource`,
+  TestBackend + insta snapshots.
+- **README hero** `docs/images/check-demo.png` (even padding via
+  `scripts/pad_screenshot.py`).
+- **crates.io CI**: Trusted Publishing via `rust-lang/crates-io-auth-action@v1`
+  in a dedicated `publish-crates` job (no bare OIDC).
+
+### Changed
+- Interactive CLI color via `src/term.rs` (`FORCE_COLOR` / `NO_COLOR` /
+  TTY). Color decisions are not OnceLock-sticky across tests.
+- CI-stable optional-dependency define test (missing Editor on runners).
+
+### Notes
+- First release that exercises crates.io Trusted Publishing end-to-end when
+  the publisher is configured for `release.yml`.
+- Full multi-pane IDE TUI remains out of scope (see GH #9).
+
+
 ## [0.3.0] - 2026-08-12
 
 ### Added
@@ -78,77 +115,3 @@ GitHub Release body to match this section (gh release edit).
 - Multi-platform GitHub Release + npm OIDC publish
 
 ## [0.2.6] - 2026-08-12
-
-### Fixed
-- npm publish tarball paths use `./` so CLI does not treat them as git URLs
-
-### Distribution
-- Multi-platform GitHub Release + npm OIDC publish
-
-### Added
-- Self-update CLI: `openplanet-lsp update` / `update --check` / `update --status`
-  - Latest version from the npm registry (no GitHub API)
-  - Detects npm-global, npm-local, cargo, development, and standalone installs
-  - Writes `~/.config/openplanet-lsp/update-status.json` (override via
-    `OPENPLANET_LSP_CONFIG_DIR`)
-  - Language server background check (≈daily) with editor info notification
-
-## [0.2.5] - 2026-08-12
-
-### Fixed
-- Clear setup-node injected NODE_AUTH_TOKEN so npm OIDC trusted publish works
-
-### Distribution
-- Multi-platform GitHub Release + npm OIDC publish
-
-
-## [0.2.4] - 2026-08-12
-
-### Fixed
-- Cross-compile darwin-x64 on macos-14 (avoid scarce macos-13 runners)
-
-### Distribution
-- Multi-platform GitHub Release + npm OIDC publish
-
-
-## [0.2.3] - 2026-08-11
-
-### Fixed
-- bump-version.sh refreshes Cargo.lock so CI `--locked` builds succeed after version bumps
-
-### Distribution
-- Multi-platform GitHub Release + npm OIDC publish
-
-
-## [0.2.2] - 2026-08-11
-
-### Fixed
-- Refresh Cargo.lock so release builds succeed with `--locked`
-
-### Distribution
-- Multi-platform GitHub Release + npm OIDC publish (retry of 0.2.1 pipeline)
-
-
-## [0.2.1] - 2026-08-11
-
-### Distribution
-- First automated multi-platform release via GitHub Actions + npm OIDC trusted publishing
-- Binaries for Linux/macOS/Windows (x64 + arm64) on GitHub Releases
-- npm packages: `openplanet-lsp` + platform optional dependencies
-
-### Fixed
-- Compiler-parity batch B001–B007 and external named-arg binding (included from master)
-
-
-### Added
-
-- Multi-platform distribution: GitHub Release binaries and npm packages
-  (`openplanet-lsp` + platform optional dependencies) for Linux, macOS, and
-  Windows (x64 and arm64). See `RELEASE.md`.
-
-### Fixed
-
-- Compiler-parity diagnostics batch (B001–B007): named argument binding,
-  empty catch bodies, external method arity, bare `string` param warnings,
-  Nadeo undefined members when member lists are trusted, distinct enum args
-  at external calls, and external named-arg binding follow-up.

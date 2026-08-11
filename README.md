@@ -1,7 +1,6 @@
 # openplanet-lsp
 
-<!-- After capturing, put the file at docs/images/cli-demo.png and uncomment: -->
-<!-- ![openplanet-lsp CLI](docs/images/cli-demo.png) -->
+![openplanet-lsp check — pretty diagnostics](docs/images/check-demo.png)
 
 Language Server Protocol implementation for **OpenPlanet AngelScript**
 (Trackmania / OpenPlanet plugins).

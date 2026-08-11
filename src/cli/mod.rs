@@ -29,7 +29,7 @@ ARGS:
 
 OPTIONS:
     -h, --help          Show this help message
-    --watch             Live TUI: re-check on file changes (q quit, j/k scroll, r refresh)
+    --watch             Live TUI: re-check on file changes (q quit · j/k · PgUp/PgDn · g/G · r refresh)
     --format FMT        One-shot output only: plain | pretty | auto (default: auto)
                         auto → pretty when stdout is color-capable, else plain
                         plain → gcc-style path:line:col: severity: message

@@ -6,8 +6,8 @@ Language Server Protocol implementation for **OpenPlanet AngelScript**
 This npm package installs a small Node launcher plus an optional
 platform-specific native binary (`openplanet-lsp-*`).
 
-<!-- Screenshot: drop docs/images/cli-demo.png here after capturing (see repo README) -->
-<!-- ![CLI demo](https://raw.githubusercontent.com/clankercode/lsp-openplanet/master/docs/images/cli-demo.png) -->
+![openplanet-lsp check — pretty diagnostics](https://raw.githubusercontent.com/clankercode/lsp-openplanet/master/docs/images/check-demo.png)
+
 
 ## Install
 

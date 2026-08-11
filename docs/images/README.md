@@ -1,12 +1,14 @@
 # README screenshots
 
-Place capture(s) here for GitHub / npm / crates.io READMEs:
+| File | Use |
+|------|-----|
+| `check-demo.png` | Hero: pretty `check` on `tests/fixtures/showcase-diags` (even 12px pad) |
+| `cli-demo.png` | Optional: version + update status collage |
+| `watch-demo.png` | Optional: `check --watch` TUI |
 
-| File | Suggested use |
-|------|----------------|
-| `cli-demo.png` | Primary hero: version + help + check + update status |
-| `update-demo.png` | Focused `update --check` with install type / source lines |
-| `check-demo.png` | `openplanet-lsp check` on a sample plugin |
+Pad new captures:
 
-After adding images, uncomment the `![…](…)` lines in the root `README.md`
-and `npm/openplanet-lsp/README.md`.
+```bash
+python3 scripts/pad_screenshot.py docs/images/check-demo.png --measure
+python3 scripts/pad_screenshot.py docs/images/NEW.png --in-place   # or --pad 24
+```

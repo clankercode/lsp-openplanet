@@ -68,6 +68,10 @@ where
                     KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
                     KeyCode::Char('j') | KeyCode::Down => app.scroll_down(),
                     KeyCode::Char('k') | KeyCode::Up => app.scroll_up(),
+                    KeyCode::PageDown | KeyCode::Char(' ') => app.page_down(10),
+                    KeyCode::PageUp => app.page_up(10),
+                    KeyCode::Char('g') | KeyCode::Home => app.select_first(),
+                    KeyCode::Char('G') | KeyCode::End => app.select_last(),
                     KeyCode::Char('r') => source.request_refresh(),
                     _ => {}
                 },
