@@ -1291,6 +1291,42 @@ impl<'a> Checker<'a> {
             .unwrap_handle()
     }
 
+    /// True for AngelScript any-type `?` and unsubstituted generic params
+    /// (`T`, `T[]`, nested) that appear in Core typedb array methods.
+    fn is_unsubstituted_generic_or_any(ty: &TypeRepr) -> bool {
+        match ty {
+            TypeRepr::Named(n) if n == "?" || n == "T" => true,
+            TypeRepr::Array(inner) | TypeRepr::Handle(inner) | TypeRepr::Const(inner) => {
+                Self::is_unsubstituted_generic_or_any(inner)
+            }
+            TypeRepr::Generic { args, .. } => {
+                args.iter().any(Self::is_unsubstituted_generic_or_any)
+            }
+            _ => false,
+        }
+    }
+
+    /// Bare function values (`Funcdef`) and CoroutineFunc* names are
+    /// interchangeable at `startnew` / funcdef parameter sites.
+    fn funcdef_converts_to_coroutine(arg: &TypeRepr, param: &TypeRepr) -> bool {
+        let is_coro = |t: &TypeRepr| match t {
+            TypeRepr::Named(n) | TypeRepr::Funcdef(n) => {
+                n == "CoroutineFunc"
+                    || n.starts_with("CoroutineFuncUserdata")
+                    || n == "CoroutineFuncUserdata"
+            }
+            _ => false,
+        };
+        match arg {
+            TypeRepr::Funcdef(_) if is_coro(param) => true,
+            TypeRepr::Named(n) | TypeRepr::Funcdef(n) if is_coro(arg) && is_coro(param) => {
+                let _ = n;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// True when two Named type strings refer to the same type/enum after
     /// typedb suffix / short-name canonicalization (B007).
     fn named_types_equivalent(&self, a: &str, b: &str) -> bool {
@@ -1340,6 +1376,19 @@ impl<'a> Checker<'a> {
 
                     let arg_core = Self::peel_const_handle(&arg_ty);
                     let param_core = Self::peel_const_handle(&param_ty);
+
+                    // AngelScript `?` is the any-type placeholder (`tostring`).
+                    // Generic array/dictionary methods use unsubstituted `T`
+                    // in typedb — do not ArgTypeMismatch against the
+                    // placeholder name (better-totd InsertLast/Find FPs).
+                    if Self::is_unsubstituted_generic_or_any(param_core) {
+                        continue;
+                    }
+                    // Function-pointer decay: bare functions (`Funcdef`) and
+                    // engine funcdefs convert to CoroutineFunc* handles.
+                    if Self::funcdef_converts_to_coroutine(arg_core, param_core) {
+                        continue;
+                    }
 
                     match (arg_core, param_core) {
                         (TypeRepr::Primitive(arg_p), TypeRepr::Primitive(param_p)) => {
@@ -1737,21 +1786,22 @@ impl<'a> Checker<'a> {
                 for depth in (1..=self.namespace_stack.len()).rev() {
                     let ns = self.namespace_stack[..depth].join("::");
                     let qualified = format!("{}::{}", ns, name);
-                    if self.scope.has_global_ident(&qualified) {
-                        if self.scope.lookup_function_return(&qualified).is_some() {
-                            return TypeRepr::Error(String::new());
-                        }
-                        return TypeRepr::Named(qualified);
+                    if let Some(ty) = self.scope.lookup_global_value_type(&qualified) {
+                        return ty;
                     }
-                }
-                // 4. Global top-level lookup.
-                if self.scope.has_global_ident(&name) {
-                    if self.scope.has_function(&format!("get_{}", name))
-                        || self.scope.has_function(&format!("set_{}", name))
-                    {
+                    if self.scope.has_global_ident(&qualified) {
+                        // Known name without a stored value type — silence
+                        // rather than Named(varName) which false-positives
+                        // ArgTypeMismatch against real param types.
                         return TypeRepr::Error(String::new());
                     }
-                    return TypeRepr::Named(name);
+                }
+                // 4. Global top-level lookup (vars, functions-as-values, enums).
+                if let Some(ty) = self.scope.lookup_global_value_type(&name) {
+                    return ty;
+                }
+                if self.scope.has_global_ident(&name) {
+                    return TypeRepr::Error(String::new());
                 }
                 // 5. AngelScript / Openplanet hardcoded builtins — silent.
                 if builtins::is_builtin_type(&name) || builtins::is_builtin_global(&name) {
@@ -4386,6 +4436,154 @@ mod tests {
         assert!(
             bad.is_empty(),
             "expected no ArgTypeMismatch for matching local enum, got {:?}",
+            diags
+        );
+    }
+
+    /// better-totd FP: bare function names are valid `CoroutineFunc@` args to
+    /// `startnew` (AngelScript function-pointer decay). Must not report
+    /// ArgTypeMismatch against `CoroutineFunc`.
+    #[test]
+    fn startnew_bare_function_name_is_silent() {
+        let diags = check_with_typedb(
+            r#"
+            void Worker() {}
+            void Main() { startnew(Worker); }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::ArgTypeMismatch { function_name, .. }
+                        if function_name == "startnew"
+                )
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no startnew ArgTypeMismatch for bare function, got {:?}",
+            diags
+        );
+    }
+
+    /// better-totd FP: global `vec4` variables must keep their type when
+    /// passed to external APIs (not collapse to Named(varName)).
+    #[test]
+    fn global_vec4_var_push_style_color_is_silent() {
+        let diags = check_with_typedb(
+            r#"
+            vec4 overviewTableRowBg = vec4(.2, .2, .2, .2);
+            void f() {
+                UI::PushStyleColor(UI::Col::TableRowBg, overviewTableRowBg);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for global vec4 arg, got {:?}",
+            diags
+        );
+    }
+
+    /// better-totd FP: `UI::Font@` globals are valid `PushFont` args.
+    #[test]
+    fn global_font_handle_push_font_is_silent() {
+        let diags = check_with_typedb(
+            r#"
+            UI::Font@ g_BoldFont;
+            void f() { UI::PushFont(g_BoldFont); }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for UI::Font@ → PushFont, got {:?}",
+            diags
+        );
+    }
+
+    /// better-totd FP: array methods are generic in `T`; do not compare the
+    /// element value against the unsubstituted placeholder type name `T`.
+    #[test]
+    fn array_insert_last_concrete_element_is_silent() {
+        let diags = check_with_typedb(
+            r#"
+            class LazyMap {}
+            void f() {
+                array<LazyMap@> maps;
+                LazyMap@ lm;
+                maps.InsertLast(lm);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for array.InsertLast(T), got {:?}",
+            diags
+        );
+    }
+
+    /// better-totd FP: `tostring` accepts any value via `?` — enums/named
+    /// types must not ArgTypeMismatch against the placeholder.
+    #[test]
+    fn tostring_any_type_param_is_silent() {
+        let diags = check_with_typedb(
+            r#"
+            enum SortMethod { Date, Name, _LastNop }
+            void f() {
+                SortMethod sm = SortMethod::Date;
+                string s = tostring(sm);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::ArgTypeMismatch { function_name, .. }
+                        if function_name == "tostring"
+                )
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no tostring ArgTypeMismatch for enum, got {:?}",
+            diags
+        );
+    }
+
+    /// better-totd FP: `Json::Value@` is valid for `Json::ToFile`'s value param.
+    #[test]
+    fn json_to_file_value_handle_is_silent() {
+        let diags = check_with_typedb(
+            r#"
+            namespace AuthorTracker {
+                Json::Value@ meta = null;
+                void Save() { Json::ToFile("x.json", meta); }
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no ArgTypeMismatch for Json::ToFile Value@, got {:?}",
             diags
         );
     }

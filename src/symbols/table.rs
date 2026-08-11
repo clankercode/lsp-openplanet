@@ -349,12 +349,17 @@ impl SymbolTable {
                 ast::ImportTarget::Module { .. } => {}
             },
             ast::Item::VarDecl(var) => {
+                // Lift the raw type-expression text (same as class fields) so
+                // Ident value-lookup can parse a real TypeRepr instead of
+                // collapsing globals to Named(varName) — better-totd FPs on
+                // UI::PushStyleColor / PushFont / Json::ToFile.
+                let type_text = var.type_expr.span.text(source).to_string();
                 for decl in &var.declarators {
                     let name = qualify(decl.name.text(source));
                     out.push(Symbol {
                         name,
                         kind: SymbolKind::Variable {
-                            type_name: String::new(),
+                            type_name: type_text.clone(),
                         },
                         span: var.span,
                         file_id,
@@ -364,10 +369,11 @@ impl SymbolTable {
             }
             ast::Item::Property(prop) => {
                 let name = qualify(prop.name.text(source));
+                let type_text = prop.type_expr.span.text(source).to_string();
                 out.push(Symbol {
                     name,
                     kind: SymbolKind::Variable {
-                        type_name: String::new(),
+                        type_name: type_text,
                     },
                     span: prop.span,
                     file_id,
