@@ -1,19 +1,20 @@
 ---
 claimed_at: "2026-08-11T11:55:52Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-11T12:18:26Z"
 complexity: high
 created_at: "2026-08-11T11:53:37Z"
 depends_on:
     - B003
+duration_minutes: 22.575266526216666
 estimate_hours: 5
 id: B007
 priority: high
 started_at: "2026-08-11T11:55:52Z"
-status: in_progress
+status: done
 tags: []
 title: Distinct enum types treated as interchangeable at call sites
-updated_at: "2026-08-11T11:55:52Z"
+updated_at: "2026-08-11T12:18:26Z"
 ---
 ## Goal
 Reject passing one enum type where another distinct enum is required (even if int-compatible).
