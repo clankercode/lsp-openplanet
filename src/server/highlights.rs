@@ -505,11 +505,6 @@ fn collect_expr_ctx(
 mod tests {
     use super::*;
 
-    fn pos_of(source: &str, needle: &str) -> Position {
-        let offset = source.find(needle).expect("needle not found");
-        offset_to_position(source, offset + 1) // cursor inside the needle
-    }
-
     #[test]
     fn test_local_variable_highlights_all_uses() {
         let src = "void f() { int x = 0; x = 1; g(x); }\n";

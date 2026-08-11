@@ -1318,11 +1318,33 @@ impl<'a> Checker<'a> {
         &mut self,
         display_name: &str,
         args: &[CallArg],
-        param_types: &[String],
+        overload: &OverloadSig,
     ) {
-        for (param_index, arg) in args.iter().enumerate() {
+        let mut next_positional = 0usize;
+        for arg in args {
+            let param_index = if let Some(name_ident) = &arg.name {
+                let name = name_ident.text(self.source);
+                match overload
+                    .param_names
+                    .iter()
+                    .position(|param_name| param_name.as_deref() == Some(name))
+                {
+                    Some(index) => index,
+                    None => {
+                        // Unknown names stay conservative; still visit the
+                        // value so nested diagnostics are retained.
+                        let _ = self.expr_type(&arg.value);
+                        continue;
+                    }
+                }
+            } else {
+                let index = next_positional;
+                next_positional += 1;
+                index
+            };
+
             let arg_ty = self.expr_type(&arg.value);
-            let Some(param_text) = param_types.get(param_index) else {
+            let Some(param_text) = overload.param_types.get(param_index) else {
                 continue;
             };
             let param_ty = TypeRepr::parse_type_string(param_text.trim());
@@ -1383,11 +1405,7 @@ impl<'a> Checker<'a> {
             .filter(|sig| args.len() >= sig.min_args && args.len() <= sig.param_types.len())
             .collect();
         if matching.len() == 1 {
-            self.walk_args_and_check_external_param_types(
-                display_name,
-                args,
-                &matching[0].param_types,
-            );
+            self.walk_args_and_check_external_param_types(display_name, args, matching[0]);
         } else {
             self.walk_args(args);
         }
@@ -3945,6 +3963,69 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn external_free_named_args_bind_by_name() {
+        let diags = check_with_typedb(
+            r#"
+            void f() {
+                UI::TableSetupColumn("Name", init_width_or_weight: 100.0);
+                UI::Columns(2, border: "not bool");
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "TableSetupColumn must skip defaulted flags, and Columns::border must bind by name: {:?}",
+            diags
+        );
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgTypeMismatch {
+                function_name: "Columns".into(),
+                param_index: 2,
+                expected: "bool".into(),
+                got: "string".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn external_member_named_args_bind_by_name() {
+        let diags = check_with_typedb(
+            r#"
+            void f() {
+                Context@ ctx;
+                ctx.AssertTrue(message: true);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "AssertTrue::message must bind by name, got {:?}",
+            diags
+        );
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgTypeMismatch {
+                function_name: "AssertTrue".into(),
+                param_index: 1,
+                expected: "string".into(),
+                got: "bool".into(),
+            }
+        );
+    }
+
     // ── B004: bare string param sanity warning ──────────────────────────────
 
     #[test]

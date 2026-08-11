@@ -19,11 +19,14 @@ pub struct GlobalScope<'a> {
 }
 
 /// A single overload candidate for a workspace free function, as returned
-/// by `GlobalScope::lookup_function_overloads`. Stores parameter type text
-/// (caller parses via `PrimitiveType::from_name` / `TypeRepr::parse_type_string`),
-/// the minimum required arg count, and the return type text.
+/// by `GlobalScope::lookup_function_overloads`. Stores parameter names and
+/// type text (callers parse types via `PrimitiveType::from_name` /
+/// `TypeRepr::parse_type_string`); missing typedb names remain `None` to
+/// preserve alignment with parameter types. Also stores the minimum required
+/// arg count and return type text.
 #[derive(Debug, Clone)]
 pub struct OverloadSig {
+    pub param_names: Vec<Option<String>>,
     pub param_types: Vec<String>,
     pub min_args: usize,
     pub return_type: String,
@@ -621,6 +624,7 @@ impl<'a> GlobalScope<'a> {
                 found_on_this = true;
                 let min_args = m.params.iter().filter(|p| p.default.is_none()).count();
                 out.push(OverloadSig {
+                    param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                     param_types: m.params.iter().map(|p| p.type_name.clone()).collect(),
                     min_args,
                     return_type: m.return_type.clone(),
@@ -657,6 +661,7 @@ impl<'a> GlobalScope<'a> {
                 .map(|f| {
                     let min_args = f.params.iter().filter(|p| p.default.is_none()).count();
                     OverloadSig {
+                        param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         param_types: f.params.iter().map(|p| p.type_name.clone()).collect(),
                         min_args,
                         return_type: f.return_type.clone(),
@@ -710,6 +715,7 @@ impl<'a> GlobalScope<'a> {
             } = &s.kind
             {
                 out.push(OverloadSig {
+                    param_names: params.iter().map(|(name, _)| Some(name.clone())).collect(),
                     param_types: params.iter().map(|(_, ty_text)| ty_text.clone()).collect(),
                     min_args: *min_args,
                     return_type: return_type.clone(),
@@ -1251,6 +1257,42 @@ mod tests {
         assert_eq!(
             scope.canonicalize_type_name("CGameEditorPluginMap::ECardinalDirections"),
             "Game::CGameEditorPluginMap::ECardinalDirections"
+        );
+    }
+
+    #[test]
+    fn external_param_overloads_preserve_param_names() {
+        use crate::typedb::index::TypeIndex;
+
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+
+        let table_setup_column = scope
+            .lookup_external_function_param_overloads("UI::TableSetupColumn")
+            .expect("UI::TableSetupColumn");
+        assert_eq!(table_setup_column.len(), 1);
+        assert_eq!(
+            table_setup_column[0].param_names,
+            vec![
+                Some("label".to_string()),
+                Some("flags".to_string()),
+                Some("init_width_or_weight".to_string()),
+                Some("user_id".to_string()),
+            ]
+        );
+
+        let assert_true = scope
+            .lookup_external_method_param_overloads("Context", "AssertTrue")
+            .expect("Context::AssertTrue");
+        assert_eq!(assert_true.len(), 1);
+        assert_eq!(
+            assert_true[0].param_names,
+            vec![Some("condition".to_string()), Some("message".to_string())]
         );
     }
 }
