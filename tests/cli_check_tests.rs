@@ -286,10 +286,8 @@ dependencies = ["DepPlugin"]
 
 #[test]
 fn check_command_reports_missing_required_dependency() {
-    let base = std::env::temp_dir().join(format!(
-        "openplanet-lsp-missing-dep-{}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("openplanet-lsp-missing-dep-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(base.join("plugins")).unwrap();
     fs::create_dir_all(base.join("consumer/src")).unwrap();
@@ -326,4 +324,57 @@ dependencies = ["NoSuchDep"]
         "expected missing dep name in output; stdout={stdout:?} stderr={stderr:?}"
     );
     let _ = fs::remove_dir_all(base);
+}
+
+/// Curated screenshot/CI fixture: must stay in the demo band (>=10 diags).
+#[test]
+fn check_command_showcase_diags_fixture_has_many_diagnostics() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/showcase-diags");
+    let typedb = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--typedb-dir")
+        .arg(&typedb)
+        .arg(&fixture)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Errors are expected — fixture is deliberately broken.
+    assert!(
+        !output.status.success(),
+        "expected showcase-diags to fail check; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    // Summary line: "N diagnostics (...)" — require a demo-worthy floor.
+    let count = stdout
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let (num, rest) = line.trim().split_once(' ')?;
+            if rest.starts_with("diagnostics") {
+                num.parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
+    assert!(
+        count >= 10,
+        "expected >= 10 diagnostics on showcase-diags, got {count}; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("unknown type")
+            || stdout.contains("undefined identifier")
+            || stdout.contains("expects"),
+        "expected demo-worthy diagnostic messages; stdout={stdout:?}"
+    );
 }
