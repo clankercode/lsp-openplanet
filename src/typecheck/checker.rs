@@ -10,6 +10,7 @@
 //! literals and identifier lookup. Those are later iterations.
 
 use super::builtins;
+use super::call_site::{self, ArgBind};
 use super::global_scope::{GlobalScope, OverloadSig};
 use super::repr::{PrimitiveType, TypeRepr};
 use super::resolver::TypeResolver;
@@ -1216,20 +1217,14 @@ impl<'a> Checker<'a> {
         let overloads = self.scope.lookup_function_overloads(qualified);
         match overloads.len() {
             0 => {
-                // Not a workspace function (external-only). Check external
-                // free-function arity when typedb signatures are available
-                // (B003/B005), then type-check args when a unique overload
-                // matches (B007).
-                if let Some(overloads) = self
-                    .scope
-                    .lookup_external_function_param_overloads(qualified)
-                {
-                    let ranges: Vec<(usize, usize)> = overloads
-                        .iter()
-                        .map(|s| (s.min_args, s.param_types.len()))
-                        .collect();
+                // Not a workspace function (external-only). Prefer unified
+                // callables_free (I3) which returns external overloads when
+                // workspace is empty.
+                let external = self.scope.callables_free(qualified);
+                if !external.is_empty() {
+                    let ranges = call_site::arity_ranges(&external);
                     self.check_arity_against_ranges(display_name, &ranges, args.len(), callee_span);
-                    self.check_external_call_arg_types(display_name, args, &overloads);
+                    self.check_external_call_arg_types(display_name, args, &external);
                 } else if let Some(ranges) =
                     self.scope.lookup_external_function_arity_ranges(qualified)
                 {
@@ -1322,71 +1317,61 @@ impl<'a> Checker<'a> {
     ) {
         let mut next_positional = 0usize;
         for arg in args {
-            let param_index = if let Some(name_ident) = &arg.name {
-                let name = name_ident.text(self.source);
-                match overload
-                    .param_names
-                    .iter()
-                    .position(|param_name| param_name.as_deref() == Some(name))
-                {
-                    Some(index) => index,
-                    None => {
-                        // Unknown names stay conservative; still visit the
-                        // value so nested diagnostics are retained.
-                        let _ = self.expr_type(&arg.value);
+            let named = arg.name.as_ref().map(|n| n.text(self.source));
+            match call_site::bind_arg(named, &overload.param_names, &mut next_positional) {
+                ArgBind::UnknownName => {
+                    // Unknown names stay conservative; still visit the
+                    // value so nested diagnostics are retained.
+                    let _ = self.expr_type(&arg.value);
+                    continue;
+                }
+                ArgBind::Index(param_index) => {
+                    let arg_ty = self.expr_type(&arg.value);
+                    let Some(param_text) = overload.param_types.get(param_index) else {
+                        continue;
+                    };
+                    let param_ty = TypeRepr::parse_type_string(param_text.trim());
+                    if matches!(param_ty, TypeRepr::Error(_)) {
                         continue;
                     }
-                }
-            } else {
-                let index = next_positional;
-                next_positional += 1;
-                index
-            };
+                    if matches!(arg_ty, TypeRepr::Error(_)) {
+                        continue;
+                    }
 
-            let arg_ty = self.expr_type(&arg.value);
-            let Some(param_text) = overload.param_types.get(param_index) else {
-                continue;
-            };
-            let param_ty = TypeRepr::parse_type_string(param_text.trim());
-            if matches!(param_ty, TypeRepr::Error(_)) {
-                continue;
-            }
-            if matches!(arg_ty, TypeRepr::Error(_)) {
-                continue;
-            }
+                    let arg_core = Self::peel_const_handle(&arg_ty);
+                    let param_core = Self::peel_const_handle(&param_ty);
 
-            let arg_core = Self::peel_const_handle(&arg_ty);
-            let param_core = Self::peel_const_handle(&param_ty);
-
-            match (arg_core, param_core) {
-                (TypeRepr::Primitive(arg_p), TypeRepr::Primitive(param_p)) => {
-                    if !is_convertible(arg_core, param_core) {
-                        self.diagnostics.push(TypeDiagnostic {
-                            span: arg.value.span,
-                            kind: TypeDiagnosticKind::ArgTypeMismatch {
-                                function_name: display_name.to_string(),
-                                param_index,
-                                expected: param_p.as_str().to_string(),
-                                got: arg_p.as_str().to_string(),
-                            },
-                        });
+                    match (arg_core, param_core) {
+                        (TypeRepr::Primitive(arg_p), TypeRepr::Primitive(param_p)) => {
+                            if !is_convertible(arg_core, param_core) {
+                                self.diagnostics.push(TypeDiagnostic {
+                                    span: arg.value.span,
+                                    kind: TypeDiagnosticKind::ArgTypeMismatch {
+                                        function_name: display_name.to_string(),
+                                        param_index,
+                                        expected: param_p.as_str().to_string(),
+                                        got: arg_p.as_str().to_string(),
+                                    },
+                                });
+                            }
+                        }
+                        (TypeRepr::Named(arg_n), TypeRepr::Named(param_n)) => {
+                            if !self.named_types_equivalent(arg_n, param_n) {
+                                self.diagnostics.push(TypeDiagnostic {
+                                    span: arg.value.span,
+                                    kind: TypeDiagnosticKind::ArgTypeMismatch {
+                                        function_name: display_name.to_string(),
+                                        param_index,
+                                        expected: param_n.clone(),
+                                        got: arg_n.clone(),
+                                    },
+                                });
+                            }
+                        }
+                        // Mixed / unknown shapes: stay silent (conservative).
+                        _ => {}
                     }
                 }
-                (TypeRepr::Named(arg_n), TypeRepr::Named(param_n)) => {
-                    if !self.named_types_equivalent(arg_n, param_n) {
-                        self.diagnostics.push(TypeDiagnostic {
-                            span: arg.value.span,
-                            kind: TypeDiagnosticKind::ArgTypeMismatch {
-                                function_name: display_name.to_string(),
-                                param_index,
-                                expected: param_n.clone(),
-                                got: arg_n.clone(),
-                            },
-                        });
-                    }
-                }
-                // Mixed / unknown shapes: stay silent (conservative).
-                _ => {}
             }
         }
     }
@@ -1400,12 +1385,8 @@ impl<'a> Checker<'a> {
         args: &[CallArg],
         overloads: &[OverloadSig],
     ) {
-        let matching: Vec<&OverloadSig> = overloads
-            .iter()
-            .filter(|sig| args.len() >= sig.min_args && args.len() <= sig.param_types.len())
-            .collect();
-        if matching.len() == 1 {
-            self.walk_args_and_check_external_param_types(display_name, args, matching[0]);
+        if let Some(sig) = call_site::unique_overload_for_argc(overloads, args.len()) {
+            self.walk_args_and_check_external_param_types(display_name, args, sig);
         } else {
             self.walk_args(args);
         }
@@ -1432,47 +1413,41 @@ impl<'a> Checker<'a> {
     ) {
         let mut next_positional = 0usize;
         for arg in args {
-            let param_index = if let Some(name_ident) = &arg.name {
-                let name = name_ident.text(self.source);
-                match params.iter().position(|(n, _)| n == name) {
-                    Some(idx) => idx,
-                    None => {
-                        // Unknown parameter name — still type the value for
-                        // nested diagnostics, but don't emit ArgTypeMismatch.
-                        let _ = self.expr_type(&arg.value);
+            let named = arg.name.as_ref().map(|n| n.text(self.source));
+            match call_site::bind_arg_workspace(named, params, &mut next_positional) {
+                ArgBind::UnknownName => {
+                    // Unknown parameter name — still type the value for
+                    // nested diagnostics, but don't emit ArgTypeMismatch.
+                    let _ = self.expr_type(&arg.value);
+                    continue;
+                }
+                ArgBind::Index(param_index) => {
+                    let arg_ty = self.expr_type(&arg.value);
+                    let Some((_, param_text)) = params.get(param_index) else {
                         continue;
+                    };
+                    let Some(param_p) = PrimitiveType::from_name(param_text.trim()) else {
+                        continue;
+                    };
+                    let param_ty = TypeRepr::Primitive(param_p);
+                    if matches!(arg_ty, TypeRepr::Primitive(_))
+                        && matches!(param_ty, TypeRepr::Primitive(_))
+                        && !is_convertible(&arg_ty, &param_ty)
+                    {
+                        let TypeRepr::Primitive(arg_p) = arg_ty else {
+                            continue;
+                        };
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: arg.value.span,
+                            kind: TypeDiagnosticKind::ArgTypeMismatch {
+                                function_name: display_name.to_string(),
+                                param_index,
+                                expected: param_p.as_str().to_string(),
+                                got: arg_p.as_str().to_string(),
+                            },
+                        });
                     }
                 }
-            } else {
-                let idx = next_positional;
-                next_positional += 1;
-                idx
-            };
-
-            let arg_ty = self.expr_type(&arg.value);
-            let Some((_, param_text)) = params.get(param_index) else {
-                continue;
-            };
-            let Some(param_p) = PrimitiveType::from_name(param_text.trim()) else {
-                continue;
-            };
-            let param_ty = TypeRepr::Primitive(param_p);
-            if matches!(arg_ty, TypeRepr::Primitive(_))
-                && matches!(param_ty, TypeRepr::Primitive(_))
-                && !is_convertible(&arg_ty, &param_ty)
-            {
-                let TypeRepr::Primitive(arg_p) = arg_ty else {
-                    continue;
-                };
-                self.diagnostics.push(TypeDiagnostic {
-                    span: arg.value.span,
-                    kind: TypeDiagnosticKind::ArgTypeMismatch {
-                        function_name: display_name.to_string(),
-                        param_index,
-                        expected: param_p.as_str().to_string(),
-                        got: arg_p.as_str().to_string(),
-                    },
-                });
             }
         }
     }
@@ -1596,14 +1571,9 @@ impl<'a> Checker<'a> {
                 // B003: external method arity (unique + multi with no match).
                 // B007: after arity OK, type-check Named/primitive args against
                 // the unique matching overload's param types (incl. Nadeo).
-                if let Some(overloads) = self
-                    .scope
-                    .lookup_external_method_param_overloads(&type_name, &member_name)
-                {
-                    let ranges: Vec<(usize, usize)> = overloads
-                        .iter()
-                        .map(|s| (s.min_args, s.param_types.len()))
-                        .collect();
+                let overloads = self.scope.callables_method(&type_name, &member_name);
+                if !overloads.is_empty() {
+                    let ranges = call_site::arity_ranges(&overloads);
                     self.check_arity_against_ranges(&member_name, &ranges, args.len(), callee.span);
                     self.check_external_call_arg_types(&member_name, args, &overloads);
                 } else if let Some(ranges) = self

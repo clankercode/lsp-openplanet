@@ -343,35 +343,35 @@ fn resolve_callee(
     // Free function, bare or qualified (`::` -> namespaced).
     let mut out: Vec<ResolvedSignature> = Vec::new();
 
-    // Workspace overloads first.
+    // Unified callables (workspace first, else external) — same truth as checker.
     if let Some(scope) = scope {
-        for ov in scope.lookup_function_overloads(callee) {
+        for ov in scope.callables_free(callee) {
             out.push(overload_to_signature(callee.to_string(), ov, None));
         }
-        // If unqualified and no workspace hit, also try the last `::`
-        // segment as a bare name for workspace lookup.
+        // If unqualified and no hit, also try the last `::` segment as a bare name.
         if out.is_empty() {
             if let Some(idx) = callee.rfind("::") {
                 let bare = &callee[idx + 2..];
-                for ov in scope.lookup_function_overloads(bare) {
+                for ov in scope.callables_free(bare) {
                     out.push(overload_to_signature(bare.to_string(), ov, None));
                 }
             }
         }
     }
 
-    // External type index free functions.
-    if let Some(index) = type_index {
-        if let Some(fns) = index.lookup_function(callee) {
-            for f in fns {
-                out.push(function_info_to_signature(f));
-            }
-        } else if let Some(idx) = callee.rfind("::") {
-            // Try the bare tail against the external index too.
-            let bare = &callee[idx + 2..];
-            if let Some(fns) = index.lookup_function(bare) {
+    // Fallback: external type index when no GlobalScope was provided.
+    if out.is_empty() {
+        if let Some(index) = type_index {
+            if let Some(fns) = index.lookup_function(callee) {
                 for f in fns {
                     out.push(function_info_to_signature(f));
+                }
+            } else if let Some(idx) = callee.rfind("::") {
+                let bare = &callee[idx + 2..];
+                if let Some(fns) = index.lookup_function(bare) {
+                    for f in fns {
+                        out.push(function_info_to_signature(f));
+                    }
                 }
             }
         }
@@ -445,8 +445,13 @@ fn resolve_member_call(
         collect_workspace_method_overloads(&bare_type, method, scope, &mut out);
     }
 
-    // External type index method lookup.
-    if let Some(index) = type_index {
+    // External methods via unified callables_method (I3).
+    if let Some(scope) = scope {
+        for ov in scope.callables_method(&bare_type, method) {
+            out.push(overload_to_signature(method.to_string(), ov, None));
+        }
+    } else if let Some(index) = type_index {
+        // Fallback when no GlobalScope: walk type_index directly.
         if let Some(ty) = index.lookup_type(&bare_type) {
             for m in &ty.methods {
                 if m.name == method {
@@ -554,16 +559,21 @@ fn overload_to_signature(name: String, ov: OverloadSig, doc: Option<String>) -> 
     } else {
         ov.return_type
     };
+    // ResolvedSignature params are (type, name) for label rendering.
+    let params: Vec<(String, String)> = ov
+        .param_types
+        .into_iter()
+        .zip(
+            ov.param_names
+                .into_iter()
+                .chain(std::iter::repeat(None))
+                .map(|n| n.unwrap_or_default()),
+        )
+        .collect();
     ResolvedSignature {
         label_name: name,
         return_type,
-        // Workspace params come from `OverloadSig` as raw type text only
-        // (no names). Use an empty name so the label falls back to "type".
-        params: ov
-            .param_types
-            .into_iter()
-            .map(|t| (t, String::new()))
-            .collect(),
+        params,
         doc,
         min_args: ov.min_args,
     }

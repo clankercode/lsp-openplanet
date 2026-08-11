@@ -18,10 +18,7 @@ use crate::symbols::SymbolTable;
 ///
 /// The returned table contains one file entry per input; look-ups via
 /// [`SymbolTable::lookup`] will see symbols contributed by any sibling file.
-pub fn build_plugin_symbol_table(
-    files: &[(PathBuf, String)],
-    config: &LspConfig,
-) -> SymbolTable {
+pub fn build_plugin_symbol_table(files: &[(PathBuf, String)], config: &LspConfig) -> SymbolTable {
     let mut table = SymbolTable::new();
     for (_path, source) in files {
         let pp = preprocessor::preprocess(source, &config.defines);
