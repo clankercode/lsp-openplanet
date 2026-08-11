@@ -319,25 +319,22 @@ fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'
         }
         ListDensity::Relaxed => {
             // Row 1: severity + location … optional `> fragment <` on the RHS.
+            // Keep padded `loc` (trailing spaces) so `› frag ‹` shares one column.
             let mut head_spans = vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
-                Span::styled(
-                    loc.trim_end().to_string(),
-                    Style::default().fg(ratatui::style::Color::Cyan),
-                ),
+                Span::styled(loc, Style::default().fg(ratatui::style::Color::Cyan)),
             ];
             if let Some(frag) = code_fragment(d) {
-                head_spans.push(Span::raw("   "));
+                head_spans.push(Span::raw("  "));
                 head_spans.push(Span::styled(
-                    "› ".to_string(),
+                    "›".to_string(),
                     Style::default().add_modifier(Modifier::DIM),
                 ));
+                head_spans.push(Span::raw(" "));
+                head_spans.push(Span::styled(frag, style.add_modifier(Modifier::BOLD)));
+                head_spans.push(Span::raw(" "));
                 head_spans.push(Span::styled(
-                    frag,
-                    style.add_modifier(Modifier::BOLD),
-                ));
-                head_spans.push(Span::styled(
-                    " ‹".to_string(),
+                    "‹".to_string(),
                     Style::default().add_modifier(Modifier::DIM),
                 ));
             }
@@ -356,29 +353,72 @@ fn code_fragment(d: &DiagItem) -> Option<String> {
     if chars.is_empty() {
         return None;
     }
-    let mut start = d.start_col0().min(chars.len().saturating_sub(1));
-    let mut end = d.end_col0().max(start + 1).min(chars.len());
-    // If the span is tiny, try a modest widen so the fragment is readable
-    // (e.g. a single `(` is less useful than a short token around it).
-    if end - start < 3 && chars.len() > 3 {
-        let pad = 2usize;
-        start = start.saturating_sub(pad);
-        end = (end + pad).min(chars.len());
-    }
-    let frag: String = chars[start..end].iter().collect();
-    let frag = frag.trim();
+    let start = d.start_col0().min(chars.len().saturating_sub(1));
+    let end = d.end_col0().max(start + 1).min(chars.len());
+    let mut frag: String = chars[start..end].iter().collect();
+    frag = frag.trim().to_string();
     if frag.is_empty() {
         return None;
     }
-    // Cap display width so long lines don't dominate the row.
+    // Prefer a slightly richer call slice when the bare span is a tiny literal
+    // inside `Name(...)` — e.g. `true` → `MakeTint(true)` when short enough.
+    if frag.chars().count() <= 6 {
+        if let Some(richer) = enrich_call_fragment(&chars, start, end) {
+            frag = richer;
+        }
+    }
     const MAX: usize = 28;
-    let frag = if frag.chars().count() > MAX {
+    if frag.chars().count() > MAX {
         let take: String = frag.chars().take(MAX.saturating_sub(1)).collect();
-        format!("{take}…")
-    } else {
-        frag.to_string()
-    };
+        frag = format!("{take}…");
+    }
     Some(frag)
+}
+
+/// If span sits inside `Ident(...)`, return that call slice when compact.
+fn enrich_call_fragment(chars: &[char], start: usize, end: usize) -> Option<String> {
+    // Walk left for '(' then identifier.
+    let mut i = start;
+    while i > 0 && chars[i] != '(' {
+        i -= 1;
+    }
+    if chars.get(i) != Some(&'(') {
+        return None;
+    }
+    let open = i;
+    // identifier immediately before '('
+    let mut j = open;
+    while j > 0 && (chars[j - 1].is_ascii_alphanumeric() || chars[j - 1] == '_' || chars[j - 1] == ':') {
+        j -= 1;
+    }
+    if j == open {
+        return None;
+    }
+    // matching ')' after end
+    let mut k = end.saturating_sub(1);
+    let mut depth = 0i32;
+    let mut close = None;
+    while k < chars.len() {
+        match chars[k] {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    close = Some(k);
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    let close = close?;
+    let slice: String = chars[j..=close].iter().collect();
+    let slice = slice.trim().to_string();
+    if slice.chars().count() > 28 || slice.chars().count() < 4 {
+        return None;
+    }
+    Some(slice)
 }
 
 fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
@@ -386,14 +426,11 @@ fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
     let sev = d.severity.label();
     let sev_style = severity_style(d.severity).add_modifier(Modifier::BOLD);
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(path, Style::default().fg(ratatui::style::Color::Cyan)),
-            Span::raw(format!(":{}:{}: ", d.line, d.col)),
-            Span::styled(sev.to_string(), sev_style),
-        ]),
-        Line::from(""),
-    ];
+    let mut lines = vec![Line::from(vec![
+        Span::styled(path, Style::default().fg(ratatui::style::Color::Cyan)),
+        Span::raw(format!(":{}:{}: ", d.line, d.col)),
+        Span::styled(sev.to_string(), sev_style),
+    ])];
 
     if let Some(src) = d.source_line.as_ref() {
         let gutter_w = d.line.to_string().len().max(2);
@@ -558,7 +595,10 @@ mod tests {
     fn code_fragment_extracts_span() {
         let d = &canned_snapshot().diagnostics[0];
         let frag = code_fragment(d).expect("frag");
-        assert!(frag.contains("true") || frag.contains("MakeTint"), "{frag}");
+        assert!(
+            frag.contains("true") || frag.contains("MakeTint"),
+            "{frag}"
+        );
     }
 
     #[test]
