@@ -6,10 +6,8 @@
 
 use std::path::PathBuf;
 
+use crate::analysis::DocumentAnalysis;
 use crate::config::LspConfig;
-use crate::lexer;
-use crate::parser::Parser;
-use crate::preprocessor;
 use crate::symbols::SymbolTable;
 
 /// Build a [`SymbolTable`] from a slice of source files representing a single
@@ -21,12 +19,9 @@ use crate::symbols::SymbolTable;
 pub fn build_plugin_symbol_table(files: &[(PathBuf, String)], config: &LspConfig) -> SymbolTable {
     let mut table = SymbolTable::new();
     for (_path, source) in files {
-        let pp = preprocessor::preprocess(source, &config.defines);
-        let tokens = lexer::tokenize_filtered(&pp.masked_source);
-        let mut parser = Parser::new(&tokens, &pp.masked_source);
-        let file = parser.parse_file();
+        let analysis = DocumentAnalysis::analyze(source, &config.defines);
         let fid = table.allocate_file_id();
-        let symbols = SymbolTable::extract_symbols(fid, &pp.masked_source, &file);
+        let symbols = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
         table.set_file_symbols(fid, symbols);
     }
     table
@@ -60,5 +55,21 @@ mod tests {
         assert!(!table.lookup("A").is_empty());
         assert!(!table.lookup("B").is_empty());
         assert!(!table.lookup("C").is_empty());
+    }
+
+    #[test]
+    fn workspace_symbols_respect_preprocessor_defines() {
+        let files = vec![(
+            PathBuf::from("feature.as"),
+            "#if FEATURE\nclass EnabledOnly {}\n#endif".into(),
+        )];
+
+        let without_feature = build_plugin_symbol_table(&files, &LspConfig::default());
+        assert!(without_feature.lookup("EnabledOnly").is_empty());
+
+        let mut config = LspConfig::default();
+        config.defines.insert("FEATURE".to_string());
+        let with_feature = build_plugin_symbol_table(&files, &config);
+        assert!(!with_feature.lookup("EnabledOnly").is_empty());
     }
 }
