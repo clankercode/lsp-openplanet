@@ -13,6 +13,15 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-08-11
+
+### Fixed
+- bump-version.sh refreshes Cargo.lock so CI `--locked` builds succeed after version bumps
+
+### Distribution
+- Multi-platform GitHub Release + npm OIDC publish
+
+
 ## [0.2.2] - 2026-08-11
 
 ### Fixed

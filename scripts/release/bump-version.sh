@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bump Cargo.toml + all npm package.json versions together.
+# Bump Cargo.toml + all npm package.json versions together, then refresh
+# Cargo.lock so `cargo build --locked` stays valid.
 # Usage: scripts/release/bump-version.sh 0.3.0
 set -euo pipefail
 
@@ -42,11 +43,16 @@ for pkg in npm/*/package.json; do
   " "$pkg" "$VERSION"
 done
 
+# Keep Cargo.lock in lockstep with Cargo.toml package version (required for --locked CI).
+echo "Refreshing Cargo.lock…"
+cargo generate-lockfile
+cargo metadata --locked --format-version 1 >/dev/null
+echo "Cargo.lock OK for --locked builds"
+
 echo
 echo "Versions set to ${VERSION}."
 echo "Next:"
-echo "  1. Update Cargo.lock if needed: cargo build"
-echo "  2. Commit: git commit -am \"chore: release v${VERSION}\""
-echo "  3. Tag:    git tag -a v${VERSION} -m \"v${VERSION}\""
-echo "  4. Push:   git push origin HEAD && git push origin v${VERSION}"
-echo "  5. Watch:  gh run watch  # release workflow"
+echo "  1. Commit: git add Cargo.toml Cargo.lock npm CHANGELOG.md && git commit -m \"chore: release v${VERSION}\""
+echo "  2. Tag:    git tag -a v${VERSION} -m \"v${VERSION}\""
+echo "  3. Push:   git push origin HEAD && git push origin v${VERSION}"
+echo "  4. Watch:  gh run watch  # release workflow"
