@@ -144,7 +144,6 @@ fn parse_update_args(args: &[String]) -> Result<update::UpdateOptions, String> {
             }
             "--force" => {
                 options.force_install = true;
-                options.force_check = true;
                 i += 1;
             }
             other if other.starts_with('-') => {
@@ -179,10 +178,8 @@ fn run_update_command(args: &[String]) -> i32 {
 
     match update::run_update(&options) {
         Ok(report) => {
-            print!("{report}");
-            // Exit 0 when check/status succeeds. If an update is available on
-            // --check, still 0 (informational); scripts can parse the status file.
-            0
+            print!("{}", report.text);
+            report.exit_code
         }
         Err(err) => {
             eprintln!("{err}");

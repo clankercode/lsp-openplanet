@@ -18,6 +18,15 @@ GitHub Release body to match this section (gh release edit).
   `OPENPLANET_LSP_LATEST_VERSION`, `OPENPLANET_LSP_UPDATE_PACKAGE`
 - `scripts/release/smoke-self-update.sh` + CI/release self-update smoke jobs
 
+### Fixed
+- Self-update status truthfulness after apply (`pending_restart` /
+  `installed_version`; no longer claims “update available” post-install)
+- LSP auto-check refreshes when running binary version skews vs status file
+  (or after pending_restart once the new version is running)
+- Windows default Node (`Program Files\\nodejs\\…`) classified as npm-global
+- Atomic status file write; `%APPDATA%` / `XDG_CONFIG_HOME` config dir order
+- Exit code `3` when an update exists but cannot be auto-applied
+
 ## [0.2.6] - 2026-08-12
 
 ### Fixed

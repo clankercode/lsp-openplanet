@@ -87,6 +87,12 @@ pub struct UpdateStatus {
     pub exe_path: String,
     pub update_command: Option<String>,
     pub error: Option<String>,
+    /// Install finished; this process still runs the old binary until restart.
+    #[serde(default)]
+    pub pending_restart: bool,
+    /// Version that was installed on disk (when known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
 }
 
 #[derive(Debug)]
@@ -115,12 +121,18 @@ impl UpdateError {
 pub struct UpdateOptions {
     /// Only check and write the status file; do not install.
     pub check_only: bool,
-    /// Print last saved status without hitting the network.
+    /// Print last saved status without contacting the network.
     pub status_only: bool,
-    /// Re-check even if the status file is fresh.
-    pub force_check: bool,
     /// Reinstall even when already on the latest reported version.
     pub force_install: bool,
+}
+
+/// CLI/run outcome: text plus process exit code.
+#[derive(Debug, Clone)]
+pub struct UpdateReport {
+    pub text: String,
+    /// 0 = ok / up-to-date / applied; 3 = update available but not applied.
+    pub exit_code: i32,
 }
 
 // ── public entry points ────────────────────────────────────────────────────
@@ -148,10 +160,23 @@ pub fn npm_update_package_specs() -> Vec<String> {
     }
 }
 
-/// Resolve the user config directory (`~/.config/openplanet-lsp` by default).
+/// Resolve the user config directory.
+///
+/// Order: `OPENPLANET_LSP_CONFIG_DIR` → `XDG_CONFIG_HOME` → `%APPDATA%` (Windows)
+/// → `~/.config` via `HOME` / `USERPROFILE`.
 pub fn config_dir() -> Result<PathBuf, UpdateError> {
     if let Ok(dir) = std::env::var("OPENPLANET_LSP_CONFIG_DIR") {
         return Ok(PathBuf::from(dir));
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return Ok(PathBuf::from(xdg).join(PACKAGE_NAME));
+        }
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        if !appdata.is_empty() {
+            return Ok(PathBuf::from(appdata).join(PACKAGE_NAME));
+        }
     }
     if let Ok(home) = std::env::var("HOME") {
         return Ok(PathBuf::from(home).join(".config").join(PACKAGE_NAME));
@@ -160,7 +185,7 @@ pub fn config_dir() -> Result<PathBuf, UpdateError> {
         return Ok(PathBuf::from(profile).join(".config").join(PACKAGE_NAME));
     }
     Err(UpdateError::msg(
-        "cannot resolve config dir: set HOME, USERPROFILE, or OPENPLANET_LSP_CONFIG_DIR",
+        "cannot resolve config dir: set OPENPLANET_LSP_CONFIG_DIR, XDG_CONFIG_HOME, APPDATA, HOME, or USERPROFILE",
     ))
 }
 
@@ -185,10 +210,21 @@ pub fn save_status(status: &UpdateStatus) -> Result<PathBuf, UpdateError> {
     fs::create_dir_all(&dir)
         .map_err(|e| UpdateError::msg(format!("failed to create {}: {e}", dir.display())))?;
     let path = dir.join(STATUS_FILE_NAME);
+    let tmp = dir.join(format!("{STATUS_FILE_NAME}.tmp"));
     let text = serde_json::to_string_pretty(status)
         .map_err(|e| UpdateError::msg(format!("failed to serialize update status: {e}")))?;
-    fs::write(&path, text + "\n")
-        .map_err(|e| UpdateError::msg(format!("failed to write {}: {e}", path.display())))?;
+    fs::write(&tmp, text + "\n")
+        .map_err(|e| UpdateError::msg(format!("failed to write {}: {e}", tmp.display())))?;
+    // Replace atomically when the OS allows; fall back to remove+rename on Windows.
+    if let Err(e) = fs::rename(&tmp, &path) {
+        let _ = fs::remove_file(&path);
+        fs::rename(&tmp, &path).map_err(|e2| {
+            UpdateError::msg(format!(
+                "failed to finalize {}: {e}; retry: {e2}",
+                path.display()
+            ))
+        })?;
+    }
     Ok(path)
 }
 
@@ -323,6 +359,8 @@ pub fn check_for_update() -> Result<UpdateStatus, UpdateError> {
         exe_path: exe,
         update_command: method.update_command(),
         error,
+        pending_restart: false,
+        installed_version: None,
     };
     save_status(&status)?;
     Ok(status)
@@ -333,6 +371,15 @@ pub fn should_auto_check(last: Option<&UpdateStatus>, interval: Duration) -> boo
     let Some(last) = last else {
         return true;
     };
+    let running = current_version();
+    // New binary after upgrade/restart — refresh status immediately.
+    if last.current_version != running {
+        return true;
+    }
+    // Install finished earlier; this process is now the installed version.
+    if last.pending_restart && last.installed_version.as_deref() == Some(running.as_str()) {
+        return true;
+    }
     let now = now_epoch_secs();
     now.saturating_sub(last.checked_at) >= interval.as_secs()
 }
@@ -375,27 +422,45 @@ pub fn apply_update_with_status(
         InstallMethod::NpmGlobal => {
             let mut args = vec!["install".to_string(), "-g".to_string()];
             args.extend(npm_update_package_specs());
-            run_command_owned("npm", &args, None)?;
+            run_command_owned("npm", &args, None).map_err(annotate_replace_failure)?;
         }
         InstallMethod::NpmLocal { package_root } => {
             let mut args = vec!["install".to_string()];
             args.extend(npm_update_package_specs());
-            run_command_owned("npm", &args, Some(package_root))?;
+            run_command_owned("npm", &args, Some(package_root))
+                .map_err(annotate_replace_failure)?;
         }
         InstallMethod::Cargo => {
             run_command(
                 "cargo",
                 &["install", "--git", CARGO_GIT_URL, "--locked", "--force"],
                 None,
-            )?;
+            )
+            .map_err(annotate_replace_failure)?;
         }
         _ => unreachable!("can_auto_apply guards apply arms"),
     }
 
-    // Refresh status after install. The running binary version is unchanged
-    // until restart; record the latest registry view.
-    let mut after = check_for_update()?;
-    after.error = None;
+    // Running process still has the old binary mapped. Record install outcome
+    // explicitly instead of re-deriving "update available" from CARGO_PKG_VERSION.
+    let installed = status
+        .latest_version
+        .clone()
+        .unwrap_or_else(current_version);
+    let now = now_epoch_secs();
+    let after = UpdateStatus {
+        checked_at: now,
+        checked_at_rfc3339: epoch_to_rfc3339(now),
+        current_version: current_version(),
+        latest_version: status.latest_version.clone(),
+        update_available: false,
+        install_method: method.as_str().to_string(),
+        exe_path: status.exe_path.clone(),
+        update_command: method.update_command(),
+        error: None,
+        pending_restart: true,
+        installed_version: Some(installed),
+    };
     save_status(&after)?;
     Ok(after)
 }
@@ -408,10 +473,15 @@ pub fn format_status(status: &UpdateStatus) -> String {
         Some(v) => out.push_str(&format!("latest:   {v} (npm)\n")),
         None => out.push_str("latest:   (unavailable)\n"),
     }
+    if let Some(inst) = &status.installed_version {
+        out.push_str(&format!("installed: {inst}\n"));
+    }
     out.push_str(&format!("method:   {}\n", status.install_method));
     out.push_str(&format!("exe:      {}\n", status.exe_path));
     out.push_str(&format!("checked:  {}\n", status.checked_at_rfc3339));
-    if status.update_available {
+    if status.pending_restart {
+        out.push_str("status:   installed — restart required\n");
+    } else if status.update_available {
         out.push_str("status:   update available\n");
         if let Some(cmd) = &status.update_command {
             out.push_str(&format!("update:   {cmd}\n"));
@@ -431,17 +501,26 @@ pub fn format_status(status: &UpdateStatus) -> String {
 }
 
 /// CLI entry: parse is done by main; this runs the chosen action.
-pub fn run_update(options: &UpdateOptions) -> Result<String, UpdateError> {
+pub fn run_update(options: &UpdateOptions) -> Result<UpdateReport, UpdateError> {
     if options.status_only {
         return match load_status()? {
-            Some(status) => Ok(format_status(&status)),
-            None => Ok("no update status saved yet; run `openplanet-lsp update --check`\n".into()),
+            Some(status) => Ok(UpdateReport {
+                text: format_status(&status),
+                exit_code: 0,
+            }),
+            None => Ok(UpdateReport {
+                text: "no update status saved yet; run `openplanet-lsp update --check`\n".into(),
+                exit_code: 0,
+            }),
         };
     }
 
     if options.check_only {
         let status = check_for_update()?;
-        return Ok(format_status(&status));
+        return Ok(UpdateReport {
+            text: format_status(&status),
+            exit_code: 0,
+        });
     }
 
     // Full update path
@@ -451,7 +530,10 @@ pub fn run_update(options: &UpdateOptions) -> Result<String, UpdateError> {
         return Err(UpdateError::msg(err.clone()));
     }
     if !before.update_available && !options.force_install {
-        return Ok(format_status(&before));
+        return Ok(UpdateReport {
+            text: format_status(&before),
+            exit_code: 0,
+        });
     }
 
     if !method.can_auto_apply() {
@@ -471,17 +553,27 @@ pub fn run_update(options: &UpdateOptions) -> Result<String, UpdateError> {
         };
         let mut report = format!("{reason}\nManual step: {hint}\n\n");
         report.push_str(&format_status(&before));
-        return Ok(report);
+        return Ok(UpdateReport {
+            text: report,
+            // Scripts can distinguish "needs manual action" from success.
+            exit_code: if before.update_available { 3 } else { 0 },
+        });
     }
 
     let after = apply_update_with_status(&method, &before, options.force_install)?;
     let mut report = String::new();
     report.push_str("Update command finished.\n");
     report.push_str(
-        "Restart openplanet-lsp (and your editor language client) to use the new binary.\n\n",
+        "Restart openplanet-lsp (and your editor language client) to use the new binary.\n",
+    );
+    report.push_str(
+        "If install failed on Windows because the file was locked, stop the language server first.\n\n",
     );
     report.push_str(&format_status(&after));
-    Ok(report)
+    Ok(UpdateReport {
+        text: report,
+        exit_code: 0,
+    })
 }
 
 // ── internals ──────────────────────────────────────────────────────────────
@@ -543,6 +635,13 @@ fn is_npm_global_path(exe: &Path) -> bool {
         "/.volta/tools/image/packages/",
         "/.local/share/pnpm/global/",
         "/.local/lib/node_modules/",
+        // Default Windows Node installer layout
+        "\\nodejs\\node_modules\\",
+        "/nodejs/node_modules/",
+        "Program Files\\nodejs\\",
+        "Program Files/nodejs/",
+        "Program Files (x86)\\nodejs\\",
+        "Program Files (x86)/nodejs/",
     ];
     if global_markers.iter().any(|m| s.contains(m)) {
         return true;
@@ -557,16 +656,29 @@ fn is_npm_global_path(exe: &Path) -> bool {
 }
 
 fn npm_global_root() -> Option<PathBuf> {
-    let output = Command::new("npm").args(["root", "-g"]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if root.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(root))
-    }
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let output = Command::new("npm").args(["root", "-g"]).output().ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if root.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(root))
+            }
+        })
+        .clone()
+}
+
+fn annotate_replace_failure(err: UpdateError) -> UpdateError {
+    UpdateError::msg(format!(
+        "{err}\nHint: if the package manager could not replace the running binary \
+         (common on Windows), stop openplanet-lsp / your editor language client and retry."
+    ))
 }
 
 fn parse_version(raw: &str) -> Option<(u64, u64, u64)> {
@@ -835,6 +947,8 @@ mod tests {
             exe_path: "/bin/openplanet-lsp".into(),
             update_command: Some("npm install -g openplanet-lsp@latest".into()),
             error: None,
+            pending_restart: false,
+            installed_version: None,
         };
         let path = save_status(&status).unwrap();
         assert!(path.ends_with(STATUS_FILE_NAME));
@@ -846,17 +960,46 @@ mod tests {
     }
 
     #[test]
+    fn should_auto_check_on_version_skew() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OPENPLANET_LSP_VERSION");
+        let last = UpdateStatus {
+            checked_at: now_epoch_secs(),
+            checked_at_rfc3339: "now".into(),
+            current_version: "0.1.0".into(),
+            latest_version: Some("0.2.0".into()),
+            update_available: true,
+            install_method: "npm-global".into(),
+            exe_path: "/x".into(),
+            update_command: None,
+            error: None,
+            pending_restart: false,
+            installed_version: None,
+        };
+        // Running binary is newer than last recorded current → recheck.
+        assert_ne!(current_version(), "0.1.0");
+        assert!(should_auto_check(
+            Some(&last),
+            Duration::from_secs(24 * 3600)
+        ));
+    }
+
+    #[test]
     fn should_auto_check_respects_interval() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OPENPLANET_LSP_VERSION");
         let fresh = UpdateStatus {
             checked_at: now_epoch_secs(),
             checked_at_rfc3339: "now".into(),
-            current_version: "0.2.4".into(),
-            latest_version: Some("0.2.4".into()),
+            current_version: current_version(),
+            latest_version: Some(current_version()),
             update_available: false,
             install_method: "npm-global".into(),
             exe_path: "/x".into(),
             update_command: None,
             error: None,
+            pending_restart: false,
+            installed_version: None,
         };
         assert!(!should_auto_check(
             Some(&fresh),
@@ -872,6 +1015,27 @@ mod tests {
             Some(&stale),
             Duration::from_secs(24 * 3600)
         ));
+    }
+
+    #[test]
+    fn format_status_pending_restart() {
+        let status = UpdateStatus {
+            checked_at: 0,
+            checked_at_rfc3339: "1970-01-01T00:00:00Z".into(),
+            current_version: "0.2.0".into(),
+            latest_version: Some("0.2.6".into()),
+            update_available: false,
+            install_method: "npm-global".into(),
+            exe_path: "/x".into(),
+            update_command: None,
+            error: None,
+            pending_restart: true,
+            installed_version: Some("0.2.6".into()),
+        };
+        let text = format_status(&status);
+        assert!(text.contains("installed — restart required"));
+        assert!(text.contains("installed: 0.2.6"));
+        assert!(!text.contains("update available"));
     }
 
     #[test]
@@ -897,6 +1061,17 @@ mod tests {
     fn detect_npm_global_windows_roaming() {
         let path = PathBuf::from(
             r"C:\Users\me\AppData\Roaming\npm\node_modules\openplanet-lsp-win32-x64\bin\openplanet-lsp.exe",
+        );
+        assert_eq!(
+            detect_install_method_from_path(&path),
+            InstallMethod::NpmGlobal
+        );
+    }
+
+    #[test]
+    fn detect_npm_global_windows_program_files_nodejs() {
+        let path = PathBuf::from(
+            r"C:\Program Files\nodejs\node_modules\openplanet-lsp-win32-x64\bin\openplanet-lsp.exe",
         );
         assert_eq!(
             detect_install_method_from_path(&path),
@@ -940,6 +1115,8 @@ mod tests {
             exe_path: "/x".into(),
             update_command: Some("npm install -g openplanet-lsp@latest".into()),
             error: None,
+            pending_restart: false,
+            installed_version: None,
         };
         let text = format_status(&status);
         assert!(text.contains("update available"));

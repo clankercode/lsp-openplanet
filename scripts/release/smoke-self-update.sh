@@ -93,6 +93,17 @@ echo "== apply self-update via local tarballs =="
 APPLY_OUT="$("${BIN}" update)"
 echo "${APPLY_OUT}"
 echo "${APPLY_OUT}" | grep -F 'Update command finished'
+echo "${APPLY_OUT}" | grep -F 'installed — restart required'
+echo "${APPLY_OUT}" | grep -F "installed: ${VERSION}"
+python3 - <<'PY'
+import json, os
+p = os.path.join(os.environ["OPENPLANET_LSP_CONFIG_DIR"], "update-status.json")
+s = json.load(open(p))
+assert s["update_available"] is False, s
+assert s["pending_restart"] is True, s
+assert s["installed_version"] == os.environ["OPENPLANET_LSP_LATEST_VERSION"], s
+print("post-apply status json ok")
+PY
 
 echo "== post-update still works =="
 AFTER="$("${BIN}" --version)"
