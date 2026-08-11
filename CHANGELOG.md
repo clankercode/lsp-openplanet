@@ -13,6 +13,16 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-08-12
+
+### Added
+- **Standalone self-update**: installs outside npm/cargo (e.g. `~/.local/bin`) download the matching GitHub Release archive, extract the binary, and atomically replace the running path. Override archive with `OPENPLANET_LSP_RELEASE_ARCHIVE` for tests.
+- **crates.io**: package metadata + dual license (Unlicense OR CC0-1.0); optional CI publish via `CARGO_REGISTRY_TOKEN`.
+
+### Changed
+- Cargo self-update install no longer passes `--locked` (uses latest compatible deps from the git install path).
+
+
 ## [0.2.8] - 2026-08-12
 
 ### Architecture (I7 → I1 → I2+I3)
