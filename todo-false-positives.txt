@@ -45,3 +45,11 @@ LSP previously reported 22 errors; after fixes → 4 empty-catch (B002) under
 - Empty `catch {}` under optional deps: B002 true positives when defines on.
 - `Text::Join`: real game error on 1.29.5; plugin targets ~1.29.12. LSP still
   silent (FN under NamespaceAccess). Version-ranged API rules: GH #18.
+
+## 2026-08-12, tm-dashboard (Miss Dashboard 1.9.6)
+
+### Case: `nvg::Font` unknown type (FP)
+Plugin: `nvg::Font g_font;` / `m_font` fields; `nvg::LoadFont` / `FontFace`.
+Core typedb (1.29.5): `nvg::LoadFont` → `int`, `FontFace(int)` — no `nvg::Font` class.
+Game compile: accepts `nvg::Font` (no diagnostic).
+LSP: UnknownType. Fix: builtin type alias `nvg::Font`.

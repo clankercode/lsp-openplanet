@@ -385,6 +385,22 @@ mod tests {
     }
 
     #[test]
+    fn resolve_nvg_font_builtin() {
+        // Typedb omits `nvg::Font` but the game accepts it (tm-dashboard).
+        let source = "nvg::Font";
+        let ty = parse_type(source);
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, None);
+        let mut r = TypeResolver::new(&scope, source);
+        let out = r.resolve(&ty);
+        assert_eq!(out, TypeRepr::Named("nvg::Font".into()));
+        assert!(
+            r.take_diagnostics().is_empty(),
+            "nvg::Font must not be unknown-type"
+        );
+    }
+
+    #[test]
     fn resolve_unqualified_walks_workspace_namespaces() {
         // A workspace type declared inside `namespace Ns` should be
         // resolvable by its short name from an unrelated file with no

@@ -4587,4 +4587,33 @@ mod tests {
             diags
         );
     }
+
+    /// tm-dashboard FP: game accepts `nvg::Font` even though Core typedb only
+    /// documents LoadFont→int / FontFace(int). Must not UnknownType.
+    #[test]
+    fn nvg_font_type_is_known() {
+        let diags = check_with_typedb(
+            r#"
+            nvg::Font g_font;
+            void Main() {
+                g_font = nvg::LoadFont("DroidSans.ttf", true);
+                nvg::FontFace(g_font);
+            }
+            "#,
+        );
+        let unknown: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::UnknownType(n) if n.contains("nvg::Font") || n == "Font"
+                )
+            })
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "expected no UnknownType for nvg::Font, got {:?}",
+            diags
+        );
+    }
 }

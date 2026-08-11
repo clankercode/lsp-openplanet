@@ -15,7 +15,8 @@
 /// True if `name` refers to an AngelScript / Openplanet builtin type name
 /// that plugins can reference directly (as a constructor-like callable or
 /// a bare type reference). Currently covers the `CoroutineFunc` funcdef
-/// family that AngelScript's `Meta::startnew` accepts.
+/// family that AngelScript's `Meta::startnew` accepts, plus a few Core
+/// types the JSON dump omits (still accepted by the game compiler).
 pub fn is_builtin_type(name: &str) -> bool {
     matches!(
         name,
@@ -25,6 +26,11 @@ pub fn is_builtin_type(name: &str) -> bool {
             | "CoroutineFuncUserdataInt64"
             | "CoroutineFuncUserdataUint64"
             | "CoroutineFuncUserdataString"
+            // NanoVG font handle. Typedb exposes `nvg::LoadFont` → `int` and
+            // `nvg::FontFace(int)` but does not declare a `nvg::Font` class;
+            // the game still accepts `nvg::Font` as a typedef-like type
+            // (tm-dashboard dogfood, Openplanet 1.29.5).
+            | "nvg::Font"
     )
 }
 
@@ -49,6 +55,14 @@ mod tests {
         assert!(is_builtin_type("CoroutineFuncUserdataInt64"));
         assert!(is_builtin_type("CoroutineFuncUserdataUint64"));
         assert!(is_builtin_type("CoroutineFuncUserdataString"));
+    }
+
+    #[test]
+    fn nvg_font_is_builtin() {
+        assert!(is_builtin_type("nvg::Font"));
+        // Bare Font is UI::Font in typedb — not this alias.
+        assert!(!is_builtin_type("Font"));
+        assert!(!is_builtin_type("nvg::Paint"));
     }
 
     #[test]
