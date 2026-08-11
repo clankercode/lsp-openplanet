@@ -1,6 +1,6 @@
 {
   "name": "openplanet-lsp-linux-x64",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "openplanet-lsp native binary for linux-x64",
   "license": "MIT",
   "homepage": "https://github.com/clankercode/lsp-openplanet",

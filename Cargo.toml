@@ -1,6 +1,6 @@
 [package]
 name = "openplanet-lsp"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 description = "Language Server Protocol implementation for OpenPlanet AngelScript"
 

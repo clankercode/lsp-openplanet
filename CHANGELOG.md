@@ -13,24 +13,33 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-08-12
+
 ### Added
-- Self-update CI/dev hooks: `OPENPLANET_LSP_VERSION`,
-  `OPENPLANET_LSP_LATEST_VERSION`, `OPENPLANET_LSP_UPDATE_PACKAGE`,
-  `OPENPLANET_LSP_PACKAGE_MANAGER`
-- `scripts/release/smoke-self-update.sh` (local tarball) and
-  `smoke-self-update-registry.sh` (npm/pnpm/yarn/bun registry loop)
-- Self-update supports **pnpm / yarn / bun** (global + local) in addition to npm
-- Registry multi-PM self-update CI (`self-update-matrix` workflow + `smoke-self-update-registry.sh`);
-  manual/`workflow_dispatch` + post-tag-release only (not every PR)
+- Self-update CLI hardening and multi package-manager support:
+  `openplanet-lsp update` / `update --check` / `update --status`
+- Install-method detection for **npm / pnpm / yarn / bun** (global + local),
+  plus cargo / development / standalone
+- Status file: `~/.config/openplanet-lsp/update-status.json`
+  (`XDG_CONFIG_HOME` / `%APPDATA%` / `OPENPLANET_LSP_CONFIG_DIR`)
+- Dev/CI overrides: `OPENPLANET_LSP_VERSION`, `OPENPLANET_LSP_LATEST_VERSION`,
+  `OPENPLANET_LSP_UPDATE_PACKAGE`, `OPENPLANET_LSP_PACKAGE_MANAGER`,
+  `OPENPLANET_LSP_EXE`
+- Smoke scripts: `smoke-self-update.sh` (local tarballs) and
+  `smoke-self-update-registry.sh` (registry multi-PM loop)
+- CI workflow **`self-update-matrix`** (manual `workflow_dispatch` + post-tag
+  release); not run on every PR
 
 ### Fixed
-- Self-update status truthfulness after apply (`pending_restart` /
-  `installed_version`; no longer claims “update available” post-install)
-- LSP auto-check refreshes when running binary version skews vs status file
-  (or after pending_restart once the new version is running)
-- Windows default Node (`Program Files\\nodejs\\…`) classified as npm-global
-- Atomic status file write; `%APPDATA%` / `XDG_CONFIG_HOME` config dir order
-- Exit code `3` when an update exists but cannot be auto-applied
+- Post-apply status truthfulness (`pending_restart` / `installed_version`)
+- LSP auto-check refreshes on running-binary version skew; notify only on
+  fresh network checks
+- Windows path classification (Program Files nodejs, `\` separators)
+- Atomic status write; exit code `3` when update cannot be auto-applied
+- Release workflow only publishes on real non-deleted tags
+
+### Distribution
+- Multi-platform GitHub Release + npm OIDC publish
 
 ## [0.2.6] - 2026-08-12
 
