@@ -197,7 +197,17 @@ impl App {
                 .collect()
         };
 
-        let title = format!(" diagnostics · {} ", self.density.label());
+        let sel = self
+            .list_state
+            .selected()
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let n = self.snapshot.diagnostics.len();
+        let title = if n == 0 {
+            format!(" diagnostics · {} ", self.density.label())
+        } else {
+            format!(" diagnostics · {} · {sel}/{n} ", self.density.label())
+        };
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
             .highlight_style(
@@ -325,13 +335,24 @@ fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'
                 Span::styled(loc, Style::default().fg(ratatui::style::Color::Cyan)),
             ];
             if let Some(frag) = code_fragment(d) {
+                // Fixed-width fragment field so the column lines up across rows.
+                const FRAG_INNER: usize = 20;
+                let display = if frag.chars().count() > FRAG_INNER {
+                    let take: String = frag.chars().take(FRAG_INNER.saturating_sub(1)).collect();
+                    format!("{take}…")
+                } else {
+                    format!("{frag:<FRAG_INNER$}")
+                };
                 head_spans.push(Span::raw("  "));
                 head_spans.push(Span::styled(
                     "›".to_string(),
                     Style::default().add_modifier(Modifier::DIM),
                 ));
                 head_spans.push(Span::raw(" "));
-                head_spans.push(Span::styled(frag, style.add_modifier(Modifier::BOLD)));
+                head_spans.push(Span::styled(
+                    display,
+                    style.add_modifier(Modifier::BOLD),
+                ));
                 head_spans.push(Span::raw(" "));
                 head_spans.push(Span::styled(
                     "‹".to_string(),
@@ -377,6 +398,12 @@ fn code_fragment(d: &DiagItem) -> Option<String> {
 
 /// If span sits inside `Ident(...)`, return that call slice when compact.
 fn enrich_call_fragment(chars: &[char], start: usize, end: usize) -> Option<String> {
+    // Only on statement-like lines (calls), not bare declarations.
+    let line: String = chars.iter().collect();
+    let stmt_like = line.contains('=') || line.trim_end().ends_with(';');
+    if !stmt_like {
+        return None;
+    }
     // Walk left for '(' then identifier.
     let mut i = start;
     while i > 0 && chars[i] != '(' {
