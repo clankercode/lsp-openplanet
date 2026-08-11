@@ -13,6 +13,15 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-11
+
+### Fixed
+- Refresh Cargo.lock so release builds succeed with `--locked`
+
+### Distribution
+- Multi-platform GitHub Release + npm OIDC publish (retry of 0.2.1 pipeline)
+
+
 ## [0.2.1] - 2026-08-11
 
 ### Distribution
