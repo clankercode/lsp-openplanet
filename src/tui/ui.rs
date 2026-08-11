@@ -133,19 +133,14 @@ impl App {
 
         self.draw_header(f, chunks[0]);
 
-        // Prefer detail for pretty excerpts; list stays scannable.
-        let n = self.snapshot.diagnostics.len();
-        let (list_pct, detail_pct) = match (self.density, n) {
-            (_, 0) => (40u16, 60u16),
-            (ListDensity::Relaxed, _) => (55, 45),
-            (ListDensity::Compact, n) if n <= 8 => (38, 62),
-            (ListDensity::Compact, _) => (48, 52),
-        };
+        // Detail height: content-driven, min 6 inner lines, +1 slack, +2 borders.
+        // Caps so the list keeps the bulk of the screen (no huge empty detail).
+        let detail_h = detail_box_height(self.selected_diag());
         let mid = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Ratio(u32::from(list_pct), 100),
-                Constraint::Ratio(u32::from(detail_pct), 100),
+                Constraint::Min(4),
+                Constraint::Length(detail_h),
             ])
             .split(chunks[1]);
         self.draw_list(f, mid[0]);
@@ -295,6 +290,19 @@ fn format_location(d: &DiagItem, loc_w: usize) -> String {
     format!("{:<loc_w$}", truncated)
 }
 
+/// Total terminal rows for the detail box (borders included).
+/// Inner content height = max(6, content_lines + 1), then +2 for borders.
+fn detail_box_height(selected: Option<&DiagItem>) -> u16 {
+    let content = match selected {
+        None => 2usize, // empty-state lines
+        Some(d) => pretty_detail_lines(d).len(),
+    };
+    let inner = content.saturating_add(1).max(6);
+    // Hard cap: never more than 8 content rows (+2 borders = 10).
+    let inner = inner.min(8);
+    (inner + 2) as u16
+}
+
 fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'static> {
     let glyph = d.severity.glyph();
     let loc = format_location(d, loc_w);
@@ -310,14 +318,67 @@ fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'
             ListItem::new(row)
         }
         ListDensity::Relaxed => {
-            let head = Line::from(vec![
+            // Row 1: severity + location … optional `> fragment <` on the RHS.
+            let mut head_spans = vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
-                Span::styled(loc.trim_end().to_string(), Style::default().fg(ratatui::style::Color::Cyan)),
-            ]);
+                Span::styled(
+                    loc.trim_end().to_string(),
+                    Style::default().fg(ratatui::style::Color::Cyan),
+                ),
+            ];
+            if let Some(frag) = code_fragment(d) {
+                head_spans.push(Span::raw("   "));
+                head_spans.push(Span::styled(
+                    "› ".to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+                head_spans.push(Span::styled(
+                    frag,
+                    style.add_modifier(Modifier::BOLD),
+                ));
+                head_spans.push(Span::styled(
+                    " ‹".to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
+            let head = Line::from(head_spans);
             let msg = Line::from(Span::styled(format!("   {}", d.message), style));
             ListItem::new(vec![head, msg])
         }
     }
+}
+
+/// Problematic span from the source line, for relaxed-mode list chrome.
+/// Prefers the exact caret span; widens slightly for single-char / empty spans.
+fn code_fragment(d: &DiagItem) -> Option<String> {
+    let src = d.source_line.as_ref()?;
+    let chars: Vec<char> = src.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let mut start = d.start_col0().min(chars.len().saturating_sub(1));
+    let mut end = d.end_col0().max(start + 1).min(chars.len());
+    // If the span is tiny, try a modest widen so the fragment is readable
+    // (e.g. a single `(` is less useful than a short token around it).
+    if end - start < 3 && chars.len() > 3 {
+        let pad = 2usize;
+        start = start.saturating_sub(pad);
+        end = (end + pad).min(chars.len());
+    }
+    let frag: String = chars[start..end].iter().collect();
+    let frag = frag.trim();
+    if frag.is_empty() {
+        return None;
+    }
+    // Cap display width so long lines don't dominate the row.
+    const MAX: usize = 28;
+    let frag = if frag.chars().count() > MAX {
+        let take: String = frag.chars().take(MAX.saturating_sub(1)).collect();
+        format!("{take}…")
+    } else {
+        frag.to_string()
+    };
+    Some(frag)
 }
 
 fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
@@ -491,6 +552,23 @@ mod tests {
         assert_eq!(plural(2, "warning", "warnings"), "2 warnings");
         assert!(diag_counts_phrase(3, 2, 1).contains("1 warning"));
         assert!(!diag_counts_phrase(3, 2, 1).contains("1 warnings"));
+    }
+
+    #[test]
+    fn code_fragment_extracts_span() {
+        let d = &canned_snapshot().diagnostics[0];
+        let frag = code_fragment(d).expect("frag");
+        assert!(frag.contains("true") || frag.contains("MakeTint"), "{frag}");
+    }
+
+    #[test]
+    fn detail_box_height_min_six_inner() {
+        // borders + max(6, content+1) — at least 8 total rows
+        let h = detail_box_height(Some(&canned_snapshot().diagnostics[0]));
+        assert!(h >= 8, "h={h}");
+        assert!(h <= 10, "h={h}");
+        let empty = detail_box_height(None);
+        assert!(empty >= 8, "empty={empty}");
     }
 
     #[test]
