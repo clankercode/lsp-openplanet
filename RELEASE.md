@@ -346,7 +346,11 @@ gh workflow run release.yml -f dry_run=true
 gh run watch
 ```
 
-Use this to validate the matrix before a real tag when the workflow changed.
+Manual dispatch is deliberately **dry-run-only**. The workflow rejects a
+manual run with `dry_run=false`, and both GitHub/npm publish steps (plus the
+post-publish self-update smoke) independently require a pushed, non-deleted
+tag. Tag-deletion events are explicitly rejected. Use this to validate the
+matrix before a real tag when the workflow changed.
 
 ---
 

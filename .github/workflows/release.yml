@@ -26,7 +26,7 @@ on:
       dry_run:
         description: "Build and pack only (skip GitHub release upload + npm publish)"
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: write
@@ -53,6 +53,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.event.deleted }}" == "true" ]]; then
+            echo "Tag deletion events cannot create or publish a release."
+            exit 1
+          fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" ]]; then
+            echo "Manual dispatch is dry-run only; push a vX.Y.Z tag for a real release."
+            exit 1
+          fi
           CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             TAG="${{ github.ref_name }}"
@@ -314,7 +322,7 @@ jobs:
           fi
 
       - name: Create / update GitHub Release
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
@@ -354,7 +362,7 @@ jobs:
           ls -lh npm-tgz
 
       - name: Publish npm packages (OIDC trusted publishing)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
         shell: bash
         env:
           VERSION: ${{ needs.version.outputs.version }}
@@ -411,7 +419,7 @@ jobs:
   # be an older build, run self-update against registry @latest, confirm it works.
   self-update-smoke:
     needs: [version, publish]
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-node@v4
