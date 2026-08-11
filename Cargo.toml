@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/openplanet-lsp-tui"]
+resolver = "2"
+
 [package]
 name = "openplanet-lsp"
 version = "0.3.0"

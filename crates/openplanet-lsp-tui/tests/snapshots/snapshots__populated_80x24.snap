@@ -1,0 +1,29 @@
+---
+source: crates/openplanet-lsp-tui/tests/snapshots.rs
+assertion_line: 42
+expression: out
+---
+"┌ openplanet-lsp · showcase-diags ─────────────────────────────────────────────┐"
+"│ 3 diags · 2E/1W ready · 42ms                                                 │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+"┌ diagnostics ─────────────────────────────────────────────────────────────────┐"
+"│›  E  src/Main.as:14:5  unknown type `NoSuchEngineType`                       │"
+"│   E  src/Helpers.as:31:19  type `string` has no member `NotARealMethod`      │"
+"│   W  src/Helpers.as:4:24  Use 'const string &in msg' to pass a string by refe│"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+"┌ keys ────────────────────────────────────────────────────────────────────────┐"
+"│ q quit  ·  j/k or ↓/↑ scroll  ·  r refresh                                   │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
