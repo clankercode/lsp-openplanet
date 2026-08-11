@@ -1052,12 +1052,13 @@ impl<'a> Checker<'a> {
         if !self.scope.is_external_type(&type_name) {
             return TypeRepr::Error(String::new());
         }
-        // Nadeo-sourced types have partial member metadata (return types
-        // and many property types are empty because the Nadeo format uses
-        // type IDs rather than type-name strings), so a failed lookup can
-        // mean the DB is incomplete rather than the member is actually
-        // missing. Suppress the diagnostic.
-        if self.scope.is_nadeo_type(&type_name) {
+        // Nadeo-sourced types can have incomplete member metadata. When the
+        // typedb lists zero properties/methods for the type, a failed
+        // lookup may just mean the DB is incomplete — stay silent. When
+        // the type has a non-empty member list, trust it and emit
+        // UndefinedMember for missing names (B006).
+        if self.scope.is_nadeo_type(&type_name) && !self.scope.nadeo_member_list_trusted(&type_name)
+        {
             return TypeRepr::Error(String::new());
         }
         self.diagnostics.push(TypeDiagnostic {
@@ -1448,7 +1449,11 @@ impl<'a> Checker<'a> {
                 if !self.scope.is_external_type(&type_name) {
                     return TypeRepr::Error(String::new());
                 }
-                if self.scope.is_nadeo_type(&type_name) {
+                // Same Nadeo completeness rule as `member_access_type` (B006):
+                // suppress only when the typedb member list is empty.
+                if self.scope.is_nadeo_type(&type_name)
+                    && !self.scope.nadeo_member_list_trusted(&type_name)
+                {
                     return TypeRepr::Error(String::new());
                 }
                 self.diagnostics.push(TypeDiagnostic {
@@ -3723,6 +3728,151 @@ mod tests {
                 expected_max: 3,
                 got: 4,
             }
+        );
+    }
+
+    // ── B006: UndefinedMember on Nadeo types with trusted member lists ──
+
+    #[test]
+    fn nadeo_missing_member_on_populated_type_fires() {
+        // CGameCtnCollection has a large non-empty member list and does
+        // not declare CollectionName (that lives on CGameCtnChallenge).
+        let diags = check_with_typedb(
+            r#"void f() {
+                CGameCtnCollection@ c;
+                string n = c.CollectionName;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected UndefinedMember for CollectionName on CGameCtnCollection, got {:?}",
+            diags
+        );
+        match &bad[0].kind {
+            TypeDiagnosticKind::UndefinedMember {
+                object_type,
+                member,
+            } => {
+                assert!(
+                    object_type.ends_with("CGameCtnCollection"),
+                    "object_type={object_type}"
+                );
+                assert_eq!(member, "CollectionName");
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nadeo_existing_member_on_populated_type_silent() {
+        // CollectionName is a real property of CGameCtnChallenge.
+        let diags = check_with_typedb(
+            r#"void f() {
+                CGameCtnChallenge@ map;
+                string n = map.CollectionName;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no UndefinedMember for real CollectionName, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn nadeo_nested_collection_name_case_fires() {
+        // Real bug report: map.Collection.CollectionName — Collection is
+        // CGameCtnCollection@ which has no CollectionName member.
+        let diags = check_with_typedb(
+            r#"void f() {
+                CGameCtnChallenge@ map;
+                string n = string(map.Collection.CollectionName);
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::UndefinedMember { member, .. } if member == "CollectionName"
+                )
+            })
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected CollectionName UndefinedMember on nested Collection, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn nadeo_empty_member_list_stays_silent() {
+        // CMwEngine has zero listed members in the Nadeo fixture — incomplete
+        // metadata, so missing members must not flood diagnostics.
+        let diags = check_with_typedb(
+            r#"void f() {
+                CMwEngine@ e;
+                auto x = e.TotallyMissingMember;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected silence for empty Nadeo member list, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn nadeo_inherited_member_via_parent_silent() {
+        // IdName lives on CMwNod; CGameCtnCollection parents to CMwNod.
+        let diags = check_with_typedb(
+            r#"void f() {
+                CGameCtnCollection@ c;
+                string id = c.IdName;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no UndefinedMember for inherited IdName, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn nadeo_missing_method_on_populated_type_fires() {
+        let diags = check_with_typedb(
+            r#"void f() {
+                CGameCtnCollection@ c;
+                c.DefinitelyNotAMethod();
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected UndefinedMember for missing Nadeo method, got {:?}",
+            diags
         );
     }
 }
