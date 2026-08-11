@@ -5,22 +5,20 @@
 //! CI, and editor captures stay machine-friendly.
 
 use std::io::{self, IsTerminal};
-use std::sync::OnceLock;
 
 /// Whether styled output should be emitted on stdout.
 pub fn color_stdout() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| decide_color(io::stdout().is_terminal()))
+    decide_color(io::stdout().is_terminal())
 }
 
 /// Whether styled output should be emitted on stderr.
 pub fn color_stderr() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| decide_color(io::stderr().is_terminal()))
+    decide_color(io::stderr().is_terminal())
 }
 
 fn decide_color(tty: bool) -> bool {
-    if env_truthy("NO_COLOR") {
+    // NO_COLOR: any presence disables (https://no-color.org/), including empty.
+    if std::env::var_os("NO_COLOR").is_some() {
         return false;
     }
     if env_truthy("CLICOLOR_FORCE") || env_truthy("FORCE_COLOR") {
@@ -38,8 +36,7 @@ fn decide_color(tty: bool) -> bool {
 
 fn env_truthy(name: &str) -> bool {
     match std::env::var(name) {
-        Ok(v) if v.is_empty() => name == "NO_COLOR", // NO_COLOR present => off
-        Ok(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no"),
+        Ok(v) => !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | ""),
         Err(_) => false,
     }
 }

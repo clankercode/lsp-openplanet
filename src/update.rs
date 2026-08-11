@@ -2019,7 +2019,7 @@ mod tests {
             installed_version: Some("0.2.6".into()),
             version_source: "npm".into(),
         };
-        let text = format_status(&status);
+        let text = format_status_with(&status, false);
         assert!(text.contains("installed — restart required"));
         assert!(text.contains("installed: 0.2.6"));
         assert!(!text.contains("update available"));
@@ -2118,7 +2118,7 @@ mod tests {
             installed_version: None,
             version_source: "npm".into(),
         };
-        let text = format_status(&status);
+        let text = format_status_with(&status, false);
         assert!(text.contains("update available"));
         assert!(text.contains("0.2.4"));
         assert!(text.contains("current:  0.2.0 (install type: npm-global)"));
@@ -2157,7 +2157,7 @@ mod tests {
             installed_version: None,
             version_source: "github".into(),
         };
-        let text = format_status(&status);
+        let text = format_status_with(&status, false);
         assert!(text.contains("current:  0.2.9 (install type: standalone)"));
         assert!(text.contains("latest:   0.2.9 (source checked: github)"));
         assert!(text.contains("status:   up to date"));
