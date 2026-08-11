@@ -188,34 +188,18 @@ impl App {
                 ))),
             ]
         } else {
-            let path_w = self
+            let loc_w = self
                 .snapshot
                 .diagnostics
                 .iter()
-                .map(|d| short_path(&d.path).chars().count())
+                .map(|d| bare_location(d).chars().count())
                 .max()
-                .unwrap_or(12)
-                .min(28);
-            let line_w = self
-                .snapshot
-                .diagnostics
-                .iter()
-                .map(|d| d.line.to_string().len())
-                .max()
-                .unwrap_or(2)
-                .max(2);
-            let col_w = self
-                .snapshot
-                .diagnostics
-                .iter()
-                .map(|d| d.col.to_string().len())
-                .max()
-                .unwrap_or(1)
-                .max(1);
+                .unwrap_or(16)
+                .min(40);
             self.snapshot
                 .diagnostics
                 .iter()
-                .map(|d| list_item_for(d, self.density, path_w, line_w, col_w))
+                .map(|d| list_item_for(d, self.density, loc_w))
                 .collect()
         };
 
@@ -301,25 +285,17 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
-fn format_location(d: &DiagItem, path_w: usize, line_w: usize, col_w: usize) -> String {
-    let path = short_path(&d.path);
-    format!(
-        "{path:<path_w$}:{line:>line_w$}:{col:>col_w$}",
-        path = path,
-        line = d.line,
-        col = d.col,
-    )
+fn bare_location(d: &DiagItem) -> String {
+    format!("{}:{}:{}", short_path(&d.path), d.line, d.col)
 }
 
-fn list_item_for(
-    d: &DiagItem,
-    density: ListDensity,
-    path_w: usize,
-    line_w: usize,
-    col_w: usize,
-) -> ListItem<'static> {
+fn format_location(d: &DiagItem, loc_w: usize) -> String {
+    format!("{:<loc_w$}", bare_location(d))
+}
+
+fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'static> {
     let glyph = d.severity.glyph();
-    let loc = format_location(d, path_w, line_w, col_w);
+    let loc = format_location(d, loc_w);
     let style = severity_style(d.severity);
     match density {
         ListDensity::Compact => {
@@ -334,7 +310,7 @@ fn list_item_for(
         ListDensity::Relaxed => {
             let head = Line::from(vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
-                Span::styled(loc, Style::default().fg(ratatui::style::Color::Cyan)),
+                Span::styled(loc.trim_end().to_string(), Style::default().fg(ratatui::style::Color::Cyan)),
             ]);
             let msg = Line::from(Span::styled(format!("    {}", d.message), style));
             ListItem::new(vec![head, msg])
