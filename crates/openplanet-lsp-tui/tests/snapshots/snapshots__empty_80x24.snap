@@ -1,10 +1,9 @@
 ---
 source: crates/openplanet-lsp-tui/tests/snapshots.rs
-assertion_line: 30
-expression: out
+expression: terminal.backend()
 ---
-"┌ openplanet-lsp · empty-plugin ───────────────────────────────────────────────┐"
-"│ 0 diags · 0E/0W ready · 5ms                                                  │"
+"┌ openplanet-lsp check --watch ────────────────────────────────────────────────┐"
+"│ watching: ./MyPlugin  ·  0 diags (0E/0W)  ·  idle                            │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "┌ diagnostics ─────────────────────────────────────────────────────────────────┐"
 "│  (no diagnostics)                                                            │"
@@ -25,5 +24,5 @@ expression: out
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "┌ keys ────────────────────────────────────────────────────────────────────────┐"
-"│ q quit  ·  j/k or ↓/↑ scroll  ·  r refresh                                   │"
+"│ q quit  ·  j/k scroll  ·  r refresh                                          │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

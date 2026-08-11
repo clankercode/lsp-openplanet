@@ -27,8 +27,11 @@ impl Severity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagItem {
     pub severity: Severity,
+    /// Display-relative path preferred (avoid absolute host paths in snapshots).
     pub path: PathBuf,
+    /// 1-based for display.
     pub line: u32,
+    /// 1-based for display.
     pub col: u32,
     pub message: String,
 }
@@ -47,8 +50,8 @@ impl RunStatus {
         match self {
             RunStatus::Idle => "idle".into(),
             RunStatus::Running => "checking…".into(),
-            RunStatus::Ready { duration } => format!("ready · {}ms", duration.as_millis()),
-            RunStatus::Failed { message } => format!("failed · {message}"),
+            RunStatus::Ready { duration } => format!("last: {}ms", duration.as_millis()),
+            RunStatus::Failed { message } => format!("failed: {message}"),
         }
     }
 }
@@ -56,6 +59,7 @@ impl RunStatus {
 /// Full diagnostics snapshot for the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
+    /// e.g. workspace path basename or `./MyPlugin`.
     pub root_label: String,
     pub diagnostics: Vec<DiagItem>,
     pub status: RunStatus,
@@ -85,14 +89,14 @@ impl Snapshot {
     }
 }
 
-/// Events the UI understands. Host maps notify + check → these.
+/// Events the UI understands. Host maps notify + check results into these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceEvent {
     /// Replace the visible diagnostic set (full refresh is fine for v1).
     Diagnostics(Snapshot),
     /// Non-fatal status line update without clearing the list.
     Status(RunStatus),
-    /// Source requests UI shutdown (e.g. parent cancelled).
+    /// Source requests UI exit (e.g. parent cancelled).
     Shutdown,
 }
 

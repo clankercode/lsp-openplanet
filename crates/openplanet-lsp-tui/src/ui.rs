@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::types::{RunStatus, Severity, Snapshot};
 
+/// Watch-list application state.
 #[derive(Debug)]
 pub struct App {
     pub snapshot: Snapshot,
@@ -15,15 +16,25 @@ pub struct App {
     pub should_quit: bool,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new("(no workspace)")
+    }
+}
+
 impl App {
     pub fn new(root_label: impl Into<String>) -> Self {
-        let mut list_state = ListState::default();
-        list_state.select(Some(0));
         Self {
             snapshot: Snapshot::empty(root_label),
-            list_state,
+            list_state: ListState::default(),
             should_quit: false,
         }
+    }
+
+    pub fn from_snapshot(snapshot: Snapshot) -> Self {
+        let mut app = Self::new(snapshot.root_label.clone());
+        app.apply_snapshot(snapshot);
+        app
     }
 
     pub fn apply_snapshot(&mut self, snap: Snapshot) {
@@ -59,6 +70,11 @@ impl App {
         self.list_state.select(Some(i.saturating_sub(1)));
     }
 
+    pub fn selected(&self) -> Option<usize> {
+        self.list_state.selected()
+    }
+
+    /// Pure render of current state into a frame.
     pub fn draw(&mut self, f: &mut Frame<'_>) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -78,17 +94,19 @@ impl App {
         let n = self.snapshot.diagnostics.len();
         let e = self.snapshot.error_count();
         let w = self.snapshot.warning_count();
-        let title = format!(" openplanet-lsp · {} ", self.snapshot.root_label);
-        let line = Line::from(vec![
-            Span::raw(format!(" {n} diags")),
-            Span::raw(format!(" · {e}E/{w}W ")),
-            Span::styled(
-                self.snapshot.status.label(),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-        ]);
-        let block = Block::default().borders(Borders::ALL).title(title);
-        f.render_widget(Paragraph::new(line).block(block), area);
+        let title = " openplanet-lsp check --watch ";
+        let body = format!(
+            " watching: {}  ·  {n} diags ({e}E/{w}W)  ·  {} ",
+            self.snapshot.root_label,
+            self.snapshot.status.label()
+        );
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Line::from(Span::styled(
+                title,
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+        f.render_widget(Paragraph::new(body).block(block), area);
     }
 
     fn draw_list(&mut self, f: &mut Frame<'_>, area: Rect) {
@@ -129,8 +147,31 @@ impl App {
     }
 
     fn draw_footer(&self, f: &mut Frame<'_>, area: Rect) {
-        let hints = Paragraph::new(" q quit  ·  j/k or ↓/↑ scroll  ·  r refresh ")
+        let hints = Paragraph::new(" q quit  ·  j/k scroll  ·  r refresh ")
             .block(Block::default().borders(Borders::ALL).title(" keys "));
         f.render_widget(hints, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock::canned_snapshot;
+
+    #[test]
+    fn scroll_clamps() {
+        let mut app = App::new("x");
+        app.scroll_down();
+        assert_eq!(app.selected(), None);
+
+        app.apply_snapshot(canned_snapshot());
+        assert_eq!(app.selected(), Some(0));
+        app.scroll_down();
+        assert_eq!(app.selected(), Some(1));
+        app.scroll_down();
+        app.scroll_down();
+        assert_eq!(app.selected(), Some(2));
+        app.scroll_up();
+        assert_eq!(app.selected(), Some(1));
     }
 }
