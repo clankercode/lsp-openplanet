@@ -182,18 +182,34 @@ impl App {
                 Style::default().add_modifier(Modifier::DIM),
             )))]
         } else {
-            let loc_w = self
+            let path_w = self
                 .snapshot
                 .diagnostics
                 .iter()
-                .map(|d| location_text(d).chars().count())
+                .map(|d| short_path(&d.path).chars().count())
                 .max()
                 .unwrap_or(12)
-                .min(36);
+                .min(28);
+            let line_w = self
+                .snapshot
+                .diagnostics
+                .iter()
+                .map(|d| d.line.to_string().len())
+                .max()
+                .unwrap_or(2)
+                .max(2);
+            let col_w = self
+                .snapshot
+                .diagnostics
+                .iter()
+                .map(|d| d.col.to_string().len())
+                .max()
+                .unwrap_or(1)
+                .max(1);
             self.snapshot
                 .diagnostics
                 .iter()
-                .map(|d| list_item_for(d, self.density, loc_w))
+                .map(|d| list_item_for(d, self.density, path_w, line_w, col_w))
                 .collect()
         };
 
@@ -274,23 +290,31 @@ fn location_text(d: &DiagItem) -> String {
     format!("{}:{}:{}", short_path(&d.path), d.line, d.col)
 }
 
-fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'static> {
+fn format_location(d: &DiagItem, path_w: usize, line_w: usize, col_w: usize) -> String {
+    let path = short_path(&d.path);
+    format!(
+        "{path:<path_w$}:{line:>line_w$}:{col:<col_w$}",
+        path = path,
+        line = d.line,
+        col = d.col,
+    )
+}
+
+fn list_item_for(
+    d: &DiagItem,
+    density: ListDensity,
+    path_w: usize,
+    line_w: usize,
+    col_w: usize,
+) -> ListItem<'static> {
     let glyph = d.severity.glyph();
-    let loc = location_text(d);
+    let loc = format_location(d, path_w, line_w, col_w);
     let style = severity_style(d.severity);
-    let loc_pad = format!("{loc:<loc_w$}");
     match density {
         ListDensity::Compact => {
-            // Columns: sev | location | message
             let row = Line::from(vec![
-                Span::styled(
-                    format!(" {glyph} "),
-                    style.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    loc_pad,
-                    Style::default().fg(ratatui::style::Color::Cyan),
-                ),
+                Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
+                Span::styled(loc, Style::default().fg(ratatui::style::Color::Cyan)),
                 Span::raw("  "),
                 Span::styled(d.message.clone(), style),
             ]);
@@ -298,23 +322,15 @@ fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'
         }
         ListDensity::Relaxed => {
             let head = Line::from(vec![
-                Span::styled(
-                    format!(" {glyph} "),
-                    style.add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
                 Span::styled(loc, Style::default().fg(ratatui::style::Color::Cyan)),
             ]);
-            // Indent message under location column (sev col ≈ 3 chars).
-            let msg = Line::from(Span::styled(
-                format!("    {}", d.message),
-                style,
-            ));
+            let msg = Line::from(Span::styled(format!("    {}", d.message), style));
             ListItem::new(vec![head, msg])
         }
     }
 }
 
-/// Pretty detail: header, source line, caret-only line, then message.
 fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
     let path = d.path.display().to_string();
     let sev = d.severity.label();

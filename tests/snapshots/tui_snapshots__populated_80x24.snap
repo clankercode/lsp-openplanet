@@ -7,7 +7,7 @@ expression: terminal.backend()
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "┌ diagnostics · compact ───────────────────────────────────────────────────────┐"
 "│▌  E src/Overlay.as:23:26  argument 1 of `MakeTint`: expected `int`, got `bool│"
-"│   W src/Helpers.as:4:24   Use 'const string &in msg' to pass a string by refe│"
+"│   W src/Helpers.as: 4:24  Use 'const string &in msg' to pass a string by refe│"
 "│   E src/Overlay.as:36:5   unknown type `FakeVehicleState`                    │"
 "│                                                                              │"
 "│                                                                              │"
