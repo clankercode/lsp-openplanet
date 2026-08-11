@@ -13,9 +13,16 @@ use super::builtins;
 use super::global_scope::{GlobalScope, OverloadSig};
 use super::repr::{PrimitiveType, TypeRepr};
 use super::resolver::TypeResolver;
+use crate::lexer::token::TokenKind;
 use crate::lexer::Span;
 use crate::parser::ast::*;
 use crate::symbols::scope::SymbolKind;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeDiagnosticSeverity {
+    Error,
+    Warning,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeDiagnosticKind {
@@ -51,6 +58,10 @@ pub enum TypeDiagnosticKind {
     ConstViolation {
         detail: String,
     },
+    /// Game sanity check: bare `string` params should be `const string &in`.
+    StringByValueParam {
+        param_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +71,13 @@ pub struct TypeDiagnostic {
 }
 
 impl TypeDiagnostic {
+    pub fn severity(&self) -> TypeDiagnosticSeverity {
+        match &self.kind {
+            TypeDiagnosticKind::StringByValueParam { .. } => TypeDiagnosticSeverity::Warning,
+            _ => TypeDiagnosticSeverity::Error,
+        }
+    }
+
     pub fn message(&self) -> String {
         match &self.kind {
             TypeDiagnosticKind::UnknownType(n) => format!("unknown type `{}`", n),
@@ -114,7 +132,23 @@ impl TypeDiagnostic {
             TypeDiagnosticKind::ConstViolation { detail } => {
                 format!("const violation: {}", detail)
             }
+            TypeDiagnosticKind::StringByValueParam { param_name } => {
+                if param_name.is_empty() {
+                    "Sanity check: Use 'const string &in' to pass a string by reference".to_string()
+                } else {
+                    format!(
+                        "Sanity check: Use 'const string &in {}' to pass a string by reference",
+                        param_name
+                    )
+                }
+            }
         }
+    }
+}
+
+impl std::fmt::Display for TypeDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
     }
 }
 
@@ -655,6 +689,7 @@ impl<'a> Checker<'a> {
         self.return_type_stack.push(ret_ty.clone());
         self.push_frame();
         for p in &func.params {
+            self.warn_string_by_value_param(p);
             let ty = self.resolve_type_expr(&p.type_expr);
             if let Some(name) = &p.name {
                 self.define_local(name.text(self.source).to_string(), ty, name.span);
@@ -679,6 +714,33 @@ impl<'a> Checker<'a> {
         }
         self.pop_frame();
         self.return_type_stack.pop();
+    }
+
+    /// B004: AngelScript/Openplanet sanity check — bare `string` (or
+    /// `const string`) parameters copy the string; prefer `const string &in`.
+    fn warn_string_by_value_param(&mut self, param: &Param) {
+        if !is_string_by_value_type(&param.type_expr) {
+            return;
+        }
+        // Reference params (`string &in`, `const string &in`, …) are fine;
+        // those set a non-None modifier extracted from the type expr.
+        if param.modifier != ParamModifier::None {
+            return;
+        }
+        let param_name = param
+            .name
+            .as_ref()
+            .map(|n| n.text(self.source).to_string())
+            .unwrap_or_default();
+        let span = param
+            .name
+            .as_ref()
+            .map(|n| n.span)
+            .unwrap_or(param.type_expr.span);
+        self.diagnostics.push(TypeDiagnostic {
+            span,
+            kind: TypeDiagnosticKind::StringByValueParam { param_name },
+        });
     }
 
     /// Conservative "does the last statement of this slice definitely
@@ -1873,6 +1935,16 @@ fn resolve_overload<'a>(overloads: &'a [OverloadSig], arg_tys: &[TypeRepr]) -> O
         OverloadMatch::Unique(top[0])
     } else {
         OverloadMatch::Ambiguous
+    }
+}
+
+/// True when `ty` is bare `string` or `const string` (by value), not a
+/// reference/handle/array/template wrapping of string.
+fn is_string_by_value_type(ty: &TypeExpr) -> bool {
+    match &ty.kind {
+        TypeExprKind::Primitive(TokenKind::KwString) => true,
+        TypeExprKind::Const(inner) => is_string_by_value_type(inner),
+        _ => false,
     }
 }
 
@@ -3722,6 +3794,118 @@ mod tests {
                 expected_min: 2,
                 expected_max: 3,
                 got: 4,
+            }
+        );
+    }
+
+    // ── B004: bare string param sanity warning ──────────────────────────────
+
+    #[test]
+    fn bare_string_param_warns() {
+        let diags = check("void f(string x) {}");
+        let warn: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::StringByValueParam { .. }))
+            .collect();
+        assert_eq!(
+            warn.len(),
+            1,
+            "expected StringByValueParam warning, got {:?}",
+            diags
+        );
+        assert_eq!(
+            warn[0].kind,
+            TypeDiagnosticKind::StringByValueParam {
+                param_name: "x".into()
+            }
+        );
+        assert_eq!(warn[0].severity(), TypeDiagnosticSeverity::Warning);
+        assert!(
+            warn[0]
+                .message()
+                .contains("const string &in x"),
+            "message should mention preferred form, got {}",
+            warn[0].message()
+        );
+        // Display impl mirrors message()
+        assert_eq!(format!("{}", warn[0]), warn[0].message());
+    }
+
+    #[test]
+    fn const_string_in_param_silent() {
+        let diags = check("void f(const string &in x) {}");
+        let warn: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::StringByValueParam { .. }))
+            .collect();
+        assert!(
+            warn.is_empty(),
+            "const string &in should not warn, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn string_in_param_silent() {
+        let diags = check("void f(string &in x) {}");
+        let warn: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::StringByValueParam { .. }))
+            .collect();
+        assert!(
+            warn.is_empty(),
+            "string &in should not warn, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn other_types_unaffected_by_string_by_value_warn() {
+        let diags = check("void f(int x, bool y, float z) {}");
+        let warn: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::StringByValueParam { .. }))
+            .collect();
+        assert!(
+            warn.is_empty(),
+            "non-string params should not warn, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn const_string_by_value_also_warns() {
+        // `const string` without &in is still a by-value copy.
+        let diags = check("void f(const string x) {}");
+        let warn: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::StringByValueParam { .. }))
+            .collect();
+        assert_eq!(
+            warn.len(),
+            1,
+            "const string by value should warn, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn bare_string_method_param_warns() {
+        let diags = check("class C { void m(string name) {} }");
+        let warn: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::StringByValueParam { .. }))
+            .collect();
+        assert_eq!(
+            warn.len(),
+            1,
+            "method bare string param should warn, got {:?}",
+            diags
+        );
+        assert_eq!(
+            warn[0].kind,
+            TypeDiagnosticKind::StringByValueParam {
+                param_name: "name".into()
             }
         );
     }

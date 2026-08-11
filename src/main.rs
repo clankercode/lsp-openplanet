@@ -59,10 +59,20 @@ fn run_check_command(args: &[String]) -> i32 {
                 eprintln!("warning: type database not loaded; pass --typedb-dir or --no-typedb");
             }
             print!("{}", cli::format_check_report(&report));
-            if report.diagnostics.is_empty() {
-                0
-            } else {
+            // Warnings (e.g. B004 bare-string params) are reported but do not
+            // fail the check command; only errors produce a non-zero exit.
+            let has_errors = report.diagnostics.iter().any(|item| {
+                !matches!(
+                    item.diagnostic.severity,
+                    Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+                        | Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION)
+                        | Some(tower_lsp::lsp_types::DiagnosticSeverity::HINT)
+                )
+            });
+            if has_errors {
                 1
+            } else {
+                0
             }
         }
         Err(err) => {
