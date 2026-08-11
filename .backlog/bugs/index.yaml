@@ -7,3 +7,4 @@ bugs:
     - file: B006-unknown-member-on-nadeo-type-n.todo
     - file: B007-distinct-enum-types-treated-as.todo
     - file: B008-i7-wire-check-analysis-through.todo
+    - file: B009-i1-deepen-document-analysis-in.todo
