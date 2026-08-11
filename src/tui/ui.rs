@@ -335,29 +335,21 @@ fn list_item_for(d: &DiagItem, density: ListDensity, loc_w: usize) -> ListItem<'
                 Span::styled(loc, Style::default().fg(ratatui::style::Color::Cyan)),
             ];
             if let Some(frag) = code_fragment(d) {
-                // Fixed-width fragment field so the column lines up across rows.
-                const FRAG_INNER: usize = 20;
-                let display = if frag.chars().count() > FRAG_INNER {
+                // Fixed-width field: `› frag ‹` then trailing pad (spaces outside brackets).
+                const FRAG_INNER: usize = 18;
+                let inner = if frag.chars().count() > FRAG_INNER {
                     let take: String = frag.chars().take(FRAG_INNER.saturating_sub(1)).collect();
                     format!("{take}…")
                 } else {
-                    format!("{frag:<FRAG_INNER$}")
+                    frag
                 };
+                let field = format!("› {inner} ‹");
+                // Total field width including brackets/spaces.
+                const FIELD_W: usize = 22; // › + sp + 18 + sp + ‹
+                let field = format!("{field:<FIELD_W$}");
                 head_spans.push(Span::raw("  "));
-                head_spans.push(Span::styled(
-                    "›".to_string(),
-                    Style::default().add_modifier(Modifier::DIM),
-                ));
-                head_spans.push(Span::raw(" "));
-                head_spans.push(Span::styled(
-                    display,
-                    style.add_modifier(Modifier::BOLD),
-                ));
-                head_spans.push(Span::raw(" "));
-                head_spans.push(Span::styled(
-                    "‹".to_string(),
-                    Style::default().add_modifier(Modifier::DIM),
-                ));
+                // Paint brackets dim, body severity — split spans by scanning field.
+                head_spans.extend(paint_fragment_field(&field, style));
             }
             let head = Line::from(head_spans);
             let msg = Line::from(Span::styled(format!("   {}", d.message), style));
@@ -397,6 +389,52 @@ fn code_fragment(d: &DiagItem) -> Option<String> {
 }
 
 /// If span sits inside `Ident(...)`, return that call slice when compact.
+
+/// Style a padded `› frag ‹…` field: dim brackets, severity body, dim trailing pad.
+fn paint_fragment_field(field: &str, style: Style) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = field.chars().collect();
+    if chars.is_empty() {
+        return out;
+    }
+    // Expect starts with ›
+    let mut i = 0usize;
+    if chars[0] == '›' {
+        out.push(Span::styled("›".to_string(), Style::default().add_modifier(Modifier::DIM)));
+        i = 1;
+    }
+    if i < chars.len() && chars[i] == ' ' {
+        out.push(Span::raw(" "));
+        i += 1;
+    }
+    // body until space+‹ or ‹
+    let body_start = i;
+    while i < chars.len() && chars[i] != '‹' {
+        i += 1;
+    }
+    // trim trailing space before ‹ from body
+    let mut body_end = i;
+    while body_end > body_start && chars[body_end - 1] == ' ' {
+        body_end -= 1;
+    }
+    if body_end > body_start {
+        let body: String = chars[body_start..body_end].iter().collect();
+        out.push(Span::styled(body, style.add_modifier(Modifier::BOLD)));
+    }
+    if body_end < i {
+        out.push(Span::raw(" ".repeat(i - body_end)));
+    }
+    if i < chars.len() && chars[i] == '‹' {
+        out.push(Span::styled("‹".to_string(), Style::default().add_modifier(Modifier::DIM)));
+        i += 1;
+    }
+    if i < chars.len() {
+        let pad: String = chars[i..].iter().collect();
+        out.push(Span::raw(pad));
+    }
+    out
+}
+
 fn enrich_call_fragment(chars: &[char], start: usize, end: usize) -> Option<String> {
     // Only on statement-like lines (calls), not bare declarations.
     let line: String = chars.iter().collect();
