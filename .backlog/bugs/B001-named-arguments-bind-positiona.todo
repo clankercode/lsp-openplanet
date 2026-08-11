@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-11T11:55:52Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-11T12:04:42Z"
 complexity: medium
 created_at: "2026-08-11T11:53:37Z"
 depends_on: []
+duration_minutes: 8.834186356833333
 estimate_hours: 3
 id: B001
 priority: high
 started_at: "2026-08-11T11:55:52Z"
-status: in_progress
+status: done
 tags: []
 title: Named arguments bind positionally instead of by name
-updated_at: "2026-08-11T11:55:52Z"
+updated_at: "2026-08-11T12:04:42Z"
 ---
 ## Goal
 Fix false-positive ArgTypeMismatch when callers skip defaulted params via named arguments.
