@@ -1,9 +1,7 @@
 use tower_lsp::lsp_types::*;
 
+use crate::analysis::DocumentAnalysis;
 use crate::config::LspConfig;
-use crate::lexer;
-use crate::parser::Parser;
-use crate::preprocessor;
 use crate::symbols::SymbolTable;
 use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticSeverity};
 use crate::typedb::TypeIndex;
@@ -12,9 +10,8 @@ use crate::typedb::TypeIndex;
 ///
 /// If `workspace_symbols` is `Some`, the supplied pooled [`SymbolTable`] is
 /// used as the workspace for name resolution (so sibling-file declarations
-/// are visible). If `None`, a single-file symbol table is built on the fly
-/// from `source` alone — this is the current production behavior; multi-file
-/// wiring for `Backend::on_change` is a separate concern.
+/// and dependency exports are visible). If `None`, a single-file symbol table
+/// is built on the fly from `source` alone.
 pub fn compute_diagnostics(
     uri: &Url,
     source: &str,
@@ -22,17 +19,27 @@ pub fn compute_diagnostics(
     type_index: Option<&TypeIndex>,
     workspace_symbols: Option<&SymbolTable>,
 ) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
+    let analysis = DocumentAnalysis::analyze(source, &config.defines);
+    compute_diagnostics_from_analysis(uri, &analysis, config, type_index, workspace_symbols)
+}
 
-    // Check if this is info.toml
+/// Diagnostics from an existing [`DocumentAnalysis`] (shared pipeline).
+pub fn compute_diagnostics_from_analysis(
+    uri: &Url,
+    analysis: &DocumentAnalysis,
+    _config: &LspConfig,
+    type_index: Option<&TypeIndex>,
+    workspace_symbols: Option<&SymbolTable>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let source = analysis.source.as_str();
+
     if uri.path().ends_with("info.toml") {
         compute_toml_diagnostics(source, &mut diagnostics);
         return diagnostics;
     }
 
-    // Preprocess
-    let preprocess_result = preprocessor::preprocess(source, &config.defines);
-    for err in &preprocess_result.errors {
+    for err in analysis.preprocess_errors() {
         diagnostics.push(Diagnostic {
             range: line_range(source, err.line),
             severity: Some(DiagnosticSeverity::ERROR),
@@ -42,14 +49,7 @@ pub fn compute_diagnostics(
         });
     }
 
-    // Lex
-    let tokens = lexer::tokenize_filtered(&preprocess_result.masked_source);
-
-    // Parse
-    let mut parser = Parser::new(&tokens, &preprocess_result.masked_source);
-    let file = parser.parse_file();
-
-    for err in &parser.errors {
+    for err in &analysis.parse_errors {
         let range = span_to_range(source, err.span);
         diagnostics.push(Diagnostic {
             range,
@@ -60,24 +60,21 @@ pub fn compute_diagnostics(
         });
     }
 
-    // Type-check. Prefer the caller-supplied pooled workspace symbol table
-    // when present; otherwise fall back to a single-file table built from
-    // the current source only.
     let owned_symbols: Option<SymbolTable> = if workspace_symbols.is_some() {
         None
     } else {
         let mut symbols = SymbolTable::new();
         let fid = symbols.allocate_file_id();
         let file_syms =
-            SymbolTable::extract_symbols(fid, &preprocess_result.masked_source, &file);
+            SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
         symbols.set_file_symbols(fid, file_syms);
         Some(symbols)
     };
     let symbols_ref: &SymbolTable = workspace_symbols
         .unwrap_or_else(|| owned_symbols.as_ref().expect("owned symbols built above"));
     let scope = GlobalScope::new(symbols_ref, type_index);
-    let mut checker = Checker::new(&preprocess_result.masked_source, &scope);
-    checker.check_file(&file);
+    let mut checker = Checker::new(analysis.masked_source(), &scope);
+    checker.check_file(&analysis.file);
     for diag in &checker.diagnostics {
         let range = span_to_range(source, diag.span);
         let severity = match diag.severity() {

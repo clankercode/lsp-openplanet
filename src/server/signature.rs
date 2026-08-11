@@ -26,9 +26,8 @@
 
 use tower_lsp::lsp_types::*;
 
-use crate::lexer;
+use crate::analysis::DocumentAnalysis;
 use crate::parser::ast::SourceFile;
-use crate::parser::Parser;
 use crate::server::diagnostics::position_to_offset;
 use crate::server::scope_query;
 use crate::symbols::scope::SymbolKind;
@@ -70,9 +69,8 @@ pub fn signature_help(
     let call = find_enclosing_call(source, cursor)?;
 
     // Parse once for receiver-type lookup on member calls.
-    let tokens = lexer::tokenize_filtered(source);
-    let mut parser = Parser::new(&tokens, source);
-    let file: SourceFile = parser.parse_file();
+    let analysis = DocumentAnalysis::analyze_plain(source);
+    let file: SourceFile = analysis.file;
 
     let scope = workspace.map(|ws| GlobalScope::new(ws, type_index));
 
@@ -666,16 +664,12 @@ fn pick_active_signature(sigs: &[ResolvedSignature], active_param: u32) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer;
-    use crate::parser::Parser;
 
     fn ws_from(source: &str) -> SymbolTable {
         let mut table = SymbolTable::new();
-        let tokens = lexer::tokenize_filtered(source);
-        let mut parser = Parser::new(&tokens, source);
-        let file = parser.parse_file();
+        let analysis = DocumentAnalysis::analyze_plain(source);
         let fid = table.allocate_file_id();
-        let syms = SymbolTable::extract_symbols(fid, source, &file);
+        let syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
         table.set_file_symbols(fid, syms);
         table
     }
