@@ -186,10 +186,7 @@ pub fn detect_install_method() -> InstallMethod {
 }
 
 pub fn detect_install_method_from_path(exe: &Path) -> InstallMethod {
-    let components: Vec<String> = exe
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
+    let components = path_components_lossy(exe);
 
     // npm optionalDep layout:
     //   .../node_modules/openplanet-lsp-<plat>/bin/openplanet-lsp
@@ -228,6 +225,16 @@ pub fn detect_install_method_from_path(exe: &Path) -> InstallMethod {
     InstallMethod::Standalone {
         exe_path: exe.to_path_buf(),
     }
+}
+
+/// Split a path on `/` and `\` so Windows layouts still classify when the host
+/// OS uses a different separator (and for mixed-separator paths).
+fn path_components_lossy(path: &Path) -> Vec<String> {
+    path.to_string_lossy()
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != ".")
+        .map(|p| p.to_string())
+        .collect()
 }
 
 /// Compare dotted numeric versions (`1.2.3`). Returns `Ordering` when both parse.
@@ -307,6 +314,16 @@ pub fn default_check_interval() -> Duration {
 /// Apply an update using the detected install method.
 pub fn apply_update(force: bool) -> Result<UpdateStatus, UpdateError> {
     let method = detect_install_method();
+    let status = check_for_update()?;
+    apply_update_with_status(&method, &status, force)
+}
+
+/// Apply using a status already obtained from [`check_for_update`].
+pub fn apply_update_with_status(
+    method: &InstallMethod,
+    status: &UpdateStatus,
+    force: bool,
+) -> Result<UpdateStatus, UpdateError> {
     if !method.can_auto_apply() {
         let hint = method
             .update_command()
@@ -317,15 +334,14 @@ pub fn apply_update(force: bool) -> Result<UpdateStatus, UpdateError> {
         )));
     }
 
-    let status = check_for_update()?;
     if let Some(err) = &status.error {
         return Err(UpdateError::msg(err.clone()));
     }
     if !status.update_available && !force {
-        return Ok(status);
+        return Ok(status.clone());
     }
 
-    match &method {
+    match method {
         InstallMethod::NpmGlobal => {
             run_command(
                 "npm",
@@ -351,13 +367,9 @@ pub fn apply_update(force: bool) -> Result<UpdateStatus, UpdateError> {
     }
 
     // Refresh status after install. The running binary version is unchanged
-    // until restart; record that an update was attempted/applied.
+    // until restart; record the latest registry view.
     let mut after = check_for_update()?;
-    if force || status.update_available {
-        // If we are still the same process binary, current_version stays old.
-        // Annotate via update_command field already present; clear stale error.
-        after.error = None;
-    }
+    after.error = None;
     save_status(&after)?;
     Ok(after)
 }
@@ -402,16 +414,12 @@ pub fn run_update(options: &UpdateOptions) -> Result<String, UpdateError> {
     }
 
     if options.check_only {
-        let existing = load_status().ok().flatten();
-        if !options.force_check && !should_auto_check(existing.as_ref(), Duration::from_secs(0)) {
-            // check_only always hits network unless we add a --cached flag;
-            // force_check is for auto path. CLI --check always refreshes.
-        }
         let status = check_for_update()?;
         return Ok(format_status(&status));
     }
 
     // Full update path
+    let method = detect_install_method();
     let before = check_for_update()?;
     if let Some(err) = &before.error {
         return Err(UpdateError::msg(err.clone()));
@@ -420,7 +428,27 @@ pub fn run_update(options: &UpdateOptions) -> Result<String, UpdateError> {
         return Ok(format_status(&before));
     }
 
-    let after = apply_update(options.force_install)?;
+    if !method.can_auto_apply() {
+        let hint = method
+            .update_command()
+            .unwrap_or_else(|| "rebuild from source or install via npm".into());
+        let reason = if before.update_available {
+            format!(
+                "Update available but install method `{}` cannot be auto-updated.",
+                method.as_str()
+            )
+        } else {
+            format!(
+                "Install method `{}` cannot be auto-updated.",
+                method.as_str()
+            )
+        };
+        let mut report = format!("{reason}\nManual step: {hint}\n\n");
+        report.push_str(&format_status(&before));
+        return Ok(report);
+    }
+
+    let after = apply_update_with_status(&method, &before, options.force_install)?;
     let mut report = String::new();
     report.push_str("Update command finished.\n");
     report.push_str(
@@ -446,13 +474,29 @@ fn infer_npm_package_root(exe: &Path, nm_idx: usize, components: &[String]) -> O
     // Prefer the directory that owns the top-level node_modules (project root
     // or npm prefix). For nested optionalDeps, use the outermost node_modules.
     let outer_nm = components.iter().position(|c| c == "node_modules")?;
-    let mut root: PathBuf = components[..outer_nm].iter().collect();
-    if root.as_os_str().is_empty() {
-        // path started at node_modules
-        root = exe.components().take(nm_idx).collect::<PathBuf>();
+    let root_parts: Vec<&str> = components[..outer_nm].iter().map(String::as_str).collect();
+    if root_parts.is_empty() {
+        // path started at node_modules — fall back to host-native parents
+        let fallback: PathBuf = exe.components().take(nm_idx).collect();
+        if fallback.as_os_str().is_empty() {
+            return None;
+        }
+        return Some(fallback);
     }
-    if root.as_os_str().is_empty() {
-        return None;
+
+    // Rebuild with `/` join; on Windows absolute paths keep a drive prefix like `C:`.
+    let mut root = PathBuf::new();
+    for (i, part) in root_parts.iter().enumerate() {
+        if i == 0 && part.ends_with(':') {
+            // Drive letter — PathBuf::push("C:") alone is fine on Windows; on
+            // Unix keep it as a prefix component for stable test expectations.
+            root.push(part);
+        } else if i == 0 && !part.starts_with(':') {
+            // Absolute POSIX path
+            root.push(format!("/{part}"));
+        } else {
+            root.push(part);
+        }
     }
     Some(root)
 }
@@ -788,6 +832,30 @@ mod tests {
     fn epoch_to_rfc3339_known_instant() {
         // 2024-01-01T00:00:00Z
         assert_eq!(epoch_to_rfc3339(1_704_067_200), "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn detect_npm_nested_optional_dep() {
+        let path = PathBuf::from(
+            "/work/app/node_modules/openplanet-lsp/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
+        );
+        match detect_install_method_from_path(&path) {
+            InstallMethod::NpmLocal { package_root } => {
+                assert_eq!(package_root, PathBuf::from("/work/app"));
+            }
+            other => panic!("expected NpmLocal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_npm_global_windows_roaming() {
+        let path = PathBuf::from(
+            r"C:\Users\me\AppData\Roaming\npm\node_modules\openplanet-lsp-win32-x64\bin\openplanet-lsp.exe",
+        );
+        assert_eq!(
+            detect_install_method_from_path(&path),
+            InstallMethod::NpmGlobal
+        );
     }
 
     #[test]

@@ -492,7 +492,8 @@ impl Backend {
             let result = tokio::task::spawn_blocking(|| {
                 let last = update::load_status().ok().flatten();
                 if !update::should_auto_check(last.as_ref(), update::default_check_interval()) {
-                    return last;
+                    // Fresh enough — keep status file, do not re-notify.
+                    return None;
                 }
                 match update::check_for_update() {
                     Ok(status) => Some(status),
@@ -505,34 +506,31 @@ impl Backend {
             .await;
 
             let status = match result {
-                Ok(status) => status,
+                Ok(Some(status)) => status,
+                Ok(None) => return,
                 Err(err) => {
                     tracing::debug!("update check task join error: {err}");
                     return;
                 }
             };
 
-            if let Some(status) = status {
-                if status.update_available {
-                    let latest = status
-                        .latest_version
-                        .clone()
-                        .unwrap_or_else(|| "?".into());
-                    let cmd = status
-                        .update_command
-                        .clone()
-                        .unwrap_or_else(|| "openplanet-lsp update".into());
-                    let msg = format!(
-                        "openplanet-lsp {latest} is available (current {}). Run `{cmd}` or `openplanet-lsp update`.",
-                        status.current_version
-                    );
-                    tracing::info!("{msg}");
-                    client
-                        .show_message(MessageType::INFO, msg)
-                        .await;
-                } else if let Some(err) = status.error {
-                    tracing::debug!("update check error recorded: {err}");
-                }
+            if status.update_available {
+                let latest = status
+                    .latest_version
+                    .clone()
+                    .unwrap_or_else(|| "?".into());
+                let cmd = status
+                    .update_command
+                    .clone()
+                    .unwrap_or_else(|| "openplanet-lsp update".into());
+                let msg = format!(
+                    "openplanet-lsp {latest} is available (current {}). Run `{cmd}` or `openplanet-lsp update`.",
+                    status.current_version
+                );
+                tracing::info!("{msg}");
+                client.show_message(MessageType::INFO, msg).await;
+            } else if let Some(err) = status.error {
+                tracing::debug!("update check error recorded: {err}");
             }
         });
     }
