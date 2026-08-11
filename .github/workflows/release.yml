@@ -1,0 +1,399 @@
+name: release
+
+# Build multi-platform binaries, attach them to a GitHub Release, and publish
+# npm packages (platform packages + meta launcher).
+#
+# Trigger:
+#   - push tag matching v* (e.g. v0.2.0)
+#   - workflow_dispatch with dry_run (build/pack only)
+#
+# npm auth: GitHub OIDC trusted publishing (no NPM_TOKEN secret).
+#   Each package must have a trusted publisher:
+#     repo clankercode/lsp-openplanet, workflow release.yml, allow publish
+#   Configure via: npm trust github <pkg> --file release.yml \
+#     --repo clankercode/lsp-openplanet --allow-publish -y
+#
+# After this workflow succeeds, an agent/human MUST finalize the release:
+#   write/update CHANGELOG.md and `gh release edit` with real notes.
+# Full procedure: RELEASE.md (keep that file in sync if this workflow changes).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and pack only (skip GitHub release upload + npm publish)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep npm metadata version in lockstep with the tag (set in version job).
+  PACKAGE_NAME: openplanet-lsp
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            # workflow_dispatch validates the version currently checked out,
+            # including a bump that has not been tagged yet.
+            TAG="v${CARGO_VER}"
+          fi
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag '${TAG}' must look like v1.2.3"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          if [[ "${CARGO_VER}" != "${VERSION}" ]]; then
+            echo "Cargo.toml version (${CARGO_VER}) != tag version (${VERSION})"
+            echo "Bump Cargo.toml (and npm package.json versions) before tagging."
+            exit 1
+          fi
+          node - "${VERSION}" <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const version = process.argv[2];
+          const packageFiles = fs.readdirSync('npm')
+            .map((dir) => path.join('npm', dir, 'package.json'))
+            .filter((file) => fs.existsSync(file));
+          if (packageFiles.length === 0) throw new Error('No npm package manifests found');
+
+          const manifests = packageFiles.map((file) => ({
+            file,
+            manifest: JSON.parse(fs.readFileSync(file, 'utf8')),
+          }));
+          const errors = [];
+          for (const { file, manifest } of manifests) {
+            if (manifest.version !== version) {
+              errors.push(`${file} version (${manifest.version}) != release version (${version})`);
+            }
+          }
+
+          const meta = manifests.find(({ manifest }) => manifest.name === 'openplanet-lsp');
+          if (!meta) errors.push('npm/openplanet-lsp meta package is missing');
+          const platformNames = manifests
+            .filter(({ manifest }) => manifest.name !== 'openplanet-lsp')
+            .map(({ manifest }) => manifest.name)
+            .sort();
+          const mappedNames = Object.values(require('./npm/openplanet-lsp/lib/platform').PLATFORMS)
+            .map(({ package: packageName }) => packageName)
+            .sort();
+          const optionalDependencies = meta?.manifest.optionalDependencies || {};
+          const optionalNames = Object.keys(optionalDependencies).sort();
+          if (JSON.stringify(platformNames) !== JSON.stringify(mappedNames)) {
+            errors.push('npm platform manifests do not match lib/platform.js');
+          }
+          if (JSON.stringify(optionalNames) !== JSON.stringify(mappedNames)) {
+            errors.push('meta optionalDependencies do not match lib/platform.js');
+          }
+          for (const packageName of optionalNames) {
+            if (optionalDependencies[packageName] !== version) {
+              errors.push(`meta optionalDependency ${packageName} (${optionalDependencies[packageName]}) != release version (${version})`);
+            }
+          }
+          if (errors.length > 0) {
+            console.error(errors.join('\n'));
+            process.exit(1);
+          }
+          console.log(`Cargo, npm packages, and platform pins are locked at ${version}`);
+          NODE
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${TAG} (${VERSION})"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            npm_pkg: openplanet-lsp-linux-x64
+            archive: tar.gz
+            bin_name: openplanet-lsp
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            npm_pkg: openplanet-lsp-linux-arm64
+            archive: tar.gz
+            bin_name: openplanet-lsp
+          - os: macos-13
+            target: x86_64-apple-darwin
+            npm_pkg: openplanet-lsp-darwin-x64
+            archive: tar.gz
+            bin_name: openplanet-lsp
+          - os: macos-14
+            target: aarch64-apple-darwin
+            npm_pkg: openplanet-lsp-darwin-arm64
+            archive: tar.gz
+            bin_name: openplanet-lsp
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            npm_pkg: openplanet-lsp-win32-x64
+            archive: zip
+            bin_name: openplanet-lsp.exe
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            npm_pkg: openplanet-lsp-win32-arm64
+            archive: zip
+            bin_name: openplanet-lsp.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/${{ matrix.bin_name }}"
+          if [[ ! -f "${BIN}" ]]; then
+            # cargo may omit .exe in path on windows matrix bin_name already has it
+            echo "missing binary: ${BIN}"
+            ls -la "target/${{ matrix.target }}/release/" || true
+            exit 1
+          fi
+          # Strip debug symbols on unix-like targets (best-effort).
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            strip "${BIN}" || true
+          fi
+          echo "BIN_PATH=${BIN}" >> "$GITHUB_ENV"
+          ls -lh "${BIN}"
+
+      - name: Stage GitHub release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          STAGE="dist/${TARGET}"
+          mkdir -p "${STAGE}"
+          cp "${BIN_PATH}" "${STAGE}/"
+          # Lightweight provenance files
+          cp README.md "${STAGE}/" 2>/dev/null || true
+          {
+            echo "openplanet-lsp ${VERSION}"
+            echo "target: ${TARGET}"
+            echo "commit: ${GITHUB_SHA}"
+          } > "${STAGE}/BUILD_INFO.txt"
+
+          mkdir -p dist/archives
+          ASSET="openplanet-lsp-v${VERSION}-${TARGET}"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            ASSET_PATH="dist/archives/${ASSET}.zip"
+            ASSET_NAME="${ASSET}.zip"
+            (
+              cd "${STAGE}"
+              if command -v zip >/dev/null 2>&1; then
+                zip -r "../archives/${ASSET}.zip" .
+              else
+                powershell -Command "Compress-Archive -Path * -DestinationPath '../archives/${ASSET}.zip'"
+              fi
+            )
+          else
+            ASSET_PATH="dist/archives/${ASSET}.tar.gz"
+            ASSET_NAME="${ASSET}.tar.gz"
+            tar -C "${STAGE}" -czf "${ASSET_PATH}" .
+          fi
+          echo "ASSET_PATH=${ASSET_PATH}" >> "$GITHUB_ENV"
+          echo "ASSET_NAME=${ASSET_NAME}" >> "$GITHUB_ENV"
+          ls -lh "${ASSET_PATH}"
+
+      - name: Stage npm platform package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.version.outputs.version }}"
+          PKG_DIR="npm/${{ matrix.npm_pkg }}"
+          test -d "${PKG_DIR}"
+          # Sync version field
+          node -e "
+            const fs=require('fs');
+            const p='${PKG_DIR}/package.json';
+            const j=JSON.parse(fs.readFileSync(p,'utf8'));
+            j.version='${VERSION}';
+            fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
+          "
+          mkdir -p "${PKG_DIR}/bin"
+          cp "${BIN_PATH}" "${PKG_DIR}/bin/${{ matrix.bin_name }}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "${PKG_DIR}/bin/${{ matrix.bin_name }}"
+          fi
+          # Pack for the publish job
+          mkdir -p dist/npm-tgz
+          (cd npm && npm pack "./${{ matrix.npm_pkg }}" --pack-destination ../dist/npm-tgz)
+          ls -lh dist/npm-tgz
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            ${{ env.ASSET_PATH }}
+            dist/npm-tgz/*.tgz
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    # OIDC: GitHub Actions → npm trusted publisher (no long-lived token).
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Trusted publishing requires Node ≥ 22.14 and npm ≥ 11.5.1
+      # (npm trust / OIDC path). Use current LTS line 24.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Show npm / node (OIDC publish prerequisites)
+        run: |
+          node -v
+          npm -v
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: build-*
+          merge-multiple: true
+
+      - name: Collect release assets + npm tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets npm-tgz
+          # artifacts may be nested depending on upload layout
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print -exec cp {} release-assets/ \;
+          find artifacts -type f -name '*.tgz' -print -exec cp {} npm-tgz/ \;
+          echo "Release assets:"
+          ls -lh release-assets
+          echo "npm tarballs:"
+          ls -lh npm-tgz
+          count=$(ls release-assets | wc -l)
+          if [[ "${count}" -lt 1 ]]; then
+            echo "No release assets found"
+            exit 1
+          fi
+
+      - name: Create / update GitHub Release
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: openplanet-lsp ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync meta package version + optionalDependency pins
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.VERSION;
+          if (!version) throw new Error('VERSION env missing');
+          const metaPath = 'npm/openplanet-lsp/package.json';
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+          meta.version = version;
+          for (const k of Object.keys(meta.optionalDependencies || {})) {
+            meta.optionalDependencies[k] = version;
+          }
+          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n');
+          console.log('meta package.json ->', version);
+          console.log('optionalDependencies', meta.optionalDependencies);
+          NODE
+
+      - name: Pack meta package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p npm-tgz
+          (cd npm && npm pack ./openplanet-lsp --pack-destination ../npm-tgz)
+          ls -lh npm-tgz
+
+      - name: Publish npm packages (OIDC trusted publishing)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          # Do NOT set NODE_AUTH_TOKEN / NPM_TOKEN — npm CLI uses OIDC when
+          # id-token: write is present and packages have trusted publishers.
+        run: |
+          set -euo pipefail
+          if [[ -n "${NODE_AUTH_TOKEN:-}" || -n "${NPM_TOKEN:-}" ]]; then
+            echo "Refusing to publish: NODE_AUTH_TOKEN/NPM_TOKEN is set."
+            echo "This workflow uses GitHub OIDC trusted publishing only."
+            exit 1
+          fi
+          shopt -s nullglob
+          # Platform tarballs look like: openplanet-lsp-linux-x64-0.2.0.tgz
+          # Meta tarball looks like:     openplanet-lsp-0.2.0.tgz
+          platforms=(
+            npm-tgz/openplanet-lsp-linux-*.tgz
+            npm-tgz/openplanet-lsp-darwin-*.tgz
+            npm-tgz/openplanet-lsp-win32-*.tgz
+          )
+          if [[ ${#platforms[@]} -eq 0 ]]; then
+            echo "No platform tarballs found"
+            ls -la npm-tgz || true
+            exit 1
+          fi
+          for tgz in "${platforms[@]}"; do
+            echo "Publishing platform ${tgz} (OIDC)"
+            npm publish "${tgz}" --access public --provenance
+          done
+          META_TGZ="npm-tgz/openplanet-lsp-${VERSION}.tgz"
+          if [[ ! -f "${META_TGZ}" ]]; then
+            echo "Meta tarball missing: ${META_TGZ}"
+            ls -la npm-tgz
+            exit 1
+          fi
+          echo "Publishing meta ${META_TGZ} (OIDC)"
+          npm publish "${META_TGZ}" --access public --provenance
+
+      - name: Dry-run summary
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          echo "Dry run complete. Artifacts staged but not published."
+          ls -lh release-assets npm-tgz

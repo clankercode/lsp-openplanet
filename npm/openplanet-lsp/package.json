@@ -1,0 +1,47 @@
+{
+  "name": "openplanet-lsp",
+  "version": "0.2.0",
+  "description": "Language Server Protocol implementation for OpenPlanet AngelScript",
+  "keywords": [
+    "openplanet",
+    "angelscript",
+    "lsp",
+    "language-server",
+    "trackmania"
+  ],
+  "homepage": "https://github.com/clankercode/lsp-openplanet",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clankercode/lsp-openplanet.git",
+    "directory": "npm/openplanet-lsp"
+  },
+  "bugs": {
+    "url": "https://github.com/clankercode/lsp-openplanet/issues"
+  },
+  "license": "MIT",
+  "author": "clankercode",
+  "type": "commonjs",
+  "bin": {
+    "openplanet-lsp": "bin/openplanet-lsp.js"
+  },
+  "main": "lib/index.js",
+  "files": [
+    "bin",
+    "lib",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "postinstall": "node ./lib/check-platform.js"
+  },
+  "optionalDependencies": {
+    "openplanet-lsp-darwin-arm64": "0.2.0",
+    "openplanet-lsp-darwin-x64": "0.2.0",
+    "openplanet-lsp-linux-arm64": "0.2.0",
+    "openplanet-lsp-linux-x64": "0.2.0",
+    "openplanet-lsp-win32-arm64": "0.2.0",
+    "openplanet-lsp-win32-x64": "0.2.0"
+  }
+}
