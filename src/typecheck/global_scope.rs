@@ -264,6 +264,18 @@ impl<'a> GlobalScope<'a> {
         self.workspace_class_member(type_name, method)
     }
 
+    /// Resolve `name` to a fully qualified external type key. Accepts either
+    /// an already-qualified name or a Nadeo short name (`CMwNod`).
+    fn resolve_external_type_name(ext: &TypeIndex, name: &str) -> Option<String> {
+        if ext.lookup_type(name).is_some() {
+            return Some(name.to_string());
+        }
+        if name.contains("::") {
+            return None;
+        }
+        ext.find_by_short_name(name).first().cloned()
+    }
+
     fn ext_lookup_member(ext: &TypeIndex, type_name: &str, member: &str) -> Option<TypeRepr> {
         // AngelScript exposes `get_Foo` / `set_Foo` methods as a virtual
         // property named `Foo`. Build both candidate names up front so we
@@ -271,8 +283,10 @@ impl<'a> GlobalScope<'a> {
         let getter_name = format!("get_{}", member);
         let setter_name = format!("set_{}", member);
 
-        // Guard against cycles in parent chains.
-        let mut current: Option<String> = Some(type_name.to_string());
+        // Guard against cycles in parent chains. Nadeo parents are stored as
+        // short names (`CMwNod`), so resolve each hop through the short-name
+        // index.
+        let mut current: Option<String> = Self::resolve_external_type_name(ext, type_name);
         let mut hops = 0usize;
         while let Some(name) = current.take() {
             hops += 1;
@@ -295,7 +309,10 @@ impl<'a> GlobalScope<'a> {
                     return Some(TypeRepr::parse_type_string(&m.return_type));
                 }
             }
-            current = info.parent.clone();
+            current = info
+                .parent
+                .as_ref()
+                .and_then(|p| Self::resolve_external_type_name(ext, p));
         }
         None
     }
@@ -307,7 +324,7 @@ impl<'a> GlobalScope<'a> {
     ) -> Option<TypeRepr> {
         let getter_name = format!("get_{}", method);
         let setter_name = format!("set_{}", method);
-        let mut current: Option<String> = Some(type_name.to_string());
+        let mut current: Option<String> = Self::resolve_external_type_name(ext, type_name);
         let mut hops = 0usize;
         while let Some(name) = current.take() {
             hops += 1;
@@ -330,7 +347,10 @@ impl<'a> GlobalScope<'a> {
                     return Some(TypeRepr::parse_type_string(&p.type_name));
                 }
             }
-            current = info.parent.clone();
+            current = info
+                .parent
+                .as_ref()
+                .and_then(|p| Self::resolve_external_type_name(ext, p));
         }
         None
     }
@@ -391,23 +411,51 @@ impl<'a> GlobalScope<'a> {
         false
     }
 
+    /// Look up external type info by fully qualified name or Nadeo short name.
+    fn external_type_info(&self, name: &str) -> Option<&crate::typedb::index::TypeInfo> {
+        let ext = self.external?;
+        if let Some(t) = ext.lookup_type(name) {
+            return Some(t);
+        }
+        if name.contains("::") {
+            return None;
+        }
+        let q = ext.find_by_short_name(name).first()?;
+        ext.lookup_type(q)
+    }
+
     /// True if `qualified` is known to the external TypeIndex as a type.
     /// Used by the member-access checker to decide whether to trust a
     /// negative lookup (only external types have complete member lists).
+    /// Accepts fully qualified names and Nadeo short names.
     pub fn is_external_type(&self, qualified: &str) -> bool {
-        self.external
-            .and_then(|ext| ext.lookup_type(qualified))
-            .is_some()
+        self.external_type_info(qualified).is_some()
     }
 
-    /// True if the type at the given fully qualified name is from the
-    /// external Nadeo (engine) database, whose member metadata is known to
-    /// be incomplete. Callers use this to suppress `UndefinedMember`
-    /// diagnostics on types whose method/property lists we can't trust.
+    /// True if the type at the given name is from the external Nadeo
+    /// (engine) database. Accepts fully qualified names and short names.
+    ///
+    /// Historically callers suppressed `UndefinedMember` for all Nadeo
+    /// types because member metadata can be incomplete. Prefer
+    /// [`Self::nadeo_member_list_trusted`] to decide whether a negative
+    /// lookup is trustworthy.
     pub fn is_nadeo_type(&self, qualified: &str) -> bool {
-        self.external
-            .and_then(|idx| idx.lookup_type(qualified))
+        self.external_type_info(qualified)
             .map(|t| matches!(t.source, crate::typedb::index::TypeSource::Nadeo))
+            .unwrap_or(false)
+    }
+
+    /// True when a Nadeo type has a non-empty `properties` + `methods`
+    /// list in the typedb. A failed member lookup against such a type can
+    /// be reported as `UndefinedMember` (trust positive completeness of
+    /// the listed API). Types with zero listed members stay silent —
+    /// their metadata is treated as incomplete (B006).
+    pub fn nadeo_member_list_trusted(&self, qualified: &str) -> bool {
+        self.external_type_info(qualified)
+            .map(|t| {
+                matches!(t.source, crate::typedb::index::TypeSource::Nadeo)
+                    && (!t.properties.is_empty() || !t.methods.is_empty())
+            })
             .unwrap_or(false)
     }
 
@@ -476,7 +524,7 @@ impl<'a> GlobalScope<'a> {
         }
         let ext = self.external?;
         let mut ranges = Vec::new();
-        let mut current: Option<String> = Some(type_name.to_string());
+        let mut current: Option<String> = Self::resolve_external_type_name(ext, type_name);
         let mut hops = 0usize;
         while let Some(name) = current.take() {
             hops += 1;
@@ -496,7 +544,10 @@ impl<'a> GlobalScope<'a> {
             if found_on_this {
                 break;
             }
-            current = info.parent.clone();
+            current = info
+                .parent
+                .as_ref()
+                .and_then(|p| Self::resolve_external_type_name(ext, p));
         }
         if ranges.is_empty() {
             None
@@ -882,6 +933,13 @@ mod tests {
             scope.is_nadeo_type(&cmwnod),
             "{} should be Nadeo-sourced",
             cmwnod
+        );
+        // Short names also resolve for Nadeo discrimination / completeness.
+        assert!(scope.is_nadeo_type("CMwNod"));
+        assert!(scope.nadeo_member_list_trusted("CGameCtnCollection"));
+        assert!(
+            !scope.nadeo_member_list_trusted("CMwEngine"),
+            "empty member list must not be trusted"
         );
         // A Core-sourced type like UI::InputBlocking should NOT report as Nadeo.
         // Fall back to any non-Nadeo core type by iterating if needed.
