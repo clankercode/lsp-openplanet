@@ -46,6 +46,17 @@ Status is written to `~/.config/openplanet-lsp/update-status.json`
 in the background about once per day and shows an editor info message when a
 newer release is available.
 
+Dev/CI can pretend to be another version without rebuilding:
+
+| Env | Effect |
+|-----|--------|
+| `OPENPLANET_LSP_VERSION` | Compare as this version (`--version` stays real) |
+| `OPENPLANET_LSP_LATEST_VERSION` | Skip npm network; treat as registry latest |
+| `OPENPLANET_LSP_UPDATE_PACKAGE` | npm install target(s) instead of `@latest` |
+| `OPENPLANET_LSP_EXE` | Fake binary path for install-method detection |
+
+Local smoke: `./scripts/release/smoke-self-update.sh`
+
 ## Release / distribution
 
 See **[RELEASE.md](RELEASE.md)** for the full procedure (keep it up to date when

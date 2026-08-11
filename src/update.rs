@@ -48,10 +48,11 @@ impl InstallMethod {
 
     /// Shell command the user (or `update`) should run to upgrade, if any.
     pub fn update_command(&self) -> Option<String> {
+        let specs = npm_update_package_specs().join(" ");
         match self {
-            InstallMethod::NpmGlobal => Some(format!("npm install -g {PACKAGE_NAME}@latest")),
+            InstallMethod::NpmGlobal => Some(format!("npm install -g {specs}")),
             InstallMethod::NpmLocal { package_root } => Some(format!(
-                "npm install {PACKAGE_NAME}@latest  # in {}",
+                "npm install {specs}  # in {}",
                 package_root.display()
             )),
             InstallMethod::Cargo => Some(format!(
@@ -59,7 +60,7 @@ impl InstallMethod {
             )),
             InstallMethod::Development => None,
             InstallMethod::Standalone { .. } | InstallMethod::Unknown { .. } => Some(format!(
-                "npm install -g {PACKAGE_NAME}@latest  # or re-download from GitHub Releases"
+                "npm install -g {specs}  # or re-download from GitHub Releases"
             )),
         }
     }
@@ -124,8 +125,27 @@ pub struct UpdateOptions {
 
 // ── public entry points ────────────────────────────────────────────────────
 
-pub fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+/// Effective package version used for update comparisons.
+///
+/// Override with `OPENPLANET_LSP_VERSION` (CI/dev: pretend to be an older build).
+/// `--version` still prints the real `CARGO_PKG_VERSION`.
+pub fn current_version() -> String {
+    env_nonempty("OPENPLANET_LSP_VERSION").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+/// npm install target(s) for apply. Default: `openplanet-lsp@latest`.
+///
+/// Override with `OPENPLANET_LSP_UPDATE_PACKAGE` (whitespace-separated specs), e.g.
+/// a local `.tgz` path for smoke tests.
+pub fn npm_update_package_specs() -> Vec<String> {
+    match env_nonempty("OPENPLANET_LSP_UPDATE_PACKAGE") {
+        Some(raw) => raw
+            .split_whitespace()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+            .collect(),
+        None => vec![format!("{PACKAGE_NAME}@latest")],
+    }
 }
 
 /// Resolve the user config directory (`~/.config/openplanet-lsp` by default).
@@ -252,7 +272,17 @@ pub fn is_update_available(current: &str, latest: &str) -> bool {
 }
 
 /// Fetch the latest published version from the npm registry.
+///
+/// Override with `OPENPLANET_LSP_LATEST_VERSION` to skip the network (CI/dev).
 pub fn fetch_latest_version() -> Result<String, UpdateError> {
+    if let Some(v) = env_nonempty("OPENPLANET_LSP_LATEST_VERSION") {
+        if parse_version(&v).is_none() {
+            return Err(UpdateError::msg(format!(
+                "OPENPLANET_LSP_LATEST_VERSION is not semver-like: {v}"
+            )));
+        }
+        return Ok(v);
+    }
     if let Ok(v) = fetch_latest_via_curl() {
         return Ok(v);
     }
@@ -266,7 +296,7 @@ pub fn fetch_latest_version() -> Result<String, UpdateError> {
 
 /// Run a version check, always writing the status file.
 pub fn check_for_update() -> Result<UpdateStatus, UpdateError> {
-    let current = current_version().to_string();
+    let current = current_version();
     let method = detect_install_method();
     let exe = resolve_exe_path()
         .map(|p| p.display().to_string())
@@ -343,18 +373,14 @@ pub fn apply_update_with_status(
 
     match method {
         InstallMethod::NpmGlobal => {
-            run_command(
-                "npm",
-                &["install", "-g", &format!("{PACKAGE_NAME}@latest")],
-                None,
-            )?;
+            let mut args = vec!["install".to_string(), "-g".to_string()];
+            args.extend(npm_update_package_specs());
+            run_command_owned("npm", &args, None)?;
         }
         InstallMethod::NpmLocal { package_root } => {
-            run_command(
-                "npm",
-                &["install", &format!("{PACKAGE_NAME}@latest")],
-                Some(package_root),
-            )?;
+            let mut args = vec!["install".to_string()];
+            args.extend(npm_update_package_specs());
+            run_command_owned("npm", &args, Some(package_root))?;
         }
         InstallMethod::Cargo => {
             run_command(
@@ -613,6 +639,15 @@ fn parse_npm_latest_json(bytes: &[u8]) -> Result<String, UpdateError> {
 }
 
 fn run_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<(), UpdateError> {
+    let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    run_command_owned(program, &owned, cwd)
+}
+
+fn run_command_owned(
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+) -> Result<(), UpdateError> {
     let mut cmd = Command::new(program);
     cmd.args(args);
     if let Some(dir) = cwd {
@@ -631,6 +666,17 @@ fn run_command(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<(), U
         )));
     }
     Ok(())
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|v| {
+        let t = v.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    })
 }
 
 fn now_epoch_secs() -> u64 {
@@ -856,6 +902,30 @@ mod tests {
             detect_install_method_from_path(&path),
             InstallMethod::NpmGlobal
         );
+    }
+
+    #[test]
+    fn env_overrides_version_and_latest() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("OPENPLANET_LSP_VERSION", "0.1.0");
+        std::env::set_var("OPENPLANET_LSP_LATEST_VERSION", "9.9.9");
+        std::env::set_var("OPENPLANET_LSP_UPDATE_PACKAGE", "./old.tgz ./new.tgz");
+        assert_eq!(current_version(), "0.1.0");
+        assert_eq!(fetch_latest_version().unwrap(), "9.9.9");
+        assert!(is_update_available(
+            &current_version(),
+            &fetch_latest_version().unwrap()
+        ));
+        assert_eq!(
+            npm_update_package_specs(),
+            vec!["./old.tgz".to_string(), "./new.tgz".to_string()]
+        );
+        let cmd = InstallMethod::NpmGlobal.update_command().unwrap();
+        assert!(cmd.contains("./old.tgz"));
+        assert!(cmd.contains("-g"));
+        std::env::remove_var("OPENPLANET_LSP_VERSION");
+        std::env::remove_var("OPENPLANET_LSP_LATEST_VERSION");
+        std::env::remove_var("OPENPLANET_LSP_UPDATE_PACKAGE");
     }
 
     #[test]

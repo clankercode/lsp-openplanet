@@ -145,6 +145,7 @@ Use the helper:
 - [ ] On a clean branch that will become the release tip (usually `master`)
 - [ ] `cargo test` green (or CI green on the commit you will tag)
 - [ ] Optional local smoke: `./scripts/release/smoke-local.sh`
+- [ ] Optional self-update smoke: `./scripts/release/smoke-self-update.sh`
 - [ ] npm trusted publishers configured for all 7 packages (`npm trust list …`)
 - [ ] You know the previous tag for the changelog range:
   ```bash
@@ -390,9 +391,11 @@ npm/
 scripts/release/
   bump-version.sh                 # Cargo.toml + all npm versions
   smoke-local.sh                  # host-only pack + run
+  smoke-self-update.sh            # pack + pretend-old + update + still runs
 .github/workflows/
-  ci.yml                          # PR/main tests + npm manifest smoke
-  release.yml                     # tag → binaries + GH release + npm publish
+  ci.yml                          # PR/main tests + npm manifest + self-update smoke
+  release.yml                     # tag → binaries + GH release + npm publish +
+                                  # post-publish self-update smoke
 ```
 
 ---

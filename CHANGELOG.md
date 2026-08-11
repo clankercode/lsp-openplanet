@@ -13,6 +13,11 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Added
+- Self-update CI/dev hooks: `OPENPLANET_LSP_VERSION`,
+  `OPENPLANET_LSP_LATEST_VERSION`, `OPENPLANET_LSP_UPDATE_PACKAGE`
+- `scripts/release/smoke-self-update.sh` + CI/release self-update smoke jobs
+
 ## [0.2.6] - 2026-08-12
 
 ### Fixed
@@ -20,7 +25,6 @@ GitHub Release body to match this section (gh release edit).
 
 ### Distribution
 - Multi-platform GitHub Release + npm OIDC publish
-
 
 ### Added
 - Self-update CLI: `openplanet-lsp update` / `update --check` / `update --status`

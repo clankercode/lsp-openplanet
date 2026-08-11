@@ -37,3 +37,17 @@ jobs:
           node -e "require('./npm/openplanet-lsp/lib/platform.js'); console.log('platform map ok')"
           # Meta package should pack without the native binary present.
           (cd npm && npm pack ./openplanet-lsp --dry-run)
+
+  # Pack host npm packages, install into a temp prefix, pretend to be older via
+  # OPENPLANET_LSP_VERSION, run `openplanet-lsp update`, confirm still works.
+  self-update-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Self-update smoke (local tarballs)
+        run: ./scripts/release/smoke-self-update.sh

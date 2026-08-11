@@ -44,6 +44,16 @@ BEHAVIOR:
       $OPENPLANET_LSP_CONFIG_DIR/update-status.json
       (default: ~/.config/openplanet-lsp/update-status.json)
 
+DEV / CI OVERRIDES (optional):
+    OPENPLANET_LSP_VERSION          Pretend current version (update compare only;
+                                    --version still prints the real binary version)
+    OPENPLANET_LSP_LATEST_VERSION   Skip network; treat this as registry latest
+    OPENPLANET_LSP_UPDATE_PACKAGE    npm install target(s) instead of
+                                    openplanet-lsp@latest (whitespace-separated;
+                                    local .tgz paths ok)
+    OPENPLANET_LSP_EXE              Pretend this is the running binary path
+                                    (install-method detection)
+
 EXAMPLES:
     openplanet-lsp update --check
     openplanet-lsp update --status

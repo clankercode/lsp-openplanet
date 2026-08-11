@@ -406,3 +406,62 @@ jobs:
         run: |
           echo "Dry run complete. Artifacts staged but not published."
           ls -lh release-assets npm-tgz
+
+  # After a real publish: install the just-released package from npm, pretend to
+  # be an older build, run self-update against registry @latest, confirm it works.
+  self-update-smoke:
+    needs: [version, publish]
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Install published package + self-update
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset NODE_AUTH_TOKEN NPM_TOKEN || true
+          # Registry can lag briefly after publish.
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if npm view "openplanet-lsp@${VERSION}" version; then
+              break
+            fi
+            echo "waiting for npm ${VERSION} (try ${i})..."
+            sleep 15
+          done
+          npm view "openplanet-lsp@${VERSION}" version
+
+          npm install -g "openplanet-lsp@${VERSION}"
+          hash -r || true
+          BIN="$(command -v openplanet-lsp)"
+          echo "bin=${BIN}"
+          "${BIN}" --version | tee /tmp/oplsp-ver.txt
+          grep -F "openplanet-lsp ${VERSION}" /tmp/oplsp-ver.txt
+
+          CFG="$(mktemp -d)"
+          export OPENPLANET_LSP_CONFIG_DIR="${CFG}"
+          export OPENPLANET_LSP_VERSION="0.0.0"
+          # Hit real registry for latest (should be >= just-published).
+          unset OPENPLANET_LSP_LATEST_VERSION || true
+          unset OPENPLANET_LSP_UPDATE_PACKAGE || true
+
+          "${BIN}" update --check | tee /tmp/oplsp-check.txt
+          grep -E 'status:   update available|status:   up to date' /tmp/oplsp-check.txt
+          # With VERSION forced to 0.0.0, an update must be available if registry has anything.
+          grep -F 'status:   update available' /tmp/oplsp-check.txt
+          grep -F 'method:   npm-global' /tmp/oplsp-check.txt
+
+          "${BIN}" update | tee /tmp/oplsp-update.txt
+          grep -F 'Update command finished' /tmp/oplsp-update.txt
+
+          hash -r || true
+          BIN2="$(command -v openplanet-lsp)"
+          "${BIN2}" --version | tee /tmp/oplsp-ver2.txt
+          # After update we should still be on a runnable binary at least as new as VERSION.
+          "${BIN2}" update --help >/dev/null
+          "${BIN2}" check --help >/dev/null
+          echo "OK: post-publish self-update smoke for ${VERSION}"
