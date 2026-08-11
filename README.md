@@ -36,10 +36,10 @@ openplanet-lsp update           # apply update via detected install method
 ```
 
 Latest version is read from the **npm registry** (not the GitHub API). The
-binary path is classified as `npm-global`, `npm-local`, `cargo`, `development`,
-or `standalone`, and the matching upgrade command is used when possible
-(`npm install -g …`, project-local `npm install …`, or
-`cargo install --git …`).
+binary path is classified as `npm` / `pnpm` / `yarn` / `bun` (global or local),
+`cargo`, `development`, or `standalone`, and the matching upgrade command is
+used when possible (`npm install -g …`, `pnpm add -g …`, `yarn global add …`,
+`bun add -g …`, project-local adds, or `cargo install --git …`).
 
 Status is written to `~/.config/openplanet-lsp/update-status.json`
 (override with `OPENPLANET_LSP_CONFIG_DIR`). The language server also probes
@@ -52,7 +52,8 @@ Dev/CI can pretend to be another version without rebuilding:
 |-----|--------|
 | `OPENPLANET_LSP_VERSION` | Compare as this version (`--version` stays real) |
 | `OPENPLANET_LSP_LATEST_VERSION` | Skip npm network; treat as registry latest |
-| `OPENPLANET_LSP_UPDATE_PACKAGE` | npm install target(s) instead of `@latest` |
+| `OPENPLANET_LSP_UPDATE_PACKAGE` | install target(s) instead of `@latest` |
+| `OPENPLANET_LSP_PACKAGE_MANAGER` | Force `npm` / `pnpm` / `yarn` / `bun` |
 | `OPENPLANET_LSP_EXE` | Fake binary path for install-method detection |
 
 Local smoke: `./scripts/release/smoke-self-update.sh`

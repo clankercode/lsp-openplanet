@@ -37,8 +37,9 @@ OPTIONS:
 
 BEHAVIOR:
     Latest version is read from the npm registry (registry.npmjs.org), not the
-    GitHub API. The running binary path is classified as npm-global, npm-local,
-    cargo, development, or standalone, and the matching upgrade command is used.
+    GitHub API. The running binary path is classified as npm/pnpm/yarn/bun
+    (global or local), cargo, development, or standalone, and the matching
+    upgrade command is used.
 
     Status is written to:
       $OPENPLANET_LSP_CONFIG_DIR/update-status.json
@@ -48,9 +49,10 @@ DEV / CI OVERRIDES (optional):
     OPENPLANET_LSP_VERSION          Pretend current version (update compare only;
                                     --version still prints the real binary version)
     OPENPLANET_LSP_LATEST_VERSION   Skip network; treat this as registry latest
-    OPENPLANET_LSP_UPDATE_PACKAGE    npm install target(s) instead of
+    OPENPLANET_LSP_UPDATE_PACKAGE    install target(s) instead of
                                     openplanet-lsp@latest (whitespace-separated;
                                     local .tgz paths ok)
+    OPENPLANET_LSP_PACKAGE_MANAGER  Force js pm: npm | pnpm | yarn | bun
     OPENPLANET_LSP_EXE              Pretend this is the running binary path
                                     (install-method detection)
 

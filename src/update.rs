@@ -2,7 +2,8 @@
 //!
 //! Latest version is resolved from the **npm registry** (not the GitHub API).
 //! Install method is inferred from the running binary path; update applies the
-//! matching package-manager command when one is known.
+//! matching package-manager command when one is known (npm / pnpm / yarn / bun,
+//! cargo, …).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,13 +18,50 @@ const CARGO_GIT_URL: &str = "https://github.com/clankercode/lsp-openplanet";
 const STATUS_FILE_NAME: &str = "update-status.json";
 const DEFAULT_CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
+/// JavaScript package manager used for a node_modules-based install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsPackageManager {
+    Npm,
+    Pnpm,
+    Yarn,
+    Bun,
+}
+
+impl JsPackageManager {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JsPackageManager::Npm => "npm",
+            JsPackageManager::Pnpm => "pnpm",
+            JsPackageManager::Yarn => "yarn",
+            JsPackageManager::Bun => "bun",
+        }
+    }
+
+    pub fn program(self) -> &'static str {
+        self.as_str()
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "npm" => Some(Self::Npm),
+            "pnpm" => Some(Self::Pnpm),
+            "yarn" | "yarnpkg" => Some(Self::Yarn),
+            "bun" => Some(Self::Bun),
+            _ => None,
+        }
+    }
+}
+
 /// How this binary appears to have been installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallMethod {
-    /// `npm install -g openplanet-lsp` (binary under a global node_modules tree).
-    NpmGlobal,
-    /// Project-local `node_modules` dependency.
-    NpmLocal { package_root: PathBuf },
+    /// Global JS package manager install (`npm/pnpm/yarn/bun … -g`).
+    NodeGlobal { pm: JsPackageManager },
+    /// Project-local dependency under a package root.
+    NodeLocal {
+        pm: JsPackageManager,
+        package_root: PathBuf,
+    },
     /// `~/.cargo/bin/openplanet-lsp` (typically `cargo install --git …`).
     Cargo,
     /// Built from a checkout (`target/debug` or `target/release`).
@@ -35,24 +73,25 @@ pub enum InstallMethod {
 }
 
 impl InstallMethod {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> String {
         match self {
-            InstallMethod::NpmGlobal => "npm-global",
-            InstallMethod::NpmLocal { .. } => "npm-local",
-            InstallMethod::Cargo => "cargo",
-            InstallMethod::Development => "development",
-            InstallMethod::Standalone { .. } => "standalone",
-            InstallMethod::Unknown { .. } => "unknown",
+            InstallMethod::NodeGlobal { pm } => format!("{}-global", pm.as_str()),
+            InstallMethod::NodeLocal { pm, .. } => format!("{}-local", pm.as_str()),
+            InstallMethod::Cargo => "cargo".into(),
+            InstallMethod::Development => "development".into(),
+            InstallMethod::Standalone { .. } => "standalone".into(),
+            InstallMethod::Unknown { .. } => "unknown".into(),
         }
     }
 
     /// Shell command the user (or `update`) should run to upgrade, if any.
     pub fn update_command(&self) -> Option<String> {
-        let specs = npm_update_package_specs().join(" ");
+        let specs = update_package_specs().join(" ");
         match self {
-            InstallMethod::NpmGlobal => Some(format!("npm install -g {specs}")),
-            InstallMethod::NpmLocal { package_root } => Some(format!(
-                "npm install {specs}  # in {}",
+            InstallMethod::NodeGlobal { pm } => Some(js_global_update_cmdline(*pm, &specs)),
+            InstallMethod::NodeLocal { pm, package_root } => Some(format!(
+                "{}  # in {}",
+                js_local_update_cmdline(*pm, &specs),
                 package_root.display()
             )),
             InstallMethod::Cargo => Some(format!(
@@ -68,8 +107,28 @@ impl InstallMethod {
     pub fn can_auto_apply(&self) -> bool {
         matches!(
             self,
-            InstallMethod::NpmGlobal | InstallMethod::NpmLocal { .. } | InstallMethod::Cargo
+            InstallMethod::NodeGlobal { .. }
+                | InstallMethod::NodeLocal { .. }
+                | InstallMethod::Cargo
         )
+    }
+}
+
+fn js_global_update_cmdline(pm: JsPackageManager, specs: &str) -> String {
+    match pm {
+        JsPackageManager::Npm => format!("npm install -g {specs}"),
+        JsPackageManager::Pnpm => format!("pnpm add -g {specs}"),
+        JsPackageManager::Yarn => format!("yarn global add {specs}"),
+        JsPackageManager::Bun => format!("bun add -g {specs}"),
+    }
+}
+
+fn js_local_update_cmdline(pm: JsPackageManager, specs: &str) -> String {
+    match pm {
+        JsPackageManager::Npm => format!("npm install {specs}"),
+        JsPackageManager::Pnpm => format!("pnpm add {specs}"),
+        JsPackageManager::Yarn => format!("yarn add {specs}"),
+        JsPackageManager::Bun => format!("bun add {specs}"),
     }
 }
 
@@ -149,7 +208,7 @@ pub fn current_version() -> String {
 ///
 /// Override with `OPENPLANET_LSP_UPDATE_PACKAGE` (whitespace-separated specs), e.g.
 /// a local `.tgz` path for smoke tests.
-pub fn npm_update_package_specs() -> Vec<String> {
+pub fn update_package_specs() -> Vec<String> {
     match env_nonempty("OPENPLANET_LSP_UPDATE_PACKAGE") {
         Some(raw) => raw
             .split_whitespace()
@@ -158,6 +217,11 @@ pub fn npm_update_package_specs() -> Vec<String> {
             .collect(),
         None => vec![format!("{PACKAGE_NAME}@latest")],
     }
+}
+
+/// Backward-compatible alias.
+pub fn npm_update_package_specs() -> Vec<String> {
+    update_package_specs()
 }
 
 /// Resolve the user config directory.
@@ -243,23 +307,31 @@ pub fn detect_install_method() -> InstallMethod {
 
 pub fn detect_install_method_from_path(exe: &Path) -> InstallMethod {
     let components = path_components_lossy(exe);
+    let path_str = exe.to_string_lossy();
 
-    // npm optionalDep layout:
+    // Global JS PM shims / stores (before generic node_modules handling).
+    if let Some(pm) = detect_global_js_pm_from_path(&path_str, &components) {
+        return InstallMethod::NodeGlobal { pm };
+    }
+
+    // JS package layout:
     //   .../node_modules/openplanet-lsp-<plat>/bin/openplanet-lsp
     //   .../node_modules/openplanet-lsp/node_modules/openplanet-lsp-<plat>/bin/...
+    //   pnpm virtual store: .../node_modules/.pnpm/.../node_modules/openplanet-lsp-*/
     if let Some(nm_idx) = components.iter().rposition(|c| c == "node_modules") {
         let package_root = infer_npm_package_root(exe, nm_idx, &components);
-        if is_npm_global_path(exe) {
-            return InstallMethod::NpmGlobal;
+        let package_root = package_root.unwrap_or_else(|| {
+            exe.parent()
+                .and_then(|p| p.parent())
+                .unwrap_or(exe)
+                .to_path_buf()
+        });
+        if is_node_global_path(exe) {
+            let pm = detect_js_pm(exe, Some(&package_root), true);
+            return InstallMethod::NodeGlobal { pm };
         }
-        return InstallMethod::NpmLocal {
-            package_root: package_root.unwrap_or_else(|| {
-                exe.parent()
-                    .and_then(|p| p.parent())
-                    .unwrap_or(exe)
-                    .to_path_buf()
-            }),
-        };
+        let pm = detect_js_pm(exe, Some(&package_root), false);
+        return InstallMethod::NodeLocal { pm, package_root };
     }
 
     // cargo install destination
@@ -355,7 +427,7 @@ pub fn check_for_update() -> Result<UpdateStatus, UpdateError> {
         current_version: current,
         latest_version: latest,
         update_available,
-        install_method: method.as_str().to_string(),
+        install_method: method.as_str(),
         exe_path: exe,
         update_command: method.update_command(),
         error,
@@ -419,16 +491,11 @@ pub fn apply_update_with_status(
     }
 
     match method {
-        InstallMethod::NpmGlobal => {
-            let mut args = vec!["install".to_string(), "-g".to_string()];
-            args.extend(npm_update_package_specs());
-            run_command_owned("npm", &args, None).map_err(annotate_replace_failure)?;
+        InstallMethod::NodeGlobal { pm } => {
+            apply_js_pm(*pm, true, None).map_err(annotate_replace_failure)?;
         }
-        InstallMethod::NpmLocal { package_root } => {
-            let mut args = vec!["install".to_string()];
-            args.extend(npm_update_package_specs());
-            run_command_owned("npm", &args, Some(package_root))
-                .map_err(annotate_replace_failure)?;
+        InstallMethod::NodeLocal { pm, package_root } => {
+            apply_js_pm(*pm, false, Some(package_root)).map_err(annotate_replace_failure)?;
         }
         InstallMethod::Cargo => {
             run_command(
@@ -454,7 +521,7 @@ pub fn apply_update_with_status(
         current_version: current_version(),
         latest_version: status.latest_version.clone(),
         update_available: false,
-        install_method: method.as_str().to_string(),
+        install_method: method.as_str(),
         exe_path: status.exe_path.clone(),
         update_command: method.update_command(),
         error: None,
@@ -619,8 +686,8 @@ fn infer_npm_package_root(exe: &Path, nm_idx: usize, components: &[String]) -> O
     Some(root)
 }
 
-fn is_npm_global_path(exe: &Path) -> bool {
-    // Heuristics: global prefix layouts and `npm root -g` match.
+fn is_node_global_path(exe: &Path) -> bool {
+    // Heuristics: global prefix layouts and package-manager `root -g` matches.
     let s = exe.to_string_lossy();
     let global_markers = [
         "/lib/node_modules/",
@@ -633,7 +700,7 @@ fn is_npm_global_path(exe: &Path) -> bool {
         "/.nvm/versions/",
         "/.fnm/",
         "/.volta/tools/image/packages/",
-        "/.local/share/pnpm/global/",
+        "/.local/share/pnpm/",
         "/.local/lib/node_modules/",
         // Default Windows Node installer layout
         "\\nodejs\\node_modules\\",
@@ -642,36 +709,286 @@ fn is_npm_global_path(exe: &Path) -> bool {
         "Program Files/nodejs/",
         "Program Files (x86)\\nodejs\\",
         "Program Files (x86)/nodejs/",
+        // yarn classic global
+        "/.config/yarn/global/",
+        "\\.config\\yarn\\global\\",
+        "/.yarn/global/",
+        "\\.yarn\\global\\",
+        "AppData\\Local\\Yarn\\Data\\global\\",
+        "AppData/Local/Yarn/Data/global/",
+        // bun global
+        "/.bun/install/global/",
+        "\\.bun\\install\\global\\",
     ];
     if global_markers.iter().any(|m| s.contains(m)) {
         return true;
     }
 
-    if let Some(global_root) = npm_global_root() {
-        if s.contains(&*global_root.to_string_lossy()) {
+    for root in [
+        npm_global_root(),
+        pnpm_global_root(),
+        yarn_global_root(),
+        bun_global_root(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if s.contains(&*root.to_string_lossy()) {
             return true;
         }
     }
     false
 }
 
-fn npm_global_root() -> Option<PathBuf> {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            let output = Command::new("npm").args(["root", "-g"]).output().ok()?;
-            if !output.status.success() {
-                return None;
+/// Detect PM from well-known global shim/store paths (no node_modules required).
+fn detect_global_js_pm_from_path(
+    path_str: &str,
+    components: &[String],
+) -> Option<JsPackageManager> {
+    if path_str.contains("/.bun/") || path_str.contains("\\.bun\\") {
+        return Some(JsPackageManager::Bun);
+    }
+    if path_str.contains("/.local/share/pnpm/")
+        || path_str.contains("\\.local\\share\\pnpm\\")
+        || path_str.contains("/pnpm/global/")
+        || path_str.contains("\\pnpm\\global\\")
+    {
+        return Some(JsPackageManager::Pnpm);
+    }
+    if path_str.contains("/.config/yarn/global/")
+        || path_str.contains("\\.config\\yarn\\global\\")
+        || path_str.contains("/.yarn/global/")
+        || path_str.contains("\\.yarn\\global\\")
+        || path_str.contains("Yarn\\Data\\global")
+        || path_str.contains("Yarn/Data/global")
+    {
+        return Some(JsPackageManager::Yarn);
+    }
+    // bun/pnpm often put user-facing shims in */.bun/bin or */.local/share/pnpm
+    if components
+        .windows(2)
+        .any(|w| w[0] == ".bun" && w[1] == "bin")
+    {
+        return Some(JsPackageManager::Bun);
+    }
+    if components
+        .windows(3)
+        .any(|w| w[0] == ".local" && w[1] == "share" && w[2] == "pnpm")
+    {
+        return Some(JsPackageManager::Pnpm);
+    }
+    None
+}
+
+/// Choose npm/pnpm/yarn/bun for a node install.
+///
+/// Order: `OPENPLANET_LSP_PACKAGE_MANAGER` override → path heuristics →
+/// lockfiles / node_modules layout at package root → global root match → npm.
+fn detect_js_pm(exe: &Path, package_root: Option<&Path>, global: bool) -> JsPackageManager {
+    if let Some(raw) = env_nonempty("OPENPLANET_LSP_PACKAGE_MANAGER") {
+        if let Some(pm) = JsPackageManager::parse(&raw) {
+            return pm;
+        }
+    }
+
+    let s = exe.to_string_lossy();
+    if let Some(pm) = detect_global_js_pm_from_path(&s, &path_components_lossy(exe)) {
+        return pm;
+    }
+    if s.contains("/.pnpm/") || s.contains("\\.pnpm\\") || s.contains("node_modules/.pnpm") {
+        return JsPackageManager::Pnpm;
+    }
+    if s.contains("/.yarn/") || s.contains("\\.yarn\\") {
+        return JsPackageManager::Yarn;
+    }
+
+    if let Some(root) = package_root {
+        if let Some(pm) = detect_js_pm_from_package_root(root) {
+            return pm;
+        }
+    }
+
+    if global {
+        if let Some(root) = pnpm_global_root() {
+            if s.contains(&*root.to_string_lossy()) {
+                return JsPackageManager::Pnpm;
             }
-            let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if root.is_empty() {
-                None
+        }
+        if let Some(root) = yarn_global_root() {
+            if s.contains(&*root.to_string_lossy()) {
+                return JsPackageManager::Yarn;
+            }
+        }
+        if let Some(root) = bun_global_root() {
+            if s.contains(&*root.to_string_lossy()) {
+                return JsPackageManager::Bun;
+            }
+        }
+        if let Some(root) = npm_global_root() {
+            if s.contains(&*root.to_string_lossy()) {
+                return JsPackageManager::Npm;
+            }
+        }
+    }
+    JsPackageManager::Npm
+}
+
+fn detect_js_pm_from_package_root(root: &Path) -> Option<JsPackageManager> {
+    // Lockfiles (most reliable for project-local installs).
+    if root.join("bun.lockb").is_file() || root.join("bun.lock").is_file() {
+        return Some(JsPackageManager::Bun);
+    }
+    if root.join("pnpm-lock.yaml").is_file() {
+        return Some(JsPackageManager::Pnpm);
+    }
+    if root.join("yarn.lock").is_file() {
+        return Some(JsPackageManager::Yarn);
+    }
+    if root.join("package-lock.json").is_file() || root.join("npm-shrinkwrap.json").is_file() {
+        return Some(JsPackageManager::Npm);
+    }
+    // Layout hints when lockfile is absent / gitignored.
+    if root.join("node_modules/.pnpm").is_dir() {
+        return Some(JsPackageManager::Pnpm);
+    }
+    if root.join(".yarn").is_dir() || root.join(".pnp.cjs").is_file() {
+        return Some(JsPackageManager::Yarn);
+    }
+    None
+}
+
+fn apply_js_pm(
+    pm: JsPackageManager,
+    global: bool,
+    package_root: Option<&Path>,
+) -> Result<(), UpdateError> {
+    let specs = update_package_specs();
+    if specs.is_empty() {
+        return Err(UpdateError::msg("no package specs to install"));
+    }
+    let mut args: Vec<String> = Vec::new();
+    match pm {
+        JsPackageManager::Npm => {
+            args.push("install".into());
+            if global {
+                args.push("-g".into());
+            }
+            args.extend(specs);
+            run_command_owned("npm", &args, package_root)
+        }
+        JsPackageManager::Pnpm => {
+            args.push("add".into());
+            if global {
+                args.push("-g".into());
+            }
+            args.extend(specs);
+            run_command_owned("pnpm", &args, package_root)
+        }
+        JsPackageManager::Yarn => {
+            if global {
+                args.push("global".into());
+                args.push("add".into());
+                args.extend(specs);
+                run_command_owned("yarn", &args, None)
             } else {
-                Some(PathBuf::from(root))
+                args.push("add".into());
+                args.extend(specs);
+                run_command_owned("yarn", &args, package_root)
             }
-        })
-        .clone()
+        }
+        JsPackageManager::Bun => {
+            args.push("add".into());
+            if global {
+                args.push("-g".into());
+            }
+            args.extend(specs);
+            run_command_owned("bun", &args, package_root)
+        }
+    }
+}
+
+fn npm_global_root() -> Option<PathBuf> {
+    cached_cmd_path("npm-root-g", || {
+        let output = Command::new("npm").args(["root", "-g"]).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if root.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(root))
+        }
+    })
+}
+
+fn pnpm_global_root() -> Option<PathBuf> {
+    cached_cmd_path("pnpm-root-g", || {
+        let output = Command::new("pnpm").args(["root", "-g"]).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if root.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(root))
+        }
+    })
+}
+
+fn yarn_global_root() -> Option<PathBuf> {
+    cached_cmd_path("yarn-global-folder", || {
+        // Yarn classic: `yarn global dir` → …/global ; packages under node_modules there.
+        // Yarn berry may fail — ignore.
+        let output = Command::new("yarn").args(["global", "dir"]).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if root.is_empty() {
+            None
+        } else {
+            let p = PathBuf::from(root);
+            let nm = p.join("node_modules");
+            Some(if nm.is_dir() { nm } else { p })
+        }
+    })
+}
+
+fn bun_global_root() -> Option<PathBuf> {
+    cached_cmd_path("bun-global", || {
+        if let Ok(home) = std::env::var("HOME") {
+            let p = PathBuf::from(&home).join(".bun/install/global/node_modules");
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let p = PathBuf::from(&profile).join(".bun/install/global/node_modules");
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+        None
+    })
+}
+
+fn cached_cmd_path(
+    key: &'static str,
+    compute: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, Option<PathBuf>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().ok()?;
+    if let Some(v) = guard.get(key) {
+        return v.clone();
+    }
+    let v = compute();
+    guard.insert(key, v.clone());
+    v
 }
 
 fn annotate_replace_failure(err: UpdateError) -> UpdateError {
@@ -867,7 +1184,9 @@ mod tests {
         );
         assert_eq!(
             detect_install_method_from_path(&path),
-            InstallMethod::NpmGlobal
+            InstallMethod::NodeGlobal {
+                pm: JsPackageManager::Npm
+            }
         );
     }
 
@@ -877,10 +1196,13 @@ mod tests {
             "/work/my-plugin/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
         );
         match detect_install_method_from_path(&path) {
-            InstallMethod::NpmLocal { package_root } => {
+            InstallMethod::NodeLocal {
+                pm: JsPackageManager::Npm,
+                package_root,
+            } => {
                 assert_eq!(package_root, PathBuf::from("/work/my-plugin"));
             }
-            other => panic!("expected NpmLocal, got {other:?}"),
+            other => panic!("expected NodeLocal npm, got {other:?}"),
         }
     }
 
@@ -912,17 +1234,147 @@ mod tests {
 
     #[test]
     fn update_command_for_methods() {
-        assert!(InstallMethod::NpmGlobal
-            .update_command()
-            .unwrap()
-            .contains("npm install -g"));
+        assert!(InstallMethod::NodeGlobal {
+            pm: JsPackageManager::Npm
+        }
+        .update_command()
+        .unwrap()
+        .contains("npm install -g"));
+        assert!(InstallMethod::NodeGlobal {
+            pm: JsPackageManager::Pnpm
+        }
+        .update_command()
+        .unwrap()
+        .contains("pnpm add -g"));
+        assert!(InstallMethod::NodeGlobal {
+            pm: JsPackageManager::Yarn
+        }
+        .update_command()
+        .unwrap()
+        .contains("yarn global add"));
+        assert!(InstallMethod::NodeGlobal {
+            pm: JsPackageManager::Bun
+        }
+        .update_command()
+        .unwrap()
+        .contains("bun add -g"));
+        assert!(InstallMethod::NodeLocal {
+            pm: JsPackageManager::Pnpm,
+            package_root: PathBuf::from("/app"),
+        }
+        .update_command()
+        .unwrap()
+        .contains("pnpm add "));
         assert!(InstallMethod::Cargo
             .update_command()
             .unwrap()
             .contains("cargo install --git"));
         assert!(InstallMethod::Development.update_command().is_none());
-        assert!(InstallMethod::NpmGlobal.can_auto_apply());
+        assert!(InstallMethod::NodeGlobal {
+            pm: JsPackageManager::Yarn
+        }
+        .can_auto_apply());
         assert!(!InstallMethod::Development.can_auto_apply());
+    }
+
+    #[test]
+    fn detect_pnpm_bun_yarn_global_paths() {
+        let pnpm = PathBuf::from(
+            "/home/u/.local/share/pnpm/global/5/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
+        );
+        assert_eq!(
+            detect_install_method_from_path(&pnpm),
+            InstallMethod::NodeGlobal {
+                pm: JsPackageManager::Pnpm
+            }
+        );
+        let bun = PathBuf::from(
+            "/home/u/.bun/install/global/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
+        );
+        assert_eq!(
+            detect_install_method_from_path(&bun),
+            InstallMethod::NodeGlobal {
+                pm: JsPackageManager::Bun
+            }
+        );
+        let yarn = PathBuf::from(
+            "/home/u/.config/yarn/global/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
+        );
+        assert_eq!(
+            detect_install_method_from_path(&yarn),
+            InstallMethod::NodeGlobal {
+                pm: JsPackageManager::Yarn
+            }
+        );
+        let bun_shim = PathBuf::from("/home/u/.bun/bin/openplanet-lsp");
+        assert_eq!(
+            detect_install_method_from_path(&bun_shim),
+            InstallMethod::NodeGlobal {
+                pm: JsPackageManager::Bun
+            }
+        );
+    }
+
+    #[test]
+    fn detect_local_pm_from_lockfile() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("OPENPLANET_LSP_PACKAGE_MANAGER");
+        let dir = std::env::temp_dir().join(format!(
+            "oplsp-pm-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let bin_dir = dir.join("node_modules/openplanet-lsp-linux-x64/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let exe = bin_dir.join("openplanet-lsp");
+        fs::write(&exe, b"x").unwrap();
+
+        fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9'\n").unwrap();
+        match detect_install_method_from_path(&exe) {
+            InstallMethod::NodeLocal {
+                pm: JsPackageManager::Pnpm,
+                package_root,
+            } => assert_eq!(package_root, dir),
+            other => panic!("expected pnpm-local, got {other:?}"),
+        }
+        fs::remove_file(dir.join("pnpm-lock.yaml")).unwrap();
+
+        fs::write(dir.join("yarn.lock"), "# yarn\n").unwrap();
+        match detect_install_method_from_path(&exe) {
+            InstallMethod::NodeLocal {
+                pm: JsPackageManager::Yarn,
+                ..
+            } => {}
+            other => panic!("expected yarn-local, got {other:?}"),
+        }
+        fs::remove_file(dir.join("yarn.lock")).unwrap();
+
+        fs::write(dir.join("bun.lock"), "{}\n").unwrap();
+        match detect_install_method_from_path(&exe) {
+            InstallMethod::NodeLocal {
+                pm: JsPackageManager::Bun,
+                ..
+            } => {}
+            other => panic!("expected bun-local, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn package_manager_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("OPENPLANET_LSP_PACKAGE_MANAGER", "pnpm");
+        let path =
+            PathBuf::from("/work/app/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp");
+        match detect_install_method_from_path(&path) {
+            InstallMethod::NodeLocal {
+                pm: JsPackageManager::Pnpm,
+                ..
+            } => {}
+            other => panic!("expected pnpm via env, got {other:?}"),
+        }
+        std::env::remove_var("OPENPLANET_LSP_PACKAGE_MANAGER");
     }
 
     #[test]
@@ -1050,10 +1502,13 @@ mod tests {
             "/work/app/node_modules/openplanet-lsp/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
         );
         match detect_install_method_from_path(&path) {
-            InstallMethod::NpmLocal { package_root } => {
+            InstallMethod::NodeLocal {
+                pm: JsPackageManager::Npm,
+                package_root,
+            } => {
                 assert_eq!(package_root, PathBuf::from("/work/app"));
             }
-            other => panic!("expected NpmLocal, got {other:?}"),
+            other => panic!("expected NodeLocal npm, got {other:?}"),
         }
     }
 
@@ -1064,7 +1519,9 @@ mod tests {
         );
         assert_eq!(
             detect_install_method_from_path(&path),
-            InstallMethod::NpmGlobal
+            InstallMethod::NodeGlobal {
+                pm: JsPackageManager::Npm
+            }
         );
     }
 
@@ -1075,7 +1532,9 @@ mod tests {
         );
         assert_eq!(
             detect_install_method_from_path(&path),
-            InstallMethod::NpmGlobal
+            InstallMethod::NodeGlobal {
+                pm: JsPackageManager::Npm
+            }
         );
     }
 
@@ -1095,12 +1554,17 @@ mod tests {
             npm_update_package_specs(),
             vec!["./old.tgz".to_string(), "./new.tgz".to_string()]
         );
-        let cmd = InstallMethod::NpmGlobal.update_command().unwrap();
+        let cmd = InstallMethod::NodeGlobal {
+            pm: JsPackageManager::Npm,
+        }
+        .update_command()
+        .unwrap();
         assert!(cmd.contains("./old.tgz"));
         assert!(cmd.contains("-g"));
         std::env::remove_var("OPENPLANET_LSP_VERSION");
         std::env::remove_var("OPENPLANET_LSP_LATEST_VERSION");
         std::env::remove_var("OPENPLANET_LSP_UPDATE_PACKAGE");
+        std::env::remove_var("OPENPLANET_LSP_PACKAGE_MANAGER");
     }
 
     #[test]

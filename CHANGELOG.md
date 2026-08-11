@@ -15,8 +15,10 @@ GitHub Release body to match this section (gh release edit).
 
 ### Added
 - Self-update CI/dev hooks: `OPENPLANET_LSP_VERSION`,
-  `OPENPLANET_LSP_LATEST_VERSION`, `OPENPLANET_LSP_UPDATE_PACKAGE`
+  `OPENPLANET_LSP_LATEST_VERSION`, `OPENPLANET_LSP_UPDATE_PACKAGE`,
+  `OPENPLANET_LSP_PACKAGE_MANAGER`
 - `scripts/release/smoke-self-update.sh` + CI/release self-update smoke jobs
+- Self-update supports **pnpm / yarn / bun** (global + local) in addition to npm
 
 ### Fixed
 - Self-update status truthfulness after apply (`pending_restart` /

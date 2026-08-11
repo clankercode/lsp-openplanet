@@ -25,7 +25,8 @@ openplanet-lsp update
 
 `update` reads the latest version from the npm registry, writes status to
 `~/.config/openplanet-lsp/update-status.json`, and (without `--check`) runs the
-install-method-specific upgrade command when one is known.
+install-method-specific upgrade command when one is known (npm / pnpm / yarn /
+bun global or local, or cargo).
 
 ## Supported platforms
 
