@@ -1,0 +1,12 @@
+[meta]
+name     = "Showcase Diags"
+author   = "openplanet-lsp"
+category = "Dev"
+version  = "0.1.0"
+siteid   = 0
+
+[script]
+# Fake optional deps so DEPENDENCY_* stays undefined on CI *and* developer
+# machines that happen to have real MLHook/VehicleState installed.
+optional_dependencies = ["ShowcaseFakeHook", "ShowcaseFakeVehicle"]
+module = "ShowcaseDiags"
