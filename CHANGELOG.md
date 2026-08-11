@@ -17,7 +17,8 @@ GitHub Release body to match this section (gh release edit).
 - Self-update CI/dev hooks: `OPENPLANET_LSP_VERSION`,
   `OPENPLANET_LSP_LATEST_VERSION`, `OPENPLANET_LSP_UPDATE_PACKAGE`,
   `OPENPLANET_LSP_PACKAGE_MANAGER`
-- `scripts/release/smoke-self-update.sh` + CI/release self-update smoke jobs
+- `scripts/release/smoke-self-update.sh` (local tarball) and
+  `smoke-self-update-registry.sh` (npm/pnpm/yarn/bun registry loop)
 - Self-update supports **pnpm / yarn / bun** (global + local) in addition to npm
 - Registry multi-PM self-update CI (`self-update-matrix` workflow + `smoke-self-update-registry.sh`);
   manual/`workflow_dispatch` + post-tag-release only (not every PR)
