@@ -415,6 +415,26 @@ jobs:
           echo "Dry run complete. Artifacts staged but not published."
           ls -lh release-assets npm-tgz
 
+      - name: Publish crate to crates.io
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN secret not set — skipping crates.io publish"
+            echo "Add a crates.io API token as repo secret CARGO_REGISTRY_TOKEN to enable."
+            exit 0
+          fi
+          # Publish job is Node-centric for npm; install a minimal Rust toolchain here.
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          source "$HOME/.cargo/env"
+          rustc -V
+          cargo -V
+          cargo publish --locked --no-verify
+          # --no-verify: full build already done in the matrix; keep this step light.
+
   # After a real tag publish: multi-PM registry self-update (npm/pnpm/yarn/bun).
   # Manual re-runs: Actions → "self-update-matrix" → Run workflow.
   self-update-matrix:

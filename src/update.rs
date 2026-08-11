@@ -3,7 +3,7 @@
 //! Latest version is resolved from the **npm registry** (not the GitHub API).
 //! Install method is inferred from the running binary path; update applies the
 //! matching package-manager command when one is known (npm / pnpm / yarn / bun,
-//! cargo, …).
+//! cargo) or downloads the GitHub Release archive for **standalone** installs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 const PACKAGE_NAME: &str = "openplanet-lsp";
 const NPM_LATEST_URL: &str = "https://registry.npmjs.org/openplanet-lsp/latest";
 const CARGO_GIT_URL: &str = "https://github.com/clankercode/lsp-openplanet";
+/// GitHub repo used for standalone release-asset downloads.
+const GITHUB_REPO: &str = "clankercode/lsp-openplanet";
 const STATUS_FILE_NAME: &str = "update-status.json";
 const DEFAULT_CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 
@@ -94,12 +96,15 @@ impl InstallMethod {
                 js_local_update_cmdline(*pm, &specs),
                 package_root.display()
             )),
-            InstallMethod::Cargo => Some(format!(
-                "cargo install --git {CARGO_GIT_URL} --locked --force"
-            )),
+            // Prefer crates.io once published; git always works today.
+            InstallMethod::Cargo => Some(format!("cargo install --git {CARGO_GIT_URL} --force")),
             InstallMethod::Development => None,
-            InstallMethod::Standalone { .. } | InstallMethod::Unknown { .. } => Some(format!(
-                "npm install -g {specs}  # or re-download from GitHub Releases"
+            InstallMethod::Standalone { exe_path } => Some(format!(
+                "openplanet-lsp update  # replace {}",
+                exe_path.display()
+            )),
+            InstallMethod::Unknown { .. } => Some(format!(
+                "npm install -g {specs}  # or openplanet-lsp update if standalone"
             )),
         }
     }
@@ -110,6 +115,7 @@ impl InstallMethod {
             InstallMethod::NodeGlobal { .. }
                 | InstallMethod::NodeLocal { .. }
                 | InstallMethod::Cargo
+                | InstallMethod::Standalone { .. }
         )
     }
 }
@@ -500,10 +506,16 @@ pub fn apply_update_with_status(
         InstallMethod::Cargo => {
             run_command(
                 "cargo",
-                &["install", "--git", CARGO_GIT_URL, "--locked", "--force"],
+                &["install", "--git", CARGO_GIT_URL, "--force"],
                 None,
             )
             .map_err(annotate_replace_failure)?;
+        }
+        InstallMethod::Standalone { exe_path } => {
+            let version = status.latest_version.as_deref().ok_or_else(|| {
+                UpdateError::msg("no latest version available for standalone update")
+            })?;
+            apply_standalone(exe_path, version).map_err(annotate_replace_failure)?;
         }
         _ => unreachable!("can_auto_apply guards apply arms"),
     }
@@ -855,6 +867,338 @@ fn detect_js_pm_from_package_root(root: &Path) -> Option<JsPackageManager> {
         return Some(JsPackageManager::Yarn);
     }
     None
+}
+
+/// Download (or open a local archive) the GitHub Release asset for this host
+/// and atomically replace `exe_path`.
+///
+/// Best-practice notes:
+/// - Fetch into a temp dir; never stream directly over the live binary.
+/// - Extract the platform binary from the release layout (root of tar.gz/zip).
+/// - Write to `exe_path.new`, fsync when possible, then rename into place so a
+///   crash mid-write cannot leave a truncated executable.
+/// - On Windows, rename the running binary aside first (cannot overwrite a
+///   mapped PE image).
+///
+/// Dev/CI: set `OPENPLANET_LSP_RELEASE_ARCHIVE` to a local `.tar.gz` / `.zip`
+/// to skip the network.
+fn apply_standalone(exe_path: &Path, version: &str) -> Result<(), UpdateError> {
+    let version = version.trim().trim_start_matches('v');
+    if parse_version(version).is_none() {
+        return Err(UpdateError::msg(format!(
+            "invalid version for standalone update: {version:?}"
+        )));
+    }
+
+    let tmp = std::env::temp_dir().join(format!(
+        "openplanet-lsp-update-{}-{}",
+        version,
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp)
+        .map_err(|e| UpdateError::msg(format!("create temp dir {}: {e}", tmp.display())))?;
+
+    let result = (|| {
+        let (archive_path, cleanup_download) = resolve_release_archive(version, &tmp)?;
+        let extract_dir = tmp.join("extract");
+        fs::create_dir_all(&extract_dir).map_err(|e| {
+            UpdateError::msg(format!("create extract dir {}: {e}", extract_dir.display()))
+        })?;
+        extract_release_archive(&archive_path, &extract_dir)?;
+        if cleanup_download {
+            let _ = fs::remove_file(&archive_path);
+        }
+        let new_bin = find_binary_in_extract(&extract_dir)?;
+        replace_executable(exe_path, &new_bin)
+    })();
+
+    let _ = fs::remove_dir_all(&tmp);
+    result
+}
+
+/// Returns `(archive_path, delete_after)`.
+fn resolve_release_archive(version: &str, tmp: &Path) -> Result<(PathBuf, bool), UpdateError> {
+    if let Some(local) = env_nonempty("OPENPLANET_LSP_RELEASE_ARCHIVE") {
+        let p = PathBuf::from(local);
+        if !p.is_file() {
+            return Err(UpdateError::msg(format!(
+                "OPENPLANET_LSP_RELEASE_ARCHIVE is not a file: {}",
+                p.display()
+            )));
+        }
+        return Ok((p, false));
+    }
+
+    let (target, ext) = host_release_target()?;
+    let asset = format!("openplanet-lsp-v{version}-{target}.{ext}");
+    let url = format!("https://github.com/{GITHUB_REPO}/releases/download/v{version}/{asset}");
+    let dest = tmp.join(&asset);
+    download_file(&url, &dest)?;
+    Ok((dest, true))
+}
+
+/// Rust target triple + archive extension for the running host.
+fn host_release_target() -> Result<(&'static str, &'static str), UpdateError> {
+    // Keep in lockstep with .github/workflows/release.yml matrix targets.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        return Ok(("x86_64-unknown-linux-gnu", "tar.gz"));
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        return Ok(("aarch64-unknown-linux-gnu", "tar.gz"));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        return Ok(("x86_64-apple-darwin", "tar.gz"));
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return Ok(("aarch64-apple-darwin", "tar.gz"));
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        return Ok(("x86_64-pc-windows-msvc", "zip"));
+    }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        return Ok(("aarch64-pc-windows-msvc", "zip"));
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "aarch64"),
+    )))]
+    {
+        Err(UpdateError::msg(format!(
+            "standalone self-update is not supported on this host ({}-{})",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )))
+    }
+}
+
+fn download_file(url: &str, dest: &Path) -> Result<(), UpdateError> {
+    let output = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--max-time",
+            "120",
+            "-o",
+            dest.to_str().ok_or_else(|| {
+                UpdateError::msg(format!("non-utf8 download path: {}", dest.display()))
+            })?,
+            url,
+        ])
+        .output()
+        .map_err(|e| UpdateError::msg(format!("curl download failed: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(UpdateError::msg(format!(
+            "curl download exited {} for {url}: {stderr}",
+            output.status
+        )));
+    }
+    if !dest.is_file() {
+        return Err(UpdateError::msg(format!(
+            "download produced no file at {}",
+            dest.display()
+        )));
+    }
+    Ok(())
+}
+
+fn extract_release_archive(archive: &Path, dest_dir: &Path) -> Result<(), UpdateError> {
+    let name = archive
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let dest = dest_dir
+        .to_str()
+        .ok_or_else(|| UpdateError::msg("non-utf8 extract dir"))?;
+    let arch = archive
+        .to_str()
+        .ok_or_else(|| UpdateError::msg("non-utf8 archive path"))?;
+
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        let output = Command::new("tar")
+            .args(["-xzf", arch, "-C", dest])
+            .output()
+            .map_err(|e| UpdateError::msg(format!("tar extract failed: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(UpdateError::msg(format!(
+                "tar exited {}: {stderr}",
+                output.status
+            )));
+        }
+        return Ok(());
+    }
+
+    if name.ends_with(".zip") {
+        // Prefer `unzip` when present; fall back to PowerShell on Windows.
+        if Command::new("unzip").arg("-h").output().is_ok() {
+            let output = Command::new("unzip")
+                .args(["-o", arch, "-d", dest])
+                .output()
+                .map_err(|e| UpdateError::msg(format!("unzip failed: {e}")))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(UpdateError::msg(format!(
+                    "unzip exited {}: {stderr}",
+                    output.status
+                )));
+            }
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            let ps = format!(
+                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                arch.replace('\'', "''"),
+                dest.replace('\'', "''")
+            );
+            let output = Command::new("powershell")
+                .args(["-NoProfile", "-Command", &ps])
+                .output()
+                .map_err(|e| UpdateError::msg(format!("powershell Expand-Archive failed: {e}")))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(UpdateError::msg(format!(
+                    "Expand-Archive exited {}: {stderr}",
+                    output.status
+                )));
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            return Err(UpdateError::msg(
+                "cannot extract .zip: `unzip` not found on PATH",
+            ));
+        }
+    }
+
+    Err(UpdateError::msg(format!(
+        "unsupported release archive format: {}",
+        archive.display()
+    )))
+}
+
+fn find_binary_in_extract(dir: &Path) -> Result<PathBuf, UpdateError> {
+    #[cfg(windows)]
+    const WANT: &str = "openplanet-lsp.exe";
+    #[cfg(not(windows))]
+    const WANT: &str = "openplanet-lsp";
+
+    // Prefer top-level match (release archives place the binary at root).
+    let direct = dir.join(WANT);
+    if direct.is_file() {
+        return Ok(direct);
+    }
+
+    // Fall back to a shallow walk for nested layouts.
+    let mut found = Vec::new();
+    fn walk(dir: &Path, want: &str, out: &mut Vec<PathBuf>, depth: usize) {
+        if depth > 4 {
+            return;
+        }
+        let Ok(rd) = fs::read_dir(dir) else {
+            return;
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                walk(&p, want, out, depth + 1);
+            } else if p.file_name().and_then(|s| s.to_str()) == Some(want) {
+                out.push(p);
+            }
+        }
+    }
+    walk(dir, WANT, &mut found, 0);
+    match found.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Err(UpdateError::msg(format!(
+            "release archive did not contain `{WANT}`"
+        ))),
+        many => Err(UpdateError::msg(format!(
+            "release archive contained multiple `{WANT}` files ({})",
+            many.len()
+        ))),
+    }
+}
+
+/// Atomically replace `target` with the contents of `new_bin`.
+fn replace_executable(target: &Path, new_bin: &Path) -> Result<(), UpdateError> {
+    if !new_bin.is_file() {
+        return Err(UpdateError::msg(format!(
+            "new binary missing: {}",
+            new_bin.display()
+        )));
+    }
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let staging = parent.join(format!(
+        "{}.new.{}",
+        target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("openplanet-lsp"),
+        std::process::id()
+    ));
+
+    fs::copy(new_bin, &staging)
+        .map_err(|e| UpdateError::msg(format!("copy new binary to {}: {e}", staging.display())))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&staging)
+            .map_err(|e| UpdateError::msg(format!("stat staging: {e}")))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&staging, perms)
+            .map_err(|e| UpdateError::msg(format!("chmod staging: {e}")))?;
+    }
+
+    #[cfg(windows)]
+    {
+        // Running PE cannot be overwritten in-place. Move it aside first.
+        if target.exists() {
+            let bak = parent.join(format!(
+                "{}.old.{}",
+                target
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("openplanet-lsp"),
+                std::process::id()
+            ));
+            let _ = fs::remove_file(&bak);
+            fs::rename(target, &bak).map_err(|e| {
+                UpdateError::msg(format!(
+                    "could not move running binary aside ({} → {}): {e}",
+                    target.display(),
+                    bak.display()
+                ))
+            })?;
+            // Best-effort cleanup; may fail while this process still holds the mapping.
+            let _ = fs::remove_file(&bak);
+        }
+    }
+
+    fs::rename(&staging, target).map_err(|e| {
+        // Try to leave staging behind rather than delete on failure.
+        UpdateError::msg(format!(
+            "could not install new binary at {}: {e}",
+            target.display()
+        ))
+    })?;
+
+    Ok(())
 }
 
 fn apply_js_pm(
@@ -1269,11 +1613,25 @@ mod tests {
             .update_command()
             .unwrap()
             .contains("cargo install --git"));
+        assert!(!InstallMethod::Cargo
+            .update_command()
+            .unwrap()
+            .contains("--locked"));
         assert!(InstallMethod::Development.update_command().is_none());
         assert!(InstallMethod::NodeGlobal {
             pm: JsPackageManager::Yarn
         }
         .can_auto_apply());
+        assert!(InstallMethod::Standalone {
+            exe_path: PathBuf::from("/opt/openplanet-lsp")
+        }
+        .can_auto_apply());
+        assert!(InstallMethod::Standalone {
+            exe_path: PathBuf::from("/opt/openplanet-lsp")
+        }
+        .update_command()
+        .unwrap()
+        .contains("openplanet-lsp update"));
         assert!(!InstallMethod::Development.can_auto_apply());
     }
 
@@ -1585,5 +1943,70 @@ mod tests {
         let text = format_status(&status);
         assert!(text.contains("update available"));
         assert!(text.contains("0.2.4"));
+    }
+
+    #[test]
+    fn standalone_apply_from_local_archive_replaces_binary() {
+        let dir = std::env::temp_dir().join(format!(
+            "openplanet-lsp-standalone-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let old_exe = dir.join("openplanet-lsp");
+        fs::write(&old_exe, b"OLD_BINARY_CONTENT").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = fs::metadata(&old_exe).unwrap().permissions();
+            p.set_mode(0o755);
+            fs::set_permissions(&old_exe, p).unwrap();
+        }
+
+        // Build a release-shaped tar.gz with a new binary at archive root.
+        let stage = dir.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let new_bin = stage.join("openplanet-lsp");
+        fs::write(&new_bin, b"NEW_BINARY_CONTENT_V999").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = fs::metadata(&new_bin).unwrap().permissions();
+            p.set_mode(0o755);
+            fs::set_permissions(&new_bin, p).unwrap();
+        }
+        // BUILD_INFO.txt like CI archives
+        fs::write(stage.join("BUILD_INFO.txt"), "test\n").unwrap();
+
+        let archive = dir.join("openplanet-lsp-v9.9.9-test.tar.gz");
+        let status = std::process::Command::new("tar")
+            .args([
+                "-czf",
+                archive.to_str().unwrap(),
+                "-C",
+                stage.to_str().unwrap(),
+                ".",
+            ])
+            .status()
+            .expect("tar available");
+        assert!(status.success(), "tar create failed");
+
+        std::env::set_var("OPENPLANET_LSP_RELEASE_ARCHIVE", &archive);
+        apply_standalone(&old_exe, "9.9.9").expect("standalone apply");
+        std::env::remove_var("OPENPLANET_LSP_RELEASE_ARCHIVE");
+
+        let got = fs::read(&old_exe).unwrap();
+        assert_eq!(got, b"NEW_BINARY_CONTENT_V999");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_release_target_is_known() {
+        // Smoke: current CI host must map to a release asset.
+        let (triple, ext) = host_release_target().expect("host supported");
+        assert!(!triple.is_empty());
+        assert!(ext == "tar.gz" || ext == "zip");
     }
 }

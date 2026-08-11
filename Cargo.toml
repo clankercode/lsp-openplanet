@@ -3,6 +3,26 @@ name = "openplanet-lsp"
 version = "0.2.8"
 edition = "2021"
 description = "Language Server Protocol implementation for OpenPlanet AngelScript"
+license = "MIT"
+repository = "https://github.com/clankercode/lsp-openplanet"
+homepage = "https://github.com/clankercode/lsp-openplanet"
+readme = "README.md"
+authors = ["Max Kaye <m@xk.io>"]
+keywords = ["lsp", "language-server", "angelscript", "openplanet", "trackmania"]
+categories = ["development-tools", "parser-implementations"]
+exclude = [
+  ".worktrees/",
+  ".backlog/",
+  "tests/fixtures/",
+  "npm/",
+  "scripts/",
+  "docs/",
+  "served-html/",
+  ".github/",
+  "todo-*.txt",
+  "package.json",
+  "package-lock.json",
+]
 
 [dependencies]
 tower-lsp = "0.20"

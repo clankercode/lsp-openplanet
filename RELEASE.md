@@ -12,12 +12,14 @@ Canonical location: repository root `RELEASE.md`
 
 ## What a release produces
 
-One git tag (`vX.Y.Z`) drives both channels via
+One git tag (`vX.Y.Z`) drives distribution via
 [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
 1. **GitHub Release** — multi-platform binary archives attached to the tag
 2. **npm** — meta package `openplanet-lsp` + optional platform packages with
    the native binary
+3. **crates.io** — `cargo publish` of the `openplanet-lsp` crate (when
+   `CARGO_REGISTRY_TOKEN` is configured; skipped with a warning otherwise)
 
 | Runner           | Rust target                 | npm package                 | Archive   |
 |------------------|-----------------------------|-----------------------------|-----------|
@@ -42,6 +44,36 @@ changelog and update the release body** — see [Post-CI](#5-post-ci--changelog-
 - Actions allowed to create releases (`contents: write` on the workflow is enough for `GITHUB_TOKEN`)
 - Workflow must grant `id-token: write` for npm OIDC (already set in `release.yml`)
 - `gh` CLI authenticated (`gh auth status`)
+
+### crates.io
+
+1. Create a crates.io account linked to GitHub if needed: https://crates.io
+2. **First publish is manual** (claims the crate name under your account):
+
+   ```bash
+   cargo login   # paste API token from https://crates.io/settings/tokens
+   cargo publish --dry-run
+   cargo publish
+   ```
+
+3. For **CI auto-publish on tags**, add a crates.io API token as the repo
+   secret **`CARGO_REGISTRY_TOKEN`**
+   (`gh secret set CARGO_REGISTRY_TOKEN`). The `publish` job runs
+   `cargo publish --locked --no-verify` after npm; if the secret is missing
+   the step warns and skips (does not fail the release).
+
+4. `Cargo.toml` must keep publish metadata current: `license`, `repository`,
+   `readme`, `description`, `authors` (see package section).
+
+5. After crates.io is live, cargo installs can use:
+
+   ```bash
+   cargo install openplanet-lsp --force
+   ```
+
+   Self-update currently still runs `cargo install --git … --force` so it
+   works before/without crates.io; switch to registry install in a follow-up
+   once the crate is published.
 
 ### npm — GitHub OIDC trusted publishing (preferred; no long-lived token)
 
