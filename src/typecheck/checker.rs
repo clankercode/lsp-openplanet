@@ -134,14 +134,19 @@ impl TypeDiagnostic {
                 format!("const violation: {}", detail)
             }
             TypeDiagnosticKind::StringByValueParam { param_name } => {
-                if param_name.is_empty() {
+                // Match Openplanet 1.29.5 compiler wording exactly (RemoteBuild probe).
+                let base = if param_name.is_empty() {
                     "Sanity check: Use 'const string &in' to pass a string by reference".to_string()
                 } else {
                     format!(
                         "Sanity check: Use 'const string &in {}' to pass a string by reference",
                         param_name
                     )
-                }
+                };
+                format!(
+                    "{} (prefix the parameter name with an underscore to ignore this warning)",
+                    base
+                )
             }
         }
     }
@@ -719,6 +724,8 @@ impl<'a> Checker<'a> {
 
     /// B004: AngelScript/Openplanet sanity check — bare `string` (or
     /// `const string`) parameters copy the string; prefer `const string &in`.
+    /// Openplanet suppresses the warning when the parameter name is prefixed
+    /// with `_`.
     fn warn_string_by_value_param(&mut self, param: &Param) {
         if !is_string_by_value_type(&param.type_expr) {
             return;
@@ -733,6 +740,10 @@ impl<'a> Checker<'a> {
             .as_ref()
             .map(|n| n.text(self.source).to_string())
             .unwrap_or_default();
+        // Game: "prefix the parameter name with an underscore to ignore"
+        if param_name.starts_with('_') {
+            return;
+        }
         let span = param
             .name
             .as_ref()
@@ -4073,8 +4084,30 @@ mod tests {
             "message should mention preferred form, got {}",
             warn[0].message()
         );
+        assert!(
+            warn[0]
+                .message()
+                .contains("prefix the parameter name with an underscore to ignore this warning"),
+            "message must match Openplanet underscore-suppress trailer, got {}",
+            warn[0].message()
+        );
         // Display impl mirrors message()
         assert_eq!(format!("{}", warn[0]), warn[0].message());
+    }
+
+    #[test]
+    fn underscore_prefixed_string_param_silent() {
+        // Game: void foo(string _x) does not emit the sanity warning.
+        let diags = check("void f(string _x) {}");
+        let warn: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::StringByValueParam { .. }))
+            .collect();
+        assert!(
+            warn.is_empty(),
+            "underscore-prefixed bare string param should not warn, got {:?}",
+            diags
+        );
     }
 
     #[test]
