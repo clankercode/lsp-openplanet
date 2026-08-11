@@ -13,6 +13,15 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-08-12
+
+### Fixed
+- Clear setup-node injected NODE_AUTH_TOKEN so npm OIDC trusted publish works
+
+### Distribution
+- Multi-platform GitHub Release + npm OIDC publish
+
+
 ## [0.2.4] - 2026-08-12
 
 ### Fixed

@@ -1,6 +1,6 @@
 {
   "name": "openplanet-lsp-darwin-x64",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "openplanet-lsp native binary for darwin-x64",
   "license": "MIT",
   "homepage": "https://github.com/clankercode/lsp-openplanet",

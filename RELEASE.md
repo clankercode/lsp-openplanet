@@ -108,7 +108,7 @@ UI equivalent: each package → **Settings → Trusted Publisher → GitHub Acti
 After OIDC works end-to-end:
 
 - Package **Settings → Publishing access** → require 2FA and **disallow tokens**
-- Do **not** add an `NPM_TOKEN` Actions secret (the workflow refuses token auth)
+- Do **not** add an `NPM_TOKEN` Actions secret. The publish step unsets token env vars so OIDC is used
 
 #### CI requirements (already in `release.yml`)
 
