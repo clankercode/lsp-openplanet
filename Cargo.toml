@@ -38,7 +38,7 @@ zip = "2"
 dashmap = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-openplanet-lsp-tui = { path = "crates/openplanet-lsp-tui" }
+openplanet-lsp-tui = { path = "crates/openplanet-lsp-tui", version = "0.3.1" }
 notify = "6.1"
 notify-debouncer-mini = "0.4"
 

@@ -13,6 +13,19 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-12
+
+### Fixed
+- **crates.io publish**: path-only `openplanet-lsp-tui` blocked `cargo publish`.
+  The TUI crate is now a publishable package; CI publishes **tui then main**.
+  `openplanet-lsp` depends on `openplanet-lsp-tui` with an explicit version.
+
+### Notes
+- GitHub Release + npm already shipped **0.3.1** (pretty check, watch TUI,
+  bare-TTY entrypoints, showcase fixture, README hero). 0.3.2 is the crates.io
+  packaging fix for those same features.
+
+
 ## [0.3.1] - 2026-08-12
 
 ### Added
