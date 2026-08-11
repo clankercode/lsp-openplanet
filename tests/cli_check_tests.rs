@@ -283,3 +283,47 @@ dependencies = ["DepPlugin"]
 
     let _ = fs::remove_dir_all(base);
 }
+
+#[test]
+fn check_command_reports_missing_required_dependency() {
+    let base = std::env::temp_dir().join(format!(
+        "openplanet-lsp-missing-dep-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("plugins")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        r#"
+[meta]
+name = "Consumer"
+version = "0.1.0"
+[script]
+dependencies = ["NoSuchDep"]
+"#,
+    )
+    .unwrap();
+    fs::write(base.join("consumer/src/Main.as"), "void Main() {}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("plugins"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "expected missing required dep to fail check; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("NoSuchDep") || stderr.contains("NoSuchDep"),
+        "expected missing dep name in output; stdout={stdout:?} stderr={stderr:?}"
+    );
+    let _ = fs::remove_dir_all(base);
+}
