@@ -20,7 +20,7 @@ pub mod repr;
 pub mod resolver;
 pub mod workspace;
 
-pub use checker::{Checker, TypeDiagnostic, TypeDiagnosticKind};
+pub use checker::{Checker, TypeDiagnostic, TypeDiagnosticKind, TypeDiagnosticSeverity};
 pub use global_scope::GlobalScope;
 pub use repr::{PrimitiveType, TypeRepr};
 pub use resolver::{ResolveDiagnostic, TypeResolver};

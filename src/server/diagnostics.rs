@@ -5,7 +5,7 @@ use crate::lexer;
 use crate::parser::Parser;
 use crate::preprocessor;
 use crate::symbols::SymbolTable;
-use crate::typecheck::{Checker, GlobalScope};
+use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticSeverity};
 use crate::typedb::TypeIndex;
 
 /// Compute diagnostics for a single file.
@@ -80,9 +80,13 @@ pub fn compute_diagnostics(
     checker.check_file(&file);
     for diag in &checker.diagnostics {
         let range = span_to_range(source, diag.span);
+        let severity = match diag.severity() {
+            TypeDiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
+            TypeDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
+        };
         diagnostics.push(Diagnostic {
             range,
-            severity: Some(DiagnosticSeverity::ERROR),
+            severity: Some(severity),
             message: diag.message(),
             source: Some("openplanet-lsp".to_string()),
             ..Default::default()
