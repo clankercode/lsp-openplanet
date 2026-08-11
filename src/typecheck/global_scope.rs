@@ -725,6 +725,31 @@ impl<'a> GlobalScope<'a> {
         out
     }
 
+    /// Unified free-function callables for a name (I3).
+    ///
+    /// Workspace overloads win when present; otherwise external typedb
+    /// free-function overloads. Empty when neither source knows the name.
+    /// Signature help and the checker should share this path so arity/params
+    /// stay consistent.
+    pub fn callables_free(&self, qualified: &str) -> Vec<OverloadSig> {
+        let ws = self.lookup_function_overloads(qualified);
+        if !ws.is_empty() {
+            return ws;
+        }
+        self.lookup_external_function_param_overloads(qualified)
+            .unwrap_or_default()
+    }
+
+    /// Unified method callables on `type_name` (I3).
+    ///
+    /// Currently external typedb methods (with parent walk). Workspace class
+    /// methods remain via `workspace_class_member` / signature's member path
+    /// until those carry full overload lists in the symbol table.
+    pub fn callables_method(&self, type_name: &str, method: &str) -> Vec<OverloadSig> {
+        self.lookup_external_method_param_overloads(type_name, method)
+            .unwrap_or_default()
+    }
+
     /// Look up the declared base classes of a workspace class by
     /// fully qualified name. Returns an empty vec if no workspace class with
     /// that name exists, or the class has no bases. Only consults
