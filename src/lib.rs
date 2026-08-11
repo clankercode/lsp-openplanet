@@ -6,6 +6,7 @@ pub mod parser;
 pub mod preprocessor;
 pub mod server;
 pub mod symbols;
+pub mod term;
 pub mod typecheck;
 pub mod typedb;
 pub mod update;

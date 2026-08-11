@@ -166,7 +166,7 @@ name = "CLI Check Fixture"
 version = "0.1.0"
 
 [script]
-dependencies = ["Editor"]
+optional_dependencies = ["Editor"]
 defines = ["CUSTOM_DEF"]
 "#,
     )

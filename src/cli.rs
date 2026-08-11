@@ -284,7 +284,17 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
 }
 
 pub fn format_check_report(report: &CheckReport) -> String {
+    format_check_report_with(report, crate::term::color_stdout())
+}
+
+/// Format check diagnostics; `color` forces ANSI on/off (tests / screenshots).
+pub fn format_check_report_with(report: &CheckReport, color: bool) -> String {
+    use crate::term;
+
     let mut out = String::new();
+    let mut n_err = 0usize;
+    let mut n_warn = 0usize;
+    let mut n_other = 0usize;
 
     for item in &report.diagnostics {
         let rel = item.path.strip_prefix(&report.root).unwrap_or(&item.path);
@@ -292,21 +302,62 @@ pub fn format_check_report(report: &CheckReport) -> String {
         let line = range.start.line + 1;
         let col = range.start.character + 1;
         let severity = severity_label(item.diagnostic.severity);
+        match item.diagnostic.severity {
+            Some(DiagnosticSeverity::ERROR) | None => n_err += 1,
+            Some(DiagnosticSeverity::WARNING) => n_warn += 1,
+            _ => n_other += 1,
+        }
+
+        let sev_styled = match item.diagnostic.severity {
+            Some(DiagnosticSeverity::ERROR) | None => term::error(color, severity),
+            Some(DiagnosticSeverity::WARNING) => term::warning(color, severity),
+            Some(DiagnosticSeverity::INFORMATION) => term::info(color, severity),
+            Some(DiagnosticSeverity::HINT) => term::dim(color, severity),
+            _ => severity.to_string(),
+        };
+
+        // gcc/clang-ish: path:line:col: severity: message
         out.push_str(&format!(
-            "{}:{}:{}: {}: {}\n",
-            rel.display(),
-            line,
-            col,
-            severity,
+            "{}:{}: {}: {}\n",
+            term::path(color, rel.display().to_string()),
+            term::loc(color, format!("{line}:{col}")),
+            sev_styled,
             item.diagnostic.message
         ));
     }
 
-    out.push_str(&format!(
-        "{} diagnostics in {}\n",
-        report.diagnostics.len(),
-        report.root.display()
-    ));
+    let summary = if report.diagnostics.is_empty() {
+        term::ok(color, format!("0 diagnostics in {}", report.root.display()))
+    } else {
+        let mut parts = Vec::new();
+        if n_err > 0 {
+            parts.push(term::error(
+                color,
+                format!("{n_err} error{}", if n_err == 1 { "" } else { "s" }),
+            ));
+        }
+        if n_warn > 0 {
+            parts.push(term::warning(
+                color,
+                format!("{n_warn} warning{}", if n_warn == 1 { "" } else { "s" }),
+            ));
+        }
+        if n_other > 0 {
+            parts.push(term::info(color, format!("{n_other} other")));
+        }
+        format!(
+            "{} {} in {}",
+            term::bold(color, format!("{} diagnostics", report.diagnostics.len())),
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!("({})", parts.join(", "))
+            },
+            term::path(color, report.root.display().to_string())
+        )
+    };
+    out.push_str(&summary);
+    out.push('\n');
     out
 }
 

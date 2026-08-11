@@ -472,7 +472,11 @@ fn fetch_latest_crate() -> Result<String, UpdateError> {
     let version = value
         .pointer("/crate/max_version")
         .and_then(|v| v.as_str())
-        .or_else(|| value.pointer("/crate/newest_version").and_then(|v| v.as_str()))
+        .or_else(|| {
+            value
+                .pointer("/crate/newest_version")
+                .and_then(|v| v.as_str())
+        })
         .ok_or_else(|| UpdateError::msg("crates.io JSON missing crate.max_version"))?;
     if parse_version(version).is_none() {
         return Err(UpdateError::msg(format!(
@@ -669,10 +673,18 @@ pub fn apply_update_with_status(
 
 /// Format a human-readable status report.
 pub fn format_status(status: &UpdateStatus) -> String {
+    format_status_with(status, crate::term::color_stdout())
+}
+
+/// Format status; `color` forces ANSI on/off (tests / screenshots).
+pub fn format_status_with(status: &UpdateStatus, color: bool) -> String {
+    use crate::term;
+
     let mut out = String::new();
     out.push_str(&format!(
-        "current:  {} (install type: {})\n",
-        status.current_version, status.install_method
+        "current:  {} {}\n",
+        term::bold(color, &status.current_version),
+        term::info(color, format!("(install type: {})", status.install_method))
     ));
     match &status.latest_version {
         Some(v) => {
@@ -681,33 +693,61 @@ pub fn format_status(status: &UpdateStatus) -> String {
             } else {
                 status.version_source.as_str()
             };
-            out.push_str(&format!("latest:   {v} (source checked: {src})\n"));
+            out.push_str(&format!(
+                "latest:   {} {}\n",
+                term::bold(color, v),
+                term::dim(color, format!("(source checked: {src})"))
+            ));
         }
-        None => out.push_str("latest:   (unavailable)\n"),
+        None => out.push_str(&format!(
+            "latest:   {}\n",
+            term::warning(color, "(unavailable)")
+        )),
     }
     if let Some(inst) = &status.installed_version {
-        out.push_str(&format!("installed: {inst}\n"));
+        out.push_str(&format!("installed: {}\n", term::ok(color, inst)));
     }
-    out.push_str(&format!("method:   {}\n", status.install_method));
-    out.push_str(&format!("exe:      {}\n", status.exe_path));
-    out.push_str(&format!("checked:  {}\n", status.checked_at_rfc3339));
+    out.push_str(&format!(
+        "method:   {}\n",
+        term::info(color, &status.install_method)
+    ));
+    out.push_str(&format!(
+        "exe:      {}\n",
+        term::path(color, &status.exe_path)
+    ));
+    out.push_str(&format!(
+        "checked:  {}\n",
+        term::dim(color, &status.checked_at_rfc3339)
+    ));
     if status.pending_restart {
-        out.push_str("status:   installed — restart required\n");
+        out.push_str(&format!(
+            "status:   {}\n",
+            term::warning(color, "installed — restart required")
+        ));
     } else if status.update_available {
-        out.push_str("status:   update available\n");
+        out.push_str(&format!(
+            "status:   {}\n",
+            term::warning(color, "update available")
+        ));
         if let Some(cmd) = &status.update_command {
-            out.push_str(&format!("update:   {cmd}\n"));
+            out.push_str(&format!("update:   {}\n", term::ok(color, cmd)));
         }
     } else if status.error.is_some() {
-        out.push_str("status:   check failed\n");
+        out.push_str(&format!(
+            "status:   {}\n",
+            term::error(color, "check failed")
+        ));
     } else {
-        out.push_str("status:   up to date\n");
+        out.push_str(&format!("status:   {}\n", term::ok(color, "up to date")));
     }
     if let Some(err) = &status.error {
-        out.push_str(&format!("error:    {err}\n"));
+        out.push_str(&format!("error:    {}\n", term::error(color, err)));
     }
     if let Ok(path) = status_path() {
-        out.push_str(&format!("file:     {}\n", path.display()));
+        out.push_str(&format!(
+            "file:     {}\n",
+            term::dim(color, path.display().to_string())
+        ));
     }
     out
 }
@@ -2089,8 +2129,14 @@ mod tests {
     fn version_source_parse_aliases() {
         assert_eq!(VersionSource::parse("npm").unwrap(), VersionSource::Npm);
         assert_eq!(VersionSource::parse("crate").unwrap(), VersionSource::Crate);
-        assert_eq!(VersionSource::parse("crates").unwrap(), VersionSource::Crate);
-        assert_eq!(VersionSource::parse("github").unwrap(), VersionSource::Github);
+        assert_eq!(
+            VersionSource::parse("crates").unwrap(),
+            VersionSource::Crate
+        );
+        assert_eq!(
+            VersionSource::parse("github").unwrap(),
+            VersionSource::Github
+        );
         assert_eq!(VersionSource::parse("gh").unwrap(), VersionSource::Github);
         assert!(VersionSource::parse("ftp").is_err());
     }
