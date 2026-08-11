@@ -6,3 +6,5 @@ npm/*/bin/openplanet-lsp.exe
 
 # npm pack output
 *.tgz
+
+.worktrees/
