@@ -130,6 +130,13 @@ jobs:
           set -euo pipefail
           # Classic yarn for `yarn global add` compatibility.
           npm install -g yarn@1.22.22 pnpm@9
+          # pnpm needs an explicit global bin dir on fresh runners.
+          export PNPM_HOME="${HOME}/.local/share/pnpm"
+          mkdir -p "${PNPM_HOME}"
+          echo "PNPM_HOME=${PNPM_HOME}" >> "${GITHUB_ENV}"
+          echo "${PNPM_HOME}" >> "${GITHUB_PATH}"
+          export PATH="${PNPM_HOME}:${PATH}"
+          pnpm config set global-bin-dir "${PNPM_HOME}"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             powershell -NoProfile -Command "irm bun.sh/install.ps1 | iex" || true
             echo "${USERPROFILE}\\.bun\\bin" >> "${GITHUB_PATH}"
@@ -139,8 +146,6 @@ jobs:
             echo "${HOME}/.bun/bin" >> "${GITHUB_PATH}"
             export PATH="${HOME}/.bun/bin:${PATH}"
           fi
-          echo "${HOME}/.local/share/pnpm" >> "${GITHUB_PATH}"
-          export PATH="${HOME}/.local/share/pnpm:${PATH}"
           hash -r || true
           node -v
           npm -v
@@ -156,8 +161,15 @@ jobs:
           TARGET_VERSION: ${{ needs.resolve-matrix.outputs.target_version }}
           PACKAGE_MANAGERS: ${{ needs.resolve-matrix.outputs.package_managers }}
           WAIT_FOR_VERSION: ${{ needs.resolve-matrix.outputs.target_version }}
+          PNPM_HOME: ${{ env.PNPM_HOME }}
         run: |
           set -euo pipefail
+          # setup-node injects a registry npmrc + dummy token; strip for public installs.
           unset NODE_AUTH_TOKEN NPM_TOKEN || true
+          unset NPM_CONFIG_USERCONFIG || true
+          export PNPM_HOME="${PNPM_HOME:-${HOME}/.local/share/pnpm}"
+          mkdir -p "${PNPM_HOME}"
+          export PATH="${PNPM_HOME}:${HOME}/.bun/bin:${HOME}/.local/bin:${PATH}"
+          pnpm config set global-bin-dir "${PNPM_HOME}" || true
           chmod +x ./scripts/release/smoke-self-update-registry.sh
           ./scripts/release/smoke-self-update-registry.sh

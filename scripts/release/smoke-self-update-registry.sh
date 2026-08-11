@@ -39,6 +39,13 @@ need_cmd() {
 }
 
 export PATH="${NPM_GLOBAL_PREFIX}/bin:${HOME}/.local/share/pnpm:${HOME}/.bun/bin:${HOME}/.yarn/bin:${PATH}"
+# pnpm global installs need PNPM_HOME / global-bin-dir on fresh machines (CI).
+export PNPM_HOME="${PNPM_HOME:-${HOME}/.local/share/pnpm}"
+mkdir -p "${PNPM_HOME}"
+export PATH="${PNPM_HOME}:${PATH}"
+if command -v pnpm >/dev/null 2>&1; then
+  pnpm config set global-bin-dir "${PNPM_HOME}" >/dev/null 2>&1 || true
+fi
 if command -v yarn >/dev/null 2>&1; then
   yarn_bin="$(yarn global bin 2>/dev/null || true)"
   if [[ -n "${yarn_bin}" ]]; then
