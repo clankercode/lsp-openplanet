@@ -330,19 +330,36 @@ def main(argv: list[str] | None = None) -> int:
     out_im.save(out_path)
     print(f"wrote:    {out_path}  ({out_im.size[0]}×{out_im.size[1]})")
 
-    # Re-measure output for eval
+    # Re-measure output for eval against the requested target
     verify = Image.open(out_path)
     vwork = verify.convert("RGBA") if verify.mode not in ("RGB", "RGBA") else verify
     vbox = find_content_bbox(vwork, bg, args.tolerance)
     assert vbox is not None
     vm = margins_from_box(vwork.size, vbox)
     print(
-        f"verify:   L={vm.left} T={vm.top} R={vm.right} B={vm.bottom}  even={vm.is_even()}"
+        f"verify:   L={vm.left} T={vm.top} R={vm.right} B={vm.bottom}  "
+        f"uniform={vm.is_even()}"
     )
-    if not vm.is_even():
-        print("eval:     WARN — output margins not perfectly even (tolerance/bg?)")
+
+    def close(a: int, b: int, tol: int = 1) -> bool:
+        return abs(a - b) <= tol
+
+    hit = (
+        close(vm.left, target.left)
+        and close(vm.right, target.right)
+        and close(vm.top, target.top)
+        and close(vm.bottom, target.bottom)
+    )
+    if not hit:
+        print(
+            "eval:     FAIL — output margins != target "
+            f"(want L={target.left} T={target.top} R={target.right} B={target.bottom})"
+        )
         return 1
-    print("eval:     PASS — evenly padded")
+    if vm.is_even():
+        print("eval:     PASS — evenly padded (all sides equal)")
+    else:
+        print("eval:     PASS — matched target margins")
     return 0
 
 
