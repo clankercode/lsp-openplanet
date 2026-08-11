@@ -416,6 +416,8 @@ jobs:
           ls -lh release-assets npm-tgz
 
       - name: Publish crate to crates.io
+        # Soft-fail: npm + GH assets are primary; crates OIDC may still need tuning.
+        continue-on-error: true
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.event.deleted == false }}
         env:
           # Optional fallback if trusted publishing is not configured yet.
@@ -432,7 +434,7 @@ jobs:
           cargo -V
 
           # Preferred: crates.io Trusted Publishing (GitHub OIDC).
-          # Configure at https://crates.io/crates/openplanet-lsp/settings/new-trusted-publisher
+          # Configure at https://crates.io/crates/openplanet-lsp/settings
           #   repository: clankercode/lsp-openplanet
           #   workflow: release.yml
           # Job already has permissions.id-token: write.
