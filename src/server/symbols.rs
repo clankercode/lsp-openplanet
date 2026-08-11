@@ -2,17 +2,15 @@ use std::collections::HashMap;
 
 use tower_lsp::lsp_types::*;
 
-use crate::lexer;
-use crate::parser::Parser;
+use crate::analysis::DocumentAnalysis;
 use crate::parser::ast::{ClassMember, Item};
 use crate::server::diagnostics::span_to_range;
 use crate::symbols::SymbolTable;
 use crate::symbols::scope::SymbolKind as InternalSymbolKind;
 
 pub fn document_symbols(source: &str) -> Option<DocumentSymbolResponse> {
-    let tokens = lexer::tokenize_filtered(source);
-    let mut parser = Parser::new(&tokens, source);
-    let file = parser.parse_file();
+    let analysis = DocumentAnalysis::analyze_plain(source);
+    let file = analysis.file;
 
     let symbols: Vec<DocumentSymbol> = file
         .items
@@ -256,9 +254,7 @@ mod tests {
     use crate::parser::ast::SourceFile;
 
     fn parse(src: &str) -> SourceFile {
-        let tokens = lexer::tokenize_filtered(src);
-        let mut parser = Parser::new(&tokens, src);
-        parser.parse_file()
+        DocumentAnalysis::analyze_plain(src).file
     }
 
     fn doc_symbols(src: &str) -> Vec<DocumentSymbol> {
