@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --locked
+      - name: Release build (smoke)
+        run: cargo build --release --locked
+
+  npm-pack-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Validate npm package manifests
+        run: |
+          set -euo pipefail
+          for pkg in npm/*/package.json; do
+            echo "check $pkg"
+            node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$pkg"
+          done
+          node -e "require('./npm/openplanet-lsp/lib/platform.js'); console.log('platform map ok')"
+          # Meta package should pack without the native binary present.
+          (cd npm && npm pack ./openplanet-lsp --dry-run)

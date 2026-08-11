@@ -1,0 +1,29 @@
+{
+  "name": "openplanet-lsp-linux-x64",
+  "version": "0.2.0",
+  "description": "openplanet-lsp native binary for linux-x64",
+  "license": "MIT",
+  "homepage": "https://github.com/clankercode/lsp-openplanet",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clankercode/lsp-openplanet.git",
+    "directory": "npm/openplanet-lsp-linux-x64"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "preferUnplugged": true,
+  "publishConfig": {
+    "access": "public"
+  }
+}

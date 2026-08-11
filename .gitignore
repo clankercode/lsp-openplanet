@@ -1,1 +1,8 @@
 target/
+
+# Native binaries staged into npm platform packages (CI / smoke-local)
+npm/*/bin/openplanet-lsp
+npm/*/bin/openplanet-lsp.exe
+
+# npm pack output
+*.tgz

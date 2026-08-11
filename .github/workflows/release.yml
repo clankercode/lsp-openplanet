@@ -1,0 +1,333 @@
+name: release
+
+# Build multi-platform binaries, attach them to a GitHub Release, and publish
+# npm packages (platform packages + meta launcher).
+#
+# Trigger:
+#   - push tag matching v* (e.g. v0.2.0)
+#   - workflow_dispatch with tag input (must already exist, or will be created
+#     only if you also push the tag yourself)
+#
+# Required repo secrets:
+#   NPM_TOKEN  — npm automation token with publish rights for openplanet-lsp*
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and pack only (skip GitHub release upload + npm publish)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep npm metadata version in lockstep with the tag (set in version job).
+  PACKAGE_NAME: openplanet-lsp
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            # workflow_dispatch: use latest tag or Cargo.toml version
+            TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+            if [[ -z "${TAG}" ]]; then
+              VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+              TAG="v${VER}"
+            fi
+          fi
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag '${TAG}' must look like v1.2.3"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "${CARGO_VER}" != "${VERSION}" ]]; then
+            echo "Cargo.toml version (${CARGO_VER}) != tag version (${VERSION})"
+            echo "Bump Cargo.toml (and npm package.json versions) before tagging."
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${TAG} (${VERSION})"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            npm_pkg: openplanet-lsp-linux-x64
+            archive: tar.gz
+            bin_name: openplanet-lsp
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            npm_pkg: openplanet-lsp-linux-arm64
+            archive: tar.gz
+            bin_name: openplanet-lsp
+          - os: macos-13
+            target: x86_64-apple-darwin
+            npm_pkg: openplanet-lsp-darwin-x64
+            archive: tar.gz
+            bin_name: openplanet-lsp
+          - os: macos-14
+            target: aarch64-apple-darwin
+            npm_pkg: openplanet-lsp-darwin-arm64
+            archive: tar.gz
+            bin_name: openplanet-lsp
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            npm_pkg: openplanet-lsp-win32-x64
+            archive: zip
+            bin_name: openplanet-lsp.exe
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            npm_pkg: openplanet-lsp-win32-arm64
+            archive: zip
+            bin_name: openplanet-lsp.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "${{ matrix.target }}"
+          BIN="target/${{ matrix.target }}/release/${{ matrix.bin_name }}"
+          if [[ ! -f "${BIN}" ]]; then
+            # cargo may omit .exe in path on windows matrix bin_name already has it
+            echo "missing binary: ${BIN}"
+            ls -la "target/${{ matrix.target }}/release/" || true
+            exit 1
+          fi
+          # Strip debug symbols on unix-like targets (best-effort).
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            strip "${BIN}" || true
+          fi
+          echo "BIN_PATH=${BIN}" >> "$GITHUB_ENV"
+          ls -lh "${BIN}"
+
+      - name: Stage GitHub release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          STAGE="dist/${TARGET}"
+          mkdir -p "${STAGE}"
+          cp "${BIN_PATH}" "${STAGE}/"
+          # Lightweight provenance files
+          cp README.md "${STAGE}/" 2>/dev/null || true
+          {
+            echo "openplanet-lsp ${VERSION}"
+            echo "target: ${TARGET}"
+            echo "commit: ${GITHUB_SHA}"
+          } > "${STAGE}/BUILD_INFO.txt"
+
+          mkdir -p dist/archives
+          ASSET="openplanet-lsp-v${VERSION}-${TARGET}"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            (
+              cd "${STAGE}"
+              if command -v zip >/dev/null 2>&1; then
+                zip -r "../archives/${ASSET}.zip" .
+              else
+                powershell -Command "Compress-Archive -Path * -DestinationPath '../archives/${ASSET}.zip'"
+              fi
+            )
+            echo "ASSET_PATH=dist/archives/${ASSET}.zip" >> "$GITHUB_ENV"
+            echo "ASSET_NAME=${ASSET}.zip" >> "$GITHUB_ENV"
+          else
+            tar -C "${STAGE}" -czf "dist/archives/${ASSET}.tar.gz" .
+            echo "ASSET_PATH=dist/archives/${ASSET}.tar.gz" >> "$GITHUB_ENV"
+            echo "ASSET_NAME=${ASSET}.tar.gz" >> "$GITHUB_ENV"
+          fi
+          ls -lh "${ASSET_PATH}"
+
+      - name: Stage npm platform package
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.version.outputs.version }}"
+          PKG_DIR="npm/${{ matrix.npm_pkg }}"
+          test -d "${PKG_DIR}"
+          # Sync version field
+          node -e "
+            const fs=require('fs');
+            const p='${PKG_DIR}/package.json';
+            const j=JSON.parse(fs.readFileSync(p,'utf8'));
+            j.version='${VERSION}';
+            fs.writeFileSync(p, JSON.stringify(j,null,2)+'\n');
+          "
+          mkdir -p "${PKG_DIR}/bin"
+          cp "${BIN_PATH}" "${PKG_DIR}/bin/${{ matrix.bin_name }}"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "${PKG_DIR}/bin/${{ matrix.bin_name }}"
+          fi
+          # Pack for the publish job
+          mkdir -p dist/npm-tgz
+          (cd npm && npm pack "./${{ matrix.npm_pkg }}" --pack-destination ../dist/npm-tgz)
+          ls -lh dist/npm-tgz
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            ${{ env.ASSET_PATH }}
+            dist/npm-tgz/*.tgz
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: build-*
+          merge-multiple: true
+
+      - name: Collect release assets + npm tarballs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets npm-tgz
+          # artifacts may be nested depending on upload layout
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print -exec cp {} release-assets/ \;
+          find artifacts -type f -name '*.tgz' -print -exec cp {} npm-tgz/ \;
+          echo "Release assets:"
+          ls -lh release-assets
+          echo "npm tarballs:"
+          ls -lh npm-tgz
+          count=$(ls release-assets | wc -l)
+          if [[ "${count}" -lt 1 ]]; then
+            echo "No release assets found"
+            exit 1
+          fi
+
+      - name: Create / update GitHub Release
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: openplanet-lsp ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync meta package version + optionalDependency pins
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.VERSION;
+          if (!version) throw new Error('VERSION env missing');
+          const metaPath = 'npm/openplanet-lsp/package.json';
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+          meta.version = version;
+          for (const k of Object.keys(meta.optionalDependencies || {})) {
+            meta.optionalDependencies[k] = version;
+          }
+          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + '\n');
+          console.log('meta package.json ->', version);
+          console.log('optionalDependencies', meta.optionalDependencies);
+          NODE
+
+      - name: Pack meta package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p npm-tgz
+          (cd npm && npm pack ./openplanet-lsp --pack-destination ../npm-tgz)
+          ls -lh npm-tgz
+
+      - name: Publish npm packages
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "NPM_TOKEN secret is not set; cannot publish."
+            exit 1
+          fi
+          shopt -s nullglob
+          # Platform tarballs look like: openplanet-lsp-linux-x64-0.2.0.tgz
+          # Meta tarball looks like:     openplanet-lsp-0.2.0.tgz
+          platforms=(
+            npm-tgz/openplanet-lsp-linux-*.tgz
+            npm-tgz/openplanet-lsp-darwin-*.tgz
+            npm-tgz/openplanet-lsp-win32-*.tgz
+          )
+          if [[ ${#platforms[@]} -eq 0 ]]; then
+            echo "No platform tarballs found"
+            ls -la npm-tgz || true
+            exit 1
+          fi
+          for tgz in "${platforms[@]}"; do
+            echo "Publishing platform ${tgz}"
+            npm publish "${tgz}" --access public
+          done
+          META_TGZ="npm-tgz/openplanet-lsp-${VERSION}.tgz"
+          if [[ ! -f "${META_TGZ}" ]]; then
+            echo "Meta tarball missing: ${META_TGZ}"
+            ls -la npm-tgz
+            exit 1
+          fi
+          echo "Publishing meta ${META_TGZ}"
+          npm publish "${META_TGZ}" --access public
+
+      - name: Dry-run summary
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          echo "Dry run complete. Artifacts staged but not published."
+          ls -lh release-assets npm-tgz
