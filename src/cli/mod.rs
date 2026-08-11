@@ -1,3 +1,7 @@
+//! CLI `check` command: workspace diagnostics + human-readable reports.
+//!
+//! Pretty layout rules live in [`pretty`] (provisional — issue #12 / map #8).
+
 use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
@@ -9,6 +13,8 @@ use crate::workspace::load::{load_plugin_workspace, symbol_table_from_load, Depe
 use crate::workspace::manifest::Manifest;
 use crate::workspace::project;
 
+mod pretty;
+
 const CHECK_HELP: &str = "\
 openplanet-lsp check - Run workspace diagnostics for an OpenPlanet plugin
 
@@ -17,6 +23,10 @@ USAGE:
 
 OPTIONS:
     -h, --help          Show this help message
+    --format FMT        Output format: plain | pretty | auto (default: auto)
+                        auto → pretty when stdout is color-capable, else plain
+                        plain → gcc-style path:line:col: severity: message
+                        pretty → source excerpt + carets (see module docs)
     --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
     --no-typedb         Run without Openplanet/Nadeo type database files
     --plugins-dir DIR   Directory to search for plugin dependencies
@@ -32,10 +42,46 @@ OPTIONS:
 
 EXAMPLES:
     openplanet-lsp check ~/plugins/tm-agent
+    openplanet-lsp check --format pretty ~/plugins/tm-agent
     openplanet-lsp check --plugins-dir ~/openplanet/plugins --plugins-dir ~/openplanet/my-plugins ~/plugins/tm-agent
     openplanet-lsp check --plugin-files-search-path src --plugin-files-search-path generated .
     openplanet-lsp check --typedb-dir /path/to/typedb --plugins-dir ~/openplanet/my-plugins .
+
 ";
+
+/// How `check` should render diagnostics on stdout.
+///
+/// Provisional (issue #12): `Auto` picks pretty when the color capability bit
+/// is on (`color_stdout()`-equivalent), otherwise plain gcc-style.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CheckFormat {
+    #[default]
+    Auto,
+    Plain,
+    Pretty,
+}
+
+impl CheckFormat {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "plain" => Ok(Self::Plain),
+            "pretty" => Ok(Self::Pretty),
+            other => Err(format!(
+                "unknown --format value '{other}' (expected plain, pretty, or auto)"
+            )),
+        }
+    }
+
+    /// Whether the pretty layout should be used given a color-capability bit.
+    pub fn use_pretty(self, color_capable: bool) -> bool {
+        match self {
+            Self::Plain => false,
+            Self::Pretty => true,
+            Self::Auto => color_capable,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct CheckOptions {
@@ -44,6 +90,7 @@ pub struct CheckOptions {
     pub no_typedb: bool,
     pub plugins_dirs: Vec<PathBuf>,
     pub plugin_files_search_paths: Vec<PathBuf>,
+    pub format: CheckFormat,
 }
 
 #[derive(Debug)]
@@ -90,6 +137,25 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
             }
             "--no-typedb" => {
                 options.no_typedb = true;
+                i += 1;
+            }
+            "--format" => {
+                let Some(value) = args.get(i + 1) else {
+                    return Err(CliError::Usage(
+                        "--format requires a value (plain, pretty, or auto)".to_string(),
+                    ));
+                };
+                options.format = CheckFormat::parse(value).map_err(CliError::Usage)?;
+                i += 2;
+            }
+            _ if arg.starts_with("--format=") => {
+                let value = arg.trim_start_matches("--format=");
+                if value.is_empty() {
+                    return Err(CliError::Usage(
+                        "--format requires a value (plain, pretty, or auto)".to_string(),
+                    ));
+                }
+                options.format = CheckFormat::parse(value).map_err(CliError::Usage)?;
                 i += 1;
             }
             "--typedb-dir" => {
@@ -283,12 +349,29 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     })
 }
 
+/// Format a check report using env/TTY color and [`CheckFormat::Auto`].
 pub fn format_check_report(report: &CheckReport) -> String {
-    format_check_report_with(report, crate::term::color_stdout())
+    format_check_report_with(report, crate::term::color_stdout(), CheckFormat::Auto)
+}
+
+/// Format a check report with an explicit [`CheckFormat`] (CLI entry).
+pub fn format_check_report_for(report: &CheckReport, format: CheckFormat) -> String {
+    format_check_report_with(report, crate::term::color_stdout(), format)
 }
 
 /// Format check diagnostics; `color` forces ANSI on/off (tests / screenshots).
-pub fn format_check_report_with(report: &CheckReport, color: bool) -> String {
+///
+/// `format` selects plain gcc-style vs pretty excerpts. See [`CheckFormat::use_pretty`].
+pub fn format_check_report_with(report: &CheckReport, color: bool, format: CheckFormat) -> String {
+    if format.use_pretty(color) {
+        pretty::format_pretty(report, color)
+    } else {
+        format_plain(report, color)
+    }
+}
+
+/// gcc/clang-ish plain lines: `path:line:col: severity: message`
+fn format_plain(report: &CheckReport, color: bool) -> String {
     use crate::term;
 
     let mut out = String::new();
@@ -316,7 +399,6 @@ pub fn format_check_report_with(report: &CheckReport, color: bool) -> String {
             _ => severity.to_string(),
         };
 
-        // gcc/clang-ish: path:line:col: severity: message
         out.push_str(&format!(
             "{}:{}: {}: {}\n",
             term::path(color, rel.display().to_string()),
@@ -397,12 +479,54 @@ fn load_type_index(config: &LspConfig, no_typedb: bool) -> Result<Option<TypeInd
         .map_err(|e| CliError::Check(format!("failed to load type database: {e}")))
 }
 
-fn severity_label(severity: Option<DiagnosticSeverity>) -> &'static str {
+pub(crate) fn severity_label(severity: Option<DiagnosticSeverity>) -> &'static str {
     match severity {
         Some(DiagnosticSeverity::ERROR) => "error",
         Some(DiagnosticSeverity::WARNING) => "warning",
         Some(DiagnosticSeverity::INFORMATION) => "info",
         Some(DiagnosticSeverity::HINT) => "hint",
         _ => "diagnostic",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_format_values() {
+        assert_eq!(CheckFormat::parse("auto").unwrap(), CheckFormat::Auto);
+        assert_eq!(CheckFormat::parse("PLAIN").unwrap(), CheckFormat::Plain);
+        assert_eq!(CheckFormat::parse("Pretty").unwrap(), CheckFormat::Pretty);
+        assert!(CheckFormat::parse("json").is_err());
+    }
+
+    #[test]
+    fn use_pretty_matrix() {
+        assert!(!CheckFormat::Plain.use_pretty(true));
+        assert!(!CheckFormat::Plain.use_pretty(false));
+        assert!(CheckFormat::Pretty.use_pretty(true));
+        assert!(CheckFormat::Pretty.use_pretty(false));
+        assert!(CheckFormat::Auto.use_pretty(true));
+        assert!(!CheckFormat::Auto.use_pretty(false));
+    }
+
+    #[test]
+    fn parse_check_args_format_flag() {
+        let opts = parse_check_args(&[
+            "--format".into(),
+            "pretty".into(),
+            "--no-typedb".into(),
+            "/tmp/plugin".into(),
+        ])
+        .unwrap();
+        assert_eq!(opts.format, CheckFormat::Pretty);
+        assert!(opts.no_typedb);
+
+        let opts = parse_check_args(&["--format=plain".into(), ".".into()]).unwrap();
+        assert_eq!(opts.format, CheckFormat::Plain);
+
+        let opts = parse_check_args(&[".".into()]).unwrap();
+        assert_eq!(opts.format, CheckFormat::Auto);
     }
 }

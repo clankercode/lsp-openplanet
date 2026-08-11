@@ -115,7 +115,10 @@ fn run_check_command(args: &[String]) -> i32 {
             if !report.type_database_loaded && !options.no_typedb {
                 eprintln!("warning: type database not loaded; pass --typedb-dir or --no-typedb");
             }
-            print!("{}", cli::format_check_report(&report));
+            print!(
+                "{}",
+                cli::format_check_report_for(&report, options.format)
+            );
             // Warnings (e.g. B004 bare-string params) are reported but do not
             // fail the check command; only errors produce a non-zero exit.
             let has_errors = report.diagnostics.iter().any(|item| {
