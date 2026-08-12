@@ -2,15 +2,12 @@
 //! Run: cargo test --test tui_export_frames -- --nocapture
 //! Writes docs/images/tui-review/*.json
 
-use openplanet_lsp::tui::{canned_snapshot, App, ListDensity};
+use openplanet_lsp::tui::{canned_snapshot, App, ListDensity, Snapshot};
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
 use ratatui::Terminal;
 use std::fs;
 use std::path::PathBuf;
-
-const W: u16 = 100;
-const H: u16 = 32;
 
 fn color_hex(c: Color) -> Option<String> {
     match c {
@@ -35,8 +32,8 @@ fn color_hex(c: Color) -> Option<String> {
     }
 }
 
-fn export(name: &str, mut app: App) {
-    let backend = TestBackend::new(W, H);
+fn export_sized(name: &str, mut app: App, w: u16, h: u16) {
+    let backend = TestBackend::new(w, h);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| app.draw(f)).unwrap();
     let buf = terminal.backend().buffer();
@@ -75,28 +72,41 @@ fn export(name: &str, mut app: App) {
 
 #[test]
 fn export_frames_for_visual_review() {
-    // compact + selected first (pretty detail with carets)
-    let mut compact = App::from_snapshot(canned_snapshot());
-    export("01-compact", compact);
+    // Main multi-diagnostic screens (compact + relaxed) at product sizes.
+    let compact = App::from_snapshot(canned_snapshot());
+    export_sized("01-compact", compact, 100, 32);
+    export_sized(
+        "01-compact-80x24",
+        App::from_snapshot(canned_snapshot()),
+        80,
+        24,
+    );
 
-    // select second (warning)
     let mut warn = App::from_snapshot(canned_snapshot());
     warn.scroll_down();
-    export("02-warning-detail", warn);
+    export_sized("02-warning-detail", warn, 100, 32);
 
-    // select third
     let mut third = App::from_snapshot(canned_snapshot());
     third.scroll_down();
     third.scroll_down();
-    export("03-fakevehicle", third);
+    export_sized("03-fakevehicle", third, 100, 32);
 
-    // relaxed density
+    // Primary relaxed multi-diag snapshot (user-requested).
     let mut relaxed = App::from_snapshot(canned_snapshot());
     relaxed.toggle_density();
     assert_eq!(relaxed.density, ListDensity::Relaxed);
-    export("04-relaxed", relaxed);
+    export_sized("04-relaxed", relaxed, 100, 32);
 
-    // empty
-    let empty = App::from_snapshot(openplanet_lsp::tui::Snapshot::empty("./EmptyPlugin"));
-    export("05-empty", empty);
+    let mut relaxed_std = App::from_snapshot(canned_snapshot());
+    relaxed_std.toggle_density();
+    export_sized("04-relaxed-80x24", relaxed_std, 80, 24);
+
+    // Second-selected relaxed (warning) for fragment variety.
+    let mut relaxed_w = App::from_snapshot(canned_snapshot());
+    relaxed_w.toggle_density();
+    relaxed_w.scroll_down();
+    export_sized("04b-relaxed-warning", relaxed_w, 100, 32);
+
+    let empty = App::from_snapshot(Snapshot::empty("./EmptyPlugin"));
+    export_sized("05-empty", empty, 100, 32);
 }

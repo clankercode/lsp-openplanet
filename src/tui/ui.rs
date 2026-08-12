@@ -190,12 +190,30 @@ impl App {
                 .max()
                 .unwrap_or(16)
                 .min(40);
+            // Inner list width (borders already drawn by Block).
+            let content_w = area.width.saturating_sub(2) as usize;
+            let lhs_max = self
+                .snapshot
+                .diagnostics
+                .iter()
+                .map(lhs_width)
+                .max()
+                .unwrap_or(12);
             let selected = self.list_state.selected();
             self.snapshot
                 .diagnostics
                 .iter()
                 .enumerate()
-                .map(|(i, d)| list_item_for(d, self.density, loc_w, selected == Some(i)))
+                .map(|(i, d)| {
+                    list_item_for(
+                        d,
+                        self.density,
+                        loc_w,
+                        content_w,
+                        lhs_max,
+                        selected == Some(i),
+                    )
+                })
                 .collect()
         };
 
@@ -315,14 +333,20 @@ fn detail_box_height(selected: Option<&DiagItem>) -> u16 {
     (inner + 2) as u16
 }
 
+fn lhs_width(d: &DiagItem) -> usize {
+    // " E " + bare location
+    3 + bare_location(d).chars().count()
+}
+
 fn list_item_for(
     d: &DiagItem,
     density: ListDensity,
     loc_w: usize,
+    content_w: usize,
+    lhs_max: usize,
     selected: bool,
 ) -> ListItem<'static> {
     let glyph = d.severity.glyph();
-    let loc = format_location(d, loc_w);
     let style = severity_style(d.severity);
     let msg_style = if selected {
         style
@@ -331,13 +355,14 @@ fn list_item_for(
     };
     let loc_style = if selected {
         Style::default()
-            .fg(ratatui::style::Color::Cyan)
+            .fg(ratatui::style::Color::Rgb(120, 220, 255))
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(ratatui::style::Color::Cyan)
+        Style::default().fg(ratatui::style::Color::Rgb(100, 190, 230))
     };
     match density {
         ListDensity::Compact => {
+            let loc = format_location(d, loc_w);
             let row = Line::from(vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
                 Span::styled(loc, loc_style),
@@ -347,28 +372,35 @@ fn list_item_for(
             ListItem::new(row)
         }
         ListDensity::Relaxed => {
-            // Row 1: severity + location … optional `> fragment <` on the RHS.
-            // Keep padded `loc` (trailing spaces) so `› frag ‹` shares one column.
+            // LHS: severity + bare path:line:col (no trailing pad).
+            let bare = bare_location(d);
+            let lhs = format!(" {glyph} {bare}");
             let mut head_spans = vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
-                Span::styled(loc, loc_style),
+                Span::styled(bare, loc_style),
             ];
+            // RHS: `› frag ‹` right-aligned to content_w.
+            // Only elide when the fragment would start left of lhs_max + 3.
             if let Some(frag) = code_fragment(d) {
-                // Fixed-width field: `› frag ‹` then trailing pad (spaces outside brackets).
-                const FRAG_INNER: usize = 18;
-                let inner = if frag.chars().count() > FRAG_INNER {
-                    let take: String = frag.chars().take(FRAG_INNER.saturating_sub(1)).collect();
-                    format!("{take}…")
-                } else {
-                    frag
-                };
-                let field = format!("› {inner} ‹");
-                // Total field width including brackets/spaces.
-                const FIELD_W: usize = 22; // › + sp + 18 + sp + ‹
-                let field = format!("{field:<FIELD_W$}");
-                head_spans.push(Span::raw("  "));
-                // Paint brackets dim, body severity — split spans by scanning field.
-                head_spans.extend(paint_fragment_field(&field, style));
+                let min_gap = 3usize;
+                let rhs_budget = content_w.saturating_sub(lhs_max.saturating_add(min_gap));
+                if let Some(rhs) = format_fragment_rhs(&frag, rhs_budget) {
+                    let lhs_len = lhs.chars().count();
+                    let rhs_len = rhs.chars().count();
+                    let gap = content_w.saturating_sub(lhs_len).saturating_sub(rhs_len);
+                    // Prefer at least min_gap when budget allows; right-align uses full remainder.
+                    let gap = gap.max(min_gap.min(content_w.saturating_sub(lhs_len)));
+                    // Recompute if gap+lhs+rhs > content_w (gap forced): shrink gap.
+                    let gap = if lhs_len + gap + rhs_len > content_w {
+                        content_w.saturating_sub(lhs_len + rhs_len)
+                    } else {
+                        gap
+                    };
+                    if gap > 0 {
+                        head_spans.push(Span::raw(" ".repeat(gap)));
+                    }
+                    head_spans.extend(paint_fragment_field(&rhs, style));
+                }
             }
             let head = Line::from(head_spans);
             let msg = Line::from(Span::styled(format!("   {}", d.message), msg_style));
@@ -377,8 +409,30 @@ fn list_item_for(
     }
 }
 
-/// Problematic span from the source line, for relaxed-mode list chrome.
-/// Prefers the exact caret span; widens slightly for single-char / empty spans.
+/// Build `› frag ‹`, truncating `frag` only when it exceeds `budget` chars total.
+fn format_fragment_rhs(frag: &str, budget: usize) -> Option<String> {
+    // overhead: '›' + ' ' + ' ' + '‹' = 4
+    const OVERHEAD: usize = 4;
+    if budget <= OVERHEAD {
+        return None;
+    }
+    let max_inner = budget - OVERHEAD;
+    let inner = if frag.chars().count() > max_inner {
+        if max_inner == 0 {
+            return None;
+        }
+        if max_inner == 1 {
+            "…".to_string()
+        } else {
+            let take: String = frag.chars().take(max_inner - 1).collect();
+            format!("{take}…")
+        }
+    } else {
+        frag.to_string()
+    };
+    Some(format!("› {inner} ‹"))
+}
+
 fn code_fragment(d: &DiagItem) -> Option<String> {
     let src = d.source_line.as_ref()?;
     let chars: Vec<char> = src.chars().collect();
@@ -399,11 +453,7 @@ fn code_fragment(d: &DiagItem) -> Option<String> {
             frag = richer;
         }
     }
-    const MAX: usize = 28;
-    if frag.chars().count() > MAX {
-        let take: String = frag.chars().take(MAX.saturating_sub(1)).collect();
-        frag = format!("{take}…");
-    }
+    // Layout-time truncation only (right-align budget) — keep full frag here.
     Some(frag)
 }
 
@@ -510,16 +560,19 @@ fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
     let sev = d.severity.label();
     let sev_style = severity_style(d.severity).add_modifier(Modifier::BOLD);
 
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            path,
-            Style::default()
-                .fg(ratatui::style::Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(":{}:{}: ", d.line, d.col)),
-        Span::styled(sev.to_string(), sev_style),
-    ])];
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                path,
+                Style::default()
+                    .fg(ratatui::style::Color::Rgb(120, 220, 255))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(":{}:{}: ", d.line, d.col)),
+            Span::styled(sev.to_string(), sev_style),
+        ]),
+        Line::from(""), // blank between header and source (even spacing in the box)
+    ];
 
     if let Some(src) = d.source_line.as_ref() {
         let gutter_w = d.line.to_string().len().max(2);
@@ -585,10 +638,13 @@ fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
 
 fn severity_style(sev: Severity) -> Style {
     match sev {
-        Severity::Error => Style::default().fg(ratatui::style::Color::Red),
-        Severity::Warning => Style::default().fg(ratatui::style::Color::Yellow),
-        Severity::Info => Style::default().fg(ratatui::style::Color::Cyan),
-        Severity::Hint => Style::default().add_modifier(Modifier::DIM),
+        // Bright palette — default Red/Yellow are muddy on dark terminals.
+        Severity::Error => Style::default().fg(ratatui::style::Color::Rgb(255, 85, 85)),
+        Severity::Warning => Style::default().fg(ratatui::style::Color::Rgb(255, 215, 0)),
+        Severity::Info => Style::default().fg(ratatui::style::Color::Rgb(120, 200, 255)),
+        Severity::Hint => Style::default()
+            .fg(ratatui::style::Color::Rgb(160, 160, 170))
+            .add_modifier(Modifier::DIM),
     }
 }
 
@@ -678,6 +734,66 @@ mod tests {
         assert_eq!(plural(2, "warning", "warnings"), "2 warnings");
         assert!(diag_counts_phrase(3, 2, 1).contains("1 warning"));
         assert!(!diag_counts_phrase(3, 2, 1).contains("1 warnings"));
+    }
+
+    #[test]
+    fn fragment_rhs_no_truncate_when_room() {
+        // At 80 cols, canned frags must stay full (user requirement).
+        let content_w = 78usize; // 80 - borders
+        let diags = &canned_snapshot().diagnostics;
+        let lhs_max = diags.iter().map(lhs_width).max().unwrap();
+        let budget = content_w.saturating_sub(lhs_max + 3);
+        for d in diags {
+            let frag = code_fragment(d).expect("frag");
+            let rhs = format_fragment_rhs(&frag, budget).expect("rhs");
+            assert!(!rhs.contains('…'), "should not truncate {rhs} budget={budget}");
+            if frag.contains("MakeTint") {
+                assert!(rhs.contains("MakeTint(true)"), "{rhs}");
+            }
+            if frag == "FakeVehicleState" || frag.contains("FakeVehicle") {
+                assert!(rhs.contains("FakeVehicleState"), "{rhs}");
+            }
+        }
+    }
+
+    #[test]
+    fn fragment_rhs_right_aligns() {
+        let content_w = 78usize;
+        let diags = &canned_snapshot().diagnostics;
+        let lhs_max = diags.iter().map(lhs_width).max().unwrap();
+        let budget = content_w - lhs_max - 3;
+        for d in diags {
+            let bare = bare_location(d);
+            let lhs = format!(" {} {bare}", d.severity.glyph());
+            let frag = code_fragment(d).unwrap();
+            let rhs = format_fragment_rhs(&frag, budget).unwrap();
+            let gap = content_w - lhs.chars().count() - rhs.chars().count();
+            assert!(gap >= 3, "gap={gap} lhs={lhs:?} rhs={rhs:?}");
+            assert_eq!(
+                lhs.chars().count() + gap + rhs.chars().count(),
+                content_w,
+                "must fill to right edge"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_has_blank_after_header() {
+        let d = &canned_snapshot().diagnostics[0];
+        let lines = pretty_detail_lines(d);
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(rows.len() >= 3, "{rows:?}");
+        assert!(rows[0].contains("Overlay"), "{rows:?}");
+        assert_eq!(rows[1], "", "blank line after header: {rows:?}");
+        assert!(rows[2].contains('│'), "{rows:?}");
     }
 
     #[test]
