@@ -13,6 +13,35 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-12
+
+### Added
+- **Watch TUI polish (product-ready):** pretty caret detail pane, compact/relaxed
+  density (`c`), right-aligned `› fragment ‹` on relaxed rows, content-sized detail box.
+- **Showcase screenshots:** real `tests/fixtures/showcase-diags` frames; README hero
+  `docs/images/watch-demo.png` (relaxed + MakeTint detail).
+- **Async watch checks:** background worker so `checking…` paints and the UI stays
+  navigable during analysis; dirty edits coalesce to one follow-up run.
+- **Stable selection** across refresh (path/range/message identity).
+- **Watch health / stale:** last-good list labeled stale while checking or after
+  failure; `watch off · r to refresh` when notify fails.
+- **justfile** for local build/install/test/check/watch/TUI export recipes.
+- README **Watch TUI** keys, watched files (`*.as`/`*.inc`/`info.toml`), exit codes.
+
+### Changed
+- Status wording: `checked in N ms` (was `last: Nms`).
+- Brighter error/warning palette for dark terminals; `▸` selection marker.
+- Message ellipsis; location column width capped to ~40% of list width.
+- Page size follows viewport × density; Ctrl-C quits; plain keys ignore Ctrl/Alt.
+- Info/Hint counts appear in the header when non-zero.
+- TUI export tests are `#[ignore]` — regenerate with `just tui-frames` /
+  `just tui-showcase-shots` (normal `cargo test` no longer rewrites docs).
+
+### Fixed
+- Duplicate startup check (`first_poll` + `dirty`) — exactly one initial run.
+- Detail pane blank line restored between path header and source gutter.
+- Fragments right-align and only truncate when they would collide with the LHS.
+
 ## [0.3.3] - 2026-08-12
 
 ### Fixed
