@@ -8,6 +8,8 @@ platform-specific native binary (`openplanet-lsp-*`).
 
 ![openplanet-lsp check — pretty diagnostics](https://raw.githubusercontent.com/clankercode/lsp-openplanet/master/docs/images/check-demo.png)
 
+![openplanet-lsp watch TUI — relaxed density](https://raw.githubusercontent.com/clankercode/lsp-openplanet/master/docs/images/watch-demo.png)
+
 
 ## Install
 

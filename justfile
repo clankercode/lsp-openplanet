@@ -55,10 +55,17 @@ watch-showcase:
       --typedb-dir {{typedb}} \
       {{showcase}}
 
-# Export TUI review frames + PNGs under docs/images/tui-review/
+# Export canned mock TUI frames + PNGs under docs/images/tui-review/
 tui-frames:
     cargo test --test tui_export_frames -- --nocapture
     for f in docs/images/tui-review/*.json; do python3 scripts/tui_frame_to_png.py "$f" -o "${f%.json}.png"; done
+
+# Real showcase-diags TUI shots → docs/images/watch-demo.png (relaxed hero)
+tui-showcase-shots:
+    cargo test --test tui_export_showcase -- --nocapture
+    for f in docs/images/tui-review/showcase-*.json; do python3 scripts/tui_frame_to_png.py "$f" -o "${f%.json}.png"; python3 scripts/pad_screenshot.py "${f%.json}.png" --in-place --pad 16; done
+    cp -f docs/images/tui-review/showcase-relaxed-hero.png docs/images/watch-demo.png
+    @echo "hero → docs/images/watch-demo.png"
 
 # Clippy (all targets)
 clippy:

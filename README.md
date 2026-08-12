@@ -2,6 +2,8 @@
 
 ![openplanet-lsp check — pretty diagnostics](docs/images/check-demo.png)
 
+![openplanet-lsp watch TUI — relaxed density on showcase-diags](docs/images/watch-demo.png)
+
 Language Server Protocol implementation for **OpenPlanet AngelScript**
 (Trackmania / OpenPlanet plugins).
 
