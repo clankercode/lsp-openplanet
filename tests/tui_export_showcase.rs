@@ -91,6 +91,7 @@ fn export_sized(name: &str, mut app: App, w: u16, h: u16) {
 }
 
 #[test]
+#[ignore = "writes docs/images; run via just tui-frames / tui-showcase-shots"]
 fn export_showcase_tui_frames() {
     let snap = showcase_snapshot();
     let n = snap.diagnostics.len();

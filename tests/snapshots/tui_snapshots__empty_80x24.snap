@@ -25,4 +25,4 @@ expression: terminal.backend()
 "│                                                                              │"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-" j/k move · PgUp/Dn page · g/G top/end · r refresh · c density · q quit         "
+" j/k move · PgUp/Dn page · g/G top/end · r refresh · c density · q/^C quit      "

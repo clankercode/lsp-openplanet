@@ -56,6 +56,14 @@ impl ListDensity {
             ListDensity::Relaxed => "relaxed",
         }
     }
+
+    /// Rows consumed per list item (including message line in relaxed).
+    pub fn rows_per_item(self) -> usize {
+        match self {
+            ListDensity::Compact => 1,
+            ListDensity::Relaxed => 2,
+        }
+    }
 }
 
 /// One row in the watch list (CLI view model — not LSP wire types).
@@ -77,6 +85,19 @@ pub struct DiagItem {
 }
 
 impl DiagItem {
+    /// Stable identity for selection across refreshes (path + range + message).
+    pub fn identity_key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}:{}:{}",
+            self.path.display(),
+            self.line,
+            self.col,
+            self.end_col,
+            self.severity.glyph(),
+            self.message
+        )
+    }
+
     /// 0-based start column on the expanded source line.
     pub fn start_col0(&self) -> usize {
         self.col.saturating_sub(1) as usize
@@ -90,6 +111,25 @@ impl DiagItem {
             start + 1
         } else {
             end
+        }
+    }
+}
+
+/// File-watch subsystem health (independent of check status).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum WatchHealth {
+    /// notify is active.
+    #[default]
+    Active,
+    /// Watcher failed; manual `r` still works.
+    ManualOnly { reason: String },
+}
+
+impl WatchHealth {
+    pub fn label(&self) -> String {
+        match self {
+            WatchHealth::Active => String::new(),
+            WatchHealth::ManualOnly { .. } => "watch off · r to refresh".into(),
         }
     }
 }
@@ -108,9 +148,25 @@ impl RunStatus {
         match self {
             RunStatus::Idle => "idle".into(),
             RunStatus::Running => "checking…".into(),
-            RunStatus::Ready { duration } => format!("last: {}ms", duration.as_millis()),
-            RunStatus::Failed { message } => format!("failed: {message}"),
+            RunStatus::Ready { duration } => format!("checked in {} ms", duration.as_millis()),
+            RunStatus::Failed { message } => {
+                // Keep header short; full message lives in detail/banner via status.
+                let short: String = message.chars().take(40).collect();
+                if message.chars().count() > 40 {
+                    format!("failed: {short}…")
+                } else {
+                    format!("failed: {short}")
+                }
+            }
         }
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self, RunStatus::Running)
+    }
+
+    pub fn is_failed(&self) -> bool {
+        matches!(self, RunStatus::Failed { .. })
     }
 }
 
@@ -121,6 +177,9 @@ pub struct Snapshot {
     pub root_label: String,
     pub diagnostics: Vec<DiagItem>,
     pub status: RunStatus,
+    /// True when list is last-good while a new check is running or after failure.
+    pub stale: bool,
+    pub watch_health: WatchHealth,
 }
 
 impl Snapshot {
@@ -129,6 +188,8 @@ impl Snapshot {
             root_label: root_label.into(),
             diagnostics: Vec::new(),
             status: RunStatus::Idle,
+            stale: false,
+            watch_health: WatchHealth::Active,
         }
     }
 
@@ -145,6 +206,20 @@ impl Snapshot {
             .filter(|d| d.severity == Severity::Warning)
             .count()
     }
+
+    pub fn info_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Info)
+            .count()
+    }
+
+    pub fn hint_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Hint)
+            .count()
+    }
 }
 
 /// Events the UI understands. Host maps notify + check results into these.
@@ -154,6 +229,8 @@ pub enum SourceEvent {
     Diagnostics(Snapshot),
     /// Non-fatal status line update without clearing the list.
     Status(RunStatus),
+    /// Update watch-health badge without clearing diagnostics.
+    WatchHealth(WatchHealth),
     /// Source requests UI exit (e.g. parent cancelled).
     Shutdown,
 }

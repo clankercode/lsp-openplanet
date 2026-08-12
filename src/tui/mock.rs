@@ -102,6 +102,8 @@ pub fn canned_snapshot() -> Snapshot {
         status: RunStatus::Ready {
             duration: Duration::from_millis(120),
         },
+        stale: false,
+        watch_health: super::types::WatchHealth::Active,
     }
 }
 

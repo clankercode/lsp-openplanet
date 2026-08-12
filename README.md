@@ -142,11 +142,35 @@ openplanet-lsp check --format plain ./tests/fixtures/showcase-diags
 openplanet-lsp check .                  # PATH = plugin root or a .as file
 openplanet-lsp check --help
 
-# live watch TUI (re-checks on *.as / info.toml changes)
+# live watch TUI (re-checks on *.as / *.inc / info.toml changes)
 openplanet-lsp check --watch .
 # or, from inside a plugin directory on a TTY:
 openplanet-lsp
 ```
+
+#### Watch TUI
+
+Interactive diagnostics browser (requires a real TTY).
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` or arrows | Move selection |
+| `PgUp` / `PgDn` / Space | Page |
+| `g` / `G` (Home/End) | Top / end |
+| `c` | Toggle **compact** ↔ **relaxed** density |
+| `r` | Manual refresh |
+| `q` / Esc / Ctrl-C | Quit |
+
+- **Compact:** one row per diagnostic (message ellipsized).
+- **Relaxed:** location + message; right-aligned `› fragment ‹` on the location row.
+- **Detail:** pretty source excerpt with carets for the selected item.
+- Auto-refresh watches `*.as`, `*.inc`, and `info.toml` under the plugin root. If the watcher fails to start, the header shows `watch off · r to refresh`.
+- Header status: `checking…` while a run is in flight; `checked in N ms` when ready; last-good list is labeled **stale** during a check or after failure.
+- Checks run off the UI thread so navigation stays responsive.
+
+Exit codes for **one-shot** `check`: **0** if no errors (warnings allowed); **1** if diagnostics include errors; **2** on usage / IO failures.
+
+Interactive **`check --watch`**: exits **0** on normal quit; **2** on setup/runtime failure (does not return the last diagnostic status).
 
 Useful options (see `--help` for the full list):
 
@@ -157,9 +181,6 @@ Useful options (see `--help` for the full list):
 | `--typedb-dir <DIR>` | Load OpenPlanet type database from DIR |
 | `--no-typedb` | Skip type DB (parse-only / limited checks) |
 | `--plugins-dir <DIR>` | Extra OpenPlanet plugins dir for dependency exports |
-
-Exit code **0** if no errors (warnings allowed); **1** if diagnostics include
-errors; **2** on usage / IO failures.
 
 ### `update` — self-update
 

@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-use super::types::{DiagItem, ListDensity, RunStatus, Severity, Snapshot};
+use super::types::{DiagItem, ListDensity, RunStatus, Severity, Snapshot, WatchHealth};
 
 /// Watch-list application state.
 #[derive(Debug)]
@@ -15,6 +15,10 @@ pub struct App {
     pub list_state: ListState,
     pub should_quit: bool,
     pub density: ListDensity,
+    /// Last selected diagnostic identity (for stable reselect on refresh).
+    selected_key: Option<String>,
+    /// Inner list height from last draw (for viewport-aware paging).
+    list_inner_h: u16,
 }
 
 impl Default for App {
@@ -30,6 +34,8 @@ impl App {
             list_state: ListState::default(),
             should_quit: false,
             density: ListDensity::Compact,
+            selected_key: None,
+            list_inner_h: 10,
         }
     }
 
@@ -40,18 +46,58 @@ impl App {
     }
 
     pub fn apply_snapshot(&mut self, snap: Snapshot) {
+        // Prefer previous identity; fall back to current selection index.
+        let prev_key = self
+            .selected_key
+            .clone()
+            .or_else(|| self.selected_diag().map(|d| d.identity_key()));
+        let prev_idx = self.list_state.selected();
+
         let len = snap.diagnostics.len();
         self.snapshot = snap;
         if len == 0 {
             self.list_state.select(None);
-        } else {
-            let idx = self.list_state.selected().unwrap_or(0).min(len - 1);
-            self.list_state.select(Some(idx));
+            self.selected_key = None;
+            return;
         }
+
+        let idx = if let Some(key) = prev_key.as_ref() {
+            snap_find_key(&self.snapshot, key)
+                .or_else(|| snap_nearest(&self.snapshot, key, prev_idx))
+                .unwrap_or_else(|| prev_idx.unwrap_or(0).min(len - 1))
+        } else {
+            prev_idx.unwrap_or(0).min(len - 1)
+        };
+        self.list_state.select(Some(idx));
+        self.selected_key = self.snapshot.diagnostics.get(idx).map(|d| d.identity_key());
     }
 
     pub fn apply_status(&mut self, status: RunStatus) {
+        // Running/failed over last-good list → mark stale; ready clears stale.
+        match &status {
+            RunStatus::Running | RunStatus::Failed { .. } => {
+                if !self.snapshot.diagnostics.is_empty() {
+                    self.snapshot.stale = true;
+                }
+            }
+            RunStatus::Ready { .. } => {
+                self.snapshot.stale = false;
+            }
+            RunStatus::Idle => {}
+        }
         self.snapshot.status = status;
+    }
+
+    pub fn apply_watch_health(&mut self, health: WatchHealth) {
+        self.snapshot.watch_health = health;
+    }
+
+    /// Page step from last-drawn list height and density.
+    pub fn page_step(&self) -> usize {
+        let inner = self.list_inner_h.saturating_sub(2) as usize; // borders
+        let per = self.density.rows_per_item().max(1);
+        let visible = (inner / per).max(1);
+        visible.saturating_sub(1).max(1)
     }
 
     pub fn toggle_density(&mut self) {
@@ -64,7 +110,7 @@ impl App {
             return;
         }
         let i = self.list_state.selected().unwrap_or(0);
-        self.list_state.select(Some((i + 1).min(len - 1)));
+        self.select_index((i + 1).min(len - 1));
     }
 
     pub fn scroll_up(&mut self) {
@@ -73,7 +119,7 @@ impl App {
             return;
         }
         let i = self.list_state.selected().unwrap_or(0);
-        self.list_state.select(Some(i.saturating_sub(1)));
+        self.select_index(i.saturating_sub(1));
     }
 
     pub fn page_down(&mut self, page: usize) {
@@ -82,7 +128,7 @@ impl App {
             return;
         }
         let i = self.list_state.selected().unwrap_or(0);
-        self.list_state.select(Some((i + page.max(1)).min(len - 1)));
+        self.select_index((i + page.max(1)).min(len - 1));
     }
 
     pub fn page_up(&mut self, page: usize) {
@@ -91,14 +137,15 @@ impl App {
             return;
         }
         let i = self.list_state.selected().unwrap_or(0);
-        self.list_state.select(Some(i.saturating_sub(page.max(1))));
+        self.select_index(i.saturating_sub(page.max(1)));
     }
 
     pub fn select_first(&mut self) {
         if self.snapshot.diagnostics.is_empty() {
             self.list_state.select(None);
+            self.selected_key = None;
         } else {
-            self.list_state.select(Some(0));
+            self.select_index(0);
         }
     }
 
@@ -106,9 +153,15 @@ impl App {
         let len = self.snapshot.diagnostics.len();
         if len == 0 {
             self.list_state.select(None);
+            self.selected_key = None;
         } else {
-            self.list_state.select(Some(len - 1));
+            self.select_index(len - 1);
         }
+    }
+
+    fn select_index(&mut self, idx: usize) {
+        self.list_state.select(Some(idx));
+        self.selected_key = self.snapshot.diagnostics.get(idx).map(|d| d.identity_key());
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -143,6 +196,7 @@ impl App {
                 Constraint::Length(detail_h),
             ])
             .split(chunks[1]);
+        self.list_inner_h = mid[0].height;
         self.draw_list(f, mid[0]);
         self.draw_detail(f, mid[1]);
 
@@ -153,13 +207,22 @@ impl App {
         let n = self.snapshot.diagnostics.len();
         let e = self.snapshot.error_count();
         let w = self.snapshot.warning_count();
+        let i = self.snapshot.info_count();
+        let h = self.snapshot.hint_count();
         let title = " openplanet-lsp · watch ";
-        let body = format!(
-            " {}  ·  {}  ·  {} ",
-            self.snapshot.root_label,
-            diag_counts_phrase(n, e, w),
+        let mut parts = vec![
+            self.snapshot.root_label.clone(),
+            diag_counts_phrase(n, e, w, i, h),
             self.snapshot.status.label(),
-        );
+        ];
+        if self.snapshot.stale {
+            parts.push("stale".into());
+        }
+        let wh = self.snapshot.watch_health.label();
+        if !wh.is_empty() {
+            parts.push(wh);
+        }
+        let body = format!(" {} ", parts.join("  ·  "));
         let block = Block::default()
             .borders(Borders::ALL)
             .title(Line::from(Span::styled(
@@ -182,6 +245,9 @@ impl App {
                 ))),
             ]
         } else {
+            // Inner list width (borders already drawn by Block; ▸ marker uses 1).
+            let content_w = area.width.saturating_sub(2).saturating_sub(1) as usize;
+            let loc_cap = (content_w * 40 / 100).clamp(12, 40);
             let loc_w = self
                 .snapshot
                 .diagnostics
@@ -189,9 +255,7 @@ impl App {
                 .map(|d| bare_location(d).chars().count())
                 .max()
                 .unwrap_or(16)
-                .min(40);
-            // Inner list width (borders already drawn by Block).
-            let content_w = area.width.saturating_sub(2) as usize;
+                .min(loc_cap);
             let lhs_max = self
                 .snapshot
                 .diagnostics
@@ -223,10 +287,11 @@ impl App {
             .map(|i| i + 1)
             .unwrap_or(0);
         let n = self.snapshot.diagnostics.len();
+        let stale = if self.snapshot.stale { " · stale" } else { "" };
         let title = if n == 0 {
-            format!(" diagnostics · {} ", self.density.label())
+            format!(" diagnostics · {}{stale} ", self.density.label())
         } else {
-            format!(" diagnostics · {} · {sel}/{n} ", self.density.label())
+            format!(" diagnostics · {} · {sel}/{n}{stale} ", self.density.label())
         };
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
@@ -235,7 +300,8 @@ impl App {
                     .bg(ratatui::style::Color::Rgb(55, 58, 78))
                     .add_modifier(Modifier::BOLD),
             )
-            .highlight_symbol("");
+            // One-cell non-color selection affordance (plus RGB bg when available).
+            .highlight_symbol("▸");
 
         f.render_stateful_widget(list, area, &mut self.list_state);
     }
@@ -273,14 +339,14 @@ impl App {
         };
         // Single muted line — no heavy box title competing with content.
         let hints = Paragraph::new(format!(
-            " j/k move · PgUp/Dn page · g/G top/end · r refresh · {density_hint} · q quit "
+            " j/k move · PgUp/Dn page · g/G top/end · r refresh · {density_hint} · q/^C quit "
         ))
         .style(Style::default().add_modifier(Modifier::DIM));
         f.render_widget(hints, area);
     }
 }
 
-fn diag_counts_phrase(n: usize, e: usize, w: usize) -> String {
+fn diag_counts_phrase(n: usize, e: usize, w: usize, i: usize, h: usize) -> String {
     let d = plural(n, "diagnostic", "diagnostics");
     let mut parts = Vec::new();
     if e > 0 {
@@ -288,6 +354,12 @@ fn diag_counts_phrase(n: usize, e: usize, w: usize) -> String {
     }
     if w > 0 {
         parts.push(plural(w, "warning", "warnings"));
+    }
+    if i > 0 {
+        parts.push(plural(i, "info", "infos"));
+    }
+    if h > 0 {
+        parts.push(plural(h, "hint", "hints"));
     }
     if parts.is_empty() {
         format!("{d}")
@@ -302,6 +374,62 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     } else {
         format!("{n} {many}")
     }
+}
+
+
+fn snap_find_key(snap: &Snapshot, key: &str) -> Option<usize> {
+    snap.diagnostics.iter().position(|d| d.identity_key() == key)
+}
+
+/// Nearest diagnostic by (path, line, col) when exact key vanishes.
+fn snap_nearest(snap: &Snapshot, key: &str, prev_idx: Option<usize>) -> Option<usize> {
+    // key format: path:line:col:end:glyph:message
+    let parts: Vec<&str> = key.splitn(6, ':').collect();
+    if parts.len() < 3 {
+        return prev_idx.map(|i| i.min(snap.diagnostics.len().saturating_sub(1)));
+    }
+    // path may contain ':', so parse from the right for numbers — use identity fields loosely
+    let line = parts.iter().rev().nth(4).and_then(|s| s.parse::<u32>().ok());
+    let path_hint = parts.first().copied().unwrap_or("");
+    let mut best: Option<(usize, u32)> = None;
+    for (i, d) in snap.diagnostics.iter().enumerate() {
+        let path_s = d.path.display().to_string();
+        if !path_s.contains(path_hint) && !path_hint.is_empty() && !path_s.ends_with(path_hint) {
+            // still consider by line distance if path matches loosely
+        }
+        let dist = if let Some(l) = line {
+            d.line.abs_diff(l)
+        } else {
+            0
+        };
+        let path_bonus = if path_s == path_hint || path_s.ends_with(path_hint) {
+            0u32
+        } else {
+            1000
+        };
+        let score = dist.saturating_add(path_bonus);
+        if best.map(|(_, s)| score < s).unwrap_or(true) {
+            best = Some((i, score));
+        }
+    }
+    best.map(|(i, _)| i).or_else(|| {
+        prev_idx.map(|i| i.min(snap.diagnostics.len().saturating_sub(1)))
+    })
+}
+
+fn ellipsize(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let n = s.chars().count();
+    if n <= max_chars {
+        return s.to_string();
+    }
+    if max_chars == 1 {
+        return "…".into();
+    }
+    let take: String = s.chars().take(max_chars - 1).collect();
+    format!("{take}…")
 }
 
 fn bare_location(d: &DiagItem) -> String {
@@ -363,11 +491,14 @@ fn list_item_for(
     match density {
         ListDensity::Compact => {
             let loc = format_location(d, loc_w);
+            let used = 3 + loc.chars().count() + 2; // " E " + loc + "  "
+            let msg_budget = content_w.saturating_sub(used).max(4);
+            let msg = ellipsize(&d.message, msg_budget);
             let row = Line::from(vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
                 Span::styled(loc, loc_style),
                 Span::raw("  "),
-                Span::styled(d.message.clone(), msg_style),
+                Span::styled(msg, msg_style),
             ]);
             ListItem::new(row)
         }
@@ -403,7 +534,9 @@ fn list_item_for(
                 }
             }
             let head = Line::from(head_spans);
-            let msg = Line::from(Span::styled(format!("   {}", d.message), msg_style));
+            let msg_budget = content_w.saturating_sub(3).max(4);
+            let msg_txt = ellipsize(&d.message, msg_budget);
+            let msg = Line::from(Span::styled(format!("   {msg_txt}"), msg_style));
             ListItem::new(vec![head, msg])
         }
     }
@@ -694,6 +827,33 @@ mod tests {
     }
 
     #[test]
+    fn selection_survives_insert_above() {
+        let mut app = App::from_snapshot(canned_snapshot());
+        app.scroll_down(); // select warning (index 1)
+        let key = app.selected_diag().unwrap().identity_key();
+        assert!(key.contains("Helpers"));
+
+        let mut snap = canned_snapshot();
+        // insert a new error above the warning
+        snap.diagnostics.insert(
+            0,
+            DiagItem {
+                severity: Severity::Error,
+                path: std::path::PathBuf::from("src/New.as"),
+                line: 1,
+                col: 1,
+                end_col: 2,
+                message: "brand new".into(),
+                source_line: None,
+            },
+        );
+        app.apply_snapshot(snap);
+        let sel = app.selected_diag().unwrap();
+        assert_eq!(sel.identity_key(), key, "should keep Helpers warning selected");
+        assert_eq!(app.selected(), Some(2)); // shifted down by 1
+    }
+
+    #[test]
     fn density_toggles() {
         let mut app = App::new("x");
         assert_eq!(app.density, ListDensity::Compact);
@@ -732,8 +892,9 @@ mod tests {
     fn plural_grammar() {
         assert_eq!(plural(1, "warning", "warnings"), "1 warning");
         assert_eq!(plural(2, "warning", "warnings"), "2 warnings");
-        assert!(diag_counts_phrase(3, 2, 1).contains("1 warning"));
-        assert!(!diag_counts_phrase(3, 2, 1).contains("1 warnings"));
+        assert!(diag_counts_phrase(3, 2, 1, 0, 0).contains("1 warning"));
+        assert!(!diag_counts_phrase(3, 2, 1, 0, 0).contains("1 warnings"));
+        assert!(diag_counts_phrase(4, 1, 1, 1, 1).contains("1 info"));
     }
 
     #[test]

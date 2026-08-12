@@ -71,6 +71,7 @@ fn export_sized(name: &str, mut app: App, w: u16, h: u16) {
 }
 
 #[test]
+#[ignore = "writes docs/images; run via just tui-frames / tui-showcase-shots"]
 fn export_frames_for_visual_review() {
     // Main multi-diagnostic screens (compact + relaxed) at product sizes.
     let compact = App::from_snapshot(canned_snapshot());

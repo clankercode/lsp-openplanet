@@ -10,9 +10,9 @@ mod mock;
 mod types;
 mod ui;
 
-pub use app::{render_once, run, run_with_backend, RunOptions};
+pub use app::{handle_key, render_once, run, run_with_backend, RunOptions};
 pub use mock::{canned_snapshot, MockSource};
 pub use types::{
-    DiagItem, ListDensity, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource,
+    DiagItem, ListDensity, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource, WatchHealth,
 };
 pub use ui::App;

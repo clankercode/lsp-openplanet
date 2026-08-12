@@ -35,9 +35,10 @@ test:
 test-lib:
     cargo test --lib
 
-# TUI crate/module + snapshot tests
+# TUI module + watch adapter + snapshot tests
 test-tui:
     cargo test --lib tui::
+    cargo test --lib cli::watch::
     cargo test --test tui_snapshots
 
 # Pretty check on showcase fixture
@@ -57,12 +58,12 @@ watch-showcase:
 
 # Export canned mock TUI frames + PNGs under docs/images/tui-review/
 tui-frames:
-    cargo test --test tui_export_frames -- --nocapture
+    cargo test --test tui_export_frames -- --ignored --nocapture
     for f in docs/images/tui-review/*.json; do python3 scripts/tui_frame_to_png.py "$f" -o "${f%.json}.png"; done
 
 # Real showcase-diags TUI shots → docs/images/watch-demo.png (relaxed hero)
 tui-showcase-shots:
-    cargo test --test tui_export_showcase -- --nocapture
+    cargo test --test tui_export_showcase -- --ignored --nocapture
     for f in docs/images/tui-review/showcase-*.json; do python3 scripts/tui_frame_to_png.py "$f" -o "${f%.json}.png"; python3 scripts/pad_screenshot.py "${f%.json}.png" --in-place --pad 16; done
     cp -f docs/images/tui-review/showcase-relaxed-hero.png docs/images/watch-demo.png
     @echo "hero → docs/images/watch-demo.png"
