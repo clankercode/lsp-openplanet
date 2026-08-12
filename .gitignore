@@ -8,3 +8,4 @@ npm/*/bin/openplanet-lsp.exe
 *.tgz
 
 .worktrees/
+*.bak
