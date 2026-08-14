@@ -362,6 +362,38 @@ impl<'a> GlobalScope<'a> {
         None
     }
 
+    /// True when `type_name` is (or derives from) `base` in the external
+    /// typedb. Walks the parent chain with a cycle guard, same as
+    /// `ext_lookup_member`. Used to gate game-builtin allowances (GH #21:
+    /// `MwAddRef`/`MwRelease` on CMwNod).
+    pub fn is_external_derived_from(&self, type_name: &str, base: &str) -> bool {
+        let Some(ext) = self.external else {
+            return false;
+        };
+        let Some(base_resolved) = Self::resolve_external_type_name(ext, base) else {
+            return false;
+        };
+        let mut current: Option<String> = Self::resolve_external_type_name(ext, type_name);
+        let mut hops = 0usize;
+        while let Some(name) = current.take() {
+            hops += 1;
+            if hops > 32 {
+                break;
+            }
+            if name == base_resolved {
+                return true;
+            }
+            let Some(info) = ext.lookup_type(&name) else {
+                return false;
+            };
+            current = info
+                .parent
+                .as_ref()
+                .and_then(|p| Self::resolve_external_type_name(ext, p));
+        }
+        false
+    }
+
     fn ext_lookup_method_return(
         ext: &TypeIndex,
         type_name: &str,

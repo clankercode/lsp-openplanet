@@ -1149,6 +1149,16 @@ impl<'a> Checker<'a> {
         {
             return TypeRepr::Error(String::new());
         }
+        // GH #21: `MwAddRef` / `MwRelease` are AngelScript builtins on every
+        // CMwNod-derived type (manual refcount). The typedb never declares
+        // them, so any CMwNod-derived receiver gets a free pass here.
+        if matches!(member_name.as_str(), "MwAddRef" | "MwRelease")
+            && self.scope.is_external_derived_from(&type_name, "CMwNod")
+        {
+            // Returns void; the checker has no Void TypeRepr, so use the
+            // silence sentinel (same as untyped Nadeo methods above).
+            return TypeRepr::Error(String::new());
+        }
         self.diagnostics.push(TypeDiagnostic {
             span,
             kind: TypeDiagnosticKind::UndefinedMember {
@@ -1709,6 +1719,14 @@ impl<'a> Checker<'a> {
                 // suppress only when the typedb member list is empty.
                 if self.scope.is_nadeo_type(&type_name)
                     && !self.scope.nadeo_member_list_trusted(&type_name)
+                {
+                    return TypeRepr::Error(String::new());
+                }
+                // GH #21: `MwAddRef` / `MwRelease` are AngelScript builtins
+                // on every CMwNod-derived type; the typedb never declares
+                // them. Mirror of the gate in `member_access_type`.
+                if matches!(member_name.as_str(), "MwAddRef" | "MwRelease")
+                    && self.scope.is_external_derived_from(&type_name, "CMwNod")
                 {
                     return TypeRepr::Error(String::new());
                 }
@@ -4719,6 +4737,35 @@ mod tests {
         assert!(
             hits.len() == 1,
             "expected exactly 1 UndefinedIdentifier for `nod` (Widget's use; TreeElem's own use must stay silent), got {:?}",
+            diags
+        );
+    }
+
+    // GH #21: `MwAddRef` / `MwRelease` are AngelScript builtins on every
+    // CMwNod-derived type (refcount management). The typedb doesn't declare
+    // them, so the LSP flooded ~107 UndefinedMember FPs on
+    // tm-editor-plus-plus. Game accepts these silently.
+    #[test]
+    fn mw_addref_release_on_mwnod_stays_silent() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CMwNod@ nod, CGameCtnBlockInfo@ bi) {
+                nod.MwAddRef();
+                bi.MwAddRef();
+                bi.MwRelease();
+            }
+            "#,
+        );
+        let hits: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { member, .. }
+                    if member == "MwAddRef" || member == "MwRelease")
+            })
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "MwAddRef/MwRelease must not fire UndefinedMember, got {:?}",
             diags
         );
     }
