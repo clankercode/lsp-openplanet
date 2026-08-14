@@ -93,6 +93,14 @@ impl<'a> GlobalScope<'a> {
             if ext.lookup_enum(qualified).is_some() {
                 return true;
             }
+            // Typedb indexes enums by short name (`ECardinalDirections`), so
+            // a qualified lookup (`CGameCtnBlock::ECardinalDirections`) must
+            // fall through to the tail segment before giving up (B007).
+            if let Some((_, tail)) = qualified.rsplit_once("::") {
+                if ext.lookup_enum(tail).is_some() {
+                    return true;
+                }
+            }
         }
         false
     }

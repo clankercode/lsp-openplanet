@@ -1445,8 +1445,18 @@ impl<'a> Checker<'a> {
                             // inheritance chain links them, accept silently.
                             // Enums have no typedb parent chain, so B007
                             // (distinct enums stay non-convertible) is intact.
+                            let is_unknown_workspace_arg = !arg_n.contains("::")
+                                && !self.scope.is_external_type(arg_n)
+                                && !self.scope.has_enum(arg_n);
                             if !self.named_types_equivalent(arg_n, param_n)
                                 && !self.scope.is_external_derived_from(arg_n, param_n)
+                                // GH #23: an `auto` (or workspace-local class)
+                                // the typedb can't see has no ancestry to
+                                // compare — skip rather than FP. Qualified
+                                // names (`A::B`) are never skipped: that's
+                                // how class-nested enum args appear, and
+                                // B007 must keep firing on cross-enum args.
+                                && !is_unknown_workspace_arg
                             {
                                 self.diagnostics.push(TypeDiagnostic {
                                     span: arg.value.span,
@@ -4744,6 +4754,57 @@ mod tests {
         assert!(
             hits.len() == 1,
             "expected exactly 1 UndefinedIdentifier for `nod` (Widget's use; TreeElem's own use must stay silent), got {:?}",
+            diags
+        );
+    }
+
+    // GH #23: an `auto` local resolves to the `auto` placeholder, which has
+    // no real type. Comparing it against a Named param produced
+    // `expected X, got auto` FPs. Until we infer from the initializer, the
+    // arg check must silence `auto` args (same as unknown/error types).
+    // GH #23 RED: when the initializer can't be inferred (workspace-local
+    // class with no typedb footprint), `expr_type` yields the `auto`
+    // placeholder and the arg check must not compare it against the param.
+    #[test]
+    fn auto_typed_arg_stays_silent() {
+        let diags = check_with_typedb(
+            r#"
+            class Helper {}
+            void Use() {
+                auto h = Helper();
+                Reflection::GetRefCount(h);
+            }
+            "#,
+        );
+        let hits: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "auto-typed arg must not fire ArgTypeMismatch, got {:?}",
+            diags
+        );
+    }
+
+    // GH #23 control: a fully-typed mismatch must still fire.
+    #[test]
+    fn fully_typed_mismatch_still_fires() {
+        let diags = check_with_typedb(
+            r#"
+            void Use() {
+                MwClassInfo@ info;
+                Reflection::GetRefCount(info);
+            }
+            "#,
+        );
+        let hits: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            !hits.is_empty(),
+            "int arg for UI::Font param must still fire ArgTypeMismatch, got {:?}",
             diags
         );
     }
