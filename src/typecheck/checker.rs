@@ -1887,7 +1887,13 @@ impl<'a> Checker<'a> {
                 // Skip Error operands (already diagnosed upstream) and
                 // unknown/workspace types we can't classify confidently.
                 if matches!(op, UnaryOp::Not) && !operand_ty.is_error() {
-                    let legal = matches!(operand_ty, TypeRepr::Primitive(PrimitiveType::Bool));
+                    // Strip `const` (and handle) wrappers: `!` on a
+                    // `const bool` constant is legal (E++ uses
+                    // `!ENABLE_OLD_CHECK_PLACING_ITEM_HELPER`).
+                    let legal = matches!(
+                        operand_ty.unwrap_const(),
+                        TypeRepr::Primitive(PrimitiveType::Bool)
+                    );
                     if !legal {
                         self.diagnostics.push(TypeDiagnostic {
                             span: expr.span,
@@ -4928,6 +4934,24 @@ mod tests {
         assert!(
             diags.is_empty(),
             "legal bool `!` must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn unary_not_on_const_bool_stays_silent() {
+        // E++ uses `!CONSTANT` where the constant is `const bool` — legal.
+        let diags = check(
+            r#"
+            const bool ENABLE_OLD_HELPER = false;
+            void Use() {
+                if (!ENABLE_OLD_HELPER) { return; }
+            }
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "const bool `!` must stay silent, got {:?}",
             diags
         );
     }
