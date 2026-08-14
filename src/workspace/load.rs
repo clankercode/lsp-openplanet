@@ -185,30 +185,44 @@ fn load_dependency_exports(
     let mut seen_ids = HashSet::new();
     let mut seen_files = HashSet::new();
 
-    // Required: dependencies + export_dependencies
-    let mut required = Vec::new();
-    required.extend(script.dependencies.iter().cloned());
-    required.extend(script.export_dependencies.iter().cloned());
+    // Required: dependencies + export_dependencies. A resolved dep's own
+    // `export_dependencies` are enqueued so nested exports walk transitively
+    // (MLFeed → MLHook). Optional deps load when present, never error.
+    // Vec is used as a stack (pop from back), so push optional FIRST and
+    // required LAST → required deps process before optional ones.
+    let mut queue: Vec<(String, bool)> = Vec::new(); // (id, is_required)
+    queue.extend(
+        script
+            .optional_dependencies
+            .iter()
+            .map(|d| (d.clone(), false)),
+    );
+    queue.extend(script.export_dependencies.iter().map(|d| (d.clone(), true)));
+    queue.extend(script.dependencies.iter().map(|d| (d.clone(), true)));
 
-    for dep_id in required {
+    while let Some((dep_id, is_required)) = queue.pop() {
         if !seen_ids.insert(dep_id.clone()) {
             continue;
         }
         match resolve_in_dirs(&dep_id, plugins_dirs, plugin_files_search_paths) {
             Some(resolved) => {
                 push_export_sources(&resolved.export_files, &mut result, &mut seen_files)?;
+                // Recurse into the dep's own export_dependencies so nested
+                // exports resolve. These are treated as required-transitive
+                // (a missing nested dep only errors if the *root* required it).
+                if let Some(dep_script) = &resolved.manifest.script {
+                    for nested in &dep_script.export_dependencies {
+                        if !seen_ids.contains(nested) {
+                            queue.push((nested.clone(), false));
+                        }
+                    }
+                }
             }
-            None => result.missing_required.push(dep_id),
-        }
-    }
-
-    // Optional: load when present; never missing-error
-    for dep_id in &script.optional_dependencies {
-        if !seen_ids.insert(dep_id.clone()) {
-            continue;
-        }
-        if let Some(resolved) = resolve_in_dirs(dep_id, plugins_dirs, plugin_files_search_paths) {
-            push_export_sources(&resolved.export_files, &mut result, &mut seen_files)?;
+            None => {
+                if is_required {
+                    result.missing_required.push(dep_id);
+                }
+            }
         }
     }
 
@@ -229,20 +243,20 @@ fn resolve_in_dirs(
 }
 
 fn push_export_sources(
-    export_files: &[PathBuf],
+    export_files: &[(PathBuf, String)],
     result: &mut DepLoad,
     seen_files: &mut HashSet<PathBuf>,
 ) -> Result<(), String> {
-    for export_path in export_files {
+    for (export_path, source) in export_files {
         let key = export_path
             .canonicalize()
             .unwrap_or_else(|_| export_path.clone());
         if !seen_files.insert(key) {
             continue;
         }
-        let source = std::fs::read_to_string(export_path)
-            .map_err(|e| format!("failed to read {}: {e}", export_path.display()))?;
-        result.loaded_files.push((export_path.clone(), source));
+        result
+            .loaded_files
+            .push((export_path.clone(), source.clone()));
     }
     Ok(())
 }
@@ -408,12 +422,192 @@ dependencies = ["NoSearchPath"]
         .unwrap();
         fs::write(base.join("consumer/src/Main.as"), "void Main() {}\n").unwrap();
 
-        let load = load_plugin_workspace(
-            &base.join("consumer"),
-            &DependencySearch::with_defaults(),
+        let load =
+            load_plugin_workspace(&base.join("consumer"), &DependencySearch::with_defaults())
+                .unwrap();
+        assert_eq!(load.missing_required_dependencies, vec!["NoSearchPath"]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Build a `.op` ZIP archive on disk containing `info.toml` + export files.
+    fn write_op_archive(op_path: &Path, info_toml: &str, files: &[(&str, &str)]) {
+        use std::io::Write;
+        let f = fs::File::create(op_path).unwrap();
+        let mut zip = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("info.toml", opts).unwrap();
+        zip.write_all(info_toml.as_bytes()).unwrap();
+        for (name, contents) in files {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// GH #20: an installed dependency shipped as a `.op` ZIP archive must
+    /// contribute its `exports`/`shared_exports` to the workspace symbol
+    /// table — the common installed-Openplanet case (MLFeedRaceData.op etc.).
+    #[test]
+    fn op_archive_dependency_exports_load_into_symbol_table() {
+        let base = temp_tree("op-arch");
+        fs::create_dir_all(base.join("deps")).unwrap();
+        fs::create_dir_all(base.join("consumer/src")).unwrap();
+
+        write_op_archive(
+            &base.join("deps/MLFeedRaceData.op"),
+            r#"
+[meta]
+name = "MLFeedRaceData"
+version = "1.0.0"
+[script]
+module = "MLFeed"
+exports = ["Export.as"]
+shared_exports = ["SharedExport.as"]
+"#,
+            &[
+                (
+                    "Export.as",
+                    "namespace MLFeed { class RaceData { int cp; } }\n",
+                ),
+                (
+                    "SharedExport.as",
+                    "namespace MLFeed { shared class HookData { int t; } }\n",
+                ),
+            ],
+        );
+
+        fs::write(
+            base.join("consumer/info.toml"),
+            r#"
+[meta]
+name = "Consumer"
+version = "0.1.0"
+[script]
+dependencies = ["MLFeedRaceData"]
+"#,
         )
         .unwrap();
-        assert_eq!(load.missing_required_dependencies, vec!["NoSearchPath"]);
+        fs::write(
+            base.join("consumer/src/Main.as"),
+            "void Main() { MLFeed::RaceData@ t; MLFeed::HookData@ h; }\n",
+        )
+        .unwrap();
+
+        let search = DependencySearch {
+            plugins_dirs: vec![base.join("deps")],
+            plugin_files_search_paths: vec![PathBuf::from("src")],
+        };
+        let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
+        assert!(
+            load.missing_required_dependencies.is_empty(),
+            "missing={:?}",
+            load.missing_required_dependencies
+        );
+        // Both export files should be present as non-diagnostic sources.
+        let dep_files: Vec<_> = load
+            .files
+            .iter()
+            .filter(|f| !f.report_diagnostics)
+            .collect();
+        assert!(
+            dep_files.len() >= 2,
+            "expected exports + shared_exports from .op, got {} dep files",
+            dep_files.len()
+        );
+
+        let table = symbol_table_from_load(&load, &LspConfig::default());
+        assert!(
+            !table.lookup("RaceData").is_empty() || !table.lookup("MLFeed::RaceData").is_empty(),
+            "RaceData from .op export should be in symbol table"
+        );
+        assert!(
+            !table.lookup("HookData").is_empty() || !table.lookup("MLFeed::HookData").is_empty(),
+            "HookData from .op shared_export should be in symbol table"
+        );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// GH #20 acceptance #4: a `.op` dependency's own `export_dependencies`
+    /// must still resolve transitively (MLFeed → MLHook).
+    #[test]
+    fn op_archive_export_dependencies_walk_transitively() {
+        let base = temp_tree("op-nested");
+        fs::create_dir_all(base.join("deps")).unwrap();
+        fs::create_dir_all(base.join("consumer/src")).unwrap();
+
+        // Inner dep: MLHook.op
+        write_op_archive(
+            &base.join("deps/MLHook.op"),
+            r#"
+[meta]
+name = "MLHook"
+version = "1.0.0"
+[script]
+module = "MLHook"
+exports = ["HookExport.as"]
+"#,
+            &[(
+                "HookExport.as",
+                "namespace MLHook { class HookEvent { int id; } }\n",
+            )],
+        );
+        // Outer dep: MLFeedRaceData.op depends on MLHook
+        write_op_archive(
+            &base.join("deps/MLFeedRaceData.op"),
+            r#"
+[meta]
+name = "MLFeedRaceData"
+version = "1.0.0"
+[script]
+module = "MLFeed"
+exports = ["Export.as"]
+export_dependencies = ["MLHook"]
+"#,
+            &[(
+                "Export.as",
+                "namespace MLFeed { class RaceData { int cp; } }\n",
+            )],
+        );
+
+        fs::write(
+            base.join("consumer/info.toml"),
+            r#"
+[meta]
+name = "Consumer"
+version = "0.1.0"
+[script]
+dependencies = ["MLFeedRaceData"]
+"#,
+        )
+        .unwrap();
+        fs::write(
+            base.join("consumer/src/Main.as"),
+            "void Main() { MLFeed::RaceData@ t; MLHook::HookEvent@ e; }\n",
+        )
+        .unwrap();
+
+        let search = DependencySearch {
+            plugins_dirs: vec![base.join("deps")],
+            plugin_files_search_paths: vec![PathBuf::from("src")],
+        };
+        let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
+        assert!(
+            load.missing_required_dependencies.is_empty(),
+            "missing={:?}",
+            load.missing_required_dependencies
+        );
+
+        let table = symbol_table_from_load(&load, &LspConfig::default());
+        assert!(
+            !table.lookup("RaceData").is_empty() || !table.lookup("MLFeed::RaceData").is_empty(),
+            "RaceData from outer .op export should be in symbol table"
+        );
+        assert!(
+            !table.lookup("HookEvent").is_empty() || !table.lookup("MLHook::HookEvent").is_empty(),
+            "HookEvent from nested export_dependency .op should be in symbol table"
+        );
+
         let _ = fs::remove_dir_all(base);
     }
 }

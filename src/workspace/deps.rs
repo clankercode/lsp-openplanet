@@ -7,7 +7,11 @@ pub struct ResolvedDependency {
     pub id: String,
     pub root: PathBuf,
     pub manifest: Manifest,
-    pub export_files: Vec<PathBuf>,
+    /// `(path, source)` pairs. For directory plugins the path is a real file
+    /// and the source was read from disk eagerly. For `.op` archives the path
+    /// is a pseudo-path `Archive.op::<entry>` (never read from disk) and the
+    /// source was read from the ZIP in-memory.
+    pub export_files: Vec<(PathBuf, String)>,
 }
 
 /// Resolve a dependency by ID from the plugins directory.
@@ -95,31 +99,68 @@ fn resolve_op_archive(id: &str, archive_path: &Path) -> Option<ResolvedDependenc
 
     let manifest = Manifest::parse(&toml_contents).ok()?;
 
-    // For .op archives, export files would need to be extracted or read on demand.
-    // For now, return empty — the caller can extract as needed.
+    // GH #20: read export entries straight from the ZIP in-memory. No extract
+    // to disk; the path stored is a pseudo-path so the workspace dedup and
+    // provenance still work without touching the filesystem.
+    let export_files = collect_op_export_files(archive_path, &mut archive, &manifest);
+
     Some(ResolvedDependency {
         id: id.to_string(),
         root: archive_path.to_path_buf(),
         manifest,
-        export_files: Vec::new(),
+        export_files,
     })
+}
+
+fn collect_op_export_files(
+    archive_path: &Path,
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    manifest: &Manifest,
+) -> Vec<(PathBuf, String)> {
+    let mut files = Vec::new();
+    let Some(script) = &manifest.script else {
+        return files;
+    };
+    let names: Vec<&str> = script
+        .exports
+        .iter()
+        .chain(script.shared_exports.iter())
+        .map(|s| s.as_str())
+        .collect();
+    for export in names {
+        let Ok(mut entry) = archive.by_name(export) else {
+            continue;
+        };
+        let mut buf = String::new();
+        if std::io::Read::read_to_string(&mut entry, &mut buf).is_err() {
+            continue;
+        }
+        // Pseudo-path: `<archive>.op::<entry>` — unambiguous, non-FS, unique
+        // per archive so the seen-files dedup can't collide across deps.
+        let pseudo = PathBuf::from(format!("{}::{}", archive_path.display(), export));
+        files.push((pseudo, buf));
+    }
+    files
 }
 
 fn collect_export_files(
     root: &Path,
     manifest: &Manifest,
     plugin_files_search_paths: &[PathBuf],
-) -> Vec<PathBuf> {
+) -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
     if let Some(script) = &manifest.script {
-        for export in &script.exports {
+        for export in script.exports.iter().chain(script.shared_exports.iter()) {
             if let Some(path) = resolve_plugin_file(root, export, plugin_files_search_paths) {
-                files.push(path);
-            }
-        }
-        for export in &script.shared_exports {
-            if let Some(path) = resolve_plugin_file(root, export, plugin_files_search_paths) {
-                files.push(path);
+                // A listed export that exists but can't be read is unusual.
+                // The old push_export_sources path hard-errored the whole
+                // load; warn instead so one bad dep doesn't sink the workspace.
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => files.push((path, source)),
+                    Err(e) => {
+                        tracing::warn!("failed to read dep export {}: {e}", path.display());
+                    }
+                }
             }
         }
     }
