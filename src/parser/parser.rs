@@ -523,19 +523,7 @@ impl<'a> Parser<'a> {
                 Ok(Item::Import(decl))
             }
             _ if self.looks_like_type_start() => {
-                // Game parity (OP 1.29.5): `shared` is only legal on
-                // classes/interfaces. tm-control-mcp AsyncDispatch.as:24/25
-                // hit this — the game errored "Expected '(' / Instead
-                // found '='" while the LSP silently dropped the keyword.
-                if is_shared {
-                    return Err(ParseError {
-                        span: self.current_span(),
-                        kind: ParseErrorKind::Custom(
-                            "`shared` is only valid on classes/interfaces".into(),
-                        ),
-                    });
-                }
-                self.parse_func_or_var_item(attrs)
+                self.parse_func_or_var_item(attrs, is_shared)
             }
             other => Err(ParseError {
                 span: self.current_span(),
@@ -1096,27 +1084,53 @@ impl<'a> Parser<'a> {
 
     /// Parse a top-level function or variable declaration.
     /// We've already determined this looks like a type start.
-    fn parse_func_or_var_item(&mut self, attrs: Vec<Attribute>) -> Result<Item, ParseError> {
+    fn parse_func_or_var_item(
+        &mut self,
+        attrs: Vec<Attribute>,
+        is_shared: bool,
+    ) -> Result<Item, ParseError> {
         let type_start = self.current_span().start;
         let type_expr = self.parse_type_expr()?;
         let name = self.expect_ident()?;
+
+        // Game parity (OP 1.29.5): `shared` on a *variable* is rejected by
+        // the game (tm-control-mcp AsyncDispatch.as:24/25 → "Expected '(' /
+        // Instead found '='"); on a *function* it's the cross-plugin export
+        // mechanism (E++ Math_Shared.as / UI_Components.as) and must parse.
+        // The func-vs-var split only exists after the declarator, so the
+        // check lives here, not in parse_item.
+        let shared_var_err = |span: crate::lexer::Span| ParseError {
+            span,
+            kind: ParseErrorKind::Custom(
+                "`shared` is only valid on classes, interfaces, and functions".into(),
+            ),
+        };
 
         if self.at(TokenKind::LParen) {
             // Ambiguity: `Type name(...)` is either a function declaration
             // or a variable with constructor-style initializer.
             if self.looks_like_constructor_init() {
+                if is_shared {
+                    return Err(shared_var_err(name.span));
+                }
                 let decl = self.parse_var_decl_rest(attrs, type_expr, name)?;
                 return Ok(Item::VarDecl(decl));
             }
-            // Function declaration
+            // Function declaration — `shared` is legal here.
             let decl = self.parse_function_rest(attrs, type_expr, name, false, false)?;
             Ok(Item::Function(decl))
         } else if self.at(TokenKind::LBrace) {
             // Top-level property accessor: `[const] Type name { get { ... } }`
+            if is_shared {
+                return Err(shared_var_err(name.span));
+            }
             let prop = self.parse_property_accessor_block(type_start, type_expr, name)?;
             Ok(Item::Property(prop))
         } else {
             // Variable declaration
+            if is_shared {
+                return Err(shared_var_err(name.span));
+            }
             let decl = self.parse_var_decl_rest(attrs, type_expr, name)?;
             Ok(Item::VarDecl(decl))
         }
@@ -3006,11 +3020,19 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_on_function_is_error() {
-        let (_file, errors) = parse_file("shared void f() {}");
+    fn test_shared_on_function_parses() {
+        // `shared` on a function is the cross-plugin export mechanism
+        // (E++ Math_Shared.as / UI_Components.as) — the game accepts it.
+        let (file, errors) = parse_file("shared void f() {}");
         assert!(
-            !errors.is_empty(),
-            "`shared` on a function decl must be a parse error (game rejects it)"
+            errors.is_empty(),
+            "shared function must parse cleanly, got {:?}",
+            errors
+        );
+        assert!(
+            matches!(&file.items[0], Item::Function(_)),
+            "expected Function item, got {:?}",
+            file.items
         );
     }
 
