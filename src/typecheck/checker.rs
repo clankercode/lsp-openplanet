@@ -1440,7 +1440,14 @@ impl<'a> Checker<'a> {
                             }
                         }
                         (TypeRepr::Named(arg_n), TypeRepr::Named(param_n)) => {
-                            if !self.named_types_equivalent(arg_n, param_n) {
+                            // GH #22: subclass → base is convertible in
+                            // AngelScript for handle args. When the typedb
+                            // inheritance chain links them, accept silently.
+                            // Enums have no typedb parent chain, so B007
+                            // (distinct enums stay non-convertible) is intact.
+                            if !self.named_types_equivalent(arg_n, param_n)
+                                && !self.scope.is_external_derived_from(arg_n, param_n)
+                            {
                                 self.diagnostics.push(TypeDiagnostic {
                                     span: arg.value.span,
                                     kind: TypeDiagnosticKind::ArgTypeMismatch {
@@ -4737,6 +4744,53 @@ mod tests {
         assert!(
             hits.len() == 1,
             "expected exactly 1 UndefinedIdentifier for `nod` (Widget's use; TreeElem's own use must stay silent), got {:?}",
+            diags
+        );
+    }
+
+    // GH #22: subclass args must be accepted where a base-class param is
+    // expected (external typedb inheritance walk). `Dev::GetRefCount` takes
+    // `CMwNod`; passing `CGameCtnAnchoredObject` (a descendant) is legal
+    // in-game but the LSP reported ArgTypeMismatch.
+    #[test]
+    fn subclass_arg_accepted_for_base_param() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CGameCtnAnchoredObject@ obj) {
+                Reflection::GetRefCount(obj);
+            }
+            "#,
+        );
+        let hits: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "subclass arg for CMwNod param must not fire ArgTypeMismatch, got {:?}",
+            diags
+        );
+    }
+
+    // GH #22 control: unrelated Named pairs must still be rejected.
+    // `MwClassInfo` has no typedb parent chain into CMwNod — passing it to
+    // a CMwNod param is a genuine mismatch and must stay loud.
+    #[test]
+    fn unrelated_named_arg_still_rejected() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(MwClassInfo@ info) {
+                Reflection::GetRefCount(info);
+            }
+            "#,
+        );
+        let hits: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            !hits.is_empty(),
+            "string arg for CMwNod param must still fire ArgTypeMismatch, got {:?}",
             diags
         );
     }
