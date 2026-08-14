@@ -121,18 +121,36 @@ fn collect_op_export_files(
     let Some(script) = &manifest.script else {
         return files;
     };
+    // Dedup names: a file listed in both exports and shared_exports would
+    // otherwise be read+decoded twice from the ZIP (seen_files drops the
+    // second push, but the IO already happened).
+    let mut seen_names = std::collections::HashSet::new();
     let names: Vec<&str> = script
         .exports
         .iter()
         .chain(script.shared_exports.iter())
         .map(|s| s.as_str())
+        .filter(|n| seen_names.insert(*n))
         .collect();
     for export in names {
+        // Warn (don't silently drop) on missing/unreadable entries — otherwise
+        // a corrupt archive reproduces the exact "unknown type" false-positive
+        // class GH #20 set out to fix, with no signal. Parity with dir path.
         let Ok(mut entry) = archive.by_name(export) else {
+            tracing::warn!(
+                "op export `{}` not found in {}",
+                export,
+                archive_path.display()
+            );
             continue;
         };
         let mut buf = String::new();
-        if std::io::Read::read_to_string(&mut entry, &mut buf).is_err() {
+        if let Err(e) = std::io::Read::read_to_string(&mut entry, &mut buf) {
+            tracing::warn!(
+                "op export `{}` unreadable in {}: {e}",
+                export,
+                archive_path.display()
+            );
             continue;
         }
         // Pseudo-path: `<archive>.op::<entry>` — unambiguous, non-FS, unique

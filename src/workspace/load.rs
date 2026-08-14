@@ -190,17 +190,30 @@ fn load_dependency_exports(
     // (MLFeed → MLHook). Optional deps load when present, never error.
     // Vec is used as a stack (pop from back), so push optional FIRST and
     // required LAST → required deps process before optional ones.
-    let mut queue: Vec<(String, bool)> = Vec::new(); // (id, is_required)
+    // Tuple: (id, is_required, required_by). required_by is the dep whose
+    // manifest pulled this id in transitively (None for root manifest entries)
+    // — used to warn when a nested export_dependency can't be resolved.
+    let mut queue: Vec<(String, bool, Option<String>)> = Vec::new();
     queue.extend(
         script
             .optional_dependencies
             .iter()
-            .map(|d| (d.clone(), false)),
+            .map(|d| (d.clone(), false, None)),
     );
-    queue.extend(script.export_dependencies.iter().map(|d| (d.clone(), true)));
-    queue.extend(script.dependencies.iter().map(|d| (d.clone(), true)));
+    queue.extend(
+        script
+            .export_dependencies
+            .iter()
+            .map(|d| (d.clone(), true, None)),
+    );
+    queue.extend(
+        script
+            .dependencies
+            .iter()
+            .map(|d| (d.clone(), true, None)),
+    );
 
-    while let Some((dep_id, is_required)) = queue.pop() {
+    while let Some((dep_id, is_required, required_by)) = queue.pop() {
         if !seen_ids.insert(dep_id.clone()) {
             continue;
         }
@@ -213,7 +226,7 @@ fn load_dependency_exports(
                 if let Some(dep_script) = &resolved.manifest.script {
                     for nested in &dep_script.export_dependencies {
                         if !seen_ids.contains(nested) {
-                            queue.push((nested.clone(), false));
+                            queue.push((nested.clone(), false, Some(dep_id.clone())));
                         }
                     }
                 }
@@ -221,6 +234,14 @@ fn load_dependency_exports(
             None => {
                 if is_required {
                     result.missing_required.push(dep_id);
+                } else if let Some(parent) = required_by {
+                    // A resolved dep named this as an export_dependency but it
+                    // can't be found — the parent will now produce "unknown
+                    // type" false positives. Surface it (pinned semantics: not
+                    // a hard missing_required, but not silent either).
+                    tracing::warn!(
+                        "dependency `{dep_id}` (export_dependency of `{parent}`) not found in any plugins dir"
+                    );
                 }
             }
         }

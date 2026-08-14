@@ -261,6 +261,18 @@ fn bare_launch_exit() -> Option<i32> {
 
 #[tokio::main]
 async fn main() {
+    // Initialize tracing FIRST so every subcommand (check, watch, update, LSP)
+    // emits warnings. Previously this sat just before run_stdio, so the CLI
+    // `check` path (which std::process::exit's from handle_early_args) never
+    // initialized a subscriber and tracing::warn! from dep loading was dropped.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = handle_early_args(&args) {
         if code == RUN_LSP_CODE {
@@ -273,14 +285,6 @@ async fn main() {
             std::process::exit(code);
         }
     }
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
 
     server::run_stdio().await;
 }
