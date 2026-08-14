@@ -63,6 +63,14 @@ pub enum TypeDiagnosticKind {
     StringByValueParam {
         param_name: String,
     },
+    /// Game parity: unary `!` is bool-only in AngelScript. Applying it to a
+    /// handle, class instance, or other non-bool operand fails in-game with
+    /// "Illegal operation on this datatype" (OP 1.29.5, tm-control-mcp
+    /// AsyncDispatch.as:136 — `!result.Get("success", false)`).
+    IllegalUnaryOperand {
+        op: String,
+        operand_type: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,6 +156,12 @@ impl TypeDiagnostic {
                     base
                 )
             }
+            TypeDiagnosticKind::IllegalUnaryOperand { op, operand_type } => format!(
+                // Match Openplanet 1.29.5 compiler wording class ("Illegal
+                // operation on this datatype").
+                "illegal operation `{} {}`: `{}` does not support this operator",
+                op, operand_type, operand_type
+            ),
         }
     }
 }
@@ -1830,7 +1844,29 @@ impl<'a> Checker<'a> {
                 let _ = self.expr_type(rhs);
                 TypeRepr::Error(String::new())
             }
-            ExprKind::Unary { expr, .. } | ExprKind::Postfix { expr, .. } => self.expr_type(expr),
+            ExprKind::Unary { op, expr } => {
+                let operand_ty = self.expr_type(expr);
+                // AngelScript: `!` is bool-only. Game rejects non-bool
+                // operands with "Illegal operation on this datatype"
+                // (OP 1.29.5; tm-control-mcp AsyncDispatch.as:136).
+                // Skip Error operands (already diagnosed upstream) and
+                // unknown/workspace types we can't classify confidently.
+                if matches!(op, UnaryOp::Not) && !operand_ty.is_error() {
+                    let legal = matches!(operand_ty, TypeRepr::Primitive(PrimitiveType::Bool));
+                    if !legal {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: expr.span,
+                            kind: TypeDiagnosticKind::IllegalUnaryOperand {
+                                op: "!".into(),
+                                operand_type: operand_ty.display(),
+                            },
+                        });
+                    }
+                    return TypeRepr::Primitive(PrimitiveType::Bool);
+                }
+                operand_ty
+            }
+            ExprKind::Postfix { expr, .. } => self.expr_type(expr),
             ExprKind::Call { callee, args } => {
                 // `call_type` is responsible for walking each `args` entry
                 // exactly once via `expr_type`. Do NOT pre-walk here — the
@@ -4683,6 +4719,53 @@ mod tests {
         assert!(
             hits.len() == 1,
             "expected exactly 1 UndefinedIdentifier for `nod` (Widget's use; TreeElem's own use must stay silent), got {:?}",
+            diags
+        );
+    }
+
+    // Intake 2026-08-14 (tm-control-mcp log): unary `!` on a handle —
+    // game rejects with "Illegal operation on this datatype" (OP 1.29.5,
+    // AsyncDispatch.as:136 `!result.Get("success", false)`).
+    #[test]
+    fn unary_not_on_handle_is_diagnosed() {
+        let diags = check(
+            r#"
+            class Node { int v; }
+            void Use() {
+                Node@ n = null;
+                if (!n) { Print("no"); }
+                Node n2;
+                if (!n2) { Print("no2"); }   // value instance — also illegal
+            }
+            "#,
+        );
+        let hits: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::IllegalUnaryOperand { .. }))
+            .collect();
+        assert!(
+            hits.len() == 2,
+            "expected IllegalUnaryOperand on both `!n` (handle) and `!n2` (value instance), got {:?}",
+            diags
+        );
+    }
+
+    // Controls: legal `!` operands must stay silent.
+    #[test]
+    fn unary_not_on_bool_stays_silent() {
+        let diags = check(
+            r#"
+            void Use() {
+                bool b = true;
+                bool c;
+                if (!b) { c = true; }
+                if (!!(b && true)) { c = false; }
+            }
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "legal bool `!` must stay silent, got {:?}",
             diags
         );
     }
