@@ -216,6 +216,11 @@ impl<'a> GlobalScope<'a> {
             if !matches_name {
                 continue;
             }
+            if self.tail_prefix_is_class_member(&s.name, &tail) {
+                // `ClassName::field` is a class member, not a global — a
+                // bare name matching it stays undefined (GH #30).
+                continue;
+            }
             if matches!(
                 s.kind,
                 SymbolKind::Variable { .. } | SymbolKind::EnumValue { .. }
@@ -232,6 +237,43 @@ impl<'a> GlobalScope<'a> {
                 if en.values.iter().any(|(v, _)| v == name) {
                     return true;
                 }
+            }
+        }
+        false
+    }
+
+    /// GH #30: `ClassName::field` / `ClassName::method` symbols are class
+    /// members, not globals. When a *bare* name tail-matches such a symbol,
+    /// the prefix chain must not be treated as a namespace — otherwise any
+    /// sibling class's field silently "resolves" the bare name.
+    ///
+    /// Walks each `::`-separated prefix segment of the symbol name; if any
+    /// prefix segment names a class/interface, the symbol is a class member.
+    fn tail_prefix_is_class_member(&self, symbol_name: &str, tail: &str) -> bool {
+        let Some(prefix) = symbol_name.strip_suffix(tail) else {
+            return false;
+        };
+        // Build progressively longer prefixes; if any names a class or
+        // interface, this is a member symbol. Namespaces are never classes,
+        // so `A::B::var` with A/B namespaces stays a legitimate global.
+        let segments: Vec<&str> = prefix.split("::").collect();
+        let mut acc = String::new();
+        for seg in segments {
+            if seg.is_empty() {
+                continue;
+            }
+            if !acc.is_empty() {
+                acc.push_str("::");
+            }
+            acc.push_str(seg);
+            if self.workspace.all_symbols().any(|s| {
+                s.name == acc
+                    && matches!(
+                        s.kind,
+                        SymbolKind::Class { .. } | SymbolKind::Interface { .. }
+                    )
+            }) {
+                return true;
             }
         }
         false
@@ -856,6 +898,11 @@ impl<'a> GlobalScope<'a> {
         for s in self.workspace.all_symbols() {
             let matches_name = s.name == qualified || s.name.ends_with(&tail);
             if !matches_name {
+                continue;
+            }
+            if self.tail_prefix_is_class_member(&s.name, &tail) {
+                // `ClassName::field` is not a global value — bare-name tail
+                // matches against class members must stay undefined (GH #30).
                 continue;
             }
             match &s.kind {

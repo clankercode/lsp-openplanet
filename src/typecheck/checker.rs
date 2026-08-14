@@ -4649,4 +4649,41 @@ mod tests {
             diags
         );
     }
+
+    // GH #30: a bare ident that happens to match a field of a *sibling* class
+    // in the same file must stay undefined inside another class's method.
+    // Fields are stored as `ClassName::fieldName` and the workspace tail
+    // match (ends_with "::name") used to leak them into bare-name lookup.
+    #[test]
+    fn sibling_class_field_does_not_silence_undefined_ident() {
+        let diags = check_workspace(
+            r#"
+            class Widget {
+                CGameItemModel@ item;
+                void Frob() {
+                    auto bad = cast<CGameItemModel>(nod);
+                    if (bad is null) return;
+                }
+            }
+            "#,
+            &[r#"
+            class TreeElem {
+                CMwNod@ nod;
+                void Use() { if (nod is null) return; }
+            }
+            "#],
+        );
+        let hits: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(
+                &d.kind,
+                TypeDiagnosticKind::UndefinedIdentifier(n) if n == "nod"
+            ))
+            .collect();
+        assert!(
+            hits.len() == 1,
+            "expected exactly 1 UndefinedIdentifier for `nod` (Widget's use; TreeElem's own use must stay silent), got {:?}",
+            diags
+        );
+    }
 }
