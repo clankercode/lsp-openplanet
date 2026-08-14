@@ -94,6 +94,45 @@ only the in-game compile failed).
 Workaround / fix:
     CGameEditorPluginMap::ECardinalDirections(int(targetBlock.Direction))
 
+## 2026-08-14, tm-control-mcp (Openplanet.log 18:59–19:04, OP 1.29.5 next)
+
+### Case 7: Unary `!` on non-bool (Json::Value@ handle) — game rejects, LSP silent
+Plugin source (pre-fix AsyncDispatch.as:136, git 1e7ab7d):
+    Json::Value@ result = CallTool(toolName, input);
+    } else if (!result.Get("success", false)) {
+
+Compiler reports (game-side, twice):
+    AsyncDispatch.as (136, 20) : ERR : Illegal operation on this datatype
+
+AngelScript `!` is bool-only. The 2-arg `Json::Value::Get(key, def)` returns
+`const Json::Value@`, so `!(...)` applies opNot to a handle.
+Workaround/fix (landed 065b7a9):
+    result.HasKey("success") && !bool(result["success"])
+
+LSP today: 0 diagnostics on `!result.Get("success", false)` AND on bare
+`!someHandle`. Likely general rule: `!` on any non-bool operand should be
+diagnosed (int/float/string variants silent in LSP too — game-evidence only
+for the handle case so far; probe before encoding the wider rule).
+Note: arg 2 (`false` → `const Json::Value&in`) was accepted by the game, so
+only the unary-`!` half is proven illegal.
+
+### Case 8: `shared` on global/namespace var — game parse error, LSP silent
+Plugin source (interim 3598-byte AsyncDispatch.as, never committed; arithmetic
+proven: '=' at cols 42/38 with `shared ` prefix, byte delta 14 = 2×7):
+    shared dictionary@ g_PendingRequests = dictionary();
+    shared dictionary@ g_AsyncInputs = dictionary();
+
+Compiler reports (game-side):
+    AsyncDispatch.as (24, 42) : ERR : Expected '('
+    AsyncDispatch.as (24, 42) : ERR : Instead found '='
+    AsyncDispatch.as (25, 38) : ERR : Expected '('
+    AsyncDispatch.as (25, 38) : ERR : Instead found '='
+
+`shared` is only legal on class/interface/enum/funcdef decls, not variables.
+LSP parser eats KwShared (parser.rs ~L492) and drops it for non-class items
+without a diagnostic. Workaround: plain `dictionary@ g_X = dictionary();`.
+Related issue class: none open; #31 covers different FPs.
+
 ## 2026-08-12, tm-dashboard
 
 ### Case: Draw::GetWidth / Draw::GetHeight removed
