@@ -522,7 +522,21 @@ impl<'a> Parser<'a> {
                 let decl = self.parse_import_decl()?;
                 Ok(Item::Import(decl))
             }
-            _ if self.looks_like_type_start() => self.parse_func_or_var_item(attrs),
+            _ if self.looks_like_type_start() => {
+                // Game parity (OP 1.29.5): `shared` is only legal on
+                // classes/interfaces. tm-control-mcp AsyncDispatch.as:24/25
+                // hit this — the game errored "Expected '(' / Instead
+                // found '='" while the LSP silently dropped the keyword.
+                if is_shared {
+                    return Err(ParseError {
+                        span: self.current_span(),
+                        kind: ParseErrorKind::Custom(
+                            "`shared` is only valid on classes/interfaces".into(),
+                        ),
+                    });
+                }
+                self.parse_func_or_var_item(attrs)
+            }
             other => Err(ParseError {
                 span: self.current_span(),
                 kind: ParseErrorKind::ExpectedItem { found: other },
@@ -2977,6 +2991,39 @@ pub fn parse(source: &str) -> (SourceFile, Vec<ParseError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Intake 2026-08-14 (tm-control-mcp log, OP 1.29.5): `shared` on a
+    /// non-class item is a compile error in-game — `Expected '(' / Instead
+    /// found '='` at AsyncDispatch.as:24/25 (`shared dictionary@ g_X = ...`).
+    /// The LSP parser previously ate `KwShared` and silently dropped it.
+    #[test]
+    fn test_shared_on_global_var_is_error() {
+        let (_file, errors) = parse_file("shared dictionary@ g_PendingRequests = dictionary();");
+        assert!(
+            !errors.is_empty(),
+            "`shared` on a global var decl must be a parse error (game rejects it)"
+        );
+    }
+
+    #[test]
+    fn test_shared_on_function_is_error() {
+        let (_file, errors) = parse_file("shared void f() {}");
+        assert!(
+            !errors.is_empty(),
+            "`shared` on a function decl must be a parse error (game rejects it)"
+        );
+    }
+
+    #[test]
+    fn test_shared_class_still_parses() {
+        let (file, errors) = parse_file("shared class Foo { int x; }");
+        assert!(errors.is_empty(), "shared class must parse cleanly, got {:?}", errors);
+        assert!(
+            matches!(&file.items[0], Item::Class(c) if c.is_shared),
+            "expected shared class item, got {:?}",
+            file.items
+        );
+    }
 
     /// Helper: parse a type expression from source text.
     fn parse_type(source: &str) -> (TypeExpr, Vec<ParseError>) {
