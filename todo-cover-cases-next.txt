@@ -93,3 +93,19 @@ only the in-game compile failed).
 
 Workaround / fix:
     CGameEditorPluginMap::ECardinalDirections(int(targetBlock.Direction))
+
+## 2026-08-12, tm-dashboard
+
+### Case: Draw::GetWidth / Draw::GetHeight removed
+Plugin source (Thing.as / SettingsWidgets.as):
+    vec2 screenSize = vec2(Draw::GetWidth(), Draw::GetHeight());
+
+Game (Openplanet 1.29.5):
+    ERR : No matching symbol 'Draw::GetWidth'
+    ERR : No matching symbol 'Draw::GetHeight'
+
+Typedb: zero functions under `Draw`; replacements are `Display::GetWidth` /
+`Display::GetHeight`.
+
+LSP today: silent (NamespaceAccess external miss stays quiet).
+Related: version-ranged API rules GH #18 (Draw removal / Display rename).

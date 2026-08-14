@@ -839,6 +839,51 @@ impl<'a> GlobalScope<'a> {
             .unwrap_or_else(|| name.to_string())
     }
 
+    /// Resolve a workspace global used as a *value* (not a call callee).
+    ///
+    /// Returns:
+    /// - `Variable` → parsed `type_name` (empty text → `Error("")` silence)
+    /// - `Function` → `Funcdef(qualified)` so function-pointer decay sites
+    ///   (`startnew(Worker)`) don't compare as `Named("Worker")` vs
+    ///   `Named("CoroutineFunc")`
+    /// - `EnumValue` → `Named(enum_name)`
+    /// - virtual property via `get_`/`set_` → getter return type when known
+    ///
+    /// `None` when the name is not a workspace value symbol (caller falls
+    /// through to other Ident rules).
+    pub fn lookup_global_value_type(&self, qualified: &str) -> Option<TypeRepr> {
+        let tail = format!("::{}", qualified);
+        for s in self.workspace.all_symbols() {
+            let matches_name = s.name == qualified || s.name.ends_with(&tail);
+            if !matches_name {
+                continue;
+            }
+            match &s.kind {
+                SymbolKind::Variable { type_name } => {
+                    return Some(TypeRepr::parse_type_string(type_name));
+                }
+                SymbolKind::Function { .. } => {
+                    return Some(TypeRepr::Funcdef(s.name.clone()));
+                }
+                SymbolKind::EnumValue { enum_name, .. } => {
+                    return Some(TypeRepr::Named(enum_name.clone()));
+                }
+                _ => {}
+            }
+        }
+        // Virtual property: bare name with get_/set_ accessors.
+        let getter = qualified_virtual_name(qualified, "get_");
+        if let Some(t) = self.lookup_function_return(&getter) {
+            return Some(t);
+        }
+        let setter = qualified_virtual_name(qualified, "set_");
+        if self.has_function(&setter) {
+            // Setter-only: type unknown — silence rather than Named(name).
+            return Some(TypeRepr::Error(String::new()));
+        }
+        None
+    }
+
     /// Look up a free function's return type by qualified name.
     pub fn lookup_function_return(&self, qualified: &str) -> Option<TypeRepr> {
         if let Some(ext) = self.external {

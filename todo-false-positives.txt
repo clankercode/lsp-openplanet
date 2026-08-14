@@ -20,3 +20,36 @@ The LSP appears to be binding named arguments positionally — it maps the
 named arg to the next unfilled slot (argument 2, `pushFont: bool`) instead
 of matching by parameter name. Named arguments should skip over intermediate
 defaulted parameters.
+
+## 2026-08-12, tm-better-totd (LSP FPs vs game)
+
+Remote-build on Openplanet **1.29.5**: game failed only on `Text::Join` (5×).
+LSP previously reported 22 errors; after fixes → 4 empty-catch (B002) under
+`#if DEPENDENCY_*` optional-dep defines.
+
+### Fixed false positives
+
+1. **startnew(BareFunc)** — bare function idents typed as `Named(funcName)` and
+   ArgTypeMismatch vs `CoroutineFunc`. Fix: functions-as-values → `Funcdef`,
+   convertible to CoroutineFunc* params.
+2. **Global vars as args** (`vec4 overviewTableRowBg`, `UI::Font@ g_BoldFont`,
+   `Json::Value@ meta`) — symbol extractor stored empty `type_name` for
+   top-level VarDecl/Property; Ident collapsed to `Named(varName)`. Fix: lift
+   type text + `lookup_global_value_type`.
+3. **array.InsertLast / Find** — external overloads use unsubstituted `T`;
+   ArgTypeMismatch `expected T, got LazyMap`. Fix: skip unsubstituted generic
+   / `?` placeholders in external arg checks (`tostring` too).
+
+### Not FPs / deferred
+
+- Empty `catch {}` under optional deps: B002 true positives when defines on.
+- `Text::Join`: real game error on 1.29.5; plugin targets ~1.29.12. LSP still
+  silent (FN under NamespaceAccess). Version-ranged API rules: GH #18.
+
+## 2026-08-12, tm-dashboard (Miss Dashboard 1.9.6)
+
+### Case: `nvg::Font` unknown type (FP)
+Plugin: `nvg::Font g_font;` / `m_font` fields; `nvg::LoadFont` / `FontFace`.
+Core typedb (1.29.5): `nvg::LoadFont` → `int`, `FontFace(int)` — no `nvg::Font` class.
+Game compile: accepts `nvg::Font` (no diagnostic).
+LSP: UnknownType. Fix: builtin type alias `nvg::Font`.
