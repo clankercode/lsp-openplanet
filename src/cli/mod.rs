@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 
+use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::config::LspConfig;
 use crate::server::diagnostics;
 use crate::typedb::TypeIndex;
-use crate::workspace::load::{load_plugin_workspace, symbol_table_from_load, DependencySearch};
+use crate::workspace::load::{load_plugin_workspace, DependencySearch};
 use crate::workspace::manifest::Manifest;
 use crate::workspace::project;
 
@@ -291,14 +292,15 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     .finalize_with_config(&config);
 
     let load = load_plugin_workspace(&root, &search).map_err(CliError::Check)?;
-    let workspace = symbol_table_from_load(&load, &config);
+    // One snapshot: parse each file once, pool symbols (GH #39).
+    let snapshot = AnalysisSnapshot::from_load(&load, &config);
 
     let mut cli_diagnostics = Vec::new();
 
-    if !load.missing_required_dependencies.is_empty() {
+    if !snapshot.missing_required_dependencies().is_empty() {
         let manifest_path = load.root.join("info.toml");
         for diagnostic in diagnostics::missing_required_dependency_diagnostics(
-            &load.missing_required_dependencies,
+            snapshot.missing_required_dependencies(),
         ) {
             cli_diagnostics.push(CliDiagnostic {
                 path: manifest_path.clone(),
@@ -322,7 +324,7 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
             &source,
             &config,
             type_index.as_ref(),
-            Some(&workspace),
+            Some(snapshot.symbols()),
         ) {
             cli_diagnostics.push(CliDiagnostic {
                 path: manifest_path.clone(),
@@ -342,12 +344,16 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
                 item.path.display()
             ))
         })?;
-        for diagnostic in diagnostics::compute_diagnostics(
+        // Reuse the snapshot's per-file analysis instead of re-parsing.
+        let analysis = snapshot
+            .analysis_at_path(&item.path)
+            .expect("snapshot contains every loaded file");
+        for diagnostic in diagnostics::compute_diagnostics_from_analysis(
             &uri,
-            &item.source,
+            analysis,
             &config,
             type_index.as_ref(),
-            Some(&workspace),
+            Some(snapshot.symbols()),
         ) {
             cli_diagnostics.push(CliDiagnostic {
                 path: item.path.clone(),

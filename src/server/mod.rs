@@ -15,7 +15,6 @@ pub mod semantic_tokens;
 pub mod signature;
 pub mod symbols;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,8 +24,8 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::config::LspConfig;
-use crate::symbols::SymbolTable;
 use crate::typedb::TypeIndex;
 use crate::update;
 
@@ -34,13 +33,12 @@ pub struct Backend {
     client: Client,
     config: tokio::sync::RwLock<LspConfig>,
     type_index: tokio::sync::RwLock<Option<Arc<TypeIndex>>>,
-    #[allow(dead_code)]
-    symbol_table: tokio::sync::RwLock<SymbolTable>,
     /// Open document contents: URI → source text
     documents: DashMap<Url, String>,
-    /// File path → file ID mapping
-    #[allow(dead_code)]
-    file_ids: DashMap<PathBuf, usize>,
+    /// Cached analysis snapshot: rebuilt on every document lifecycle event
+    /// (`did_open` / `did_change` / `did_close`). Requests between rebuilds
+    /// read the same consistent view (GH #39).
+    snapshot: tokio::sync::RwLock<Arc<AnalysisSnapshot>>,
     workspace_root: tokio::sync::RwLock<Option<PathBuf>>,
 }
 
@@ -50,113 +48,107 @@ impl Backend {
             client,
             config: tokio::sync::RwLock::new(LspConfig::load(None, None)),
             type_index: tokio::sync::RwLock::new(None),
-            symbol_table: tokio::sync::RwLock::new(SymbolTable::new()),
             documents: DashMap::new(),
-            file_ids: DashMap::new(),
+            snapshot: tokio::sync::RwLock::new(Arc::new(AnalysisSnapshot::from_files(
+                &[],
+                &LspConfig::default(),
+            ))),
             workspace_root: tokio::sync::RwLock::new(None),
         }
     }
 
-    /// Build a workspace symbol table: open documents + on-disk plugin sources
-    /// and dependency export files (shared path with CLI `check`).
-    async fn build_workspace(
-        &self,
-    ) -> (
-        SymbolTable,
-        HashMap<usize, (Url, String)>,
-        Vec<String>,
-    ) {
+    /// Open documents as `(path, source)` pairs for the overlay merge.
+    fn open_documents(&self) -> Vec<(PathBuf, String)> {
+        self.documents
+            .iter()
+            .filter_map(|entry| {
+                let uri = entry.key().clone();
+                let source = entry.value().clone();
+                uri.to_file_path().ok().map(|path| (path, source))
+            })
+            .collect()
+    }
+
+    /// Build a workspace analysis snapshot: open documents overlaid on the
+    /// on-disk plugin workspace (plugin sources + dependency exports).
+    /// Shared path with CLI `check`; the snapshot owns parse + symbol
+    /// pooling (GH #39).
+    async fn build_snapshot(&self) -> Arc<AnalysisSnapshot> {
         let config = self.config.read().await;
         let root = self.workspace_root.read().await.clone();
+        let open = self.open_documents();
 
-        let mut open: Vec<(PathBuf, String)> = Vec::new();
-        let mut open_uris: HashMap<PathBuf, Url> = HashMap::new();
-        for entry in self.documents.iter() {
-            let uri = entry.key().clone();
-            let source = entry.value().clone();
-            if let Ok(path) = uri.to_file_path() {
-                open_uris.insert(path.clone(), uri);
-                open.push((path, source));
-            }
-        }
-
-        // Stable ordered list of (path, source, optional uri for navigation).
-        let mut ordered: Vec<(PathBuf, String, Option<Url>)> = Vec::new();
-        let mut missing_required_dependencies = Vec::new();
-
-        if let Some(root) = root.as_ref() {
-            let search = crate::workspace::load::DependencySearch::with_defaults()
-                .finalize_with_config(&config);
-            if let Ok(disk) = crate::workspace::load::load_plugin_workspace(root, &search) {
-                missing_required_dependencies = disk.missing_required_dependencies.clone();
-                let merged = crate::workspace::load::merge_open_documents(&disk, &open);
-                for f in merged.files {
-                    let uri = open_uris
-                        .get(&f.path)
-                        .cloned()
-                        .or_else(|| Url::from_file_path(&f.path).ok());
-                    ordered.push((f.path, f.source, uri));
+        let load = match root.as_ref() {
+            Some(root) => {
+                let search = crate::workspace::load::DependencySearch::with_defaults()
+                    .finalize_with_config(&config);
+                match crate::workspace::load::load_plugin_workspace(root, &search) {
+                    Ok(disk) => crate::workspace::load::merge_open_documents(&disk, &open),
+                    Err(err) => {
+                        tracing::warn!("workspace load failed, falling back to open docs: {err}");
+                        crate::workspace::load::PluginWorkspaceLoad {
+                            root: root.clone(),
+                            files: open_into_files(open),
+                            missing_required_dependencies: Vec::new(),
+                        }
+                    }
                 }
             }
-        }
+            // No workspace root: open documents only.
+            None => crate::workspace::load::PluginWorkspaceLoad {
+                root: PathBuf::new(),
+                files: open_into_files(open),
+                missing_required_dependencies: Vec::new(),
+            },
+        };
 
-        if ordered.is_empty() {
-            for (path, source) in &open {
-                ordered.push((
-                    path.clone(),
-                    source.clone(),
-                    open_uris.get(path).cloned(),
-                ));
-            }
-        }
+        Arc::new(AnalysisSnapshot::from_load(&load, &config))
+    }
 
-        let inputs: Vec<_> = ordered
-            .iter()
-            .map(|(p, s, _)| (p.clone(), s.clone()))
-            .collect();
-        let table = crate::typecheck::build_plugin_symbol_table(&inputs, &config);
-
-        // file_id in SymbolTable is allocated 0..n-1 in input order.
-        let mut files = HashMap::new();
-        for (i, (_path, source, uri)) in ordered.iter().enumerate() {
-            if let Some(uri) = uri {
-                files.insert(i, (uri.clone(), source.clone()));
-            }
-        }
-        (table, files, missing_required_dependencies)
+    /// Rebuild the cached snapshot and return it.
+    async fn refresh_snapshot(&self) -> Arc<AnalysisSnapshot> {
+        let snap = self.build_snapshot().await;
+        *self.snapshot.write().await = snap.clone();
+        snap
     }
 
     async fn on_change(&self, uri: &Url, text: &str) {
-        let (workspace, _files, missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.refresh_snapshot().await;
         let config = self.config.read().await;
         let type_index = self.type_index.read().await;
-        let mut diags = diagnostics::compute_diagnostics(
-            uri,
-            text,
-            &config,
-            type_index.as_deref(),
-            Some(&workspace),
-        );
+        let mut diags = match snapshot.analysis_of(uri) {
+            // Parsed as part of the snapshot build — reuse the analysis.
+            Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
+                uri,
+                analysis,
+                &config,
+                type_index.as_deref(),
+                Some(snapshot.symbols()),
+            ),
+            // Not on disk (e.g. untitled documents) — parse on the fly.
+            None => diagnostics::compute_diagnostics(
+                uri,
+                text,
+                &config,
+                type_index.as_deref(),
+                Some(snapshot.symbols()),
+            ),
+        };
         if uri.path().ends_with("info.toml") {
             diags.extend(diagnostics::missing_required_dependency_diagnostics(
-                &missing_required_dependencies,
+                snapshot.missing_required_dependencies(),
             ));
         }
 
         let manifest_diagnostics = if uri.path().ends_with("info.toml") {
             None
         } else {
-            let manifest_uri = self
-                .workspace_root
-                .read()
-                .await
-                .as_ref()
-                .and_then(|root| {
-                    let manifest_path = root.join("info.toml");
-                    Url::from_file_path(&manifest_path)
-                        .ok()
-                        .map(|manifest_uri| (manifest_uri, manifest_path))
-                });
+            let manifest_uri = self.workspace_root.read().await.as_ref().and_then(|root| {
+                let manifest_path = root.join("info.toml");
+                Url::from_file_path(&manifest_path)
+                    .ok()
+                    .map(|manifest_uri| (manifest_uri, manifest_path))
+            });
             manifest_uri.map(|(manifest_uri, manifest_path)| {
                 let manifest_source = self
                     .documents
@@ -170,12 +162,12 @@ impl Backend {
                             &manifest_uri,
                             source,
                             &config,
-                            &missing_required_dependencies,
+                            snapshot.missing_required_dependencies(),
                         )
                     })
                     .unwrap_or_else(|| {
                         diagnostics::missing_required_dependency_diagnostics(
-                            &missing_required_dependencies,
+                            snapshot.missing_required_dependencies(),
                         )
                     });
                 (manifest_uri, diagnostics)
@@ -193,6 +185,22 @@ impl Backend {
                 .await;
         }
     }
+}
+
+/// Convert open documents into workspace source files (all report
+/// diagnostics — they are user-editable buffers).
+fn open_into_files(
+    open: Vec<(PathBuf, String)>,
+) -> Vec<crate::workspace::load::WorkspaceSourceFile> {
+    open.into_iter()
+        .map(
+            |(path, source)| crate::workspace::load::WorkspaceSourceFile {
+                path,
+                source,
+                report_diagnostics: true,
+            },
+        )
+        .collect()
 }
 
 #[tower_lsp::async_trait]
@@ -292,6 +300,9 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.documents.remove(&params.text_document.uri);
+        // The closed buffer no longer overlays disk; rebuild so features
+        // see the on-disk contents again.
+        self.refresh_snapshot().await;
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -302,8 +313,13 @@ impl LanguageServer for Backend {
             None => String::new(),
         };
         let type_index = self.type_index.read().await;
-        let (table, _files, _missing_required_dependencies) = self.build_workspace().await;
-        let items = completion::complete(&source, pos, type_index.as_deref(), Some(&table));
+        let snapshot = self.snapshot.read().await.clone();
+        let items = completion::complete(
+            &source,
+            pos,
+            type_index.as_deref(),
+            Some(snapshot.symbols()),
+        );
         Ok(Some(CompletionResponse::Array(items)))
     }
 
@@ -315,8 +331,13 @@ impl LanguageServer for Backend {
             None => String::new(),
         };
         let type_index = self.type_index.read().await;
-        let (table, _files, _missing_required_dependencies) = self.build_workspace().await;
-        Ok(hover::hover(&source, pos, type_index.as_deref(), Some(&table)))
+        let snapshot = self.snapshot.read().await.clone();
+        Ok(hover::hover(
+            &source,
+            pos,
+            type_index.as_deref(),
+            Some(snapshot.symbols()),
+        ))
     }
 
     async fn goto_definition(
@@ -329,10 +350,13 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (table, files, _missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.snapshot.read().await.clone();
+        let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
-        Ok(navigation::goto_definition(&source, pos, &table, &workspace_files)
-            .map(GotoDefinitionResponse::Scalar))
+        Ok(
+            navigation::goto_definition(&source, pos, snapshot.symbols(), &workspace_files)
+                .map(GotoDefinitionResponse::Scalar),
+        )
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -342,7 +366,8 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (_table, files, _missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.snapshot.read().await.clone();
+        let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let refs = navigation::find_references(
             &source,
@@ -366,10 +391,7 @@ impl LanguageServer for Backend {
         Ok(highlights::document_highlights(&source, pos))
     }
 
-    async fn folding_range(
-        &self,
-        params: FoldingRangeParams,
-    ) -> Result<Option<Vec<FoldingRange>>> {
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let uri = &params.text_document.uri;
         let source = match self.documents.get(uri) {
             Some(doc) => doc.value().clone(),
@@ -385,13 +407,13 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (table, _files, _missing_required_dependencies) = self.build_workspace().await;
         let type_index = self.type_index.read().await;
+        let snapshot = self.snapshot.read().await.clone();
         Ok(signature::signature_help(
             &source,
             pos,
             type_index.as_deref(),
-            Some(&table),
+            Some(snapshot.symbols()),
         ))
     }
 
@@ -409,10 +431,11 @@ impl LanguageServer for Backend {
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
-        let (table, files, _missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.snapshot.read().await.clone();
+        let files = snapshot.uri_map();
         Ok(Some(symbols::workspace_symbols(
             &params.query,
-            &table,
+            snapshot.symbols(),
             &files,
         )))
     }
@@ -424,7 +447,8 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (_table, files, _missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.snapshot.read().await.clone();
+        let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         Ok(navigation::rename(
             &source,
@@ -447,10 +471,7 @@ impl LanguageServer for Backend {
         Ok(Some(SemanticTokensResult::Tokens(tokens)))
     }
 
-    async fn formatting(
-        &self,
-        params: DocumentFormattingParams,
-    ) -> Result<Option<Vec<TextEdit>>> {
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let uri = &params.text_document.uri;
         let source = match self.documents.get(uri) {
             Some(doc) => doc.value().clone(),
@@ -471,22 +492,19 @@ impl LanguageServer for Backend {
         }]))
     }
 
-    async fn inlay_hint(
-        &self,
-        params: InlayHintParams,
-    ) -> Result<Option<Vec<InlayHint>>> {
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = &params.text_document.uri;
         let source = match self.documents.get(uri) {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (table, _files, _missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.snapshot.read().await.clone();
         let type_index = self.type_index.read().await;
         let hints = inlay_hints::inlay_hints(
             &source,
             params.range,
             type_index.as_deref(),
-            Some(&table),
+            Some(snapshot.symbols()),
         );
         Ok(Some(hints))
     }
@@ -501,9 +519,10 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (workspace, files, _missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.snapshot.read().await.clone();
+        let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };
-        let items = call_hierarchy::prepare(&source, uri, pos, &workspace, &ws_files);
+        let items = call_hierarchy::prepare(&source, uri, pos, snapshot.symbols(), &ws_files);
         if items.is_empty() {
             Ok(None)
         } else {
@@ -515,11 +534,12 @@ impl LanguageServer for Backend {
         &self,
         params: CallHierarchyIncomingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
-        let (workspace, files, _missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.snapshot.read().await.clone();
+        let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };
         Ok(Some(call_hierarchy::incoming(
             &params.item,
-            &workspace,
+            snapshot.symbols(),
             &ws_files,
         )))
     }
@@ -528,25 +548,23 @@ impl LanguageServer for Backend {
         &self,
         params: CallHierarchyOutgoingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
-        let (workspace, files, _missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.snapshot.read().await.clone();
+        let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };
         Ok(Some(call_hierarchy::outgoing(
             &params.item,
-            &workspace,
+            snapshot.symbols(),
             &ws_files,
         )))
     }
 
-    async fn code_action(
-        &self,
-        params: CodeActionParams,
-    ) -> Result<Option<CodeActionResponse>> {
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = &params.text_document.uri;
         let source = match self.documents.get(uri) {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let (workspace, _files, _missing_required_dependencies) = self.build_workspace().await;
+        let snapshot = self.snapshot.read().await.clone();
         let type_index_guard = self.type_index.read().await;
         let type_index = type_index_guard.as_deref();
         let actions = code_actions::code_actions(
@@ -554,16 +572,13 @@ impl LanguageServer for Backend {
             &source,
             params.range,
             &params.context.diagnostics,
-            &workspace,
+            snapshot.symbols(),
             type_index,
         );
         Ok(Some(actions))
     }
 
-    async fn execute_command(
-        &self,
-        params: ExecuteCommandParams,
-    ) -> Result<Option<Value>> {
+    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
         match params.command.as_str() {
             "openplanet.regenerateTypeDb" => Ok(Some(self.regenerate_type_db().await)),
             other => {
@@ -600,16 +615,13 @@ impl Backend {
                 Ok(Some(status)) => status,
                 Ok(None) => return,
                 Err(err) => {
-                    tracing::debug!("update check task join error: {err}");
+                    tracing::debug!("update task join error: {err}");
                     return;
                 }
             };
 
             if status.update_available {
-                let latest = status
-                    .latest_version
-                    .clone()
-                    .unwrap_or_else(|| "?".into());
+                let latest = status.latest_version.clone().unwrap_or_else(|| "?".into());
                 let cmd = status
                     .update_command
                     .clone()
