@@ -30,7 +30,6 @@ use crate::analysis::DocumentAnalysis;
 use crate::parser::ast::SourceFile;
 use crate::server::diagnostics::position_to_offset;
 use crate::server::scope_query;
-use crate::symbols::SymbolTable;
 use crate::typecheck::global_scope::{GlobalScope, OverloadSig};
 use crate::typedb::TypeIndex;
 
@@ -61,8 +60,7 @@ struct ResolvedSignature {
 pub fn signature_help(
     analysis: &DocumentAnalysis,
     position: Position,
-    type_index: Option<&TypeIndex>,
-    workspace: Option<&SymbolTable>,
+    scope: &GlobalScope<'_>,
 ) -> Option<SignatureHelp> {
     let source = analysis.masked_source();
     let cursor = position_to_offset(source, position);
@@ -71,15 +69,13 @@ pub fn signature_help(
     // Reuse the snapshot's parse for receiver-type lookup on member calls.
     let file: &SourceFile = &analysis.file;
 
-    let scope = workspace.map(|ws| GlobalScope::new(ws, type_index));
-
     let sigs = resolve_callee(
         &call.callee_text,
         source,
         file,
         cursor as u32,
-        scope.as_ref(),
-        type_index,
+        scope,
+        scope.external(),
     );
     if sigs.is_empty() {
         return None;
@@ -321,56 +317,32 @@ fn resolve_callee(
     source: &str,
     file: &SourceFile,
     cursor_offset: u32,
-    scope: Option<&GlobalScope<'_>>,
+    scope: &GlobalScope<'_>,
     type_index: Option<&TypeIndex>,
 ) -> Vec<ResolvedSignature> {
     // Member / method call: `recv.method` (split on the LAST dot).
     if let Some(last_dot) = callee.rfind('.') {
         let receiver = &callee[..last_dot];
         let method = &callee[last_dot + 1..];
-        return resolve_member_call(
-            receiver,
-            method,
-            source,
-            file,
-            cursor_offset,
-            scope,
-            type_index,
-        );
+        return resolve_member_call(receiver, method, source, file, cursor_offset, scope);
     }
 
     // Free function, bare or qualified (`::` -> namespaced).
     let mut out: Vec<ResolvedSignature> = Vec::new();
 
-    // Unified callables (workspace first, else external) — same truth as checker.
-    if let Some(scope) = scope {
-        for ov in scope.callables_free(callee) {
-            out.push(overload_to_signature(callee.to_string(), ov, None));
-        }
-        // If unqualified and no hit, also try the last `::` segment as a bare name.
-        if out.is_empty() {
-            if let Some(idx) = callee.rfind("::") {
-                let bare = &callee[idx + 2..];
-                for ov in scope.callables_free(bare) {
-                    out.push(overload_to_signature(bare.to_string(), ov, None));
-                }
-            }
-        }
+    // Unified callables (workspace first, else external) — same truth as
+    // the checker. `callables_free` folds the qualified→bare-tail retry in.
+    for ov in scope.callables_free(callee) {
+        out.push(overload_to_signature(callee.to_string(), ov, None));
     }
 
-    // Fallback: external type index when no GlobalScope was provided.
+    // External index direct lookup (preserves typedb doc comments, which
+    // `OverloadSig` does not carry).
     if out.is_empty() {
         if let Some(index) = type_index {
             if let Some(fns) = index.lookup_function(callee) {
                 for f in fns {
                     out.push(function_info_to_signature(f));
-                }
-            } else if let Some(idx) = callee.rfind("::") {
-                let bare = &callee[idx + 2..];
-                if let Some(fns) = index.lookup_function(bare) {
-                    for f in fns {
-                        out.push(function_info_to_signature(f));
-                    }
                 }
             }
         }
@@ -403,8 +375,7 @@ fn resolve_member_call(
     source: &str,
     file: &SourceFile,
     cursor_offset: u32,
-    scope: Option<&GlobalScope<'_>>,
-    type_index: Option<&TypeIndex>,
+    scope: &GlobalScope<'_>,
 ) -> Vec<ResolvedSignature> {
     // MVP: only resolve simple-identifier receivers whose type is a local
     // var or a same-file class field. Anything else falls through to empty.
@@ -440,36 +411,11 @@ fn resolve_member_call(
     // return type, which isn't enough for signature help. We need the full
     // parameter list, so walk the SymbolTable directly for `Class::method`
     // (and its parents).
-    if let Some(scope) = scope {
-        collect_workspace_method_overloads(&bare_type, method, scope, &mut out);
-    }
+    collect_workspace_method_overloads(&bare_type, method, scope, &mut out);
 
     // External methods via unified callables_method (I3).
-    if let Some(scope) = scope {
-        for ov in scope.callables_method(&bare_type, method) {
-            out.push(overload_to_signature(method.to_string(), ov, None));
-        }
-    } else if let Some(index) = type_index {
-        // Fallback when no GlobalScope: walk type_index directly.
-        if let Some(ty) = index.lookup_type(&bare_type) {
-            for m in &ty.methods {
-                if m.name == method {
-                    let params: Vec<(String, String)> = m
-                        .params
-                        .iter()
-                        .map(|p| (p.type_name.clone(), p.name.clone().unwrap_or_default()))
-                        .collect();
-                    let min_args = m.params.iter().filter(|p| p.default.is_none()).count();
-                    out.push(ResolvedSignature {
-                        label_name: m.name.clone(),
-                        return_type: m.return_type.clone(),
-                        params,
-                        doc: m.doc.clone(),
-                        min_args,
-                    });
-                }
-            }
-        }
+    for ov in scope.callables_method(&bare_type, method) {
+        out.push(overload_to_signature(method.to_string(), ov, None));
     }
 
     out
@@ -490,8 +436,7 @@ fn collect_workspace_method_overloads(
             break;
         }
         let mut any = false;
-        for (return_type, params, min_args, doc) in
-            scope.workspace_class_method_sigs(&name, method)
+        for (return_type, params, min_args, doc) in scope.workspace_class_method_sigs(&name, method)
         {
             {
                 any = true;
@@ -666,6 +611,7 @@ fn pick_active_signature(sigs: &[ResolvedSignature], active_param: u32) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbols::SymbolTable;
 
     fn ws_from(source: &str) -> SymbolTable {
         let mut table = SymbolTable::new();
@@ -698,7 +644,12 @@ mod tests {
         let src = "void f(int a, string b) {}\nvoid main() { f(| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(
+            &DocumentAnalysis::analyze_plain(&source),
+            position,
+            &GlobalScope::new(&ws, None),
+        )
+        .expect("signature help");
         assert_eq!(help.signatures.len(), 1);
         assert_eq!(help.active_signature, Some(0));
         assert_eq!(help.active_parameter, Some(0));
@@ -711,7 +662,12 @@ mod tests {
         let src = "void f(int a, string b) {}\nvoid main() { f(42,| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(
+            &DocumentAnalysis::analyze_plain(&source),
+            position,
+            &GlobalScope::new(&ws, None),
+        )
+        .expect("signature help");
         assert_eq!(help.active_parameter, Some(1));
         assert_eq!(help.active_signature, Some(0));
     }
@@ -725,7 +681,12 @@ void f(int a, string b) {}
 void main() { f(1,| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(
+            &DocumentAnalysis::analyze_plain(&source),
+            position,
+            &GlobalScope::new(&ws, None),
+        )
+        .expect("signature help");
         assert_eq!(help.signatures.len(), 3);
         assert_eq!(help.active_parameter, Some(1));
         // Only the third overload has 2+ params, so active_signature must be
@@ -747,7 +708,12 @@ void main() { f(1,| }";
         let src = "void f(int a, string b) {}\nvoid main() { f(1, | }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(
+            &DocumentAnalysis::analyze_plain(&source),
+            position,
+            &GlobalScope::new(&ws, None),
+        )
+        .expect("signature help");
         assert_eq!(help.active_parameter, Some(1));
     }
 
@@ -759,7 +725,12 @@ void inner(string s) {}
 void main() { outer(inner(| ) }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(
+            &DocumentAnalysis::analyze_plain(&source),
+            position,
+            &GlobalScope::new(&ws, None),
+        )
+        .expect("signature help");
         let active = help.active_signature.unwrap_or(0) as usize;
         assert!(
             help.signatures[active].label.contains("inner"),
@@ -773,7 +744,11 @@ void main() { outer(inner(| ) }";
         let src = "void f() {}\nvoid main() { int x = 5;| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws));
+        let help = signature_help(
+            &DocumentAnalysis::analyze_plain(&source),
+            position,
+            &GlobalScope::new(&ws, None),
+        );
         assert!(
             help.is_none(),
             "expected None outside a call, got {:?}",
@@ -788,7 +763,12 @@ class Foo { void m(int x) {} }
 void main() { Foo f; f.m(| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(
+            &DocumentAnalysis::analyze_plain(&source),
+            position,
+            &GlobalScope::new(&ws, None),
+        )
+        .expect("signature help");
         assert_eq!(help.active_parameter, Some(0));
         assert!(
             help.signatures[0].label.contains("int"),

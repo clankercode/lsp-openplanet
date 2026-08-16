@@ -53,6 +53,12 @@ pub struct SymbolTable {
     files: HashMap<usize, FileSymbols>,
     /// name → list of symbols (cross-file)
     global_index: HashMap<String, Vec<(usize, usize)>>, // (file_id, symbol_index)
+    /// last `::`-segment → symbols carrying that tail (qualified names only;
+    /// bare names live in `global_index`). Backs `lookup_tail` (GH #41).
+    tail_index: HashMap<String, Vec<(usize, usize)>>,
+    /// every `::`-prefix → symbols registered under it. Backs
+    /// `lookup_members` (GH #41).
+    member_index: HashMap<String, Vec<(usize, usize)>>,
     next_file_id: usize,
 }
 
@@ -78,6 +84,31 @@ impl SymbolTable {
                 .entry(sym.name.clone())
                 .or_default()
                 .push((file_id, idx));
+            if let Some(tail) = sym.name.rsplit("::").next() {
+                // Guard: for a bare name `tail == name`; the exact index
+                // already covers it, the tail index is for qualified names.
+                if tail != sym.name.as_str() {
+                    self.tail_index
+                        .entry(tail.to_string())
+                        .or_default()
+                        .push((file_id, idx));
+                }
+            }
+            // Register under every `::`-prefix so `lookup_members(owner)`
+            // matches everything `name.starts_with(owner + "::")` would.
+            let mut acc = String::new();
+            for seg in sym.name.split("::") {
+                if acc.is_empty() {
+                    acc.push_str(seg);
+                } else {
+                    self.member_index
+                        .entry(acc.clone())
+                        .or_default()
+                        .push((file_id, idx));
+                    acc.push_str("::");
+                    acc.push_str(seg);
+                }
+            }
         }
 
         self.files.insert(file_id, FileSymbols { file_id, symbols });
@@ -86,6 +117,12 @@ impl SymbolTable {
     pub fn remove_file(&mut self, file_id: usize) {
         if self.files.remove(&file_id).is_some() {
             for entries in self.global_index.values_mut() {
+                entries.retain(|(fid, _)| *fid != file_id);
+            }
+            for entries in self.tail_index.values_mut() {
+                entries.retain(|(fid, _)| *fid != file_id);
+            }
+            for entries in self.member_index.values_mut() {
                 entries.retain(|(fid, _)| *fid != file_id);
             }
         }
@@ -105,6 +142,52 @@ impl SymbolTable {
 
     pub fn all_symbols(&self) -> impl Iterator<Item = &Symbol> {
         self.files.values().flat_map(|f| f.symbols.iter())
+    }
+
+    /// Symbols whose qualified name ends in `::tail`. Index-backed —
+    /// O(candidates) instead of a linear scan of every workspace symbol
+    /// (GH #41). Bare names (no `::`) are excluded: they're exact
+    /// `global_index` hits, not tail matches.
+    pub fn lookup_tail(&self, tail: &str) -> Vec<&Symbol> {
+        let empty: Vec<(usize, usize)> = Vec::new();
+        let entries = self.tail_index.get(tail).unwrap_or(&empty);
+        entries
+            .iter()
+            .filter_map(|(file_id, idx)| self.files.get(file_id)?.symbols.get(*idx))
+            .collect()
+    }
+
+    /// Every symbol whose qualified name starts with `owner + "::"`
+    /// (e.g. `Class` matches `Class::field`, `Class::method`). Index-backed
+    /// via `member_index` (GH #41).
+    pub fn lookup_members(&self, owner: &str) -> Vec<&Symbol> {
+        let empty: Vec<(usize, usize)> = Vec::new();
+        let entries = self.member_index.get(owner).unwrap_or(&empty);
+        entries
+            .iter()
+            .filter_map(|(file_id, idx)| self.files.get(file_id)?.symbols.get(*idx))
+            .collect()
+    }
+
+    /// Resolve a source-level reference by the same ladder the checker
+    /// applies: exact qualified name first, then — when the name is
+    /// qualified — an exact hit on the bare tail, then any symbol whose
+    /// qualified tail matches. Absorbs the per-feature qualified→bare
+    /// retry ladders that hover / goto-definition / call-hierarchy each
+    /// used to carry inline (GH #41).
+    pub fn lookup_reference(&self, name: &str) -> Vec<&Symbol> {
+        let exact = self.lookup(name);
+        if !exact.is_empty() {
+            return exact;
+        }
+        if let Some((_, bare)) = name.rsplit_once("::") {
+            let bare_hits = self.lookup(bare);
+            if !bare_hits.is_empty() {
+                return bare_hits;
+            }
+            return self.lookup_tail(bare);
+        }
+        Vec::new()
     }
 
     /// Extract symbols from a parsed AST file

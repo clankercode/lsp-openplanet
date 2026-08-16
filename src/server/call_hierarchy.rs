@@ -157,8 +157,7 @@ pub fn outgoing(
             if found_body.is_some() {
                 return;
             }
-            let matches = qname == target_qname
-                || bare_tail(qname) == target_bare;
+            let matches = qname == target_qname || bare_tail(qname) == target_bare;
             if matches {
                 if let Some(b) = decl.body.as_ref() {
                     found_body = Some(b.clone());
@@ -220,7 +219,10 @@ fn collect_outgoing(
 // ---------------------------------------------------------------------------
 
 /// Walk the token stream at `position` to pull out a qualified identifier name.
-fn identifier_at(analysis: &crate::analysis::DocumentAnalysis, position: Position) -> Option<String> {
+fn identifier_at(
+    analysis: &crate::analysis::DocumentAnalysis,
+    position: Position,
+) -> Option<String> {
     // Reuse navigation's token-based approach.
     crate::server::navigation::name_at_position(analysis, position)
 }
@@ -253,8 +255,7 @@ fn lookup_function_item(
     let candidate = candidate.or_else(|| {
         // Search all symbols with matching bare tail.
         workspace.all_symbols().find(|s| {
-            matches!(s.kind, InternalSymbolKind::Function { .. })
-                && bare_tail(&s.name) == query
+            matches!(s.kind, InternalSymbolKind::Function { .. }) && bare_tail(&s.name) == query
         })
     })?;
     let (uri, analysis) = files.get(candidate.file_id)?;
@@ -339,12 +340,8 @@ fn visit_functions_src<'a, F>(
     }
 }
 
-fn visit_item_src<'a, F>(
-    item: &'a Item,
-    source: &str,
-    namespace: Option<&str>,
-    f: &mut F,
-) where
+fn visit_item_src<'a, F>(item: &'a Item, source: &str, namespace: Option<&str>, f: &mut F)
+where
     F: FnMut(&str, &'a FunctionDecl),
 {
     match item {
@@ -498,7 +495,11 @@ fn collect_calls_in_expr(expr: &Expr, source: &str, out: &mut Vec<(String, Span)
                 collect_calls_in_expr(a, source, out);
             }
         }
-        ExprKind::Is { expr: inner, target, .. } => {
+        ExprKind::Is {
+            expr: inner,
+            target,
+            ..
+        } => {
             collect_calls_in_expr(inner, source, out);
             if let crate::parser::ast::IsTarget::Expr(e) = target {
                 collect_calls_in_expr(e, source, out);
@@ -541,9 +542,7 @@ fn callee_name_span(callee: &Expr, source: &str) -> Option<(String, Span)> {
             let last = path.segments.last()?;
             Some((path.to_string(source), last.span))
         }
-        ExprKind::Member { member, .. } => {
-            Some((member.text(source).to_string(), member.span))
-        }
+        ExprKind::Member { member, .. } => Some((member.text(source).to_string(), member.span)),
         _ => None,
     }
 }
@@ -742,7 +741,11 @@ fn walk_expr<F: FnMut(&Expr)>(expr: &Expr, f: &mut F) {
                 walk_expr(i, f);
             }
         }
-        ExprKind::Is { expr: inner, target, .. } => {
+        ExprKind::Is {
+            expr: inner,
+            target,
+            ..
+        } => {
             walk_expr(inner, f);
             if let crate::parser::ast::IsTarget::Expr(e) = target {
                 walk_expr(e, f);
@@ -775,11 +778,7 @@ mod tests {
         let mut table = SymbolTable::new();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(source);
         let fid = table.allocate_file_id();
-        let symbols = SymbolTable::extract_symbols(
-            fid,
-            analysis.masked_source(),
-            &analysis.file,
-        );
+        let symbols = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
         table.set_file_symbols(fid, symbols);
         let leaked: &'static crate::analysis::DocumentAnalysis = Box::leak(Box::new(analysis));
         let mut files = HashMap::new();
@@ -791,7 +790,9 @@ mod tests {
     fn test_prepare_on_function_declaration() {
         let src = "void foo() {}\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles { files: &ws_owned.files };
+        let ws = WorkspaceFiles {
+            files: &ws_owned.files,
+        };
         let uri = Url::parse("file:///t/a.as").unwrap();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         // Cursor on `foo` (col 5-8)
@@ -804,7 +805,9 @@ mod tests {
     fn test_prepare_on_call_site() {
         let src = "void foo() {}\nvoid bar() { foo(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles { files: &ws_owned.files };
+        let ws = WorkspaceFiles {
+            files: &ws_owned.files,
+        };
         let uri = Url::parse("file:///t/a.as").unwrap();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         // Cursor on `foo` call, line 1 col 14
@@ -817,7 +820,9 @@ mod tests {
     fn test_prepare_on_non_function_returns_empty() {
         let src = "void foo() { int x = 0; }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles { files: &ws_owned.files };
+        let ws = WorkspaceFiles {
+            files: &ws_owned.files,
+        };
         let uri = Url::parse("file:///t/a.as").unwrap();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         // Cursor on `x` (col 17)
@@ -829,7 +834,9 @@ mod tests {
     fn test_incoming_calls_single_caller() {
         let src = "void a() {}\nvoid b() { a(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles { files: &ws_owned.files };
+        let ws = WorkspaceFiles {
+            files: &ws_owned.files,
+        };
         let uri = Url::parse("file:///t/a.as").unwrap();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         // Prepare on `a` declaration
@@ -845,7 +852,9 @@ mod tests {
     fn test_incoming_calls_multiple_callers() {
         let src = "void a() {}\nvoid b() { a(); }\nvoid c() { a(); }\nvoid d() { a(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles { files: &ws_owned.files };
+        let ws = WorkspaceFiles {
+            files: &ws_owned.files,
+        };
         let uri = Url::parse("file:///t/a.as").unwrap();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let items = prepare(&analysis, &uri, Position::new(0, 5), &ws_owned.table, &ws);
@@ -859,7 +868,9 @@ mod tests {
     fn test_incoming_calls_multiple_sites_same_caller() {
         let src = "void a() {}\nvoid b() { a(); a(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles { files: &ws_owned.files };
+        let ws = WorkspaceFiles {
+            files: &ws_owned.files,
+        };
         let uri = Url::parse("file:///t/a.as").unwrap();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let items = prepare(&analysis, &uri, Position::new(0, 5), &ws_owned.table, &ws);
@@ -872,7 +883,9 @@ mod tests {
     fn test_outgoing_calls_lists_callees() {
         let src = "void g() {}\nvoid h() {}\nvoid f() { g(); h(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles { files: &ws_owned.files };
+        let ws = WorkspaceFiles {
+            files: &ws_owned.files,
+        };
         let uri = Url::parse("file:///t/a.as").unwrap();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let items = prepare(&analysis, &uri, Position::new(2, 5), &ws_owned.table, &ws);
@@ -888,7 +901,9 @@ mod tests {
     fn test_outgoing_calls_dedupes() {
         let src = "void g() {}\nvoid f() { g(); g(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles { files: &ws_owned.files };
+        let ws = WorkspaceFiles {
+            files: &ws_owned.files,
+        };
         let uri = Url::parse("file:///t/a.as").unwrap();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let items = prepare(&analysis, &uri, Position::new(1, 5), &ws_owned.table, &ws);

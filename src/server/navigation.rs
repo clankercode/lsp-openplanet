@@ -2,8 +2,9 @@
 //!
 //! Both features share a position → symbol-name lookup that walks the token
 //! stream at the cursor, reconstructing any `Ns::Name` prefix. Definitions
-//! are resolved against a [`SymbolTable`] built from the open documents, and
-//! references are located via a pragmatic token-scan (no AST-aware shadowing).
+//! are resolved against the checker's resolution surface ([`GlobalScope`])
+//! built from the open documents, and references are located via a pragmatic
+//! token-scan (no AST-aware shadowing).
 //!
 //! Since GH #40 every entry point consumes a [`DocumentAnalysis`] — the
 //! per-file view (masked source + AST) — instead of re-lexing/parsing raw
@@ -16,7 +17,7 @@ use tower_lsp::lsp_types::*;
 use crate::analysis::DocumentAnalysis;
 use crate::lexer::{self, TokenKind};
 use crate::server::diagnostics::{position_to_offset, span_to_range};
-use crate::symbols::SymbolTable;
+use crate::typecheck::GlobalScope;
 
 /// Per-file view used by navigation / call hierarchy / workspace symbols:
 /// `file_id` → `(uri, analysis)`. Built from an [`AnalysisSnapshot`] so
@@ -76,17 +77,11 @@ pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Opti
 pub fn goto_definition(
     analysis: &DocumentAnalysis,
     position: Position,
-    workspace: &SymbolTable,
+    scope: &GlobalScope<'_>,
     files: &WorkspaceFiles,
 ) -> Option<Location> {
     let qual = name_at_position(analysis, position)?;
-    let qualified_hits = workspace.lookup(&qual);
-    let candidates = if !qualified_hits.is_empty() {
-        qualified_hits
-    } else {
-        let bare = qual.rsplit("::").next().unwrap_or(&qual);
-        workspace.lookup(bare)
-    };
+    let candidates = scope.lookup_reference(&qual);
     let sym = candidates.first()?;
     let (uri, def_analysis) = files.get(sym.file_id)?;
     Some(Location {
@@ -179,6 +174,7 @@ pub fn find_references(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbols::SymbolTable;
 
     fn build_single_file_workspace(
         uri_str: &str,
@@ -228,7 +224,8 @@ mod tests {
         let (table, files) = build_single_file_workspace("file:///t/a.as", src);
         let analysis = DocumentAnalysis::analyze_plain(src);
         let ws_files = WorkspaceFiles { files: &files };
-        let loc = goto_definition(&analysis, pos(1, 26), &table, &ws_files).unwrap();
+        let scope = GlobalScope::new(&table, None);
+        let loc = goto_definition(&analysis, pos(1, 26), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, Url::parse("file:///t/a.as").unwrap());
         // Points at the declaration (line 0), not the use.
         assert_eq!(loc.range.start.line, 0);

@@ -24,6 +24,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::config::LspConfig;
+use crate::typecheck::GlobalScope;
 use crate::typedb::TypeIndex;
 use crate::update;
 
@@ -312,8 +313,7 @@ impl LanguageServer for Backend {
         };
         let type_index = self.type_index.read().await;
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let items = completion::complete(
             &analysis,
@@ -333,15 +333,10 @@ impl LanguageServer for Backend {
         };
         let type_index = self.type_index.read().await;
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
-        Ok(hover::hover(
-            &analysis,
-            pos,
-            type_index.as_deref(),
-            Some(snapshot.symbols()),
-        ))
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        Ok(hover::hover(&analysis, pos, &scope))
     }
 
     async fn goto_definition(
@@ -355,13 +350,14 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
         Ok(
-            navigation::goto_definition(&analysis, pos, snapshot.symbols(), &workspace_files)
+            navigation::goto_definition(&analysis, pos, &scope, &workspace_files)
                 .map(GotoDefinitionResponse::Scalar),
         )
     }
@@ -374,8 +370,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
@@ -399,8 +394,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         Ok(highlights::document_highlights(&analysis, pos))
     }
@@ -412,8 +406,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         Ok(Some(folding::folding_ranges(&analysis)))
     }
@@ -427,15 +420,10 @@ impl LanguageServer for Backend {
         };
         let type_index = self.type_index.read().await;
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
-        Ok(signature::signature_help(
-            &analysis,
-            pos,
-            type_index.as_deref(),
-            Some(snapshot.symbols()),
-        ))
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        Ok(signature::signature_help(&analysis, pos, &scope))
     }
 
     async fn document_symbol(
@@ -470,8 +458,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
@@ -493,8 +480,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let tokens = semantic_tokens::semantic_tokens(&analysis);
         Ok(Some(SemanticTokensResult::Tokens(tokens)))
@@ -529,8 +515,7 @@ impl LanguageServer for Backend {
         };
         let snapshot = self.snapshot.read().await.clone();
         let type_index = self.type_index.read().await;
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let hints = inlay_hints::inlay_hints(
             &analysis,
@@ -552,8 +537,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
-        let owned =
-            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };

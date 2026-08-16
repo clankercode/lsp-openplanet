@@ -18,14 +18,13 @@ use crate::server::diagnostics::position_to_offset;
 use crate::server::navigation;
 use crate::server::scope_query;
 use crate::symbols::scope::SymbolKind;
-use crate::symbols::SymbolTable;
+use crate::typecheck::GlobalScope;
 use crate::typedb::TypeIndex;
 
 pub fn hover(
     analysis: &crate::analysis::DocumentAnalysis,
     position: Position,
-    type_index: Option<&TypeIndex>,
-    workspace: Option<&SymbolTable>,
+    scope: &GlobalScope<'_>,
 ) -> Option<Hover> {
     let source = analysis.masked_source();
     let qualified = navigation::name_at_position(analysis, position)?;
@@ -68,20 +67,14 @@ pub fn hover(
     }
 
     // 3) Workspace symbol lookup.
-    if let Some(ws) = workspace {
-        let mut hits = ws.lookup(&qualified);
-        if hits.is_empty() {
-            hits = ws.lookup(&bare);
-        }
-        if let Some(sym) = hits.first() {
-            if let Some(md) = format_workspace_symbol(sym) {
-                return Some(markdown_hover(md));
-            }
+    if let Some(sym) = scope.lookup_reference(&qualified).first() {
+        if let Some(md) = format_workspace_symbol(sym) {
+            return Some(markdown_hover(md));
         }
     }
 
     // 4) External type database.
-    if let Some(index) = type_index {
+    if let Some(index) = scope.external() {
         if let Some(h) = lookup_external(&qualified, index) {
             return Some(h);
         }
@@ -259,6 +252,7 @@ mod tests {
     use super::*;
     use crate::lexer;
     use crate::parser::Parser;
+    use crate::symbols::SymbolTable;
 
     fn ws_from(source: &str) -> SymbolTable {
         let mut table = SymbolTable::new();
@@ -297,7 +291,9 @@ mod tests {
         // Second occurrence of `x` — cursor sits inside it.
         let pos = pos_of(src, "x", 2);
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let h = hover(&analysis, pos, None, None).expect("hover should return");
+        let empty = SymbolTable::new();
+        let scope = GlobalScope::new(&empty, None);
+        let h = hover(&analysis, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -310,7 +306,9 @@ mod tests {
         let src = "void f(int arg) { arg; }";
         let pos = pos_of(src, "arg", 2);
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let h = hover(&analysis, pos, None, None).expect("hover should return");
+        let empty = SymbolTable::new();
+        let scope = GlobalScope::new(&empty, None);
+        let h = hover(&analysis, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -323,7 +321,8 @@ mod tests {
         let ws = ws_from(src);
         let pos = pos_of(src, "greet", 2);
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let h = hover(&analysis, pos, None, Some(&ws)).expect("hover should return");
+        let scope = GlobalScope::new(&ws, None);
+        let h = hover(&analysis, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -335,7 +334,9 @@ mod tests {
         let src = "class C { int field; void m() { field; } }";
         let pos = pos_of(src, "field", 2);
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let h = hover(&analysis, pos, None, None).expect("hover should return");
+        let empty = SymbolTable::new();
+        let scope = GlobalScope::new(&empty, None);
+        let h = hover(&analysis, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -348,7 +349,9 @@ mod tests {
         let src = "void f() {}";
         // Column 4: the space between `void` and `f`.
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let h = hover(&analysis, Position::new(0, 4), None, None);
+        let empty = SymbolTable::new();
+        let scope = GlobalScope::new(&empty, None);
+        let h = hover(&analysis, Position::new(0, 4), &scope);
         assert!(h.is_none());
     }
 }

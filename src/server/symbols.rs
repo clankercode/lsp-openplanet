@@ -316,21 +316,14 @@ mod tests {
         HashMap<usize, (Url, &'static crate::analysis::DocumentAnalysis)>,
     ) {
         let mut table = SymbolTable::new();
-        let mut files: HashMap<
-            usize,
-            (Url, &'static crate::analysis::DocumentAnalysis),
-        > = HashMap::new();
+        let mut files: HashMap<usize, (Url, &'static crate::analysis::DocumentAnalysis)> =
+            HashMap::new();
         for (name, src) in sources {
             let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
             let fid = table.allocate_file_id();
-            let syms = SymbolTable::extract_symbols(
-                fid,
-                analysis.masked_source(),
-                &analysis.file,
-            );
+            let syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
             table.set_file_symbols(fid, syms);
-            let leaked: &'static crate::analysis::DocumentAnalysis =
-                Box::leak(Box::new(analysis));
+            let leaked: &'static crate::analysis::DocumentAnalysis = Box::leak(Box::new(analysis));
             let uri = Url::parse(&format!("file:///tmp/{}", name)).unwrap();
             files.insert(fid, (uri, leaked));
         }
@@ -359,10 +352,8 @@ mod tests {
 
     #[test]
     fn workspace_symbols_empty_query_returns_all_top_level() {
-        let (table, files) = build_workspace(&[(
-            "a.as",
-            "class Hello {} enum E { A, B } void f() {}",
-        )]);
+        let (table, files) =
+            build_workspace(&[("a.as", "class Hello {} enum E { A, B } void f() {}")]);
         let results = workspace_symbols("", &table, &files);
         let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Hello"));
