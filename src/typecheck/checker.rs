@@ -1241,6 +1241,29 @@ impl<'a> Checker<'a> {
     /// `fallback_ret` is whatever `lookup_function_return(qualified)` gave
     /// us — used verbatim for the unique-overload path (its data comes from
     /// that same lookup) and as a silent fallback for ambiguous / no-match.
+    /// Overload set for a possibly-qualified callable. For a `Class::Method`
+    /// (or `Ns::Class::Method`) shape where `Class` is a known workspace class,
+    /// include overloads inherited from its parent chain (GH #34) so a call
+    /// matching only a parent-declared overload isn't flagged for arity. Free
+    /// functions and unknown receivers fall back to the direct overload set.
+    fn method_overloads_including_inherited(&self, qualified: &str) -> Vec<OverloadSig> {
+        let direct = self.scope.lookup_function_overloads(qualified);
+        let Some((class_part, method)) = qualified.rsplit_once("::") else {
+            return direct;
+        };
+        if !self.scope.is_workspace_class(class_part) {
+            return direct;
+        }
+        let augmented = self
+            .scope
+            .lookup_method_overloads_with_inheritance(class_part, method);
+        if augmented.is_empty() {
+            direct
+        } else {
+            augmented
+        }
+    }
+
     fn resolve_workspace_function_call(
         &mut self,
         display_name: &str,
@@ -1249,7 +1272,7 @@ impl<'a> Checker<'a> {
         callee_span: Span,
         fallback_ret: TypeRepr,
     ) -> TypeRepr {
-        let overloads = self.scope.lookup_function_overloads(qualified);
+        let overloads = self.method_overloads_including_inherited(qualified);
         match overloads.len() {
             0 => {
                 // Not a workspace function (external-only). Prefer unified
@@ -2282,6 +2305,39 @@ mod tests {
         assert_eq!(
             diags[0].kind,
             TypeDiagnosticKind::UndefinedIdentifier("y".into())
+        );
+    }
+
+    /// GH #34: a method overload inherited from a parent class must count
+    /// toward arity on a NAMESPACE-QUALIFIED call `Ns::Child::Method(2 args)`,
+    /// which resolves to the parent's 2-arg overload even though the child
+    /// only declares a 3-arg one. (Member-access `c.Method(..)` is already
+    /// lenient; the qualified path was not.)
+    #[test]
+    fn inherited_method_overload_counts_for_arity() {
+        let src = r#"
+namespace MLFeed {
+    class Base {
+        void UpdateFrom(int a, int b) { }
+    }
+    class Child : Base {
+        void UpdateFrom(int a, int b, bool c) { }
+    }
+}
+void Main() {
+    MLFeed::Child::UpdateFrom(1, 2);   // resolves to Base::UpdateFrom(int,int) — legal
+}
+"#;
+        let diags = check(src);
+        let arity: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(
+            arity.len(),
+            0,
+            "inherited 2-arg overload must satisfy the qualified 2-arg call; got {:?}",
+            diags
         );
     }
 

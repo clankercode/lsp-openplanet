@@ -849,6 +849,42 @@ impl<'a> GlobalScope<'a> {
         Vec::new()
     }
 
+    /// True when `class_name` names a workspace class symbol (used to decide
+    /// whether a qualified `Class::Method` callee should pull inherited
+    /// overloads into its arity/overload set — GH #34).
+    pub fn is_workspace_class(&self, class_name: &str) -> bool {
+        self.workspace.all_symbols().any(|s| {
+            s.name == class_name && matches!(s.kind, SymbolKind::Class { .. })
+        })
+    }
+
+    /// Collect every workspace method overload named `Class::method`, walking
+    /// the class's inheritance chain so an overload declared on a parent counts
+    /// toward arity/overload resolution on the child (GH #34). The qualified
+    /// `class_name` may itself be namespace-qualified (`Ns::Child`); parents are
+    /// normalized in that namespace context. Cycle-guarded.
+    pub fn lookup_method_overloads_with_inheritance(
+        &self,
+        class_name: &str,
+        method: &str,
+    ) -> Vec<OverloadSig> {
+        let mut out = Vec::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue =
+            std::collections::VecDeque::from([self.normalize_workspace_class_name(class_name)]);
+        while let Some(name) = queue.pop_front() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let qualified = format!("{}::{}", name, method);
+            out.extend(self.lookup_function_overloads(&qualified));
+            for parent in self.workspace_class_parents(&name) {
+                queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &name));
+            }
+        }
+        out
+    }
+
     /// Walk the workspace class inheritance chain starting from
     /// `class_name`, looking for a field or method named `member`.
     /// Returns the first match as a `TypeRepr`, parsed from the raw
