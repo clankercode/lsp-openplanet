@@ -188,22 +188,9 @@ mod tests {
     fn build_single_file_workspace(
         uri_str: &str,
         source: &str,
-    ) -> (
-        SymbolTable,
-        HashMap<usize, (Url, &'static crate::analysis::DocumentAnalysis)>,
-    ) {
-        let mut table = SymbolTable::new();
-        let fid = table.allocate_file_id();
-        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(source);
-        let symbols = crate::symbols::SymbolTable::extract_symbols(
-            fid,
-            analysis.masked_source(),
-            &analysis.file,
-        );
-        table.set_file_symbols(fid, symbols);
-        let leaked: &'static crate::analysis::DocumentAnalysis = Box::leak(Box::new(analysis));
-        let files = HashMap::from([(fid, (Url::parse(uri_str).unwrap(), leaked))]);
-        (table, files)
+    ) -> crate::server::test_support::TestWorkspace {
+        let name = uri_str.rsplit('/').next().unwrap_or("a.as");
+        crate::server::test_support::TestWorkspace::one_file(name, source)
     }
 
     fn pos(line: u32, character: u32) -> Position {
@@ -230,12 +217,13 @@ mod tests {
     #[test]
     fn goto_definition_resolves_single_file() {
         let src = "int target = 1;\nvoid main() { int x = target; }\n";
-        let (table, files) = build_single_file_workspace("file:///t/a.as", src);
-        let analysis = DocumentAnalysis::analyze_plain(src);
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
         let ws_files = WorkspaceFiles { files: &files };
-        let scope = GlobalScope::new(&table, None);
-        let loc = goto_definition(&analysis, pos(1, 26), &scope, &ws_files).unwrap();
-        assert_eq!(loc.uri, Url::parse("file:///t/a.as").unwrap());
+        let scope = tw.scope();
+        let loc = goto_definition(analysis, pos(1, 26), &scope, &ws_files).unwrap();
+        assert_eq!(loc.uri, tw.uri());
         // Points at the declaration (line 0), not the use.
         assert_eq!(loc.range.start.line, 0);
     }
@@ -243,23 +231,24 @@ mod tests {
     #[test]
     fn find_references_scans_open_documents() {
         let src = "int counter = 0;\nvoid main() { counter += 1; }\n";
-        let (table, files) = build_single_file_workspace("file:///t/a.as", src);
-        let _ = table;
-        let analysis = DocumentAnalysis::analyze_plain(src);
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
         let ws_files = WorkspaceFiles { files: &files };
-        let refs = find_references(&analysis, pos(1, 15), &ws_files, true);
+        let refs = find_references(analysis, pos(1, 15), &ws_files, true);
         assert_eq!(refs.len(), 2);
     }
 
     #[test]
     fn rename_rewrites_matching_identifiers() {
         let src = "int counter = 0;\nvoid main() { counter += 1; }\n";
-        let (_table, files) = build_single_file_workspace("file:///t/a.as", src);
-        let analysis = DocumentAnalysis::analyze_plain(src);
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
         let ws_files = WorkspaceFiles { files: &files };
-        let edit = rename(&analysis, pos(1, 15), "tally", &ws_files).unwrap();
+        let edit = rename(analysis, pos(1, 15), "tally", &ws_files).unwrap();
         let changes = edit.changes.unwrap();
-        let edits = changes.get(&Url::parse("file:///t/a.as").unwrap()).unwrap();
+        let edits = changes.get(&tw.uri()).unwrap();
         assert_eq!(edits.len(), 2);
         assert!(edits.iter().all(|e| e.new_text == "tally"));
     }

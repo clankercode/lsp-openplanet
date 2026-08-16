@@ -4,9 +4,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use openplanet_lsp::config::LspConfig;
-use openplanet_lsp::lexer;
-use openplanet_lsp::parser::Parser;
-use openplanet_lsp::preprocessor;
 use openplanet_lsp::server::diagnostics;
 use openplanet_lsp::server::Backend;
 use openplanet_lsp::typecheck::build_plugin_symbol_table;
@@ -110,20 +107,15 @@ fn parse_fixture(fixture_name: &str) -> Vec<(PathBuf, Vec<String>)> {
     for file_path in &source_files {
         let source = std::fs::read_to_string(file_path).unwrap();
 
-        // Preprocess
-        let pp = preprocessor::preprocess(&source, &defines);
-        let mut diags: Vec<String> = pp
-            .errors
+        // Same pipeline the server runs (GH #43): one DocumentAnalysis
+        // instead of hand-rolled preprocess→lex→parse.
+        let analysis = openplanet_lsp::analysis::DocumentAnalysis::analyze(&source, &defines);
+        let mut diags: Vec<String> = analysis
+            .preprocess_errors()
             .iter()
             .map(|e| format!("preprocess: {:?}", e.kind))
             .collect();
-
-        // Lex + Parse
-        let tokens = lexer::tokenize_filtered(&pp.masked_source);
-        let mut parser = Parser::new(&tokens, &pp.masked_source);
-        let _file = parser.parse_file();
-
-        for err in &parser.errors {
+        for err in &analysis.parse_errors {
             diags.push(format!("parse: {}", err));
         }
 
@@ -140,7 +132,9 @@ fn real_plugins_dir() -> Option<PathBuf> {
 
 fn check_real_plugin_if_available(plugin_name: &str) {
     let Some(plugins_dir) = real_plugins_dir() else {
-        eprintln!("skipping real-plugin check for {plugin_name}: OPENPLANET_REAL_PLUGINS_DIR not set");
+        eprintln!(
+            "skipping real-plugin check for {plugin_name}: OPENPLANET_REAL_PLUGINS_DIR not set"
+        );
         return;
     };
     let plugin = plugins_dir.join(plugin_name);
@@ -322,23 +316,27 @@ fn parse_plugin_tree(plugin_dir: &Path, stats: &mut CorpusStats) {
 
     for file_path in &source_files {
         stats.files += 1;
-        let Ok(source) = std::fs::read_to_string(file_path) else { continue };
+        let Ok(source) = std::fs::read_to_string(file_path) else {
+            continue;
+        };
 
-        let pp = preprocessor::preprocess(&source, &defines);
-        if !pp.errors.is_empty() {
+        // Same pipeline the server runs (GH #43).
+        let analysis = openplanet_lsp::analysis::DocumentAnalysis::analyze(&source, &defines);
+        let pp_errors = analysis.preprocess_errors();
+        if !pp_errors.is_empty() {
             stats.files_with_preprocess_errors += 1;
-            stats.preprocess_errors += pp.errors.len();
+            stats.preprocess_errors += pp_errors.len();
         }
 
-        let tokens = lexer::tokenize_filtered(&pp.masked_source);
-        let mut parser = Parser::new(&tokens, &pp.masked_source);
-        let _file = parser.parse_file();
+        let parse_errors = &analysis.parse_errors;
 
-        if !parser.errors.is_empty() {
+        if !parse_errors.is_empty() {
             stats.files_with_parse_errors += 1;
-            stats.parse_errors += parser.errors.len();
-            stats.worst_files.push((parser.errors.len(), file_path.clone()));
-            for err in &parser.errors {
+            stats.parse_errors += parse_errors.len();
+            stats
+                .worst_files
+                .push((parse_errors.len(), file_path.clone()));
+            for err in parse_errors.iter() {
                 let msg = err.to_string();
                 let key = error_kind_key(&msg);
                 let entry = stats.kind_counts.entry(key).or_insert_with(|| {
@@ -355,7 +353,9 @@ fn parse_plugin_tree(plugin_dir: &Path, stats: &mut CorpusStats) {
 
 fn discover_plugin_dirs(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(root) else { return out };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() && path.join("info.toml").exists() {
@@ -395,25 +395,21 @@ fn test_dump_file_errors() {
     let path = PathBuf::from(file_path);
     let source = std::fs::read_to_string(&path).expect("read DUMP_FILE");
     let defines = LspConfig::default_defines();
-    let pp = preprocessor::preprocess(&source, &defines);
-    let tokens = lexer::tokenize_filtered(&pp.masked_source);
-    let mut parser = Parser::new(&tokens, &pp.masked_source);
-    let _ = parser.parse_file();
+    // Same pipeline the server runs (GH #43).
+    let analysis = openplanet_lsp::analysis::DocumentAnalysis::analyze(&source, &defines);
 
     eprintln!("=== {} ===", path.display());
-    eprintln!("parse errors: {}", parser.errors.len());
-    for err in &parser.errors {
+    eprintln!("parse errors: {}", analysis.parse_errors.len());
+    for err in &analysis.parse_errors {
         let off = err.span.start as usize;
-        let (line, col) = offset_to_line_col(&pp.masked_source, off);
-        let line_start = pp.masked_source[..off]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let line_end = pp.masked_source[off..]
+        let masked = analysis.masked_source();
+        let (line, col) = offset_to_line_col(masked, off);
+        let line_start = masked[..off].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_end = masked[off..]
             .find('\n')
             .map(|i| off + i)
-            .unwrap_or(pp.masked_source.len());
-        let context = &pp.masked_source[line_start..line_end];
+            .unwrap_or(masked.len());
+        let context = &masked[line_start..line_end];
         eprintln!("  L{}:{:2}  {}", line, col, err);
         eprintln!("       | {}", context.trim_end());
     }
@@ -425,26 +421,32 @@ fn test_lsp_diagnostics_cross_document_workspace() {
     // symbol table containing declarations from a sibling document is fed
     // to compute_diagnostics, references to those declarations must not
     // flag as unknown-type / undefined-identifier.
-    use openplanet_lsp::parser::Parser as AsParser;
     use openplanet_lsp::symbols::SymbolTable;
 
     let src_a = "class Foo { int x; }";
     let src_b = "void use() { Foo f; f.x = 1; }";
 
-    // Build a pooled workspace table over both files.
+    // Build a pooled workspace table over both files (one analysis per
+    // file, same as the snapshot builder).
     let mut table = SymbolTable::new();
     for src in [src_a, src_b] {
-        let tokens = lexer::tokenize_filtered(src);
-        let mut parser = AsParser::new(&tokens, src);
-        let file = parser.parse_file();
+        let analysis = openplanet_lsp::analysis::DocumentAnalysis::analyze_plain(src);
         let fid = table.allocate_file_id();
-        let syms = SymbolTable::extract_symbols(fid, src, &file);
+        let syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
         table.set_file_symbols(fid, syms);
     }
 
     let uri = Url::parse("file:///tmp/b.as").unwrap();
-    let diags =
-        diagnostics::compute_diagnostics(&uri, src_b, &LspConfig::default(), None, Some(&table));
+    // Same shape the LSP backend uses: analysis + pooled workspace symbols.
+    let analysis =
+        openplanet_lsp::analysis::DocumentAnalysis::analyze(src_b, &LspConfig::default().defines);
+    let diags = diagnostics::compute_diagnostics_from_analysis(
+        &uri,
+        &analysis,
+        &LspConfig::default(),
+        None,
+        &table,
+    );
     let offenders: Vec<&str> = diags
         .iter()
         .map(|d| d.message.as_str())
@@ -460,17 +462,9 @@ fn test_lsp_diagnostics_cross_document_workspace() {
 #[test]
 fn test_lsp_diagnostics_emit_type_errors() {
     let uri = Url::parse("file:///tmp/fake.as").expect("parse url");
-    let diags = diagnostics::compute_diagnostics(
-        &uri,
-        "NotAType x;",
-        &LspConfig::default(),
-        None,
-        None,
-    );
+    let diags = diagnostics::compute_diagnostics(&uri, "NotAType x;", &LspConfig::default(), None);
     assert!(
-        diags
-            .iter()
-            .any(|d| d.message.contains("unknown type")),
+        diags.iter().any(|d| d.message.contains("unknown type")),
         "expected an unknown-type diagnostic, got: {:?}",
         diags
     );
@@ -485,7 +479,10 @@ fn test_corpus_parse_histogram() {
     let root = PathBuf::from(root);
     let plugin_dirs = discover_plugin_dirs(&root);
     eprintln!("Corpus root: {}", root.display());
-    eprintln!("Discovered {} plugins (dirs with info.toml)", plugin_dirs.len());
+    eprintln!(
+        "Discovered {} plugins (dirs with info.toml)",
+        plugin_dirs.len()
+    );
 
     let mut stats = CorpusStats::default();
     for plugin in &plugin_dirs {
@@ -497,7 +494,10 @@ fn test_corpus_parse_histogram() {
     eprintln!("plugins              : {}", stats.plugins);
     eprintln!("files                : {}", stats.files);
     eprintln!("files w/ parse errors: {}", stats.files_with_parse_errors);
-    eprintln!("files w/ pp errors   : {}", stats.files_with_preprocess_errors);
+    eprintln!(
+        "files w/ pp errors   : {}",
+        stats.files_with_preprocess_errors
+    );
     eprintln!("total parse errors   : {}", stats.parse_errors);
     eprintln!("total pp errors      : {}", stats.preprocess_errors);
     eprintln!();
@@ -521,8 +521,8 @@ fn test_corpus_parse_histogram() {
     }
 
     // Write machine-readable summary for the goal loop
-    let summary_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".goal-loops/corpus-histogram.txt");
+    let summary_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".goal-loops/corpus-histogram.txt");
     if let Some(parent) = summary_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -537,7 +537,10 @@ fn test_corpus_parse_histogram() {
     ));
     summary.push_str("# top 50 kinds\n");
     for (kind, (count, example)) in kinds.iter().take(50) {
-        summary.push_str(&format!("{:>6}  {}\n        e.g. {}\n", count, kind, example));
+        summary.push_str(&format!(
+            "{:>6}  {}\n        e.g. {}\n",
+            count, kind, example
+        ));
     }
     summary.push_str("\n# top 30 worst files\n");
     for (count, path) in stats.worst_files.iter().take(30) {
@@ -654,9 +657,7 @@ fn test_corpus_type_diagnostic_histogram() {
         // against that pooled table below.
         let loaded: Vec<(PathBuf, String)> = source_files
             .iter()
-            .filter_map(|p| {
-                std::fs::read_to_string(p).ok().map(|s| (p.clone(), s))
-            })
+            .filter_map(|p| std::fs::read_to_string(p).ok().map(|s| (p.clone(), s)))
             .collect();
 
         let workspace = build_plugin_symbol_table(&loaded, &cfg);
@@ -669,12 +670,12 @@ fn test_corpus_type_diagnostic_histogram() {
                 Ok(u) => u,
                 Err(_) => continue,
             };
-            let diags = diagnostics::compute_diagnostics(
+            let diags = diagnostics::compute_diagnostics_from_analysis(
                 &url,
-                source,
+                &openplanet_lsp::analysis::DocumentAnalysis::analyze(source, &cfg.defines),
                 &cfg,
                 Some(&index),
-                Some(&workspace),
+                &workspace,
             );
             if diags.is_empty() {
                 continue;
@@ -689,16 +690,12 @@ fn test_corpus_type_diagnostic_histogram() {
                     // Extract the name from messages like `unknown type `Foo``.
                     if let Some(rest) = d.message.strip_prefix("unknown type `") {
                         if let Some(name) = rest.strip_suffix('`') {
-                            *unknown_type_counts
-                                .entry(name.to_string())
-                                .or_insert(0) += 1;
+                            *unknown_type_counts.entry(name.to_string()).or_insert(0) += 1;
                         }
                     }
                     if let Some(rest) = d.message.strip_prefix("undefined identifier `") {
                         if let Some(name) = rest.strip_suffix('`') {
-                            *undefined_ident_counts
-                                .entry(name.to_string())
-                                .or_insert(0) += 1;
+                            *undefined_ident_counts.entry(name.to_string()).or_insert(0) += 1;
                         }
                     }
                     // `type `Foo` has no member `bar``
@@ -708,9 +705,7 @@ fn test_corpus_type_diagnostic_histogram() {
                             let tail = &rest[after_ty + "` has no member `".len()..];
                             if let Some(member) = tail.strip_suffix('`') {
                                 let key = format!("{}::{}", ty, member);
-                                *undefined_member_counts
-                                    .entry(key)
-                                    .or_insert(0) += 1;
+                                *undefined_member_counts.entry(key).or_insert(0) += 1;
                             }
                         }
                     }
@@ -743,8 +738,8 @@ fn test_corpus_type_diagnostic_histogram() {
     }
 
     // Machine-readable summary for the goal loop.
-    let summary_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(".goal-loops/type-diag-histogram.txt");
+    let summary_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".goal-loops/type-diag-histogram.txt");
     if let Some(parent) = summary_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -772,8 +767,8 @@ fn test_corpus_type_diagnostic_histogram() {
     if dump_unknown {
         let mut utc: Vec<_> = unknown_type_counts.iter().collect();
         utc.sort_by(|a, b| b.1.cmp(a.1));
-        let unk_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".goal-loops/unknown-types.txt");
+        let unk_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".goal-loops/unknown-types.txt");
         let mut u = String::new();
         for (name, count) in utc.iter().take(60) {
             u.push_str(&format!("{:>6}  {}\n", count, name));
@@ -783,8 +778,8 @@ fn test_corpus_type_diagnostic_histogram() {
 
         let mut uic: Vec<_> = undefined_ident_counts.iter().collect();
         uic.sort_by(|a, b| b.1.cmp(a.1));
-        let ui_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".goal-loops/undefined-idents.txt");
+        let ui_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".goal-loops/undefined-idents.txt");
         let mut u = String::new();
         for (name, count) in uic.iter().take(60) {
             u.push_str(&format!("{:>6}  {}\n", count, name));
@@ -794,8 +789,8 @@ fn test_corpus_type_diagnostic_histogram() {
 
         let mut umc: Vec<_> = undefined_member_counts.iter().collect();
         umc.sort_by(|a, b| b.1.cmp(a.1));
-        let um_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".goal-loops/undefined-members.txt");
+        let um_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".goal-loops/undefined-members.txt");
         let mut u = String::new();
         for (name, count) in umc.iter().take(60) {
             u.push_str(&format!("{:>6}  {}\n", count, name));
@@ -827,10 +822,9 @@ fn test_debug_single_file_diagnostics() {
     let source = std::fs::read_to_string(&file_path).unwrap();
     let url = Url::from_file_path(&file_path).unwrap();
     let cfg = LspConfig::default();
-    let diags = diagnostics::compute_diagnostics(&url, &source, &cfg, Some(&index), None);
+    let diags = diagnostics::compute_diagnostics(&url, &source, &cfg, Some(&index));
     eprintln!("total diagnostics: {}", diags.len());
-    let mut buckets: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
+    let mut buckets: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for d in &diags {
         *buckets.entry(d.message.clone()).or_insert(0) += 1;
     }
@@ -938,10 +932,7 @@ async fn test_tower_lsp_smoke_crossfile_hover() {
     // Any non-empty content counts — we just want to prove the stack wired.
     match &hover.contents {
         tower_lsp::lsp_types::HoverContents::Markup(m) => {
-            assert!(
-                !m.value.is_empty(),
-                "hover markup must be non-empty"
-            );
+            assert!(!m.value.is_empty(), "hover markup must be non-empty");
         }
         tower_lsp::lsp_types::HoverContents::Scalar(_)
         | tower_lsp::lsp_types::HoverContents::Array(_) => {
@@ -1029,7 +1020,11 @@ async fn test_tower_lsp_smoke_signature_help() {
     assert_eq!(help.active_parameter, Some(1));
     // The single overload's label should include both param types.
     let label = &help.signatures[0].label;
-    assert!(label.contains("int"), "label should mention int, got {:?}", label);
+    assert!(
+        label.contains("int"),
+        "label should mention int, got {:?}",
+        label
+    );
     assert!(
         label.contains("string"),
         "label should mention string, got {:?}",
@@ -1109,7 +1104,10 @@ async fn test_tower_lsp_smoke_document_highlight() {
         .await
         .expect("initialize should succeed");
     assert!(
-        init_result.capabilities.document_highlight_provider.is_some(),
+        init_result
+            .capabilities
+            .document_highlight_provider
+            .is_some(),
         "server must advertise document_highlight capability"
     );
 
@@ -1142,12 +1140,14 @@ async fn test_tower_lsp_smoke_document_highlight() {
         .expect("document_highlight must return Some");
     assert_eq!(hs.len(), 3, "expected 3 highlights, got {:?}", hs);
     assert!(
-        hs.iter().any(|h| h.kind == Some(DocumentHighlightKind::WRITE)),
+        hs.iter()
+            .any(|h| h.kind == Some(DocumentHighlightKind::WRITE)),
         "expected at least one WRITE highlight, got {:?}",
         hs
     );
     assert!(
-        hs.iter().any(|h| h.kind == Some(DocumentHighlightKind::READ)),
+        hs.iter()
+            .any(|h| h.kind == Some(DocumentHighlightKind::READ)),
         "expected at least one READ highlight, got {:?}",
         hs
     );
@@ -1279,12 +1279,7 @@ async fn test_tower_lsp_smoke_call_hierarchy() {
         .await
         .expect("incoming must not error")
         .expect("incoming must return Some");
-    assert_eq!(
-        incomings.len(),
-        1,
-        "expected 1 caller, got {:?}",
-        incomings
-    );
+    assert_eq!(incomings.len(), 1, "expected 1 caller, got {:?}", incomings);
     assert_eq!(incomings[0].from.name, "b");
     assert_eq!(incomings[0].from_ranges.len(), 1);
 }

@@ -319,12 +319,24 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
                 manifest_path.display()
             ))
         })?;
-        for diagnostic in diagnostics::compute_diagnostics(
+        // The manifest is not an .as file — parse on the fly with an
+        // owned symbol pool.
+        let manifest_analysis =
+            crate::analysis::DocumentAnalysis::analyze(&source, &config.defines);
+        let mut manifest_symbols = crate::symbols::SymbolTable::new();
+        let mf_fid = manifest_symbols.allocate_file_id();
+        let mf_syms = crate::symbols::SymbolTable::extract_symbols(
+            mf_fid,
+            manifest_analysis.masked_source(),
+            &manifest_analysis.file,
+        );
+        manifest_symbols.set_file_symbols(mf_fid, mf_syms);
+        for diagnostic in diagnostics::compute_diagnostics_from_analysis(
             &uri,
-            &source,
+            &manifest_analysis,
             &config,
             type_index.as_ref(),
-            Some(snapshot.symbols()),
+            &manifest_symbols,
         ) {
             cli_diagnostics.push(CliDiagnostic {
                 path: manifest_path.clone(),
@@ -353,7 +365,7 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
             analysis,
             &config,
             type_index.as_ref(),
-            Some(snapshot.symbols()),
+            snapshot.symbols(),
         ) {
             cli_diagnostics.push(CliDiagnostic {
                 path: item.path.clone(),

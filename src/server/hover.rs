@@ -290,20 +290,7 @@ fn lookup_external(qualified: &str, index: &TypeIndex) -> Option<Hover> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer;
-    use crate::parser::Parser;
-    use crate::symbols::SymbolTable;
-
-    fn ws_from(source: &str) -> SymbolTable {
-        let mut table = SymbolTable::new();
-        let tokens = lexer::tokenize_filtered(source);
-        let mut parser = Parser::new(&tokens, source);
-        let file = parser.parse_file();
-        let fid = table.allocate_file_id();
-        let syms = SymbolTable::extract_symbols(fid, source, &file);
-        table.set_file_symbols(fid, syms);
-        table
-    }
+    use crate::server::test_support::TestWorkspace;
 
     /// Find a 1-based column of the first occurrence of `needle` starting at
     /// position `from` (byte offset). Returns the (line, character).
@@ -331,8 +318,8 @@ mod tests {
         // Second occurrence of `x` — cursor sits inside it.
         let pos = pos_of(src, "x", 2);
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let empty = SymbolTable::new();
-        let scope = GlobalScope::new(&empty, None);
+        let tw = TestWorkspace::one_file("hover.as", src);
+        let scope = tw.scope();
         let h = hover(&analysis, None, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
@@ -346,8 +333,8 @@ mod tests {
         let src = "void f(int arg) { arg; }";
         let pos = pos_of(src, "arg", 2);
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let empty = SymbolTable::new();
-        let scope = GlobalScope::new(&empty, None);
+        let tw = TestWorkspace::one_file("hover.as", src);
+        let scope = tw.scope();
         let h = hover(&analysis, None, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
@@ -358,11 +345,11 @@ mod tests {
     #[test]
     fn hover_shows_workspace_function() {
         let src = "void greet() {}\nvoid main() { greet(); }";
-        let ws = ws_from(src);
+        let tw = TestWorkspace::one_file("hover.as", src);
         let pos = pos_of(src, "greet", 2);
-        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let scope = GlobalScope::new(&ws, None);
-        let h = hover(&analysis, None, pos, &scope).expect("hover should return");
+        let analysis = tw.analysis();
+        let scope = tw.scope();
+        let h = hover(analysis, None, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -374,8 +361,8 @@ mod tests {
         let src = "class C { int field; void m() { field; } }";
         let pos = pos_of(src, "field", 2);
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let empty = SymbolTable::new();
-        let scope = GlobalScope::new(&empty, None);
+        let tw = TestWorkspace::one_file("hover.as", src);
+        let scope = tw.scope();
         let h = hover(&analysis, None, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
@@ -389,8 +376,8 @@ mod tests {
         let src = "void f() {}";
         // Column 4: the space between `void` and `f`.
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let empty = SymbolTable::new();
-        let scope = GlobalScope::new(&empty, None);
+        let tw = TestWorkspace::one_file("hover.as", src);
+        let scope = tw.scope();
         let h = hover(&analysis, None, Position::new(0, 4), &scope);
         assert!(h.is_none());
     }

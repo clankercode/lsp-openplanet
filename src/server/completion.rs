@@ -338,18 +338,10 @@ fn make_item(label: &str, kind: CompletionItemKind) -> CompletionItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer;
-    use crate::parser::Parser;
+    use crate::server::test_support::TestWorkspace;
 
-    fn ws_from(source: &str) -> SymbolTable {
-        let mut table = SymbolTable::new();
-        let tokens = lexer::tokenize_filtered(source);
-        let mut parser = Parser::new(&tokens, source);
-        let file = parser.parse_file();
-        let fid = table.allocate_file_id();
-        let syms = SymbolTable::extract_symbols(fid, source, &file);
-        table.set_file_symbols(fid, syms);
-        table
+    fn ws_from(source: &str) -> TestWorkspace {
+        TestWorkspace::one_file("compl.as", source)
     }
 
     fn pos_after(source: &str, marker: &str) -> Position {
@@ -375,7 +367,7 @@ mod tests {
         let ws = ws_from(src);
         let pos = pos_after(src, "obj.");
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let items = complete(&analysis, None, pos, None, Some(&ws));
+        let items = complete(&analysis, None, pos, None, Some(ws.snapshot.symbols()));
         let labels = labels(&items);
         assert!(labels.contains(&"x"), "missing x in {:?}", labels);
         assert!(labels.contains(&"m"), "missing m in {:?}", labels);
@@ -400,7 +392,7 @@ mod tests {
         let ws = ws_from(src);
         let pos = pos_after(src, "gr");
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let items = complete(&analysis, None, pos, None, Some(&ws));
+        let items = complete(&analysis, None, pos, None, Some(ws.snapshot.symbols()));
         let labels = labels(&items);
         assert!(labels.contains(&"greet"), "missing greet in {:?}", labels);
     }

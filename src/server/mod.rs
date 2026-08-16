@@ -12,6 +12,8 @@ pub mod scope_query;
 pub mod semantic_tokens;
 pub mod signature;
 pub mod symbols;
+#[cfg(test)]
+pub mod test_support;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -122,16 +124,29 @@ impl Backend {
                 analysis,
                 &config,
                 type_index.as_deref(),
-                Some(snapshot.symbols()),
+                snapshot.symbols(),
             ),
-            // Not on disk (e.g. untitled documents) — parse on the fly.
-            None => diagnostics::compute_diagnostics(
-                uri,
-                text,
-                &config,
-                type_index.as_deref(),
-                Some(snapshot.symbols()),
-            ),
+            // Not on disk (e.g. untitled documents) — parse on the fly
+            // with an owned one-file symbol pool.
+            None => {
+                let analysis_owned =
+                    crate::analysis::DocumentAnalysis::analyze(text, &config.defines);
+                let mut symbols = crate::symbols::SymbolTable::new();
+                let fid = symbols.allocate_file_id();
+                let syms = crate::symbols::SymbolTable::extract_symbols(
+                    fid,
+                    analysis_owned.masked_source(),
+                    &analysis_owned.file,
+                );
+                symbols.set_file_symbols(fid, syms);
+                diagnostics::compute_diagnostics_from_analysis(
+                    uri,
+                    &analysis_owned,
+                    &config,
+                    type_index.as_deref(),
+                    &symbols,
+                )
+            }
         };
         if uri.path().ends_with("info.toml") {
             diags.extend(diagnostics::missing_required_dependency_diagnostics(
@@ -428,7 +443,12 @@ impl LanguageServer for Backend {
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
         let checked = snapshot.checked_file(uri, &scope);
-        Ok(signature::signature_help(&analysis, checked.as_ref(), pos, &scope))
+        Ok(signature::signature_help(
+            &analysis,
+            checked.as_ref(),
+            pos,
+            &scope,
+        ))
     }
 
     async fn document_symbol(
@@ -526,7 +546,7 @@ impl LanguageServer for Backend {
             &analysis,
             params.range,
             type_index.as_deref(),
-            Some(snapshot.symbols()),
+            snapshot.symbols(),
         );
         Ok(Some(hints))
     }
@@ -546,7 +566,9 @@ impl LanguageServer for Backend {
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };
-        let items = call_hierarchy::prepare(&analysis, uri, pos, snapshot.symbols(), &ws_files);
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        let items = call_hierarchy::prepare(&analysis, uri, pos, &scope, &ws_files);
         if items.is_empty() {
             Ok(None)
         } else {
@@ -561,9 +583,11 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot.read().await.clone();
         let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
         Ok(Some(call_hierarchy::incoming(
             &params.item,
-            snapshot.symbols(),
+            &scope,
             &ws_files,
         )))
     }
@@ -575,9 +599,11 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot.read().await.clone();
         let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
         Ok(Some(call_hierarchy::outgoing(
             &params.item,
-            snapshot.symbols(),
+            &scope,
             &ws_files,
         )))
     }

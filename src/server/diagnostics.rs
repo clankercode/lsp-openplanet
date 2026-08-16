@@ -17,10 +17,14 @@ pub fn compute_diagnostics(
     source: &str,
     config: &LspConfig,
     type_index: Option<&TypeIndex>,
-    workspace_symbols: Option<&SymbolTable>,
 ) -> Vec<Diagnostic> {
     let analysis = DocumentAnalysis::analyze(source, &config.defines);
-    compute_diagnostics_from_analysis(uri, &analysis, config, type_index, workspace_symbols)
+    // No snapshot behind this call — pool symbols from this parse alone.
+    let mut symbols = SymbolTable::new();
+    let fid = symbols.allocate_file_id();
+    let file_syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
+    symbols.set_file_symbols(fid, file_syms);
+    compute_diagnostics_from_analysis(uri, &analysis, config, type_index, &symbols)
 }
 
 /// Diagnostics for required plugin dependencies that were not resolved by the
@@ -50,7 +54,7 @@ pub fn compute_manifest_diagnostics(
     config: &LspConfig,
     missing_required_dependencies: &[String],
 ) -> Vec<Diagnostic> {
-    let mut diagnostics = compute_diagnostics(uri, source, config, None, None);
+    let mut diagnostics = compute_diagnostics(uri, source, config, None);
     diagnostics.extend(missing_required_dependency_diagnostics(
         missing_required_dependencies,
     ));
@@ -63,7 +67,7 @@ pub fn compute_diagnostics_from_analysis(
     analysis: &DocumentAnalysis,
     _config: &LspConfig,
     type_index: Option<&TypeIndex>,
-    workspace_symbols: Option<&SymbolTable>,
+    workspace_symbols: &SymbolTable,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let source = analysis.source.as_str();
@@ -94,19 +98,7 @@ pub fn compute_diagnostics_from_analysis(
         });
     }
 
-    let owned_symbols: Option<SymbolTable> = if workspace_symbols.is_some() {
-        None
-    } else {
-        let mut symbols = SymbolTable::new();
-        let fid = symbols.allocate_file_id();
-        let file_syms =
-            SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
-        symbols.set_file_symbols(fid, file_syms);
-        Some(symbols)
-    };
-    let symbols_ref: &SymbolTable = workspace_symbols
-        .unwrap_or_else(|| owned_symbols.as_ref().expect("owned symbols built above"));
-    let scope = GlobalScope::new(symbols_ref, type_index);
+    let scope = GlobalScope::new(workspace_symbols, type_index);
     let mut checker = Checker::new(analysis.masked_source(), &scope);
     checker.check_file(&analysis.file);
     for diag in &checker.diagnostics {
@@ -156,7 +148,11 @@ fn compute_toml_diagnostics(source: &str, diagnostics: &mut Vec<Diagnostic>) {
 }
 
 fn line_range(source: &str, line: usize) -> Range {
-    let _line_start = source.lines().take(line).map(|l| l.len() + 1).sum::<usize>();
+    let _line_start = source
+        .lines()
+        .take(line)
+        .map(|l| l.len() + 1)
+        .sum::<usize>();
     let line_text = source.lines().nth(line).unwrap_or("");
     Range::new(
         Position::new(line as u32, 0),
@@ -183,7 +179,8 @@ pub fn position_to_offset(source: &str, pos: Position) -> usize {
     let mut offset = 0;
     for ch in source.chars() {
         if line == pos.line {
-            if (offset - source[..offset].rfind('\n').map_or(0, |n| n + 1)) as u32 >= pos.character {
+            if (offset - source[..offset].rfind('\n').map_or(0, |n| n + 1)) as u32 >= pos.character
+            {
                 return offset;
             }
         }

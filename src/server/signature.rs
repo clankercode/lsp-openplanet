@@ -636,15 +636,10 @@ fn pick_active_signature(sigs: &[ResolvedSignature], active_param: u32) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::symbols::SymbolTable;
+    use crate::server::test_support::TestWorkspace;
 
-    fn ws_from(source: &str) -> SymbolTable {
-        let mut table = SymbolTable::new();
-        let analysis = DocumentAnalysis::analyze_plain(source);
-        let fid = table.allocate_file_id();
-        let syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
-        table.set_file_symbols(fid, syms);
-        table
+    fn ws_from(source: &str) -> TestWorkspace {
+        TestWorkspace::one_file("sig.as", source)
     }
 
     /// Offset-based helper: returns the `Position` corresponding to a
@@ -673,7 +668,7 @@ mod tests {
             &DocumentAnalysis::analyze_plain(&source),
             None,
             position,
-            &GlobalScope::new(&ws, None),
+            &ws.scope(),
         )
         .expect("signature help");
         assert_eq!(help.signatures.len(), 1);
@@ -692,7 +687,7 @@ mod tests {
             &DocumentAnalysis::analyze_plain(&source),
             None,
             position,
-            &GlobalScope::new(&ws, None),
+            &ws.scope(),
         )
         .expect("signature help");
         assert_eq!(help.active_parameter, Some(1));
@@ -712,7 +707,7 @@ void main() { f(1,| }";
             &DocumentAnalysis::analyze_plain(&source),
             None,
             position,
-            &GlobalScope::new(&ws, None),
+            &ws.scope(),
         )
         .expect("signature help");
         assert_eq!(help.signatures.len(), 3);
@@ -740,7 +735,7 @@ void main() { f(1,| }";
             &DocumentAnalysis::analyze_plain(&source),
             None,
             position,
-            &GlobalScope::new(&ws, None),
+            &ws.scope(),
         )
         .expect("signature help");
         assert_eq!(help.active_parameter, Some(1));
@@ -758,7 +753,7 @@ void main() { outer(inner(| ) }";
             &DocumentAnalysis::analyze_plain(&source),
             None,
             position,
-            &GlobalScope::new(&ws, None),
+            &ws.scope(),
         )
         .expect("signature help");
         let active = help.active_signature.unwrap_or(0) as usize;
@@ -778,7 +773,7 @@ void main() { outer(inner(| ) }";
             &DocumentAnalysis::analyze_plain(&source),
             None,
             position,
-            &GlobalScope::new(&ws, None),
+            &ws.scope(),
         );
         assert!(
             help.is_none(),
@@ -798,7 +793,7 @@ void main() { Foo f; f.m(| }";
             &DocumentAnalysis::analyze_plain(&source),
             None,
             position,
-            &GlobalScope::new(&ws, None),
+            &ws.scope(),
         )
         .expect("signature help");
         assert_eq!(help.active_parameter, Some(0));

@@ -5,8 +5,8 @@ use tower_lsp::lsp_types::*;
 use crate::analysis::DocumentAnalysis;
 use crate::parser::ast::{ClassMember, Item};
 use crate::server::diagnostics::span_to_range;
-use crate::symbols::SymbolTable;
 use crate::symbols::scope::SymbolKind as InternalSymbolKind;
+use crate::symbols::SymbolTable;
 
 pub fn document_symbols(analysis: &DocumentAnalysis) -> Option<DocumentSymbolResponse> {
     // Names and ranges come from the masked AST; masking preserves byte
@@ -311,36 +311,18 @@ mod tests {
 
     fn build_workspace(
         sources: &[(&str, &str)],
-    ) -> (
-        SymbolTable,
-        HashMap<usize, (Url, &'static crate::analysis::DocumentAnalysis)>,
-    ) {
-        let mut table = SymbolTable::new();
-        let mut files: HashMap<
-            usize,
-            (Url, &'static crate::analysis::DocumentAnalysis),
-        > = HashMap::new();
-        for (name, src) in sources {
-            let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-            let fid = table.allocate_file_id();
-            let syms = SymbolTable::extract_symbols(
-                fid,
-                analysis.masked_source(),
-                &analysis.file,
-            );
-            table.set_file_symbols(fid, syms);
-            let leaked: &'static crate::analysis::DocumentAnalysis =
-                Box::leak(Box::new(analysis));
-            let uri = Url::parse(&format!("file:///tmp/{}", name)).unwrap();
-            files.insert(fid, (uri, leaked));
-        }
-        (table, files)
+    ) -> Vec<crate::server::test_support::TestWorkspace> {
+        sources
+            .iter()
+            .map(|(name, src)| crate::server::test_support::TestWorkspace::one_file(name, src))
+            .collect()
     }
 
     #[test]
     fn workspace_symbols_finds_class() {
-        let (table, files) = build_workspace(&[("a.as", "class Hello {}")]);
-        let results = workspace_symbols("hello", &table, &files);
+        let tws = build_workspace(&[("a.as", "class Hello {}")]);
+        let files = tws[0].uri_map();
+        let results = workspace_symbols("hello", tws[0].snapshot.symbols(), &files);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Hello");
         assert_eq!(results[0].kind, SymbolKind::CLASS);
@@ -348,8 +330,9 @@ mod tests {
 
     #[test]
     fn workspace_symbols_substring_match() {
-        let (table, files) = build_workspace(&[("a.as", "class Hello {}")]);
-        let results = workspace_symbols("el", &table, &files);
+        let tws = build_workspace(&[("a.as", "class Hello {}")]);
+        let files = tws[0].uri_map();
+        let results = workspace_symbols("el", tws[0].snapshot.symbols(), &files);
         assert!(
             results.iter().any(|s| s.name == "Hello"),
             "expected Hello in results: {:?}",
@@ -359,11 +342,9 @@ mod tests {
 
     #[test]
     fn workspace_symbols_empty_query_returns_all_top_level() {
-        let (table, files) = build_workspace(&[(
-            "a.as",
-            "class Hello {} enum E { A, B } void f() {}",
-        )]);
-        let results = workspace_symbols("", &table, &files);
+        let tws = build_workspace(&[("a.as", "class Hello {} enum E { A, B } void f() {}")]);
+        let files = tws[0].uri_map();
+        let results = workspace_symbols("", tws[0].snapshot.symbols(), &files);
         let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"Hello"));
         assert!(names.contains(&"E"));

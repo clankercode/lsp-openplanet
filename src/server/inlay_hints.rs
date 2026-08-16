@@ -25,8 +25,8 @@ use crate::parser::ast::{
     SourceFile, Stmt, StmtKind, TypeExpr, TypeExprKind, VarDeclStmt,
 };
 use crate::server::diagnostics::offset_to_position;
-use crate::symbols::SymbolTable;
 use crate::symbols::scope::SymbolKind;
+use crate::symbols::SymbolTable;
 use crate::typedb::TypeIndex;
 
 /// Public entry: compute inlay hints for the given source, restricted to
@@ -36,7 +36,7 @@ pub fn inlay_hints(
     analysis: &crate::analysis::DocumentAnalysis,
     range: Range,
     type_index: Option<&TypeIndex>,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
 ) -> Vec<InlayHint> {
     let source = analysis.masked_source();
     let file: &SourceFile = &analysis.file;
@@ -59,7 +59,7 @@ pub fn inlay_hints(
 fn collect_from_item(
     item: &Item,
     source: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
     out: &mut Vec<InlayHint>,
 ) {
@@ -89,7 +89,7 @@ fn collect_from_item(
 fn collect_from_function(
     func: &FunctionDecl,
     source: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
     out: &mut Vec<InlayHint>,
 ) {
@@ -100,7 +100,7 @@ fn collect_from_function(
 fn collect_from_body(
     body: &FunctionBody,
     source: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
     out: &mut Vec<InlayHint>,
 ) {
@@ -112,7 +112,7 @@ fn collect_from_body(
 fn collect_from_stmt(
     stmt: &Stmt,
     source: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
     out: &mut Vec<InlayHint>,
 ) {
@@ -190,7 +190,7 @@ fn collect_from_stmt(
 fn collect_from_expr(
     expr: &Expr,
     source: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
     out: &mut Vec<InlayHint>,
 ) {
@@ -256,7 +256,7 @@ fn collect_from_expr(
 fn collect_var_decl_hint(
     vd: &VarDeclStmt,
     source: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
     out: &mut Vec<InlayHint>,
 ) {
@@ -296,7 +296,7 @@ fn collect_var_decl_hint(
 fn infer_init_type(
     expr: &Expr,
     source: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
 ) -> Option<String> {
     match &expr.kind {
@@ -305,9 +305,7 @@ fn infer_init_type(
         ExprKind::StringLit => Some("string".to_string()),
         ExprKind::BoolLit(_) => Some("bool".to_string()),
         ExprKind::Cast { target_type, .. } => Some(type_expr_text(target_type, source)),
-        ExprKind::TypeConstruct { target_type, .. } => {
-            Some(type_expr_text(target_type, source))
-        }
+        ExprKind::TypeConstruct { target_type, .. } => Some(type_expr_text(target_type, source)),
         ExprKind::Call { callee, .. } => {
             let callee_text = extract_ident_chain(callee, source)?;
             lookup_callee_return_type(&callee_text, workspace, type_index)
@@ -334,7 +332,7 @@ fn collect_param_name_hints(
     callee: &Expr,
     args: &[CallArg],
     source: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
     out: &mut Vec<InlayHint>,
 ) {
@@ -396,7 +394,7 @@ fn is_literal_or_null(kind: &ExprKind) -> bool {
 /// callee can't be resolved or has no parameter metadata.
 fn lookup_callee_param_names(
     callee: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
 ) -> Option<Vec<String>> {
     // Workspace free functions are keyed by bare name only — the symbol
@@ -405,10 +403,8 @@ fn lookup_callee_param_names(
     // to the TypeIndex (which is keyed on fully qualified names) to avoid
     // matching an unrelated `Baz::bar` by its bare tail.
     if !callee.contains("::") {
-        if let Some(ws) = workspace {
-            if let Some(names) = lookup_workspace_function_params(callee, ws) {
-                return Some(names);
-            }
+        if let Some(names) = lookup_workspace_function_params(callee, workspace) {
+            return Some(names);
         }
     }
     if let Some(index) = type_index {
@@ -439,10 +435,7 @@ fn lookup_callee_param_names(
     None
 }
 
-fn lookup_workspace_function_params(
-    name: &str,
-    ws: &SymbolTable,
-) -> Option<Vec<String>> {
+fn lookup_workspace_function_params(name: &str, ws: &SymbolTable) -> Option<Vec<String>> {
     for s in ws.all_symbols() {
         if s.name != name {
             continue;
@@ -459,11 +452,11 @@ fn lookup_workspace_function_params(
 /// text.
 fn lookup_callee_return_type(
     callee: &str,
-    workspace: Option<&SymbolTable>,
+    workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
 ) -> Option<String> {
-    if let Some(ws) = workspace {
-        for s in ws.all_symbols() {
+    {
+        for s in workspace.all_symbols() {
             if s.name != callee {
                 continue;
             }
@@ -510,8 +503,8 @@ fn extract_ident_chain(expr: &Expr, source: &str) -> Option<String> {
 fn position_in_range(p: Position, range: Range) -> bool {
     let after_start = p.line > range.start.line
         || (p.line == range.start.line && p.character >= range.start.character);
-    let before_end = p.line < range.end.line
-        || (p.line == range.end.line && p.character <= range.end.character);
+    let before_end =
+        p.line < range.end.line || (p.line == range.end.line && p.character <= range.end.character);
     after_start && before_end
 }
 
@@ -522,18 +515,10 @@ fn position_in_range(p: Position, range: Range) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer;
-    use crate::parser::Parser;
+    use crate::server::test_support::TestWorkspace;
 
-    fn ws_from(source: &str) -> SymbolTable {
-        let mut table = SymbolTable::new();
-        let tokens = lexer::tokenize_filtered(source);
-        let mut parser = Parser::new(&tokens, source);
-        let file = parser.parse_file();
-        let fid = table.allocate_file_id();
-        let syms = SymbolTable::extract_symbols(fid, source, &file);
-        table.set_file_symbols(fid, syms);
-        table
+    fn ws_from(source: &str) -> TestWorkspace {
+        TestWorkspace::one_file("inlay.as", source)
     }
 
     fn full_range() -> Range {
@@ -543,7 +528,12 @@ mod tests {
     #[test]
     fn test_auto_local_gets_type_hint() {
         let src = "void f() { auto x = 5; }";
-        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, None);
+        let hints = inlay_hints(
+            &crate::analysis::DocumentAnalysis::analyze_plain(src),
+            full_range(),
+            None,
+            &SymbolTable::new(),
+        );
         assert_eq!(hints.len(), 1, "expected one type hint, got {:?}", hints);
         let h = &hints[0];
         assert_eq!(h.kind, Some(InlayHintKind::TYPE));
@@ -558,7 +548,12 @@ mod tests {
     #[test]
     fn test_explicit_type_no_hint() {
         let src = "void f() { int x = 5; }";
-        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, None);
+        let hints = inlay_hints(
+            &crate::analysis::DocumentAnalysis::analyze_plain(src),
+            full_range(),
+            None,
+            &SymbolTable::new(),
+        );
         assert!(
             hints.is_empty(),
             "explicit type should not emit hints, got {:?}",
@@ -570,7 +565,12 @@ mod tests {
     fn test_param_name_hint_on_literal_arg() {
         let src = "void g(int count, string name) {}\nvoid main() { g(5, \"x\"); }";
         let ws = ws_from(src);
-        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, Some(&ws));
+        let hints = inlay_hints(
+            &crate::analysis::DocumentAnalysis::analyze_plain(src),
+            full_range(),
+            None,
+            ws.snapshot.symbols(),
+        );
         let param_hints: Vec<_> = hints
             .iter()
             .filter(|h| h.kind == Some(InlayHintKind::PARAMETER))
@@ -607,7 +607,12 @@ mod tests {
         let src = "void g(int count, string name) {}\n\
                    void main() { int count = 3; g(count, \"x\"); }";
         let ws = ws_from(src);
-        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, Some(&ws));
+        let hints = inlay_hints(
+            &crate::analysis::DocumentAnalysis::analyze_plain(src),
+            full_range(),
+            None,
+            ws.snapshot.symbols(),
+        );
         let param_hints: Vec<_> = hints
             .iter()
             .filter(|h| h.kind == Some(InlayHintKind::PARAMETER))
@@ -629,7 +634,12 @@ mod tests {
         // Hints on line 1 should be excluded by a range covering only line 0.
         let src = "void f() {\n  auto x = 5;\n}";
         let range = Range::new(Position::new(0, 0), Position::new(0, 100));
-        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), range, None, None);
+        let hints = inlay_hints(
+            &crate::analysis::DocumentAnalysis::analyze_plain(src),
+            range,
+            None,
+            &SymbolTable::new(),
+        );
         assert!(
             hints.is_empty(),
             "expected no hints outside range, got {:?}",
@@ -642,7 +652,12 @@ mod tests {
         // `mystery` is not declared anywhere — must not panic, must not emit.
         let src = "void main() { mystery(1, 2); }";
         let ws = ws_from(src);
-        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, Some(&ws));
+        let hints = inlay_hints(
+            &crate::analysis::DocumentAnalysis::analyze_plain(src),
+            full_range(),
+            None,
+            ws.snapshot.symbols(),
+        );
         assert!(
             hints
                 .iter()
@@ -652,4 +667,3 @@ mod tests {
         );
     }
 }
-

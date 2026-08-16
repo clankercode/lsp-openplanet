@@ -33,8 +33,8 @@ use crate::parser::ast::{
 };
 use crate::server::diagnostics::{position_to_offset, span_to_range};
 use crate::server::navigation::WorkspaceFiles;
-use crate::symbols::SymbolTable;
 use crate::symbols::scope::SymbolKind as InternalSymbolKind;
+use crate::typecheck::GlobalScope;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -53,7 +53,7 @@ pub fn prepare(
     analysis: &crate::analysis::DocumentAnalysis,
     _uri: &Url,
     position: Position,
-    workspace: &SymbolTable,
+    scope: &GlobalScope<'_>,
     files: &WorkspaceFiles<'_>,
 ) -> Vec<CallHierarchyItem> {
     let source = analysis.masked_source();
@@ -62,12 +62,12 @@ pub fn prepare(
     };
 
     // First: direct symbol lookup (qualified or bare tail).
-    if let Some(item) = lookup_function_item(&name, workspace, files) {
+    if let Some(item) = lookup_function_item(&name, scope, files) {
         return vec![item];
     }
     let bare = bare_tail(&name);
     if bare != name {
-        if let Some(item) = lookup_function_item(bare, workspace, files) {
+        if let Some(item) = lookup_function_item(bare, scope, files) {
             return vec![item];
         }
     }
@@ -76,13 +76,13 @@ pub fn prepare(
     // site, resolve to the callee target.
     let cursor = position_to_offset(source, position);
     let file = &analysis.file;
-    if let Some(call_name) = find_enclosing_call_name(&file, source, cursor as u32) {
-        if let Some(item) = lookup_function_item(&call_name, workspace, files) {
+    if let Some(call_name) = find_enclosing_call_name(file, source, cursor as u32) {
+        if let Some(item) = lookup_function_item(&call_name, scope, files) {
             return vec![item];
         }
         let call_bare = bare_tail(&call_name);
         if call_bare != call_name {
-            if let Some(item) = lookup_function_item(call_bare, workspace, files) {
+            if let Some(item) = lookup_function_item(call_bare, scope, files) {
                 return vec![item];
             }
         }
@@ -95,7 +95,7 @@ pub fn prepare(
 /// by caller.
 pub fn incoming(
     item: &CallHierarchyItem,
-    _workspace: &SymbolTable,
+    _scope: &GlobalScope<'_>,
     files: &WorkspaceFiles<'_>,
 ) -> Vec<CallHierarchyIncomingCall> {
     let target_bare = bare_tail(data_name(item).unwrap_or(item.name.as_str())).to_string();
@@ -138,7 +138,7 @@ pub fn incoming(
 /// Find every call expression inside `item`'s body, grouped by callee.
 pub fn outgoing(
     item: &CallHierarchyItem,
-    workspace: &SymbolTable,
+    scope: &GlobalScope<'_>,
     files: &WorkspaceFiles<'_>,
 ) -> Vec<CallHierarchyOutgoingCall> {
     let target_qname = data_name(item).unwrap_or(item.name.as_str()).to_string();
@@ -165,7 +165,7 @@ pub fn outgoing(
             }
         });
         if let Some(body) = found_body {
-            return collect_outgoing(&body, src, workspace, files);
+            return collect_outgoing(&body, src, scope, files);
         }
     }
 
@@ -179,7 +179,7 @@ pub fn outgoing(
 fn collect_outgoing(
     body: &FunctionBody,
     caller_src: &str,
-    workspace: &SymbolTable,
+    scope: &GlobalScope<'_>,
     files: &WorkspaceFiles<'_>,
 ) -> Vec<CallHierarchyOutgoingCall> {
     let mut raw: Vec<(String, Span)> = Vec::new();
@@ -191,12 +191,12 @@ fn collect_outgoing(
     for (name, span) in raw {
         // Ranges are always from the CALLER's source.
         let range = span_to_range(caller_src, span);
-        let resolved = lookup_function_item(&name, workspace, files).or_else(|| {
+        let resolved = lookup_function_item(&name, scope, files).or_else(|| {
             let bare = bare_tail(&name);
             if bare == name {
                 None
             } else {
-                lookup_function_item(bare, workspace, files)
+                lookup_function_item(bare, scope, files)
             }
         });
         let Some(item) = resolved else {
@@ -243,21 +243,14 @@ fn data_name(item: &CallHierarchyItem) -> Option<&str> {
 /// for the first match whose file is present in `files`.
 fn lookup_function_item(
     query: &str,
-    workspace: &SymbolTable,
+    scope: &GlobalScope<'_>,
     files: &WorkspaceFiles<'_>,
 ) -> Option<CallHierarchyItem> {
-    // Exact-qualified first.
-    let hits = workspace.lookup(query);
-    let candidate = hits
-        .iter()
-        .find(|s| matches!(s.kind, InternalSymbolKind::Function { .. }))
-        .copied();
-    let candidate = candidate.or_else(|| {
-        // Search all symbols with matching bare tail.
-        workspace.all_symbols().find(|s| {
-            matches!(s.kind, InternalSymbolKind::Function { .. }) && bare_tail(&s.name) == query
-        })
-    })?;
+    // Ladder: exact qualified, then bare tail (GH #41).
+    let candidate = scope
+        .lookup_reference(query)
+        .into_iter()
+        .find(|s| matches!(s.kind, InternalSymbolKind::Function { .. }))?;
     let (uri, analysis) = files.get(candidate.file_id)?;
     let src = analysis.masked_source();
     let range = span_to_range(src, candidate.span);
@@ -767,36 +760,29 @@ fn walk_expr<F: FnMut(&Expr)>(expr: &Expr, f: &mut F) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower_lsp::lsp_types::Url;
+    use crate::server::test_support::TestWorkspace;
 
-    struct OwnedWorkspace {
-        table: SymbolTable,
-        files: HashMap<usize, (Url, &'static crate::analysis::DocumentAnalysis)>,
-    }
-
-    fn build_workspace(uri_str: &str, source: &str) -> OwnedWorkspace {
-        let mut table = SymbolTable::new();
-        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(source);
-        let fid = table.allocate_file_id();
-        let symbols = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
-        table.set_file_symbols(fid, symbols);
-        let leaked: &'static crate::analysis::DocumentAnalysis = Box::leak(Box::new(analysis));
-        let mut files = HashMap::new();
-        files.insert(fid, (Url::parse(uri_str).unwrap(), leaked));
-        OwnedWorkspace { table, files }
+    fn build_workspace(uri_str: &str, source: &str) -> TestWorkspace {
+        let name = uri_str.rsplit('/').next().unwrap_or("a.as");
+        TestWorkspace::one_file(name, source)
     }
 
     #[test]
     fn test_prepare_on_function_declaration() {
         let src = "void foo() {}\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles {
-            files: &ws_owned.files,
-        };
-        let uri = Url::parse("file:///t/a.as").unwrap();
+        let uri_map = ws_owned.uri_map();
+        let ws = WorkspaceFiles { files: &uri_map };
+        let uri = ws_owned.uri();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         // Cursor on `foo` (col 5-8)
-        let items = prepare(&analysis, &uri, Position::new(0, 6), &ws_owned.table, &ws);
+        let items = prepare(
+            &analysis,
+            &uri,
+            Position::new(0, 6),
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "foo");
     }
@@ -805,13 +791,18 @@ mod tests {
     fn test_prepare_on_call_site() {
         let src = "void foo() {}\nvoid bar() { foo(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles {
-            files: &ws_owned.files,
-        };
-        let uri = Url::parse("file:///t/a.as").unwrap();
+        let uri_map = ws_owned.uri_map();
+        let ws = WorkspaceFiles { files: &uri_map };
+        let uri = ws_owned.uri();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         // Cursor on `foo` call, line 1 col 14
-        let items = prepare(&analysis, &uri, Position::new(1, 14), &ws_owned.table, &ws);
+        let items = prepare(
+            &analysis,
+            &uri,
+            Position::new(1, 14),
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "foo");
     }
@@ -820,13 +811,18 @@ mod tests {
     fn test_prepare_on_non_function_returns_empty() {
         let src = "void foo() { int x = 0; }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles {
-            files: &ws_owned.files,
-        };
-        let uri = Url::parse("file:///t/a.as").unwrap();
+        let uri_map = ws_owned.uri_map();
+        let ws = WorkspaceFiles { files: &uri_map };
+        let uri = ws_owned.uri();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         // Cursor on `x` (col 17)
-        let items = prepare(&analysis, &uri, Position::new(0, 17), &ws_owned.table, &ws);
+        let items = prepare(
+            &analysis,
+            &uri,
+            Position::new(0, 17),
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         assert!(items.is_empty());
     }
 
@@ -834,15 +830,24 @@ mod tests {
     fn test_incoming_calls_single_caller() {
         let src = "void a() {}\nvoid b() { a(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles {
-            files: &ws_owned.files,
-        };
-        let uri = Url::parse("file:///t/a.as").unwrap();
+        let uri_map = ws_owned.uri_map();
+        let ws = WorkspaceFiles { files: &uri_map };
+        let uri = ws_owned.uri();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         // Prepare on `a` declaration
-        let items = prepare(&analysis, &uri, Position::new(0, 5), &ws_owned.table, &ws);
+        let items = prepare(
+            &analysis,
+            &uri,
+            Position::new(0, 5),
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         assert_eq!(items.len(), 1);
-        let incomings = incoming(&items[0], &ws_owned.table, &ws);
+        let incomings = incoming(
+            &items[0],
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         assert_eq!(incomings.len(), 1);
         assert_eq!(incomings[0].from.name, "b");
         assert_eq!(incomings[0].from_ranges.len(), 1);
@@ -852,13 +857,22 @@ mod tests {
     fn test_incoming_calls_multiple_callers() {
         let src = "void a() {}\nvoid b() { a(); }\nvoid c() { a(); }\nvoid d() { a(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles {
-            files: &ws_owned.files,
-        };
-        let uri = Url::parse("file:///t/a.as").unwrap();
+        let uri_map = ws_owned.uri_map();
+        let ws = WorkspaceFiles { files: &uri_map };
+        let uri = ws_owned.uri();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let items = prepare(&analysis, &uri, Position::new(0, 5), &ws_owned.table, &ws);
-        let incomings = incoming(&items[0], &ws_owned.table, &ws);
+        let items = prepare(
+            &analysis,
+            &uri,
+            Position::new(0, 5),
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
+        let incomings = incoming(
+            &items[0],
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         let mut names: Vec<_> = incomings.iter().map(|c| c.from.name.clone()).collect();
         names.sort();
         assert_eq!(names, vec!["b", "c", "d"]);
@@ -868,13 +882,22 @@ mod tests {
     fn test_incoming_calls_multiple_sites_same_caller() {
         let src = "void a() {}\nvoid b() { a(); a(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles {
-            files: &ws_owned.files,
-        };
-        let uri = Url::parse("file:///t/a.as").unwrap();
+        let uri_map = ws_owned.uri_map();
+        let ws = WorkspaceFiles { files: &uri_map };
+        let uri = ws_owned.uri();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let items = prepare(&analysis, &uri, Position::new(0, 5), &ws_owned.table, &ws);
-        let incomings = incoming(&items[0], &ws_owned.table, &ws);
+        let items = prepare(
+            &analysis,
+            &uri,
+            Position::new(0, 5),
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
+        let incomings = incoming(
+            &items[0],
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         assert_eq!(incomings.len(), 1);
         assert_eq!(incomings[0].from_ranges.len(), 2);
     }
@@ -883,15 +906,24 @@ mod tests {
     fn test_outgoing_calls_lists_callees() {
         let src = "void g() {}\nvoid h() {}\nvoid f() { g(); h(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles {
-            files: &ws_owned.files,
-        };
-        let uri = Url::parse("file:///t/a.as").unwrap();
+        let uri_map = ws_owned.uri_map();
+        let ws = WorkspaceFiles { files: &uri_map };
+        let uri = ws_owned.uri();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let items = prepare(&analysis, &uri, Position::new(2, 5), &ws_owned.table, &ws);
+        let items = prepare(
+            &analysis,
+            &uri,
+            Position::new(2, 5),
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "f");
-        let outs = outgoing(&items[0], &ws_owned.table, &ws);
+        let outs = outgoing(
+            &items[0],
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         let mut names: Vec<_> = outs.iter().map(|c| c.to.name.clone()).collect();
         names.sort();
         assert_eq!(names, vec!["g", "h"]);
@@ -901,14 +933,23 @@ mod tests {
     fn test_outgoing_calls_dedupes() {
         let src = "void g() {}\nvoid f() { g(); g(); }\n";
         let ws_owned = build_workspace("file:///t/a.as", src);
-        let ws = WorkspaceFiles {
-            files: &ws_owned.files,
-        };
-        let uri = Url::parse("file:///t/a.as").unwrap();
+        let uri_map = ws_owned.uri_map();
+        let ws = WorkspaceFiles { files: &uri_map };
+        let uri = ws_owned.uri();
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let items = prepare(&analysis, &uri, Position::new(1, 5), &ws_owned.table, &ws);
+        let items = prepare(
+            &analysis,
+            &uri,
+            Position::new(1, 5),
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         assert_eq!(items.len(), 1);
-        let outs = outgoing(&items[0], &ws_owned.table, &ws);
+        let outs = outgoing(
+            &items[0],
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
         assert_eq!(outs.len(), 1);
         assert_eq!(outs[0].to.name, "g");
         assert_eq!(outs[0].from_ranges.len(), 2);
