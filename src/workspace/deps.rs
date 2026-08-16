@@ -34,6 +34,52 @@ pub fn resolve_dependency(
     }
 
     resolve_by_manifest_module(dep_id, plugins_dir, plugin_files_search_paths)
+        .or_else(|| resolve_by_normalized_name(dep_id, plugins_dir, plugin_files_search_paths))
+}
+
+/// Openplanet's canonical plugin id is the plugin's display `name` with all
+/// non-alphanumeric characters stripped ("Better Room Manager" →
+/// `BetterRoomManager`, "MLFeed: Race Data" → `MLFeedRaceData`). This is also
+/// the basis for the exported `.op` filename. A dependency declared by that id
+/// must resolve to the dir plugin whose `meta.name` normalizes to it, even when
+/// the folder name and `script.module` differ (GH #33).
+fn normalize_plugin_id(name: &str) -> String {
+    name.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
+fn resolve_by_normalized_name(
+    id: &str,
+    plugins_dir: &Path,
+    plugin_files_search_paths: &[PathBuf],
+) -> Option<ResolvedDependency> {
+    let entries = std::fs::read_dir(plugins_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest_path = path.join("info.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let Ok(manifest) = Manifest::load(&manifest_path) else {
+            continue;
+        };
+        let Some(name) = manifest.meta.name.as_deref() else {
+            continue;
+        };
+        if normalize_plugin_id(name) != id {
+            continue;
+        }
+        let export_files = collect_export_files(&path, &manifest, plugin_files_search_paths);
+        return Some(ResolvedDependency {
+            id: id.to_string(),
+            root: path,
+            manifest,
+            export_files,
+        });
+    }
+    None
 }
 
 fn resolve_by_manifest_module(
@@ -203,4 +249,72 @@ fn resolve_plugin_file(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Write a directory plugin with the given info.toml body under
+    /// `plugins_dir/<folder>` and return its root.
+    fn write_dir_plugin(plugins_dir: &Path, folder: &str, info_toml: &str) -> PathBuf {
+        let root = plugins_dir.join(folder);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("info.toml"), info_toml).unwrap();
+        root
+    }
+
+    fn temp_plugins(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "opl-deps-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    /// GH #33: a dependency id that matches the provider's *display name*
+    /// (normalized: non-alphanumeric stripped) must resolve even though the
+    /// provider's folder and `module` differ. Openplanet's canonical plugin id
+    /// is the normalized display name (which is also what the exported `.op`
+    /// filename is derived from).
+    #[test]
+    fn resolves_dep_id_by_normalized_display_name() {
+        let plugins = temp_plugins("dispname");
+        write_dir_plugin(
+            &plugins,
+            "tm-better-room-manager",
+            "[meta]\nname = \"Better Room Manager\"\n[script]\nmodule = \"BRM\"\nexports = [\"BRM_Exports/Exports.as\"]\n",
+        );
+        let resolved = resolve_dependency("BetterRoomManager", &plugins, &[]);
+        assert!(
+            resolved.is_some(),
+            "dep id `BetterRoomManager` should resolve to the plugin named \"Better Room Manager\" (module BRM)"
+        );
+        let _ = fs::remove_dir_all(&plugins);
+    }
+
+    /// Control: the module-name path still works (no regression), and a
+    /// totally-unknown id still fails.
+    #[test]
+    fn still_resolves_by_module_and_rejects_unknown() {
+        let plugins = temp_plugins("module");
+        write_dir_plugin(
+            &plugins,
+            "tm-mlfeed-race-data",
+            "[meta]\nname = \"MLFeed: Race Data\"\n[script]\nmodule = \"MLFeed\"\n",
+        );
+        assert!(
+            resolve_dependency("MLFeed", &plugins, &[]).is_some(),
+            "module-name resolution must keep working"
+        );
+        assert!(
+            resolve_dependency("NoSuchPlugin", &plugins, &[]).is_none(),
+            "unknown id must not resolve"
+        );
+        let _ = fs::remove_dir_all(&plugins);
+    }
 }
