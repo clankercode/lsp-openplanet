@@ -63,6 +63,10 @@ No OpenPlanet plugin found (no info.toml at or above the current directory).
 
 Config: ~/.config/openplanet-lsp/config.toml
   default_mode = \"tui\"   # or \"lsp\"
+
+Repo:  https://github.com/clankercode/lsp-openplanet
+Found a mismatch with how Openplanet behaves in-game? Please open an issue:
+       https://github.com/clankercode/lsp-openplanet/issues
 "
 }
 
@@ -98,10 +102,7 @@ mod tests {
     fn bare_non_tty_is_lsp() {
         let cwd = Path::new("/tmp");
         let prefs = UserPrefs::default();
-        assert_eq!(
-            decide_bare_launch(false, cwd, &prefs),
-            LaunchAction::Lsp
-        );
+        assert_eq!(decide_bare_launch(false, cwd, &prefs), LaunchAction::Lsp);
     }
 
     #[test]
@@ -136,10 +137,7 @@ mod tests {
         let prefs = UserPrefs {
             default_mode: DefaultMode::Lsp,
         };
-        assert_eq!(
-            decide_bare_launch(true, &dir, &prefs),
-            LaunchAction::Lsp
-        );
+        assert_eq!(decide_bare_launch(true, &dir, &prefs), LaunchAction::Lsp);
         let _ = fs::remove_dir_all(dir);
     }
 }

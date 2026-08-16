@@ -2,6 +2,20 @@ use std::path::PathBuf;
 
 use openplanet_lsp::{cli, entrypoint, server, update};
 
+/// Issue tracker. Every help/version surface prints this so users report
+/// Openplanet-behavior mismatches as issues instead of guessing
+/// (agent-filed GH #45; see tests/cli_surface_tests.rs for the contract).
+const ISSUE_URL: &str = "https://github.com/clankercode/lsp-openplanet/issues";
+
+/// Trailer appended to `--version` output (after the machine-parsed first
+/// line `openplanet-lsp <semver>` — the VS Code extension's parseVersion
+/// reads whitespace-token 2, so trailing lines must not break it).
+const VERSION_TRAILER: &str = "\
+Repo:  https://github.com/clankercode/lsp-openplanet
+Found a mismatch with how Openplanet behaves in-game? Please open an issue:
+       https://github.com/clankercode/lsp-openplanet/issues
+";
+
 const HELP: &str = "\
 openplanet-lsp - Language Server Protocol for OpenPlanet AngelScript
 
@@ -28,6 +42,12 @@ DEFAULT (no command):
     • non-TTY (editors)  → language server
     • TTY + plugin root  → watch TUI (config: default_mode = \"tui\"|\"lsp\")
     • TTY + no plugin    → short help (exit 2)
+
+REPO & ISSUES:
+    Repo:  https://github.com/clankercode/lsp-openplanet
+    Found a mismatch with how Openplanet behaves in-game (a diagnostic the
+    game would not raise, or missing one it would)? Please open an issue:
+    https://github.com/clankercode/lsp-openplanet/issues
 
 ";
 
@@ -88,6 +108,7 @@ fn handle_early_args(args: &[String]) -> Option<i32> {
     match args.first().map(String::as_str) {
         Some("--version" | "-V") => {
             println!("openplanet-lsp {}", env!("CARGO_PKG_VERSION"));
+            print!("{VERSION_TRAILER}");
             Some(0)
         }
         Some("--help" | "-h") => {
@@ -104,11 +125,13 @@ fn handle_early_args(args: &[String]) -> Option<i32> {
         Some(arg) if arg.starts_with('-') => {
             eprintln!("unknown option: {arg}");
             eprintln!("Run `openplanet-lsp --help` for usage.");
+            eprintln!("Behavior mismatch with Openplanet? {ISSUE_URL}");
             Some(2)
         }
         Some(arg) => {
             eprintln!("unknown command: {arg}");
             eprintln!("Run `openplanet-lsp --help` for usage.");
+            eprintln!("Behavior mismatch with Openplanet? {ISSUE_URL}");
             Some(2)
         }
         None => None,
@@ -147,10 +170,7 @@ fn run_check_command(args: &[String]) -> i32 {
             if !report.type_database_loaded && !options.no_typedb {
                 eprintln!("warning: type database not loaded; pass --typedb-dir or --no-typedb");
             }
-            print!(
-                "{}",
-                cli::format_check_report_for(&report, options.format)
-            );
+            print!("{}", cli::format_check_report_for(&report, options.format));
             let has_errors = report.diagnostics.iter().any(|item| {
                 !matches!(
                     item.diagnostic.severity,
