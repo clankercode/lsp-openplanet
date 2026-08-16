@@ -199,9 +199,9 @@ impl<'a> Formatter<'a> {
         let header_end = if let Some(first) = c.members.first() {
             match first {
                 ClassMember::Field(v) => v.span.start as usize,
-                ClassMember::Method(f)
-                | ClassMember::Constructor(f)
-                | ClassMember::Destructor(f) => f.span.start as usize,
+                ClassMember::Method(f) | ClassMember::Constructor(f) | ClassMember::Destructor(f) => {
+                    f.span.start as usize
+                }
                 ClassMember::Property(p) => p.span.start as usize,
             }
         } else {
@@ -253,7 +253,9 @@ impl<'a> Formatter<'a> {
             ClassMember::Field(v) => {
                 self.write_condensed(self.span_text(v.span));
             }
-            ClassMember::Method(f) | ClassMember::Constructor(f) | ClassMember::Destructor(f) => {
+            ClassMember::Method(f)
+            | ClassMember::Constructor(f)
+            | ClassMember::Destructor(f) => {
                 // Re-use function_decl but strip its leading indent since
                 // we've already emitted the member indent via newline().
                 let saved = self.indent;
@@ -412,11 +414,7 @@ mod tests {
         let src = "class C { int x; void f() { int y = 1; } }\nvoid g() {}\n";
         let once = format_source(src);
         let twice = format_source(&once);
-        assert_eq!(
-            once, twice,
-            "formatter is not idempotent:\n--once--\n{}\n--twice--\n{}",
-            once, twice
-        );
+        assert_eq!(once, twice, "formatter is not idempotent:\n--once--\n{}\n--twice--\n{}", once, twice);
     }
 
     #[test]
@@ -436,11 +434,6 @@ mod tests {
         let tokens = crate::lexer::tokenize_filtered(&out);
         let mut parser = crate::parser::Parser::new(&tokens, &out);
         let _file = parser.parse_file();
-        assert!(
-            parser.errors.is_empty(),
-            "formatted output failed to parse: {:?}\n{}",
-            parser.errors,
-            out
-        );
+        assert!(parser.errors.is_empty(), "formatted output failed to parse: {:?}\n{}", parser.errors, out);
     }
 }

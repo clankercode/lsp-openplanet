@@ -76,7 +76,11 @@ pub fn find_enclosing_class(file: &SourceFile, offset: u32) -> Option<&ClassDecl
     best
 }
 
-fn walk_items_for_function<'a>(item: &'a Item, offset: u32, best: &mut Option<&'a FunctionDecl>) {
+fn walk_items_for_function<'a>(
+    item: &'a Item,
+    offset: u32,
+    best: &mut Option<&'a FunctionDecl>,
+) {
     match item {
         Item::Function(func) => consider_function(func, offset, best),
         Item::Namespace(NamespaceDecl { items, .. }) => {
@@ -98,7 +102,11 @@ fn walk_items_for_function<'a>(item: &'a Item, offset: u32, best: &mut Option<&'
     }
 }
 
-fn consider_function<'a>(func: &'a FunctionDecl, offset: u32, best: &mut Option<&'a FunctionDecl>) {
+fn consider_function<'a>(
+    func: &'a FunctionDecl,
+    offset: u32,
+    best: &mut Option<&'a FunctionDecl>,
+) {
     let Some(body) = &func.body else { return };
     if body.span.start <= offset && offset <= body.span.end {
         // Prefer the narrower span (innermost).
@@ -119,7 +127,11 @@ fn consider_function<'a>(func: &'a FunctionDecl, offset: u32, best: &mut Option<
     }
 }
 
-fn walk_items_for_class<'a>(item: &'a Item, offset: u32, best: &mut Option<&'a ClassDecl>) {
+fn walk_items_for_class<'a>(
+    item: &'a Item,
+    offset: u32,
+    best: &mut Option<&'a ClassDecl>,
+) {
     match item {
         Item::Class(cls) => {
             if cls.span.start <= offset && offset <= cls.span.end {
@@ -153,7 +165,12 @@ fn collect_locals_from_body(
     }
 }
 
-fn collect_locals_from_stmt(source: &str, stmt: &Stmt, offset: u32, out: &mut Vec<LocalVar>) {
+fn collect_locals_from_stmt(
+    source: &str,
+    stmt: &Stmt,
+    offset: u32,
+    out: &mut Vec<LocalVar>,
+) {
     if stmt.span.start > offset {
         return;
     }
@@ -174,7 +191,9 @@ fn collect_locals_from_stmt(source: &str, stmt: &Stmt, offset: u32, out: &mut Ve
                 collect_locals_from_stmt(source, e, offset, out);
             }
         }
-        StmtKind::For { init, body, .. } => {
+        StmtKind::For {
+            init, body, ..
+        } => {
             if let Some(i) = init {
                 collect_locals_from_stmt(source, i, offset, out);
             }
@@ -295,7 +314,12 @@ pub fn class_member_type(cls: &ClassDecl, source: &str, member: &str) -> Option<
 
 /// Walk `func.body` looking for the most recent `VarDecl` whose declarator
 /// matches `name` and lies before `offset`; return its type text.
-pub fn local_type_at(source: &str, file: &SourceFile, offset: u32, name: &str) -> Option<String> {
+pub fn local_type_at(
+    source: &str,
+    file: &SourceFile,
+    offset: u32,
+    name: &str,
+) -> Option<String> {
     let locals = find_locals_in_scope(source, file, offset);
     // Prefer the local with the largest decl_offset (most recent, so innermost).
     locals
@@ -304,3 +328,4 @@ pub fn local_type_at(source: &str, file: &SourceFile, offset: u32, name: &str) -
         .max_by_key(|l| l.decl_offset)
         .map(|l| l.type_text)
 }
+

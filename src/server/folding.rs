@@ -90,9 +90,9 @@ fn collect_items(items: &[Item], source: &str, out: &mut Vec<FoldingRange>) {
 fn collect_class_members(cls: &ClassDecl, source: &str, out: &mut Vec<FoldingRange>) {
     for member in &cls.members {
         match member {
-            ClassMember::Method(f) | ClassMember::Constructor(f) | ClassMember::Destructor(f) => {
-                collect_function(f, source, out)
-            }
+            ClassMember::Method(f)
+            | ClassMember::Constructor(f)
+            | ClassMember::Destructor(f) => collect_function(f, source, out),
             ClassMember::Property(p) => {
                 if let Some(body) = &p.getter {
                     push_body_fold(body, source, out);

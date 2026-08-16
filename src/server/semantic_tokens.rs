@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 
 use tower_lsp::lsp_types::{
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensLegend,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensLegend,
 };
 
 use crate::analysis::DocumentAnalysis;
@@ -255,23 +256,14 @@ impl IdentClassifier {
                     self.classify_stmt(s);
                 }
             }
-            StmtKind::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
+            StmtKind::If { condition, then_branch, else_branch } => {
                 self.classify_expr(condition);
                 self.classify_stmt(then_branch);
                 if let Some(e) = else_branch {
                     self.classify_stmt(e);
                 }
             }
-            StmtKind::For {
-                init,
-                condition,
-                step,
-                body,
-            } => {
+            StmtKind::For { init, condition, step, body } => {
                 if let Some(i) = init {
                     self.classify_stmt(i);
                 }
@@ -303,10 +295,7 @@ impl IdentClassifier {
                 }
             }
             StmtKind::Return(Some(e)) => self.classify_expr(e),
-            StmtKind::TryCatch {
-                try_body,
-                catch_body,
-            } => {
+            StmtKind::TryCatch { try_body, catch_body } => {
                 self.classify_stmt(try_body);
                 self.classify_stmt(catch_body);
             }
@@ -355,16 +344,13 @@ impl IdentClassifier {
                     self.classify_expr(e);
                 }
             }
-            ExprKind::Ternary {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
+            ExprKind::Ternary { condition, then_expr, else_expr } => {
                 self.classify_expr(condition);
                 self.classify_expr(then_expr);
                 self.classify_expr(else_expr);
             }
-            ExprKind::Assign { lhs, rhs, .. } | ExprKind::HandleAssign { lhs, rhs } => {
+            ExprKind::Assign { lhs, rhs, .. }
+            | ExprKind::HandleAssign { lhs, rhs } => {
                 self.classify_expr(lhs);
                 self.classify_expr(rhs);
             }
@@ -405,22 +391,21 @@ fn classify_token(tok: &Token, classifier: &IdentClassifier) -> Option<(u32, u32
         LineComment | BlockComment => Some((TT_COMMENT, 0)),
         StringLit => Some((TT_STRING, 0)),
         IntLit | FloatLit | HexLit => Some((TT_NUMBER, 0)),
-        Ident => Some(
-            classifier
-                .by_offset
-                .get(&tok.span.start)
-                .copied()
-                .unwrap_or((TT_VARIABLE, 0)),
-        ),
+        Ident => Some(classifier
+            .by_offset
+            .get(&tok.span.start)
+            .copied()
+            .unwrap_or((TT_VARIABLE, 0))),
         Eof | Error => None,
         // Punctuation that we don't want to color at all.
-        LParen | RParen | LBrace | RBrace | LBracket | RBracket | Semi | Comma | Dot
-        | ColonColon | Colon => None,
+        LParen | RParen | LBrace | RBrace | LBracket | RBracket | Semi | Comma
+        | Dot | ColonColon | Colon => None,
         // Operators.
-        Plus | Minus | Star | StarStar | Slash | Percent | Eq | EqEq | BangEq | Lt | Gt | LtEq
-        | GtEq | AmpAmp | PipePipe | Bang | Amp | Pipe | Caret | CaretCaret | Tilde | LtLt
-        | GtGt | PlusEq | MinusEq | StarEq | SlashEq | PercentEq | AmpEq | PipeEq | CaretEq
-        | LtLtEq | GtGtEq | PlusPlus | MinusMinus | Question => Some((TT_OPERATOR, 0)),
+        Plus | Minus | Star | StarStar | Slash | Percent | Eq | EqEq | BangEq
+        | Lt | Gt | LtEq | GtEq | AmpAmp | PipePipe | Bang | Amp | Pipe
+        | Caret | CaretCaret | Tilde | LtLt | GtGt | PlusEq | MinusEq | StarEq
+        | SlashEq | PercentEq | AmpEq | PipeEq | CaretEq | LtLtEq | GtGtEq
+        | PlusPlus | MinusMinus | Question => Some((TT_OPERATOR, 0)),
         At | Hash => Some((TT_OPERATOR, 0)),
         // Everything else is a keyword.
         _ => Some((TT_KEYWORD, 0)),

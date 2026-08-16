@@ -247,9 +247,9 @@ fn collect_class(cls: &ClassDecl, source: &str, name: &str, out: &mut Vec<Occurr
     for m in &cls.members {
         match m {
             ClassMember::Field(vd) => collect_var_decl(vd, source, name, out),
-            ClassMember::Method(f) | ClassMember::Constructor(f) | ClassMember::Destructor(f) => {
-                collect_function(f, source, name, out)
-            }
+            ClassMember::Method(f)
+            | ClassMember::Constructor(f)
+            | ClassMember::Destructor(f) => collect_function(f, source, name, out),
             ClassMember::Property(p) => collect_property(p, source, name, out),
         }
     }
@@ -465,11 +465,7 @@ fn collect_expr_ctx(
                 collect_expr(a, source, name, out);
             }
         }
-        ExprKind::Is {
-            expr: inner,
-            target,
-            ..
-        } => {
+        ExprKind::Is { expr: inner, target, .. } => {
             collect_expr(inner, source, name, out);
             if let crate::parser::ast::IsTarget::Expr(e) = target {
                 collect_expr(e, source, name, out);
@@ -570,8 +566,7 @@ mod tests {
         // Field declarator + `count = 1` LHS + `print(count)` argument = 3.
         assert!(hs.len() >= 2, "got {:?}", hs);
         assert!(
-            hs.iter()
-                .any(|h| h.kind == Some(DocumentHighlightKind::WRITE)),
+            hs.iter().any(|h| h.kind == Some(DocumentHighlightKind::WRITE)),
             "expected at least one WRITE, got {:?}",
             hs
         );

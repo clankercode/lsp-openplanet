@@ -17,8 +17,8 @@ use tower_lsp::lsp_types::*;
 use crate::parser::ast::{ClassMember, SourceFile};
 use crate::server::diagnostics::position_to_offset;
 use crate::server::scope_query;
-use crate::symbols::SymbolTable;
 use crate::symbols::scope::SymbolKind;
+use crate::symbols::SymbolTable;
 use crate::typedb::TypeIndex;
 
 pub fn complete(
@@ -69,20 +69,14 @@ fn extract_namespace_prefix(prefix: &str) -> Option<String> {
         .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != ':')
         .map_or(0, |i| i + 1);
     let ns = &before[start..];
-    if ns.is_empty() {
-        None
-    } else {
-        Some(ns.to_string())
-    }
+    if ns.is_empty() { None } else { Some(ns.to_string()) }
 }
 
 fn complete_namespace_members(
     namespace: &str,
     type_index: Option<&TypeIndex>,
 ) -> Vec<CompletionItem> {
-    let Some(index) = type_index else {
-        return Vec::new();
-    };
+    let Some(index) = type_index else { return Vec::new() };
     index
         .namespace_members(namespace)
         .into_iter()
@@ -214,38 +208,10 @@ fn complete_identifier(
 
     // Keywords.
     for kw in &[
-        "void",
-        "bool",
-        "int",
-        "uint",
-        "float",
-        "double",
-        "string",
-        "auto",
-        "class",
-        "interface",
-        "enum",
-        "namespace",
-        "funcdef",
-        "if",
-        "else",
-        "for",
-        "while",
-        "do",
-        "switch",
-        "case",
-        "default",
-        "break",
-        "continue",
-        "return",
-        "try",
-        "catch",
-        "null",
-        "true",
-        "false",
-        "const",
-        "cast",
-        "import",
+        "void", "bool", "int", "uint", "float", "double", "string", "auto", "class", "interface",
+        "enum", "namespace", "funcdef", "if", "else", "for", "while", "do", "switch", "case",
+        "default", "break", "continue", "return", "try", "catch", "null", "true", "false",
+        "const", "cast", "import",
     ] {
         items.push(make_item(kw, CompletionItemKind::KEYWORD));
     }
@@ -266,14 +232,23 @@ fn complete_identifier(
             match m {
                 ClassMember::Field(vd) => {
                     for d in &vd.declarators {
-                        items.push(make_item(d.name.text(source), CompletionItemKind::FIELD));
+                        items.push(make_item(
+                            d.name.text(source),
+                            CompletionItemKind::FIELD,
+                        ));
                     }
                 }
                 ClassMember::Method(f) => {
-                    items.push(make_item(f.name.text(source), CompletionItemKind::METHOD));
+                    items.push(make_item(
+                        f.name.text(source),
+                        CompletionItemKind::METHOD,
+                    ));
                 }
                 ClassMember::Property(p) => {
-                    items.push(make_item(p.name.text(source), CompletionItemKind::PROPERTY));
+                    items.push(make_item(
+                        p.name.text(source),
+                        CompletionItemKind::PROPERTY,
+                    ));
                 }
                 _ => {}
             }
@@ -433,6 +408,10 @@ mod tests {
             complete(&analysis, pos, None, None)
         };
         let labels = labels(&items);
-        assert!(labels.contains(&"field"), "missing field in {:?}", labels);
+        assert!(
+            labels.contains(&"field"),
+            "missing field in {:?}",
+            labels
+        );
     }
 }

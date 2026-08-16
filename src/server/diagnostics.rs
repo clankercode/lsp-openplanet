@@ -99,7 +99,8 @@ pub fn compute_diagnostics_from_analysis(
     } else {
         let mut symbols = SymbolTable::new();
         let fid = symbols.allocate_file_id();
-        let file_syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
+        let file_syms =
+            SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
         symbols.set_file_symbols(fid, file_syms);
         Some(symbols)
     };
@@ -155,11 +156,7 @@ fn compute_toml_diagnostics(source: &str, diagnostics: &mut Vec<Diagnostic>) {
 }
 
 fn line_range(source: &str, line: usize) -> Range {
-    let _line_start = source
-        .lines()
-        .take(line)
-        .map(|l| l.len() + 1)
-        .sum::<usize>();
+    let _line_start = source.lines().take(line).map(|l| l.len() + 1).sum::<usize>();
     let line_text = source.lines().nth(line).unwrap_or("");
     Range::new(
         Position::new(line as u32, 0),
@@ -186,8 +183,7 @@ pub fn position_to_offset(source: &str, pos: Position) -> usize {
     let mut offset = 0;
     for ch in source.chars() {
         if line == pos.line {
-            if (offset - source[..offset].rfind('\n').map_or(0, |n| n + 1)) as u32 >= pos.character
-            {
+            if (offset - source[..offset].rfind('\n').map_or(0, |n| n + 1)) as u32 >= pos.character {
                 return offset;
             }
         }
@@ -221,15 +217,11 @@ mod tests {
             &LspConfig::default(),
             &["MissingDep".to_string()],
         );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("[meta].version"))
-        );
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("MissingDep"))
-        );
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("[meta].version")));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("MissingDep")));
     }
 }
