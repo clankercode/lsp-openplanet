@@ -1319,12 +1319,31 @@ impl<'a> Checker<'a> {
                         // winner's return type.
                         TypeRepr::parse_type_string(&sig.return_type)
                     }
-                    OverloadMatch::Ambiguous
-                    | OverloadMatch::NoMatch
-                    | OverloadMatch::NoOverloads => {
+                    OverloadMatch::Ambiguous | OverloadMatch::NoOverloads => {
                         // Silent skip — matches iter 19/22 overloaded
                         // behaviour. Return the lookup fallback so downstream
                         // `.member` chains still see *some* type.
+                        fallback_ret
+                    }
+                    OverloadMatch::NoMatch => {
+                        // No overload accepted the args. Stay silent on
+                        // TYPE-driven no-match (conservative — a conversion or
+                        // workspace-local arg may resolve later), but a call
+                        // whose count is outside EVERY overload's arity range
+                        // is unambiguously wrong: diagnose it (GH #34 review
+                        // Arm B — the augmented inherited set must not swallow
+                        // a genuinely-wrong call the single-overload path used
+                        // to catch).
+                        let ranges: Vec<(usize, usize)> = overloads
+                            .iter()
+                            .map(|s| (s.min_args, s.param_types.len()))
+                            .collect();
+                        self.check_arity_against_ranges(
+                            display_name,
+                            &ranges,
+                            args.len(),
+                            callee_span,
+                        );
                         fallback_ret
                     }
                 }
@@ -2337,6 +2356,69 @@ void Main() {
             arity.len(),
             0,
             "inherited 2-arg overload must satisfy the qualified 2-arg call; got {:?}",
+            diags
+        );
+    }
+
+    /// GH #34 follow-up (review Arm B): a call that exceeds EVERY overload's
+    /// arity (own + inherited) must still diagnose. The augmented overload set
+    /// must not silently swallow a genuinely-wrong call the pre-#34 single-
+    /// overload path caught.
+    #[test]
+    fn inherited_overload_exceeding_all_arity_still_diagnoses() {
+        let src = r#"
+namespace MLFeed {
+    class Base {
+        void UpdateFrom(int a, int b) { }
+    }
+    class Child : Base {
+        void UpdateFrom(int a, int b, bool c) { }
+    }
+}
+void Main() {
+    MLFeed::Child::UpdateFrom(1, 2, true, 99);   // 4 args: exceeds 2-arg AND 3-arg
+}
+"#;
+        let diags = check(src);
+        let arity: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(
+            arity.len(),
+            1,
+            "call exceeding all overloads (own + inherited) must diagnose; got {:?}",
+            diags
+        );
+    }
+
+    /// Control: a call matching ANY overload (incl. inherited) stays silent —
+    /// the exceeds-all fix must not introduce false positives on valid calls.
+    #[test]
+    fn inherited_overload_matching_any_stays_silent() {
+        let src = r#"
+namespace MLFeed {
+    class Base {
+        void UpdateFrom(int a, int b) { }
+    }
+    class Child : Base {
+        void UpdateFrom(int a, int b, bool c) { }
+    }
+}
+void Main() {
+    MLFeed::Child::UpdateFrom(1, 2);            // matches Base 2-arg
+    MLFeed::Child::UpdateFrom(1, 2, true);      // matches Child 3-arg
+}
+"#;
+        let diags = check(src);
+        let arity: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(
+            arity.len(),
+            0,
+            "calls matching any overload must not be flagged; got {:?}",
             diags
         );
     }
