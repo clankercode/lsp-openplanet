@@ -13,6 +13,55 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-17
+
+Architecture batch from the `improve-codebase-architecture` review (GH #39–#43).
+No new diagnostics by design — this release is about the LSP being fast and
+consistent — but request latency and memory behavior improve, and hover /
+completion / signature help now answer from recorded checker state instead of
+re-derived parses.
+
+### Added
+- **Queryable checker interface (GH #42):** `Checker` now records
+  span→type results during its normal expression walk
+  (`with_type_recording` / `type_at_span` / `recorded_expr_types`), giving
+  server features a single authoritative type source. Hover, completion, and
+  signature help consume the recorded types (stage 2) instead of re-parsing
+  and re-inferring per request.
+
+### Changed
+- **One workspace view, not N re-derivations (GH #39):** new
+  `AnalysisSnapshot` module — the backend caches a single snapshot per
+  document change instead of re-loading and re-parsing the whole plugin per
+  keystroke and per request; the CLI `check` uses the same snapshot. Cuts
+  redundant work across all 13 request handlers.
+- **Every feature through the `DocumentAnalysis` seam (GH #40):** hover,
+  completion, signature, inlay hints, folding, highlights, symbols,
+  navigation, call hierarchy and semantic tokens all consume the same
+  `&DocumentAnalysis` view (same preprocessing + AST), ending the
+  "one query, three answers" divergence. (Formatter intentionally stays on
+  the raw AST so `#if 0`-disabled code is never deleted on format.)
+- **Deeper `GlobalScope`, closed pub-field seam (GH #41):** the
+  `workspace`/`external` fields are now private; the name-resolution ladder
+  and class-member/inheritance walks that server features and the checker
+  previously duplicated now live behind the `GlobalScope` interface.
+  `SymbolTable` lookups are indexed instead of linear scans — faster on
+  large multi-file plugins.
+- **Tests cross the production seam (GH #43):** test-only `Option` fallbacks
+  in `WorkspaceFiles` are gone; tests exercise the same
+  `TestWorkspace` → `DocumentAnalysis` → checker path production uses.
+
+### Breaking (library API)
+- `GlobalScope::workspace` / `GlobalScope::external` are private; use the
+  interface methods instead.
+- Feature entry points now take `&DocumentAnalysis` (and the backend cache is
+  `Arc<AnalysisSnapshot>`), so downstream code calling the old signatures
+  must adapt. CLI behavior is unchanged.
+
+### Distribution
+- GitHub Release binaries, npm (meta + 6 platform packages), crates.io —
+  all at 0.5.0, published by `release.yml` from tag `v0.5.0`.
+
 ## [0.4.1] - 2026-08-16
 
 ### Fixed
