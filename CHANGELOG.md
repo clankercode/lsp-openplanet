@@ -13,6 +13,56 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-16
+
+A large compiler-parity and dependency-resolution batch driven by a full
+plugin-fleet dogfood sweep (129 real plugins compared LSP-vs-game). Most fixes
+kill false positives the LSP reported on code the game compiles clean.
+
+### Added
+- **`.op` archive dependency exports (#20):** load dependency export scripts
+  directly from installed `.op` (ZIP) archives in memory, and walk
+  `export_dependencies` transitively. Cross-file shared-function imports from
+  `.op` deps now resolve (kills the `undefined identifier 'tabs'` class of FP).
+- **`game_target`-derived preprocessor defines:** `default_defines()` no longer
+  defines every ManiaPlanet platform at once. Defines now come from the game
+  target (default `TMNEXT`), overridable via config file / init options /
+  repo-local `.openplanet-lsp.toml`, so the LSP only compiles the `#if` branches
+  the real game would (#36).
+- **`source_paths` / `ignore_paths` config:** new `.openplanet-lsp.toml` keys to
+  restrict which `.as` files are checked when a repo keeps non-compiled scripts
+  (asset packs, fixtures, experiments) alongside the real sources. `source_paths`
+  is an allowlist (wins if set), `ignore_paths` a blocklist; with neither,
+  everything under the plugin root is checked (unchanged default).
+- **Parser diagnostics:** error on `shared` applied to non-class items, and on
+  unary `!` applied to a non-bool operand.
+
+### Fixed
+- **Dependency id resolution (#33):** resolve a dependency whose id is the
+  provider's normalized display name (e.g. `BetterRoomManager` ← "Better Room
+  Manager") when dir-name / `.op` / module-name all miss. Fixes `dependency not
+  found` + cascading unknown-type FPs (tm-bosslike, tm-simple-room-admin).
+- **Inherited method overloads (#34):** a `Ns::Class::Method(...)` call now
+  counts overloads inherited from the workspace class's parent chain, so a call
+  matching a parent-declared overload is no longer flagged for arity
+  (tm-mlfeed-race-data).
+- **Dead `#if` platform branches (#36):** TM2020 treats `#if MP4` / `#elif TURBO`
+  as dead; the LSP no longer type-checks them (tm-skids-magician).
+- **Typecheck FP silencing:** accept subclass args where a base param is expected
+  (#22); silence `ArgTypeMismatch` on `auto`/workspace-local args (#23); silence
+  spurious `MwAddRef`/`MwRelease` on `CMwNod`-derived types (#21); sibling class
+  fields no longer silence undefined identifiers (#30); strip the `const`
+  wrapper before the unary `!` bool check; allow `shared` on functions while
+  keeping the var-decl rejection.
+- **OP 1.29.5 parity (#29):** better-totd / dashboard typecheck FPs and
+  catch/string handling.
+- **Dependency-resolution visibility (#20 review):** surface silent
+  dependency-resolution failures instead of swallowing them.
+
+### Tooling
+- **Plugin-fleet dogfood driver** (`scripts/fleet_dogfood.py`) + curated ledger
+  (`docs/plugin-fleet-ledger.md`) for systematic LSP-vs-game parity sweeps.
+
 ## [0.3.4] - 2026-08-12
 
 ### Added
