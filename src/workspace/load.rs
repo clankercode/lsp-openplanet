@@ -36,6 +36,12 @@ pub struct PluginWorkspaceLoad {
 pub struct DependencySearch {
     pub plugins_dirs: Vec<PathBuf>,
     pub plugin_files_search_paths: Vec<PathBuf>,
+    /// Allowlist of root-relative dirs to check `.as` files in (`Some` → only
+    /// these). From `.openplanet-lsp.toml` `source_paths`.
+    pub source_paths: Option<Vec<PathBuf>>,
+    /// Blocklist of root-relative dirs to skip (only when `source_paths` is
+    /// `None`). From `.openplanet-lsp.toml` `ignore_paths`.
+    pub ignore_paths: Option<Vec<PathBuf>>,
 }
 
 impl DependencySearch {
@@ -43,6 +49,8 @@ impl DependencySearch {
         Self {
             plugins_dirs: Vec::new(),
             plugin_files_search_paths: vec![PathBuf::from("src")],
+            source_paths: None,
+            ignore_paths: None,
         }
     }
 
@@ -61,8 +69,35 @@ impl DependencySearch {
         if self.plugin_files_search_paths.is_empty() {
             self.plugin_files_search_paths.push(PathBuf::from("src"));
         }
+        // Carry source inclusion/exclusion from config (allowlist wins).
+        self.source_paths = config.source_paths.clone();
+        self.ignore_paths = config.ignore_paths.clone();
         self
     }
+}
+
+/// Decide whether a discovered `.as` file should be checked, given the
+/// source include/exclude config. Precedence: `source_paths` (allowlist) →
+/// `ignore_paths` (blocklist) → include everything. Root-relative prefix match:
+/// an entry `src` matches `src/**` but not `src_old/**`. Root-level files
+/// (directly under root) are only excluded by an exact-match blocklist entry
+/// that is itself a file name, which we don't support — they stay included.
+fn source_file_included(root: &Path, path: &Path, search: &DependencySearch) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return true;
+    };
+    if let Some(allow) = &search.source_paths {
+        // Allowlist: file must live under one of the listed dirs. A bare
+        // root-level file (rel has a single component) is included only if the
+        // allowlist contains "." (explicit opt-in for root-level sources).
+        return allow.iter().any(|dir| {
+            dir == Path::new(".") && rel.components().count() == 1 || rel.starts_with(dir)
+        });
+    }
+    if let Some(ignore) = &search.ignore_paths {
+        return !ignore.iter().any(|dir| rel.starts_with(dir));
+    }
+    true
 }
 
 /// Load plugin `.as` sources under `root` and dependency export files.
@@ -76,6 +111,9 @@ pub fn load_plugin_workspace(
 
     let mut files = Vec::new();
     for path in project::discover_source_files(&root) {
+        if !source_file_included(&root, &path, search) {
+            continue;
+        }
         let source = std::fs::read_to_string(&path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         files.push(WorkspaceSourceFile {
@@ -350,6 +388,7 @@ dependencies = ["DepPlugin"]
         let search = DependencySearch {
             plugins_dirs: vec![base.join("deps")],
             plugin_files_search_paths: vec![PathBuf::from("src")],
+            ..DependencySearch::with_defaults()
         };
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         assert!(
@@ -392,6 +431,7 @@ optional_dependencies = ["MissingOptional"]
         let search = DependencySearch {
             plugins_dirs: vec![base.join("deps")],
             plugin_files_search_paths: vec![PathBuf::from("src")],
+            ..DependencySearch::with_defaults()
         };
         // deps dir may not exist — still ok
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
@@ -420,6 +460,7 @@ dependencies = ["NoSuchPlugin"]
         let search = DependencySearch {
             plugins_dirs: vec![base.join("deps")],
             plugin_files_search_paths: vec![PathBuf::from("src")],
+            ..DependencySearch::with_defaults()
         };
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         assert_eq!(load.missing_required_dependencies, vec!["NoSuchPlugin"]);
@@ -447,6 +488,97 @@ dependencies = ["NoSearchPath"]
             load_plugin_workspace(&base.join("consumer"), &DependencySearch::with_defaults())
                 .unwrap();
         assert_eq!(load.missing_required_dependencies, vec!["NoSearchPath"]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Build a consumer plugin with sources in several root-relative dirs.
+    fn multi_dir_consumer(base: &Path) {
+        fs::create_dir_all(base.join("consumer/src")).unwrap();
+        fs::create_dir_all(base.join("consumer/OtherPacks")).unwrap();
+        fs::create_dir_all(base.join("consumer/Scripts")).unwrap();
+        fs::write(
+            base.join("consumer/info.toml"),
+            "[meta]\nname = \"C\"\nversion = \"0.1.0\"\n[script]\n",
+        )
+        .unwrap();
+        fs::write(base.join("consumer/src/Main.as"), "void Main() {}\n").unwrap();
+        fs::write(base.join("consumer/OtherPacks/DS.as"), "void ds() {}\n").unwrap();
+        fs::write(base.join("consumer/Scripts/Util.as"), "void util() {}\n").unwrap();
+    }
+
+    fn loaded_rel_paths(load: &PluginWorkspaceLoad, base: &Path) -> Vec<String> {
+        let mut v: Vec<String> = load
+            .files
+            .iter()
+            .filter(|f| f.report_diagnostics)
+            .map(|f| {
+                f.path
+                    .strip_prefix(base.join("consumer").canonicalize().unwrap())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn no_source_config_checks_everything() {
+        let base = temp_tree("sp-all");
+        multi_dir_consumer(&base);
+        let load = load_plugin_workspace(&base.join("consumer"), &DependencySearch::with_defaults())
+            .unwrap();
+        let rel = loaded_rel_paths(&load, &base);
+        assert!(rel.iter().any(|p| p == "src/Main.as"), "{rel:?}");
+        assert!(rel.iter().any(|p| p == "OtherPacks/DS.as"), "{rel:?}");
+        assert!(rel.iter().any(|p| p == "Scripts/Util.as"), "{rel:?}");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn ignore_paths_excludes_listed_dirs() {
+        let base = temp_tree("sp-ignore");
+        multi_dir_consumer(&base);
+        let search = DependencySearch {
+            ignore_paths: Some(vec![PathBuf::from("OtherPacks"), PathBuf::from("Scripts")]),
+            ..DependencySearch::with_defaults()
+        };
+        let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
+        let rel = loaded_rel_paths(&load, &base);
+        assert!(rel.iter().any(|p| p == "src/Main.as"), "{rel:?}");
+        assert!(!rel.iter().any(|p| p.starts_with("OtherPacks/")), "{rel:?}");
+        assert!(!rel.iter().any(|p| p.starts_with("Scripts/")), "{rel:?}");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn source_paths_allowlist_checks_only_listed_dirs() {
+        let base = temp_tree("sp-allow");
+        multi_dir_consumer(&base);
+        let search = DependencySearch {
+            source_paths: Some(vec![PathBuf::from("src")]),
+            ..DependencySearch::with_defaults()
+        };
+        let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
+        let rel = loaded_rel_paths(&load, &base);
+        assert_eq!(rel, vec!["src/Main.as".to_string()], "{rel:?}");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn source_paths_takes_precedence_over_ignore_paths() {
+        let base = temp_tree("sp-both");
+        multi_dir_consumer(&base);
+        let search = DependencySearch {
+            source_paths: Some(vec![PathBuf::from("src")]),
+            // ignore_paths lists src too, but the allowlist must win.
+            ignore_paths: Some(vec![PathBuf::from("src")]),
+            ..DependencySearch::with_defaults()
+        };
+        let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
+        let rel = loaded_rel_paths(&load, &base);
+        assert_eq!(rel, vec!["src/Main.as".to_string()], "{rel:?}");
         let _ = fs::remove_dir_all(base);
     }
 
@@ -517,6 +649,7 @@ dependencies = ["MLFeedRaceData"]
         let search = DependencySearch {
             plugins_dirs: vec![base.join("deps")],
             plugin_files_search_paths: vec![PathBuf::from("src")],
+            ..DependencySearch::with_defaults()
         };
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         assert!(
@@ -611,6 +744,7 @@ dependencies = ["MLFeedRaceData"]
         let search = DependencySearch {
             plugins_dirs: vec![base.join("deps")],
             plugin_files_search_paths: vec![PathBuf::from("src")],
+            ..DependencySearch::with_defaults()
         };
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         assert!(

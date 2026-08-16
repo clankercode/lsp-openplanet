@@ -12,6 +12,19 @@ pub struct LspConfig {
     pub game_json: Option<PathBuf>,
     pub game_target: String,
     pub defines: HashSet<String>,
+    /// True when `defines` came from an explicit source (config file / init
+    /// options) rather than the target-derived default. When false, `load`
+    /// re-derives defines from the final `game_target` so a non-default target
+    /// (set via repo-local config or init options) gets matching platform
+    /// defines without the user also hand-listing them (GH #36).
+    #[doc(hidden)]
+    pub defines_overridden: bool,
+    /// Allowlist of root-relative dirs to check `.as` files in (from
+    /// `.openplanet-lsp.toml` `source_paths`). `Some` → check only these.
+    pub source_paths: Option<Vec<PathBuf>>,
+    /// Blocklist of root-relative dirs to skip (from `.openplanet-lsp.toml`
+    /// `ignore_paths`). Only consulted when `source_paths` is `None`.
+    pub ignore_paths: Option<Vec<PathBuf>>,
 }
 
 impl Default for LspConfig {
@@ -26,6 +39,9 @@ impl Default for LspConfig {
             game_json: None,
             game_target: "TMNEXT".to_string(),
             defines: Self::default_defines(),
+            defines_overridden: false,
+            source_paths: None,
+            ignore_paths: None,
         }
     }
 }
@@ -38,6 +54,14 @@ struct ConfigFile {
     defines: Option<Vec<String>>,
     /// Bare-TTY default: `"tui"` (default) or `"lsp"`.
     default_mode: Option<String>,
+    /// Allowlist of root-relative dirs to check `.as` files in (e.g.
+    /// `["src"]`). When set, ONLY these are checked. Takes precedence over
+    /// `ignore_paths`. Absent → fall through to `ignore_paths`, else check all.
+    source_paths: Option<Vec<String>>,
+    /// Blocklist of root-relative dirs to skip when checking `.as` files
+    /// (e.g. `["OtherPacks", "vendor"]`). Only used when `source_paths` is
+    /// absent. Absent (and no `source_paths`) → check every `.as` under root.
+    ignore_paths: Option<Vec<String>>,
 }
 
 /// How bare TTY launches behave when no subcommand is given.
@@ -103,18 +127,16 @@ impl UserPrefs {
 
 impl LspConfig {
     /// Default all-permissive define set (spec Section 4.4)
-    pub fn default_defines() -> HashSet<String> {
-        [
-            "TMNEXT",
-            "MP4",
-            "MP40",
-            "MP41",
-            "TURBO",
-            "FOREVER",
-            "UNITED_FOREVER",
-            "NATIONS_FOREVER",
-            "UNITED",
-            "MP3",
+    /// Preprocessor defines for a game target. Platform selectors are
+    /// target-specific so the LSP only compiles the `#if` branches the real
+    /// game would (GH #36): defining every platform at once made dead
+    /// `#if MP4` / `#elif TURBO` branches live and flooded undefined-identifier
+    /// false positives. Default target is TMNEXT (TM2020); overridable via
+    /// `game_target` (config file / init options / repo-local config).
+    pub fn defines_for_target(target: &str) -> HashSet<String> {
+        // Always-on flags (OS, signature, build caps) — independent of which
+        // game the plugin targets.
+        const ALWAYS_ON: &[&str] = &[
             "MANIA64",
             "MANIA32",
             "WINDOWS",
@@ -128,10 +150,38 @@ impl LspConfig {
             "SIG_REGULAR",
             "SIG_SCHOOL",
             "SIG_DEVELOPER",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+        ];
+        // Platform selector(s) for the requested game. The game defines
+        // exactly one ManiaPlanet-generation family; the others stay off so
+        // their `#if` branches are dead (matching the game). Evidence (GH #36,
+        // tm-skids-magician): TM2020 treats `#if MP4` and `#elif TURBO` as
+        // DEAD — so TMNEXT does NOT imply MP4/TURBO.
+        let platform: &[&str] = match target {
+            "TMNEXT" => &["TMNEXT"],
+            "MP4" | "MP40" | "MP41" => &["MP4", "MP40", "MP41"],
+            "TURBO" => &["TURBO"],
+            "MP3" => &["MP3"],
+            "UNITED_FOREVER" | "UNITED" => &["UNITED_FOREVER", "UNITED"],
+            "NATIONS_FOREVER" => &["NATIONS_FOREVER"],
+            // Unknown target: define the target token itself so its `#if`
+            // branch is live; everything else off (conservative).
+            other => {
+                let mut s: HashSet<String> =
+                    ALWAYS_ON.iter().map(|x| x.to_string()).collect();
+                s.insert(other.to_string());
+                return s;
+            }
+        };
+        ALWAYS_ON
+            .iter()
+            .chain(platform.iter())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Standard defines for the default target (TMNEXT / TM2020).
+    pub fn default_defines() -> HashSet<String> {
+        Self::defines_for_target("TMNEXT")
     }
 
     /// Build config from layers: auto-detect → config file → init params
@@ -143,6 +193,9 @@ impl LspConfig {
             game_json: None,
             game_target: "TMNEXT".to_string(),
             defines: Self::default_defines(),
+            defines_overridden: false,
+            source_paths: None,
+            ignore_paths: None,
         };
 
         // Layer 1: Auto-detect
@@ -157,6 +210,14 @@ impl LspConfig {
         // Layer 3: Init params (highest priority)
         if let Some(opts) = init_options {
             config.apply_init_options(opts);
+        }
+
+        // GH #36: `game_target` is now final. Unless defines were explicitly
+        // overridden, re-derive them from the target so a non-default target
+        // (repo-local config / init options) gets matching platform defines and
+        // dead `#if <other-platform>` branches stay dead.
+        if !config.defines_overridden {
+            config.defines = Self::defines_for_target(&config.game_target);
         }
 
         // Layer 4: Workspace manifest-derived defines. These are additive and
@@ -267,6 +328,13 @@ impl LspConfig {
         }
         if let Some(defines) = cfg.defines {
             self.defines = defines.into_iter().collect();
+            self.defines_overridden = true;
+        }
+        if let Some(source_paths) = cfg.source_paths {
+            self.source_paths = Some(source_paths.into_iter().map(PathBuf::from).collect());
+        }
+        if let Some(ignore_paths) = cfg.ignore_paths {
+            self.ignore_paths = Some(ignore_paths.into_iter().map(PathBuf::from).collect());
         }
     }
 
@@ -285,6 +353,7 @@ impl LspConfig {
                 .iter()
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect();
+            self.defines_overridden = true;
         }
     }
 }
@@ -307,11 +376,49 @@ mod tests {
 
     #[test]
     fn test_default_defines() {
+        // Default target is TMNEXT (TM2020): TMNEXT on, always-on flags on,
+        // and other ManiaPlanet generations OFF (GH #36 — dead `#if` branches).
         let defs = LspConfig::default_defines();
         assert!(defs.contains("TMNEXT"));
         assert!(defs.contains("SIG_DEVELOPER"));
         assert!(defs.contains("WINDOWS"));
-        assert!(defs.contains("UNITED"));
+        assert!(!defs.contains("TURBO"));
+        assert!(!defs.contains("MP4"));
+        assert!(!defs.contains("MP3"));
+        assert!(!defs.contains("UNITED"));
+    }
+
+    #[test]
+    fn test_defines_for_target_selects_platform() {
+        let turbo = LspConfig::defines_for_target("TURBO");
+        assert!(turbo.contains("TURBO"));
+        assert!(turbo.contains("WINDOWS")); // always-on still present
+        assert!(!turbo.contains("TMNEXT"));
+        assert!(!turbo.contains("MP4"));
+
+        let mp4 = LspConfig::defines_for_target("MP4");
+        assert!(mp4.contains("MP4"));
+        assert!(!mp4.contains("TMNEXT"));
+        assert!(!mp4.contains("TURBO"));
+    }
+
+    #[test]
+    fn test_game_target_rederives_defines_when_not_overridden() {
+        // Setting game_target (no explicit defines) re-derives defines.
+        let opts = serde_json::json!({ "game_target": "TURBO" });
+        let config = LspConfig::load(None, Some(&opts));
+        assert_eq!(config.game_target, "TURBO");
+        assert!(config.defines.contains("TURBO"));
+        assert!(!config.defines.contains("TMNEXT"));
+    }
+
+    #[test]
+    fn test_explicit_defines_win_over_target_derivation() {
+        // Explicit defines override target derivation (init options).
+        let opts = serde_json::json!({ "game_target": "TURBO", "defines": ["CUSTOM"] });
+        let config = LspConfig::load(None, Some(&opts));
+        assert!(config.defines.contains("CUSTOM"));
+        assert!(!config.defines.contains("TURBO"));
     }
 
     #[test]

@@ -284,6 +284,9 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     let search = DependencySearch {
         plugins_dirs: options.plugins_dirs.clone(),
         plugin_files_search_paths: options.plugin_files_search_paths.clone(),
+        // Filled from config by finalize_with_config below.
+        source_paths: None,
+        ignore_paths: None,
     }
     .finalize_with_config(&config);
 

@@ -42,6 +42,19 @@ Config (`~/.config/openplanet-lsp/config.toml` or workspace `.openplanet-lsp.tom
 ```toml
 # bare TTY default when no subcommand is given
 default_mode = "tui"   # or "lsp"
+
+# Game target — picks the preprocessor platform defines (#if TMNEXT / MP4 /
+# TURBO / ...). Default "TMNEXT" (TM2020). Override for plugins that only
+# support another game.
+# game_target = "TMNEXT"
+
+# Which .as files to check, relative to the plugin root. Openplanet compiles a
+# specific set; repos often keep non-compiled scripts (asset packs, fixtures,
+# experiments) alongside src/. source_paths is an ALLOWLIST (wins if set);
+# ignore_paths is a BLOCKLIST (used only when source_paths is absent); with
+# neither, every .as under the root is checked (safe default).
+# source_paths = ["src"]
+# ignore_paths = ["OtherPacks", "vendor"]
 ```
 
 Point your editor’s AngelScript / OpenPlanet language client at the binary
