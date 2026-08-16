@@ -20,8 +20,6 @@
 
 use tower_lsp::lsp_types::*;
 
-use crate::lexer;
-use crate::parser::Parser;
 use crate::parser::ast::{
     CallArg, ClassMember, Expr, ExprKind, FunctionBody, FunctionDecl, Item, NamespaceDecl,
     SourceFile, Stmt, StmtKind, TypeExpr, TypeExprKind, VarDeclStmt,
@@ -35,14 +33,13 @@ use crate::typedb::TypeIndex;
 /// `range`. Walks the parsed AST once and collects hints for `auto` locals
 /// and literal call arguments.
 pub fn inlay_hints(
-    source: &str,
+    analysis: &crate::analysis::DocumentAnalysis,
     range: Range,
     type_index: Option<&TypeIndex>,
     workspace: Option<&SymbolTable>,
 ) -> Vec<InlayHint> {
-    let tokens = lexer::tokenize_filtered(source);
-    let mut parser = Parser::new(&tokens, source);
-    let file: SourceFile = parser.parse_file();
+    let source = analysis.masked_source();
+    let file: &SourceFile = &analysis.file;
 
     let mut out: Vec<InlayHint> = Vec::new();
     for item in &file.items {
@@ -546,7 +543,7 @@ mod tests {
     #[test]
     fn test_auto_local_gets_type_hint() {
         let src = "void f() { auto x = 5; }";
-        let hints = inlay_hints(src, full_range(), None, None);
+        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, None);
         assert_eq!(hints.len(), 1, "expected one type hint, got {:?}", hints);
         let h = &hints[0];
         assert_eq!(h.kind, Some(InlayHintKind::TYPE));
@@ -561,7 +558,7 @@ mod tests {
     #[test]
     fn test_explicit_type_no_hint() {
         let src = "void f() { int x = 5; }";
-        let hints = inlay_hints(src, full_range(), None, None);
+        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, None);
         assert!(
             hints.is_empty(),
             "explicit type should not emit hints, got {:?}",
@@ -573,7 +570,7 @@ mod tests {
     fn test_param_name_hint_on_literal_arg() {
         let src = "void g(int count, string name) {}\nvoid main() { g(5, \"x\"); }";
         let ws = ws_from(src);
-        let hints = inlay_hints(src, full_range(), None, Some(&ws));
+        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, Some(&ws));
         let param_hints: Vec<_> = hints
             .iter()
             .filter(|h| h.kind == Some(InlayHintKind::PARAMETER))
@@ -610,7 +607,7 @@ mod tests {
         let src = "void g(int count, string name) {}\n\
                    void main() { int count = 3; g(count, \"x\"); }";
         let ws = ws_from(src);
-        let hints = inlay_hints(src, full_range(), None, Some(&ws));
+        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, Some(&ws));
         let param_hints: Vec<_> = hints
             .iter()
             .filter(|h| h.kind == Some(InlayHintKind::PARAMETER))
@@ -632,7 +629,7 @@ mod tests {
         // Hints on line 1 should be excluded by a range covering only line 0.
         let src = "void f() {\n  auto x = 5;\n}";
         let range = Range::new(Position::new(0, 0), Position::new(0, 100));
-        let hints = inlay_hints(src, range, None, None);
+        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), range, None, None);
         assert!(
             hints.is_empty(),
             "expected no hints outside range, got {:?}",
@@ -645,7 +642,7 @@ mod tests {
         // `mystery` is not declared anywhere — must not panic, must not emit.
         let src = "void main() { mystery(1, 2); }";
         let ws = ws_from(src);
-        let hints = inlay_hints(src, full_range(), None, Some(&ws));
+        let hints = inlay_hints(&crate::analysis::DocumentAnalysis::analyze_plain(src), full_range(), None, Some(&ws));
         assert!(
             hints
                 .iter()

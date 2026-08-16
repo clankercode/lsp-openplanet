@@ -13,9 +13,7 @@
 
 use tower_lsp::lsp_types::*;
 
-use crate::lexer;
 use crate::parser::ast::SourceFile;
-use crate::parser::Parser;
 use crate::server::diagnostics::position_to_offset;
 use crate::server::navigation;
 use crate::server::scope_query;
@@ -24,12 +22,13 @@ use crate::symbols::SymbolTable;
 use crate::typedb::TypeIndex;
 
 pub fn hover(
-    source: &str,
+    analysis: &crate::analysis::DocumentAnalysis,
     position: Position,
     type_index: Option<&TypeIndex>,
     workspace: Option<&SymbolTable>,
 ) -> Option<Hover> {
-    let qualified = navigation::name_at_position(source, position)?;
+    let source = analysis.masked_source();
+    let qualified = navigation::name_at_position(analysis, position)?;
     let bare = qualified
         .rsplit("::")
         .next()
@@ -37,10 +36,9 @@ pub fn hover(
         .to_string();
     let offset = position_to_offset(source, position) as u32;
 
-    // Parse once — we'll feed the AST into local + class lookups.
-    let tokens = lexer::tokenize_filtered(source);
-    let mut parser = Parser::new(&tokens, source);
-    let file: SourceFile = parser.parse_file();
+    // The snapshot already parsed this file — reuse its AST for local +
+    // class lookups.
+    let file: &SourceFile = &analysis.file;
 
     // 1) Local variable / parameter in the enclosing function.
     if !qualified.contains("::") {
@@ -298,7 +296,8 @@ mod tests {
         let src = "void f() { int x = 5; x; }";
         // Second occurrence of `x` — cursor sits inside it.
         let pos = pos_of(src, "x", 2);
-        let h = hover(src, pos, None, None).expect("hover should return");
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let h = hover(&analysis, pos, None, None).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -310,7 +309,8 @@ mod tests {
     fn hover_shows_local_param_type() {
         let src = "void f(int arg) { arg; }";
         let pos = pos_of(src, "arg", 2);
-        let h = hover(src, pos, None, None).expect("hover should return");
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let h = hover(&analysis, pos, None, None).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -322,7 +322,8 @@ mod tests {
         let src = "void greet() {}\nvoid main() { greet(); }";
         let ws = ws_from(src);
         let pos = pos_of(src, "greet", 2);
-        let h = hover(src, pos, None, Some(&ws)).expect("hover should return");
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let h = hover(&analysis, pos, None, Some(&ws)).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -333,7 +334,8 @@ mod tests {
     fn hover_shows_class_field() {
         let src = "class C { int field; void m() { field; } }";
         let pos = pos_of(src, "field", 2);
-        let h = hover(src, pos, None, None).expect("hover should return");
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let h = hover(&analysis, pos, None, None).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -345,7 +347,8 @@ mod tests {
     fn hover_returns_none_outside_ident() {
         let src = "void f() {}";
         // Column 4: the space between `void` and `f`.
-        let h = hover(src, Position::new(0, 4), None, None);
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let h = hover(&analysis, Position::new(0, 4), None, None);
         assert!(h.is_none());
     }
 }

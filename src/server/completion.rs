@@ -14,8 +14,6 @@
 
 use tower_lsp::lsp_types::*;
 
-use crate::lexer;
-use crate::parser::Parser;
 use crate::parser::ast::{ClassMember, SourceFile};
 use crate::server::diagnostics::position_to_offset;
 use crate::server::scope_query;
@@ -24,11 +22,12 @@ use crate::symbols::SymbolTable;
 use crate::typedb::TypeIndex;
 
 pub fn complete(
-    source: &str,
+    analysis: &crate::analysis::DocumentAnalysis,
     position: Position,
     type_index: Option<&TypeIndex>,
     workspace: Option<&SymbolTable>,
 ) -> Vec<CompletionItem> {
+    let source = analysis.masked_source();
     let offset = position_to_offset(source, position);
     let prefix = &source[..offset];
     let trimmed = prefix.trim_end_matches(is_ident_char);
@@ -50,11 +49,11 @@ pub fn complete(
 
     // Member completion (`.`).
     if trimmed.ends_with('.') {
-        return complete_dot_members(source, trimmed, offset, type_index, workspace);
+        return complete_dot_members(analysis, trimmed, offset, type_index, workspace);
     }
 
     // Default: identifier position.
-    complete_identifier(source, offset, type_index, workspace)
+    complete_identifier(analysis, offset, type_index, workspace)
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -99,20 +98,19 @@ fn receiver_name_before_dot(prefix_with_dot: &str) -> Option<String> {
 }
 
 fn complete_dot_members(
-    source: &str,
+    analysis: &crate::analysis::DocumentAnalysis,
     prefix_with_dot: &str,
     offset_hint: usize,
     type_index: Option<&TypeIndex>,
     workspace: Option<&SymbolTable>,
 ) -> Vec<CompletionItem> {
+    let source = analysis.masked_source();
     let Some(receiver) = receiver_name_before_dot(prefix_with_dot) else {
         return Vec::new();
     };
 
-    // Parse the file so we can resolve the receiver via scope queries.
-    let tokens = lexer::tokenize_filtered(source);
-    let mut parser = Parser::new(&tokens, source);
-    let file: SourceFile = parser.parse_file();
+    // Use the caller's analysis (snapshot parse) for scope queries.
+    let file: &SourceFile = &analysis.file;
     let offset = offset_hint as u32;
 
     // 1) Local variable in scope.
@@ -201,7 +199,7 @@ fn add_type_members(
 }
 
 fn complete_identifier(
-    source: &str,
+    analysis: &crate::analysis::DocumentAnalysis,
     offset: usize,
     type_index: Option<&TypeIndex>,
     workspace: Option<&SymbolTable>,
@@ -218,10 +216,9 @@ fn complete_identifier(
         items.push(make_item(kw, CompletionItemKind::KEYWORD));
     }
 
-    // Parse for locals / enclosing class.
-    let tokens = lexer::tokenize_filtered(source);
-    let mut parser = Parser::new(&tokens, source);
-    let file: SourceFile = parser.parse_file();
+    // Use the snapshot's parse for locals / enclosing class.
+    let source = analysis.masked_source();
+    let file: &SourceFile = &analysis.file;
     let offset_u32 = offset as u32;
 
     // Locals in scope.
@@ -300,6 +297,8 @@ fn make_item(label: &str, kind: CompletionItemKind) -> CompletionItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lexer;
+    use crate::parser::Parser;
 
     fn ws_from(source: &str) -> SymbolTable {
         let mut table = SymbolTable::new();
@@ -334,7 +333,8 @@ mod tests {
         let src = "class C { int x; void m() {} } void f() { C@ obj; obj. }";
         let ws = ws_from(src);
         let pos = pos_after(src, "obj.");
-        let items = complete(src, pos, None, Some(&ws));
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let items = complete(&analysis, pos, None, Some(&ws));
         let labels = labels(&items);
         assert!(labels.contains(&"x"), "missing x in {:?}", labels);
         assert!(labels.contains(&"m"), "missing m in {:?}", labels);
@@ -345,7 +345,10 @@ mod tests {
         let src = "void f() { int abc = 5; zz }";
         // Cursor sits just after `zz`, well after the `abc` declaration.
         let pos = pos_after(src, "zz");
-        let items = complete(src, pos, None, None);
+        let items = {
+            let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+            complete(&analysis, pos, None, None)
+        };
         let labels = labels(&items);
         assert!(labels.contains(&"abc"), "missing abc in {:?}", labels);
     }
@@ -355,7 +358,8 @@ mod tests {
         let src = "void greet() {} void f() { gr }";
         let ws = ws_from(src);
         let pos = pos_after(src, "gr");
-        let items = complete(src, pos, None, Some(&ws));
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let items = complete(&analysis, pos, None, Some(&ws));
         let labels = labels(&items);
         assert!(labels.contains(&"greet"), "missing greet in {:?}", labels);
     }
@@ -367,7 +371,10 @@ mod tests {
         // the important thing is we don't crash and we don't return the
         // generic identifier list.
         let pos = pos_after(src, "Foo::");
-        let items = complete(src, pos, None, None);
+        let items = {
+            let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+            complete(&analysis, pos, None, None)
+        };
         // No type index ⇒ empty namespace list, and we did NOT fall into
         // identifier completion (which would emit "void", "bool", ...).
         let labels = labels(&items);
@@ -382,7 +389,10 @@ mod tests {
     fn completion_preprocessor_directive() {
         let src = "#";
         let pos = pos_after(src, "#");
-        let items = complete(src, pos, None, None);
+        let items = {
+            let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+            complete(&analysis, pos, None, None)
+        };
         let labels = labels(&items);
         assert!(labels.contains(&"if"));
         assert!(labels.contains(&"endif"));
@@ -393,7 +403,10 @@ mod tests {
         let src = "class C { int field; void m() {  } }";
         // Cursor inside method body.
         let pos = pos_after(src, "void m() { ");
-        let items = complete(src, pos, None, None);
+        let items = {
+            let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+            complete(&analysis, pos, None, None)
+        };
         let labels = labels(&items);
         assert!(
             labels.contains(&"field"),

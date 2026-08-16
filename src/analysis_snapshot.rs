@@ -100,16 +100,12 @@ impl AnalysisSnapshot {
     }
 
     /// file_id ↔ URI map in the shape navigation/call-hierarchy expect:
-    /// `file_id → (uri, source)` for files that have a URI.
-    pub fn uri_map(&self) -> HashMap<usize, (Url, String)> {
+    /// `file_id → (uri, analysis)` for files that have a URI.
+    pub fn uri_map(&self) -> HashMap<usize, (Url, &DocumentAnalysis)> {
         self.files
             .iter()
             .enumerate()
-            .filter_map(|(fid, f)| {
-                f.uri
-                    .as_ref()
-                    .map(|uri| (fid, (uri.clone(), f.analysis.source.clone())))
-            })
+            .filter_map(|(fid, f)| f.uri.as_ref().map(|uri| (fid, (uri.clone(), &f.analysis))))
             .collect()
     }
 
@@ -169,7 +165,7 @@ mod tests {
             AnalysisSnapshot::from_files(&[(path, "int x;".to_string())], &LspConfig::default());
         let map = snap.uri_map();
         assert_eq!(map.len(), 1);
-        assert_eq!(map[&0].1, "int x;");
+        assert_eq!(map[&0].1.masked_source(), "int x;");
         let uri = map[&0].0.clone();
         assert!(snap.analysis_of(&uri).is_some());
     }

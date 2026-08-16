@@ -1170,11 +1170,16 @@ async fn test_tower_lsp_smoke_folding_range() {
     );
 
     let uri = Url::parse("file:///smoke/folding.as").unwrap();
+    // Class lives OUTSIDE the `#if DEBUG` block: with no defines the
+    // preprocessor masks the conditional out, so AST folds must come from
+    // the class, and the region fold still comes from the raw directive
+    // lines (GH #40: folding now consumes the masked DocumentAnalysis).
     let src = "\
 /*\n  header comment\n*/\n\
 #if DEBUG\n\
-class Foo {\n  void m() {\n    int y = 0;\n  }\n}\n\
-#endif\n";
+int debug_only = 1;\n\
+#endif\n\
+class Foo {\n  void m() {\n    int y = 0;\n  }\n}\n";
     backend
         .did_open(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {

@@ -13,6 +13,7 @@ use tower_lsp::lsp_types::{
     SemanticTokensLegend,
 };
 
+use crate::analysis::DocumentAnalysis;
 use crate::lexer::{Span, Token, TokenKind};
 use crate::parser::ast::*;
 use crate::server::diagnostics::offset_to_position;
@@ -68,18 +69,21 @@ pub fn legend() -> SemanticTokensLegend {
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
-/// Build the semantic-tokens payload for `source`.
-pub fn semantic_tokens(source: &str) -> SemanticTokens {
+/// Build the semantic-tokens payload for an analyzed document.
+///
+/// The raw token stream (WITH trivia — comments) must come from the
+/// ORIGINAL source, since masking blanks out directive lines and inactive
+/// regions. Identifier classification uses the masked AST; its spans stay
+/// valid on the original text because masking is byte-length-preserving.
+pub fn semantic_tokens(analysis: &DocumentAnalysis) -> SemanticTokens {
+    let source = analysis.source.as_str();
+
     // Raw tokens (with trivia) so we can emit comments and operators too.
     let raw_tokens = crate::lexer::tokenize(source);
 
-    // Parse to get AST-based identifier classifications.
-    let filtered = crate::lexer::tokenize_filtered(source);
-    let mut parser = crate::parser::Parser::new(&filtered, source);
-    let file = parser.parse_file();
-
+    // AST-based identifier classifications from the shared analysis.
     let mut classifier = IdentClassifier::default();
-    classifier.classify_file(&file);
+    classifier.classify_file(&analysis.file);
 
     let mut emitter = TokenEmitter::new(source);
     for tok in &raw_tokens {
@@ -470,6 +474,11 @@ impl<'a> TokenEmitter<'a> {
 mod tests {
     use super::*;
 
+    fn tokens(src: &str) -> SemanticTokens {
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        semantic_tokens(&analysis)
+    }
+
     /// Flatten a `SemanticTokens` into the raw u32 stream, mirroring the
     /// on-wire encoding the task's tests expect.
     fn flat(st: &SemanticTokens) -> Vec<u32> {
@@ -486,7 +495,7 @@ mod tests {
 
     #[test]
     fn keyword_classified() {
-        let st = semantic_tokens("void f() {}");
+        let st = tokens("void f() {}");
         let data = flat(&st);
         assert!(data.len() >= 5);
         assert_eq!(data[3], TT_KEYWORD);
@@ -494,7 +503,7 @@ mod tests {
 
     #[test]
     fn function_name_classified() {
-        let st = semantic_tokens("void greet() {}");
+        let st = tokens("void greet() {}");
         let data = flat(&st);
         assert!(data.len() >= 10);
         assert_eq!(data[3], TT_KEYWORD); // void
@@ -503,7 +512,7 @@ mod tests {
 
     #[test]
     fn class_name_classified() {
-        let st = semantic_tokens("class Foo { }");
+        let st = tokens("class Foo { }");
         let data = flat(&st);
         assert_eq!(data[3], TT_KEYWORD);
         assert_eq!(data[8], TT_CLASS);
@@ -511,7 +520,7 @@ mod tests {
 
     #[test]
     fn string_literal_classified() {
-        let st = semantic_tokens(r#"string s = "hello";"#);
+        let st = tokens(r#"string s = "hello";"#);
         let data = flat(&st);
         let mut found_string = false;
         for chunk in data.chunks(5) {
@@ -525,7 +534,7 @@ mod tests {
 
     #[test]
     fn enum_member_classified() {
-        let st = semantic_tokens("enum E { A, B }");
+        let st = tokens("enum E { A, B }");
         let data = flat(&st);
         let types: Vec<u32> = data.chunks(5).map(|c| c[3]).collect();
         assert!(types.contains(&TT_ENUM));
@@ -534,7 +543,7 @@ mod tests {
 
     #[test]
     fn number_literal_classified() {
-        let st = semantic_tokens("int x = 42;");
+        let st = tokens("int x = 42;");
         let data = flat(&st);
         let types: Vec<u32> = data.chunks(5).map(|c| c[3]).collect();
         assert!(types.contains(&TT_NUMBER));
@@ -542,7 +551,7 @@ mod tests {
 
     #[test]
     fn comment_classified() {
-        let st = semantic_tokens("// hello\nint x = 1;");
+        let st = tokens("// hello\nint x = 1;");
         let data = flat(&st);
         let types: Vec<u32> = data.chunks(5).map(|c| c[3]).collect();
         assert!(types.contains(&TT_COMMENT));
@@ -550,7 +559,7 @@ mod tests {
 
     #[test]
     fn parameter_classified() {
-        let st = semantic_tokens("void f(int a) {}");
+        let st = tokens("void f(int a) {}");
         let data = flat(&st);
         let types: Vec<u32> = data.chunks(5).map(|c| c[3]).collect();
         assert!(types.contains(&TT_PARAMETER));
@@ -558,7 +567,7 @@ mod tests {
 
     #[test]
     fn operator_classified() {
-        let st = semantic_tokens("int x = 1 + 2;");
+        let st = tokens("int x = 1 + 2;");
         let data = flat(&st);
         let types: Vec<u32> = data.chunks(5).map(|c| c[3]).collect();
         assert!(types.contains(&TT_OPERATOR));
@@ -566,7 +575,7 @@ mod tests {
 
     #[test]
     fn namespace_classified() {
-        let st = semantic_tokens("namespace Foo { void bar() {} }");
+        let st = tokens("namespace Foo { void bar() {} }");
         let data = flat(&st);
         let types: Vec<u32> = data.chunks(5).map(|c| c[3]).collect();
         assert!(types.contains(&TT_NAMESPACE));
@@ -577,7 +586,7 @@ mod tests {
     fn delta_encoding_monotonic() {
         // Ensure the encoder produces valid delta rows (delta_line
         // non-negative, and delta_start non-negative when delta_line == 0).
-        let st = semantic_tokens("int a = 1;\nint b = 2;");
+        let st = tokens("int a = 1;\nint b = 2;");
         for t in &st.data {
             if t.delta_line == 0 {
                 // delta_start is u32 so non-negative by construction; the

@@ -15,8 +15,7 @@
 
 use tower_lsp::lsp_types::*;
 
-use crate::lexer;
-use crate::parser::Parser;
+use crate::analysis::DocumentAnalysis;
 use crate::parser::ast::{
     ClassDecl, ClassMember, Expr, ExprKind, FunctionBody, FunctionDecl, Item, NamespaceDecl,
     PropertyDecl, SourceFile, Stmt, StmtKind, UnaryOp, VarDeclStmt,
@@ -26,17 +25,21 @@ use crate::server::diagnostics::{offset_to_position, position_to_offset};
 /// Public entry: compute document highlights for the identifier under
 /// `position`. Returns `None` when the cursor isn't on an identifier-like
 /// byte run.
-pub fn document_highlights(source: &str, position: Position) -> Option<Vec<DocumentHighlight>> {
+pub fn document_highlights(
+    analysis: &DocumentAnalysis,
+    position: Position,
+) -> Option<Vec<DocumentHighlight>> {
+    // The cursor comes from the editor, i.e. it addresses the ORIGINAL
+    // text; masked spans still line up because masking is byte-preserving.
+    let source = analysis.source.as_str();
     let cursor_offset = position_to_offset(source, position);
     let name = identifier_at(source, cursor_offset)?;
 
-    let tokens = lexer::tokenize_filtered(source);
-    let mut parser = Parser::new(&tokens, source);
-    let file: SourceFile = parser.parse_file();
+    let file: &SourceFile = &analysis.file;
 
     let mut out: Vec<Occurrence> = Vec::new();
     for item in &file.items {
-        collect_item(item, source, &name, &mut out);
+        collect_item(item, analysis.masked_source(), &name, &mut out);
     }
 
     // Deduplicate by (start, end); prefer the first-seen kind.
@@ -505,13 +508,18 @@ fn collect_expr_ctx(
 mod tests {
     use super::*;
 
+    fn highlights(src: &str, position: Position) -> Option<Vec<DocumentHighlight>> {
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        document_highlights(&analysis, position)
+    }
+
     #[test]
     fn test_local_variable_highlights_all_uses() {
         let src = "void f() { int x = 0; x = 1; g(x); }\n";
         // Put cursor on the declarator's 'x'.
         let decl_x = src.find("int x").unwrap() + 4;
         let position = offset_to_position(src, decl_x + 1);
-        let hs = document_highlights(src, position).expect("should return some");
+        let hs = highlights(src, position).expect("should return some");
         // Three 'x': declarator, LHS of x=1, and argument g(x).
         assert_eq!(hs.len(), 3, "got {:?}", hs);
     }
@@ -522,7 +530,7 @@ mod tests {
         // Cursor on the declarator 'x'.
         let decl_x = src.find("int x").unwrap() + 4;
         let position = offset_to_position(src, decl_x);
-        let hs = document_highlights(src, position).expect("some");
+        let hs = highlights(src, position).expect("some");
         // Expected: declarator=WRITE, LHS of `x = x + 1`=WRITE, RHS `x + 1`=READ.
         assert_eq!(hs.len(), 3, "got {:?}", hs);
         let writes = hs
@@ -542,11 +550,11 @@ mod tests {
         let src = "void f() { int x = 0; }\n";
         // Cursor inside `void`.
         let p = offset_to_position(src, 1);
-        assert!(document_highlights(src, p).is_none());
+        assert!(highlights(src, p).is_none());
         // Cursor inside `int`.
         let int_off = src.find("int").unwrap() + 1;
         let p2 = offset_to_position(src, int_off);
-        assert!(document_highlights(src, p2).is_none());
+        assert!(highlights(src, p2).is_none());
     }
 
     #[test]
@@ -554,7 +562,7 @@ mod tests {
         let src = "class Foo { int count; void m() { count = 1; print(count); } }\n";
         let field = src.find("int count").unwrap() + 4;
         let p = offset_to_position(src, field + 1);
-        let hs = document_highlights(src, p).expect("some");
+        let hs = highlights(src, p).expect("some");
         // Field declarator + `count = 1` LHS + `print(count)` argument = 3.
         assert!(hs.len() >= 2, "got {:?}", hs);
         assert!(
@@ -574,7 +582,7 @@ mod tests {
         let src = "void f() { int y = 1; y = 2; }\nvoid g() { int y = 3; }\n";
         let y_in_f = src.find("int y").unwrap() + 4;
         let p = offset_to_position(src, y_in_f + 1);
-        let hs = document_highlights(src, p).expect("some");
+        let hs = highlights(src, p).expect("some");
         // Naive matcher: matches all three `y` identifiers across both
         // functions. This is the acceptable over-simplification.
         assert_eq!(hs.len(), 3, "got {:?}", hs);
@@ -585,6 +593,6 @@ mod tests {
         let src = "void f() {   int x = 0; }\n";
         let ws_off = src.find("  int").unwrap() + 1;
         let p = offset_to_position(src, ws_off);
-        assert!(document_highlights(src, p).is_none());
+        assert!(highlights(src, p).is_none());
     }
 }

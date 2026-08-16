@@ -8,11 +8,13 @@ use crate::server::diagnostics::span_to_range;
 use crate::symbols::SymbolTable;
 use crate::symbols::scope::SymbolKind as InternalSymbolKind;
 
-pub fn document_symbols(source: &str) -> Option<DocumentSymbolResponse> {
-    let analysis = DocumentAnalysis::analyze_plain(source);
-    let file = analysis.file;
+pub fn document_symbols(analysis: &DocumentAnalysis) -> Option<DocumentSymbolResponse> {
+    // Names and ranges come from the masked AST; masking preserves byte
+    // offsets, so span→text/line mapping via the masked source is exact.
+    let source = analysis.masked_source();
 
-    let symbols: Vec<DocumentSymbol> = file
+    let symbols: Vec<DocumentSymbol> = analysis
+        .file
         .items
         .iter()
         .filter_map(|item| item_to_symbol(item, source))
@@ -207,7 +209,7 @@ fn item_to_symbol(item: &Item, source: &str) -> Option<DocumentSymbol> {
 pub fn workspace_symbols(
     query: &str,
     workspace: &SymbolTable,
-    file_uris: &HashMap<usize, (Url, String)>,
+    file_uris: &HashMap<usize, (Url, &crate::analysis::DocumentAnalysis)>,
 ) -> Vec<SymbolInformation> {
     let q = query.to_lowercase();
     let mut results = Vec::new();
@@ -229,10 +231,10 @@ pub fn workspace_symbols(
             InternalSymbolKind::Variable { .. } => SymbolKind::VARIABLE,
             InternalSymbolKind::Namespace => SymbolKind::NAMESPACE,
         };
-        let Some((uri, source)) = file_uris.get(&sym.file_id) else {
+        let Some((uri, analysis)) = file_uris.get(&sym.file_id) else {
             continue;
         };
-        let range = span_to_range(source, sym.span);
+        let range = span_to_range(analysis.masked_source(), sym.span);
         results.push(SymbolInformation {
             name: sym.name.clone(),
             kind,
@@ -258,7 +260,8 @@ mod tests {
     }
 
     fn doc_symbols(src: &str) -> Vec<DocumentSymbol> {
-        match document_symbols(src) {
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        match document_symbols(&analysis) {
             Some(DocumentSymbolResponse::Nested(v)) => v,
             _ => Vec::new(),
         }
@@ -312,16 +315,28 @@ mod tests {
 
     fn build_workspace(
         sources: &[(&str, &str)],
-    ) -> (SymbolTable, HashMap<usize, (Url, String)>) {
+    ) -> (
+        SymbolTable,
+        HashMap<usize, (Url, &'static crate::analysis::DocumentAnalysis)>,
+    ) {
         let mut table = SymbolTable::new();
-        let mut files: HashMap<usize, (Url, String)> = HashMap::new();
+        let mut files: HashMap<
+            usize,
+            (Url, &'static crate::analysis::DocumentAnalysis),
+        > = HashMap::new();
         for (name, src) in sources {
-            let file = parse(src);
+            let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
             let fid = table.allocate_file_id();
-            let syms = SymbolTable::extract_symbols(fid, src, &file);
+            let syms = SymbolTable::extract_symbols(
+                fid,
+                analysis.masked_source(),
+                &analysis.file,
+            );
             table.set_file_symbols(fid, syms);
+            let leaked: &'static crate::analysis::DocumentAnalysis =
+                Box::leak(Box::new(analysis));
             let uri = Url::parse(&format!("file:///tmp/{}", name)).unwrap();
-            files.insert(fid, (uri, src.to_string()));
+            files.insert(fid, (uri, leaked));
         }
         (table, files)
     }

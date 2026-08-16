@@ -1,14 +1,17 @@
 //! Folding range provider.
 //!
 //! Computes `textDocument/foldingRange` results for OpenPlanet AngelScript
-//! sources. Two complementary passes run over the same source:
+//! sources. Two complementary passes run over one [`DocumentAnalysis`]:
 //!
-//! 1. **AST pass** walks `SourceFile` items collecting brace-to-brace folds
-//!    for namespaces, classes, interfaces, enums, functions, methods, and
-//!    nested statement blocks (`if`/`for`/`while`/`do-while`/`switch`/`try`).
-//! 2. **Byte pass** scans the raw source for things the AST doesn't model as
-//!    spans: multi-line block comments (`/* ... */`) and `#if`/`#endif`
-//!    preprocessor regions.
+//! 1. **AST pass** walks the parsed (masked) `SourceFile` items collecting
+//!    brace-to-brace folds for namespaces, classes, interfaces, enums,
+//!    functions, methods, and nested statement blocks
+//!    (`if`/`for`/`while`/`do-while`/`switch`/`try`).
+//! 2. **Byte pass** scans the ORIGINAL source for things the AST doesn't
+//!    model as spans: multi-line block comments (`/* ... */`) and
+//!    `#if`/`#endif` preprocessor regions. It must run on the original
+//!    text because masking blanks directive lines — but since masking is
+//!    length-preserving, line numbers agree between both views.
 //!
 //! Single-line folds (`start_line == end_line`) are filtered out — they add
 //! nothing for the editor — and the final list is sorted by `(start_line,
@@ -16,25 +19,24 @@
 
 use tower_lsp::lsp_types::{FoldingRange, FoldingRangeKind};
 
-use crate::lexer;
+use crate::analysis::DocumentAnalysis;
 use crate::lexer::Span;
-use crate::parser::Parser;
 use crate::parser::ast::{
     ClassDecl, ClassMember, FunctionBody, FunctionDecl, Item, Stmt, StmtKind,
 };
 use crate::server::diagnostics::offset_to_position;
 
-/// Compute all folding ranges for a single source file.
-pub fn folding_ranges(source: &str) -> Vec<FoldingRange> {
+/// Compute all folding ranges for a single analyzed document.
+pub fn folding_ranges(analysis: &DocumentAnalysis) -> Vec<FoldingRange> {
     let mut out: Vec<FoldingRange> = Vec::new();
 
-    // AST pass.
-    let tokens = lexer::tokenize_filtered(source);
-    let mut parser = Parser::new(&tokens, source);
-    let file = parser.parse_file();
-    collect_items(&file.items, source, &mut out);
+    // AST pass — spans come from the masked AST; `masked_source()` preserves
+    // byte offsets, so offset→line mapping is exact.
+    let masked = analysis.masked_source();
+    collect_items(&analysis.file.items, masked, &mut out);
 
-    // Byte pass (comments + preprocessor regions).
+    // Byte pass (comments + preprocessor regions) over the original text.
+    let source = analysis.source.as_str();
     let skip = compute_skip_mask(source.as_bytes());
     collect_block_comments(source, &mut out);
     collect_preprocessor_regions(source, &skip, &mut out);
@@ -389,10 +391,15 @@ fn collect_preprocessor_regions(source: &str, skip: &[bool], out: &mut Vec<Foldi
 mod tests {
     use super::*;
 
+    fn ranges(src: &str) -> Vec<FoldingRange> {
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        folding_ranges(&analysis)
+    }
+
     #[test]
     fn test_function_body_folds() {
         let src = "void f() {\n  int x = 0;\n  x = 1;\n}\n";
-        let folds = folding_ranges(src);
+        let folds = ranges(src);
         assert!(
             folds.iter().any(|f| f.start_line == 0 && f.end_line >= 2),
             "expected a fold covering the function body, got {:?}",
@@ -403,7 +410,7 @@ mod tests {
     #[test]
     fn test_single_line_function_no_fold() {
         let src = "void f() { return; }\n";
-        let folds = folding_ranges(src);
+        let folds = ranges(src);
         assert!(
             folds.is_empty(),
             "expected no folds for single-line function, got {:?}",
@@ -414,7 +421,7 @@ mod tests {
     #[test]
     fn test_nested_class_and_method_fold() {
         let src = "class Foo {\n  void m() {\n    int y = 0;\n  }\n}\n";
-        let folds = folding_ranges(src);
+        let folds = ranges(src);
         assert!(
             folds.len() >= 2,
             "expected class body + method body folds, got {:?}",
@@ -427,7 +434,7 @@ mod tests {
     #[test]
     fn test_block_comment_multiline_fold() {
         let src = "/*\n  hi\n*/\nvoid f() {}\n";
-        let folds = folding_ranges(src);
+        let folds = ranges(src);
         let comment_folds: Vec<_> = folds
             .iter()
             .filter(|f| f.kind == Some(FoldingRangeKind::Comment))
@@ -440,7 +447,7 @@ mod tests {
     #[test]
     fn test_block_comment_single_line_no_fold() {
         let src = "/* inline */\n";
-        let folds = folding_ranges(src);
+        let folds = ranges(src);
         assert!(
             folds
                 .iter()
@@ -453,7 +460,7 @@ mod tests {
     #[test]
     fn test_preprocessor_if_endif_fold() {
         let src = "#if MY_FLAG\nvoid f() {}\n#endif\n";
-        let folds = folding_ranges(src);
+        let folds = ranges(src);
         let regions: Vec<_> = folds
             .iter()
             .filter(|f| f.kind == Some(FoldingRangeKind::Region))
@@ -466,7 +473,7 @@ mod tests {
     #[test]
     fn test_nested_preprocessor_if_fold() {
         let src = "#if OUTER\n#if INNER\nvoid f() {}\n#endif\n#endif\n";
-        let folds = folding_ranges(src);
+        let folds = ranges(src);
         let regions: Vec<_> = folds
             .iter()
             .filter(|f| f.kind == Some(FoldingRangeKind::Region))

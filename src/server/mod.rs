@@ -1,7 +1,6 @@
 pub mod call_hierarchy;
 pub mod code_actions;
 pub mod completion;
-pub mod definition;
 pub mod diagnostics;
 pub mod folding;
 pub mod formatter;
@@ -9,7 +8,6 @@ pub mod highlights;
 pub mod hover;
 pub mod inlay_hints;
 pub mod navigation;
-pub mod references;
 pub mod scope_query;
 pub mod semantic_tokens;
 pub mod signature;
@@ -314,8 +312,11 @@ impl LanguageServer for Backend {
         };
         let type_index = self.type_index.read().await;
         let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let items = completion::complete(
-            &source,
+            &analysis,
             pos,
             type_index.as_deref(),
             Some(snapshot.symbols()),
@@ -332,8 +333,11 @@ impl LanguageServer for Backend {
         };
         let type_index = self.type_index.read().await;
         let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         Ok(hover::hover(
-            &source,
+            &analysis,
             pos,
             type_index.as_deref(),
             Some(snapshot.symbols()),
@@ -351,10 +355,13 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         Ok(
-            navigation::goto_definition(&source, pos, snapshot.symbols(), &workspace_files)
+            navigation::goto_definition(&analysis, pos, snapshot.symbols(), &workspace_files)
                 .map(GotoDefinitionResponse::Scalar),
         )
     }
@@ -367,10 +374,13 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let refs = navigation::find_references(
-            &source,
+            &analysis,
             pos,
             &workspace_files,
             params.context.include_declaration,
@@ -388,7 +398,11 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        Ok(highlights::document_highlights(&source, pos))
+        let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
+        Ok(highlights::document_highlights(&analysis, pos))
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
@@ -397,7 +411,11 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        Ok(Some(folding::folding_ranges(&source)))
+        let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
+        Ok(Some(folding::folding_ranges(&analysis)))
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
@@ -409,8 +427,11 @@ impl LanguageServer for Backend {
         };
         let type_index = self.type_index.read().await;
         let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         Ok(signature::signature_help(
-            &source,
+            &analysis,
             pos,
             type_index.as_deref(),
             Some(snapshot.symbols()),
@@ -422,9 +443,10 @@ impl LanguageServer for Backend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
-        let doc = self.documents.get(uri);
-        let source = doc.as_ref().map(|d| d.value().as_str()).unwrap_or("");
-        Ok(symbols::document_symbols(source))
+        let snapshot = self.snapshot.read().await.clone();
+        let empty = crate::analysis::DocumentAnalysis::analyze_plain("");
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&empty);
+        Ok(symbols::document_symbols(analysis))
     }
 
     async fn symbol(
@@ -448,10 +470,13 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         Ok(navigation::rename(
-            &source,
+            &analysis,
             pos,
             &params.new_name,
             &workspace_files,
@@ -467,7 +492,11 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let tokens = semantic_tokens::semantic_tokens(&source);
+        let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
+        let tokens = semantic_tokens::semantic_tokens(&analysis);
         Ok(Some(SemanticTokensResult::Tokens(tokens)))
     }
 
@@ -500,8 +529,11 @@ impl LanguageServer for Backend {
         };
         let snapshot = self.snapshot.read().await.clone();
         let type_index = self.type_index.read().await;
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let hints = inlay_hints::inlay_hints(
-            &source,
+            &analysis,
             params.range,
             type_index.as_deref(),
             Some(snapshot.symbols()),
@@ -520,9 +552,12 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let snapshot = self.snapshot.read().await.clone();
+        let owned =
+            crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };
-        let items = call_hierarchy::prepare(&source, uri, pos, snapshot.symbols(), &ws_files);
+        let items = call_hierarchy::prepare(&analysis, uri, pos, snapshot.symbols(), &ws_files);
         if items.is_empty() {
             Ok(None)
         } else {

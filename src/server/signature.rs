@@ -60,17 +60,17 @@ struct ResolvedSignature {
 }
 
 pub fn signature_help(
-    source: &str,
+    analysis: &DocumentAnalysis,
     position: Position,
     type_index: Option<&TypeIndex>,
     workspace: Option<&SymbolTable>,
 ) -> Option<SignatureHelp> {
+    let source = analysis.masked_source();
     let cursor = position_to_offset(source, position);
     let call = find_enclosing_call(source, cursor)?;
 
-    // Parse once for receiver-type lookup on member calls.
-    let analysis = DocumentAnalysis::analyze_plain(source);
-    let file: SourceFile = analysis.file;
+    // Reuse the snapshot's parse for receiver-type lookup on member calls.
+    let file: &SourceFile = &analysis.file;
 
     let scope = workspace.map(|ws| GlobalScope::new(ws, type_index));
 
@@ -706,7 +706,7 @@ mod tests {
         let src = "void f(int a, string b) {}\nvoid main() { f(| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.signatures.len(), 1);
         assert_eq!(help.active_signature, Some(0));
         assert_eq!(help.active_parameter, Some(0));
@@ -719,7 +719,7 @@ mod tests {
         let src = "void f(int a, string b) {}\nvoid main() { f(42,| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.active_parameter, Some(1));
         assert_eq!(help.active_signature, Some(0));
     }
@@ -733,7 +733,7 @@ void f(int a, string b) {}
 void main() { f(1,| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.signatures.len(), 3);
         assert_eq!(help.active_parameter, Some(1));
         // Only the third overload has 2+ params, so active_signature must be
@@ -755,7 +755,7 @@ void main() { f(1,| }";
         let src = "void f(int a, string b) {}\nvoid main() { f(1, | }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.active_parameter, Some(1));
     }
 
@@ -767,7 +767,7 @@ void inner(string s) {}
 void main() { outer(inner(| ) }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
         let active = help.active_signature.unwrap_or(0) as usize;
         assert!(
             help.signatures[active].label.contains("inner"),
@@ -781,7 +781,7 @@ void main() { outer(inner(| ) }";
         let src = "void f() {}\nvoid main() { int x = 5;| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&source, position, None, Some(&ws));
+        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws));
         assert!(
             help.is_none(),
             "expected None outside a call, got {:?}",
@@ -796,7 +796,7 @@ class Foo { void m(int x) {} }
 void main() { Foo f; f.m(| }";
         let (source, position) = split_cursor(src);
         let ws = ws_from(&source);
-        let help = signature_help(&source, position, None, Some(&ws)).expect("signature help");
+        let help = signature_help(&DocumentAnalysis::analyze_plain(&source), position, None, Some(&ws)).expect("signature help");
         assert_eq!(help.active_parameter, Some(0));
         assert!(
             help.signatures[0].label.contains("int"),

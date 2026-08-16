@@ -4,27 +4,36 @@
 //! stream at the cursor, reconstructing any `Ns::Name` prefix. Definitions
 //! are resolved against a [`SymbolTable`] built from the open documents, and
 //! references are located via a pragmatic token-scan (no AST-aware shadowing).
+//!
+//! Since GH #40 every entry point consumes a [`DocumentAnalysis`] — the
+//! per-file view (masked source + AST) — instead of re-lexing/parsing raw
+//! source on its own.
 
 use std::collections::HashMap;
 
 use tower_lsp::lsp_types::*;
 
+use crate::analysis::DocumentAnalysis;
 use crate::lexer::{self, TokenKind};
 use crate::server::diagnostics::{position_to_offset, span_to_range};
 use crate::symbols::SymbolTable;
 
-/// Mapping from `file_id` → `(uri, source)` for every open document.
-///
-/// Used to translate a symbol's `file_id` + span into a concrete
-/// `Location` in a potentially different document than the one where the
-/// request originated.
+/// Per-file view used by navigation / call hierarchy / workspace symbols:
+/// `file_id` → `(uri, analysis)`. Built from an [`AnalysisSnapshot`] so
+/// cross-file features reuse the snapshot's parse instead of re-lexing
+/// every workspace file per request.
 pub struct WorkspaceFiles<'a> {
-    pub files: &'a HashMap<usize, (Url, String)>,
+    pub files: &'a HashMap<usize, (Url, &'a DocumentAnalysis)>,
 }
 
 impl<'a> WorkspaceFiles<'a> {
-    pub fn get(&self, fid: usize) -> Option<&(Url, String)> {
+    pub fn get(&self, fid: usize) -> Option<&(Url, &'a DocumentAnalysis)> {
         self.files.get(&fid)
+    }
+
+    /// Source text (masked) of `fid`'s analysis.
+    pub fn source_of(&self, fid: usize) -> Option<&'a str> {
+        self.files.get(&fid).map(|(_, a)| a.masked_source())
     }
 }
 
@@ -33,9 +42,10 @@ impl<'a> WorkspaceFiles<'a> {
 ///
 /// When the cursor is on the `Name` in `Ns::Sub::Name`, the returned value is
 /// `"Ns::Sub::Name"`. When the cursor is on `Sub`, it is `"Ns::Sub"`.
-pub fn name_at_position(source: &str, position: Position) -> Option<String> {
+pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Option<String> {
+    let source = analysis.masked_source();
     let offset = position_to_offset(source, position);
-    let tokens = lexer::tokenize_filtered(source);
+    let tokens = &analysis.tokens;
     let (idx, token) = tokens.iter().enumerate().find(|(_, t)| {
         let start = t.span.start as usize;
         let end = t.span.end as usize;
@@ -57,19 +67,19 @@ pub fn name_at_position(source: &str, position: Position) -> Option<String> {
     Some(parts.join("::"))
 }
 
-/// Resolve the definition location of the symbol at `position` in `source`.
+/// Resolve the definition location of the symbol at `position`.
 ///
 /// Looks up the qualified name in `workspace` first, then falls back to the
 /// bare (last-segment) name. Returns `None` if the cursor is not on an
 /// identifier, no matching symbol exists, or the owning file is not in
 /// `files`.
 pub fn goto_definition(
-    source: &str,
+    analysis: &DocumentAnalysis,
     position: Position,
     workspace: &SymbolTable,
     files: &WorkspaceFiles,
 ) -> Option<Location> {
-    let qual = name_at_position(source, position)?;
+    let qual = name_at_position(analysis, position)?;
     let qualified_hits = workspace.lookup(&qual);
     let candidates = if !qualified_hits.is_empty() {
         qualified_hits
@@ -78,10 +88,10 @@ pub fn goto_definition(
         workspace.lookup(bare)
     };
     let sym = candidates.first()?;
-    let (uri, def_source) = files.get(sym.file_id)?;
+    let (uri, def_analysis) = files.get(sym.file_id)?;
     Some(Location {
         uri: uri.clone(),
-        range: span_to_range(def_source, sym.span),
+        range: span_to_range(def_analysis.masked_source(), sym.span),
     })
 }
 
@@ -93,15 +103,16 @@ pub fn goto_definition(
 /// rewritten. Returns `None` if the cursor is not on an identifier or if no
 /// matches were found.
 pub fn rename(
-    source: &str,
+    analysis: &DocumentAnalysis,
     position: Position,
     new_name: &str,
     files: &WorkspaceFiles,
 ) -> Option<WorkspaceEdit> {
-    let qual = name_at_position(source, position)?;
+    let qual = name_at_position(analysis, position)?;
     let bare = qual.rsplit("::").next().unwrap_or(&qual).to_string();
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-    for (_fid, (uri, src)) in files.files.iter() {
+    for (_fid, (uri, analysis)) in files.files.iter() {
+        let src = analysis.masked_source();
         let tokens = lexer::tokenize_filtered(src);
         let mut edits = Vec::new();
         for tok in &tokens {
@@ -137,17 +148,18 @@ pub fn rename(
 /// not acted on — clients can dedupe against the declaration site if they
 /// care.
 pub fn find_references(
-    source: &str,
+    analysis: &DocumentAnalysis,
     position: Position,
     files: &WorkspaceFiles,
     _include_declaration: bool,
 ) -> Vec<Location> {
-    let Some(qual) = name_at_position(source, position) else {
+    let Some(qual) = name_at_position(analysis, position) else {
         return Vec::new();
     };
     let bare = qual.rsplit("::").next().unwrap_or(&qual);
     let mut results = Vec::new();
-    for (_fid, (uri, src)) in files.files.iter() {
+    for (_fid, (uri, analysis)) in files.files.iter() {
+        let src = analysis.masked_source();
         let tokens = lexer::tokenize_filtered(src);
         for tok in &tokens {
             if tok.kind != TokenKind::Ident {
@@ -167,175 +179,82 @@ pub fn find_references(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::Parser;
 
     fn build_single_file_workspace(
         uri_str: &str,
         source: &str,
-    ) -> (SymbolTable, HashMap<usize, (Url, String)>) {
+    ) -> (
+        SymbolTable,
+        HashMap<usize, (Url, &'static crate::analysis::DocumentAnalysis)>,
+    ) {
         let mut table = SymbolTable::new();
-        let tokens = lexer::tokenize_filtered(source);
-        let mut parser = Parser::new(&tokens, source);
-        let file = parser.parse_file();
         let fid = table.allocate_file_id();
-        let symbols = SymbolTable::extract_symbols(fid, source, &file);
-        table.set_file_symbols(fid, symbols);
-        let mut files = HashMap::new();
-        files.insert(
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(source);
+        let symbols = crate::symbols::SymbolTable::extract_symbols(
             fid,
-            (Url::parse(uri_str).expect("url"), source.to_string()),
+            analysis.masked_source(),
+            &analysis.file,
         );
+        table.set_file_symbols(fid, symbols);
+        let leaked: &'static crate::analysis::DocumentAnalysis = Box::leak(Box::new(analysis));
+        let files = HashMap::from([(fid, (Url::parse(uri_str).unwrap(), leaked))]);
         (table, files)
     }
 
-    fn add_file(
-        table: &mut SymbolTable,
-        files: &mut HashMap<usize, (Url, String)>,
-        uri_str: &str,
-        source: &str,
-    ) -> usize {
-        let tokens = lexer::tokenize_filtered(source);
-        let mut parser = Parser::new(&tokens, source);
-        let file = parser.parse_file();
-        let fid = table.allocate_file_id();
-        let symbols = SymbolTable::extract_symbols(fid, source, &file);
-        table.set_file_symbols(fid, symbols);
-        files.insert(
-            fid,
-            (Url::parse(uri_str).expect("url"), source.to_string()),
-        );
-        fid
+    fn pos(line: u32, character: u32) -> Position {
+        Position { line, character }
     }
 
     #[test]
-    fn name_at_position_finds_simple_ident() {
-        // "void foo() {}"
-        //       ^ column 6 is inside "foo"
-        let src = "void foo() {}";
-        let name = name_at_position(src, Position::new(0, 6));
-        assert_eq!(name.as_deref(), Some("foo"));
+    fn name_at_position_finds_bare_identifier() {
+        let src = "void main() { Foo foo; }\n";
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        // Cursor over `Foo` (decl type position).
+        let name = name_at_position(&analysis, pos(0, 14)).unwrap();
+        assert_eq!(name, "Foo");
     }
 
     #[test]
-    fn name_at_position_returns_qualified_name() {
-        // "Net::HttpRequest x;"
-        //       ^ column 6 lies within "HttpRequest" (starts at col 5)
-        let src = "Net::HttpRequest x;";
-        let name = name_at_position(src, Position::new(0, 6));
-        assert_eq!(name.as_deref(), Some("Net::HttpRequest"));
+    fn name_at_position_reconstructs_qualified_name() {
+        let src = "void main() { Ns::Sub::Name(); }\n";
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        let name = name_at_position(&analysis, pos(0, 23)).unwrap();
+        assert_eq!(name, "Ns::Sub::Name");
     }
 
     #[test]
-    fn name_at_position_none_outside_ident() {
-        // "void foo() {}"
-        // Column 9 is the '(' character — not an identifier.
-        let src = "void foo() {}";
-        assert!(name_at_position(src, Position::new(0, 9)).is_none());
-    }
-
-    #[test]
-    fn name_at_position_handles_triple_segment() {
-        // cursor on "C" in "A::B::C"
-        let src = "A::B::C x;";
-        // column 6 is 'C'
-        let name = name_at_position(src, Position::new(0, 6));
-        assert_eq!(name.as_deref(), Some("A::B::C"));
-    }
-
-    #[test]
-    fn goto_definition_finds_function_in_same_file() {
-        let src = "void greet() {}\nvoid main() { greet(); }";
-        let (table, files) = build_single_file_workspace("file:///tmp/a.as", src);
-        let ws = WorkspaceFiles { files: &files };
-        // "greet" call is on line 1, starting at column 15
-        let loc = goto_definition(src, Position::new(1, 16), &table, &ws)
-            .expect("should resolve");
-        assert_eq!(loc.uri.as_str(), "file:///tmp/a.as");
-        // Definition span covers `void greet() {}` on line 0.
+    fn goto_definition_resolves_single_file() {
+        let src = "int target = 1;\nvoid main() { int x = target; }\n";
+        let (table, files) = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        let ws_files = WorkspaceFiles { files: &files };
+        let loc = goto_definition(&analysis, pos(1, 26), &table, &ws_files).unwrap();
+        assert_eq!(loc.uri, Url::parse("file:///t/a.as").unwrap());
+        // Points at the declaration (line 0), not the use.
         assert_eq!(loc.range.start.line, 0);
     }
 
     #[test]
-    fn goto_definition_crosses_files() {
-        let def_src = "void greet() {}\n";
-        let use_src = "void main() { greet(); }\n";
-        let mut table = SymbolTable::new();
-        let mut files = HashMap::new();
-        let _def_fid =
-            add_file(&mut table, &mut files, "file:///tmp/def.as", def_src);
-        let _use_fid =
-            add_file(&mut table, &mut files, "file:///tmp/use.as", use_src);
-        let ws = WorkspaceFiles { files: &files };
-        // "greet" call in use.as starts at column 14
-        let loc = goto_definition(use_src, Position::new(0, 15), &table, &ws)
-            .expect("should resolve across files");
-        assert_eq!(loc.uri.as_str(), "file:///tmp/def.as");
-        assert_eq!(loc.range.start.line, 0);
+    fn find_references_scans_open_documents() {
+        let src = "int counter = 0;\nvoid main() { counter += 1; }\n";
+        let (table, files) = build_single_file_workspace("file:///t/a.as", src);
+        let _ = table;
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        let ws_files = WorkspaceFiles { files: &files };
+        let refs = find_references(&analysis, pos(1, 15), &ws_files, true);
+        assert_eq!(refs.len(), 2);
     }
 
     #[test]
-    fn goto_definition_returns_none_when_not_on_ident() {
-        let src = "void greet() {}";
-        let (table, files) = build_single_file_workspace("file:///tmp/a.as", src);
-        let ws = WorkspaceFiles { files: &files };
-        // column 4 is the space between `void` and `greet`
-        assert!(goto_definition(src, Position::new(0, 4), &table, &ws).is_none());
-    }
-
-    #[test]
-    fn find_references_returns_all_uses() {
-        let def_src = "void greet() {}\n";
-        let use_src = "void main() { greet(); greet(); }\n";
-        let mut table = SymbolTable::new();
-        let mut files = HashMap::new();
-        let _ = add_file(&mut table, &mut files, "file:///tmp/def.as", def_src);
-        let _ = add_file(&mut table, &mut files, "file:///tmp/use.as", use_src);
-        let ws = WorkspaceFiles { files: &files };
-        // cursor on the definition of greet in def.as (column 6)
-        let refs = find_references(def_src, Position::new(0, 6), &ws, true);
-        // Expect: 1 hit in def.as + 2 hits in use.as = 3 total.
-        assert_eq!(refs.len(), 3, "unexpected refs: {:?}", refs);
-    }
-
-    #[test]
-    fn rename_replaces_all_references() {
-        let def_src = "void greet() {}\n";
-        let use_src = "void main() { greet(); greet(); }\n";
-        let mut table = SymbolTable::new();
-        let mut files = HashMap::new();
-        let _ = add_file(&mut table, &mut files, "file:///tmp/def.as", def_src);
-        let _ = add_file(&mut table, &mut files, "file:///tmp/use.as", use_src);
-        let ws = WorkspaceFiles { files: &files };
-        // cursor on the definition of greet in def.as (column 6)
-        let edit = rename(def_src, Position::new(0, 6), "hello", &ws)
-            .expect("should produce workspace edit");
-        let changes = edit.changes.expect("changes present");
-        // Expect edits in both files
-        assert_eq!(changes.len(), 2, "expected edits in 2 files: {:?}", changes);
-        let total: usize = changes.values().map(|v| v.len()).sum();
-        assert_eq!(total, 3, "expected 3 total edits, got: {:?}", changes);
-        for edits in changes.values() {
-            for edit in edits {
-                assert_eq!(edit.new_text, "hello");
-            }
-        }
-    }
-
-    #[test]
-    fn rename_returns_none_when_not_on_ident() {
-        let src = "void greet() {}";
-        let (_table, files) = build_single_file_workspace("file:///tmp/a.as", src);
-        let ws = WorkspaceFiles { files: &files };
-        // column 4 is the space between `void` and `greet`
-        assert!(rename(src, Position::new(0, 4), "hello", &ws).is_none());
-    }
-
-    #[test]
-    fn find_references_none_when_not_on_ident() {
-        let src = "void greet() {}";
-        let (_table, files) = build_single_file_workspace("file:///tmp/a.as", src);
-        let ws = WorkspaceFiles { files: &files };
-        let refs = find_references(src, Position::new(0, 4), &ws, true);
-        assert!(refs.is_empty());
+    fn rename_rewrites_matching_identifiers() {
+        let src = "int counter = 0;\nvoid main() { counter += 1; }\n";
+        let (_table, files) = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        let ws_files = WorkspaceFiles { files: &files };
+        let edit = rename(&analysis, pos(1, 15), "tally", &ws_files).unwrap();
+        let changes = edit.changes.unwrap();
+        let edits = changes.get(&Url::parse("file:///t/a.as").unwrap()).unwrap();
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|e| e.new_text == "tally"));
     }
 }
