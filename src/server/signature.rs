@@ -30,7 +30,6 @@ use crate::analysis::DocumentAnalysis;
 use crate::parser::ast::SourceFile;
 use crate::server::diagnostics::position_to_offset;
 use crate::server::scope_query;
-use crate::symbols::scope::SymbolKind;
 use crate::symbols::SymbolTable;
 use crate::typecheck::global_scope::{GlobalScope, OverloadSig};
 use crate::typedb::TypeIndex;
@@ -77,7 +76,7 @@ pub fn signature_help(
     let sigs = resolve_callee(
         &call.callee_text,
         source,
-        &file,
+        file,
         cursor as u32,
         scope.as_ref(),
         type_index,
@@ -490,17 +489,10 @@ fn collect_workspace_method_overloads(
         if !visited.insert(name.clone()) {
             break;
         }
-        let qualified = format!("{}::{}", name, method);
         let mut any = false;
-        for s in scope.workspace.all_symbols() {
-            if s.name != qualified {
-                continue;
-            }
-            if let SymbolKind::Function {
-                return_type,
-                params,
-                min_args,
-            } = &s.kind
+        for (return_type, params, min_args, doc) in
+            scope.workspace_class_method_sigs(&name, method)
+        {
             {
                 any = true;
                 // Storage order: `(name, type_text)`.
@@ -514,8 +506,8 @@ fn collect_workspace_method_overloads(
                         return_type.clone()
                     },
                     params: sig_params,
-                    doc: s.doc.clone(),
-                    min_args: *min_args,
+                    doc,
+                    min_args,
                 });
             }
         }

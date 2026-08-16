@@ -17,7 +17,6 @@ use super::resolver::TypeResolver;
 use crate::lexer::token::TokenKind;
 use crate::lexer::Span;
 use crate::parser::ast::*;
-use crate::symbols::scope::SymbolKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeDiagnosticSeverity {
@@ -407,28 +406,7 @@ impl<'a> Checker<'a> {
         if let Some((_, members)) = self.file_classes.get(class_name) {
             out.extend(members.clone());
         } else {
-            let prefix = format!("{}::", class_name);
-            for s in self.scope.workspace.all_symbols() {
-                if !s.name.starts_with(&prefix) {
-                    continue;
-                }
-                let member_name = s.name.strip_prefix(&prefix).unwrap_or(&s.name);
-                match &s.kind {
-                    SymbolKind::Variable { type_name } => {
-                        out.push((
-                            member_name.to_string(),
-                            TypeRepr::parse_type_string(type_name),
-                        ));
-                    }
-                    SymbolKind::Function { return_type, .. } => {
-                        out.push((
-                            member_name.to_string(),
-                            TypeRepr::parse_type_string(return_type),
-                        ));
-                    }
-                    _ => {}
-                }
-            }
+            out.extend(self.scope.workspace_class_member_pairs(class_name));
         }
 
         for parent in self.scope.workspace_class_parents(class_name) {
@@ -1668,13 +1646,9 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Named(resolved);
                 }
-                if let Some(ext) = self.scope.external {
-                    if let Some(enum_name) = ext.find_by_short_name(&name).first() {
-                        if ext.lookup_enum(enum_name).is_some() {
-                            self.walk_args(args);
-                            return TypeRepr::Named(enum_name.clone());
-                        }
-                    }
+                if let Some(enum_name) = self.scope.external_enum_by_short_name(&name) {
+                    self.walk_args(args);
+                    return TypeRepr::Named(enum_name);
                 }
                 if self.scope.has_global_ident(&name) {
                     self.walk_args(args);

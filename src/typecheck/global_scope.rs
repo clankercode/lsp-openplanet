@@ -14,8 +14,8 @@ use crate::typedb::TypeIndex;
 /// Read-only merged view of all globally visible symbols:
 /// workspace-defined (user code) + external (Openplanet core + Nadeo).
 pub struct GlobalScope<'a> {
-    pub workspace: &'a SymbolTable,
-    pub external: Option<&'a TypeIndex>,
+    workspace: &'a SymbolTable,
+    external: Option<&'a TypeIndex>,
 }
 
 /// A single overload candidate for a workspace free function, as returned
@@ -440,62 +440,6 @@ impl<'a> GlobalScope<'a> {
         None
     }
 
-    /// True if a fully qualified path `A::B::C` resolves as:
-    /// - a type / function / enum / workspace variable directly, OR
-    /// - `A::B` being an enum and `C` one of its values, OR
-    /// - a workspace class member path `Class::member` (any kind).
-    ///
-    /// Used by the checker when walking `ExprKind::NamespaceAccess`.
-    pub fn has_qualified_path(&self, qual: &str) -> bool {
-        // Direct hit as type/function/enum/global.
-        if self.has_global_ident(qual) {
-            return true;
-        }
-        // Enum value: split off the tail, see if the head names an enum
-        // and the tail is one of its values.
-        if let Some(idx) = qual.rfind("::") {
-            let head = &qual[..idx];
-            let tail = &qual[idx + 2..];
-            // Workspace enum with matching value.
-            for s in self.workspace.all_symbols() {
-                if s.name == head {
-                    if let SymbolKind::Enum { values } = &s.kind {
-                        if values.iter().any(|(v, _)| v == tail) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            // External enum with matching value.
-            if let Some(ext) = self.external {
-                if let Some(en) = ext.lookup_enum(head) {
-                    if en.values.iter().any(|(v, _)| v == tail) {
-                        return true;
-                    }
-                }
-            }
-            // Workspace class member (e.g. `Foo::bar` → class `Foo` has `bar`).
-            // Any Variable/Function/EnumValue symbol whose fully qualified
-            // name exactly equals `qual` is accepted.
-            for s in self.workspace.all_symbols() {
-                if s.name == qual {
-                    return true;
-                }
-            }
-            // External: is the head a known type with member `tail`?
-            if let Some(ext) = self.external {
-                if let Some(info) = ext.lookup_type(head) {
-                    if info.properties.iter().any(|p| p.name == tail)
-                        || info.methods.iter().any(|m| m.name == tail)
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
     /// Look up external type info by fully qualified name or Nadeo short name.
     fn external_type_info(&self, name: &str) -> Option<&crate::typedb::index::TypeInfo> {
         let ext = self.external?;
@@ -767,17 +711,9 @@ impl<'a> GlobalScope<'a> {
     /// Look up a unique workspace free function's parameter type text list
     /// by qualified name. Returns `None` if the name has zero matches *or*
     /// two-plus matches (the overloaded case — callers conservatively
-    /// suppress type checking when overloads exist). Returns the raw
-    /// `type_text` strings as stored in the symbol table; callers are
-    /// responsible for parsing them (e.g. via `PrimitiveType::from_name`).
-    pub fn lookup_function_param_types(&self, qualified: &str) -> Option<Vec<String>> {
-        self.lookup_function_params(qualified)
-            .map(|params| params.into_iter().map(|(_, ty_text)| ty_text).collect())
-    }
-
     /// Return every workspace free-function overload matching `qualified`.
-    /// Unlike `lookup_function_signature` / `lookup_function_param_types`,
-    /// this does NOT suppress the 2+-match case — callers get the full set
+    /// Unlike `lookup_function_signature`, this does NOT suppress the
+    /// 2+-match case — callers get the full set
     /// and are expected to run their own overload resolution. Returns an
     /// empty Vec if no workspace function has that name.
     ///
@@ -895,6 +831,77 @@ impl<'a> GlobalScope<'a> {
     ///
     /// Uses a visited-set to prevent infinite loops on cyclic
     /// inheritance (pathological user code: `A : B, B : A`).
+    /// External typedb enum lookup by short name: the enum's qualified
+    /// name if `short` names an enum in the type database (absorbs the
+    /// former `scope.external` field read in the checker, GH #41).
+    pub fn external_enum_by_short_name(&self, short: &str) -> Option<String> {
+        let ext = self.external?;
+        ext.find_by_short_name(short)
+            .into_iter()
+            .find(|enum_name| ext.lookup_enum(enum_name).is_some())
+            .cloned()
+    }
+
+    /// All members (fields + methods, typed) declared on `class_name`
+    /// itself — NOT walking parents. Each method appears with its return
+    /// type as the member type (same approximation the checker uses for
+    /// implicit-this resolution). Absorbs the former pub-field prefix
+    /// scans in `checker.rs` / `signature.rs` (GH #41).
+    pub fn workspace_class_member_pairs(&self, class_name: &str) -> Vec<(String, TypeRepr)> {
+        let prefix = format!("{}::", class_name);
+        let mut out = Vec::new();
+        for s in self.workspace.all_symbols() {
+            if !s.name.starts_with(&prefix) {
+                continue;
+            }
+            let member_name = s.name.strip_prefix(&prefix).unwrap_or(&s.name);
+            match &s.kind {
+                crate::symbols::scope::SymbolKind::Variable { type_name } => {
+                    out.push((member_name.to_string(), TypeRepr::parse_type_string(type_name)));
+                }
+                crate::symbols::scope::SymbolKind::Function { return_type, .. } => {
+                    out.push((
+                        member_name.to_string(),
+                        TypeRepr::parse_type_string(return_type),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Function symbols on a class (qualified `Class::method`) as
+    /// `(return_type, params, min_args, doc)` tuples — the data
+    /// `signature.rs` used to walk `workspace.all_symbols()` for (GH #41).
+    pub fn workspace_class_method_sigs(
+        &self,
+        class_name: &str,
+        method: &str,
+    ) -> Vec<(String, Vec<(String, String)>, usize, Option<String>)> {
+        let qualified = format!("{}::{}", class_name, method);
+        let mut out = Vec::new();
+        for s in self.workspace.all_symbols() {
+            if s.name != qualified {
+                continue;
+            }
+            if let crate::symbols::scope::SymbolKind::Function {
+                return_type,
+                params,
+                min_args,
+            } = &s.kind
+            {
+                out.push((
+                    return_type.clone(),
+                    params.clone(),
+                    *min_args,
+                    s.doc.clone(),
+                ));
+            }
+        }
+        out
+    }
+
     pub fn workspace_class_member(&self, class_name: &str, member: &str) -> Option<TypeRepr> {
         let getter = format!("get_{}", member);
         let setter = format!("set_{}", member);
