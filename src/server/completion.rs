@@ -23,6 +23,7 @@ use crate::typedb::TypeIndex;
 
 pub fn complete(
     analysis: &crate::analysis::DocumentAnalysis,
+    checked: Option<&crate::analysis_snapshot::CheckedFile<'_>>,
     position: Position,
     type_index: Option<&TypeIndex>,
     workspace: Option<&SymbolTable>,
@@ -49,7 +50,7 @@ pub fn complete(
 
     // Member completion (`.`).
     if trimmed.ends_with('.') {
-        return complete_dot_members(analysis, trimmed, offset, type_index, workspace);
+        return complete_dot_members(analysis, checked, trimmed, offset, type_index, workspace);
     }
 
     // Default: identifier position.
@@ -69,14 +70,20 @@ fn extract_namespace_prefix(prefix: &str) -> Option<String> {
         .rfind(|c: char| !c.is_alphanumeric() && c != '_' && c != ':')
         .map_or(0, |i| i + 1);
     let ns = &before[start..];
-    if ns.is_empty() { None } else { Some(ns.to_string()) }
+    if ns.is_empty() {
+        None
+    } else {
+        Some(ns.to_string())
+    }
 }
 
 fn complete_namespace_members(
     namespace: &str,
     type_index: Option<&TypeIndex>,
 ) -> Vec<CompletionItem> {
-    let Some(index) = type_index else { return Vec::new() };
+    let Some(index) = type_index else {
+        return Vec::new();
+    };
     index
         .namespace_members(namespace)
         .into_iter()
@@ -99,6 +106,7 @@ fn receiver_name_before_dot(prefix_with_dot: &str) -> Option<String> {
 
 fn complete_dot_members(
     analysis: &crate::analysis::DocumentAnalysis,
+    checked: Option<&crate::analysis_snapshot::CheckedFile<'_>>,
     prefix_with_dot: &str,
     offset_hint: usize,
     type_index: Option<&TypeIndex>,
@@ -113,9 +121,23 @@ fn complete_dot_members(
     let file: &SourceFile = &analysis.file;
     let offset = offset_hint as u32;
 
+    // 0) Recorded receiver type (GH #42): the checker already resolved
+    // the receiver expression — query its span→type map before falling
+    // back to the scope_query approximations.
+    let mut type_text: Option<String> = None;
+    if let Some(checked) = checked {
+        // The receiver's last byte sits just before the `.` (which is at
+        // `prefix_with_dot.len() - 1`).
+        let receiver_last = prefix_with_dot.len().saturating_sub(2) as u32;
+        if let Some(ty) = checked.type_at_offset(receiver_last) {
+            type_text = Some(ty.display());
+        }
+    }
+
     // 1) Local variable in scope.
-    let mut type_text: Option<String> =
-        scope_query::local_type_at(source, &file, offset, &receiver);
+    if type_text.is_none() {
+        type_text = scope_query::local_type_at(source, &file, offset, &receiver);
+    }
 
     // 2) Field on the enclosing class.
     if type_text.is_none() {
@@ -208,10 +230,38 @@ fn complete_identifier(
 
     // Keywords.
     for kw in &[
-        "void", "bool", "int", "uint", "float", "double", "string", "auto", "class", "interface",
-        "enum", "namespace", "funcdef", "if", "else", "for", "while", "do", "switch", "case",
-        "default", "break", "continue", "return", "try", "catch", "null", "true", "false",
-        "const", "cast", "import",
+        "void",
+        "bool",
+        "int",
+        "uint",
+        "float",
+        "double",
+        "string",
+        "auto",
+        "class",
+        "interface",
+        "enum",
+        "namespace",
+        "funcdef",
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "switch",
+        "case",
+        "default",
+        "break",
+        "continue",
+        "return",
+        "try",
+        "catch",
+        "null",
+        "true",
+        "false",
+        "const",
+        "cast",
+        "import",
     ] {
         items.push(make_item(kw, CompletionItemKind::KEYWORD));
     }
@@ -232,23 +282,14 @@ fn complete_identifier(
             match m {
                 ClassMember::Field(vd) => {
                     for d in &vd.declarators {
-                        items.push(make_item(
-                            d.name.text(source),
-                            CompletionItemKind::FIELD,
-                        ));
+                        items.push(make_item(d.name.text(source), CompletionItemKind::FIELD));
                     }
                 }
                 ClassMember::Method(f) => {
-                    items.push(make_item(
-                        f.name.text(source),
-                        CompletionItemKind::METHOD,
-                    ));
+                    items.push(make_item(f.name.text(source), CompletionItemKind::METHOD));
                 }
                 ClassMember::Property(p) => {
-                    items.push(make_item(
-                        p.name.text(source),
-                        CompletionItemKind::PROPERTY,
-                    ));
+                    items.push(make_item(p.name.text(source), CompletionItemKind::PROPERTY));
                 }
                 _ => {}
             }
@@ -334,7 +375,7 @@ mod tests {
         let ws = ws_from(src);
         let pos = pos_after(src, "obj.");
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let items = complete(&analysis, pos, None, Some(&ws));
+        let items = complete(&analysis, None, pos, None, Some(&ws));
         let labels = labels(&items);
         assert!(labels.contains(&"x"), "missing x in {:?}", labels);
         assert!(labels.contains(&"m"), "missing m in {:?}", labels);
@@ -347,7 +388,7 @@ mod tests {
         let pos = pos_after(src, "zz");
         let items = {
             let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-            complete(&analysis, pos, None, None)
+            complete(&analysis, None, pos, None, None)
         };
         let labels = labels(&items);
         assert!(labels.contains(&"abc"), "missing abc in {:?}", labels);
@@ -359,7 +400,7 @@ mod tests {
         let ws = ws_from(src);
         let pos = pos_after(src, "gr");
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let items = complete(&analysis, pos, None, Some(&ws));
+        let items = complete(&analysis, None, pos, None, Some(&ws));
         let labels = labels(&items);
         assert!(labels.contains(&"greet"), "missing greet in {:?}", labels);
     }
@@ -373,7 +414,7 @@ mod tests {
         let pos = pos_after(src, "Foo::");
         let items = {
             let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-            complete(&analysis, pos, None, None)
+            complete(&analysis, None, pos, None, None)
         };
         // No type index ⇒ empty namespace list, and we did NOT fall into
         // identifier completion (which would emit "void", "bool", ...).
@@ -391,7 +432,7 @@ mod tests {
         let pos = pos_after(src, "#");
         let items = {
             let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-            complete(&analysis, pos, None, None)
+            complete(&analysis, None, pos, None, None)
         };
         let labels = labels(&items);
         assert!(labels.contains(&"if"));
@@ -405,13 +446,9 @@ mod tests {
         let pos = pos_after(src, "void m() { ");
         let items = {
             let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-            complete(&analysis, pos, None, None)
+            complete(&analysis, None, pos, None, None)
         };
         let labels = labels(&items);
-        assert!(
-            labels.contains(&"field"),
-            "missing field in {:?}",
-            labels
-        );
+        assert!(labels.contains(&"field"), "missing field in {:?}", labels);
     }
 }

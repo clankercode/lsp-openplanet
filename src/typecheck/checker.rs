@@ -221,6 +221,11 @@ pub struct Checker<'a> {
     /// `expr_type` (query surface, GH #42). Only recorded when
     /// `record_types` is set; innermost expression wins on shared starts.
     expr_types: std::collections::HashMap<u32, TypeRepr>,
+    /// Full (start, end) → type map backing the span-containment queries
+    /// (`type_at_offset`, GH #42 stage 2). Same recording pass as
+    /// `expr_types`; kept separate because the two query shapes have
+    /// different collision rules.
+    span_expr_types: std::collections::HashMap<(u32, u32), TypeRepr>,
     record_types: bool,
 }
 
@@ -237,6 +242,7 @@ impl<'a> Checker<'a> {
             return_type_stack: Vec::new(),
             diagnostics: Vec::new(),
             expr_types: std::collections::HashMap::new(),
+            span_expr_types: std::collections::HashMap::new(),
             record_types: false,
         }
     }
@@ -258,6 +264,24 @@ impl<'a> Checker<'a> {
     /// All recorded span→type entries.
     pub fn recorded_expr_types(&self) -> &std::collections::HashMap<u32, TypeRepr> {
         &self.expr_types
+    }
+
+    /// Type of the innermost recorded expression whose span contains
+    /// `offset` (GH #42 stage 2). `record_types` must have been set; an
+    /// empty map yields `None`. Ties on width resolve to the later
+    /// recorded entry (innermost walk order).
+    pub fn type_at_offset(&self, offset: u32) -> Option<&TypeRepr> {
+        self.span_expr_types
+            .iter()
+            .filter(|((start, end), _)| *start <= offset && offset < *end)
+            .min_by_key(|((start, end), _)| end - start)
+            .map(|(_, ty)| ty)
+    }
+
+    /// Type of the recorded expression spanning exactly
+    /// `start..end` (identifier-shaped lookups, GH #42 stage 2).
+    pub fn type_at_span_range(&self, start: u32, end: u32) -> Option<&TypeRepr> {
+        self.span_expr_types.get(&(start, end))
     }
 
     pub fn check_file(&mut self, file: &SourceFile) {
@@ -1857,6 +1881,8 @@ impl<'a> Checker<'a> {
         let ty = self.expr_type_inner(expr);
         if self.record_types {
             self.expr_types.insert(expr.span.start, ty.clone());
+            self.span_expr_types
+                .insert((expr.span.start, expr.span.end), ty.clone());
         }
         ty
     }
@@ -4898,10 +4924,12 @@ void Main() {
         );
         let hits: Vec<_> = diags
             .iter()
-            .filter(|d| matches!(
-                &d.kind,
-                TypeDiagnosticKind::UndefinedIdentifier(n) if n == "nod"
-            ))
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::UndefinedIdentifier(n) if n == "nod"
+                )
+            })
             .collect();
         assert!(
             hits.len() == 1,

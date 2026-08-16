@@ -43,7 +43,10 @@ impl<'a> WorkspaceFiles<'a> {
 ///
 /// When the cursor is on the `Name` in `Ns::Sub::Name`, the returned value is
 /// `"Ns::Sub::Name"`. When the cursor is on `Sub`, it is `"Ns::Sub"`.
-pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Option<String> {
+pub fn ident_span_at(
+    analysis: &DocumentAnalysis,
+    position: Position,
+) -> Option<(u32, u32, String)> {
     let source = analysis.masked_source();
     let offset = position_to_offset(source, position);
     let tokens = &analysis.tokens;
@@ -56,6 +59,8 @@ pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Opti
         return None;
     }
     let mut parts = vec![token.span.text(source).to_string()];
+    let start = token.span.start;
+    let end = token.span.end;
     let mut i = idx;
     while i >= 2
         && tokens[i - 1].kind == TokenKind::ColonColon
@@ -65,7 +70,11 @@ pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Opti
         i -= 2;
     }
     parts.reverse();
-    Some(parts.join("::"))
+    Some((start, end, parts.join("::")))
+}
+
+pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Option<String> {
+    ident_span_at(analysis, position).map(|(_, _, name)| name)
 }
 
 /// Resolve the definition location of the symbol at `position`.

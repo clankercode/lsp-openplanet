@@ -13,6 +13,7 @@
 
 use tower_lsp::lsp_types::*;
 
+use crate::analysis_snapshot::CheckedFile;
 use crate::parser::ast::SourceFile;
 use crate::server::diagnostics::position_to_offset;
 use crate::server::navigation;
@@ -23,6 +24,7 @@ use crate::typedb::TypeIndex;
 
 pub fn hover(
     analysis: &crate::analysis::DocumentAnalysis,
+    checked: Option<&CheckedFile<'_>>,
     position: Position,
     scope: &GlobalScope<'_>,
 ) -> Option<Hover> {
@@ -35,13 +37,38 @@ pub fn hover(
         .to_string();
     let offset = position_to_offset(source, position) as u32;
 
-    // The snapshot already parsed this file — reuse its AST for local +
-    // class lookups.
-    let file: &SourceFile = &analysis.file;
-
-    // 1) Local variable / parameter in the enclosing function.
+    // 1) + 2) Recorded expression type at the cursor (GH #42): the checker
+    // already resolved locals, params, fields and initializers — query its
+    // span→type map instead of re-walking the AST with scope_query.
     if !qualified.contains("::") {
-        if let Some(ty_text) = scope_query::local_type_at(source, &file, offset, &bare) {
+        if let Some(checked) = checked {
+            if let Some(ty) = checked.type_at_offset(offset) {
+                let display = ty.display();
+                let ty_display = if display.is_empty() {
+                    "?"
+                } else {
+                    display.as_str()
+                };
+                let md = if is_field_name(analysis, offset, &bare) {
+                    format!(
+                        "```angelscript\n(field) {}:{} {}\n```",
+                        class_name_at(analysis, offset),
+                        display,
+                        bare
+                    )
+                } else {
+                    format!("```angelscript\n(local) {} {}\n```", ty_display, bare)
+                };
+                return Some(markdown_hover(md));
+            }
+        }
+    }
+
+    // Legacy fallback when no checked view is available (should not happen
+    // in production; keeps the query surface optional for tests).
+    if !qualified.contains("::") && checked.is_none() {
+        let file: &SourceFile = &analysis.file;
+        if let Some(ty_text) = scope_query::local_type_at(source, file, offset, &bare) {
             let ty_display = if ty_text.is_empty() {
                 "?"
             } else {
@@ -50,11 +77,7 @@ pub fn hover(
             let md = format!("```angelscript\n(local) {} {}\n```", ty_display, bare);
             return Some(markdown_hover(md));
         }
-    }
-
-    // 2) Field on the enclosing class (only for bare names).
-    if !qualified.contains("::") {
-        if let Some(cls) = scope_query::find_enclosing_class(&file, offset) {
+        if let Some(cls) = scope_query::find_enclosing_class(file, offset) {
             if let Some(ty_text) = scope_query::class_member_type(cls, source, &bare) {
                 let cls_name = cls.name.text(source);
                 let md = format!(
@@ -87,6 +110,23 @@ pub fn hover(
     }
 
     None
+}
+
+/// True when the ident at `offset` is a field of the enclosing class
+/// (drives the `(field)` hover label, GH #42).
+fn is_field_name(analysis: &crate::analysis::DocumentAnalysis, offset: u32, bare: &str) -> bool {
+    let file: &SourceFile = &analysis.file;
+    scope_query::find_enclosing_class(file, offset)
+        .and_then(|cls| scope_query::class_member_type(cls, analysis.masked_source(), bare))
+        .is_some()
+}
+
+/// Qualified name of the class enclosing `offset`, when any.
+fn class_name_at(analysis: &crate::analysis::DocumentAnalysis, offset: u32) -> String {
+    let file: &SourceFile = &analysis.file;
+    scope_query::find_enclosing_class(file, offset)
+        .map(|cls| cls.name.text(analysis.masked_source()).to_string())
+        .unwrap_or_default()
 }
 
 fn markdown_hover(value: String) -> Hover {
@@ -293,7 +333,7 @@ mod tests {
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let empty = SymbolTable::new();
         let scope = GlobalScope::new(&empty, None);
-        let h = hover(&analysis, pos, &scope).expect("hover should return");
+        let h = hover(&analysis, None, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -308,7 +348,7 @@ mod tests {
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let empty = SymbolTable::new();
         let scope = GlobalScope::new(&empty, None);
-        let h = hover(&analysis, pos, &scope).expect("hover should return");
+        let h = hover(&analysis, None, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -322,7 +362,7 @@ mod tests {
         let pos = pos_of(src, "greet", 2);
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let scope = GlobalScope::new(&ws, None);
-        let h = hover(&analysis, pos, &scope).expect("hover should return");
+        let h = hover(&analysis, None, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -336,7 +376,7 @@ mod tests {
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let empty = SymbolTable::new();
         let scope = GlobalScope::new(&empty, None);
-        let h = hover(&analysis, pos, &scope).expect("hover should return");
+        let h = hover(&analysis, None, pos, &scope).expect("hover should return");
         let HoverContents::Markup(m) = h.contents else {
             panic!("expected markdown hover")
         };
@@ -351,7 +391,39 @@ mod tests {
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let empty = SymbolTable::new();
         let scope = GlobalScope::new(&empty, None);
-        let h = hover(&analysis, Position::new(0, 4), &scope);
+        let h = hover(&analysis, None, Position::new(0, 4), &scope);
         assert!(h.is_none());
+    }
+
+    #[test]
+    fn hover_uses_checked_view_types() {
+        // GH #42: with a checked view, hover reads the checker's recorded
+        // span→type instead of the scope_query approximation.
+        let dir = std::env::temp_dir().join("ols-hover-checked-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("e.as");
+        let src = "void main() { int x = 1; int y = x; }";
+        std::fs::write(&path, src).unwrap();
+        let snap = crate::analysis_snapshot::AnalysisSnapshot::from_files(
+            &[(path, src.to_string())],
+            &crate::config::LspConfig::default(),
+        );
+        let uri = snap.uri_map()[&0].0.clone();
+        let symbols = snap.symbols();
+        let scope = GlobalScope::new(symbols, None);
+        let checked = snap.checked_file(&uri, &scope).expect("checked view");
+
+        // Cursor over the use of `x` (offset 33 → line 0, char 33).
+        let analysis = snap.analysis_of(&uri).expect("analysis");
+        let h = hover(analysis, Some(&checked), Position::new(0, 33), &scope)
+            .expect("hover should return");
+        let HoverContents::Markup(m) = h.contents else {
+            panic!("expected markdown hover")
+        };
+        assert!(
+            m.value.contains("(local) int x"),
+            "expected recorded int type in {:?}",
+            m.value
+        );
     }
 }

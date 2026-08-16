@@ -59,6 +59,7 @@ struct ResolvedSignature {
 
 pub fn signature_help(
     analysis: &DocumentAnalysis,
+    checked: Option<&crate::analysis_snapshot::CheckedFile<'_>>,
     position: Position,
     scope: &GlobalScope<'_>,
 ) -> Option<SignatureHelp> {
@@ -74,6 +75,7 @@ pub fn signature_help(
         source,
         file,
         cursor as u32,
+        checked,
         scope,
         scope.external(),
     );
@@ -317,6 +319,7 @@ fn resolve_callee(
     source: &str,
     file: &SourceFile,
     cursor_offset: u32,
+    checked: Option<&crate::analysis_snapshot::CheckedFile<'_>>,
     scope: &GlobalScope<'_>,
     type_index: Option<&TypeIndex>,
 ) -> Vec<ResolvedSignature> {
@@ -324,7 +327,15 @@ fn resolve_callee(
     if let Some(last_dot) = callee.rfind('.') {
         let receiver = &callee[..last_dot];
         let method = &callee[last_dot + 1..];
-        return resolve_member_call(receiver, method, source, file, cursor_offset, scope);
+        return resolve_member_call(
+            receiver,
+            method,
+            source,
+            file,
+            cursor_offset,
+            checked,
+            scope,
+        );
     }
 
     // Free function, bare or qualified (`::` -> namespaced).
@@ -375,6 +386,7 @@ fn resolve_member_call(
     source: &str,
     file: &SourceFile,
     cursor_offset: u32,
+    checked: Option<&crate::analysis_snapshot::CheckedFile<'_>>,
     scope: &GlobalScope<'_>,
 ) -> Vec<ResolvedSignature> {
     // MVP: only resolve simple-identifier receivers whose type is a local
@@ -384,8 +396,21 @@ fn resolve_member_call(
         return Vec::new();
     }
 
-    let mut receiver_type: Option<String> =
-        scope_query::local_type_at(source, file, cursor_offset, receiver_trimmed);
+    // 0) Recorded receiver type (GH #42): query the checker's span→type
+    // map at the receiver's last byte before falling back to scope_query.
+    let mut receiver_type: Option<String> = None;
+    if let Some(checked) = checked {
+        if let Some(dot_pos) = source[..cursor_offset as usize].rfind(receiver_trimmed) {
+            let last = (dot_pos + receiver_trimmed.len()).saturating_sub(1) as u32;
+            if let Some(ty) = checked.type_at_offset(last) {
+                receiver_type = Some(ty.display());
+            }
+        }
+    }
+
+    if receiver_type.is_none() {
+        receiver_type = scope_query::local_type_at(source, file, cursor_offset, receiver_trimmed);
+    }
 
     if receiver_type.is_none() {
         if let Some(cls) = scope_query::find_enclosing_class(file, cursor_offset) {
@@ -646,6 +671,7 @@ mod tests {
         let ws = ws_from(&source);
         let help = signature_help(
             &DocumentAnalysis::analyze_plain(&source),
+            None,
             position,
             &GlobalScope::new(&ws, None),
         )
@@ -664,6 +690,7 @@ mod tests {
         let ws = ws_from(&source);
         let help = signature_help(
             &DocumentAnalysis::analyze_plain(&source),
+            None,
             position,
             &GlobalScope::new(&ws, None),
         )
@@ -683,6 +710,7 @@ void main() { f(1,| }";
         let ws = ws_from(&source);
         let help = signature_help(
             &DocumentAnalysis::analyze_plain(&source),
+            None,
             position,
             &GlobalScope::new(&ws, None),
         )
@@ -710,6 +738,7 @@ void main() { f(1,| }";
         let ws = ws_from(&source);
         let help = signature_help(
             &DocumentAnalysis::analyze_plain(&source),
+            None,
             position,
             &GlobalScope::new(&ws, None),
         )
@@ -727,6 +756,7 @@ void main() { outer(inner(| ) }";
         let ws = ws_from(&source);
         let help = signature_help(
             &DocumentAnalysis::analyze_plain(&source),
+            None,
             position,
             &GlobalScope::new(&ws, None),
         )
@@ -746,6 +776,7 @@ void main() { outer(inner(| ) }";
         let ws = ws_from(&source);
         let help = signature_help(
             &DocumentAnalysis::analyze_plain(&source),
+            None,
             position,
             &GlobalScope::new(&ws, None),
         );
@@ -765,6 +796,7 @@ void main() { Foo f; f.m(| }";
         let ws = ws_from(&source);
         let help = signature_help(
             &DocumentAnalysis::analyze_plain(&source),
+            None,
             position,
             &GlobalScope::new(&ws, None),
         )

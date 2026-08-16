@@ -26,6 +26,8 @@ use tower_lsp::lsp_types::Url;
 use crate::analysis::DocumentAnalysis;
 use crate::config::LspConfig;
 use crate::symbols::SymbolTable;
+use crate::typecheck::checker::Checker;
+use crate::typecheck::GlobalScope;
 use crate::workspace::load::{PluginWorkspaceLoad, WorkspaceSourceFile};
 
 /// One file's contribution to the snapshot: its path, URI, parsed
@@ -129,6 +131,73 @@ impl AnalysisSnapshot {
     pub fn missing_required_dependencies(&self) -> &[String] {
         &self.missing_required_dependencies
     }
+
+    /// The checked view of one file (GH #42): run the checker with type
+    /// recording over the snapshot's parse, against the pooled workspace
+    /// symbols. Built on demand — diagnostics requests and hover queries
+    /// pay for exactly the check pass they need, once per snapshot
+    /// generation (the result is not cached; callers holding the snapshot
+    /// Arc across a rebuild get a fresh view through the new snapshot).
+    ///
+    /// `type_index` is the external typedb, when loaded.
+    pub fn checked_file<'s>(
+        &'s self,
+        uri: &Url,
+        scope: &'s GlobalScope<'s>,
+    ) -> Option<CheckedFile<'s>> {
+        let analysis = &self
+            .files
+            .iter()
+            .find(|f| f.uri.as_ref() == Some(uri))?
+            .analysis;
+        let mut checker = Checker::new(analysis.masked_source(), scope).with_type_recording();
+        checker.check_file(&analysis.file);
+        Some(CheckedFile {
+            analysis,
+            checker,
+            diagnostics: Vec::new(),
+        })
+    }
+}
+
+/// One file's checked view: the parse it was checked against plus the
+/// checker's span→type recording (GH #42). Diagnostics are exposed via
+/// [`CheckedFile::take_diagnostics`] so hover-style consumers can ignore
+/// them without the checker growing a "no diagnostics" mode.
+pub struct CheckedFile<'a> {
+    /// The parse the check ran against (masked source + AST).
+    pub analysis: &'a DocumentAnalysis,
+    checker: Checker<'a>,
+    diagnostics: Vec<crate::typecheck::TypeDiagnostic>,
+}
+
+impl<'a> CheckedFile<'a> {
+    /// Type of the innermost recorded expression containing `offset`
+    /// (GH #42). `None` when the offset is not inside any recorded
+    /// expression.
+    pub fn type_at_offset(&self, offset: u32) -> Option<&crate::typecheck::repr::TypeRepr> {
+        self.checker.type_at_offset(offset)
+    }
+
+    /// Type recorded for the expression spanning exactly `start..end`.
+    pub fn type_at_span_range(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> Option<&crate::typecheck::repr::TypeRepr> {
+        self.checker.type_at_span_range(start, end)
+    }
+
+    /// Drain the checker's diagnostics (GH #39 keeps diagnostics as a
+    /// query, not snapshot state — this is the query).
+    pub fn take_diagnostics(&mut self) -> Vec<crate::typecheck::TypeDiagnostic> {
+        std::mem::take(&mut self.diagnostics)
+    }
+
+    /// Borrow the underlying checker (test surface).
+    pub fn checker(&self) -> &Checker<'a> {
+        &self.checker
+    }
 }
 
 /// Convenience alias for call-sites that share one snapshot.
@@ -168,5 +237,27 @@ mod tests {
         assert_eq!(map[&0].1.masked_source(), "int x;");
         let uri = map[&0].0.clone();
         assert!(snap.analysis_of(&uri).is_some());
+    }
+
+    #[test]
+    fn checked_file_records_types_for_queries() {
+        // GH #42: the checked view exposes span→type queries over the
+        // snapshot's parse.
+        let dir = std::env::temp_dir().join("ols-snap-checked-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d.as");
+        let src = "void main() { int x = 1; int y = x; }";
+        std::fs::write(&path, src).unwrap();
+        let snap = AnalysisSnapshot::from_files(&[(path, src.to_string())], &LspConfig::default());
+        let uri = snap.uri_map()[&0].0.clone();
+        let symbols = snap.symbols();
+        let scope = GlobalScope::new(symbols, None);
+        let checked = snap.checked_file(&uri, &scope).expect("checked view");
+        // `1` (the initializer of x) sits at offset 22.
+        let ty = checked.type_at_offset(22).expect("1 recorded");
+        assert_eq!(ty.display(), "int");
+        // The use of `x` in `int y = x` sits at offset 33.
+        let ty = checked.type_at_offset(33).expect("x recorded");
+        assert_eq!(ty.display(), "int");
     }
 }

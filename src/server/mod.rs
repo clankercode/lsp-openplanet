@@ -315,8 +315,11 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot.read().await.clone();
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        let checked = snapshot.checked_file(uri, &scope);
         let items = completion::complete(
             &analysis,
+            checked.as_ref(),
             pos,
             type_index.as_deref(),
             Some(snapshot.symbols()),
@@ -336,7 +339,8 @@ impl LanguageServer for Backend {
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
-        Ok(hover::hover(&analysis, pos, &scope))
+        let checked = snapshot.checked_file(uri, &scope);
+        Ok(hover::hover(&analysis, checked.as_ref(), pos, &scope))
     }
 
     async fn goto_definition(
@@ -423,7 +427,8 @@ impl LanguageServer for Backend {
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
-        Ok(signature::signature_help(&analysis, pos, &scope))
+        let checked = snapshot.checked_file(uri, &scope);
+        Ok(signature::signature_help(&analysis, checked.as_ref(), pos, &scope))
     }
 
     async fn document_symbol(
