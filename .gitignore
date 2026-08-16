@@ -9,3 +9,7 @@ npm/*/bin/openplanet-lsp.exe
 
 .worktrees/
 *.bak
+
+# Python
+__pycache__/
+*.pyc
