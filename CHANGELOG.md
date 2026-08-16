@@ -13,6 +13,17 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-16
+
+### Fixed
+- **#34 follow-up (review "Arm B"):** the inherited-overload augmentation in
+  0.4.0 fixed a false positive but introduced a false negative — once the
+  overload set held 2+ entries (own + inherited), a call whose arg count was
+  outside **every** overload's range went silent (the pre-0.4.0 single-overload
+  path had caught it). Now the multi-overload no-match arm diagnoses when the
+  count exceeds/undershoots every overload's arity, while type-driven no-match
+  and genuinely-ambiguous calls stay silent (the conservative anti-FP policy).
+
 ## [0.4.0] - 2026-08-16
 
 A large compiler-parity and dependency-resolution batch driven by a full
