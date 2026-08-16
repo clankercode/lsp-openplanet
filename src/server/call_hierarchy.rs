@@ -768,7 +768,6 @@ mod tests {
 
     struct OwnedWorkspace {
         table: SymbolTable,
-        analyses: Vec<crate::analysis::DocumentAnalysis>,
         files: HashMap<usize, (Url, &'static crate::analysis::DocumentAnalysis)>,
     }
 
@@ -785,11 +784,7 @@ mod tests {
         let leaked: &'static crate::analysis::DocumentAnalysis = Box::leak(Box::new(analysis));
         let mut files = HashMap::new();
         files.insert(fid, (Url::parse(uri_str).unwrap(), leaked));
-        OwnedWorkspace {
-            table,
-            analyses: Vec::new(),
-            files,
-        }
+        OwnedWorkspace { table, files }
     }
 
     #[test]

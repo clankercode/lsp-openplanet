@@ -255,10 +255,6 @@ mod tests {
     use super::*;
     use crate::parser::ast::SourceFile;
 
-    fn parse(src: &str) -> SourceFile {
-        DocumentAnalysis::analyze_plain(src).file
-    }
-
     fn doc_symbols(src: &str) -> Vec<DocumentSymbol> {
         let analysis = DocumentAnalysis::analyze_plain(src);
         match document_symbols(&analysis) {

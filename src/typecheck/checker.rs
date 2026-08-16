@@ -217,6 +217,11 @@ pub struct Checker<'a> {
     file_const_methods: std::collections::HashSet<(String, String)>,
     return_type_stack: Vec<TypeRepr>,
     pub diagnostics: Vec<TypeDiagnostic>,
+    /// Span-start → computed type for every expression visited by
+    /// `expr_type` (query surface, GH #42). Only recorded when
+    /// `record_types` is set; innermost expression wins on shared starts.
+    expr_types: std::collections::HashMap<u32, TypeRepr>,
+    record_types: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -231,7 +236,28 @@ impl<'a> Checker<'a> {
             file_const_methods: std::collections::HashSet::new(),
             return_type_stack: Vec::new(),
             diagnostics: Vec::new(),
+            expr_types: std::collections::HashMap::new(),
+            record_types: false,
         }
+    }
+
+    /// Enable span→type recording for the query surface (GH #42).
+    /// Diagnostics are still collected; callers that only want queries
+    /// simply ignore them.
+    pub fn with_type_recording(mut self) -> Self {
+        self.record_types = true;
+        self
+    }
+
+    /// Type recorded for the expression starting at `span_start`
+    /// (query surface, GH #42). Requires `with_type_recording`.
+    pub fn type_at_span(&self, span_start: u32) -> Option<&TypeRepr> {
+        self.expr_types.get(&span_start)
+    }
+
+    /// All recorded span→type entries.
+    pub fn recorded_expr_types(&self) -> &std::collections::HashMap<u32, TypeRepr> {
+        &self.expr_types
     }
 
     pub fn check_file(&mut self, file: &SourceFile) {
@@ -1828,6 +1854,14 @@ impl<'a> Checker<'a> {
     // ── Expression walker / minimal type derivation ─────────────────────────
 
     fn expr_type(&mut self, expr: &Expr) -> TypeRepr {
+        let ty = self.expr_type_inner(expr);
+        if self.record_types {
+            self.expr_types.insert(expr.span.start, ty.clone());
+        }
+        ty
+    }
+
+    fn expr_type_inner(&mut self, expr: &Expr) -> TypeRepr {
         match &expr.kind {
             ExprKind::IntLit(_) | ExprKind::HexLit(_) => TypeRepr::Primitive(PrimitiveType::Int),
             ExprKind::FloatLit(_) => TypeRepr::Primitive(PrimitiveType::Float),
@@ -5066,5 +5100,55 @@ void Main() {
             "const bool `!` must stay silent, got {:?}",
             diags
         );
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+    use crate::symbols::SymbolTable;
+
+    fn check_with_recording(src: &str) -> Checker<'static> {
+        let src: &'static str = Box::leak(src.to_string().into_boxed_str());
+        let mut table = SymbolTable::new();
+        let fid = table.allocate_file_id();
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
+        table.set_file_symbols(fid, syms);
+        let table: &'static SymbolTable = Box::leak(Box::new(table));
+        let scope: &'static GlobalScope<'static> =
+            Box::leak(Box::new(GlobalScope::new(table, None)));
+        let mut c = Checker::new(src, scope).with_type_recording();
+        c.check_file(&analysis.file);
+        c
+    }
+
+    #[test]
+    fn type_at_span_resolves_local_initializer() {
+        let c = check_with_recording("void main() { int x = 42; }\n");
+        // `42` starts at offset 22.
+        let ty = c.type_at_span(22).expect("42 recorded");
+        assert!(matches!(ty, TypeRepr::Primitive(PrimitiveType::Int)));
+    }
+
+    #[test]
+    fn type_at_span_resolves_ident_local() {
+        let c = check_with_recording("void main() { int x = 1; int y = x; }\n");
+        // Second statement's `x` initializer starts at offset 33.
+        let ty = c.type_at_span(33).expect("x recorded");
+        assert!(matches!(ty, TypeRepr::Primitive(PrimitiveType::Int)));
+    }
+
+    #[test]
+    fn recording_off_by_default() {
+        let src: &'static str =
+            Box::leak("void main() { int x = 1; }\n".to_string().into_boxed_str());
+        let table: &'static SymbolTable = Box::leak(Box::new(SymbolTable::new()));
+        let scope: &'static GlobalScope<'static> =
+            Box::leak(Box::new(GlobalScope::new(table, None)));
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let mut c = Checker::new(src, scope);
+        c.check_file(&analysis.file);
+        assert!(c.recorded_expr_types().is_empty());
     }
 }
