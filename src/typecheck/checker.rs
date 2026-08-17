@@ -2545,7 +2545,10 @@ impl<'a> Checker<'a> {
                 let operand_binary_or_lit = |e: &Expr| {
                     matches!(
                         e.kind,
-                        ExprKind::Binary { .. } | ExprKind::IntLit(_) | ExprKind::HexLit(_)
+                        ExprKind::Binary { .. }
+                            | ExprKind::IntLit(_)
+                            | ExprKind::HexLit(_)
+                            | ExprKind::TypeConstruct { .. }
                     )
                 };
                 let mut emit_span: Option<Span> = None;
@@ -2564,7 +2567,15 @@ impl<'a> Checker<'a> {
                         }
                     }
                     BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
-                        if !subtree_has_int_literal(lhs) && !subtree_has_int_literal(rhs) {
+                        // Game probe (signmap, 2026-08-18): explicit
+                        // conversions exempt the mix — `u < int(E::LAST)`
+                        // and `u < int(3)` are silent; only var-vs-var
+                        // mixes warn.
+                        if !subtree_has_int_literal(lhs)
+                            && !subtree_has_int_literal(rhs)
+                            && !subtree_has_conversion(lhs)
+                            && !subtree_has_conversion(rhs)
+                        {
                             let ls = signedness_of(self, lhs);
                             let rs = signedness_of(self, rhs);
                             if let (Some(ls), Some(rs)) = (ls, rs) {
@@ -2879,6 +2890,39 @@ fn is_integer(p: PrimitiveType) -> bool {
 /// the game compiler stays silent whenever either compared subtree is
 /// "literal-tainted" (RemoteBuild probe 2026-08-17: `n > 0`, `0 < n`,
 /// `arr.Length > 0` all silent).
+/// True when the subtree contains an explicit type conversion
+/// (`int(x)` TypeConstruct). Game probe (2026-08-18): a conversion anywhere
+/// in a relational operand exempts the Signed/Unsigned warning.
+fn subtree_has_conversion(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::TypeConstruct { .. } | ExprKind::Cast { .. } => true,
+        ExprKind::Binary { lhs, rhs, .. } => {
+            subtree_has_conversion(lhs) || subtree_has_conversion(rhs)
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Postfix { expr, .. } => {
+            subtree_has_conversion(expr)
+        }
+        ExprKind::Call { callee, args } => {
+            subtree_has_conversion(callee) || args.iter().any(|a| subtree_has_conversion(&a.value))
+        }
+        ExprKind::Member { object, .. } => subtree_has_conversion(object),
+        ExprKind::Index { object, index } => {
+            subtree_has_conversion(object) || subtree_has_conversion(index)
+        }
+        ExprKind::Is { expr, .. } => subtree_has_conversion(expr),
+        ExprKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            subtree_has_conversion(condition)
+                || subtree_has_conversion(then_expr)
+                || subtree_has_conversion(else_expr)
+        }
+        _ => false,
+    }
+}
+
 fn subtree_has_int_literal(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::IntLit(_) | ExprKind::HexLit(_) => true,

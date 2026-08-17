@@ -164,9 +164,7 @@ impl<'a> Parser<'a> {
         } else {
             let err = ParseError {
                 span: self.current_span(),
-                kind: ParseErrorKind::ExpectedIdent {
-                    found: self.peek(),
-                },
+                kind: ParseErrorKind::ExpectedIdent { found: self.peek() },
             };
             Err(err)
         }
@@ -522,9 +520,7 @@ impl<'a> Parser<'a> {
                 let decl = self.parse_import_decl()?;
                 Ok(Item::Import(decl))
             }
-            _ if self.looks_like_type_start() => {
-                self.parse_func_or_var_item(attrs, is_shared)
-            }
+            _ if self.looks_like_type_start() => self.parse_func_or_var_item(attrs, is_shared),
             other => Err(ParseError {
                 span: self.current_span(),
                 kind: ParseErrorKind::ExpectedItem { found: other },
@@ -536,6 +532,11 @@ impl<'a> Parser<'a> {
     fn parse_class_decl(&mut self, attrs: Vec<Attribute>) -> Result<ClassDecl, ParseError> {
         let start = self.current_span().start;
         self.expect(TokenKind::KwClass)?;
+        // Game parity (live RemoteBuild probe, PluginManager PluginCache.as):
+        // the Openplanet compiler accepts `class @Name` (e.g. `class @Info`)
+        // and binds it as plain `Name`. Eat the stray handle marker so the
+        // class — and every reference to it — parses instead of cascading.
+        self.eat(TokenKind::At);
         let name = self.expect_ident()?;
 
         // Optional base class list
@@ -816,9 +817,7 @@ impl<'a> Parser<'a> {
         } else {
             return Err(ParseError {
                 span: self.current_span(),
-                kind: ParseErrorKind::ExpectedIdent {
-                    found: self.peek(),
-                },
+                kind: ParseErrorKind::ExpectedIdent { found: self.peek() },
             });
         };
         self.expect(TokenKind::LBrace)?;
@@ -1175,9 +1174,7 @@ impl<'a> Parser<'a> {
                 _ => {
                     self.error(ParseError {
                         span: self.current_span(),
-                        kind: ParseErrorKind::ExpectedIdent {
-                            found: self.peek(),
-                        },
+                        kind: ParseErrorKind::ExpectedIdent { found: self.peek() },
                     });
                     self.synchronize();
                 }
@@ -1416,10 +1413,7 @@ impl<'a> Parser<'a> {
     ///   - `= expr`            (assignment-style)
     ///   - `(args)`            (constructor-style: `IO::File f(path, mode);`)
     ///   - nothing             (uninitialized)
-    fn parse_var_initializer(
-        &mut self,
-        type_expr: &TypeExpr,
-    ) -> Result<Option<Expr>, ParseError> {
+    fn parse_var_initializer(&mut self, type_expr: &TypeExpr) -> Result<Option<Expr>, ParseError> {
         if self.eat(TokenKind::Eq) {
             return Ok(Some(self.parse_expr()?));
         }
@@ -1480,13 +1474,13 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::At) {
             let start = self.current_span().start;
             self.advance(); // eat @
-            // Parse the LHS with `parse_ternary_expr` so the inner call stops
-            // before assignment operators — otherwise `@x = null` is greedily
-            // consumed as a nested `Assign` and HandleAssign is never produced.
+                            // Parse the LHS with `parse_ternary_expr` so the inner call stops
+                            // before assignment operators — otherwise `@x = null` is greedily
+                            // consumed as a nested `Assign` and HandleAssign is never produced.
             let lhs = self.parse_ternary_expr()?;
             if self.at(TokenKind::Eq) {
                 self.advance(); // eat =
-                // Eat optional @ on rhs
+                                // Eat optional @ on rhs
                 self.eat(TokenKind::At);
                 let rhs = self.parse_assignment_expr()?;
                 return Ok(Expr {
@@ -2112,8 +2106,7 @@ impl<'a> Parser<'a> {
                             }
                         };
                         segments.push(member);
-                        let span =
-                            Span::new(expr.span.start, segments.last().unwrap().span.end);
+                        let span = Span::new(expr.span.start, segments.last().unwrap().span.end);
                         expr = Expr {
                             span,
                             kind: ExprKind::NamespaceAccess {
@@ -2288,9 +2281,7 @@ impl<'a> Parser<'a> {
                 let cc = self.advance(); // eat ::
                 let ident = self.expect_ident()?;
                 let mut segments = vec![ident];
-                while self.at(TokenKind::ColonColon)
-                    && self.peek_ahead(1) == TokenKind::Ident
-                {
+                while self.at(TokenKind::ColonColon) && self.peek_ahead(1) == TokenKind::Ident {
                     self.advance();
                     segments.push(self.expect_ident()?);
                 }
@@ -2332,16 +2323,17 @@ impl<'a> Parser<'a> {
                     // name and fall back to NamespaceAccess.
                     let kw_tok = self.advance();
                     let mut segments = vec![Ident { span: kw_tok.span }];
-                    while self.at(TokenKind::ColonColon)
-                        && self.peek_ahead(1) == TokenKind::Ident
-                    {
+                    while self.at(TokenKind::ColonColon) && self.peek_ahead(1) == TokenKind::Ident {
                         self.advance(); // eat ::
                         let ident = self.expect_ident()?;
                         segments.push(ident);
                     }
                     let span = Span::new(
                         kw_tok.span.start,
-                        segments.last().map(|s| s.span.end).unwrap_or(kw_tok.span.end),
+                        segments
+                            .last()
+                            .map(|s| s.span.end)
+                            .unwrap_or(kw_tok.span.end),
                     );
                     let qname = QualifiedName { span, segments };
                     return Ok(Expr {
@@ -2352,9 +2344,7 @@ impl<'a> Parser<'a> {
                 let start = self.current_span().start;
                 let mut target_type = self.parse_base_type()?;
                 // Allow array shorthand suffix(es): `string[]`, `int[][]`.
-                while self.at(TokenKind::LBracket)
-                    && self.peek_ahead(1) == TokenKind::RBracket
-                {
+                while self.at(TokenKind::LBracket) && self.peek_ahead(1) == TokenKind::RBracket {
                     self.advance(); // [
                     self.advance(); // ]
                     let span = self.span_from(start);
@@ -2964,7 +2954,6 @@ impl<'a> Parser<'a> {
         // After the type, we should see an identifier for it to be a var decl
         self.peek_ahead(i) == TokenKind::Ident
     }
-
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -3039,7 +3028,11 @@ mod tests {
     #[test]
     fn test_shared_class_still_parses() {
         let (file, errors) = parse_file("shared class Foo { int x; }");
-        assert!(errors.is_empty(), "shared class must parse cleanly, got {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "shared class must parse cleanly, got {:?}",
+            errors
+        );
         assert!(
             matches!(&file.items[0], Item::Class(c) if c.is_shared),
             "expected shared class item, got {:?}",
@@ -3369,14 +3362,8 @@ mod tests {
             Item::Function(decl) => {
                 assert_eq!(decl.name.text(source), "OnKeyPress");
                 assert_eq!(decl.params.len(), 2);
-                assert_eq!(
-                    decl.params[0].name.as_ref().unwrap().text(source),
-                    "down"
-                );
-                assert_eq!(
-                    decl.params[1].name.as_ref().unwrap().text(source),
-                    "key"
-                );
+                assert_eq!(decl.params[0].name.as_ref().unwrap().text(source), "down");
+                assert_eq!(decl.params[1].name.as_ref().unwrap().text(source), "key");
             }
             _ => panic!("expected Function item"),
         }

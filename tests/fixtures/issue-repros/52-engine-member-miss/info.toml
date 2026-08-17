@@ -1,0 +1,7 @@
+[meta]
+name     = "Issue Repro 52 - Engine Member Lookup Miss"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]
