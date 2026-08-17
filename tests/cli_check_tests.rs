@@ -378,3 +378,36 @@ fn check_command_showcase_diags_fixture_has_many_diagnostics() {
         "expected demo-worthy diagnostic messages; stdout={stdout:?}"
     );
 }
+
+/// Minimal issue reproductions (tests/fixtures/issue-repros/<n>-<slug>).
+/// Each fixture is a tiny standalone plugin; the test drives the real CLI.
+/// A fixed issue asserts the clean outcome so a checker regression fails CI.
+fn run_issue_repro(slug: &str) -> (bool, String, String) {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/issue-repros")
+        .join(slug);
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
+/// GH #46: mixin body references a member its consuming class declares.
+/// Fixed in 8c13ef5 — the fixture must stay clean.
+#[test]
+fn check_command_issue_repro_46_mixin_consumer_member_is_clean() {
+    let (ok, stdout, stderr) = run_issue_repro("46-mixin-consumer-member");
+    assert!(
+        ok && stdout.contains("0 diagnostics"),
+        "expected 0 diagnostics on issue-repro 46-mixin-consumer-member; stdout={stdout:?} stderr={stderr:?}"
+    );
+}
