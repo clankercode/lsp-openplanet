@@ -1943,6 +1943,15 @@ impl<'a> Checker<'a> {
                 if builtins::is_builtin_type(&name) || builtins::is_builtin_global(&name) {
                     return TypeRepr::Error(String::new());
                 }
+                // Bare unresolved idents inside a mixin class body can be
+                // members the *consuming* class provides (GH #46: mixin's
+                // `tabs.Length` where `tabs` is declared by the class that
+                // mixes it in). The game compiler checks mixin bodies in
+                // the consumer's context, so stay silent here — same policy
+                // as unresolved bare calls inside a mixin (above).
+                if self.current_class().is_some_and(|cls| cls.is_mixin) {
+                    return TypeRepr::Error(String::new());
+                }
                 // 6. Undefined.
                 self.diagnostics.push(TypeDiagnostic {
                     span: expr.span,
@@ -3900,6 +3909,52 @@ void Main() {
         assert!(
             undef.is_empty(),
             "expected no UndefinedIdentifier for mixin requirement call, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn unresolved_bare_ident_inside_mixin_class_is_silent() {
+        // GH #46: a mixin class references a member its consuming class
+        // declares (here `tabs`, declared by the class that mixes in
+        // `HasGroupMeta`). The game compiler accepts this — mixin bodies are
+        // checked in the context of the consuming class.
+        let diags = check(
+            "class Tab { } \
+             class TabGroup : HasGroupMeta { Tab@[] tabs; } \
+             mixin class HasGroupMeta { \
+                 bool Empty() { if (tabs.Length == 0) return true; return false; } \
+             }",
+        );
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(
+                |d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "tabs"),
+            )
+            .collect();
+        assert!(
+            undef.is_empty(),
+            "expected no UndefinedIdentifier for mixin requirement ident `tabs`, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn unresolved_bare_ident_outside_mixin_class_still_diagnoses() {
+        // Control: the same pattern in a non-mixin class must still flag.
+        let diags = check(
+            "class TabGroup { bool Empty() { if (tabs.Length == 0) return true; return false; } }",
+        );
+        let undef: Vec<_> = diags
+            .iter()
+            .filter(
+                |d| matches!(&d.kind, TypeDiagnosticKind::UndefinedIdentifier(n) if n == "tabs"),
+            )
+            .collect();
+        assert_eq!(
+            undef.len(),
+            1,
+            "expected exactly 1 UndefinedIdentifier for `tabs` in a plain class, got {:?}",
             diags
         );
     }
