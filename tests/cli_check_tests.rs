@@ -437,15 +437,16 @@ fn check_command_issue_repro_46_mixin_consumer_member_is_clean() {
 }
 
 /// GH #44: `@arr[0] = expr` handle-assign into an indexed Json::Value is not
-/// an l-value — the game compiler rejects it and so must the LSP. OPEN: the
-/// LSP is currently silent (false negative). Un-ignore as part of the fix.
+/// an l-value — the game compiler rejects it and so must the LSP.
+/// Game-compiler ground truth (matrix probe, 2026-08-17): the handle-assign
+/// line errors, the value-copy counterpart compiles clean. Fixed on master.
 #[test]
-#[ignore = "GH #44 open — LSP false negative, un-ignore with the fix"]
 fn check_command_issue_repro_44_indexed_handle_assign_diagnoses() {
     let (_, stdout, _) = run_issue_repro_typedb("44-indexed-handle-assign");
+    // The handle-assign into the Json index must be flagged (invalid LHS).
     assert!(
-        stdout.contains("l-value"),
-        "expected an l-value diagnostic on issue-repro 44-indexed-handle-assign; stdout={stdout:?}"
+        stdout.contains("Main.as:11") && stdout.contains("invalid left-hand side"),
+        "expected an invalid-assignment diagnostic at the @arr[0] line; stdout={stdout:?}"
     );
     // The legal value-copy counterpart must NOT be flagged.
     let legal_line_flagged = stdout

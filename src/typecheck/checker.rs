@@ -2069,6 +2069,29 @@ impl<'a> Checker<'a> {
                 TypeRepr::Error(String::new())
             }
             ExprKind::HandleAssign { lhs, rhs } => {
+                // GH #44: `@` handle-assign needs a handle *slot* on the
+                // left. An index into typed handle arrays (`T@[]`) and
+                // dictionaries is such a slot (game-verified legal), but an
+                // index into a handle-to-value-type (`Json::Value@` — the
+                // value type has no handle form) is not an l-value:
+                //   `@arr[0] = x` → game: "Expression is not an l-value".
+                // Detect by base type name so we don't depend on how the
+                // index expression itself typed (it silently yields Error).
+                if let ExprKind::Index { object, .. } = &lhs.kind {
+                    let obj_ty = self.expr_type(object);
+                    let is_value_type_handle = matches!(&obj_ty, TypeRepr::Handle(_))
+                        && Self::base_type_name(&obj_ty).is_some_and(|n| {
+                            n == "Json::Value" || PrimitiveType::from_name(&n).is_some()
+                        });
+                    if is_value_type_handle {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: lhs.span,
+                            kind: TypeDiagnosticKind::InvalidAssignmentTarget,
+                        });
+                        let _ = self.expr_type(rhs);
+                        return TypeRepr::Error(String::new());
+                    }
+                }
                 if !matches!(
                     lhs.kind,
                     ExprKind::Ident(_)
@@ -4490,6 +4513,86 @@ void Main() {
             TypeDiagnosticKind::StringByValueParam {
                 param_name: "name".into()
             }
+        );
+    }
+
+    // ── GH #44: @handle-assign into an indexed value-type slot ──────────
+
+    #[test]
+    fn handle_assign_into_json_index_is_not_an_lvalue() {
+        // Game-compiler ground truth (matrix probe, 2026-08-17):
+        //   `@arr[0] = tiny` (Json::Value@ receiver) → ERR not an l-value
+        //   `@arr[1] = iv`   (same)                  → ERR not an l-value
+        // while `arr[0] = tiny` (value-copy) is legal.
+        let diags = check_with_typedb(
+            r#"void f(Json::Value@ arr) {
+                Json::Value@ tiny = Json::Object();
+                @arr[0] = tiny;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::InvalidAssignmentTarget))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected InvalidAssignmentTarget for @ into Json index, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn handle_assign_into_json_index_primitive_rhs_also_flags() {
+        let diags = check_with_typedb(
+            r#"void f(Json::Value@ arr) {
+                int iv = 7;
+                @arr[1] = iv;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::InvalidAssignmentTarget))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected InvalidAssignmentTarget for @ into Json index (primitive rhs), got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn handle_assign_legal_forms_stay_silent() {
+        // Game-verified legal: typed handle array slot, dictionary slot,
+        // plain handle ident, value-copy into Json index.
+        let diags = check_with_typedb(
+            r#"void f(Json::Value@ arr) {
+                Json::Value@[] a;
+                Json::Value@ h = Json::Object();
+                a.InsertLast(h);
+                @a[0] = h;
+                dictionary d;
+                @d["k"] = h;
+                Json::Value@ g;
+                @g = h;
+                arr[0] = h;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::InvalidAssignmentTarget
+                        | TypeDiagnosticKind::HandleValueMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no assign diagnostics for game-legal forms, got {:?}",
+            diags
         );
     }
 
