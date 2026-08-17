@@ -62,5 +62,16 @@ Record the game verdict in the fixture's gate-test doc comment.
 | `28-removed-draw-api` | #28 | `No matching symbol 'Draw::GetWidth/GetHeight'` | open — ignored (blocked on #18) |
 | `38-typedb-shadowed-class` | #38 | clean | fixed (db6e46b) — active |
 
+GH #37 batch (game verdicts from the 2026-08-17 live probe):
+
+| Fixture | Class | Game verdict |
+|---------|-------|--------------|
+| `37a-signed-unsigned-mismatch` | `i < u` | WARN `Signed/Unsigned mismatch` |
+| `37b-float-truncation` | `int x = 3.7` / `int g = f` | WARN `…not exact` / `…truncated…` |
+| `37c-unreachable-code` | stmt after `return` | WARN `Unreachable code` |
+| `37d-variable-shadow` | inner `int x` | WARN `Variable 'x' hides…` |
+| `37e-duplicate-function` | exact dup decl | ERR `…same name and parameters already exists` |
+| `37f-sign-change` | `uint u = -1` | WARN `Implicit conversion changed sign of value` |
+
 - These fixtures are **not** part of the `showcase-diags` demo band — do not
   add screenshot-worthy output here.
