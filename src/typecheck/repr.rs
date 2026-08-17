@@ -184,7 +184,7 @@ impl TypeRepr {
             .unwrap_handle();
         match inner {
             TypeRepr::Array(elem) => Some(elem),
-            TypeRepr::Generic { base, args } if base == "array" && args.len() == 1 => {
+            TypeRepr::Generic { base, args } if is_array_generic_base(base) && args.len() == 1 => {
                 Some(&args[0])
             }
             _ => None,
@@ -200,7 +200,7 @@ impl TypeRepr {
             .unwrap_const()
             .unwrap_handle();
         matches!(inner, TypeRepr::Array(_))
-            || matches!(inner, TypeRepr::Generic { base, .. } if base == "array")
+            || matches!(inner, TypeRepr::Generic { base, .. } if is_array_generic_base(base))
     }
 
     /// True if `self` (after stripping `Const`/`Handle`) is a dictionary
@@ -233,9 +233,9 @@ impl TypeRepr {
     pub fn is_error(&self) -> bool {
         match self {
             TypeRepr::Error(_) => true,
-            TypeRepr::Handle(inner)
-            | TypeRepr::Const(inner)
-            | TypeRepr::Array(inner) => inner.is_error(),
+            TypeRepr::Handle(inner) | TypeRepr::Const(inner) | TypeRepr::Array(inner) => {
+                inner.is_error()
+            }
             TypeRepr::Generic { args, .. } => args.iter().any(|a| a.is_error()),
             _ => false,
         }
@@ -255,6 +255,26 @@ impl TypeRepr {
         }
         parse_type_string_inner(trimmed)
     }
+}
+
+/// True for generic base names that behave as AngelScript arrays when they
+/// appear in typedb member type strings: the script-side `array<T>` plus
+/// the Nadeo engine container generics (`MwFastArray<CControlBase@>` etc.)
+/// exposed on engine classes. Indexing yields the element type and
+/// `Length` / `IsEmpty` are the array accessors (GH #50).
+fn is_array_generic_base(base: &str) -> bool {
+    matches!(
+        base,
+        "array"
+            | "MwFastArray"
+            | "MwFastBuffer"
+            | "MwFastBufferCat"
+            | "MwSArray"
+            | "MwArrayInPlaceDyn"
+            | "MwNodPool"
+            | "MwStridedArray"
+            | "MwVirtualArray"
+    )
 }
 
 fn parse_type_string_inner(s: &str) -> TypeRepr {
@@ -515,9 +535,9 @@ mod tests {
     fn parse_type_string_nested_array_of_array() {
         assert_eq!(
             TypeRepr::parse_type_string("array<array<int>>"),
-            TypeRepr::Array(Box::new(TypeRepr::Array(Box::new(
-                TypeRepr::Primitive(PrimitiveType::Int)
-            ))))
+            TypeRepr::Array(Box::new(TypeRepr::Array(Box::new(TypeRepr::Primitive(
+                PrimitiveType::Int
+            )))))
         );
     }
 
@@ -533,8 +553,7 @@ mod tests {
 
     #[test]
     fn array_element_type_accessor() {
-        let arr =
-            TypeRepr::Array(Box::new(TypeRepr::Primitive(PrimitiveType::Int)));
+        let arr = TypeRepr::Array(Box::new(TypeRepr::Primitive(PrimitiveType::Int)));
         assert_eq!(
             arr.array_element_type(),
             Some(&TypeRepr::Primitive(PrimitiveType::Int))
@@ -577,6 +596,24 @@ mod tests {
             TypeRepr::parse_type_string("Foo[]"),
             TypeRepr::Array(Box::new(TypeRepr::Named("Foo".into())))
         );
+    }
+
+    /// GH #50: Nadeo engine container generics behave as arrays —
+    /// `MwFastArray<CControlBase@>` must be array-like and index to
+    /// `CControlBase@`.
+    #[test]
+    fn engine_array_generics_are_array_like() {
+        let t = TypeRepr::parse_type_string("MwFastArray<CControlBase@>");
+        assert!(t.is_array_like());
+        assert_eq!(
+            t.array_element_type(),
+            Some(&TypeRepr::Handle(Box::new(TypeRepr::Named(
+                "CControlBase".into()
+            ))))
+        );
+        // Non-array generics stay opaque.
+        let d = TypeRepr::parse_type_string("dictionary<string,int>");
+        assert!(!d.is_array_like());
     }
 
     #[test]

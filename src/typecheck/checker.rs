@@ -109,6 +109,19 @@ pub enum TypeDiagnosticKind {
     /// inside the same block. The game warns `Unreachable code` once per
     /// run at the first unreachable statement.
     UnreachableCode,
+    /// GH #49: no implicit conversion exists between distinct math value
+    /// types (`int3 size = map.Size;` — nat3 → int3). Game wording:
+    /// `Can't implicitly convert from 'const nat3' to 'int3'`.
+    NoImplicitConversion {
+        from: String,
+        to: String,
+    },
+    /// GH #47 / #49: no overload (function or value-type constructor)
+    /// matches the argument types. Game wording:
+    /// `No matching signatures to 'UI::InputText(const string, string, const bool)'`.
+    NoMatchingSignatures {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -237,6 +250,12 @@ impl TypeDiagnostic {
                 name
             ),
             TypeDiagnosticKind::UnreachableCode => "Unreachable code".to_string(),
+            TypeDiagnosticKind::NoImplicitConversion { from, to } => {
+                format!("Can't implicitly convert from '{from}' to '{to}'")
+            }
+            TypeDiagnosticKind::NoMatchingSignatures { text } => {
+                format!("No matching signatures to '{text}'")
+            }
         }
     }
 }
@@ -1190,6 +1209,22 @@ impl<'a> Checker<'a> {
         if target.is_error() || source.is_error() {
             return;
         }
+        // GH #49: distinct math value types (nat3/int3/vec*/iso*/quat) have
+        // no implicit conversion — the game rejects the initializer with
+        // `Can't implicitly convert from 'const nat3' to 'int3'`.
+        if let (TypeRepr::Named(target_n), TypeRepr::Named(source_n)) = (target, source) {
+            if is_math_value_type(target_n) && is_math_value_type(source_n) && target_n != source_n
+            {
+                self.diagnostics.push(TypeDiagnostic {
+                    span: init.span,
+                    kind: TypeDiagnosticKind::NoImplicitConversion {
+                        from: init_ty.display(),
+                        to: target_n.to_string(),
+                    },
+                });
+                return;
+            }
+        }
         let (TypeRepr::Primitive(target_p), TypeRepr::Primitive(source_p)) = (target, source)
         else {
             return;
@@ -1223,6 +1258,40 @@ impl<'a> Checker<'a> {
                 span: init.span,
                 kind: TypeDiagnosticKind::FloatTruncation { literal },
             });
+        }
+    }
+
+    /// GH #49 constructor form: the int/nat vector families have NO
+    /// cross-type constructor — `int3(nat3_value)` is rejected by the game
+    /// with `No matching signatures to 'int3(const nat3&)'`. Narrow rule,
+    /// fleet-probed: only the nat↔int same-dimension family is flagged.
+    /// Cross-type ctors that DO exist elsewhere (e.g. `quat(const vec3&)`,
+    /// `quat(const mat3&)`) must stay legal, and the typedb exposes no
+    /// per-ctor metadata (`behaviors` is not indexed), so anything beyond
+    /// the nat/int family is out of scope here.
+    fn check_math_value_ctor(&mut self, target: &TypeRepr, arg_tys: &[TypeRepr], span: Span) {
+        let TypeRepr::Named(target_n) = target else {
+            return;
+        };
+        if arg_tys.len() != 1 {
+            return;
+        }
+        let Some(target_dim) = int_nat_family(target_n) else {
+            return;
+        };
+        let source = arg_tys[0].unwrap_const();
+        let TypeRepr::Named(source_n) = source else {
+            return;
+        };
+        if let Some(source_dim) = int_nat_family(source_n) {
+            if source_n != target_n && source_dim == target_dim {
+                self.diagnostics.push(TypeDiagnostic {
+                    span,
+                    kind: TypeDiagnosticKind::NoMatchingSignatures {
+                        text: format!("{target_n}(const {source_n}&)"),
+                    },
+                });
+            }
         }
     }
 
@@ -1900,7 +1969,132 @@ impl<'a> Checker<'a> {
         if let Some(sig) = call_site::unique_overload_for_argc(overloads, args.len()) {
             self.walk_args_and_check_external_param_types(display_name, args, sig);
         } else {
-            self.walk_args(args);
+            self.check_external_overload_set(display_name, args, overloads);
+        }
+    }
+
+    /// GH #47: several overloads accept the call's arity — check argument
+    /// types against every candidate. When NO candidate can bind and at
+    /// least one rejection rests on concrete evidence (primitive/primitive
+    /// mismatch, or a literal bound to an `&out` param), emit
+    /// `NoMatchingSignatures`, mirroring the game compiler's
+    /// `UI::InputText(label, str, false)` rejection. Named/unknown-shape
+    /// args never reject a candidate on their own (FP guard).
+    fn check_external_overload_set(
+        &mut self,
+        display_name: &str,
+        args: &[CallArg],
+        overloads: &[OverloadSig],
+    ) {
+        // Compute each argument's type once (this also walks the args for
+        // nested diagnostics — callers must not pre-walk).
+        let mut arg_tys: Vec<TypeRepr> = Vec::with_capacity(args.len());
+        let mut arg_literals: Vec<bool> = Vec::with_capacity(args.len());
+        let mut arg_lvalues: Vec<bool> = Vec::with_capacity(args.len());
+        for a in args {
+            arg_tys.push(self.expr_type(&a.value));
+            arg_literals.push(matches!(
+                a.value.kind,
+                ExprKind::BoolLit(_)
+                    | ExprKind::IntLit(_)
+                    | ExprKind::HexLit(_)
+                    | ExprKind::FloatLit(_)
+                    | ExprKind::StringLit
+            ));
+            arg_lvalues.push(matches!(
+                a.value.kind,
+                ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Index { .. }
+            ));
+        }
+        let mut any_compatible = false;
+        let mut evidence_span: Option<Span> = None;
+        for sig in overloads
+            .iter()
+            .filter(|sig| args.len() >= sig.min_args && args.len() <= sig.param_types.len())
+        {
+            let mut compatible = true;
+            for (i, arg_ty) in arg_tys.iter().enumerate() {
+                if arg_ty.is_error() {
+                    continue;
+                }
+                // Named args bind by parameter name (unknown name → neutral);
+                // positional args bind left-to-right.
+                let slot = match &args.get(i).and_then(|a| a.name.as_ref()) {
+                    Some(name) => {
+                        let needle = name.text(self.source);
+                        match sig
+                            .param_names
+                            .iter()
+                            .position(|p| p.as_deref() == Some(needle))
+                        {
+                            Some(slot) => slot,
+                            None => continue,
+                        }
+                    }
+                    None => {
+                        if i >= sig.param_types.len() {
+                            continue;
+                        }
+                        i
+                    }
+                };
+                let Some(param_text) = sig.param_types.get(slot) else {
+                    continue;
+                };
+                let param_out = sig.param_out.get(slot).copied().unwrap_or(false);
+                // A literal can never bind an `&out` reference slot.
+                if param_out && !arg_lvalues[i] {
+                    compatible = false;
+                    if arg_literals[i] {
+                        evidence_span = Some(args[i].value.span);
+                    }
+                    continue;
+                }
+                let param_ty = TypeRepr::parse_type_string(param_text.trim());
+                if param_ty.is_error() {
+                    continue;
+                }
+                if Self::is_unsubstituted_generic_or_any(&Self::peel_const_handle(&param_ty)) {
+                    continue;
+                }
+                let arg_core = Self::peel_const_handle(arg_ty);
+                let param_core = Self::peel_const_handle(&param_ty);
+                if matches!(
+                    (arg_core, param_core),
+                    (TypeRepr::Primitive(_), TypeRepr::Primitive(_))
+                ) && !is_convertible(arg_core, param_core)
+                {
+                    compatible = false;
+                    evidence_span = Some(args[i].value.span);
+                }
+                // Named / handle / mixed shapes stay neutral — the strict
+                // checks live on the unique-overload path.
+            }
+            if compatible {
+                any_compatible = true;
+            }
+        }
+        if !any_compatible {
+            if let Some(span) = evidence_span {
+                let rendered = arg_tys
+                    .iter()
+                    .zip(&arg_literals)
+                    .map(|(ty, lit)| {
+                        if *lit {
+                            format!("const {}", ty.display())
+                        } else {
+                            ty.display()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.diagnostics.push(TypeDiagnostic {
+                    span,
+                    kind: TypeDiagnosticKind::NoMatchingSignatures {
+                        text: format!("{display_name}({rendered})"),
+                    },
+                });
+            }
         }
     }
 
@@ -2032,7 +2226,16 @@ impl<'a> Checker<'a> {
                 //    chained `.member` access off a constructor can
                 //    still resolve. Otherwise just silence.
                 if self.scope.has_type(&name) {
-                    self.walk_args(args);
+                    let mut arg_tys = Vec::with_capacity(args.len());
+                    for a in args {
+                        arg_tys.push(self.expr_type(&a.value));
+                    }
+                    // GH #49: `int3(nat3_value)` matches no constructor.
+                    self.check_math_value_ctor(
+                        &TypeRepr::Named(name.clone()),
+                        &arg_tys,
+                        callee.span,
+                    );
                     return TypeRepr::Named(name);
                 }
                 if let Some(resolved) = self.scope.resolve_unqualified(&name) {
@@ -2459,16 +2662,35 @@ impl<'a> Checker<'a> {
                 target_type,
                 expr: inner,
             } => {
-                let _ = self.resolve_type_expr(target_type);
+                let target = self.resolve_type_expr(target_type);
                 let _ = self.expr_type(inner);
-                TypeRepr::Error(String::new())
+                // GH #51: `cast<T>(x)` yields `T@`, so member access on the
+                // result checks T's own member set plus its base chain
+                // (`cf.Visible` → UndefinedMember when no base carries it).
+                // Unresolvable targets stay silent rather than cascading.
+                if target.is_error() || matches!(target, TypeRepr::Void) {
+                    return TypeRepr::Error(String::new());
+                }
+                match target {
+                    TypeRepr::Handle(_) => target,
+                    TypeRepr::Const(pointee) => {
+                        TypeRepr::Handle(Box::new(TypeRepr::Const(pointee)))
+                    }
+                    other => TypeRepr::Handle(Box::new(other)),
+                }
             }
             ExprKind::TypeConstruct { target_type, args } => {
-                let _ = self.resolve_type_expr(target_type);
+                let target = self.resolve_type_expr(target_type);
+                let mut arg_tys = Vec::with_capacity(args.len());
                 for a in args {
-                    let _ = self.expr_type(a);
+                    arg_tys.push(self.expr_type(a));
                 }
-                TypeRepr::Error(String::new())
+                self.check_math_value_ctor(&target, &arg_tys, expr.span);
+                if target.is_error() {
+                    TypeRepr::Error(String::new())
+                } else {
+                    target
+                }
             }
             ExprKind::ArrayInit(items) => {
                 for i in items {
@@ -2699,6 +2921,31 @@ fn is_signed_int(p: PrimitiveType) -> bool {
         p,
         PrimitiveType::Int8 | PrimitiveType::Int16 | PrimitiveType::Int | PrimitiveType::Int64
     )
+}
+
+/// GH #49: AngelScript math value types exposed by the game (Nadeo/TM
+/// add-on). They are distinct engine value types with NO implicit
+/// conversions between each other — the compiler rejects
+/// `int3 size = nat3_value;` and `int3(nat3_value)` outright. Bare names
+/// only; these types are never namespace-qualified in source.
+fn is_math_value_type(name: &str) -> bool {
+    matches!(
+        name,
+        "nat2" | "nat3" | "int2" | "int3" | "vec2" | "vec3" | "vec4" | "iso3" | "iso4" | "quat"
+    )
+}
+
+/// GH #49: the int/nat vector families. Returns the vector dimension for
+/// members (nat2/int2 → 2, nat3/int3 → 3); non-members yield `None`.
+/// Same-dimension nat↔int pairs have no cross-type constructor (game
+/// ground truth); cross-dimension and cross-family (vec/quat/iso) do have
+/// legal conversions and are NOT flagged.
+fn int_nat_family(name: &str) -> Option<u8> {
+    match name {
+        "nat2" | "int2" => Some(2),
+        "nat3" | "int3" => Some(3),
+        _ => None,
+    }
 }
 
 /// True if `p` is an unsigned integer primitive.

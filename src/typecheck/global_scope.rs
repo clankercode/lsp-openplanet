@@ -28,6 +28,9 @@ pub struct GlobalScope<'a> {
 pub struct OverloadSig {
     pub param_names: Vec<Option<String>>,
     pub param_types: Vec<String>,
+    /// Per-parameter `&out` flag (typedb `typeflags` bit 2) aligned with
+    /// `param_types`; true params bind only l-value args (GH #47).
+    pub param_out: Vec<bool>,
     pub min_args: usize,
     pub return_type: String,
 }
@@ -701,6 +704,7 @@ impl<'a> GlobalScope<'a> {
                 out.push(OverloadSig {
                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                     param_types: m.params.iter().map(|p| p.type_name.clone()).collect(),
+                    param_out: m.params.iter().map(|p| p.is_out).collect(),
                     min_args,
                     return_type: m.return_type.clone(),
                 });
@@ -738,6 +742,7 @@ impl<'a> GlobalScope<'a> {
                     OverloadSig {
                         param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         param_types: f.params.iter().map(|p| p.type_name.clone()).collect(),
+                        param_out: f.params.iter().map(|p| p.is_out).collect(),
                         min_args,
                         return_type: f.return_type.clone(),
                     }
@@ -783,6 +788,7 @@ impl<'a> GlobalScope<'a> {
                     out.push(OverloadSig {
                         param_names: params.iter().map(|(name, _)| Some(name.clone())).collect(),
                         param_types: params.iter().map(|(_, ty_text)| ty_text.clone()).collect(),
+                        param_out: params.iter().map(|_| false).collect(),
                         min_args: *min_args,
                         return_type: return_type.clone(),
                     });

@@ -37,6 +37,8 @@ pub struct CoreArg {
     #[serde(default)]
     pub typedecl: String,
     #[serde(default)]
+    pub typeflags: u32,
+    #[serde(default)]
     pub default: Option<String>,
 }
 

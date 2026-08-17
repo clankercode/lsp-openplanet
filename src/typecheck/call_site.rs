@@ -91,6 +91,7 @@ mod tests {
         OverloadSig {
             param_names: names.iter().map(|n| Some((*n).to_string())).collect(),
             param_types: names.iter().map(|_| "int".to_string()).collect(),
+            param_out: names.iter().map(|_| false).collect(),
             min_args: min,
             return_type: "void".into(),
         }
