@@ -1,5 +1,5 @@
-use super::table::SymbolTable;
 use super::scope::Symbol;
+use super::table::SymbolTable;
 use crate::typedb::index::TypeIndex;
 
 /// Resolution order (spec Section 6.3):

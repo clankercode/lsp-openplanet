@@ -146,8 +146,8 @@ pub enum TokenKind {
     AmpEq,      // &=
     PipeEq,     // |=
     CaretEq,    // ^=
-    LtLtEq,    // <<=
-    GtGtEq,    // >>=
+    LtLtEq,     // <<=
+    GtGtEq,     // >>=
     PlusPlus,   // ++
     MinusMinus, // --
     Question,   // ?

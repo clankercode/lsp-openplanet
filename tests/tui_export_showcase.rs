@@ -88,7 +88,11 @@ fn export_sized(name: &str, mut app: App, w: u16, h: u16) {
         "source": "tests/fixtures/showcase-diags",
     });
     std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
-    println!("wrote {} ({} diags in app)", path.display(), app.snapshot.diagnostics.len());
+    println!(
+        "wrote {} ({} diags in app)",
+        path.display(),
+        app.snapshot.diagnostics.len()
+    );
 }
 
 #[test]

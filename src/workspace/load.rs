@@ -244,12 +244,7 @@ fn load_dependency_exports(
             .iter()
             .map(|d| (d.clone(), true, None)),
     );
-    queue.extend(
-        script
-            .dependencies
-            .iter()
-            .map(|d| (d.clone(), true, None)),
-    );
+    queue.extend(script.dependencies.iter().map(|d| (d.clone(), true, None)));
 
     while let Some((dep_id, is_required, required_by)) = queue.pop() {
         if !seen_ids.insert(dep_id.clone()) {
@@ -527,8 +522,9 @@ dependencies = ["NoSearchPath"]
     fn no_source_config_checks_everything() {
         let base = temp_tree("sp-all");
         multi_dir_consumer(&base);
-        let load = load_plugin_workspace(&base.join("consumer"), &DependencySearch::with_defaults())
-            .unwrap();
+        let load =
+            load_plugin_workspace(&base.join("consumer"), &DependencySearch::with_defaults())
+                .unwrap();
         let rel = loaded_rel_paths(&load, &base);
         assert!(rel.iter().any(|p| p == "src/Main.as"), "{rel:?}");
         assert!(rel.iter().any(|p| p == "OtherPacks/DS.as"), "{rel:?}");

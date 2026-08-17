@@ -8,11 +8,22 @@ pub struct ParseError {
 
 #[derive(Debug, Clone)]
 pub enum ParseErrorKind {
-    Expected { expected: TokenKind, found: TokenKind },
-    ExpectedIdent { found: TokenKind },
-    ExpectedExpr { found: TokenKind },
-    ExpectedType { found: TokenKind },
-    ExpectedItem { found: TokenKind },
+    Expected {
+        expected: TokenKind,
+        found: TokenKind,
+    },
+    ExpectedIdent {
+        found: TokenKind,
+    },
+    ExpectedExpr {
+        found: TokenKind,
+    },
+    ExpectedType {
+        found: TokenKind,
+    },
+    ExpectedItem {
+        found: TokenKind,
+    },
     UnexpectedToken(TokenKind),
     UnexpectedEof,
     Custom(String),

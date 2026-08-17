@@ -266,11 +266,7 @@ mod tests {
     }
 
     fn temp_plugins(tag: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "opl-deps-{}-{}",
-            tag,
-            std::process::id()
-        ));
+        let base = std::env::temp_dir().join(format!("opl-deps-{}-{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         base

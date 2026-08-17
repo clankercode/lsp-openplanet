@@ -173,8 +173,7 @@ pub fn preprocess(source: &str, defines: &HashSet<String>) -> PreprocessResult {
     // Safe: mask_range only replaces non-newline bytes with 0x20 (space),
     // which is valid UTF-8. The original source was valid UTF-8, and we only
     // replace individual bytes with a valid single-byte ASCII character.
-    let masked_source = String::from_utf8(masked)
-        .expect("masking preserved valid UTF-8");
+    let masked_source = String::from_utf8(masked).expect("masking preserved valid UTF-8");
 
     PreprocessResult {
         masked_source,
@@ -211,9 +210,15 @@ mod tests {
         assert_eq!(result.masked_source.len(), src.len());
         // Directive lines are masked (spaces), content is preserved
         let lines: Vec<&str> = result.masked_source.lines().collect();
-        assert!(lines[0].chars().all(|c| c == ' '), "directive line should be spaces");
+        assert!(
+            lines[0].chars().all(|c| c == ' '),
+            "directive line should be spaces"
+        );
         assert_eq!(lines[1], "int x = 1;");
-        assert!(lines[2].chars().all(|c| c == ' '), "endif line should be spaces");
+        assert!(
+            lines[2].chars().all(|c| c == ' '),
+            "endif line should be spaces"
+        );
     }
 
     #[test]
@@ -224,7 +229,10 @@ mod tests {
         assert_eq!(result.masked_source.len(), src.len());
         let lines: Vec<&str> = result.masked_source.lines().collect();
         assert!(lines[0].chars().all(|c| c == ' '));
-        assert!(lines[1].chars().all(|c| c == ' '), "inactive content should be masked");
+        assert!(
+            lines[1].chars().all(|c| c == ' '),
+            "inactive content should be masked"
+        );
         assert!(lines[2].chars().all(|c| c == ' '));
     }
 
@@ -291,9 +299,15 @@ mod tests {
         let lines: Vec<&str> = result.masked_source.lines().collect();
         assert_eq!(lines[0], "class WheelState {");
         assert_eq!(lines[1], "    float m_slipCoef;");
-        assert!(lines[2].chars().all(|c| c == ' '), "#if line should be masked");
+        assert!(
+            lines[2].chars().all(|c| c == ' '),
+            "#if line should be masked"
+        );
         assert_eq!(lines[3], "    float m_breakCoef;");
-        assert!(lines[4].chars().all(|c| c == ' '), "#endif line should be masked");
+        assert!(
+            lines[4].chars().all(|c| c == ' '),
+            "#endif line should be masked"
+        );
         assert_eq!(lines[5], "}");
     }
 
@@ -320,7 +334,10 @@ mod tests {
         let result = preprocess(src, &def(&["TMNEXT"]));
         assert!(result.errors.is_empty());
         let lines: Vec<&str> = result.masked_source.lines().collect();
-        assert!(lines[1].chars().all(|c| c == ' '), "#if branch should be masked");
+        assert!(
+            lines[1].chars().all(|c| c == ' '),
+            "#if branch should be masked"
+        );
         assert_eq!(lines[3], "int b;");
     }
 
@@ -331,7 +348,10 @@ mod tests {
         assert!(result.errors.is_empty());
         let lines: Vec<&str> = result.masked_source.lines().collect();
         assert_eq!(lines[1], "int a;");
-        assert!(lines[3].chars().all(|c| c == ' '), "#elif branch should be masked when #if was true");
+        assert!(
+            lines[3].chars().all(|c| c == ' '),
+            "#elif branch should be masked when #if was true"
+        );
     }
 
     #[test]
@@ -340,8 +360,14 @@ mod tests {
         let result = preprocess(src, &def(&["TMNEXT"]));
         assert!(result.errors.is_empty());
         let lines: Vec<&str> = result.masked_source.lines().collect();
-        assert!(lines[1].chars().all(|c| c == ' '), "#if branch should be masked");
-        assert!(lines[3].chars().all(|c| c == ' '), "#elif branch should be masked");
+        assert!(
+            lines[1].chars().all(|c| c == ' '),
+            "#if branch should be masked"
+        );
+        assert!(
+            lines[3].chars().all(|c| c == ' '),
+            "#elif branch should be masked"
+        );
         assert_eq!(lines[5], "int c;");
     }
 
@@ -355,7 +381,10 @@ mod tests {
         assert!(lines[0].chars().all(|c| c == ' '));
         assert_eq!(lines[1], "int a;");
         assert!(lines[2].chars().all(|c| c == ' '));
-        assert!(lines[3].chars().all(|c| c == ' '), "else branch should be masked");
+        assert!(
+            lines[3].chars().all(|c| c == ' '),
+            "else branch should be masked"
+        );
         assert!(lines[4].chars().all(|c| c == ' '));
     }
 }

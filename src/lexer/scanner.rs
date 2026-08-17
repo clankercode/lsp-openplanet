@@ -130,34 +130,64 @@ impl<'a> Lexer<'a> {
 
             // ── Single/multi-character operators ─────────────────────────────
             b'+' => match self.peek() {
-                Some(b'+') => { self.pos += 1; self.make_token(TokenKind::PlusPlus, start) }
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::PlusEq, start) }
+                Some(b'+') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::PlusPlus, start)
+                }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::PlusEq, start)
+                }
                 _ => self.make_token(TokenKind::Plus, start),
             },
             b'-' => match self.peek() {
-                Some(b'-') => { self.pos += 1; self.make_token(TokenKind::MinusMinus, start) }
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::MinusEq, start) }
+                Some(b'-') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::MinusMinus, start)
+                }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::MinusEq, start)
+                }
                 _ => self.make_token(TokenKind::Minus, start),
             },
             b'*' => match self.peek() {
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::StarEq, start) }
-                Some(b'*') => { self.pos += 1; self.make_token(TokenKind::StarStar, start) }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::StarEq, start)
+                }
+                Some(b'*') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::StarStar, start)
+                }
                 _ => self.make_token(TokenKind::Star, start),
             },
             b'%' => match self.peek() {
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::PercentEq, start) }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::PercentEq, start)
+                }
                 _ => self.make_token(TokenKind::Percent, start),
             },
             b'=' => match self.peek() {
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::EqEq, start) }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::EqEq, start)
+                }
                 _ => self.make_token(TokenKind::Eq, start),
             },
             b'!' => match self.peek() {
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::BangEq, start) }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::BangEq, start)
+                }
                 _ => self.make_token(TokenKind::Bang, start),
             },
             b'<' => match self.peek() {
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::LtEq, start) }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::LtEq, start)
+                }
                 Some(b'<') => {
                     self.pos += 1;
                     if self.peek() == Some(b'=') {
@@ -170,7 +200,10 @@ impl<'a> Lexer<'a> {
                 _ => self.make_token(TokenKind::Lt, start),
             },
             b'>' => match self.peek() {
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::GtEq, start) }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::GtEq, start)
+                }
                 Some(b'>') => {
                     self.pos += 1;
                     if self.peek() == Some(b'=') {
@@ -183,18 +216,36 @@ impl<'a> Lexer<'a> {
                 _ => self.make_token(TokenKind::Gt, start),
             },
             b'&' => match self.peek() {
-                Some(b'&') => { self.pos += 1; self.make_token(TokenKind::AmpAmp, start) }
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::AmpEq, start) }
+                Some(b'&') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::AmpAmp, start)
+                }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::AmpEq, start)
+                }
                 _ => self.make_token(TokenKind::Amp, start),
             },
             b'|' => match self.peek() {
-                Some(b'|') => { self.pos += 1; self.make_token(TokenKind::PipePipe, start) }
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::PipeEq, start) }
+                Some(b'|') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::PipePipe, start)
+                }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::PipeEq, start)
+                }
                 _ => self.make_token(TokenKind::Pipe, start),
             },
             b'^' => match self.peek() {
-                Some(b'=') => { self.pos += 1; self.make_token(TokenKind::CaretEq, start) }
-                Some(b'^') => { self.pos += 1; self.make_token(TokenKind::CaretCaret, start) }
+                Some(b'=') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::CaretEq, start)
+                }
+                Some(b'^') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::CaretCaret, start)
+                }
                 _ => self.make_token(TokenKind::Caret, start),
             },
             b'~' => self.make_token(TokenKind::Tilde, start),
@@ -212,7 +263,10 @@ impl<'a> Lexer<'a> {
             b'@' => self.make_token(TokenKind::At, start),
             b'#' => self.make_token(TokenKind::Hash, start),
             b':' => match self.peek() {
-                Some(b':') => { self.pos += 1; self.make_token(TokenKind::ColonColon, start) }
+                Some(b':') => {
+                    self.pos += 1;
+                    self.make_token(TokenKind::ColonColon, start)
+                }
                 _ => self.make_token(TokenKind::Colon, start),
             },
 
@@ -235,7 +289,9 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
-                _ => { self.pos += 1; }
+                _ => {
+                    self.pos += 1;
+                }
             }
         }
         self.make_token(TokenKind::BlockComment, start)
@@ -249,7 +305,7 @@ impl<'a> Lexer<'a> {
         // After bump consumed the first `"`, peek/peek2 are the next two chars.
         if q == b'"' && self.peek() == Some(b'"') && self.peek2() == Some(b'"') {
             self.pos += 2; // consume the other two `"`
-            // Scan until we see `"""`
+                           // Scan until we see `"""`
             loop {
                 if self.at_end() {
                     break; // unterminated triple-string
@@ -285,7 +341,9 @@ impl<'a> Lexer<'a> {
                     // unterminated string.
                     break;
                 }
-                _ => { self.pos += 1; }
+                _ => {
+                    self.pos += 1;
+                }
             }
         }
         self.make_token(TokenKind::StringLit, start)
@@ -429,11 +487,11 @@ mod tests {
             kinds(&tokens),
             vec![
                 TokenKind::LBracket,
-                TokenKind::Ident,   // Setting
-                TokenKind::Ident,   // hidden
+                TokenKind::Ident, // Setting
+                TokenKind::Ident, // hidden
                 TokenKind::RBracket,
                 TokenKind::KwBool,
-                TokenKind::Ident,   // S_IsActive
+                TokenKind::Ident, // S_IsActive
                 TokenKind::Eq,
                 TokenKind::KwTrue,
                 TokenKind::Semi,
@@ -464,10 +522,10 @@ mod tests {
             vec![
                 TokenKind::KwCast,
                 TokenKind::Lt,
-                TokenKind::Ident,   // CTrackMania
+                TokenKind::Ident, // CTrackMania
                 TokenKind::Gt,
                 TokenKind::LParen,
-                TokenKind::Ident,   // GetApp
+                TokenKind::Ident, // GetApp
                 TokenKind::LParen,
                 TokenKind::RParen,
                 TokenKind::RParen,
@@ -487,12 +545,12 @@ mod tests {
             vec![
                 TokenKind::Hash,
                 TokenKind::KwIf,
-                TokenKind::Ident,   // TMNEXT
+                TokenKind::Ident, // TMNEXT
                 TokenKind::KwInt,
-                TokenKind::Ident,   // x
+                TokenKind::Ident, // x
                 TokenKind::Semi,
                 TokenKind::Hash,
-                TokenKind::Ident,   // endif
+                TokenKind::Ident, // endif
                 TokenKind::Eof,
             ]
         );
@@ -504,9 +562,9 @@ mod tests {
         assert_eq!(
             kinds(&tokens),
             vec![
-                TokenKind::Ident,   // CGameEditorPluginMap
+                TokenKind::Ident, // CGameEditorPluginMap
                 TokenKind::At,
-                TokenKind::Ident,   // GetEditor
+                TokenKind::Ident, // GetEditor
                 TokenKind::LParen,
                 TokenKind::RParen,
                 TokenKind::Eof,
@@ -626,10 +684,10 @@ mod tests {
             kinds(&filtered),
             vec![
                 TokenKind::KwInt,
-                TokenKind::Ident,   // x
+                TokenKind::Ident, // x
                 TokenKind::Semi,
                 TokenKind::KwInt,
-                TokenKind::Ident,   // y
+                TokenKind::Ident, // y
                 TokenKind::Semi,
                 TokenKind::Eof,
             ]
@@ -642,14 +700,25 @@ mod tests {
         let tokens = tokenize_filtered("x is null");
         assert_eq!(
             kinds(&tokens),
-            vec![TokenKind::Ident, TokenKind::KwIs, TokenKind::KwNull, TokenKind::Eof]
+            vec![
+                TokenKind::Ident,
+                TokenKind::KwIs,
+                TokenKind::KwNull,
+                TokenKind::Eof
+            ]
         );
 
         // "x !is null" → Ident, Bang, KwIs, KwNull  (parser combines these)
         let tokens2 = tokenize_filtered("x !is null");
         assert_eq!(
             kinds(&tokens2),
-            vec![TokenKind::Ident, TokenKind::Bang, TokenKind::KwIs, TokenKind::KwNull, TokenKind::Eof]
+            vec![
+                TokenKind::Ident,
+                TokenKind::Bang,
+                TokenKind::KwIs,
+                TokenKind::KwNull,
+                TokenKind::Eof
+            ]
         );
     }
 
@@ -672,12 +741,27 @@ namespace MyPlugin {
         let ks = kinds(&tokens);
 
         // Spot-check some key tokens exist in order
-        let ns_idx = ks.iter().position(|&k| k == TokenKind::KwNamespace).expect("namespace");
-        let void_idx = ks.iter().position(|&k| k == TokenKind::KwVoid).expect("void");
-        let cast_idx = ks.iter().position(|&k| k == TokenKind::KwCast).expect("cast");
+        let ns_idx = ks
+            .iter()
+            .position(|&k| k == TokenKind::KwNamespace)
+            .expect("namespace");
+        let void_idx = ks
+            .iter()
+            .position(|&k| k == TokenKind::KwVoid)
+            .expect("void");
+        let cast_idx = ks
+            .iter()
+            .position(|&k| k == TokenKind::KwCast)
+            .expect("cast");
         let is_idx = ks.iter().position(|&k| k == TokenKind::KwIs).expect("is");
-        let str_idx = ks.iter().position(|&k| k == TokenKind::StringLit).expect("string lit");
-        let flt_idx = ks.iter().position(|&k| k == TokenKind::FloatLit).expect("float lit");
+        let str_idx = ks
+            .iter()
+            .position(|&k| k == TokenKind::StringLit)
+            .expect("string lit");
+        let flt_idx = ks
+            .iter()
+            .position(|&k| k == TokenKind::FloatLit)
+            .expect("float lit");
 
         assert!(ns_idx < void_idx);
         assert!(void_idx < cast_idx);
@@ -734,7 +818,12 @@ namespace MyPlugin {
         let tokens = tokenize_filtered("42 0 100");
         assert_eq!(
             kinds(&tokens),
-            vec![TokenKind::IntLit, TokenKind::IntLit, TokenKind::IntLit, TokenKind::Eof]
+            vec![
+                TokenKind::IntLit,
+                TokenKind::IntLit,
+                TokenKind::IntLit,
+                TokenKind::Eof
+            ]
         );
     }
 

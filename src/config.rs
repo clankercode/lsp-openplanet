@@ -166,8 +166,7 @@ impl LspConfig {
             // Unknown target: define the target token itself so its `#if`
             // branch is live; everything else off (conservative).
             other => {
-                let mut s: HashSet<String> =
-                    ALWAYS_ON.iter().map(|x| x.to_string()).collect();
+                let mut s: HashSet<String> = ALWAYS_ON.iter().map(|x| x.to_string()).collect();
                 s.insert(other.to_string());
                 return s;
             }

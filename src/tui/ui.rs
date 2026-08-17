@@ -191,10 +191,7 @@ impl App {
         let detail_h = detail_box_height(self.selected_diag());
         let mid = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(4),
-                Constraint::Length(detail_h),
-            ])
+            .constraints([Constraint::Min(4), Constraint::Length(detail_h)])
             .split(chunks[1]);
         self.list_inner_h = mid[0].height;
         self.draw_list(f, mid[0]);
@@ -281,17 +278,16 @@ impl App {
                 .collect()
         };
 
-        let sel = self
-            .list_state
-            .selected()
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        let sel = self.list_state.selected().map(|i| i + 1).unwrap_or(0);
         let n = self.snapshot.diagnostics.len();
         let stale = if self.snapshot.stale { " · stale" } else { "" };
         let title = if n == 0 {
             format!(" diagnostics · {}{stale} ", self.density.label())
         } else {
-            format!(" diagnostics · {} · {sel}/{n}{stale} ", self.density.label())
+            format!(
+                " diagnostics · {} · {sel}/{n}{stale} ",
+                self.density.label()
+            )
         };
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(title))
@@ -376,9 +372,10 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
-
 fn snap_find_key(snap: &Snapshot, key: &str) -> Option<usize> {
-    snap.diagnostics.iter().position(|d| d.identity_key() == key)
+    snap.diagnostics
+        .iter()
+        .position(|d| d.identity_key() == key)
 }
 
 /// Nearest diagnostic by (path, line, col) when exact key vanishes.
@@ -389,7 +386,11 @@ fn snap_nearest(snap: &Snapshot, key: &str, prev_idx: Option<usize>) -> Option<u
         return prev_idx.map(|i| i.min(snap.diagnostics.len().saturating_sub(1)));
     }
     // path may contain ':', so parse from the right for numbers — use identity fields loosely
-    let line = parts.iter().rev().nth(4).and_then(|s| s.parse::<u32>().ok());
+    let line = parts
+        .iter()
+        .rev()
+        .nth(4)
+        .and_then(|s| s.parse::<u32>().ok());
     let path_hint = parts.first().copied().unwrap_or("");
     let mut best: Option<(usize, u32)> = None;
     for (i, d) in snap.diagnostics.iter().enumerate() {
@@ -412,9 +413,8 @@ fn snap_nearest(snap: &Snapshot, key: &str, prev_idx: Option<usize>) -> Option<u
             best = Some((i, score));
         }
     }
-    best.map(|(i, _)| i).or_else(|| {
-        prev_idx.map(|i| i.min(snap.diagnostics.len().saturating_sub(1)))
-    })
+    best.map(|(i, _)| i)
+        .or_else(|| prev_idx.map(|i| i.min(snap.diagnostics.len().saturating_sub(1))))
 }
 
 fn ellipsize(s: &str, max_chars: usize) -> String {
@@ -440,7 +440,14 @@ fn format_location(d: &DiagItem, loc_w: usize) -> String {
     let bare = bare_location(d);
     let truncated = if bare.chars().count() > loc_w {
         // Keep the tail (file:line:col) when truncating long paths.
-        let tail: String = bare.chars().rev().take(loc_w.saturating_sub(1)).collect::<String>().chars().rev().collect();
+        let tail: String = bare
+            .chars()
+            .rev()
+            .take(loc_w.saturating_sub(1))
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         format!("…{tail}")
     } else {
         bare
@@ -602,7 +609,10 @@ fn paint_fragment_field(field: &str, style: Style) -> Vec<Span<'static>> {
     // Expect starts with ›
     let mut i = 0usize;
     if chars[0] == '›' {
-        out.push(Span::styled("›".to_string(), Style::default().add_modifier(Modifier::DIM)));
+        out.push(Span::styled(
+            "›".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
         i = 1;
     }
     if i < chars.len() && chars[i] == ' ' {
@@ -627,7 +637,10 @@ fn paint_fragment_field(field: &str, style: Style) -> Vec<Span<'static>> {
         out.push(Span::raw(" ".repeat(i - body_end)));
     }
     if i < chars.len() && chars[i] == '‹' {
-        out.push(Span::styled("‹".to_string(), Style::default().add_modifier(Modifier::DIM)));
+        out.push(Span::styled(
+            "‹".to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
         i += 1;
     }
     if i < chars.len() {
@@ -655,7 +668,9 @@ fn enrich_call_fragment(chars: &[char], start: usize, end: usize) -> Option<Stri
     let open = i;
     // identifier immediately before '('
     let mut j = open;
-    while j > 0 && (chars[j - 1].is_ascii_alphanumeric() || chars[j - 1] == '_' || chars[j - 1] == ':') {
+    while j > 0
+        && (chars[j - 1].is_ascii_alphanumeric() || chars[j - 1] == '_' || chars[j - 1] == ':')
+    {
         j -= 1;
     }
     if j == open {
@@ -737,7 +752,10 @@ fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
             Span::styled("│".to_string(), pipe),
             Span::raw(" "),
             Span::raw(before),
-            Span::styled(mid, severity_style(d.severity).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+            Span::styled(
+                mid,
+                severity_style(d.severity).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
             Span::raw(after),
         ]));
 
@@ -849,7 +867,11 @@ mod tests {
         );
         app.apply_snapshot(snap);
         let sel = app.selected_diag().unwrap();
-        assert_eq!(sel.identity_key(), key, "should keep Helpers warning selected");
+        assert_eq!(
+            sel.identity_key(),
+            key,
+            "should keep Helpers warning selected"
+        );
         assert_eq!(app.selected(), Some(2)); // shifted down by 1
     }
 
@@ -907,7 +929,10 @@ mod tests {
         for d in diags {
             let frag = code_fragment(d).expect("frag");
             let rhs = format_fragment_rhs(&frag, budget).expect("rhs");
-            assert!(!rhs.contains('…'), "should not truncate {rhs} budget={budget}");
+            assert!(
+                !rhs.contains('…'),
+                "should not truncate {rhs} budget={budget}"
+            );
             if frag.contains("MakeTint") {
                 assert!(rhs.contains("MakeTint(true)"), "{rhs}");
             }
@@ -961,10 +986,7 @@ mod tests {
     fn code_fragment_extracts_span() {
         let d = &canned_snapshot().diagnostics[0];
         let frag = code_fragment(d).expect("frag");
-        assert!(
-            frag.contains("true") || frag.contains("MakeTint"),
-            "{frag}"
-        );
+        assert!(frag.contains("true") || frag.contains("MakeTint"), "{frag}");
     }
 
     #[test]

@@ -85,13 +85,18 @@ where
 /// Map a key event to an app action. Pure enough to unit-test.
 pub fn handle_key(app: &mut App, source: &mut impl TuiDataSource, key: KeyEvent) {
     // Ctrl-C always quits (raw mode often delivers Char('c') + CONTROL).
-    if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+    {
         app.should_quit = true;
         return;
     }
 
     // Ignore accidental Ctrl/Alt combos for ordinary bindings.
-    if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
         return;
     }
 
@@ -182,7 +187,11 @@ mod tests {
     fn ctrl_c_quits() {
         let mut app = App::from_snapshot(canned_snapshot());
         let mut src = NopSource;
-        handle_key(&mut app, &mut src, press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        handle_key(
+            &mut app,
+            &mut src,
+            press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
         assert!(app.should_quit);
     }
 
@@ -200,7 +209,11 @@ mod tests {
     fn ctrl_r_does_not_refresh_or_quit() {
         let mut app = App::from_snapshot(canned_snapshot());
         let mut src = NopSource;
-        handle_key(&mut app, &mut src, press_mod(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        handle_key(
+            &mut app,
+            &mut src,
+            press_mod(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
         assert!(!app.should_quit);
     }
 

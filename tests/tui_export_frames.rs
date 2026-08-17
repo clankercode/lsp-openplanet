@@ -46,9 +46,7 @@ fn export_sized(name: &str, mut app: App, w: u16, h: u16) {
             let ch = cell.symbol().chars().next().unwrap_or(' ');
             let fg = color_hex(cell.fg);
             let bg = color_hex(cell.bg);
-            let bold = cell
-                .modifier
-                .contains(ratatui::style::Modifier::BOLD);
+            let bold = cell.modifier.contains(ratatui::style::Modifier::BOLD);
             cells.push(serde_json::json!({
                 "ch": ch.to_string(),
                 "fg": fg,
