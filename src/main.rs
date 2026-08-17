@@ -22,6 +22,7 @@ openplanet-lsp - Language Server Protocol for OpenPlanet AngelScript
 USAGE:
     openplanet-lsp [FLAGS]
     openplanet-lsp check [OPTIONS] [PATH]
+    openplanet-lsp tui [PATH]
     openplanet-lsp update [OPTIONS]
     openplanet-lsp lsp
     openplanet-lsp --lsp
@@ -34,9 +35,12 @@ FLAGS:
 COMMANDS:
     check            Run workspace diagnostics (or --watch for live TUI)
                      Run `openplanet-lsp check --help` for options
+    tui              Launch the live watch TUI (alias for `check --watch`)
+                     PATH defaults to the current directory
     update           Check for / apply self-updates
                      Run `openplanet-lsp update --help` for options
     lsp              Same as --lsp (language server on stdio)
+    help             Same as --help
 
 DEFAULT (no command):
     • non-TTY (editors)  → language server
@@ -111,10 +115,11 @@ fn handle_early_args(args: &[String]) -> Option<i32> {
             print!("{VERSION_TRAILER}");
             Some(0)
         }
-        Some("--help" | "-h") => {
+        Some("--help" | "-h" | "help") => {
             print!("{}", HELP);
             Some(0)
         }
+        Some("tui") => Some(run_tui_command(&args[1..])),
         Some("--lsp") | Some("lsp") => {
             // Fall through to LSP after this function returns None... but we need
             // to skip other args handling. Signal with a dedicated path.
@@ -143,6 +148,46 @@ const RUN_LSP_CODE: i32 = 0x4c_53_50; // 'LSP' bytes-ish
 
 fn run_lsp_marker() -> i32 {
     RUN_LSP_CODE
+}
+
+/// `openplanet-lsp tui [PATH]` — launch the watch TUI directly (same engine as
+/// `check --watch`). PATH defaults to `.`; if no plugin is found at/above it,
+/// print the bare-launch help (exit 2) instead of dying on an empty watcher.
+fn run_tui_command(args: &[String]) -> i32 {
+    let mut path: Option<PathBuf> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                println!("openplanet-lsp tui [PATH]");
+                println!();
+                println!("Launch the live watch TUI (alias for `check --watch`).");
+                println!("PATH defaults to the current directory.");
+                return 0;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("unknown tui option: {other}");
+                eprintln!("Run `openplanet-lsp tui --help` for usage.");
+                return 2;
+            }
+            other => {
+                if path.is_some() {
+                    eprintln!("unexpected argument: {other}");
+                    eprintln!("Run `openplanet-lsp tui --help` for usage.");
+                    return 2;
+                }
+                path = Some(PathBuf::from(other));
+            }
+        }
+    }
+    let start = path.unwrap_or_else(|| PathBuf::from("."));
+    let start_abs = start.canonicalize().unwrap_or(start);
+    match entrypoint::resolve_plugin_root(&start_abs) {
+        Some(root) => entrypoint::run_watch_path(root),
+        None => {
+            eprint!("{}", entrypoint::no_plugin_help_message());
+            2
+        }
+    }
 }
 
 fn run_check_command(args: &[String]) -> i32 {

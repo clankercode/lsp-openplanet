@@ -12,6 +12,25 @@ fn bin() -> Command {
 }
 
 #[test]
+fn tui_subcommand_launches_watch_tui_not_unknown_command() {
+    // `openplanet-lsp tui` must route to the watch TUI (same as `check --watch`),
+    // not die as an unknown command. The test cwd (repo root) has no info.toml
+    // and stdin is piped, so the TUI must NOT start: either outcome below
+    // proves the `tui` subcommand was recognized.
+    let out = bin().arg("tui").output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unknown command"),
+        "`tui` must be a recognized subcommand: got {stderr:?}"
+    );
+    assert!(
+        stderr.contains("No OpenPlanet plugin found") || stderr.contains("watch TUI failed"),
+        "expected no-plugin help or a TUI terminal error: status {:?}, stderr {stderr:?}",
+        out.status.code()
+    );
+}
+
+#[test]
 fn version_output_includes_repo_url_and_issue_ask() {
     let out = bin().arg("--version").output().unwrap();
     assert!(out.status.success());
@@ -56,6 +75,19 @@ fn help_output_includes_repo_url_and_issue_ask() {
         String::from_utf8_lossy(&short.stdout),
         stdout,
         "-h and --help must print identical output"
+    );
+}
+
+#[test]
+fn help_subcommand_matches_long_flag() {
+    // `openplanet-lsp help` is an alias for `openplanet-lsp --help`.
+    let long = bin().arg("--help").output().unwrap();
+    let sub = bin().arg("help").output().unwrap();
+    assert!(sub.status.success(), "`help` must exit 0: {sub:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&sub.stdout),
+        String::from_utf8_lossy(&long.stdout),
+        "`help` and `--help` must print identical output"
     );
 }
 
