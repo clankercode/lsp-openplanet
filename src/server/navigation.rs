@@ -17,6 +17,7 @@ use tower_lsp::lsp_types::*;
 use crate::analysis::DocumentAnalysis;
 use crate::lexer::{self, TokenKind};
 use crate::server::diagnostics::{position_to_offset, span_to_range};
+use crate::symbols::scope::Symbol;
 use crate::typecheck::GlobalScope;
 
 /// Per-file view used by navigation / call hierarchy / workspace symbols:
@@ -80,9 +81,11 @@ pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Opti
 /// Resolve the definition location of the symbol at `position`.
 ///
 /// Looks up the qualified name in `workspace` first, then falls back to the
-/// bare (last-segment) name. Returns `None` if the cursor is not on an
-/// identifier, no matching symbol exists, or the owning file is not in
-/// `files`.
+/// bare (last-segment) name. When candidates include both real definitions
+/// and `import ... from` alias declarations, real definitions win; the
+/// import site is used only when no definition exists in the workspace.
+/// Returns `None` if the cursor is not on an identifier, no matching symbol
+/// exists, or the owning file is not in `files`.
 pub fn goto_definition(
     analysis: &DocumentAnalysis,
     position: Position,
@@ -91,12 +94,22 @@ pub fn goto_definition(
 ) -> Option<Location> {
     let qual = name_at_position(analysis, position)?;
     let candidates = scope.lookup_reference(&qual);
-    let sym = candidates.first()?;
+    let sym = prefer_definition(&candidates)?;
     let (uri, def_analysis) = files.get(sym.file_id)?;
     Some(Location {
         uri: uri.clone(),
         range: span_to_range(def_analysis.masked_source(), sym.span),
     })
+}
+
+/// Pick the best candidate from a `lookup_reference` result: a real
+/// definition if any exists, else the first import-site alias.
+pub fn prefer_definition<'s>(candidates: &[&'s Symbol]) -> Option<&'s Symbol> {
+    candidates
+        .iter()
+        .find(|s| !s.is_import_alias())
+        .copied()
+        .or_else(|| candidates.first().copied())
 }
 
 /// Build a workspace rename edit replacing every textual reference to the
@@ -225,6 +238,55 @@ mod tests {
         let loc = goto_definition(analysis, pos(1, 26), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, tw.uri());
         // Points at the declaration (line 0), not the use.
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_prefers_definition_over_import() {
+        // A name declared both by an `import ... from` statement (file A) and
+        // a real function definition (file B) must resolve to the definition:
+        // the import is just a local alias declaration for it. File A is
+        // registered first, so a naive first-match lookup lands on the import.
+        let imports_src = "import void DoThing(int x) from 'Other';\nvoid main() { DoThing(1); }\n";
+        let defs_src = "void DoThing(int x) { }\n";
+        let snap = crate::analysis_snapshot::AnalysisSnapshot::from_files(
+            &[
+                (
+                    std::path::PathBuf::from("/test/imports.as"),
+                    imports_src.to_string(),
+                ),
+                (
+                    std::path::PathBuf::from("/test/defs.as"),
+                    defs_src.to_string(),
+                ),
+            ],
+            &crate::config::LspConfig::default(),
+        );
+        let files = snap.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = crate::typecheck::GlobalScope::new(snap.symbols(), None);
+        let analysis = &snap.files()[0].analysis;
+        // Cursor on the `DoThing` call site (line 1, char 14).
+        let loc = goto_definition(analysis, pos(1, 14), &scope, &ws_files).unwrap();
+        assert_eq!(
+            loc.uri, files[&1].0,
+            "must jump to the definition file, not the importing file"
+        );
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_falls_back_to_import_when_no_definition() {
+        // When the real definition is not part of the workspace, the import
+        // site is still the best (only) answer.
+        let src = "import void Ext(int x) from 'Other';\nvoid main() { Ext(1); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = tw.scope();
+        let loc = goto_definition(analysis, pos(1, 14), &scope, &ws_files).unwrap();
+        assert_eq!(loc.uri, tw.uri());
         assert_eq!(loc.range.start.line, 0);
     }
 

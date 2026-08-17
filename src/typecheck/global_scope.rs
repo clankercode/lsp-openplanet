@@ -777,6 +777,7 @@ impl<'a> GlobalScope<'a> {
                     return_type,
                     params,
                     min_args,
+                    ..
                 } = &s.kind
                 {
                     out.push(OverloadSig {
@@ -937,6 +938,7 @@ impl<'a> GlobalScope<'a> {
                 return_type,
                 params,
                 min_args,
+                ..
             } = &s.kind
             {
                 out.push((
@@ -1191,6 +1193,7 @@ mod tests {
                     return_type: "void".into(),
                     params: vec![],
                     min_args: 0,
+                    imported: false,
                 },
             )],
         );
@@ -1255,6 +1258,7 @@ mod tests {
                     return_type: "void".into(),
                     params: vec![],
                     min_args: 0,
+                    imported: false,
                 },
             )],
         );
@@ -1363,6 +1367,7 @@ mod tests {
                         return_type: "NetworkSerializable@".into(),
                         params: vec![("buf".into(), "MemoryBuffer@".into())],
                         min_args: 1,
+                        imported: false,
                     },
                 ),
                 make_symbol(
@@ -1410,6 +1415,7 @@ mod tests {
                         return_type: "NetworkSerializable@".into(),
                         params: vec![("buf".into(), "MemoryBuffer@".into())],
                         min_args: 1,
+                        imported: false,
                     },
                 ),
                 make_symbol(

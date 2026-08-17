@@ -22,6 +22,9 @@ pub enum SymbolKind {
         /// Number of parameters that have no default value. `max_args` is
         /// `params.len()`. For arity checking: `min_args..=params.len()`.
         min_args: usize,
+        /// True when declared by an `import ... from` statement (an alias for
+        /// a function defined elsewhere), false for real definitions.
+        imported: bool,
     },
     Class {
         parents: Vec<String>,
@@ -64,5 +67,15 @@ impl Scope {
 
     pub fn lookup(&self, name: &str) -> Option<&Symbol> {
         self.symbols.get(name)
+    }
+}
+
+impl Symbol {
+    /// True when this symbol was declared by an `import ... from` statement —
+    /// a local alias for a function whose real definition lives elsewhere
+    /// (possibly outside the workspace). Navigation features prefer real
+    /// definitions over these import-site declarations when both exist.
+    pub fn is_import_alias(&self) -> bool {
+        matches!(&self.kind, SymbolKind::Function { imported: true, .. })
     }
 }

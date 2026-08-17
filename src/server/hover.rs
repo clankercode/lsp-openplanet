@@ -90,7 +90,8 @@ pub fn hover(
     }
 
     // 3) Workspace symbol lookup.
-    if let Some(sym) = scope.lookup_reference(&qualified).first() {
+    let workspace_candidates = scope.lookup_reference(&qualified);
+    if let Some(sym) = super::navigation::prefer_definition(&workspace_candidates) {
         if let Some(md) = format_workspace_symbol(sym) {
             return Some(markdown_hover(md));
         }

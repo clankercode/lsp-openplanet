@@ -246,11 +246,19 @@ fn lookup_function_item(
     scope: &GlobalScope<'_>,
     files: &WorkspaceFiles<'_>,
 ) -> Option<CallHierarchyItem> {
-    // Ladder: exact qualified, then bare tail (GH #41).
-    let candidate = scope
-        .lookup_reference(query)
-        .into_iter()
-        .find(|s| matches!(s.kind, InternalSymbolKind::Function { .. }))?;
+    // Ladder: exact qualified, then bare tail (GH #41). Prefer real
+    // definitions over `import ... from` alias declarations.
+    let candidates = scope.lookup_reference(query);
+    let candidate = candidates
+        .iter()
+        .copied()
+        .find(|s| matches!(s.kind, InternalSymbolKind::Function { .. }) && !s.is_import_alias())
+        .or_else(|| {
+            candidates
+                .iter()
+                .copied()
+                .find(|s| matches!(s.kind, InternalSymbolKind::Function { .. }))
+        })?;
     let (uri, analysis) = files.get(candidate.file_id)?;
     let src = analysis.masked_source();
     let range = span_to_range(src, candidate.span);
