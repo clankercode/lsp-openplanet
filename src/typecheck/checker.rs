@@ -4493,6 +4493,40 @@ void Main() {
         );
     }
 
+    // ── GH #38: workspace class shadows typedb short-name collision ─────
+
+    #[test]
+    fn workspace_class_shadows_typedb_short_name_for_member_lookup() {
+        // `Discord::Status` exists in the Core typedb with an empty member
+        // list. A plugin-declared `Status` (in a namespace) must shadow the
+        // engine type: the game compiler prefers the workspace declaration,
+        // so member lookups on it must not emit UndefinedMember.
+        let diags = check_with_typedb(
+            r#"namespace Repro {
+                enum StatusKind { A, B }
+                class Status {
+                    void Set(StatusKind k) { m2 = k; }
+                    StatusKind get_Kind() const property { return m2; }
+                    private StatusKind m2 = StatusKind::A;
+                }
+                Status g_Status;
+                void Use() {
+                    g_Status.Set(StatusKind::B);
+                    StatusKind b = g_Status.Kind;
+                }
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no UndefinedMember for workspace-shadowed `Status`, got {:?}",
+            diags
+        );
+    }
+
     // ── B006: UndefinedMember on Nadeo types with trusted member lists ──
 
     #[test]

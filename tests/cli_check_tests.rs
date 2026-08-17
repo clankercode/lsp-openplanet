@@ -477,10 +477,10 @@ fn check_command_issue_repro_30_sibling_field_bare_ident_diagnoses() {
 }
 
 /// GH #38: a workspace class named like an engine typedb type (`Status` vs
-/// `Discord::Status`) must shadow it — the game compiles this clean. OPEN:
-/// every member lookup currently FPs. Un-ignore as part of the fix.
+/// `Discord::Status`) must shadow it — the game compiles this clean.
+/// Game-compiler ground truth (scripts/issue_repro_game.py, 2026-08-17):
+/// fixture loads with 0 errors. Fixed on master — must stay clean.
 #[test]
-#[ignore = "GH #38 open — typedb type shadows workspace class, un-ignore with the fix"]
 fn check_command_issue_repro_38_typedb_shadowed_class_is_clean() {
     let (ok, stdout, stderr) = run_issue_repro_typedb("38-typedb-shadowed-class");
     assert!(

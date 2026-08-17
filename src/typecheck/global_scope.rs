@@ -7,8 +7,8 @@
 //! callers build one on demand by borrowing both.
 
 use super::repr::TypeRepr;
-use crate::symbols::SymbolTable;
 use crate::symbols::scope::{Symbol, SymbolKind};
+use crate::symbols::SymbolTable;
 use crate::typedb::TypeIndex;
 
 /// Read-only merged view of all globally visible symbols:
@@ -303,16 +303,39 @@ impl<'a> GlobalScope<'a> {
         false
     }
 
+    /// True if a *workspace* class/interface/funcdef symbol exists whose
+    /// name (or `::`-tail) matches `name`. Game semantics: a plugin-declared
+    /// type shadows an engine typedb type of the same short name (GH #38 —
+    /// workspace `Status` beats `Discord::Status`), so external member-list
+    /// trust must not apply to the colliding name.
+    fn workspace_type_shadows(&self, name: &str) -> bool {
+        let is_type = |s: &&crate::symbols::scope::Symbol| {
+            matches!(
+                s.kind,
+                SymbolKind::Class { .. }
+                    | SymbolKind::Interface { .. }
+                    | SymbolKind::Funcdef { .. }
+            )
+        };
+        self.workspace.lookup(name).iter().any(is_type)
+            || self.workspace.lookup_tail(name).iter().any(is_type)
+    }
+
     /// Look up a member's type on a fully qualified type name, walking
     /// parent classes. Returns the member's type (or the method's return
     /// type, for method-as-value lookups) if found.
     ///
-    /// Precedence: external TypeIndex (walks `parent`), then workspace
-    /// symbols (fallback). Workspace hits parse the type text stored by
-    /// the symbol extractor (iter 28) into a real `TypeRepr`. An empty
-    /// stored string parses to `Error("")` — still a valid silence
-    /// sentinel for suppressing `UndefinedMember`.
+    /// Precedence: a workspace type whose name collides with the lookup
+    /// shadows the external TypeIndex entirely (GH #38); otherwise external
+    /// TypeIndex first (walks `parent`), then workspace symbols (fallback).
+    /// Workspace hits parse the type text stored by the symbol extractor
+    /// (iter 28) into a real `TypeRepr`. An empty stored string parses to
+    /// `Error("")` — still a valid silence sentinel for suppressing
+    /// `UndefinedMember`.
     pub fn lookup_member_type(&self, type_name: &str, member: &str) -> Option<TypeRepr> {
+        if self.workspace_type_shadows(type_name) {
+            return self.workspace_class_member(type_name, member);
+        }
         // External types first.
         if let Some(ext) = self.external {
             if let Some(t) = Self::ext_lookup_member(ext, type_name, member) {
@@ -325,6 +348,9 @@ impl<'a> GlobalScope<'a> {
     /// Like `lookup_member_type`, but only considers methods and returns
     /// the method's return type. Walks parent classes.
     pub fn lookup_method_return(&self, type_name: &str, method: &str) -> Option<TypeRepr> {
+        if self.workspace_type_shadows(type_name) {
+            return self.workspace_class_member(type_name, method);
+        }
         if let Some(ext) = self.external {
             if let Some(t) = Self::ext_lookup_method_return(ext, type_name, method) {
                 return Some(t);
@@ -473,7 +499,14 @@ impl<'a> GlobalScope<'a> {
     /// Used by the member-access checker to decide whether to trust a
     /// negative lookup (only external types have complete member lists).
     /// Accepts fully qualified names and Nadeo short names.
+    ///
+    /// A workspace type symbol whose name collides shadows the external
+    /// type (GH #38): the checker must not apply external member-list
+    /// trust to the shadowed name.
     pub fn is_external_type(&self, qualified: &str) -> bool {
+        if self.workspace_type_shadows(qualified) {
+            return false;
+        }
         self.external_type_info(qualified).is_some()
     }
 
@@ -680,7 +713,11 @@ impl<'a> GlobalScope<'a> {
                 .as_ref()
                 .and_then(|p| self.resolve_external_type_key(p));
         }
-        if out.is_empty() { None } else { Some(out) }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
 
     /// External free-function overloads with param type strings (B007).
