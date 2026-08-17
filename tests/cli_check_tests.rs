@@ -558,18 +558,30 @@ fn check_command_issue_repro_28_removed_draw_api_diagnoses() {
 #[test]
 fn check_command_issue_repro_47_inputtext_overload_diagnoses() {
     let (_, stdout, _) = run_issue_repro_typedb("47-inputtext-overload");
-    let flagged: Vec<&str> = stdout
+    let flagged_multi = stdout
         .lines()
-        .filter(|l| l.contains("Main.as:17") || l.contains("InputText"))
-        .collect();
+        .any(|l| l.contains("Main.as:20") && l.contains("InputText"));
+    let flagged_out = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:27") && l.contains("Begin"));
     assert!(
-        !flagged.is_empty(),
+        flagged_multi,
         "expected a diagnostic on the `UI::InputText(.., false)` line; stdout={stdout:?}"
     );
-    // The legal 2-arg (line 14) and bool&out l-value (line 16) calls must stay silent.
-    let legal_flagged = stdout
-        .lines()
-        .any(|l| (l.contains("Main.as:14") || l.contains("Main.as:16")) && l.contains("error"));
+    assert!(
+        flagged_out,
+        "expected a diagnostic on the `UI::Begin(.., true)` bool-literal-into-&out line; stdout={stdout:?}"
+    );
+    // Legal: 2-arg (17), bool&out l-value (19), float&out l-value (22),
+    // numeric-literal temp bind (23), bool&out l-value Begin (25) stay silent.
+    let legal_flagged = stdout.lines().any(|l| {
+        (l.contains("Main.as:17")
+            || l.contains("Main.as:19")
+            || l.contains("Main.as:22")
+            || l.contains("Main.as:23")
+            || l.contains("Main.as:25"))
+            && l.contains("error")
+    });
     assert!(
         !legal_flagged,
         "legal InputText calls must stay silent; stdout={stdout:?}"

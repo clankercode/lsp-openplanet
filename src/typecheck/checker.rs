@@ -1720,7 +1720,7 @@ impl<'a> Checker<'a> {
                 if !external.is_empty() {
                     let ranges = call_site::arity_ranges(&external);
                     self.check_arity_against_ranges(display_name, &ranges, args.len(), callee_span);
-                    self.check_external_call_arg_types(display_name, args, &external);
+                    self.check_external_call_arg_types(display_name, qualified, args, &external);
                 } else if let Some(ranges) =
                     self.scope.lookup_external_function_arity_ranges(qualified)
                 {
@@ -1863,24 +1863,66 @@ impl<'a> Checker<'a> {
     fn walk_args_and_check_external_param_types(
         &mut self,
         display_name: &str,
+        qualified_name: &str,
         args: &[CallArg],
         overload: &OverloadSig,
     ) {
+        // Compute each argument's type once (this also walks the args for
+        // nested diagnostics — callers must not pre-walk).
+        let mut arg_tys: Vec<TypeRepr> = Vec::with_capacity(args.len());
+        let mut arg_literals = Vec::with_capacity(args.len());
+        let mut arg_bool_literals = Vec::with_capacity(args.len());
+        for a in args {
+            arg_tys.push(self.expr_type(&a.value));
+            arg_literals.push(matches!(
+                a.value.kind,
+                ExprKind::BoolLit(_)
+                    | ExprKind::IntLit(_)
+                    | ExprKind::HexLit(_)
+                    | ExprKind::FloatLit(_)
+                    | ExprKind::StringLit
+            ));
+            arg_bool_literals.push(matches!(a.value.kind, ExprKind::BoolLit(_)));
+        }
         let mut next_positional = 0usize;
-        for arg in args {
+        for (i, arg) in args.iter().enumerate() {
             let named = arg.name.as_ref().map(|n| n.text(self.source));
             match call_site::bind_arg(named, &overload.param_names, &mut next_positional) {
                 ArgBind::UnknownName => {
-                    // Unknown names stay conservative; still visit the
-                    // value so nested diagnostics are retained.
-                    let _ = self.expr_type(&arg.value);
+                    // Unknown names stay conservative; nested diagnostics
+                    // were already retained by the walk above.
                     continue;
                 }
                 ArgBind::Index(param_index) => {
-                    let arg_ty = self.expr_type(&arg.value);
+                    let arg_ty = &arg_tys[i];
                     let Some(param_text) = overload.param_types.get(param_index) else {
                         continue;
                     };
+                    // GH #47 (unique-overload half): a BOOL literal cannot
+                    // bind an `&out` slot — game probe (outmap, 2026-08-18):
+                    // `UI::Begin("w2", true)` → `No matching signatures to
+                    // 'UI::Begin(const string, const bool)'`, while numeric
+                    // literals DO bind `&out` via temporaries
+                    // (`Text::TryParseFloat("1.5", 0.0)` is accepted).
+                    if overload
+                        .param_out
+                        .get(param_index)
+                        .copied()
+                        .unwrap_or(false)
+                        && arg_bool_literals[i]
+                    {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: arg.value.span,
+                            kind: TypeDiagnosticKind::NoMatchingSignatures {
+                                text: render_no_matching_sig(
+                                    qualified_name,
+                                    &arg_tys,
+                                    &arg_literals,
+                                ),
+                            },
+                        });
+                        continue;
+                    }
                     let param_ty = TypeRepr::parse_type_string(param_text.trim());
                     if matches!(param_ty, TypeRepr::Error(_)) {
                         continue;
@@ -1889,7 +1931,7 @@ impl<'a> Checker<'a> {
                         continue;
                     }
 
-                    let arg_core = Self::peel_const_handle(&arg_ty);
+                    let arg_core = Self::peel_const_handle(arg_ty);
                     let param_core = Self::peel_const_handle(&param_ty);
 
                     // AngelScript `?` is the any-type placeholder (`tostring`).
@@ -1963,13 +2005,14 @@ impl<'a> Checker<'a> {
     fn check_external_call_arg_types(
         &mut self,
         display_name: &str,
+        qualified_name: &str,
         args: &[CallArg],
         overloads: &[OverloadSig],
     ) {
         if let Some(sig) = call_site::unique_overload_for_argc(overloads, args.len()) {
-            self.walk_args_and_check_external_param_types(display_name, args, sig);
+            self.walk_args_and_check_external_param_types(display_name, qualified_name, args, sig);
         } else {
-            self.check_external_overload_set(display_name, args, overloads);
+            self.check_external_overload_set(qualified_name, args, overloads);
         }
     }
 
@@ -1982,7 +2025,7 @@ impl<'a> Checker<'a> {
     /// args never reject a candidate on their own (FP guard).
     fn check_external_overload_set(
         &mut self,
-        display_name: &str,
+        qualified_name: &str,
         args: &[CallArg],
         overloads: &[OverloadSig],
     ) {
@@ -1990,7 +2033,7 @@ impl<'a> Checker<'a> {
         // nested diagnostics — callers must not pre-walk).
         let mut arg_tys: Vec<TypeRepr> = Vec::with_capacity(args.len());
         let mut arg_literals: Vec<bool> = Vec::with_capacity(args.len());
-        let mut arg_lvalues: Vec<bool> = Vec::with_capacity(args.len());
+        let mut arg_bool_literals: Vec<bool> = Vec::with_capacity(args.len());
         for a in args {
             arg_tys.push(self.expr_type(&a.value));
             arg_literals.push(matches!(
@@ -2001,10 +2044,7 @@ impl<'a> Checker<'a> {
                     | ExprKind::FloatLit(_)
                     | ExprKind::StringLit
             ));
-            arg_lvalues.push(matches!(
-                a.value.kind,
-                ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Index { .. }
-            ));
+            arg_bool_literals.push(matches!(a.value.kind, ExprKind::BoolLit(_)));
         }
         let mut any_compatible = false;
         let mut evidence_span: Option<Span> = None;
@@ -2042,12 +2082,14 @@ impl<'a> Checker<'a> {
                     continue;
                 };
                 let param_out = sig.param_out.get(slot).copied().unwrap_or(false);
-                // A literal can never bind an `&out` reference slot.
-                if param_out && !arg_lvalues[i] {
+                // A BOOL literal can never bind an `&out` slot; numeric
+                // literals bind via temporaries (game probe: outmap,
+                // 2026-08-18 — `UI::Begin("w2", true)` rejected,
+                // `Text::TryParseFloat("1.5", 0.0)` accepted). Non-literal
+                // rvalues stay neutral (l-value detection is conservative).
+                if param_out && arg_bool_literals[i] {
                     compatible = false;
-                    if arg_literals[i] {
-                        evidence_span = Some(args[i].value.span);
-                    }
+                    evidence_span = Some(args[i].value.span);
                     continue;
                 }
                 let param_ty = TypeRepr::parse_type_string(param_text.trim());
@@ -2076,22 +2118,10 @@ impl<'a> Checker<'a> {
         }
         if !any_compatible {
             if let Some(span) = evidence_span {
-                let rendered = arg_tys
-                    .iter()
-                    .zip(&arg_literals)
-                    .map(|(ty, lit)| {
-                        if *lit {
-                            format!("const {}", ty.display())
-                        } else {
-                            ty.display()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 self.diagnostics.push(TypeDiagnostic {
                     span,
                     kind: TypeDiagnosticKind::NoMatchingSignatures {
-                        text: format!("{display_name}({rendered})"),
+                        text: render_no_matching_sig(qualified_name, &arg_tys, &arg_literals),
                     },
                 });
             }
@@ -2288,7 +2318,13 @@ impl<'a> Checker<'a> {
                 if !overloads.is_empty() {
                     let ranges = call_site::arity_ranges(&overloads);
                     self.check_arity_against_ranges(&member_name, &ranges, args.len(), callee.span);
-                    self.check_external_call_arg_types(&member_name, args, &overloads);
+                    let qualified_method = format!("{type_name}::{member_name}");
+                    self.check_external_call_arg_types(
+                        &member_name,
+                        &qualified_method,
+                        args,
+                        &overloads,
+                    );
                 } else if let Some(ranges) = self
                     .scope
                     .lookup_external_method_arity_ranges(&type_name, &member_name)
@@ -2392,7 +2428,7 @@ impl<'a> Checker<'a> {
                             .map(|s| (s.min_args, s.param_types.len()))
                             .collect();
                         self.check_arity_against_ranges(display, &ranges, args.len(), callee.span);
-                        self.check_external_call_arg_types(display, args, &overloads);
+                        self.check_external_call_arg_types(display, &qual, args, &overloads);
                         return t;
                     }
                     if let Some(ranges) = self.scope.lookup_external_function_arity_ranges(&qual) {
@@ -2890,6 +2926,30 @@ fn is_integer(p: PrimitiveType) -> bool {
 /// the game compiler stays silent whenever either compared subtree is
 /// "literal-tainted" (RemoteBuild probe 2026-08-17: `n > 0`, `0 < n`,
 /// `arr.Length > 0` all silent).
+/// GH #47: game-compiler signature render for `No matching signatures to
+/// 'Ns::Fn(const string, string, const bool)'` — qualified callee plus one
+/// display type per argument; literals render const-qualified (the game
+/// derives constness from the expression form).
+fn render_no_matching_sig(
+    qualified_name: &str,
+    arg_tys: &[TypeRepr],
+    arg_literals: &[bool],
+) -> String {
+    let rendered = arg_tys
+        .iter()
+        .zip(arg_literals)
+        .map(|(ty, lit)| {
+            if *lit {
+                format!("const {}", ty.display())
+            } else {
+                ty.display()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{qualified_name}({rendered})")
+}
+
 /// True when the subtree contains an explicit type conversion
 /// (`int(x)` TypeConstruct). Game probe (2026-08-18): a conversion anywhere
 /// in a relational operand exempts the Signed/Unsigned warning.

@@ -13,6 +13,36 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Fixed
+- **False-negative batch (GH #47, #49, #50, #51, #52 repro 1)** — four
+  error classes the game's AngelScript compiler rejects but `check`
+  silently accepted (exit 0, zero diagnostics). All game-verified via
+  RemoteBuild probes; every one now exits 1 in non-watch mode:
+  - Member access on engine container properties (`root.Childs[i].Visible`
+    on `MwFastArray<CControlBase@>` and friends) — indexing engine array
+    generics now yields the element type, so own + base-chain member
+    lookups run and `'X' is not a member of 'Y'` fires (GH #50, #52).
+  - Member access on `cast<T>(x)` results — the cast now types as `T@`
+    instead of unknown (GH #51).
+  - `int3 v = nat3expr;` and `int3(nat3expr)` — distinct math value types
+    (nat2/3, int2/3, vec2/3/4, iso3/4, quat) never convert implicitly
+    (GH #49).
+  - Overloaded engine calls where no overload matches — e.g.
+    `UI::InputText(label, str, false)` (a `bool` value binds neither the
+    `int flags` nor the `bool&out changed` parameter) → `No matching
+    signatures to 'UI::InputText(const string, string, const bool)'`
+    (GH #47). The same rule covers unique overloads: a **bool** literal
+    into an `&out` slot (`UI::Begin("w", true)`) is rejected with the
+    game's qualified-name wording, while numeric literals bind `&out` via
+    temporaries (`Text::TryParseFloat("1.5", 0.0)` stays legal) — both
+    game-verified via RemoteBuild probes.
+- **Parser parity:** `class @Name` declarations (as shipped in PluginManager)
+  parse as plain `Name` — the game accepts them; we previously emitted a
+  parse-error cascade (19→1 pre-existing errors on that plugin).
+- **Warning parity:** `Signed/Unsigned mismatch` no longer fires when a
+  relational operand contains an explicit conversion (`u < int(E::LAST)` is
+  silent in-game; only variable-vs-variable mixes warn).
+
 ## [0.5.0] - 2026-08-17
 
 Architecture batch from the `improve-codebase-architecture` review (GH #39–#43).
