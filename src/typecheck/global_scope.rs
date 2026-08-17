@@ -896,8 +896,8 @@ impl<'a> GlobalScope<'a> {
     ) -> Vec<&Symbol> {
         let mut out = Vec::new();
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::from([self
-            .normalize_workspace_class_name(class_name)]);
+        let mut queue =
+            std::collections::VecDeque::from([self.normalize_workspace_class_name(class_name)]);
         while let Some(name) = queue.pop_front() {
             if !visited.insert(name.clone()) {
                 continue;

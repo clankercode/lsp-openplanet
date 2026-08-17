@@ -1976,18 +1976,20 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Error(String::new());
                 }
-                // 2. Implicit `this.method()` — find on current class.
-                if self.lookup_class_member(&name).is_some() {
+                // 2. Implicit `this.method()` — find on current class. The
+                //    callee expression's recorded type is the method's
+                //    return type (queries like hover read it); silence
+                //    sentinels here used to surface as `(local) <error>`.
+                if let Some(ty) = self.lookup_class_member(&name) {
                     self.walk_args(args);
-                    return TypeRepr::Error(String::new());
+                    return ty;
                 }
-                if self
+                if let Some(ty) = self
                     .current_class()
                     .and_then(|cls| self.scope.workspace_class_member(&cls.name, &name))
-                    .is_some()
                 {
                     self.walk_args(args);
-                    return TypeRepr::Error(String::new());
+                    return ty;
                 }
                 // 3. Namespace-scoped lookups (inside a namespace block).
                 //    Try function return type first (for a real typed

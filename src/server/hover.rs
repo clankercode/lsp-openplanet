@@ -49,16 +49,19 @@ pub fn hover(
                 } else {
                     display.as_str()
                 };
-                let md = if is_field_name(analysis, offset, &bare) {
+                let kind_label = if is_field_name(analysis, offset, &bare) {
                     format!(
-                        "```angelscript\n(field) {}:{} {}\n```",
+                        "(field) {}:{} {}",
                         class_name_at(analysis, offset),
                         display,
                         bare
                     )
+                } else if is_method_name(analysis, offset, &bare) {
+                    format!("(method) {} {}()", ty_display, bare)
                 } else {
-                    format!("```angelscript\n(local) {} {}\n```", ty_display, bare)
+                    format!("(local) {} {}", ty_display, bare)
                 };
+                let md = format!("```angelscript\n{}\n```", kind_label);
                 return Some(markdown_hover(md));
             }
         }
@@ -120,6 +123,21 @@ fn is_field_name(analysis: &crate::analysis::DocumentAnalysis, offset: u32, bare
     scope_query::find_enclosing_class(file, offset)
         .and_then(|cls| scope_query::class_member_type(cls, analysis.masked_source(), bare))
         .is_some()
+}
+
+/// True when the ident at `offset` names a method of the enclosing class
+/// (drives the `(method)` hover label).
+fn is_method_name(analysis: &crate::analysis::DocumentAnalysis, offset: u32, bare: &str) -> bool {
+    let file: &SourceFile = &analysis.file;
+    let source = analysis.masked_source();
+    scope_query::find_enclosing_class(file, offset).is_some_and(|cls| {
+        cls.members.iter().any(|m| {
+            matches!(
+                m,
+                crate::parser::ast::ClassMember::Method(f) if f.name.text(source) == bare
+            )
+        })
+    })
 }
 
 /// Qualified name of the class enclosing `offset`, when any.
@@ -381,6 +399,32 @@ mod tests {
         let scope = tw.scope();
         let h = hover(&analysis, None, Position::new(0, 4), &scope);
         assert!(h.is_none());
+    }
+
+    #[test]
+    fn hover_implicit_this_method_call() {
+        // GH: hovering a bare implicit-this call of a class method must NOT
+        // show "(local) <error>" — the callee resolves to the method with
+        // its return type.
+        let src = "class C { void CheckInit() {} void m() { CheckInit(); } }";
+        let tw = TestWorkspace::one_file("hover.as", src);
+        let scope = tw.scope();
+        let checked = tw
+            .snapshot
+            .checked_file(&tw.uri(), &scope)
+            .expect("checked");
+        let analysis = tw.analysis();
+        let pos = pos_of(src, "CheckInit", 2);
+        let h = hover(analysis, Some(&checked), pos, &scope).expect("hover");
+        let HoverContents::Markup(m) = h.contents else {
+            panic!("expected markdown hover")
+        };
+        assert!(
+            !m.value.contains("<error>"),
+            "hover showed <error>: {:?}",
+            m.value
+        );
+        assert!(m.value.contains("CheckInit"), "missing name: {:?}", m.value);
     }
 
     #[test]
