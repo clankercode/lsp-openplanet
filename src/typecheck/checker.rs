@@ -70,6 +70,13 @@ pub enum TypeDiagnosticKind {
         op: String,
         operand_type: String,
     },
+    /// GH #37: a second (or later) top-level function declaration with the
+    /// same namespace-qualified name and same parameter type list. Matches
+    /// the game compiler error exactly (ERROR severity; compile aborts).
+    /// Class methods are out of scope (separate world).
+    DuplicateFunction {
+        function_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -161,6 +168,11 @@ impl TypeDiagnostic {
                 "illegal operation `{} {}`: `{}` does not support this operator",
                 op, operand_type, operand_type
             ),
+            TypeDiagnosticKind::DuplicateFunction { .. } => {
+                // Exact game-compiler wording (RemoteBuild probe 2026-08-17,
+                // Openplanet 1.29.5).
+                "A function with the same name and parameters already exists".to_string()
+            }
         }
     }
 }
@@ -227,6 +239,10 @@ pub struct Checker<'a> {
     /// different collision rules.
     span_expr_types: std::collections::HashMap<(u32, u32), TypeRepr>,
     record_types: bool,
+    /// Set of `(qualified_name, param_type_signature)` pairs seen for
+    /// top-level (free) function declarations in this file. Used by GH #37
+    /// slice 3 to flag `DuplicateFunction` at the second and later decl.
+    seen_function_sigs: std::collections::HashSet<(String, String)>,
 }
 
 impl<'a> Checker<'a> {
@@ -244,6 +260,7 @@ impl<'a> Checker<'a> {
             expr_types: std::collections::HashMap::new(),
             span_expr_types: std::collections::HashMap::new(),
             record_types: false,
+            seen_function_sigs: std::collections::HashSet::new(),
         }
     }
 
@@ -561,7 +578,10 @@ impl<'a> Checker<'a> {
 
     fn check_item(&mut self, item: &Item) {
         match item {
-            Item::Function(func) => self.check_function_decl(func, true),
+            Item::Function(func) => {
+                self.check_duplicate_function_decl(func);
+                self.check_function_decl(func, true);
+            }
             Item::Class(cls) => self.check_class_decl(cls),
             Item::Interface(iface) => self.check_interface_decl(iface),
             Item::Enum(_) => {
@@ -729,6 +749,40 @@ impl<'a> Checker<'a> {
                     self.pop_frame();
                 }
             }
+        }
+    }
+
+    /// GH #37 slice 3: flag the second (and later) top-level free function
+    /// declaration with the same namespace-qualified name and the same
+    /// parameter type list. Identity is by (qualified name, whitespace-
+    /// normalized param type-expr text) — text comparison, not semantic
+    /// type resolution, so `int a` vs `int b` collide (correct) while
+    /// differently-spelled-but-equivalent types may slip through (residual).
+    /// Class methods are out of scope (they are visited via
+    /// `check_class_member`, not here).
+    fn check_duplicate_function_decl(&mut self, func: &FunctionDecl) {
+        let name = func.name.text(self.source).to_string();
+        let qual_name = if self.namespace_stack.is_empty() {
+            name
+        } else {
+            format!("{}::{}", self.namespace_stack.join("::"), name)
+        };
+        let param_sig = func
+            .params
+            .iter()
+            .map(|p| {
+                let ty = p.type_expr.span.text(self.source);
+                ty.split_whitespace().collect::<Vec<_>>().join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        if !self.seen_function_sigs.insert((qual_name, param_sig)) {
+            self.diagnostics.push(TypeDiagnostic {
+                span: func.span,
+                kind: TypeDiagnosticKind::DuplicateFunction {
+                    function_name: func.name.text(self.source).to_string(),
+                },
+            });
         }
     }
 
@@ -5319,6 +5373,102 @@ void Main() {
             diags.is_empty(),
             "const bool `!` must stay silent, got {:?}",
             diags
+        );
+    }
+
+    // ── GH #37 slice 3: duplicate top-level function declarations ───────────
+
+    fn dupfn_diags(source: &str) -> Vec<TypeDiagnostic> {
+        check(source)
+            .into_iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::DuplicateFunction { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn duplicate_function_exact_fires_once_at_second_decl() {
+        let src = "void DupFn(int a) {}\n\nvoid DupFn(int a) {}\n";
+        let diags = dupfn_diags(src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic, got {diags:?}"
+        );
+        assert_eq!(
+            diags[0].message(),
+            "A function with the same name and parameters already exists"
+        );
+        assert_eq!(diags[0].severity(), TypeDiagnosticSeverity::Error);
+        // Span points at the second declaration (its start).
+        let second_start = src.rfind("void DupFn(int a) {}").unwrap() as u32;
+        assert_eq!(diags[0].span.start, second_start);
+    }
+
+    #[test]
+    fn duplicate_function_overload_different_param_types_silent() {
+        let src = "void F(int a) {}\nvoid F(string s) {}\n";
+        let diags = dupfn_diags(src);
+        assert!(
+            diags.is_empty(),
+            "overloads must stay silent, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_function_overload_different_arity_silent() {
+        let src = "void F(int a) {}\nvoid F(int a, int b) {}\n";
+        let diags = dupfn_diags(src);
+        assert!(
+            diags.is_empty(),
+            "overloads must stay silent, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_function_cross_namespace_silent() {
+        let src = "namespace A { void F(int a) {} }\nnamespace B { void F(int a) {} }\n";
+        let diags = dupfn_diags(src);
+        assert!(
+            diags.is_empty(),
+            "same name in different namespaces must stay silent, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_function_namespaced_vs_global_silent() {
+        let src = "void F(int a) {}\nnamespace A { void F(int a) {} }\n";
+        let diags = dupfn_diags(src);
+        assert!(
+            diags.is_empty(),
+            "global vs namespaced function must stay silent, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_function_inside_same_namespace_fires() {
+        let src = "namespace A {\nvoid F(int a) {}\nvoid F(int a) {}\n}\n";
+        let diags = dupfn_diags(src);
+        assert_eq!(diags.len(), 1, "expected one diagnostic, got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_function_three_way_fires_twice() {
+        let src = "void G(int a) {}\nvoid G(int a) {}\nvoid G(int a) {}\n";
+        let diags = dupfn_diags(src);
+        assert_eq!(
+            diags.len(),
+            2,
+            "2nd and 3rd decls must both fire, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_function_methods_not_flagged() {
+        let src = "class C {\n  void M(int a) {}\n  void M(int a) {}\n}\n";
+        let diags = dupfn_diags(src);
+        assert!(
+            diags.is_empty(),
+            "methods are out of scope for this rule, got {diags:?}"
         );
     }
 }
