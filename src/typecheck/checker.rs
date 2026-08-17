@@ -6346,6 +6346,29 @@ class C {
     }
 
     #[test]
+    fn mid_block_return_suppresses_missing_return_with_dead_tail() {
+        // GH #37 review note: `stmts_terminate` intentionally moved to
+        // any-position semantics when UnreachableCode landed. Consequence:
+        // `int F() { return 1; int y = 2; }` (dead tail, no tail return)
+        // now reports ONLY UnreachableCode and NOT MissingReturn — matching
+        // the game (a return path exists). Pin the new behavior.
+        let diags = check("int F() { return 1; int y = 2; }");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::MissingReturn { .. })),
+            "mid-block return must suppress MissingReturn, got {:?}",
+            diags
+        );
+        assert_eq!(
+            unreachables(&diags).len(),
+            1,
+            "dead tail still warns UnreachableCode, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn unreachable_after_break_warns() {
         let src = "void f() { while (true) { break; int y = 2; } }";
         let diags = check(src);
