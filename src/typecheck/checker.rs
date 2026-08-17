@@ -305,6 +305,12 @@ pub struct Checker<'a> {
     /// top-level (free) function declarations in this file. Used by GH #37
     /// slice 3 to flag `DuplicateFunction` at the second and later decl.
     seen_function_sigs: std::collections::HashSet<(String, String)>,
+    /// Scoped suppression for the `+`-mix arm of SignedUnsignedMismatch
+    /// (GH #37): while walking the operands of a NON-relational arithmetic
+    /// op (`*`/`&`/…), an inner Add-mix must not warn — the game only fires
+    /// when the mix is topmost (or feeds a comparison). Depth counter so
+    /// nested binary walks restore correctly.
+    arith_suppress_add_mix: u32,
 }
 
 impl<'a> Checker<'a> {
@@ -324,6 +330,7 @@ impl<'a> Checker<'a> {
             span_expr_types: std::collections::HashMap::new(),
             record_types: false,
             seen_function_sigs: std::collections::HashSet::new(),
+            arith_suppress_add_mix: 0,
         }
     }
 
@@ -2204,27 +2211,97 @@ impl<'a> Checker<'a> {
                 TypeRepr::Error(name)
             }
             ExprKind::Binary { lhs, rhs, op } => {
-                let lhs_ty = self.expr_type(lhs);
-                let rhs_ty = self.expr_type(rhs);
-                // GH #37 slice 1: game warns `Signed/Unsigned mismatch` on
-                // relational comparisons between signed and unsigned integer
-                // operands (WARNING; RemoteBuild probe 2026-08-17 covers
-                // `<`; `<=`/`>`/`>=` share the same AngelScript rule class).
+                // GH #37 slice 1 (tightened, game-verified RemoteBuild
+                // granularity probes 2026-08-17): `Signed/Unsigned mismatch`
+                // fires in exactly two situations:
+                //
+                //  a) A relational op `<`/`<=`/`>`/`>=` (NOT `==`/`!=`)
+                //     directly compares a pure signed int with a pure
+                //     unsigned int, and neither operand subtree contains an
+                //     integer literal (`n > 0` and `0 < n` are silent).
+                //     Warning span covers the whole comparison.
+                //  b) A `+` add directly mixes a pure signed int with a pure
+                //     unsigned int with NO integer literal in either direct
+                //     operand and no *chained* arithmetic sibling
+                //     (`(i + u) * 2` and `(i + 1) + u` are silent — only the
+                //     topmost mix warns). The warning lives at the `+`
+                //     regardless of any outer comparison partner
+                //     (`i + u < j` warns; `(i + u) > 0` warns at the `+`,
+                //     not the `>`). `-`, `*`, `&` mixes are exempt.
+                //
                 // Peel Const; stay silent on Error/unknown/non-primitive.
-                if matches!(op, BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq) {
-                    let l = lhs_ty.unwrap_const();
-                    let r = rhs_ty.unwrap_const();
-                    if let (TypeRepr::Primitive(lp), TypeRepr::Primitive(rp)) = (l, r) {
-                        if is_integer(*lp)
-                            && is_integer(*rp)
-                            && is_signed_int(*lp) != is_signed_int(*rp)
-                        {
-                            self.diagnostics.push(TypeDiagnostic {
-                                span: expr.span,
-                                kind: TypeDiagnosticKind::SignedUnsignedMismatch,
-                            });
+                // The mix check runs BEFORE walking operands so a chained
+                // arith sibling can suppress the inner add — `expr_type`
+                // recursion is bottom-up and couldn't see the enclosing op.
+                // `signedness_of` uses a diagnostics checkpoint so the
+                // probe walk never double-emits; the real walk happens once
+                // at the bottom of this arm.
+                let signedness_of = |ck: &mut Self, e: &Expr| -> Option<bool> {
+                    // Some(true) = signed, Some(false) = unsigned.
+                    let mark = ck.diagnostics.len();
+                    let ty = ck.expr_type(e);
+                    ck.diagnostics.truncate(mark);
+                    match ty.unwrap_const() {
+                        TypeRepr::Primitive(p) if is_signed_int(*p) => Some(true),
+                        TypeRepr::Primitive(p) if is_unsigned_int(*p) => Some(false),
+                        _ => None,
+                    }
+                };
+                let operand_binary_or_lit = |e: &Expr| {
+                    matches!(
+                        e.kind,
+                        ExprKind::Binary { .. } | ExprKind::IntLit(_) | ExprKind::HexLit(_)
+                    )
+                };
+                let mut emit_span: Option<Span> = None;
+                match op {
+                    BinOp::Add
+                        if self.arith_suppress_add_mix == 0
+                            && !operand_binary_or_lit(lhs)
+                            && !operand_binary_or_lit(rhs) =>
+                    {
+                        let ls = signedness_of(self, lhs);
+                        let rs = signedness_of(self, rhs);
+                        if let (Some(ls), Some(rs)) = (ls, rs) {
+                            if ls != rs {
+                                emit_span = Some(expr.span);
+                            }
                         }
                     }
+                    BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+                        if !subtree_has_int_literal(lhs) && !subtree_has_int_literal(rhs) {
+                            let ls = signedness_of(self, lhs);
+                            let rs = signedness_of(self, rhs);
+                            if let (Some(ls), Some(rs)) = (ls, rs) {
+                                if ls != rs {
+                                    emit_span = Some(expr.span);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(span) = emit_span {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span,
+                        kind: TypeDiagnosticKind::SignedUnsignedMismatch,
+                    });
+                }
+                // Walk operands exactly once with diagnostics live — the
+                // signedness probes above checkpointed and rolled back.
+                // While inside a non-relational arithmetic op, suppress any
+                // inner Add-mix (game: only the topmost mix warns).
+                let suppress = !matches!(
+                    op,
+                    BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::Eq | BinOp::NotEq
+                );
+                if suppress {
+                    self.arith_suppress_add_mix += 1;
+                }
+                let _ = self.expr_type(lhs);
+                let _ = self.expr_type(rhs);
+                if suppress {
+                    self.arith_suppress_add_mix -= 1;
                 }
                 TypeRepr::Error(String::new())
             }
@@ -2481,6 +2558,47 @@ fn is_numeric_primitive(p: &PrimitiveType) -> bool {
 /// True if `p` is any integer primitive (signed or unsigned).
 fn is_integer(p: PrimitiveType) -> bool {
     is_signed_int(p) || is_unsigned_int(p)
+}
+
+/// True if the expression subtree contains an integer literal anywhere
+/// (`IntLit` / `HexLit`). Used by the `Signed/Unsigned mismatch` rule:
+/// the game compiler stays silent whenever either compared subtree is
+/// "literal-tainted" (RemoteBuild probe 2026-08-17: `n > 0`, `0 < n`,
+/// `arr.Length > 0` all silent).
+fn subtree_has_int_literal(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::IntLit(_) | ExprKind::HexLit(_) => true,
+        ExprKind::Binary { lhs, rhs, .. } => {
+            subtree_has_int_literal(lhs) || subtree_has_int_literal(rhs)
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Postfix { expr, .. } => {
+            subtree_has_int_literal(expr)
+        }
+        ExprKind::Call { callee, args } => {
+            subtree_has_int_literal(callee)
+                || args.iter().any(|a| subtree_has_int_literal(&a.value))
+        }
+        ExprKind::Member { object, .. } => subtree_has_int_literal(object),
+        ExprKind::Index { object, index } => {
+            subtree_has_int_literal(object) || subtree_has_int_literal(index)
+        }
+        ExprKind::Cast { expr, .. } => subtree_has_int_literal(expr),
+        ExprKind::TypeConstruct { args, .. } => args.iter().any(subtree_has_int_literal),
+        ExprKind::Is { expr, .. } => subtree_has_int_literal(expr),
+        ExprKind::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            subtree_has_int_literal(condition)
+                || subtree_has_int_literal(then_expr)
+                || subtree_has_int_literal(else_expr)
+        }
+        ExprKind::Assign { lhs, rhs, .. } => {
+            subtree_has_int_literal(lhs) || subtree_has_int_literal(rhs)
+        }
+        _ => false,
+    }
 }
 
 /// True if `p` is a signed integer primitive.
@@ -5755,68 +5873,165 @@ void Main() {
 
     // ── SignedUnsignedMismatch ──────────────────────────────────────────────
 
-    #[test]
-    fn signed_unsigned_mismatch_lt_warns() {
-        let diags = check("void f() { int i = 1; uint u = 2; bool b = i < u; }");
+    fn sum_diags(source: &str) -> Vec<TypeDiagnostic> {
+        check(source)
+            .into_iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::SignedUnsignedMismatch))
+            .collect()
+    }
+
+    fn assert_sum_silent(source: &str) {
+        let diags = check(source);
         assert!(
-            has_warn_kind(&diags, |k| matches!(
-                k,
-                TypeDiagnosticKind::SignedUnsignedMismatch
-            )),
-            "expected SignedUnsignedMismatch warning, got {:?}",
-            diags
+            !diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::SignedUnsignedMismatch)),
+            "expected no SignedUnsignedMismatch in {source:?}, got {diags:?}"
         );
-        let msg = diags
-            .iter()
-            .find(|d| matches!(d.kind, TypeDiagnosticKind::SignedUnsignedMismatch))
-            .expect("warning present")
-            .message();
-        assert_eq!(msg, "Signed/Unsigned mismatch");
+    }
+
+    // Game-verified semantics (RemoteBuild granularity probes 2026-08-17):
+    // warn iff (a) a relational op `<`/`<=`/`>`/`>=` (NOT `==`/`!=`)
+    // directly compares a pure signed int with a pure unsigned int with no
+    // integer literal in either subtree, or (b) a `+` add mixes int and
+    // uint with no literal in the mix subtree and no enclosing arithmetic
+    // op. `-`/`*`/`&` mixes are silent; literal-tainted subtrees are silent.
+
+    // ── Probe cells: direct relational comparisons ─────────────────────
+
+    #[test]
+    fn sum_direct_relational_var_vs_var_warns() {
+        // Cell: `int i; uint u; i < u` → WARN.
+        let diags = sum_diags("void f() { int i = 1; uint u = 2; bool b = i < u; }");
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one warning, got {diags:?}"
+        );
+        assert_eq!(diags[0].message(), "Signed/Unsigned mismatch");
     }
 
     #[test]
-    fn signed_unsigned_mismatch_each_relational_op_warns() {
+    fn sum_direct_relational_each_op_warns() {
         for op in ["<", "<=", ">", ">="] {
-            let src = format!("void f() {{ int i = 1; uint u = 2; bool b = i {} u; }}", op);
-            let diags = check(&src);
-            assert!(
-                has_warn_kind(&diags, |k| matches!(
-                    k,
-                    TypeDiagnosticKind::SignedUnsignedMismatch
-                )),
-                "op `{}` must warn, got {:?}",
-                op,
-                diags
-            );
+            let src = format!("void f() {{ int i = 1; uint u = 2; bool b = i {op} u; }}");
+            let diags = sum_diags(&src);
+            assert_eq!(diags.len(), 1, "op `{op}` must warn once, got {diags:?}");
         }
+        // Reversed operand order warns too.
+        let diags = sum_diags("void f() { int i = 1; uint u = 2; bool b = u < i; }");
+        assert_eq!(diags.len(), 1, "u < i must warn, got {diags:?}");
     }
 
     #[test]
-    fn signed_unsigned_mismatch_same_signedness_stays_silent() {
-        let diags = check(
+    fn sum_uint_vs_int_literal_silent() {
+        // Cells: `uint n; n > 0` and `n > 1` → SILENT (literal operand).
+        assert_sum_silent("void f() { uint n = 1; bool b = n > 0; }");
+        assert_sum_silent("void f() { uint n = 1; bool b = n > 1; }");
+    }
+
+    #[test]
+    fn sum_literal_left_of_uint_silent() {
+        // Cell: `uint n; 0 < n` → SILENT (literal on the left).
+        assert_sum_silent("void f() { uint n = 1; bool b = 0 < n; }");
+    }
+
+    #[test]
+    fn sum_array_length_vs_literal_silent() {
+        // Cell: `arr.Length > 0` (.Length is uint, vs literal) → SILENT.
+        assert_sum_silent("void f() { array<int> arr; bool b = arr.Length > 0; }");
+    }
+
+    #[test]
+    fn sum_equality_mixed_silent() {
+        // Cell: `int i; uint u; i == u` → SILENT (equality, not relational).
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = i == u; }");
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = i != u; }");
+    }
+
+    #[test]
+    fn sum_same_signedness_relational_silent() {
+        assert_sum_silent(
             "void f() { int i = 1; int j = 2; uint u = 3; uint v = 4; bool b = i < j; bool c = u < v; }",
         );
+    }
+
+    #[test]
+    fn sum_unknown_operand_silent() {
+        // Conservative silence: an unknown/Error operand must not warn
+        // (the undefined-ident error is emitted separately).
+        assert_sum_silent("void f() { int i = 1; bool b = i < nope; }");
+    }
+
+    // ── Probe cells: arithmetic mixes ──────────────────────────────────
+
+    #[test]
+    fn sum_add_mix_in_relational_warns_at_add() {
+        // Cell: `int i; uint u; (i + u) > 0` → WARN, span at the `+`.
+        let src = "void f() { int i = 1; uint u = 2; bool b = i + u > 0; }";
+        let diags = sum_diags(src);
+        assert_eq!(diags.len(), 1, "expected one warning, got {diags:?}");
+        let plus = src.find('+').unwrap() as u32;
         assert!(
-            !diags
-                .iter()
-                .any(|d| matches!(d.kind, TypeDiagnosticKind::SignedUnsignedMismatch)),
-            "same-signedness comparisons must not warn, got {:?}",
-            diags
+            diags[0].span.start <= plus && plus < diags[0].span.end,
+            "warning span {:?} must cover the `+` at {plus}",
+            diags[0].span
         );
     }
 
     #[test]
-    fn signed_unsigned_mismatch_unknown_operand_stays_silent() {
-        // Conservative silence: an unknown/Error operand must not warn
-        // (the undefined-ident error is emitted separately).
-        let diags = check("void f() { int i = 1; bool b = i < nope; }");
-        assert!(
-            !diags
-                .iter()
-                .any(|d| matches!(d.kind, TypeDiagnosticKind::SignedUnsignedMismatch)),
-            "unknown operand must not warn, got {:?}",
-            diags
+    fn sum_add_mix_vs_int_var_warns() {
+        // Probe T3: `i + u < j` (signed var partner) → WARN at the `+`.
+        let diags = sum_diags("void f() { int i = 1; uint u = 2; int j = 3; bool b = i + u < j; }");
+        assert_eq!(diags.len(), 1, "expected one warning, got {diags:?}");
+    }
+
+    #[test]
+    fn sum_add_mix_vs_uint_var_warns() {
+        // Probe T3: `i + u < v` (unsigned var partner) → WARN at the `+`.
+        let diags =
+            sum_diags("void f() { int i = 1; uint u = 2; uint v = 4; bool b = i + u < v; }");
+        assert_eq!(diags.len(), 1, "expected one warning, got {diags:?}");
+    }
+
+    #[test]
+    fn sum_sub_mix_relational_silent() {
+        // Cell: `int i; uint u; (i - u) < i` → SILENT (subtraction exempt).
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = i - u > 0; }");
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = (i - u) < i; }");
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = (u - i) < i; }");
+    }
+
+    #[test]
+    fn sum_mul_and_bitand_mix_silent() {
+        // Probe T2: `i * u > 0` and `(i & u) > 0` → SILENT.
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = i * u > 0; }");
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = (i & u) > 0; }");
+    }
+
+    #[test]
+    fn sum_add_literal_taint_silent() {
+        // Probe T2: `i + 1 < u` → SILENT (literal taints the add subtree).
+        assert_sum_silent("void f() { int i = 1; uint u = 2; bool b = i + 1 < u; }");
+        // Probe T3: `(i + 1) + u < j` → SILENT (taint poisons the whole chain).
+        assert_sum_silent("void f() { int i = 1; uint u = 2; int j = 3; bool b = i + 1 + u < j; }");
+    }
+
+    #[test]
+    fn sum_add_mix_under_enclosing_arith_silent() {
+        // Probe T3: `(i + u) * 2 > j` → SILENT (mix not topmost).
+        assert_sum_silent(
+            "void f() { int i = 1; uint u = 2; int j = 3; bool b = (i + u) * 2 > j; }",
         );
+    }
+
+    #[test]
+    fn sum_add_mix_inside_call_arg_warns() {
+        // Extension: the mix warning fires wherever the `+` mix appears,
+        // not only under relational ops (the game's warning lives at the
+        // `+`, independent of any comparison).
+        let diags = sum_diags("void g(int x) {}\nvoid f() { int i = 1; uint u = 2; g(i + u); }");
+        assert_eq!(diags.len(), 1, "expected one warning, got {diags:?}");
     }
 
     // ── GH #37 slice 3: duplicate top-level function declarations ───────────
