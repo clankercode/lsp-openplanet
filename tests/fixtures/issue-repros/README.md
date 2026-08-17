@@ -57,10 +57,10 @@ Record the game verdict in the fixture's gate-test doc comment.
 | Fixture | Issue | Game verdict | Status |
 |---------|-------|--------------|--------|
 | `46-mixin-consumer-member` | #46 | clean | fixed (8c13ef5) — active |
-| `44-indexed-handle-assign` | #44 | `not an l-value` (line 11 only) | open — ignored |
+| `44-indexed-handle-assign` | #44 | `not an l-value` (@-into-Json-index only) | fixed (70f3f97) — active |
 | `30-sibling-field-bare-ident` | #30 | `No matching symbol 'nod'` | fixed — active |
 | `28-removed-draw-api` | #28 | `No matching symbol 'Draw::GetWidth/GetHeight'` | open — ignored (blocked on #18) |
-| `38-typedb-shadowed-class` | #38 | clean | open — ignored |
+| `38-typedb-shadowed-class` | #38 | clean | fixed (db6e46b) — active |
 
 - These fixtures are **not** part of the `showcase-diags` demo band — do not
   add screenshot-worthy output here.
