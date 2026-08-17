@@ -504,3 +504,112 @@ fn check_command_issue_repro_28_removed_draw_api_diagnoses() {
          28-removed-draw-api; stdout={stdout:?}"
     );
 }
+
+// ── GH #37: warning-parity batch ────────────────────────────────────────
+// Game-compiler ground truth for every class captured via live RemoteBuild
+// probe 2026-08-17 (see issue comments). These gates assert the game's
+// diagnostics exist at the flagged constructs and that legal counterparts
+// stay silent.
+
+/// #37a: `i < u` → WARN Signed/Unsigned mismatch.
+#[test]
+fn check_command_issue_repro_37a_signed_unsigned_warns() {
+    let (ok, stdout, _) = run_issue_repro("37a-signed-unsigned-mismatch");
+    assert!(
+        stdout.contains("Signed/Unsigned mismatch"),
+        "expected Signed/Unsigned mismatch warning; ok={ok} stdout={stdout:?}"
+    );
+    // Warnings must not fail the check.
+    assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
+    let warned_lines: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.contains("Signed/Unsigned mismatch"))
+        .collect();
+    assert_eq!(
+        warned_lines.len(),
+        1,
+        "exactly one signed/unsigned warning (both-signed and both-unsigned stay silent); stdout={stdout:?}"
+    );
+}
+
+/// #37b: float→int implicit conversion warnings (both game wordings).
+#[test]
+fn check_command_issue_repro_37b_float_truncation_warns() {
+    let (ok, stdout, _) = run_issue_repro("37b-float-truncation");
+    assert!(
+        stdout.contains("Implicit conversion of value is not exact"),
+        "expected not-exact literal warning; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("Float value truncated in implicit conversion to integer"),
+        "expected truncation warning; stdout={stdout:?}"
+    );
+    assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
+}
+
+/// #37c: statement after `return` → WARN Unreachable code.
+#[test]
+fn check_command_issue_repro_37c_unreachable_code_warns() {
+    let (ok, stdout, _) = run_issue_repro("37c-unreachable-code");
+    let hits: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.contains("Unreachable code"))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one Unreachable code warning; stdout={stdout:?}"
+    );
+    assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
+}
+
+/// #37d: inner local hides outer → WARN Variable 'x' hides …
+#[test]
+fn check_command_issue_repro_37d_variable_shadow_warns() {
+    let (ok, stdout, _) = run_issue_repro("37d-variable-shadow");
+    let hits: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.contains("hides another variable of same name in outer scope"))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one shadow warning (distinct-name decl stays silent); stdout={stdout:?}"
+    );
+    assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
+}
+
+/// #37e: exact duplicate function → ERR (overloads stay silent).
+#[test]
+fn check_command_issue_repro_37e_duplicate_function_errors() {
+    let (ok, stdout, _) = run_issue_repro("37e-duplicate-function");
+    let hits: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.contains("same name and parameters already exists"))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one duplicate-function error (overload silent); stdout={stdout:?}"
+    );
+    assert!(
+        !ok,
+        "error-level diagnostic must fail the check; stdout={stdout:?}"
+    );
+}
+
+/// #37f: `uint u = -1;` → WARN Implicit conversion changed sign of value.
+#[test]
+fn check_command_issue_repro_37f_sign_change_warns() {
+    let (ok, stdout, _) = run_issue_repro("37f-sign-change");
+    let hits: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.contains("Implicit conversion changed sign of value"))
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "expected exactly one sign-change warning (positive literal silent); stdout={stdout:?}"
+    );
+    assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
+}
