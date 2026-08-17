@@ -1,0 +1,7 @@
+[meta]
+name     = "Issue Repro 50 - Base Class Member Check"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]

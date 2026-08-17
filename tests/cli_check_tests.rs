@@ -551,6 +551,105 @@ fn check_command_issue_repro_28_removed_draw_api_diagnoses() {
     );
 }
 
+/// GH #47: `UI::InputText(label, string, false)` has no matching overload —
+/// the 3rd arg must be `bool&out changed` (l-value) or omitted; a `bool`
+/// value binds to neither candidate. Game-compiler ground truth quoted in the
+/// issue (OP 1.27.9). OPEN — must start flagging.
+#[test]
+#[ignore = "GH #47 open — overload arg-type mismatch not diagnosed"]
+fn check_command_issue_repro_47_inputtext_overload_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("47-inputtext-overload");
+    let flagged: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("Main.as:9") || l.contains("InputText"))
+        .collect();
+    assert!(
+        !flagged.is_empty(),
+        "expected a diagnostic on the `UI::InputText(.., false)` line; stdout={stdout:?}"
+    );
+    // The legal 2-arg (line 6) and bool&out l-value (line 8) calls must stay silent.
+    let legal_flagged = stdout
+        .lines()
+        .any(|l| (l.contains("Main.as:6") || l.contains("Main.as:8")) && l.contains("error"));
+    assert!(
+        !legal_flagged,
+        "legal InputText calls must stay silent; stdout={stdout:?}"
+    );
+}
+
+/// GH #49: AngelScript has no implicit nat3 -> int3 conversion — the game
+/// rejects both the implicit init and the int3(nat3) constructor form.
+/// Ground truth quoted in the issue (tm-editor-plus-plus). OPEN — must flag.
+#[test]
+#[ignore = "GH #49 open — nat3->int3 conversion not diagnosed"]
+fn check_command_issue_repro_49_nat3_int3_conversion_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("49-nat3-int3-conversion");
+    let bad_init = stdout.lines().any(|l| l.contains("Main.as:9"));
+    let bad_ctor = stdout.lines().any(|l| l.contains("Main.as:12"));
+    assert!(
+        bad_init && bad_ctor,
+        "expected diagnostics on both nat3->int3 lines (implicit init + ctor form); stdout={stdout:?}"
+    );
+    // Legal: exact nat3 copy (line 10), three-int ctor (line 11).
+    let legal_flagged = stdout
+        .lines()
+        .any(|l| (l.contains("Main.as:10") || l.contains("Main.as:11")) && l.contains("error"));
+    assert!(
+        !legal_flagged,
+        "legal nat3/int3 initializers must stay silent; stdout={stdout:?}"
+    );
+}
+
+/// GH #50: member access on a typedb engine type must check the type's own
+/// members AND its base-class chain. `CControlBase` has no `Visible` (it
+/// lives on `CGameManialinkControl`); the game rejects `c.Visible` with
+/// `'Visible' is not a member of 'CControlBase'`. OPEN — must flag.
+#[test]
+#[ignore = "GH #50 open — base-class member check not implemented"]
+fn check_command_issue_repro_50_base_class_member_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("50-base-class-member");
+    let flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:11") && l.contains("Visible"));
+    assert!(
+        flagged,
+        "expected a diagnostic on `c.Visible` (CControlBase has no Visible); stdout={stdout:?}"
+    );
+    // Legal: own member IsReadOnly (line 12), inherited CSceneMobil.Model (line 13).
+    let legal_flagged = stdout
+        .lines()
+        .any(|l| (l.contains("Main.as:12") || l.contains("Main.as:13")) && l.contains("error"));
+    assert!(
+        !legal_flagged,
+        "legal member accesses must stay silent; stdout={stdout:?}"
+    );
+}
+
+/// GH #51: member access on a `cast<T>()` result must check T's member set.
+/// `CControlFrame` only has `ChildsRelativeLocations`; the game rejects
+/// `cf.Visible` with `'Visible' is not a member of 'CControlFrame'`. OPEN.
+#[test]
+#[ignore = "GH #51 open — cast-result member check not implemented"]
+fn check_command_issue_repro_51_cast_member_check_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("51-cast-member-check");
+    let flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:15") && l.contains("Visible"));
+    assert!(
+        flagged,
+        "expected a diagnostic on `cf.Visible` (CControlFrame has no Visible); stdout={stdout:?}"
+    );
+    // Legal: own member (11), base CControlBase (12), base CControlContainer (13).
+    let legal_flagged = stdout.lines().any(|l| {
+        (l.contains("Main.as:11") || l.contains("Main.as:12") || l.contains("Main.as:13"))
+            && l.contains("error")
+    });
+    assert!(
+        !legal_flagged,
+        "legal member accesses on the cast result must stay silent; stdout={stdout:?}"
+    );
+}
+
 // ── GH #37: warning-parity batch ────────────────────────────────────────
 // Game-compiler ground truth for every class captured via live RemoteBuild
 // probe 2026-08-17 (see issue comments). These gates assert the game's

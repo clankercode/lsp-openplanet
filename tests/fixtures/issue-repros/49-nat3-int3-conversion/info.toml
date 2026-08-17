@@ -1,0 +1,7 @@
+[meta]
+name     = "Issue Repro 49 - Nat3 To Int3 No Implicit Conversion"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]
