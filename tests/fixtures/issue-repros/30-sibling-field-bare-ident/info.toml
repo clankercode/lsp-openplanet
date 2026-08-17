@@ -1,0 +1,7 @@
+[meta]
+name     = "Issue Repro 30 - Sibling Field Bare Ident"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]

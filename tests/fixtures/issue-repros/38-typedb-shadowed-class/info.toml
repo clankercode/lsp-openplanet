@@ -1,0 +1,7 @@
+[meta]
+name     = "Issue Repro 38 - Typedb Shadowed Class"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]

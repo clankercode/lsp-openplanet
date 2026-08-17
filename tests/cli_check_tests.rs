@@ -401,6 +401,30 @@ fn run_issue_repro(slug: &str) -> (bool, String, String) {
     )
 }
 
+/// Same as run_issue_repro but with the shared typedb fixtures — required
+/// for repros whose trigger involves engine API types (#38, #28).
+fn run_issue_repro_typedb(slug: &str) -> (bool, String, String) {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/issue-repros")
+        .join(slug);
+    let typedb = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--typedb-dir")
+        .arg(&typedb)
+        .arg(&fixture)
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    )
+}
+
 /// GH #46: mixin body references a member its consuming class declares.
 /// Fixed in 8c13ef5 — the fixture must stay clean.
 #[test]
@@ -409,5 +433,73 @@ fn check_command_issue_repro_46_mixin_consumer_member_is_clean() {
     assert!(
         ok && stdout.contains("0 diagnostics"),
         "expected 0 diagnostics on issue-repro 46-mixin-consumer-member; stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+/// GH #44: `@arr[0] = expr` handle-assign into an indexed Json::Value is not
+/// an l-value — the game compiler rejects it and so must the LSP. OPEN: the
+/// LSP is currently silent (false negative). Un-ignore as part of the fix.
+#[test]
+#[ignore = "GH #44 open — LSP false negative, un-ignore with the fix"]
+fn check_command_issue_repro_44_indexed_handle_assign_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("44-indexed-handle-assign");
+    assert!(
+        stdout.contains("l-value"),
+        "expected an l-value diagnostic on issue-repro 44-indexed-handle-assign; stdout={stdout:?}"
+    );
+    // The legal value-copy counterpart must NOT be flagged.
+    let legal_line_flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:17") || l.contains("Main.as:18"));
+    assert!(
+        !legal_line_flagged,
+        "value-copy `arr[0] = tiny` must stay silent; stdout={stdout:?}"
+    );
+}
+
+/// GH #30: bare ident in a class method must not resolve to a sibling
+/// class's field via unqualified tail matching. Game-compiler ground truth
+/// (scripts/issue_repro_game.py, 2026-08-17): `No matching symbol 'nod'`.
+/// Already fixed on master — the fixture must keep flagging `nod`.
+#[test]
+fn check_command_issue_repro_30_sibling_field_bare_ident_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("30-sibling-field-bare-ident");
+    let nod_diags: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.contains("undefined identifier") && l.contains("`nod`"))
+        .collect();
+    assert_eq!(
+        nod_diags.len(),
+        1,
+        "expected exactly 1 `undefined identifier `nod`` (ItemModel only; \
+         ItemModelTreeElement's own-field use must stay silent); stdout={stdout:?}"
+    );
+}
+
+/// GH #38: a workspace class named like an engine typedb type (`Status` vs
+/// `Discord::Status`) must shadow it — the game compiles this clean. OPEN:
+/// every member lookup currently FPs. Un-ignore as part of the fix.
+#[test]
+#[ignore = "GH #38 open — typedb type shadows workspace class, un-ignore with the fix"]
+fn check_command_issue_repro_38_typedb_shadowed_class_is_clean() {
+    let (ok, stdout, stderr) = run_issue_repro_typedb("38-typedb-shadowed-class");
+    assert!(
+        ok && stdout.contains("0 diagnostics"),
+        "expected 0 diagnostics on issue-repro 38-typedb-shadowed-class; stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+/// GH #28: `Draw::GetWidth`/`GetHeight` were removed from the Openplanet
+/// API — the game compiler rejects them (`No matching symbol`) but the LSP
+/// silently accepts unknown `Ns::Fn` calls. OPEN (proper fix is #18
+/// version-ranged API rules). Un-ignore as part of the fix.
+#[test]
+#[ignore = "GH #28 open — removed-API FN, blocked on #18 version-ranged rules"]
+fn check_command_issue_repro_28_removed_draw_api_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("28-removed-draw-api");
+    assert!(
+        stdout.contains("GetWidth") && stdout.contains("GetHeight"),
+        "expected diagnostics naming Draw::GetWidth/GetHeight on issue-repro \
+         28-removed-draw-api; stdout={stdout:?}"
     );
 }
