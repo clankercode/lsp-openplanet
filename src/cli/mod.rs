@@ -416,7 +416,7 @@ pub const ISSUE_URL: &str = "https://github.com/clankercode/lsp-openplanet/issue
 /// mismatches too, so the ask prints on clean runs as well.
 fn mismatch_ask(color: bool) -> String {
     format!(
-        "\n{} Did Openplanet have different compile errors or warnings compared to openplanet-lsp output? Please log an issue: {}\n",
+        "\n{} Did Openplanet have different compile errors or warnings compared to openplanet-lsp output? Please log an issue: {}",
         crate::term::dim(color, "›"),
         ISSUE_URL
     )
@@ -624,8 +624,8 @@ mod tests {
                 "{fmt:?} output must carry the mismatch ask: {out:?}"
             );
             assert!(
-                out.trim_end().ends_with(ISSUE_URL),
-                "{fmt:?} output must end with the issue URL: {out:?}"
+                out.ends_with(&format!("{ISSUE_URL}\n")),
+                "{fmt:?} output must end with exactly the issue URL + one newline (no stray blank line): {out:?}"
             );
         }
     }
@@ -637,8 +637,8 @@ mod tests {
         let report = trailer_report(0);
         let out = format_check_report_with(&report, false, CheckFormat::Plain);
         assert!(
-            out.trim_end().ends_with(ISSUE_URL),
-            "clean output must end with the issue URL: {out:?}"
+            out.ends_with(&format!("{ISSUE_URL}\n")),
+            "clean output must end with the issue URL + one newline: {out:?}"
         );
     }
 }
