@@ -394,12 +394,32 @@ pub fn format_check_report_for(report: &CheckReport, format: CheckFormat) -> Str
 /// Format check diagnostics; `color` forces ANSI on/off (tests / screenshots).
 ///
 /// `format` selects plain gcc-style vs pretty excerpts. See [`CheckFormat::use_pretty`].
+///
+/// Both renderers end with the Openplanet-mismatch ask: a dim trailing line
+/// inviting reports whenever the game's compile errors/warnings differ from
+/// this output (GH #45 follow-up).
 pub fn format_check_report_with(report: &CheckReport, color: bool, format: CheckFormat) -> String {
-    if format.use_pretty(color) {
+    let body = if format.use_pretty(color) {
         pretty::format_pretty(report, color)
     } else {
         format_plain(report, color)
-    }
+    };
+    format!("{body}{}\n", mismatch_ask(color))
+}
+
+/// Issue tracker, shared with the top-level help/version surfaces (main.rs).
+pub const ISSUE_URL: &str = "https://github.com/clankercode/lsp-openplanet/issues";
+
+/// Trailer line appended to every one-shot `check` report (plain and pretty):
+/// did Openplanet itself have different compile errors or warnings than this
+/// output? False negatives (missing diagnostics, e.g. GH #28) count as
+/// mismatches too, so the ask prints on clean runs as well.
+fn mismatch_ask(color: bool) -> String {
+    format!(
+        "\n{} Did Openplanet have different compile errors or warnings compared to openplanet-lsp output? Please log an issue: {}\n",
+        crate::term::dim(color, "›"),
+        ISSUE_URL
+    )
 }
 
 /// gcc/clang-ish plain lines: `path:line:col: severity: message`
@@ -571,5 +591,54 @@ mod tests {
 
         let opts = parse_check_args(&[".".into()]).unwrap();
         assert_eq!(opts.format, CheckFormat::Auto);
+    }
+
+    fn trailer_report(diags: usize) -> CheckReport {
+        use tower_lsp::lsp_types::Diagnostic;
+        let diagnostics = (0..diags)
+            .map(|_| CliDiagnostic {
+                path: PathBuf::from("/tmp/plugin/src/Main.as"),
+                diagnostic: Diagnostic {
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: "boom".to_string(),
+                    ..Default::default()
+                },
+            })
+            .collect();
+        CheckReport {
+            root: PathBuf::from("/tmp/plugin"),
+            diagnostics,
+            type_database_loaded: false,
+        }
+    }
+
+    /// One-shot check output must end with the Openplanet-mismatch ask
+    /// pointing at the issue tracker (GH #45 follow-up; plain and pretty).
+    #[test]
+    fn check_report_ends_with_mismatch_issue_ask() {
+        let report = trailer_report(1);
+        for fmt in [CheckFormat::Plain, CheckFormat::Pretty] {
+            let out = format_check_report_with(&report, false, fmt);
+            assert!(
+                out.contains("different compile errors or warnings compared to openplanet-lsp"),
+                "{fmt:?} output must carry the mismatch ask: {out:?}"
+            );
+            assert!(
+                out.trim_end().ends_with(ISSUE_URL),
+                "{fmt:?} output must end with the issue URL: {out:?}"
+            );
+        }
+    }
+
+    /// Clean runs keep the ask too — missing diagnostics (false negatives,
+    /// e.g. GH #28) are mismatches worth reporting as much as extra ones.
+    #[test]
+    fn check_report_clean_still_asks_for_mismatch_reports() {
+        let report = trailer_report(0);
+        let out = format_check_report_with(&report, false, CheckFormat::Plain);
+        assert!(
+            out.trim_end().ends_with(ISSUE_URL),
+            "clean output must end with the issue URL: {out:?}"
+        );
     }
 }

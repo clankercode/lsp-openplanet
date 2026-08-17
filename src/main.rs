@@ -5,7 +5,8 @@ use openplanet_lsp::{cli, entrypoint, server, update};
 /// Issue tracker. Every help/version surface prints this so users report
 /// Openplanet-behavior mismatches as issues instead of guessing
 /// (agent-filed GH #45; see tests/cli_surface_tests.rs for the contract).
-const ISSUE_URL: &str = "https://github.com/clankercode/lsp-openplanet/issues";
+/// Shared with the check-report trailer (src/cli/mod.rs).
+const ISSUE_URL: &str = openplanet_lsp::cli::ISSUE_URL;
 
 /// Trailer appended to `--version` output (after the machine-parsed first
 /// line `openplanet-lsp <semver>` — the VS Code extension's parseVersion

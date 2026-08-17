@@ -21,6 +21,8 @@
 //! 8. Shared entry: [`super::format_check_report_with`].
 //! 9. Source excerpts are read from disk via diagnostic paths.
 //! 10. LSP JSON-RPC path is untouched.
+//! 11. The mismatch-report trailer (super::format_check_report_with) follows
+//!     the summary on one-shot output; the watch TUI does not print it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

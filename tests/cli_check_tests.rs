@@ -1,6 +1,10 @@
 use std::fs;
 use std::process::Command;
 
+/// Trailer `check` must print after diagnostics: invites reports of
+/// Openplanet-vs-openplanet-lsp diagnostic mismatches (see main.rs ISSUE_URL).
+const ISSUE_ASK_TRAILER: &str = "https://github.com/clankercode/lsp-openplanet/issues";
+
 fn make_temp_plugin(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("openplanet-lsp-{}-{}", name, std::process::id()));
     let _ = fs::remove_dir_all(&root);
@@ -351,6 +355,12 @@ fn check_command_showcase_diags_fixture_has_many_diagnostics() {
     assert!(
         !output.status.success(),
         "expected showcase-diags to fail check; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    // The mismatch-report ask must ride along whenever diagnostics print.
+    assert!(
+        stdout.contains(ISSUE_ASK_TRAILER),
+        "expected the Openplanet-mismatch report ask on check output; stdout={stdout:?}"
     );
 
     // Summary line: "N diagnostics (...)" — require a demo-worthy floor.
