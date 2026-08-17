@@ -70,6 +70,24 @@ pub enum TypeDiagnosticKind {
         op: String,
         operand_type: String,
     },
+    /// Game parity (GH #37): float→int implicit conversion in a variable
+    /// initializer. Two message variants matching the game compiler:
+    /// `literal: true` (e.g. `int ms = 3.7;`) → "Implicit conversion of
+    /// value is not exact"; `literal: false` (e.g. `int g = f;`) → "Float
+    /// value truncated in implicit conversion to integer".
+    FloatTruncation {
+        literal: bool,
+    },
+    /// Game parity (GH #37): a compile-time-known negative integer literal
+    /// (`-1`) initializes an unsigned type: `uint u = -1;` → "Implicit
+    /// conversion changed sign of value". Runtime int→uint conversions of
+    /// variables are NOT warned (game behavior).
+    SignChange,
+    /// Game parity (GH #37): a relational comparison (`<`, `<=`, `>`, `>=`)
+    /// between a signed and an unsigned integer operand → "Signed/Unsigned
+    /// mismatch". Only compile-time-verifiable primitive mixes warn; Error /
+    /// unknown / non-primitive operands stay silent.
+    SignedUnsignedMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -81,7 +99,10 @@ pub struct TypeDiagnostic {
 impl TypeDiagnostic {
     pub fn severity(&self) -> TypeDiagnosticSeverity {
         match &self.kind {
-            TypeDiagnosticKind::StringByValueParam { .. } => TypeDiagnosticSeverity::Warning,
+            TypeDiagnosticKind::StringByValueParam { .. }
+            | TypeDiagnosticKind::FloatTruncation { .. }
+            | TypeDiagnosticKind::SignChange
+            | TypeDiagnosticKind::SignedUnsignedMismatch => TypeDiagnosticSeverity::Warning,
             _ => TypeDiagnosticSeverity::Error,
         }
     }
@@ -161,6 +182,22 @@ impl TypeDiagnostic {
                 "illegal operation `{} {}`: `{}` does not support this operator",
                 op, operand_type, operand_type
             ),
+            TypeDiagnosticKind::FloatTruncation { literal } => {
+                // Exact game-compiler wording (RemoteBuild probe 2026-08-17).
+                if *literal {
+                    "Implicit conversion of value is not exact".to_string()
+                } else {
+                    "Float value truncated in implicit conversion to integer".to_string()
+                }
+            }
+            TypeDiagnosticKind::SignChange => {
+                // Exact game-compiler wording (RemoteBuild probe 2026-08-17).
+                "Implicit conversion changed sign of value".to_string()
+            }
+            TypeDiagnosticKind::SignedUnsignedMismatch => {
+                // Exact game-compiler wording (RemoteBuild probe 2026-08-17).
+                "Signed/Unsigned mismatch".to_string()
+            }
         }
     }
 }
@@ -873,11 +910,58 @@ impl<'a> Checker<'a> {
                 }
             } else {
                 if let Some(init) = &d.init {
-                    let _ = self.expr_type(init);
+                    let init_ty = self.expr_type(init);
+                    self.check_init_conversion(&declared_ty, init, &init_ty);
                 }
                 declared_ty.clone()
             };
             self.define_local(d.name.text(self.source).to_string(), local_ty, d.name.span);
+        }
+    }
+
+    /// GH #37 slice 1: warning-parity implicit conversions in variable
+    /// initializers (game-compiler WARNING classes, RemoteBuild probe
+    /// 2026-08-17). Conservative silence on Error/unknown/non-primitive
+    /// operands — never warn on a type we can't classify confidently.
+    fn check_init_conversion(&mut self, declared: &TypeRepr, init: &Expr, init_ty: &TypeRepr) {
+        let target = declared.unwrap_const();
+        let source = init_ty.unwrap_const();
+        if target.is_error() || source.is_error() {
+            return;
+        }
+        let (TypeRepr::Primitive(target_p), TypeRepr::Primitive(source_p)) = (target, source)
+        else {
+            return;
+        };
+        if is_unsigned_int(*target_p) {
+            // SignChange: `uint u = -1;` — only compile-time-known negatives
+            // (unary minus on an integer literal). Runtime int→uint of a
+            // variable is NOT warned by the game.
+            if let ExprKind::Unary {
+                op: UnaryOp::Neg,
+                expr: inner,
+            } = &init.kind
+            {
+                if matches!(inner.kind, ExprKind::IntLit(_) | ExprKind::HexLit(_)) {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: init.span,
+                        kind: TypeDiagnosticKind::SignChange,
+                    });
+                    return;
+                }
+            }
+        }
+        // FloatTruncation: float/double source into any integer target.
+        // The game uses different messages for a literal (`int ms = 3.7;`
+        // → "value is not exact") vs a non-literal expr (`int g = f;` →
+        // "truncated in implicit conversion").
+        let source_is_float = matches!(source_p, PrimitiveType::Float | PrimitiveType::Double);
+        if source_is_float && is_integer(*target_p) {
+            let literal = matches!(init.kind, ExprKind::FloatLit(_));
+            self.diagnostics.push(TypeDiagnostic {
+                span: init.span,
+                kind: TypeDiagnosticKind::FloatTruncation { literal },
+            });
         }
     }
 
@@ -1959,9 +2043,29 @@ impl<'a> Checker<'a> {
                 });
                 TypeRepr::Error(name)
             }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                let _ = self.expr_type(lhs);
-                let _ = self.expr_type(rhs);
+            ExprKind::Binary { lhs, rhs, op } => {
+                let lhs_ty = self.expr_type(lhs);
+                let rhs_ty = self.expr_type(rhs);
+                // GH #37 slice 1: game warns `Signed/Unsigned mismatch` on
+                // relational comparisons between signed and unsigned integer
+                // operands (WARNING; RemoteBuild probe 2026-08-17 covers
+                // `<`; `<=`/`>`/`>=` share the same AngelScript rule class).
+                // Peel Const; stay silent on Error/unknown/non-primitive.
+                if matches!(op, BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq) {
+                    let l = lhs_ty.unwrap_const();
+                    let r = rhs_ty.unwrap_const();
+                    if let (TypeRepr::Primitive(lp), TypeRepr::Primitive(rp)) = (l, r) {
+                        if is_integer(*lp)
+                            && is_integer(*rp)
+                            && is_signed_int(*lp) != is_signed_int(*rp)
+                        {
+                            self.diagnostics.push(TypeDiagnostic {
+                                span: expr.span,
+                                kind: TypeDiagnosticKind::SignedUnsignedMismatch,
+                            });
+                        }
+                    }
+                }
                 TypeRepr::Error(String::new())
             }
             ExprKind::Unary { op, expr } => {
@@ -2209,6 +2313,27 @@ fn is_numeric_primitive(p: &PrimitiveType) -> bool {
             | PrimitiveType::Uint64
             | PrimitiveType::Float
             | PrimitiveType::Double
+    )
+}
+
+/// True if `p` is any integer primitive (signed or unsigned).
+fn is_integer(p: PrimitiveType) -> bool {
+    is_signed_int(p) || is_unsigned_int(p)
+}
+
+/// True if `p` is a signed integer primitive.
+fn is_signed_int(p: PrimitiveType) -> bool {
+    matches!(
+        p,
+        PrimitiveType::Int8 | PrimitiveType::Int16 | PrimitiveType::Int | PrimitiveType::Int64
+    )
+}
+
+/// True if `p` is an unsigned integer primitive.
+fn is_unsigned_int(p: PrimitiveType) -> bool {
+    matches!(
+        p,
+        PrimitiveType::Uint8 | PrimitiveType::Uint16 | PrimitiveType::Uint | PrimitiveType::Uint64
     )
 }
 
@@ -5318,6 +5443,216 @@ void Main() {
         assert!(
             diags.is_empty(),
             "const bool `!` must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    // ── GH #37 slice 1: warning-parity implicit-conversion diagnostics ─────
+    //
+    // Game-compiler ground truth (live RemoteBuild probe 2026-08-17,
+    // OpenplanetNext/TM2020, OP 1.29.x) — all four are WARNING severity:
+    //   `int ms = 3.7;`            → `Implicit conversion of value is not exact`
+    //   `float f = 1.5; int g = f;`→ `Float value truncated in implicit conversion to integer`
+    //   `uint u = -1;`             → `Implicit conversion changed sign of value`
+    //   `int i; uint u; i < u`     → `Signed/Unsigned mismatch`
+
+    fn has_warn_kind(diags: &[TypeDiagnostic], pred: impl Fn(&TypeDiagnosticKind) -> bool) -> bool {
+        diags
+            .iter()
+            .any(|d| pred(&d.kind) && matches!(d.severity(), TypeDiagnosticSeverity::Warning))
+    }
+
+    // ── FloatTruncation: literal variant ────────────────────────────────────
+
+    #[test]
+    fn float_truncation_literal_int_init_warns_not_exact() {
+        let diags = check("void f() { int ms = 3.7; }");
+        assert!(
+            has_warn_kind(&diags, |k| matches!(
+                k,
+                TypeDiagnosticKind::FloatTruncation { literal: true }
+            )),
+            "expected FloatTruncation literal warning, got {:?}",
+            diags
+        );
+        let msg = diags
+            .iter()
+            .find(|d| matches!(d.kind, TypeDiagnosticKind::FloatTruncation { .. }))
+            .expect("warning present")
+            .message();
+        assert_eq!(msg, "Implicit conversion of value is not exact");
+    }
+
+    #[test]
+    fn float_truncation_literal_uint_init_warns_not_exact() {
+        let diags = check("void f() { uint ms = 3.7; }");
+        assert!(
+            has_warn_kind(&diags, |k| matches!(
+                k,
+                TypeDiagnosticKind::FloatTruncation { literal: true }
+            )),
+            "expected FloatTruncation literal warning for uint target, got {:?}",
+            diags
+        );
+    }
+
+    // ── FloatTruncation: non-literal variant ────────────────────────────────
+
+    #[test]
+    fn float_truncation_float_var_to_int_warns_truncated() {
+        let diags = check("void f() { float x = 1.5; int g = x; }");
+        assert!(
+            has_warn_kind(&diags, |k| matches!(
+                k,
+                TypeDiagnosticKind::FloatTruncation { literal: false }
+            )),
+            "expected FloatTruncation non-literal warning, got {:?}",
+            diags
+        );
+        let msg = diags
+            .iter()
+            .find(|d| matches!(d.kind, TypeDiagnosticKind::FloatTruncation { .. }))
+            .expect("warning present")
+            .message();
+        assert_eq!(
+            msg,
+            "Float value truncated in implicit conversion to integer"
+        );
+    }
+
+    // ── FloatTruncation: legal counterparts stay silent ─────────────────────
+
+    #[test]
+    fn float_truncation_exact_int_init_stays_silent() {
+        let diags = check("void f() { int x = 3; uint u = 1; }");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::FloatTruncation { .. })),
+            "int-from-int must not warn, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn float_truncation_float_init_stays_silent() {
+        let diags = check("void f() { float x = 1.5; double d = 1.5; }");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::FloatTruncation { .. })),
+            "float/double targets must not warn, got {:?}",
+            diags
+        );
+    }
+
+    // ── SignChange ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn sign_change_negative_literal_into_uint_warns() {
+        let diags = check("void f() { uint u = -1; }");
+        assert!(
+            has_warn_kind(&diags, |k| matches!(k, TypeDiagnosticKind::SignChange)),
+            "expected SignChange warning, got {:?}",
+            diags
+        );
+        let msg = diags
+            .iter()
+            .find(|d| matches!(d.kind, TypeDiagnosticKind::SignChange))
+            .expect("warning present")
+            .message();
+        assert_eq!(msg, "Implicit conversion changed sign of value");
+    }
+
+    #[test]
+    fn sign_change_positive_literal_into_uint_stays_silent() {
+        let diags = check("void f() { uint u = 1; }");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::SignChange)),
+            "positive literal into uint must not warn, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn sign_change_runtime_int_into_uint_stays_silent() {
+        // The game does NOT warn for `uint u = i;` — runtime sign changes at
+        // assignment are not this class (RemoteBuild probe; only
+        // compile-time-known negatives warn).
+        let diags = check("void f() { int i = -5; uint u = i; }");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::SignChange)),
+            "runtime int→uint must not warn, got {:?}",
+            diags
+        );
+    }
+
+    // ── SignedUnsignedMismatch ──────────────────────────────────────────────
+
+    #[test]
+    fn signed_unsigned_mismatch_lt_warns() {
+        let diags = check("void f() { int i = 1; uint u = 2; bool b = i < u; }");
+        assert!(
+            has_warn_kind(&diags, |k| matches!(
+                k,
+                TypeDiagnosticKind::SignedUnsignedMismatch
+            )),
+            "expected SignedUnsignedMismatch warning, got {:?}",
+            diags
+        );
+        let msg = diags
+            .iter()
+            .find(|d| matches!(d.kind, TypeDiagnosticKind::SignedUnsignedMismatch))
+            .expect("warning present")
+            .message();
+        assert_eq!(msg, "Signed/Unsigned mismatch");
+    }
+
+    #[test]
+    fn signed_unsigned_mismatch_each_relational_op_warns() {
+        for op in ["<", "<=", ">", ">="] {
+            let src = format!("void f() {{ int i = 1; uint u = 2; bool b = i {} u; }}", op);
+            let diags = check(&src);
+            assert!(
+                has_warn_kind(&diags, |k| matches!(
+                    k,
+                    TypeDiagnosticKind::SignedUnsignedMismatch
+                )),
+                "op `{}` must warn, got {:?}",
+                op,
+                diags
+            );
+        }
+    }
+
+    #[test]
+    fn signed_unsigned_mismatch_same_signedness_stays_silent() {
+        let diags = check(
+            "void f() { int i = 1; int j = 2; uint u = 3; uint v = 4; bool b = i < j; bool c = u < v; }",
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::SignedUnsignedMismatch)),
+            "same-signedness comparisons must not warn, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn signed_unsigned_mismatch_unknown_operand_stays_silent() {
+        // Conservative silence: an unknown/Error operand must not warn
+        // (the undefined-ident error is emitted separately).
+        let diags = check("void f() { int i = 1; bool b = i < nope; }");
+        assert!(
+            !diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::SignedUnsignedMismatch)),
+            "unknown operand must not warn, got {:?}",
             diags
         );
     }
