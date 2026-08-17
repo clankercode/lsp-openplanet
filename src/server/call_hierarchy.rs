@@ -61,7 +61,20 @@ pub fn prepare(
         return Vec::new();
     };
 
-    // First: direct symbol lookup (qualified or bare tail).
+    // First: direct symbol lookup (qualified, bare tail, then
+    // enclosing-namespace-qualified — GH-namespace blind spot).
+    if let Some(sym) = crate::server::navigation::lookup_workspace_symbol(
+        scope,
+        analysis,
+        &name,
+        position_to_offset(source, position) as u32,
+    ) {
+        if matches!(sym.kind, InternalSymbolKind::Function { .. }) {
+            if let Some(item) = function_item_from_symbol(sym, files) {
+                return vec![item];
+            }
+        }
+    }
     if let Some(item) = lookup_function_item(&name, scope, files) {
         return vec![item];
     }
@@ -259,24 +272,32 @@ fn lookup_function_item(
                 .copied()
                 .find(|s| matches!(s.kind, InternalSymbolKind::Function { .. }))
         })?;
-    let (uri, analysis) = files.get(candidate.file_id)?;
+    function_item_from_symbol(candidate, files)
+}
+
+/// Build a [`CallHierarchyItem`] from a symbol-table function symbol.
+fn function_item_from_symbol(
+    sym: &crate::symbols::scope::Symbol,
+    files: &WorkspaceFiles<'_>,
+) -> Option<CallHierarchyItem> {
+    let (uri, analysis) = files.get(sym.file_id)?;
     let src = analysis.masked_source();
-    let range = span_to_range(src, candidate.span);
-    let selection_range = select_name_range(src, candidate.span, bare_tail(&candidate.name));
-    let kind = if candidate.name.contains("::") {
+    let range = span_to_range(src, sym.span);
+    let selection_range = select_name_range(src, sym.span, bare_tail(&sym.name));
+    let kind = if sym.name.contains("::") {
         LspSymbolKind::METHOD
     } else {
         LspSymbolKind::FUNCTION
     };
     Some(CallHierarchyItem {
-        name: candidate.name.clone(),
+        name: sym.name.clone(),
         kind,
         tags: None,
         detail: None,
         uri: uri.clone(),
         range,
         selection_range,
-        data: Some(serde_json::json!({ "name": candidate.name })),
+        data: Some(serde_json::json!({ "name": sym.name })),
     })
 }
 
@@ -773,6 +794,27 @@ mod tests {
     fn build_workspace(uri_str: &str, source: &str) -> TestWorkspace {
         let name = uri_str.rsplit('/').next().unwrap_or("a.as");
         TestWorkspace::one_file(name, source)
+    }
+
+    #[test]
+    fn test_prepare_on_call_site_inside_namespace() {
+        let src = "namespace Ns {\n    void greet() {}\n    void main() { greet(); }\n}";
+        let ws_owned = build_workspace("file:///t/a.as", src);
+        let uri_map = ws_owned.uri_map();
+        let ws = WorkspaceFiles { files: &uri_map };
+        let uri = ws_owned.uri();
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let line1 = src.lines().nth(2).unwrap();
+        let col = line1.find("greet").unwrap() as u32;
+        let items = prepare(
+            &analysis,
+            &uri,
+            Position::new(2, col + 2),
+            &GlobalScope::new(ws_owned.snapshot.symbols(), None),
+            &ws,
+        );
+        assert_eq!(items.len(), 1, "call hierarchy must find Ns::greet");
+        assert_eq!(items[0].name, "Ns::greet");
     }
 
     #[test]

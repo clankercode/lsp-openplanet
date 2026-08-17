@@ -75,8 +75,8 @@ pub fn goto_definition(
     files: &WorkspaceFiles,
 ) -> Option<Location> {
     let (tok_idx, tok_span, qual) = ident_index_at(analysis, position)?;
-    let candidates = scope.lookup_reference(&qual);
-    if let Some(sym) = prefer_definition(&candidates) {
+    let source = analysis.masked_source();
+    if let Some(sym) = lookup_workspace_symbol(scope, analysis, &qual, tok_span.start) {
         return symbol_location(sym, files);
     }
 
@@ -95,7 +95,6 @@ pub fn goto_definition(
         return None;
     }
     let file = &analysis.file;
-    let source = analysis.masked_source();
     let offset = tok_span.start;
     let enclosing = enclosing_class_name(file, source, offset)?;
     let members = scope.lookup_member_symbols_with_inheritance(&enclosing, &qual);
@@ -212,6 +211,37 @@ fn enclosing_class_name(
     best.map(|(name, _)| name)
 }
 
+/// Namespace path enclosing `offset` (`["Outer", "Inner"]`), innermost
+/// last. Drives the qualified-key fallback in
+/// [`goto_definition`](crate::server::navigation::goto_definition): bare
+/// references inside a namespace resolve against `Ns::name` symbol keys.
+fn enclosing_namespace_path(
+    file: &crate::parser::ast::SourceFile,
+    source: &str,
+    offset: u32,
+) -> Vec<String> {
+    fn walk<'a>(
+        items: &'a [crate::parser::ast::Item],
+        offset: u32,
+        source: &str,
+        path: &mut Vec<String>,
+    ) {
+        for item in items {
+            if let crate::parser::ast::Item::Namespace(nsd) = item {
+                if nsd.span.start <= offset && offset <= nsd.span.end {
+                    path.push(nsd.name.text(source).to_string());
+                    walk(&nsd.items, offset, source, path);
+                }
+            }
+        }
+    }
+    // Identifier text is byte-identical between the original and masked
+    // sources (masking replaces comments/strings with same-length blanks).
+    let mut path = Vec::new();
+    walk(&file.items, offset, source, &mut path);
+    path
+}
+
 /// Resolve a symbol to a [`Location`] when its file is open.
 fn symbol_location(sym: &Symbol, files: &WorkspaceFiles) -> Option<Location> {
     let (uri, def_analysis) = files.get(sym.file_id)?;
@@ -219,6 +249,35 @@ fn symbol_location(sym: &Symbol, files: &WorkspaceFiles) -> Option<Location> {
         uri: uri.clone(),
         range: span_to_range(def_analysis.masked_source(), sym.span),
     })
+}
+
+/// Namespace-aware workspace lookup for the name at a use site: exact key,
+/// then enclosing-namespace-qualified keys innermost→outermost (the symbol
+/// table registers namespaced decls as `Ns::name`), preferring real
+/// definitions over `import ... from` aliases.
+pub fn lookup_workspace_symbol<'a>(
+    scope: &'a GlobalScope<'_>,
+    analysis: &DocumentAnalysis,
+    name: &str,
+    use_offset: u32,
+) -> Option<&'a Symbol> {
+    let candidates = scope.lookup_reference(name);
+    if let Some(sym) = prefer_definition(&candidates) {
+        return Some(sym);
+    }
+    if name.contains("::") {
+        return None;
+    }
+    let source = analysis.masked_source();
+    let ns_path = enclosing_namespace_path(&analysis.file, source, use_offset);
+    for depth in (1..=ns_path.len()).rev() {
+        let qualified = format!("{}::{}", ns_path[..depth].join("::"), name);
+        let candidates = scope.lookup_reference(&qualified);
+        if let Some(sym) = prefer_definition(&candidates) {
+            return Some(sym);
+        }
+    }
+    None
 }
 
 /// Pick the best candidate from a `lookup_reference` result: a real
@@ -315,7 +374,6 @@ pub fn find_references(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::symbols::SymbolTable;
 
     fn build_single_file_workspace(
         uri_str: &str,
@@ -344,6 +402,34 @@ mod tests {
         let analysis = DocumentAnalysis::analyze_plain(src);
         let name = name_at_position(&analysis, pos(0, 23)).unwrap();
         assert_eq!(name, "Ns::Sub::Name");
+    }
+
+    #[test]
+    fn goto_definition_inside_namespace_variable_and_function() {
+        // Bare reference inside a namespace must resolve to the
+        // namespace-qualified symbol (Ns::target / Ns::greet), which is
+        // how the symbol table registers them.
+        let src = "namespace Ns {\n    int target = 1;\n    void greet() {}\n    void main() { target; greet(); }\n}";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = tw.scope();
+
+        // Cursor on `target` inside main (line 3: `    void main() { target; greet(); }`).
+        let col = src.lines().nth(3).unwrap().find("target").unwrap() as u32;
+        let loc = goto_definition(analysis, pos(3, col + 2), &scope, &ws_files);
+        assert!(loc.is_some(), "variable in namespace did not resolve");
+        let loc = loc.unwrap();
+        assert_eq!(loc.uri, tw.uri());
+        assert_eq!(loc.range.start.line, 1, "should point at `int target` line");
+
+        // Cursor on `greet` inside main.
+        let col = src.lines().nth(3).unwrap().find("greet").unwrap() as u32;
+        let loc = goto_definition(analysis, pos(3, col + 2), &scope, &ws_files);
+        assert!(loc.is_some(), "function in namespace did not resolve");
+        let loc = loc.unwrap();
+        assert_eq!(loc.range.start.line, 2, "should point at `void greet` line");
     }
 
     #[test]

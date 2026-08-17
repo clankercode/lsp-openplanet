@@ -92,9 +92,9 @@ pub fn hover(
         }
     }
 
-    // 3) Workspace symbol lookup.
-    let workspace_candidates = scope.lookup_reference(&qualified);
-    if let Some(sym) = super::navigation::prefer_definition(&workspace_candidates) {
+    // 3) Workspace symbol lookup (namespace-aware: bare names inside a
+    //    namespace resolve against `Ns::name` symbol keys).
+    if let Some(sym) = navigation::lookup_workspace_symbol(scope, analysis, &qualified, offset) {
         if let Some(md) = format_workspace_symbol(sym) {
             return Some(markdown_hover(md));
         }
@@ -359,6 +359,22 @@ mod tests {
             panic!("expected markdown hover")
         };
         assert!(m.value.contains("int"), "missing int in {:?}", m.value);
+    }
+
+    #[test]
+    fn hover_namespaced_symbol_bare_reference() {
+        // Bare reference inside a namespace must find the `Ns::greet`
+        // symbol so hover works without `Ns::` qualification.
+        let src = "namespace Ns {\n    void greet() {}\n    void main() { greet(); }\n}";
+        let tw = TestWorkspace::one_file("hover.as", src);
+        let scope = tw.scope();
+        let analysis = tw.analysis();
+        let pos = pos_of(src, "greet", 2);
+        let h = hover(analysis, None, pos, &scope).expect("hover should return");
+        let HoverContents::Markup(m) = h.contents else {
+            panic!("expected markdown hover")
+        };
+        assert!(m.value.contains("greet"), "missing greet in {:?}", m.value);
     }
 
     #[test]
