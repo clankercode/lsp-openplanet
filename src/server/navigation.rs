@@ -48,6 +48,71 @@ pub fn ident_span_at(
     analysis: &DocumentAnalysis,
     position: Position,
 ) -> Option<(u32, u32, String)> {
+    let (_, span, qual) = ident_index_at(analysis, position)?;
+    Some((span.start, span.end, qual))
+}
+
+pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Option<String> {
+    ident_span_at(analysis, position).map(|(_, _, name)| name)
+}
+
+/// Resolve the definition location of the symbol at `position`.
+///
+/// Resolution ladder:
+/// 1. Qualified / bare workspace name via `lookup_reference` (real
+///    definitions preferred over `import ... from` aliases).
+/// 2. Class-member fallback for unqualified names inside a method body:
+///    `this.Func` accesses and implicit-`this` calls resolve through the
+///    enclosing class's inheritance chain (own class first, then
+///    superclasses breadth-first).
+///
+/// Returns `None` if the cursor is not on an identifier, no matching symbol
+/// exists, or the owning file is not in `files`.
+pub fn goto_definition(
+    analysis: &DocumentAnalysis,
+    position: Position,
+    scope: &GlobalScope<'_>,
+    files: &WorkspaceFiles,
+) -> Option<Location> {
+    let (tok_idx, tok_span, qual) = ident_index_at(analysis, position)?;
+    let candidates = scope.lookup_reference(&qual);
+    if let Some(sym) = prefer_definition(&candidates) {
+        return symbol_location(sym, files);
+    }
+
+    // Member fallback: only for unqualified names (no `::` — `Ns::F` never
+    // resolves as a member) inside a method of some class.
+    if qual.contains("::") {
+        return None;
+    }
+    let is_this_access = is_this_member_access(analysis, tok_idx);
+    // Implicit-`this` call: a call callee with no receiver (`Func()`), i.e.
+    // not preceded by `.` — `other.Func()` must NOT resolve against the
+    // enclosing class's chain.
+    let is_implicit_this_call =
+        is_call_callee(analysis, tok_idx) && !is_member_access(analysis, tok_idx);
+    if !is_this_access && !is_implicit_this_call {
+        return None;
+    }
+    let file = &analysis.file;
+    let source = analysis.masked_source();
+    let offset = tok_span.start;
+    let enclosing = enclosing_class_name(file, source, offset)?;
+    let members = scope.lookup_member_symbols_with_inheritance(&enclosing, &qual);
+    let sym = prefer_definition(&members)?;
+    let (uri, def_analysis) = files.get(sym.file_id)?;
+    Some(Location {
+        uri: uri.clone(),
+        range: span_to_range(def_analysis.masked_source(), sym.span),
+    })
+}
+
+/// [`ident_span_at`] plus the token index — the fallback needs the token's
+/// neighbours (`this.` prefix, call `(`) to classify the use site.
+fn ident_index_at(
+    analysis: &DocumentAnalysis,
+    position: Position,
+) -> Option<(usize, crate::lexer::Span, String)> {
     let source = analysis.masked_source();
     let offset = position_to_offset(source, position);
     let tokens = &analysis.tokens;
@@ -60,8 +125,6 @@ pub fn ident_span_at(
         return None;
     }
     let mut parts = vec![token.span.text(source).to_string()];
-    let start = token.span.start;
-    let end = token.span.end;
     let mut i = idx;
     while i >= 2
         && tokens[i - 1].kind == TokenKind::ColonColon
@@ -71,30 +134,86 @@ pub fn ident_span_at(
         i -= 2;
     }
     parts.reverse();
-    Some((start, end, parts.join("::")))
+    Some((idx, token.span, parts.join("::")))
 }
 
-pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Option<String> {
-    ident_span_at(analysis, position).map(|(_, _, name)| name)
+/// True when the identifier at `tok_idx` is the member of a `this.X`
+/// access (preceded by `this .`).
+fn is_this_member_access(analysis: &DocumentAnalysis, tok_idx: usize) -> bool {
+    let tokens = &analysis.tokens;
+    tok_idx >= 2
+        && tokens[tok_idx - 1].kind == TokenKind::Dot
+        && tokens[tok_idx - 2].kind == TokenKind::KwThis
 }
 
-/// Resolve the definition location of the symbol at `position`.
-///
-/// Looks up the qualified name in `workspace` first, then falls back to the
-/// bare (last-segment) name. When candidates include both real definitions
-/// and `import ... from` alias declarations, real definitions win; the
-/// import site is used only when no definition exists in the workspace.
-/// Returns `None` if the cursor is not on an identifier, no matching symbol
-/// exists, or the owning file is not in `files`.
-pub fn goto_definition(
-    analysis: &DocumentAnalysis,
-    position: Position,
-    scope: &GlobalScope<'_>,
-    files: &WorkspaceFiles,
-) -> Option<Location> {
-    let qual = name_at_position(analysis, position)?;
-    let candidates = scope.lookup_reference(&qual);
-    let sym = prefer_definition(&candidates)?;
+/// True when the identifier at `tok_idx` is any member access
+/// (preceded by `.`).
+fn is_member_access(analysis: &DocumentAnalysis, tok_idx: usize) -> bool {
+    tok_idx >= 1 && analysis.tokens[tok_idx - 1].kind == TokenKind::Dot
+}
+
+/// True when the identifier at `tok_idx` is a call callee (immediately
+/// followed by `(`).
+fn is_call_callee(analysis: &DocumentAnalysis, tok_idx: usize) -> bool {
+    analysis
+        .tokens
+        .get(tok_idx + 1)
+        .map(|t| t.kind == TokenKind::LParen)
+        .unwrap_or(false)
+}
+
+/// Namespace-qualified name of the class whose body contains `offset`, when
+/// the position sits inside any class (directly or inside a method).
+fn enclosing_class_name(
+    file: &crate::parser::ast::SourceFile,
+    source: &str,
+    offset: u32,
+) -> Option<String> {
+    /// Depth-first search for the innermost enclosing class, tracking the
+    /// namespace prefix (`Ns::Outer::Inner`).
+    fn walk<'a>(
+        item: &'a crate::parser::ast::Item,
+        offset: u32,
+        source: &str,
+        ns: &[String],
+        best: &mut Option<(String, u32)>,
+    ) {
+        use crate::parser::ast::Item;
+        match item {
+            Item::Namespace(nsd) => {
+                if nsd.span.start <= offset && offset <= nsd.span.end {
+                    let mut nested = ns.to_vec();
+                    nested.push(nsd.name.text(source).to_string());
+                    for sub in &nsd.items {
+                        walk(sub, offset, source, &nested, best);
+                    }
+                }
+            }
+            Item::Class(cls) => {
+                if cls.span.start <= offset && offset <= cls.span.end {
+                    let mut name = ns.join("::");
+                    if !name.is_empty() {
+                        name.push_str("::");
+                    }
+                    name.push_str(cls.name.text(source));
+                    let width = cls.span.end - cls.span.start;
+                    if best.as_ref().map(|(_, w)| width < *w).unwrap_or(true) {
+                        *best = Some((name, width));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best: Option<(String, u32)> = None;
+    for item in &file.items {
+        walk(item, offset, source, &[], &mut best);
+    }
+    best.map(|(name, _)| name)
+}
+
+/// Resolve a symbol to a [`Location`] when its file is open.
+fn symbol_location(sym: &Symbol, files: &WorkspaceFiles) -> Option<Location> {
     let (uri, def_analysis) = files.get(sym.file_id)?;
     Some(Location {
         uri: uri.clone(),
@@ -288,6 +407,123 @@ mod tests {
         let loc = goto_definition(analysis, pos(1, 14), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, tw.uri());
         assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_this_inherited_method_resolves_to_parent() {
+        // F2 on `Func` in `this.Func()` inside B (inherits A) must land on
+        // A::Func — the method is not declared on B itself.
+        let src = "class A { void Func() {} }\nclass B : A { void Run() { this.Func(); } }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = tw.scope();
+        // `Func` spans chars 32..36 on line 1.
+        let loc = goto_definition(analysis, pos(1, 33), &scope, &ws_files).unwrap();
+        assert_eq!(loc.uri, tw.uri());
+        // Line 0 is `class A { ... }` — the parent declaration.
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_implicit_this_inherited_method_resolves_to_parent() {
+        // Bare `Func()` call inside B — implicit this, same resolution.
+        let src = "class A { void Func() {} }\nclass B : A { void Run() { Func(); } }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = tw.scope();
+        // `Func` starts at char 27 on line 1.
+        let loc = goto_definition(analysis, pos(1, 29), &scope, &ws_files).unwrap();
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_this_member_on_own_class_resolves() {
+        // `this.Own()` — declared on B itself, also indexed `B::Own`.
+        let src = "class A { }\nclass B : A { void Own() {} void Run() { this.Own(); } }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = tw.scope();
+        // `Own` (the call site) spans chars 46..49 on line 1.
+        let loc = goto_definition(analysis, pos(1, 47), &scope, &ws_files).unwrap();
+        // `Own` is declared on B (line 1).
+        assert_eq!(loc.range.start.line, 1);
+    }
+
+    #[test]
+    fn goto_definition_local_variable_not_mistaken_for_member() {
+        // A local named like a parent method must NOT resolve to the method:
+        // bare-name fallback is only for this-accesses and call sites.
+        let src =
+            "class A { void Func() {} }\nclass B : A { void Run() { int Func = 1; Func; } }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = tw.scope();
+        // Bare `Func;` expression starts at char 41 on line 1.
+        let loc = goto_definition(analysis, pos(1, 43), &scope, &ws_files);
+        // `int Func = 1;` declares no global symbol; the member fallback must
+        // not fire for a non-call, non-this use of a shadowing local name.
+        // (If locals were ever indexed, this must point at the local decl.)
+        assert!(
+            loc.is_none(),
+            "bare local use must not resolve to A::Func, got {loc:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_inherited_method_cross_file() {
+        // Parent class in another file: F2 must jump across files.
+        let child_src = "class B : A { void Run() { this.Func(); } }\n";
+        let parent_src = "class A { void Func() {} }\n";
+        let snap = crate::analysis_snapshot::AnalysisSnapshot::from_files(
+            &[
+                (
+                    std::path::PathBuf::from("/test/child.as"),
+                    child_src.to_string(),
+                ),
+                (
+                    std::path::PathBuf::from("/test/parent.as"),
+                    parent_src.to_string(),
+                ),
+            ],
+            &crate::config::LspConfig::default(),
+        );
+        let files = snap.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = crate::typecheck::GlobalScope::new(snap.symbols(), None);
+        let analysis = &snap.files()[0].analysis;
+        // `Func` spans chars 32..36 on line 0 of child.as.
+        let loc = goto_definition(analysis, pos(0, 33), &scope, &ws_files).unwrap();
+        assert_eq!(loc.uri, files[&1].0, "must jump to parent.as");
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_receiver_call_not_resolved_against_enclosing_class() {
+        // `other.Func()` — a receiver call must NOT fall back to the
+        // enclosing class's inheritance chain (the receiver's own type owns
+        // resolution, which the global ladder already covers for
+        // class-typed receivers registered as globals).
+        let src =
+            "class A { void Func() {} }\nclass B : A { void Run(B other) { other.Func(); } }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = tw.scope();
+        // `Func` in `other.Func()` at line 1 char 47.
+        let loc = goto_definition(analysis, pos(1, 48), &scope, &ws_files);
+        assert!(
+            loc.is_none() || loc.unwrap().range.start.line == 1,
+            "receiver call must not resolve to A::Func (line 0)"
+        );
     }
 
     #[test]

@@ -883,6 +883,34 @@ impl<'a> GlobalScope<'a> {
         out
     }
 
+    /// Resolve member symbols (methods) named `member` walking the class's
+    /// inheritance chain: the class itself first, then parents breadth-first.
+    /// Names are normalized in namespace context and the walk is
+    /// cycle-guarded — same discipline as
+    /// [`lookup_method_overloads_with_inheritance`]. Returns symbols in
+    /// chain order (own-class first); empty when nothing matches.
+    pub fn lookup_member_symbols_with_inheritance(
+        &self,
+        class_name: &str,
+        member: &str,
+    ) -> Vec<&Symbol> {
+        let mut out = Vec::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::from([self
+            .normalize_workspace_class_name(class_name)]);
+        while let Some(name) = queue.pop_front() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let qualified = format!("{}::{}", name, member);
+            out.extend(self.workspace.lookup(&qualified));
+            for parent in self.workspace_class_parents(&name) {
+                queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &name));
+            }
+        }
+        out
+    }
+
     /// External typedb enum lookup by short name: the enum's qualified
     /// name if `short` names an enum in the type database (absorbs the
     /// former `scope.external` field read in the checker, GH #41).
