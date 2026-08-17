@@ -448,13 +448,13 @@ fn check_command_issue_repro_44_indexed_handle_assign_diagnoses() {
         stdout.contains("Main.as:11") && stdout.contains("invalid left-hand side"),
         "expected an invalid-assignment diagnostic at the @arr[0] line; stdout={stdout:?}"
     );
-    // The legal value-copy counterpart must NOT be flagged.
-    let legal_line_flagged = stdout
-        .lines()
-        .any(|l| l.contains("Main.as:17") || l.contains("Main.as:18"));
+    // The legal value-copy counterpart (line 16) must NOT be flagged.
+    // (A prior version of this gate checked lines 17–18 — those are the
+    // closing braces, so the assertion was dead.)
+    let legal_line_flagged = stdout.lines().any(|l| l.contains("Main.as:16"));
     assert!(
         !legal_line_flagged,
-        "value-copy `arr[0] = tiny` must stay silent; stdout={stdout:?}"
+        "value-copy `arr[0] = tiny` (Main.as:16) must stay silent; stdout={stdout:?}"
     );
 }
 
