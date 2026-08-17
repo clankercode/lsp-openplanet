@@ -687,10 +687,14 @@ fn test_corpus_type_diagnostic_histogram() {
                 let key = diag_kind_key(&d.message);
                 *kind_counts.entry(key).or_insert(0) += 1;
                 if dump_unknown {
-                    // Extract the name from messages like `unknown type `Foo``.
+                    // Extract the name from messages like `unknown type `Foo``
+                    // (possibly followed by a GH #26 note — cut at the first
+                    // backtick pair, not the end of the message).
                     if let Some(rest) = d.message.strip_prefix("unknown type `") {
-                        if let Some(name) = rest.strip_suffix('`') {
-                            *unknown_type_counts.entry(name.to_string()).or_insert(0) += 1;
+                        if let Some(end) = rest.find('`') {
+                            *unknown_type_counts
+                                .entry(rest[..end].to_string())
+                                .or_insert(0) += 1;
                         }
                     }
                     if let Some(rest) = d.message.strip_prefix("undefined identifier `") {

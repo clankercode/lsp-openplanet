@@ -477,6 +477,42 @@ fn check_command_issue_repro_30_sibling_field_bare_ident_diagnoses() {
     );
 }
 
+/// GH #26: `unknown type MLFeed::PlayerCpInfo` (qualified name whose leading
+/// segment is not a Core/Nadeo engine namespace) should carry a note hinting
+/// the cross-plugin export cause: dependency missing / not in --plugins-dir /
+/// exports failed to load. Engine-namespace typos (`Math::NotARealThing`)
+/// must stay plain errors with no note.
+#[test]
+fn check_command_issue_repro_26_export_ns_hint() {
+    let (_, stdout, _) = run_issue_repro_typedb("26-export-ns-hint");
+    let mlfeed_lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("unknown type `MLFeed::PlayerCpInfo`"))
+        .collect();
+    assert_eq!(
+        mlfeed_lines.len(),
+        1,
+        "expected exactly one MLFeed unknown-type diagnostic; stdout={stdout:?}"
+    );
+    assert!(
+        mlfeed_lines[0].contains("note: "),
+        "MLFeed::… diagnostic must carry the plugin-export note; stdout={stdout:?}"
+    );
+    let math_lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("unknown type `Math::NotARealThing`"))
+        .collect();
+    assert_eq!(
+        math_lines.len(),
+        1,
+        "expected exactly one Math unknown-type diagnostic; stdout={stdout:?}"
+    );
+    assert!(
+        math_lines.iter().all(|l| !l.contains("plugin export")),
+        "engine-namespace typo must NOT carry the plugin-export note; stdout={stdout:?}"
+    );
+}
+
 /// GH #38: a workspace class named like an engine typedb type (`Status` vs
 /// `Discord::Status`) must shadow it — the game compiles this clean.
 /// Game-compiler ground truth (scripts/issue_repro_game.py, 2026-08-17):

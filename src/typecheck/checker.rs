@@ -132,7 +132,13 @@ impl TypeDiagnostic {
 
     pub fn message(&self) -> String {
         match &self.kind {
-            TypeDiagnosticKind::UnknownType(n) => format!("unknown type `{}`", n),
+            TypeDiagnosticKind::UnknownType(n) => {
+                let mut m = format!("unknown type `{}`", n);
+                if let Some(note) = unknown_type_export_note(n) {
+                    m.push_str(&format!(" (note: {})", note));
+                }
+                m
+            }
             TypeDiagnosticKind::UndefinedIdentifier(n) => format!("undefined identifier `{}`", n),
             TypeDiagnosticKind::UndefinedMember {
                 object_type,
@@ -239,6 +245,90 @@ impl std::fmt::Display for TypeDiagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message())
     }
+}
+
+/// GH #26: when a qualified type name fails to resolve and its leading
+/// segment is NOT a known engine namespace, the most common cause is a
+/// cross-plugin export dependency that didn't load (missing install, not
+/// visible to `--plugins-dir`, or its `exports` failed to parse — see the
+/// dep-load pass from GH #20). Return a one-line note for that case; `None`
+/// keeps the plain error for bare names and engine-namespace typos.
+///
+/// The known-namespace set is the static union of Openplanet Core API
+/// namespaces (`Text`, `Math`, `IO`, …) and Nadeo engine groups (`Game`,
+/// `TrackMania`, `MwFoundations`, …) from the OpenplanetCore/OpenplanetNext
+/// typedb layout. It deliberately does NOT consult the loaded typedb so the
+/// note stays stable across typedb versions.
+fn unknown_type_export_note(name: &str) -> Option<&'static str> {
+    let prefix = name.split("::").next()?;
+    if prefix == name {
+        return None; // bare name — no namespace signal
+    }
+    if is_engine_namespace(prefix) {
+        return None;
+    }
+    Some(
+        "qualified name looks like a plugin export; ensure the dependency \
+         is installed and visible to --plugins-dir (folder or .op) and that \
+         its exports loaded",
+    )
+}
+
+/// Leading segments of every namespace/group in the Openplanet Core API and
+/// the Nadeo engine typedb (OP 1.29.5 fixture ground truth; see GH #26).
+fn is_engine_namespace(prefix: &str) -> bool {
+    matches!(
+        prefix,
+        // Core API namespaces (OpenplanetCore.json `ns` values, leading seg).
+        "Audio"
+            | "Auth"
+            | "Crypto"
+            | "Dev"
+            | "Discord"
+            | "Display"
+            | "Fids"
+            | "IO"
+            | "Icons"
+            | "Import"
+            | "Json"
+            | "Math"
+            | "Meta"
+            | "Net"
+            | "Path"
+            | "Permissions"
+            | "Reflection"
+            | "Regex"
+            | "SQLite"
+            | "Settings"
+            | "Text"
+            | "Time"
+            | "UI"
+            | "XML"
+            | "mat3"
+            | "mat4"
+            | "nvg"
+            | "string"
+            // Nadeo engine groups (OpenplanetNext.json `ns` keys).
+            | "Control"
+            | "Function"
+            | "Game"
+            | "GameData"
+            | "Graphic"
+            | "Hms"
+            | "Input"
+            | "MetaNotPersistent"
+            | "MwFoundations"
+            | "Plug"
+            | "Scene"
+            | "Script"
+            | "ShootMania"
+            | "System"
+            | "TrackMania"
+            | "Vision"
+            | "Xml"
+            // Deep Core namespaces, split on leading segment above.
+            | "Internal"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -2786,6 +2876,46 @@ mod tests {
             diags[0].kind,
             TypeDiagnosticKind::UnknownType("NotAType".into())
         );
+    }
+
+    /// GH #26: qualified unknown types with a non-engine leading segment get
+    /// a plugin-export note appended to the message; bare names and
+    /// engine-namespace names keep the plain message.
+    #[test]
+    fn unknown_type_export_note_heuristics() {
+        // Bare name → plain message, no note.
+        let bare = TypeDiagnosticKind::UnknownType("NotAType".into());
+        assert_eq!(bare_message(&bare), "unknown type `NotAType`");
+
+        // Engine namespace (Core API + Nadeo groups) → plain message.
+        for engine in ["Math::NotAThing", "Game::CNope", "TrackMania::Nope"] {
+            let k = TypeDiagnosticKind::UnknownType(engine.into());
+            assert_eq!(bare_message(&k), format!("unknown type `{engine}`"));
+        }
+
+        // Non-engine qualified name → note mentions the plugin-export cause.
+        let export_ns = TypeDiagnosticKind::UnknownType("MLFeed::PlayerCpInfo".into());
+        let m = bare_message(&export_ns);
+        assert!(m.starts_with("unknown type `MLFeed::PlayerCpInfo`"));
+        assert!(m.contains("(note:"), "expected a note, got {m:?}");
+        assert!(
+            m.contains("plugin export"),
+            "expected export hint, got {m:?}"
+        );
+        assert!(
+            m.contains("--plugins-dir"),
+            "expected --plugins-dir hint, got {m:?}"
+        );
+        // Single line — CLI/TUI render one line per diagnostic.
+        assert!(!m.contains('\n'));
+    }
+
+    fn bare_message(kind: &TypeDiagnosticKind) -> String {
+        TypeDiagnostic {
+            span: Span::new(0, 0),
+            kind: kind.clone(),
+        }
+        .message()
     }
 
     #[test]
