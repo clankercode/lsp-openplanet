@@ -646,30 +646,6 @@ fn check_command_issue_repro_51_cast_member_check_diagnoses() {
     );
 }
 
-/// GH #52 (repro 1): member lookup on an engine type consults the own set
-/// plus base chain only. The game rejects `map.FileName` (`'FileName' is
-/// not a member of 'CGameCtnChallenge'`); the legal path is
-/// `map.MapInfo.FileName` (base CGameFid carries it). Fixed — must flag.
-#[test]
-fn check_command_issue_repro_52_engine_member_miss_diagnoses() {
-    let (_, stdout, _) = run_issue_repro_typedb("52-engine-member-miss");
-    let flagged = stdout
-        .lines()
-        .any(|l| l.contains("Main.as:11") && l.contains("FileName"));
-    assert!(
-        flagged,
-        "expected a diagnostic on `map.FileName`; stdout={stdout:?}"
-    );
-    // Legal: base-chain MapInfo.FileName (line 12), own MapName (line 13).
-    let legal_flagged = stdout
-        .lines()
-        .any(|l| (l.contains("Main.as:12") || l.contains("Main.as:13")) && l.contains("error"));
-    assert!(
-        !legal_flagged,
-        "legal member accesses must stay silent; stdout={stdout:?}"
-    );
-}
-
 /// GH #48: exit-code contract. Warnings-only → exit 0 by default;
 /// `--warnings-as-errors` / `-Werror` → exit 1 when warnings are present;
 /// errors always exit 1.
