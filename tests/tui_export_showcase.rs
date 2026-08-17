@@ -46,6 +46,7 @@ fn showcase_snapshot() -> Snapshot {
         plugin_files_search_paths: vec![PathBuf::from("src")],
         format: openplanet_lsp::cli::CheckFormat::Plain,
         watch: false,
+        warnings_as_errors: false,
     };
     let report = run_check(&options).expect("run_check showcase");
     assert!(

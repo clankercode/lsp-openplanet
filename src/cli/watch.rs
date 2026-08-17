@@ -439,6 +439,7 @@ mod tests {
             plugin_files_search_paths: vec![PathBuf::from("src")],
             format: crate::cli::CheckFormat::Plain,
             watch: true,
+            warnings_as_errors: false,
         }
     }
 

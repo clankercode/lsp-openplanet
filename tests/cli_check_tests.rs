@@ -650,6 +650,83 @@ fn check_command_issue_repro_51_cast_member_check_diagnoses() {
     );
 }
 
+/// GH #48: exit-code contract. Warnings-only → exit 0 by default;
+/// `--warnings-as-errors` / `-Werror` → exit 1 when warnings are present;
+/// errors always exit 1.
+#[test]
+fn check_command_exit_codes_and_warnings_as_errors() {
+    // Warnings-only plugin (Signed/Unsigned mismatch, GH #37 warning class).
+    let root = make_temp_plugin("gh48-warn-only");
+    std::fs::write(
+        root.join("Main.as"),
+        "void Main() {\n    int i = 0;\n    uint u = 1;\n    if (i < u) {\n        u = u + 1;\n    }\n}\n",
+    )
+    .unwrap();
+
+    let run = |extra: &[&str]| {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"));
+        cmd.arg("check").arg("--no-typedb").arg(&root);
+        for a in extra {
+            cmd.arg(a);
+        }
+        cmd.env_remove("FORCE_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap()
+    };
+
+    // Default: warnings-only exits 0.
+    let out = run(&[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Signed/Unsigned mismatch"),
+        "expected the warning in output; stdout={stdout:?}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "warnings-only must exit 0 by default; stdout={stdout:?}"
+    );
+
+    // --warnings-as-errors: warnings-only exits 1.
+    let out = run(&["--warnings-as-errors"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "--warnings-as-errors must exit 1 on warnings; stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // -Werror short form, same behavior.
+    let out = run(&["-Werror"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "-Werror must exit 1 on warnings; stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // --warnings-as-errors=value form.
+    let out = run(&["--warnings-as-errors=true"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "--warnings-as-errors=true must exit 1 on warnings; stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Invalid value → usage error (exit 2).
+    let out = run(&["--warnings-as-errors=banana"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "invalid --warnings-as-errors value must be a usage error"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 // ── GH #37: warning-parity batch ────────────────────────────────────────
 // Game-compiler ground truth for every class captured via live RemoteBuild
 // probe 2026-08-17 (see issue comments). These gates assert the game's

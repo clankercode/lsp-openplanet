@@ -218,12 +218,18 @@ fn run_check_command(args: &[String]) -> i32 {
             }
             print!("{}", cli::format_check_report_for(&report, options.format));
             let has_errors = report.diagnostics.iter().any(|item| {
-                !matches!(
+                let is_error = !matches!(
                     item.diagnostic.severity,
                     Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
                         | Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION)
                         | Some(tower_lsp::lsp_types::DiagnosticSeverity::HINT)
-                )
+                );
+                let is_warning = matches!(
+                    item.diagnostic.severity,
+                    Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+                );
+                // GH #48: with --warnings-as-errors, warnings also fail the run.
+                is_error || (options.warnings_as_errors && is_warning)
             });
             if has_errors {
                 1

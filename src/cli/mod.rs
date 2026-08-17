@@ -36,6 +36,11 @@ OPTIONS:
                         plain → gcc-style path:line:col: severity: message
                         pretty → source excerpt + carets
                         Ignored with --watch (TUI owns presentation)
+    --warnings-as-errors
+                        Exit 1 when any WARNING diagnostic is present
+                        (short form -Werror; =true/=false also accepted).
+                        Default exit code: 0 = clean or warnings-only,
+                        1 = any error, 2 = usage failure
     --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
     --no-typedb         Run without Openplanet/Nadeo type database files
     --plugins-dir DIR   Directory to search for plugin dependencies
@@ -97,6 +102,10 @@ pub struct CheckOptions {
     pub format: CheckFormat,
     /// Live TUI mode (`check --watch`).
     pub watch: bool,
+    /// GH #48: treat WARNING diagnostics as errors for the exit code
+    /// (`--warnings-as-errors` / `-Werror`). Default exit contract stays:
+    /// 0 = clean or warnings-only, 1 = any error, 2 = usage failure.
+    pub warnings_as_errors: bool,
 }
 
 #[derive(Debug)]
@@ -147,6 +156,23 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
             }
             "--watch" => {
                 options.watch = true;
+                i += 1;
+            }
+            "--warnings-as-errors" | "-Werror" => {
+                options.warnings_as_errors = true;
+                i += 1;
+            }
+            _ if arg.starts_with("--warnings-as-errors=") => {
+                let value = arg.trim_start_matches("--warnings-as-errors=");
+                options.warnings_as_errors = match value {
+                    "true" | "1" => true,
+                    "false" | "0" => false,
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "--warnings-as-errors accepts true or false, got `{other}`"
+                        )))
+                    }
+                };
                 i += 1;
             }
             "--format" => {
