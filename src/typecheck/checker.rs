@@ -95,6 +95,20 @@ pub enum TypeDiagnosticKind {
     DuplicateFunction {
         function_name: String,
     },
+    /// Game parity (GH #37): a local variable declaration whose name already
+    /// exists as a local (or parameter — params live in the outermost
+    /// function frame) in an enclosing frame of the SAME function. The game
+    /// warns: `Variable 'X' hides another variable of same name in outer
+    /// scope` at the inner declarator. Conservative: local-vs-local only;
+    /// class members and globals never trigger this.
+    VariableShadow {
+        name: String,
+    },
+    /// Game parity (GH #37): statement(s) after a terminating statement
+    /// (return/break/continue, or an if-else where both branches terminate)
+    /// inside the same block. The game warns `Unreachable code` once per
+    /// run at the first unreachable statement.
+    UnreachableCode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,7 +123,9 @@ impl TypeDiagnostic {
             TypeDiagnosticKind::StringByValueParam { .. }
             | TypeDiagnosticKind::FloatTruncation { .. }
             | TypeDiagnosticKind::SignChange
-            | TypeDiagnosticKind::SignedUnsignedMismatch => TypeDiagnosticSeverity::Warning,
+            | TypeDiagnosticKind::SignedUnsignedMismatch
+            | TypeDiagnosticKind::VariableShadow { .. }
+            | TypeDiagnosticKind::UnreachableCode => TypeDiagnosticSeverity::Warning,
             _ => TypeDiagnosticSeverity::Error,
         }
     }
@@ -210,6 +226,11 @@ impl TypeDiagnostic {
                 // Openplanet 1.29.5).
                 "A function with the same name and parameters already exists".to_string()
             }
+            TypeDiagnosticKind::VariableShadow { name } => format!(
+                "Variable '{}' hides another variable of same name in outer scope",
+                name
+            ),
+            TypeDiagnosticKind::UnreachableCode => "Unreachable code".to_string(),
         }
     }
 }
@@ -265,6 +286,10 @@ pub struct Checker<'a> {
     /// `Const(_)`; a const method leaves the return type untouched.
     file_const_methods: std::collections::HashSet<(String, String)>,
     return_type_stack: Vec<TypeRepr>,
+    /// Stack of `frames.len()` values at each function/lambda entry —
+    /// marks the first frame owned by the innermost function so shadow
+    /// checks (GH #37) stay within one function.
+    function_frame_starts: Vec<usize>,
     pub diagnostics: Vec<TypeDiagnostic>,
     /// Span-start → computed type for every expression visited by
     /// `expr_type` (query surface, GH #42). Only recorded when
@@ -293,6 +318,7 @@ impl<'a> Checker<'a> {
             file_classes: std::collections::HashMap::new(),
             file_const_methods: std::collections::HashSet::new(),
             return_type_stack: Vec::new(),
+            function_frame_starts: Vec::new(),
             diagnostics: Vec::new(),
             expr_types: std::collections::HashMap::new(),
             span_expr_types: std::collections::HashMap::new(),
@@ -466,7 +492,33 @@ impl<'a> Checker<'a> {
         self.frames.pop();
     }
 
+    /// The number of frames belonging to the currently checked function —
+    /// i.e. the param frame plus every block/loop frame opened since
+    /// `check_function_decl` (or a lambda body) started. Shadow warnings
+    /// (GH #37) only consider frames within this window so a lambda local
+    /// never "hides" an outer-function local.
+    fn function_frame_start(&self) -> usize {
+        self.function_frame_starts.last().copied().unwrap_or(0)
+    }
+
     fn define_local(&mut self, name: String, ty: TypeRepr, span: Span) {
+        // GH #37: local-vs-local shadowing inside the SAME function —
+        // warn when an enclosing frame of this function already holds the
+        // name (params live in the outermost function frame, so a local
+        // shadowing a param warns too). Same-frame redefinition is a
+        // different (error-class) problem and is left alone here; class
+        // members and globals never participate.
+        let start = self.function_frame_start();
+        if self.frames.len() > start + 1
+            && self.frames[start..self.frames.len() - 1]
+                .iter()
+                .any(|f| f.locals.iter().any(|l| l.name == name))
+        {
+            self.diagnostics.push(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::VariableShadow { name: name.clone() },
+            });
+        }
         if let Some(frame) = self.frames.last_mut() {
             frame.locals.push(Local { name, ty, span });
         }
@@ -826,6 +878,7 @@ impl<'a> Checker<'a> {
     fn check_function_decl(&mut self, func: &FunctionDecl, enforce_return: bool) {
         let ret_ty = self.resolve_type_expr(&func.return_type);
         self.return_type_stack.push(ret_ty.clone());
+        self.function_frame_starts.push(self.frames.len());
         self.push_frame();
         for p in &func.params {
             self.warn_string_by_value_param(p);
@@ -852,6 +905,7 @@ impl<'a> Checker<'a> {
             }
         }
         self.pop_frame();
+        self.function_frame_starts.pop();
         self.return_type_stack.pop();
     }
 
@@ -888,18 +942,17 @@ impl<'a> Checker<'a> {
         });
     }
 
-    /// Conservative "does the last statement of this slice definitely
-    /// return?" check. Used for the MissingReturn diagnostic.
+    /// Conservative "does this statement slice definitely terminate control
+    /// (return/break/continue) at ANY position?" check. Used for the
+    /// MissingReturn diagnostic (via the last statement) and for the
+    /// UnreachableCode warning (GH #37).
     fn stmts_terminate(&self, stmts: &[Stmt]) -> bool {
-        let Some(last) = stmts.last() else {
-            return false;
-        };
-        self.stmt_terminates(last)
+        stmts.iter().any(|s| self.stmt_terminates(s))
     }
 
     fn stmt_terminates(&self, stmt: &Stmt) -> bool {
         match &stmt.kind {
-            StmtKind::Return(_) => true,
+            StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue => true,
             StmtKind::Block(inner) => self.stmts_terminate(inner),
             StmtKind::If {
                 then_branch,
@@ -919,7 +972,7 @@ impl<'a> Checker<'a> {
                     suffix_terminates = if case.stmts.is_empty() {
                         suffix_terminates
                     } else {
-                        self.stmts_terminate(&case.stmts) && suffix_terminates
+                        self.case_returns(&case.stmts) && suffix_terminates
                     };
                 }
                 has_default && suffix_terminates
@@ -928,9 +981,66 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// MissingReturn semantics for a switch case body: control must leave
+    /// via a RETURN, not a break/continue — a case that `break`s falls out
+    /// of the switch, so it must not count as "returns". Only the last
+    /// statement decides (a return buried mid-case leaves the rest of the
+    /// case dead, which is fine for this conservative check).
+    fn case_returns(&self, stmts: &[Stmt]) -> bool {
+        match stmts.last() {
+            None => false,
+            Some(s) => match &s.kind {
+                StmtKind::Return(_) => true,
+                StmtKind::Block(inner) => self.case_returns(inner),
+                StmtKind::If {
+                    then_branch,
+                    else_branch: Some(eb),
+                    ..
+                } => {
+                    self.case_terminating_stmt_returns(then_branch)
+                        && self.case_terminating_stmt_returns(eb)
+                }
+                _ => false,
+            },
+        }
+    }
+
+    fn case_terminating_stmt_returns(&self, stmt: &Stmt) -> bool {
+        match &stmt.kind {
+            StmtKind::Return(_) => true,
+            StmtKind::Block(inner) => self.case_returns(inner),
+            StmtKind::If {
+                then_branch,
+                else_branch: Some(eb),
+                ..
+            } => {
+                self.case_terminating_stmt_returns(then_branch)
+                    && self.case_terminating_stmt_returns(eb)
+            }
+            _ => false,
+        }
+    }
+
     fn check_function_body(&mut self, body: &FunctionBody) {
-        for stmt in &body.stmts {
+        self.check_stmt_block(&body.stmts);
+    }
+
+    /// Walk a block's statements, warning `Unreachable code` (GH #37) once
+    /// per run at the first statement after a terminating one.
+    fn check_stmt_block(&mut self, stmts: &[Stmt]) {
+        let mut terminated = false;
+        for stmt in stmts {
+            if terminated {
+                self.diagnostics.push(TypeDiagnostic {
+                    span: stmt.span,
+                    kind: TypeDiagnosticKind::UnreachableCode,
+                });
+                break;
+            }
             self.check_stmt(stmt);
+            if self.stmt_terminates(stmt) {
+                terminated = true;
+            }
         }
     }
 
@@ -1029,9 +1139,7 @@ impl<'a> Checker<'a> {
             StmtKind::VarDecl(var) => self.check_var_decl_local(var),
             StmtKind::Block(stmts) => {
                 self.push_frame();
-                for s in stmts {
-                    self.check_stmt(s);
-                }
+                self.check_stmt_block(stmts);
                 self.pop_frame();
             }
             StmtKind::If {
@@ -1090,9 +1198,7 @@ impl<'a> Checker<'a> {
                         let _ = self.expr_type(e);
                     }
                     self.push_frame();
-                    for s in &case.stmts {
-                        self.check_stmt(s);
-                    }
+                    self.check_stmt_block(&case.stmts);
                     self.pop_frame();
                 }
             }
@@ -2335,6 +2441,7 @@ impl<'a> Checker<'a> {
                 // the outer function's expected return type doesn't leak
                 // into `return` statements inside the lambda body.
                 self.return_type_stack.push(TypeRepr::Error(String::new()));
+                self.function_frame_starts.push(self.frames.len());
                 self.push_frame();
                 for p in params {
                     let ty = self.resolve_type_expr(&p.type_expr);
@@ -2344,6 +2451,7 @@ impl<'a> Checker<'a> {
                 }
                 self.check_function_body(body);
                 self.pop_frame();
+                self.function_frame_starts.pop();
                 self.return_type_stack.pop();
                 TypeRepr::Error(String::new())
             }
@@ -5855,5 +5963,258 @@ mod query_tests {
         let mut c = Checker::new(src, scope);
         c.check_file(&analysis.file);
         assert!(c.recorded_expr_types().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod warn_flow_tests {
+    use super::*;
+    use crate::symbols::SymbolTable;
+
+    // ── GH #37: VariableShadow + UnreachableCode warnings ───────────────────
+
+    fn check(source: &str) -> Vec<TypeDiagnostic> {
+        let tokens = crate::lexer::tokenize_filtered(source);
+        let mut parser = crate::parser::Parser::new(&tokens, source);
+        let file = parser.parse_file();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, source, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, None);
+        let mut checker = Checker::new(source, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    fn shadows(diags: &[TypeDiagnostic]) -> Vec<&TypeDiagnostic> {
+        diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::VariableShadow { .. }))
+            .collect()
+    }
+
+    fn unreachables(diags: &[TypeDiagnostic]) -> Vec<&TypeDiagnostic> {
+        diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UnreachableCode))
+            .collect()
+    }
+
+    /// Game probe 2026-08-17: inner-block `int x` hides outer `int x` →
+    /// WARN at the INNER declarator with the game's exact wording.
+    #[test]
+    fn variable_shadow_inner_block_warns() {
+        let diags = check("void f() { int x = 1; if (true) { int x = 2; x++; } x++; }");
+        let s = shadows(&diags);
+        assert_eq!(s.len(), 1, "expected 1 shadow warning, got {:?}", diags);
+        assert_eq!(
+            s[0].kind,
+            TypeDiagnosticKind::VariableShadow { name: "x".into() }
+        );
+        assert_eq!(
+            s[0].message(),
+            "Variable 'x' hides another variable of same name in outer scope"
+        );
+        assert_eq!(
+            s[0].severity(),
+            TypeDiagnosticSeverity::Warning,
+            "shadow must be a warning"
+        );
+        // Span points at the INNER declarator name.
+        let src = "void f() { int x = 1; if (true) { int x = 2; x++; } x++; }";
+        let inner_off = src.rfind("x = 2").unwrap() as u32;
+        assert_eq!(
+            s[0].span.start, inner_off,
+            "span must be the inner declarator"
+        );
+    }
+
+    /// Params live in the outermost function frame: a local shadowing a
+    /// param warns via the same mechanism.
+    #[test]
+    fn variable_shadow_of_param_warns() {
+        let diags = check("void f(int x) { if (true) { int x = 2; x++; } }");
+        let s = shadows(&diags);
+        assert_eq!(s.len(), 1, "expected param shadow warning, got {:?}", diags);
+        assert_eq!(
+            s[0].kind,
+            TypeDiagnosticKind::VariableShadow { name: "x".into() }
+        );
+    }
+
+    #[test]
+    fn variable_shadow_distinct_names_silent() {
+        let diags = check("void f() { int x = 1; if (true) { int y = 2; y++; } x++; }");
+        assert!(shadows(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// Local shadowing a CLASS MEMBER is a common legal pattern — the game
+    /// message is about "outer scope" locals; stay conservative and silent.
+    #[test]
+    fn variable_shadow_of_class_member_silent() {
+        let src = r#"
+class C {
+    int x;
+    void m() { int x = 1; x++; }
+}
+"#;
+        let diags = check(src);
+        assert!(shadows(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// Local shadowing a GLOBAL stays silent (local-vs-local only).
+    #[test]
+    fn variable_shadow_of_global_silent() {
+        let diags = check("int g; void f() { int g = 1; g++; }");
+        assert!(shadows(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// Shadowing applies uniformly inside class METHODS (shared walker).
+    #[test]
+    fn variable_shadow_in_method_warns() {
+        let src = r#"
+class C {
+    void m() { int v = 1; if (true) { int v = 2; v++; } }
+}
+"#;
+        let diags = check(src);
+        assert_eq!(shadows(&diags).len(), 1, "got {:?}", diags);
+    }
+
+    /// A lambda is its own function: its locals must not "hide" the outer
+    /// function's locals (and the outer frame must not leak in).
+    #[test]
+    fn variable_shadow_lambda_does_not_hide_outer_local() {
+        let src = "void f() { int x = 1; auto cb = function() { int x = 2; x++; }; x++; }";
+        let diags = check(src);
+        assert!(shadows(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// …but shadowing INSIDE the lambda still warns.
+    #[test]
+    fn variable_shadow_inside_lambda_warns() {
+        let src = "void f() { auto cb = function() { int x = 1; { int x = 2; x++; } }; }";
+        let diags = check(src);
+        assert_eq!(shadows(&diags).len(), 1, "got {:?}", diags);
+    }
+
+    /// Sibling blocks don't share scope: same name in two if-branches is
+    /// legal and silent.
+    #[test]
+    fn variable_shadow_sibling_blocks_silent() {
+        let src = "void f() { if (true) { int x = 1; x++; } else { int x = 2; x++; } }";
+        let diags = check(src);
+        assert!(shadows(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// Game probe 2026-08-17: statement after `return` → WARN once at the
+    /// FIRST unreachable statement.
+    #[test]
+    fn unreachable_after_return_warns_once() {
+        let diags = check("int F() { return 1; int y = 2; return y; }");
+        let u = unreachables(&diags);
+        assert_eq!(
+            u.len(),
+            1,
+            "expected 1 unreachable warning, got {:?}",
+            diags
+        );
+        assert_eq!(u[0].message(), "Unreachable code");
+        assert_eq!(u[0].severity(), TypeDiagnosticSeverity::Warning);
+        let src = "int F() { return 1; int y = 2; return y; }";
+        let off = src.find("int y").unwrap() as u32;
+        assert_eq!(
+            u[0].span.start, off,
+            "span must be the first unreachable statement"
+        );
+    }
+
+    #[test]
+    fn unreachable_after_break_warns() {
+        let src = "void f() { while (true) { break; int y = 2; } }";
+        let diags = check(src);
+        assert_eq!(unreachables(&diags).len(), 1, "got {:?}", diags);
+    }
+
+    #[test]
+    fn unreachable_after_continue_warns() {
+        let src = "void f() { for (int i = 0; i < 3; i++) { continue; i++; } }";
+        let diags = check(src);
+        assert_eq!(unreachables(&diags).len(), 1, "got {:?}", diags);
+    }
+
+    /// if-else where BOTH branches return terminates the block suffix.
+    #[test]
+    fn unreachable_after_both_branch_return_warns() {
+        let src = "int f(bool b) { if (b) { return 1; } else { return 2; } int y = 3; return y; }";
+        let diags = check(src);
+        assert_eq!(unreachables(&diags).len(), 1, "got {:?}", diags);
+    }
+
+    /// Code after a NON-terminating if is reachable — silent.
+    #[test]
+    fn reachable_after_single_branch_return_silent() {
+        let src = "int f(bool b) { if (b) { return 1; } int y = 2; return y; }";
+        let diags = check(src);
+        assert!(unreachables(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// A break inside a nested if does NOT terminate the outer loop body:
+    /// statements after it are still reachable.
+    #[test]
+    fn reachable_after_break_inside_if_silent() {
+        let src = "void f() { while (true) { if (true) { break; } int y = 2; y++; } }";
+        let diags = check(src);
+        assert!(unreachables(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// Loop body reachable on later iterations even though it ends in
+    /// break/continue — and statements BEFORE the break are fine.
+    #[test]
+    fn loop_body_before_break_silent() {
+        let src = "void f() { while (true) { int y = 2; y++; break; } }";
+        let diags = check(src);
+        assert!(unreachables(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// Normal straight-line code: no warning.
+    #[test]
+    fn normal_sequence_silent() {
+        let diags = check("void f() { int x = 1; x++; }");
+        assert!(unreachables(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// Unreachable detection applies in METHOD bodies too (shared walker).
+    #[test]
+    fn unreachable_in_method_warns() {
+        let src = "class C { int m() { return 1; int y = 2; return y; } }";
+        let diags = check(src);
+        assert_eq!(unreachables(&diags).len(), 1, "got {:?}", diags);
+    }
+
+    /// An unreachable statement nested deeper still warns once at its own
+    /// block level.
+    #[test]
+    fn unreachable_nested_block_warns() {
+        let src = "void f() { { return; } { int y = 1; } }";
+        let diags = check(src);
+        // The block `{ return; }` terminates; the following sibling block
+        // is the first unreachable statement.
+        assert_eq!(unreachables(&diags).len(), 1, "got {:?}", diags);
+    }
+
+    /// MissingReturn must still work after stmts_terminate became
+    /// any-position: `{ int x = 1; }` never returns → still diagnosed.
+    #[test]
+    fn missing_return_still_diagnosed() {
+        let diags = check("int f() { int x = 1; }");
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. })),
+            "got {:?}",
+            diags
+        );
     }
 }
