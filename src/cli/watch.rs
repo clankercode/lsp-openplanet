@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebouncedEvent};
 use crate::tui::{
     DiagItem, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource, WatchHealth,
 };
+use notify::RecursiveMode;
+use notify_debouncer_mini::{new_debouncer, DebouncedEvent};
 use tower_lsp::lsp_types::DiagnosticSeverity;
 
 use super::{run_check, CheckOptions, CheckReport, CliError};
@@ -157,12 +157,10 @@ impl WatchDataSource {
             self.checking = false;
             match outcome.result {
                 Ok(report) => {
-                    let mut snap =
-                        report_to_snapshot(&report, &self.root_label, outcome.elapsed);
+                    let mut snap = report_to_snapshot(&report, &self.root_label, outcome.elapsed);
                     snap.watch_health = self.watch_health.clone();
                     snap.stale = false;
-                    self.pending
-                        .push_back(SourceEvent::Diagnostics(snap));
+                    self.pending.push_back(SourceEvent::Diagnostics(snap));
                 }
                 Err(message) => {
                     self.pending
