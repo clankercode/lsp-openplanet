@@ -122,6 +122,12 @@ pub enum TypeDiagnosticKind {
     NoMatchingSignatures {
         text: String,
     },
+    /// GH #52 (repro 2): ternary branches with no unifiable common type.
+    /// Game wording (RemoteBuild probes 2026-08-18), e.g. `c ? "" : wstr`
+    /// (string vs wstring), `c ? 1 : true`, `c ? nat3v : int3v`:
+    /// `Can't find unambiguous implicit conversion to make both
+    /// expressions have the same type`.
+    TernaryNoCommonType,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -255,6 +261,10 @@ impl TypeDiagnostic {
             }
             TypeDiagnosticKind::NoMatchingSignatures { text } => {
                 format!("No matching signatures to '{text}'")
+            }
+            TypeDiagnosticKind::TernaryNoCommonType => {
+                // Exact game-compiler wording (RemoteBuild probe 2026-08-18).
+                "Can't find unambiguous implicit conversion to make both expressions have the same type".to_string()
             }
         }
     }
@@ -2578,6 +2588,13 @@ impl<'a> Checker<'a> {
                         _ => None,
                     }
                 };
+                // Direct operands that exempt an Add-mix: nested arithmetic
+                // (only the topmost mix warns), literals, explicit
+                // constructions, and ternaries. Ternary exemption is
+                // game-verified (RemoteBuild probe 2026-08-18): `ix + (c ?
+                // u : len)` compiles with NO warning even though the
+                // ternary unifies to uint — the relational flavor DOES
+                // pierce ternaries (`i < (c ? u : len)` warns).
                 let operand_binary_or_lit = |e: &Expr| {
                     matches!(
                         e.kind,
@@ -2585,6 +2602,7 @@ impl<'a> Checker<'a> {
                             | ExprKind::IntLit(_)
                             | ExprKind::HexLit(_)
                             | ExprKind::TypeConstruct { .. }
+                            | ExprKind::Ternary { .. }
                     )
                 };
                 let mut emit_span: Option<Span> = None;
@@ -2845,9 +2863,23 @@ impl<'a> Checker<'a> {
                 else_expr,
             } => {
                 let _ = self.expr_type(condition);
-                let _ = self.expr_type(then_expr);
-                let _ = self.expr_type(else_expr);
-                TypeRepr::Error(String::new())
+                let then_ty = self.expr_type(then_expr);
+                let else_ty = self.expr_type(else_expr);
+                // GH #52 (repro 2): the game unifies both branches to one
+                // type via implicit conversion and rejects the ternary when
+                // it can't. The error span starts at the condition — the
+                // game points there (probe: 13:19 on the fixture).
+                match ternary_unify(&then_ty, &else_ty) {
+                    TernaryUnify::Rejected => {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: expr.span,
+                            kind: TypeDiagnosticKind::TernaryNoCommonType,
+                        });
+                        TypeRepr::Error(String::new())
+                    }
+                    TernaryUnify::Unified(t) => t,
+                    TernaryUnify::Unknown => TypeRepr::Error(String::new()),
+                }
             }
             ExprKind::Is {
                 expr: inner,
@@ -3037,6 +3069,95 @@ fn is_math_value_type(name: &str) -> bool {
         name,
         "nat2" | "nat3" | "int2" | "int3" | "vec2" | "vec3" | "vec4" | "iso3" | "iso4" | "quat"
     )
+}
+
+/// GH #52 (repro 2): outcome of unifying a ternary's two branch types the
+/// way the game's implicit conversion does.
+enum TernaryUnify {
+    /// Branches unify; carries the result type of the ternary.
+    Unified(TypeRepr),
+    /// The game rejects the ternary outright (hard ERR).
+    Rejected,
+    /// Pairs we can't classify confidently (enum/int, handle pairs,
+    /// string vs other named types, any errored operand) — stay silent.
+    Unknown,
+}
+
+/// GH #52 (repro 2): game-verified ternary branch unification (RemoteBuild
+/// probes 2026-08-18). Verified verdicts:
+///   unified  — same type; any two numeric primitives (int×uint promotes
+///              to uint: `auto t = c ? i : u; t < i` warns like `i < (c ?
+///              i : u)`); null + handle
+///   rejected — distinct primitives that aren't both numeric (`c ? 1 :
+///              true`, `c ? "" : 5`, `c ? "" : i`); string vs wstring;
+///              string vs math value types (`c ? "" : vec3(1,2,3)`);
+///              distinct math value types (`c ? nat3v : int3v`, same set
+///              as the GH #49 assignment form); numeric vs null
+///              (`c ? 1 : null`)
+fn ternary_unify(a: &TypeRepr, b: &TypeRepr) -> TernaryUnify {
+    let a = a.unwrap_const();
+    let b = b.unwrap_const();
+    if a.is_error() || b.is_error() {
+        return TernaryUnify::Unknown;
+    }
+    if a == b {
+        return TernaryUnify::Unified(a.clone());
+    }
+    match (a, b) {
+        (TypeRepr::Null, TypeRepr::Handle(h)) | (TypeRepr::Handle(h), TypeRepr::Null) => {
+            TernaryUnify::Unified(TypeRepr::Handle(h.clone()))
+        }
+        (TypeRepr::Primitive(pa), TypeRepr::Primitive(pb))
+            if is_numeric_primitive(pa) && is_numeric_primitive(pb) =>
+        {
+            TernaryUnify::Unified(TypeRepr::Primitive(numeric_promote(*pa, *pb)))
+        }
+        (TypeRepr::Primitive(p), TypeRepr::Null) | (TypeRepr::Null, TypeRepr::Primitive(p))
+            if is_numeric_primitive(p) =>
+        {
+            TernaryUnify::Rejected
+        }
+        (TypeRepr::Primitive(_), TypeRepr::Primitive(_)) => TernaryUnify::Rejected,
+        (TypeRepr::Primitive(PrimitiveType::String), TypeRepr::Named(n))
+        | (TypeRepr::Named(n), TypeRepr::Primitive(PrimitiveType::String))
+            if n == "wstring" || is_math_value_type(n) =>
+        {
+            TernaryUnify::Rejected
+        }
+        (TypeRepr::Named(na), TypeRepr::Named(nb))
+            if is_math_value_type(na) && is_math_value_type(nb) =>
+        {
+            TernaryUnify::Rejected
+        }
+        _ => TernaryUnify::Unknown,
+    }
+}
+
+/// Wider-of-the-two for a numeric-mix ternary result. Small widths rank
+/// below their wider peers, floats above every integer; the promoted type
+/// drives downstream init checks (float/double vs int keeps the game's
+/// truncation-warning parity).
+fn numeric_promote(a: PrimitiveType, b: PrimitiveType) -> PrimitiveType {
+    fn rank(p: PrimitiveType) -> u8 {
+        match p {
+            PrimitiveType::Int8 => 0,
+            PrimitiveType::Uint8 => 1,
+            PrimitiveType::Int16 => 2,
+            PrimitiveType::Uint16 => 3,
+            PrimitiveType::Int => 4,
+            PrimitiveType::Uint => 5,
+            PrimitiveType::Int64 => 6,
+            PrimitiveType::Uint64 => 7,
+            PrimitiveType::Float => 8,
+            PrimitiveType::Double => 9,
+            _ => 10,
+        }
+    }
+    if rank(a) >= rank(b) {
+        a
+    } else {
+        b
+    }
 }
 
 /// GH #49: the int/nat vector families. Returns the vector dimension for
@@ -5482,6 +5603,239 @@ void Main() {
             "expected no assign diagnostics for game-legal forms, got {:?}",
             diags
         );
+    }
+
+    // ── GH #52 (repro 2): ternary branch unification ─────────────────────
+
+    #[test]
+    fn ternary_string_vs_wstring_member_flags() {
+        // Game-compiler ground truth (RemoteBuild probe 2026-08-18):
+        // `c ? "" : map.MapInfo.FileName` → ERR "Can't find unambiguous
+        // implicit conversion to make both expressions have the same type",
+        // error column at the condition.
+        let diags = check_with_typedb(
+            r#"void F(CGameCtnChallenge@ map, bool c) {
+                auto s = c ? "" : map.MapInfo.FileName;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::TernaryNoCommonType))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 TernaryNoCommonType for string vs wstring, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn ternary_wstring_vs_string_literal_also_flags() {
+        // Operand order must not matter — the wstring branch can be first.
+        let diags = check_with_typedb(
+            r#"void F(CGameCtnChallenge@ map, bool c) {
+                auto s = c ? map.MapInfo.FileName : "";
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::TernaryNoCommonType))
+            .collect();
+        assert_eq!(bad.len(), 1, "got {:?}", diags);
+    }
+
+    #[test]
+    fn ternary_bool_vs_int_flags() {
+        // Game-verified (probe 2026-08-18): `int x = c ? 1 : true;` → ERR,
+        // same wording. Numeric×bool never implicitly converts.
+        let diags = check("void F(bool c) { int x = c ? 1 : true; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::TernaryNoCommonType))
+            .collect();
+        assert_eq!(bad.len(), 1, "got {:?}", diags);
+    }
+
+    #[test]
+    fn ternary_string_vs_int_flags() {
+        // Game-verified (probe 2026-08-18): `string s = c ? "" : i;` → ERR,
+        // same wording. Only numeric×numeric pairs unify.
+        let diags = check("void F(bool c, int i) { string s = c ? \"\" : i; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::TernaryNoCommonType))
+            .collect();
+        assert_eq!(bad.len(), 1, "got {:?}", diags);
+    }
+
+    #[test]
+    fn ternary_nat3_vs_int3_flags() {
+        // Game-verified (probe 2026-08-18): `c ? map.Size : int3(1,2,3)` →
+        // ERR, same wording — same math-value-type set as the GH #49
+        // assignment form.
+        let diags = check_with_typedb(
+            r#"void F(CGameCtnChallenge@ map, bool c) {
+                auto v = c ? map.Size : int3(1, 2, 3);
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::TernaryNoCommonType))
+            .collect();
+        assert_eq!(bad.len(), 1, "got {:?}", diags);
+    }
+
+    #[test]
+    fn ternary_legal_forms_stay_silent() {
+        // Game-verified CLEAN (probe 2026-08-18): same-type (string, wstring,
+        // bool), numeric mixes (literal and vars, int/uint), null + handle.
+        let diags = check_with_typedb(
+            r#"class C {}
+            void F(CGameCtnChallenge@ map, bool c, C@ h, int i, uint u, float f) {
+                auto a = c ? "" : string(map.MapInfo.FileName);
+                auto b = c ? map.MapInfo.Name : map.MapInfo.FileName;
+                auto d = c ? true : false;
+                auto e = c ? 1 : 2.5;
+                auto g = c ? i : u;
+                auto k = c ? i : f;
+                auto m = c ? null : h;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::TernaryNoCommonType))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "game-legal ternaries must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn ternary_unified_type_feeds_init_conversion() {
+        // Game-verified (probe 2026-08-18): `int i = c ? 1.5 : 2.5;` → WARN
+        // "Float value truncated in implicit conversion to integer" — the
+        // unified (float) result flows into the init-conversion check with
+        // the non-literal message variant.
+        let diags = check("void F(bool c) { int i = c ? 1.5 : 2.5; }");
+        assert_eq!(
+            diags[0].kind,
+            TypeDiagnosticKind::FloatTruncation { literal: false }
+        );
+    }
+
+    #[test]
+    fn ternary_same_type_int_init_stays_silent() {
+        // Game-verified CLEAN: `int j = c ? 1 : 2;` unifies to int.
+        let diags = check("void F(bool c) { int j = c ? 1 : 2; }");
+        assert!(diags.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn ternary_string_vs_math_value_flags() {
+        // Game-verified ERR (RemoteBuild probe 2026-08-18): `c ? "" :
+        // vec3(1,2,3)` — same wording. String never converts to a math
+        // value type (and the pair is not string-vs-wstring).
+        let diags = check_with_typedb("void F(bool c) { auto z = c ? \"\" : vec3(1, 2, 3); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::TernaryNoCommonType))
+            .collect();
+        assert_eq!(bad.len(), 1, "got {:?}", diags);
+    }
+
+    #[test]
+    fn ternary_numeric_vs_null_flags() {
+        // Game-verified ERR (RemoteBuild probe 2026-08-18): `c ? 1 : null`
+        // — null only unifies with handles.
+        let diags = check("void F(bool c) { auto n = c ? 1 : null; }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::TernaryNoCommonType))
+            .collect();
+        assert_eq!(bad.len(), 1, "got {:?}", diags);
+    }
+
+    #[test]
+    fn ternary_unknown_pairs_stay_silent() {
+        // Unverified pairs (enum vs int, handle vs handle, string vs other
+        // named types — `text` may carry an implicit conv to string) are
+        // conservatively silent.
+        let diags = check(
+            r#"enum E { A }
+            class C {}
+            void F(bool c, E e, C@ a, C@ b, C v) {
+                auto x = c ? E::A : 5;
+                auto y = c ? a : b;
+                auto z = c ? "" : v;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::TernaryNoCommonType))
+            .collect();
+        assert!(bad.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn add_sign_mix_through_ternary_operand_stays_silent() {
+        // Game-verified CLEAN (RemoteBuild probe 2026-08-18): `ix + (c ? u
+        // : len)` and `(c ? u : len) + n` produce NO Signed/Unsigned
+        // warning — the `+` flavor only fires on plain direct operands.
+        // Regression guard: the ternary's real unified type (uint) must
+        // not start feeding the Add-mix rule.
+        let diags = check(
+            r#"void F(bool c, int ix, int n, uint i, uint len) {
+                auto a = ix + (i == 0 ? i : len);
+                auto b = (c ? i : len) + n;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::SignedUnsignedMismatch))
+            .collect();
+        assert!(bad.is_empty(), "got {:?}", diags);
+    }
+
+    #[test]
+    fn relational_sign_mix_through_ternary_operand_warns() {
+        // Game-verified WARN (RemoteBuild probe 2026-08-18): `i < (c ? u :
+        // len)` and `(c ? u : len) > i` — unlike the `+` flavor, the
+        // relational warning pierces ternary operands.
+        let diags = check(
+            r#"void F(bool c, int i, uint u, uint len) {
+                bool b1 = i < (c ? u : len);
+                bool b2 = (c ? u : len) > i;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::SignedUnsignedMismatch))
+            .collect();
+        assert_eq!(bad.len(), 2, "got {:?}", diags);
+    }
+
+    #[test]
+    fn relational_sign_mix_through_mixed_sign_ternary_warns() {
+        // Game-verified WARN ×3 (RemoteBuild probe 2026-08-18): a mixed
+        // int×uint ternary unifies to uint (int×uint promotes to the
+        // unsigned side), so the relational pierce warns — both inline and
+        // through an `auto` that captures the unified type.
+        let diags = check(
+            r#"void F(bool c, int i, uint u) {
+                bool w1 = i < (c ? i : u);
+                bool w2 = (c ? u : i) > i;
+                auto t = c ? i : u;
+                bool w3 = t < i;
+            }"#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::SignedUnsignedMismatch))
+            .collect();
+        assert_eq!(bad.len(), 3, "got {:?}", diags);
     }
 
     // ── GH #38: workspace class shadows typedb short-name collision ─────

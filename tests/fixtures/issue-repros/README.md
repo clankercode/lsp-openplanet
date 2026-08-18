@@ -61,6 +61,8 @@ Record the game verdict in the fixture's gate-test doc comment.
 | `30-sibling-field-bare-ident` | #30 | `No matching symbol 'nod'` | fixed — active |
 | `28-removed-draw-api` | #28 | `No matching symbol 'Draw::GetWidth/GetHeight'` | open — ignored (blocked on #18) |
 | `38-typedb-shadowed-class` | #38 | clean | fixed (db6e46b) — active |
+| `52-engine-member-miss` | #52 repro 1 | `'FileName' is not a member of 'CGameCtnChallenge'` (line 11) | fixed (a970f2d) — active |
+| `52b-ternary-type-ambiguity` | #52 repro 2 | `Can't find unambiguous implicit conversion…` ×3 (13:19, 14:16, 15:17; 2026-08-18 probe) | fixed — active |
 
 GH #37 batch (game verdicts from the 2026-08-17 live probe):
 

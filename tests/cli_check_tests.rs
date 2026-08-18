@@ -683,6 +683,44 @@ fn check_command_issue_repro_52_engine_member_miss_diagnoses() {
     );
 }
 
+/// GH #52 (repro 2): a ternary whose branches have no unifiable common
+/// type. The game rejects `c ? "" : map.MapInfo.FileName` (string vs
+/// wstring), `c ? 1 : true` (int vs bool) and `c ? map.Size : int3(1,2,3)`
+/// (nat3 vs int3) with `Can't find unambiguous implicit conversion to make
+/// both expressions have the same type`. Game-compiler ground truth
+/// (RemoteBuild probe 2026-08-18): ERR at 13:19, 14:16, 15:17, exact
+/// wording, nothing else. Must flag all three; legal counterparts stay
+/// silent.
+#[test]
+fn check_command_issue_repro_52b_ternary_type_ambiguity_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("52b-ternary-type-ambiguity");
+    const MSG: &str = "Can't find unambiguous implicit conversion";
+    for line in [13u16, 14, 15] {
+        let flagged = stdout
+            .lines()
+            .any(|l| l.contains(&format!("Main.as:{line}")) && l.contains(MSG));
+        assert!(
+            flagged,
+            "expected the unambiguous-conversion error on Main.as:{line}; stdout={stdout:?}"
+        );
+    }
+    // Legal: same-type / numeric / null+handle ternaries (lines 16-20) —
+    // the game verdict records NOTHING else on those lines, so guard both
+    // errors and warnings.
+    let legal_flagged = stdout.lines().any(|l| {
+        (l.contains("Main.as:16")
+            || l.contains("Main.as:17")
+            || l.contains("Main.as:18")
+            || l.contains("Main.as:19")
+            || l.contains("Main.as:20"))
+            && (l.contains("error") || l.contains("warning"))
+    });
+    assert!(
+        !legal_flagged,
+        "legal ternaries must stay silent; stdout={stdout:?}"
+    );
+}
+
 /// GH #48: exit-code contract. Warnings-only → exit 0 by default;
 /// `--warnings-as-errors` / `-Werror` → exit 1 when warnings are present;
 /// errors always exit 1.

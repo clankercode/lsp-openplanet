@@ -14,6 +14,20 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Fixed
+- **Ternary branch unification (GH #52 repro 2)** — a ternary whose
+  branches have no unifiable common type now exits 1 with the game's
+  exact error `Can't find unambiguous implicit conversion to make both
+  expressions have the same type`. Game-verified via RemoteBuild probes
+  (2026-08-18) for: `string` vs `wstring` (`c ? "" : map.MapInfo.FileName`),
+  non-numeric primitive pairs (`c ? 1 : true`, `c ? "" : 5`), distinct
+  math value types (`c ? nat3v : int3v`), `string` vs math value types
+  (`c ? "" : vec3(1,2,3)`), and numeric vs `null` (`c ? 1 : null`).
+  Ternaries now also carry their unified result type, so numeric mixes
+  keep feeding downstream checks (float-unified ternaries warn on `int`
+  init like the game; mixed int×uint ternaries promote to `uint` and warn
+  in relational mixes like the game), while the `Signed/Unsigned
+  mismatch` `+` flavor stays silent through ternary operands — both
+  game-verified.
 - **False-negative batch (GH #47, #49, #50, #51, #52 repro 1)** — four
   error classes the game's AngelScript compiler rejects but `check`
   silently accepted (exit 0, zero diagnostics). All game-verified via
