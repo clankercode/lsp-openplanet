@@ -52,11 +52,19 @@ pub struct Backend {
     /// `snapshot` / `workspace_root` / `config` fields stay as the N=1 view;
     /// feature handlers route through `workspace_for` per request URI.
     workspaces: tokio::sync::RwLock<Vec<PluginWorkspace>>,
+    /// Workspace folder paths as of the last initialize/folder-change event
+    /// (t9): input for re-walking plugin roots on watched-file events.
+    folder_paths: tokio::sync::RwLock<Vec<PathBuf>>,
+    /// Cached initialization options (t9): re-sharding after watched-file
+    /// events must re-apply the same layers (plugin_roots override, parent
+    /// config base, extra plugins dirs).
+    init_options: tokio::sync::RwLock<Option<serde_json::Value>>,
 }
 
 /// One isolated plugin workspace (multi-root spec: "one server, N isolated
 /// plugin workspaces"). Own manifest, deps, diagnostics — no cross-plugin
 /// resolution (t0); `workspace/symbol` unions across all of them (t8).
+#[derive(Clone)]
 pub struct PluginWorkspace {
     /// Canonicalized dir containing `info.toml`.
     pub root: PathBuf,
@@ -88,6 +96,131 @@ impl Backend {
             .map(|w| (w.root.clone(), w.config.clone()))
             .collect()
     }
+
+    /// t9: rebuild the shard set from the current folder list. Reuses
+    /// config+snapshot Arcs for roots whose (config-relevant) inputs are
+    /// unchanged so unrelated shards keep pointer identity.
+    async fn reshard_from_folders(
+        &self,
+        root_path: Option<&std::path::Path>,
+        init_options: Option<&serde_json::Value>,
+        publish_diagnostics: bool,
+    ) {
+        let folder_paths = self.folder_paths.read().await.clone();
+        let override_roots = self.init_options.read().await.as_ref().and_then(|o| {
+            let roots = LspConfig::load(None, Some(o)).plugin_roots;
+            (!roots.is_empty()).then_some(roots)
+        });
+        let mut effective_roots = if let Some(overrides) = override_roots {
+            overrides
+        } else {
+            let discovered = crate::workspace::roots::discover_plugin_roots(&folder_paths);
+            if discovered.is_empty() {
+                root_path.map(|p| p.to_path_buf()).into_iter().collect()
+            } else {
+                discovered
+            }
+        };
+        effective_roots = effective_roots
+            .iter()
+            .map(|r| r.canonicalize().unwrap_or_else(|_| r.clone()))
+            .collect();
+        *self.plugin_roots.write().await = effective_roots.clone();
+
+        let n_roots = effective_roots.len();
+        let parent_config_base = if n_roots > 1 { root_path } else { None };
+        let mut shards: Vec<PluginWorkspace> = Vec::with_capacity(effective_roots.len());
+        for root in &effective_roots {
+            let mut config =
+                LspConfig::load_with_parent(Some(root), parent_config_base, init_options);
+            if n_roots > 1 {
+                if let Some(parent) = &root_path {
+                    let canon = parent
+                        .canonicalize()
+                        .unwrap_or_else(|_| parent.to_path_buf());
+                    if !config.extra_plugins_dirs.contains(&canon) {
+                        config.extra_plugins_dirs.push(canon);
+                    }
+                }
+            }
+            // Reuse the existing shard when the config-relevant inputs are
+            // unchanged (same root + same rendered config) — keeps Arc
+            // identity for untouched siblings on re-shard.
+            let existing = self
+                .workspaces
+                .read()
+                .await
+                .iter()
+                .find(|w| w.root == *root)
+                .cloned();
+            if let Some(prev) = &existing {
+                if configs_equivalent(&prev.config, &config) {
+                    shards.push(prev.clone());
+                    continue;
+                }
+            }
+            let load = crate::workspace::load::DependencySearch::with_defaults()
+                .finalize_with_config(&config);
+            let open = self.open_documents_under(root);
+            let disk = crate::workspace::load::load_plugin_workspace(root, &load);
+            let merged = match disk {
+                Ok(disk) => crate::workspace::load::merge_open_documents(&disk, &open),
+                Err(err) => {
+                    tracing::warn!("workspace load failed for {root:?}: {err}");
+                    crate::workspace::load::PluginWorkspaceLoad {
+                        root: root.clone(),
+                        files: open_into_files(open),
+                        missing_required_dependencies: Vec::new(),
+                    }
+                }
+            };
+            let snapshot = Arc::new(AnalysisSnapshot::from_load(&merged, &config));
+            shards.push(PluginWorkspace {
+                root: root.clone(),
+                config,
+                snapshot,
+            });
+        }
+        // The legacy single-workspace view mirrors the first shard (N=1 exact
+        // back-compat; N=0 stays empty).
+        if let Some(first) = shards.first() {
+            *self.snapshot.write().await = first.snapshot.clone();
+            *self.config.write().await = first.config.clone();
+        }
+        *self.workspaces.write().await = shards;
+
+        if publish_diagnostics {
+            // Publish manifest diagnostics for every live shard so newly
+            // added roots get their info.toml squiggles immediately.
+            let live: Vec<(PathBuf, LspConfig, Arc<AnalysisSnapshot>)> = self
+                .workspaces
+                .read()
+                .await
+                .iter()
+                .map(|w| (w.root.clone(), w.config.clone(), w.snapshot.clone()))
+                .collect();
+            for (root, config, snapshot) in live {
+                let manifest_uri = Url::from_file_path(root.join("info.toml")).ok();
+                if let Some(manifest_uri) = manifest_uri {
+                    let source = std::fs::read_to_string(root.join("info.toml")).ok();
+                    let diagnostics = source
+                        .as_deref()
+                        .map(|s| {
+                            diagnostics::compute_manifest_diagnostics(
+                                &manifest_uri,
+                                s,
+                                &config,
+                                snapshot.missing_required_dependencies(),
+                            )
+                        })
+                        .unwrap_or_default();
+                    self.client
+                        .publish_diagnostics(manifest_uri, diagnostics, None)
+                        .await;
+                }
+            }
+        }
+    }
 }
 
 impl Backend {
@@ -104,6 +237,8 @@ impl Backend {
             workspace_root: tokio::sync::RwLock::new(None),
             plugin_roots: tokio::sync::RwLock::new(Vec::new()),
             workspaces: tokio::sync::RwLock::new(Vec::new()),
+            folder_paths: tokio::sync::RwLock::new(Vec::new()),
+            init_options: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -477,6 +612,18 @@ fn open_into_files(
         .collect()
 }
 
+/// Config fields that participate in shard reuse (t9): everything that
+/// changes what gets loaded/parsed. `defines` and the path fields.
+fn configs_equivalent(a: &LspConfig, b: &LspConfig) -> bool {
+    a.defines == b.defines
+        && a.game_target == b.game_target
+        && a.plugins_dir == b.plugins_dir
+        && a.source_paths == b.source_paths
+        && a.ignore_paths == b.ignore_paths
+        && a.extra_plugins_dirs == b.extra_plugins_dirs
+        && a.openplanet_dir == b.openplanet_dir
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
@@ -533,6 +680,8 @@ impl LanguageServer for Backend {
             .collect();
 
         *self.plugin_roots.write().await = effective_roots.clone();
+        *self.folder_paths.write().await = folder_paths;
+        *self.init_options.write().await = params.initialization_options.clone();
 
         match effective_roots.len() {
             0 => {
@@ -559,56 +708,13 @@ impl LanguageServer for Backend {
         }
 
         // Shard: one isolated workspace per effective root (multi-root spec).
-        let init_options = params.initialization_options.as_ref();
-        // Parent (opened-folder) config base + LAST-priority sibling-dep
-        // search dir (t5/t6): applies when N>1 (root_path hosts the roots).
-        let n_roots = effective_roots.len();
-        let parent_config_base = if n_roots > 1 {
-            root_path.as_deref()
-        } else {
-            None
-        };
-        let mut shards = Vec::with_capacity(effective_roots.len());
-        for root in &effective_roots {
-            let mut config =
-                LspConfig::load_with_parent(Some(root), parent_config_base, init_options);
-            if n_roots > 1 {
-                if let Some(parent) = &root_path {
-                    let canon = parent.canonicalize().unwrap_or_else(|_| parent.clone());
-                    if !config.extra_plugins_dirs.contains(&canon) {
-                        config.extra_plugins_dirs.push(canon);
-                    }
-                }
-            }
-            let load = crate::workspace::load::DependencySearch::with_defaults()
-                .finalize_with_config(&config);
-            let open = self.open_documents_under(root);
-            let disk = crate::workspace::load::load_plugin_workspace(root, &load);
-            let merged = match disk {
-                Ok(disk) => crate::workspace::load::merge_open_documents(&disk, &open),
-                Err(err) => {
-                    tracing::warn!("workspace load failed for {root:?}: {err}");
-                    crate::workspace::load::PluginWorkspaceLoad {
-                        root: root.clone(),
-                        files: open_into_files(open),
-                        missing_required_dependencies: Vec::new(),
-                    }
-                }
-            };
-            let snapshot = Arc::new(AnalysisSnapshot::from_load(&merged, &config));
-            shards.push(PluginWorkspace {
-                root: root.clone(),
-                config,
-                snapshot,
-            });
-        }
-        // The legacy single-workspace view mirrors the first shard (N=1 exact
-        // back-compat; N=0 stays empty).
-        if let Some(first) = shards.first() {
-            *self.snapshot.write().await = first.snapshot.clone();
-            *self.config.write().await = first.config.clone();
-        }
-        *self.workspaces.write().await = shards;
+        // initialize always publishes (first shard set).
+        self.reshard_from_folders(
+            root_path.as_deref(),
+            params.initialization_options.as_ref(),
+            true,
+        )
+        .await;
 
         // Load type database
         let config = self.config.read().await;
@@ -663,6 +769,13 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -705,6 +818,55 @@ impl LanguageServer for Backend {
             return; // stray: no shard to rebuild.
         }
         self.refresh_snapshot().await;
+    }
+
+    /// t9: manifest/file watcher events. `**/info.toml` events re-shard
+    /// (roots appear/disappear); other file events rebuild the owning
+    /// shard (disk contents changed under us).
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let needs_reshard = params.changes.iter().any(|event| {
+            let path = event.uri.path();
+            path.ends_with("/info.toml") || path == "/info.toml"
+        });
+        if needs_reshard {
+            let root_path = self.workspace_root.read().await.clone();
+            let init_options = self.init_options.read().await.clone();
+            self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true)
+                .await;
+            return;
+        }
+        // Non-manifest events: rebuild the owning workspace of each changed
+        // file (disk contents changed outside the editor).
+        for event in &params.changes {
+            if let Some(root) = self.workspace_root_for(&event.uri).await {
+                self.rebuild_workspace(&root).await;
+            }
+        }
+    }
+
+    /// t9: workspace folder add/remove re-shards from the updated list.
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        {
+            let mut folders = self.folder_paths.write().await;
+            for added in &params.event.added {
+                if let Ok(path) = added.uri.to_file_path() {
+                    let canon = path.canonicalize().unwrap_or(path);
+                    if !folders.contains(&canon) {
+                        folders.push(canon);
+                    }
+                }
+            }
+            for removed in &params.event.removed {
+                if let Ok(path) = removed.uri.to_file_path() {
+                    let canon = path.canonicalize().unwrap_or(path);
+                    folders.retain(|f| *f != canon);
+                }
+            }
+        }
+        let root_path = self.workspace_root.read().await.clone();
+        let init_options = self.init_options.read().await.clone();
+        self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true)
+            .await;
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
