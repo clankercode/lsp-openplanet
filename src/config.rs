@@ -25,6 +25,11 @@ pub struct LspConfig {
     /// Blocklist of root-relative dirs to skip (from `.openplanet-lsp.toml`
     /// `ignore_paths`). Only consulted when `source_paths` is `None`.
     pub ignore_paths: Option<Vec<PathBuf>>,
+    /// Explicit plugin-root override (initializationOptions `plugin_roots`,
+    /// a non-empty string array). When non-empty, replaces server-side root
+    /// discovery entirely (manual override for unusual trees — t2). Init
+    /// option ONLY: there is deliberately no config-file key.
+    pub plugin_roots: Vec<PathBuf>,
 }
 
 impl Default for LspConfig {
@@ -42,6 +47,7 @@ impl Default for LspConfig {
             defines_overridden: false,
             source_paths: None,
             ignore_paths: None,
+            plugin_roots: Vec::new(),
         }
     }
 }
@@ -195,6 +201,7 @@ impl LspConfig {
             defines_overridden: false,
             source_paths: None,
             ignore_paths: None,
+            plugin_roots: Vec::new(),
         };
 
         // Layer 1: Auto-detect
@@ -354,6 +361,19 @@ impl LspConfig {
                 .collect();
             self.defines_overridden = true;
         }
+        // Plugin-root override (t2): non-empty string array replaces
+        // server-side discovery. Empty / absent / non-string entries never
+        // produce an override (empty stays empty → discovery runs).
+        if let Some(roots) = opts.get("plugin_roots").and_then(|v| v.as_array()) {
+            let parsed: Vec<PathBuf> = roots
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(PathBuf::from)
+                .collect();
+            if !parsed.is_empty() {
+                self.plugin_roots = parsed;
+            }
+        }
     }
 }
 
@@ -430,5 +450,44 @@ mod tests {
         assert_eq!(config.game_target, "MP4");
         assert_eq!(config.defines.len(), 2);
         assert!(config.defines.contains("MP4"));
+    }
+
+    #[test]
+    fn test_plugin_roots_absent_init_option_means_no_override() {
+        // No `plugin_roots` key in initializationOptions → empty (walk wins).
+        let opts = serde_json::json!({ "game_target": "MP4" });
+        let config = LspConfig::load(None, Some(&opts));
+        assert!(config.plugin_roots.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_roots_empty_init_option_means_no_override() {
+        // Explicit empty array → still no override (non-empty required).
+        let opts = serde_json::json!({ "plugin_roots": [] });
+        let config = LspConfig::load(None, Some(&opts));
+        assert!(config.plugin_roots.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_roots_nonempty_init_option_is_parsed() {
+        let opts = serde_json::json!({
+            "plugin_roots": ["/tmp/plugin-a", "/tmp/plugin-b"]
+        });
+        let config = LspConfig::load(None, Some(&opts));
+        assert_eq!(
+            config.plugin_roots,
+            vec![
+                PathBuf::from("/tmp/plugin-a"),
+                PathBuf::from("/tmp/plugin-b")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_plugin_roots_ignores_non_string_entries() {
+        // Non-string entries are skipped, not fatal.
+        let opts = serde_json::json!({ "plugin_roots": ["/tmp/ok", 42, null] });
+        let config = LspConfig::load(None, Some(&opts));
+        assert_eq!(config.plugin_roots, vec![PathBuf::from("/tmp/ok")]);
     }
 }

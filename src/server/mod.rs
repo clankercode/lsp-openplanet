@@ -41,6 +41,12 @@ pub struct Backend {
     /// read the same consistent view (GH #39).
     snapshot: tokio::sync::RwLock<Arc<AnalysisSnapshot>>,
     workspace_root: tokio::sync::RwLock<Option<PathBuf>>,
+    /// Effective plugin roots, set once at `initialize` (t2 hybrid):
+    /// `config.plugin_roots` (init-option override) when non-empty, else
+    /// `discover_plugin_roots` over the workspace folders (root_uri
+    /// fallback), else the opened folder itself. Phase 2 will shard the
+    /// backend per entry here; phase 1 only consumes the N=1 case.
+    plugin_roots: tokio::sync::RwLock<Vec<PathBuf>>,
 }
 
 impl Backend {
@@ -55,6 +61,7 @@ impl Backend {
                 &LspConfig::default(),
             ))),
             workspace_root: tokio::sync::RwLock::new(None),
+            plugin_roots: tokio::sync::RwLock::new(Vec::new()),
         }
     }
 
@@ -220,12 +227,81 @@ fn open_into_files(
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        // Set workspace root
-        if let Some(root_uri) = params.root_uri {
-            if let Ok(path) = root_uri.to_file_path() {
-                *self.workspace_root.write().await = Some(path.clone());
-                let config = LspConfig::load(Some(&path), params.initialization_options.as_ref());
-                *self.config.write().await = config;
+        // Root intake (t2 hybrid mechanism). The opened folder (root_uri) is
+        // the base; workspace folders are preferred as discovery input when
+        // the client sent them.
+        let root_path = params
+            .root_uri
+            .as_ref()
+            .and_then(|uri| uri.to_file_path().ok());
+        let folder_paths: Vec<PathBuf> = params
+            .workspace_folders
+            .as_ref()
+            .map(|folders| {
+                folders
+                    .iter()
+                    .filter_map(|f| f.uri.to_file_path().ok())
+                    .collect()
+            })
+            .filter(|paths: &Vec<PathBuf>| !paths.is_empty())
+            .unwrap_or_else(|| root_path.clone().into_iter().collect());
+
+        if let Some(path) = &root_path {
+            let config = LspConfig::load(Some(path), params.initialization_options.as_ref());
+            *self.config.write().await = config;
+        }
+
+        // Effective roots (t2): explicit plugin_roots init-option overrides
+        // discovery entirely; otherwise walk the folders. Zero found →
+        // single-root fallback on the opened folder (pre-discovery behavior
+        // for manifest-less workspaces). Phase 2 will shard the backend per
+        // root; phase 1 serves exactly one.
+        let override_roots = self.config.read().await.plugin_roots.clone();
+        let mut effective_roots = if !override_roots.is_empty() {
+            tracing::info!(
+                "plugin roots overridden via initializationOptions: {:?}",
+                override_roots
+            );
+            override_roots
+        } else {
+            let discovered = crate::workspace::roots::discover_plugin_roots(&folder_paths);
+            if discovered.is_empty() {
+                // Fallback: the opened folder itself.
+                root_path.clone().into_iter().collect()
+            } else {
+                discovered
+            }
+        };
+        // Canonicalize override roots so they compare equal to discovered
+        // ones (discovery already canonicalizes).
+        effective_roots = effective_roots
+            .iter()
+            .map(|r| r.canonicalize().unwrap_or_else(|_| r.clone()))
+            .collect();
+
+        *self.plugin_roots.write().await = effective_roots.clone();
+
+        match effective_roots.len() {
+            0 => {
+                // No root_uri and no folders: rootless server (open docs only).
+                *self.workspace_root.write().await = None;
+            }
+            1 => {
+                // N=1: the single effective root IS the workspace root. This
+                // fixes the parent-dir-treated-as-root bug for single-plugin
+                // trees (opening a plugin's parent used to analyze the parent
+                // with no manifest).
+                *self.workspace_root.write().await = Some(effective_roots[0].clone());
+            }
+            _ => {
+                // N>1: phase 1 keeps serving the opened folder as the one
+                // workspace root (zero regression); phase 2 will shard the
+                // backend per plugin root (per-root config + snapshots).
+                tracing::info!(
+                    "multiple plugin roots discovered; phase 1 serves the opened folder, phase 2 will shard: {:?}",
+                    effective_roots
+                );
+                *self.workspace_root.write().await = root_path.clone();
             }
         }
 
@@ -733,4 +809,179 @@ pub async fn run_stdio() {
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::new(Backend::new);
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use tower_lsp::lsp_types::WorkspaceFolder;
+
+    fn temp_tree(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "openplanet-lsp-server-roots-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn write_info_toml(dir: &Path) {
+        fs::write(dir.join("info.toml"), "[meta]\n").unwrap();
+    }
+
+    fn canonic(p: &Path) -> PathBuf {
+        p.canonicalize().unwrap()
+    }
+
+    fn init_params(root: &Path, folders: Option<Vec<PathBuf>>) -> InitializeParams {
+        #[allow(deprecated)]
+        let params = InitializeParams {
+            root_uri: Some(Url::from_directory_path(root).unwrap()),
+            workspace_folders: folders.map(|fs| {
+                fs.into_iter()
+                    .map(|uri| WorkspaceFolder {
+                        uri: Url::from_directory_path(uri).unwrap(),
+                        name: "folder".to_string(),
+                    })
+                    .collect()
+            }),
+            ..Default::default()
+        };
+        params
+    }
+
+    async fn roots_of(backend: &Backend) -> Vec<PathBuf> {
+        backend.plugin_roots.read().await.clone()
+    }
+
+    async fn workspace_root_of(backend: &Backend) -> Option<PathBuf> {
+        backend.workspace_root.read().await.clone()
+    }
+
+    #[tokio::test]
+    async fn single_discovered_root_fixes_parent_as_root() {
+        // Regression pin (t2): opening the PARENT of a single-plugin tree
+        // used to treat the parent (no info.toml) as the workspace root.
+        // Discovery must find the plugin dir and make it the root.
+        let parent = temp_tree("single-parent");
+        let plugin = parent.join("plugin");
+        fs::create_dir_all(&plugin).unwrap();
+        write_info_toml(&plugin);
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&parent, Some(vec![parent.clone()])))
+            .await
+            .expect("initialize should succeed");
+
+        assert_eq!(
+            workspace_root_of(backend).await,
+            Some(canonic(&plugin)),
+            "N=1: workspace_root must be the discovered plugin root, not the opened parent"
+        );
+        assert_eq!(roots_of(backend).await, vec![canonic(&plugin)]);
+    }
+
+    #[tokio::test]
+    async fn multiple_roots_leave_workspace_root_as_opened_folder() {
+        // N>1: phase 1 keeps serving the opened folder as workspace_root;
+        // phase 2 will shard the backend per root.
+        let parent = temp_tree("multi-parent");
+        for name in ["plugin-a", "plugin-b"] {
+            let p = parent.join(name);
+            fs::create_dir_all(&p).unwrap();
+            write_info_toml(&p);
+        }
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&parent, Some(vec![parent.clone()])))
+            .await
+            .expect("initialize should succeed");
+
+        assert_eq!(
+            workspace_root_of(backend).await,
+            Some(canonic(&parent)),
+            "N>1: workspace_root stays the opened folder in phase 1"
+        );
+        assert_eq!(
+            roots_of(backend).await,
+            vec![
+                canonic(&parent.join("plugin-a")),
+                canonic(&parent.join("plugin-b"))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_roots_init_option_overrides_discovery() {
+        let parent = temp_tree("override-parent");
+        let discovered = parent.join("plugin");
+        fs::create_dir_all(&discovered).unwrap();
+        write_info_toml(&discovered);
+        let manual = parent.join("manual-plugin");
+        fs::create_dir_all(&manual).unwrap();
+        write_info_toml(&manual);
+
+        let mut params = init_params(&parent, Some(vec![parent.clone()]));
+        params.initialization_options = Some(serde_json::json!({
+            "plugin_roots": [manual.to_str().unwrap()]
+        }));
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(params)
+            .await
+            .expect("initialize should succeed");
+
+        assert_eq!(roots_of(backend).await, vec![canonic(&manual)]);
+        assert_eq!(
+            workspace_root_of(backend).await,
+            Some(canonic(&manual)),
+            "N=1 override: workspace_root follows the single effective root"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_found_falls_back_to_opened_folder() {
+        // Zero-found fallback (t2): single root on the opened folder itself —
+        // exactly the pre-discovery behavior for manifest-less workspaces.
+        let folder = temp_tree("no-plugin");
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&folder, Some(vec![folder.clone()])))
+            .await
+            .expect("initialize should succeed");
+
+        assert_eq!(workspace_root_of(backend).await, Some(canonic(&folder)));
+        assert_eq!(roots_of(backend).await, vec![canonic(&folder)]);
+    }
+
+    #[tokio::test]
+    async fn no_folders_falls_back_to_root_uri_for_discovery() {
+        // workspace_folders absent (single-folder clients): discovery runs on
+        // the root_uri path instead.
+        let parent = temp_tree("root-uri-fallback");
+        let plugin = parent.join("plugin");
+        fs::create_dir_all(&plugin).unwrap();
+        write_info_toml(&plugin);
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&parent, None))
+            .await
+            .expect("initialize should succeed");
+
+        assert_eq!(workspace_root_of(backend).await, Some(canonic(&plugin)));
+        assert_eq!(roots_of(backend).await, vec![canonic(&plugin)]);
+    }
 }
