@@ -1,6 +1,6 @@
 //! Folding range provider.
 //!
-//! Computes `textDocument/foldingRange` results for OpenPlanet AngelScript
+//! Computes `textDocument/foldingRange` results for Openplanet AngelScript
 //! sources. Two complementary passes run over one [`DocumentAnalysis`]:
 //!
 //! 1. **AST pass** walks the parsed (masked) `SourceFile` items collecting

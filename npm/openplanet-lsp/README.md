@@ -1,7 +1,7 @@
 # openplanet-lsp
 
-Language Server Protocol implementation for **OpenPlanet AngelScript**
-(Trackmania / OpenPlanet plugins).
+Language Server Protocol implementation for **Openplanet AngelScript**
+(Trackmania / Openplanet plugins).
 
 This npm package installs a small Node launcher plus an optional
 platform-specific native binary (`openplanet-lsp-*`).

@@ -1,6 +1,6 @@
 use super::token::{keyword_lookup, Token, TokenKind};
 
-/// Hand-written lexer for OpenPlanet AngelScript.
+/// Hand-written lexer for Openplanet AngelScript.
 pub struct Lexer<'a> {
     src: &'a [u8],
     pos: usize,

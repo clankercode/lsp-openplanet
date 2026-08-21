@@ -24,7 +24,7 @@ fn tui_subcommand_launches_watch_tui_not_unknown_command() {
         "`tui` must be a recognized subcommand: got {stderr:?}"
     );
     assert!(
-        stderr.contains("No OpenPlanet plugin found") || stderr.contains("watch TUI failed"),
+        stderr.contains("No Openplanet plugin found") || stderr.contains("watch TUI failed"),
         "expected no-plugin help or a TUI terminal error: status {:?}, stderr {stderr:?}",
         out.status.code()
     );

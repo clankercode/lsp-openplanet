@@ -4,8 +4,8 @@
 
 ![openplanet-lsp watch TUI — relaxed density on showcase-diags](docs/images/watch-demo.png)
 
-Language Server Protocol implementation for **OpenPlanet AngelScript**
-(Trackmania / OpenPlanet plugins).
+Language Server Protocol implementation for **Openplanet AngelScript**
+(Trackmania / Openplanet plugins).
 
 ## Install
 
@@ -57,7 +57,7 @@ default_mode = "tui"   # or "lsp"
 # ignore_paths = ["OtherPacks", "vendor"]
 ```
 
-Point your editor’s AngelScript / OpenPlanet language client at the binary
+Point your editor’s AngelScript / Openplanet language client at the binary
 (stdio, **no args** — editors attach pipes, so bare launch stays LSP).
 
 ### Generic LSP client settings
@@ -67,7 +67,7 @@ Point your editor’s AngelScript / OpenPlanet language client at the binary
 | Command | `openplanet-lsp` (or full path) |
 | Args | _(none)_ |
 | Transport | **stdio** |
-| File types | typically `.as`, `.op`, OpenPlanet plugin trees |
+| File types | typically `.as`, `.op`, Openplanet plugin trees |
 
 Workspace root should be the **plugin directory** (the folder that contains
 `info.toml` and your `.as` sources).
@@ -75,7 +75,7 @@ Workspace root should be the **plugin directory** (the folder that contains
 ### VS Code / Cursor / similar
 
 Use any generic LSP extension (e.g. [vscode-languageclient](https://code.visualstudio.com/api/language-extensions/language-server-extension-guide)
-wrapper) or an OpenPlanet-specific extension that shells out to `openplanet-lsp`.
+wrapper) or an Openplanet-specific extension that shells out to `openplanet-lsp`.
 Minimal `settings.json` shape for a generic client:
 
 ```json
@@ -128,7 +128,7 @@ Depends on build features, but typically includes:
 - completion and signature help
 - formatting / folding / semantic tokens (where implemented)
 
-Optional config: place an OpenPlanet / LSP config near the workspace (see
+Optional config: place an Openplanet / LSP config near the workspace (see
 project docs) or pass environment overrides used by the CLI.
 
 Background update probes run about once per day and can surface an editor
@@ -146,7 +146,7 @@ openplanet-lsp update [OPTIONS]
 
 ### `check` — offline plugin diagnostics
 
-Typecheck / lint an OpenPlanet plugin tree without an editor:
+Typecheck / lint an Openplanet plugin tree without an editor:
 
 ```bash
 # one-shot (pretty on TTY; plain when piped / NO_COLOR)
@@ -191,9 +191,9 @@ Useful options (see `--help` for the full list):
 |------|---------|
 | `--watch` | Live TUI; re-check on file changes |
 | `--format plain\|pretty\|auto` | One-shot output style (ignored with `--watch`) |
-| `--typedb-dir <DIR>` | Load OpenPlanet type database from DIR |
+| `--typedb-dir <DIR>` | Load Openplanet type database from DIR |
 | `--no-typedb` | Skip type DB (parse-only / limited checks) |
-| `--plugins-dir <DIR>` | Extra OpenPlanet plugins dir for dependency exports |
+| `--plugins-dir <DIR>` | Extra Openplanet plugins dir for dependency exports |
 
 ### `update` — self-update
 

@@ -1,4 +1,4 @@
-# OpenPlanet LSP — Specification
+# Openplanet LSP — Specification
 
 **Status:** draft-v0.1 (internal, pre-interview)
 **Stable path:** `specs/draft-v1.md`
@@ -6,13 +6,13 @@
 
 ## Source Inputs
 
-- `~/scrape/openplanet/` — 858 scraped OpenPlanet doc files (API, reference, tutorials)
+- `~/scrape/openplanet/` — 858 scraped Openplanet doc files (API, reference, tutorials)
 - `~/scrape/angelcode/` — 319 scraped AngelScript language docs
 - `~/src/openplanet/` — 154 real TM plugin source trees (ecosystem survey)
 - `~/src/openplanet/vscode-openplanet-angelscript/` — existing VS Code LSP implementation
 - User input (this conversation)
 
-**Source basis note:** Primary source evidence comes from scraped OpenPlanet developer docs and real plugin codebases. Claims about behavior are confirmed from source unless labeled otherwise.
+**Source basis note:** Primary source evidence comes from scraped Openplanet developer docs and real plugin codebases. Claims about behavior are confirmed from source unless labeled otherwise.
 
 ---
 
@@ -24,7 +24,7 @@
 | 2 | Scope + non-goals | needs-user | Language choice, fork vs. fresh TBD |
 | 3 | Users and actors | pending | |
 | 4 | Core workflows | pending | |
-| 5 | Concrete syntax (AngelScript/OpenPlanet) | pending | |
+| 5 | Concrete syntax (AngelScript/Openplanet) | pending | |
 | 6 | Domain-specific semantics | pending | |
 | 7 | Functional requirements | pending | |
 | 8 | Data and state | pending | |
@@ -54,11 +54,11 @@
 
 ### Problem
 
-OpenPlanet plugin developers write AngelScript code targeting a large, evolving game API
+Openplanet plugin developers write AngelScript code targeting a large, evolving game API
 (TrackMania / ManiaPlanet). The language and API surface have no well-supported LSP:
 
 - AngelScript is not a mainstream language — general-purpose language servers do not cover it.
-- OpenPlanet extends AngelScript with a custom preprocessor, plugin lifecycle callbacks,
+- Openplanet extends AngelScript with a custom preprocessor, plugin lifecycle callbacks,
   attribute syntax (`[Setting ...]`), coroutine primitives (`startnew`, `yield`),
   and ~25 API namespaces spanning 500+ documented types.
 - Plugins are multi-file modules; cross-file type resolution is necessary.
@@ -69,12 +69,12 @@ OpenPlanet plugin developers write AngelScript code targeting a large, evolving 
 
 ### Goals
 
-1. Provide accurate, context-aware code completion for OpenPlanet API symbols.
+1. Provide accurate, context-aware code completion for Openplanet API symbols.
 2. Provide type-aware hover documentation.
 3. Provide go-to-definition and find-references across plugin source files.
 4. Surface diagnostics (type errors, undefined symbols, illegal API usage) against the
-   actual OpenPlanet API — not a generic AngelScript type system.
-5. Support the OpenPlanet preprocessor (`#if`/`#elif`/`#else`/`#endif` with game/platform
+   actual Openplanet API — not a generic AngelScript type system.
+5. Support the Openplanet preprocessor (`#if`/`#elif`/`#else`/`#endif` with game/platform
    defines) such that symbol visibility is correct per active define set.
 6. Support plugin metadata (`info.toml`) to scope dependency resolution.
 7. Be validated against real TM plugin source trees and documented API; all errors must be
@@ -119,13 +119,13 @@ _Remaining sections pending Round 1 user input._
 - A-02: `info.toml` presence defines the project root.
 - A-03: All `.as` files under the project root are part of the compilation unit.
 - A-04: The primary game target is TMNEXT (TrackMania 2020).
-- A-05: `startnew()` and `yield()` are OpenPlanet-specific coroutine primitives (not standard AngelScript).
+- A-05: `startnew()` and `yield()` are Openplanet-specific coroutine primitives (not standard AngelScript).
 
 ### Confirmed
 
-- C-01: Test fixtures must use real TM plugin source files and real OpenPlanet API docs. (Confirmed (user))
+- C-01: Test fixtures must use real TM plugin source files and real Openplanet API docs. (Confirmed (user))
 - C-02: All LSP errors against fixtures must be accounted for — no silent misses. (Confirmed (user))
-- C-03: OpenPlanet attribute syntax `[Setting ...]`, `[Persistent ...]`, `[SettingsTab ...]` exists in real plugins. (Confirmed (source))
+- C-03: Openplanet attribute syntax `[Setting ...]`, `[Persistent ...]`, `[SettingsTab ...]` exists in real plugins. (Confirmed (source))
 - C-04: Plugin lifecycle callbacks: `Main()`, `Render()`, `RenderInterface()`, `RenderMenu()`, `RenderEarly()`, `Update(float dt)`, `OnKeyPress()`, `OnMouseButton()`, `OnMouseMove()`, `OnMouseWheel()`, `OnEnabled()`, `OnDisabled()`, `OnDestroyed()`, `OnSettingsChanged()`, `OnSettingsSave()`, `OnSettingsLoad()`, `OnLoadCallback(CMwNod@)`. (Confirmed (source))
 - C-05: The `funcdef` keyword is used for first-class function type declarations. (Confirmed (source))
 - C-06: `#if`/`#elif`/`#else`/`#endif` preprocessor with known defines (TMNEXT, DEV, MANIA64, etc.) (Confirmed (source))

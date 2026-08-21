@@ -1,4 +1,4 @@
-//! AST node types for OpenPlanet's AngelScript dialect.
+//! AST node types for Openplanet's AngelScript dialect.
 //!
 //! Every node carries a `Span` for source position mapping.
 //! This is a pure data types file — no parsing logic.

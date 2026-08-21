@@ -1,7 +1,7 @@
 {
   "name": "openplanet-lsp",
   "version": "0.5.0",
-  "description": "Language Server Protocol implementation for OpenPlanet AngelScript",
+  "description": "Language Server Protocol implementation for Openplanet AngelScript",
   "keywords": [
     "openplanet",
     "angelscript",

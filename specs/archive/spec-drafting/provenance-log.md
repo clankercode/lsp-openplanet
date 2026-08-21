@@ -3,7 +3,7 @@
 | Claim | Label | Evidence Source | Linked Sections | Notes |
 |-------|-------|-----------------|-----------------|-------|
 | Plugin lifecycle callbacks list (Main, Render, etc.) | Confirmed (source) | ~/scrape/openplanet/root/docs/reference/plugin-callbacks.md | S1, S5, S7 | |
-| OpenPlanet attribute syntax [Setting ...] exists | Confirmed (source) | 154 plugin survey + openplanet docs | S5, S6 | |
+| Openplanet attribute syntax [Setting ...] exists | Confirmed (source) | 154 plugin survey + openplanet docs | S5, S6 | |
 | Preprocessor directives #if/#elif/#else/#endif with TMNEXT etc. | Confirmed (source) | ~/scrape/openplanet/root/docs/reference/preprocessor.md + plugins | S5, S6 | |
 | info.toml is project root marker | Confirmed (source) | 154 plugin survey; vscode extension uses it as root | S2, S9 | |
 | ~25 API namespaces, 500+ types | Confirmed (source) | ~/scrape/openplanet/root/docs/api/ (513 files) | S1, S7 | |

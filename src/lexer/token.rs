@@ -32,7 +32,7 @@ impl Token {
     }
 }
 
-/// All token kinds for OpenPlanet AngelScript.
+/// All token kinds for Openplanet AngelScript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenKind {
     // ── Literals ────────────────────────────────────────────────────────────

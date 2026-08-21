@@ -17,7 +17,7 @@
 2. Fresh build — existing LSP is "algorithmically bad"
 3. Generic stdio LSP
 4. TMNEXT primary, JSON format same across games, preprocessor #if is the hard part
-5. Web Services: No — no native OpenPlanet support
+5. Web Services: No — no native Openplanet support
 **Additional:** info.toml must be parsed with diagnostics. Fixture tests from real plugins, all errors accounted for.
 **Draft changes:** Sections 1-3 reviewed. v0.2.
 

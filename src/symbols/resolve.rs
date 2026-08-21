@@ -7,7 +7,7 @@ use crate::typedb::index::TypeIndex;
 /// 2. File-level globals
 /// 3. Module-level globals (all files)
 /// 4. Dependency-exported symbols
-/// 5. OpenPlanet API symbols (type DB)
+/// 5. Openplanet API symbols (type DB)
 /// 6. Namespace-qualified: skip to named namespace
 pub fn resolve_name<'a>(
     name: &str,

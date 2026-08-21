@@ -18,7 +18,7 @@ mod pretty;
 pub mod watch;
 
 const CHECK_HELP: &str = "\
-openplanet-lsp check - Run workspace diagnostics for an OpenPlanet plugin
+openplanet-lsp check - Run workspace diagnostics for an Openplanet plugin
 
 USAGE:
     openplanet-lsp check [OPTIONS] [PATH]

@@ -1,8 +1,8 @@
-# OpenPlanet LSP Implementation Plan
+# Openplanet LSP Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a fast, accurate Rust LSP server for OpenPlanet AngelScript plugin development, validated against real TrackMania plugin fixtures.
+**Goal:** Build a fast, accurate Rust LSP server for Openplanet AngelScript plugin development, validated against real TrackMania plugin fixtures.
 
 **Architecture:** Hand-written lexer and recursive-descent parser with line-level preprocessor masking, dual-format type database loader (Core API + Nadeo game engine types), per-file symbol table with cross-file name resolution, and tower-lsp async server. Snapshot-tested against real TM plugin source trees with zero unexamined diagnostics.
 
@@ -86,7 +86,7 @@ openplanet-lsp/
 name = "openplanet-lsp"
 version = "0.1.0"
 edition = "2021"
-description = "Language Server Protocol implementation for OpenPlanet AngelScript"
+description = "Language Server Protocol implementation for Openplanet AngelScript"
 
 [dependencies]
 tower-lsp = "0.20"
@@ -999,7 +999,7 @@ Expected: All tests PASS.
 
 ```bash
 git add src/lexer/
-git commit -m "feat: hand-written lexer with all AngelScript/OpenPlanet tokens"
+git commit -m "feat: hand-written lexer with all AngelScript/Openplanet tokens"
 ```
 
 ---
@@ -1942,7 +1942,7 @@ Expected: Compiles. Warnings about dead code are fine for now.
 
 ```bash
 git add src/parser/ast.rs
-git commit -m "feat: complete AST node types for AngelScript/OpenPlanet"
+git commit -m "feat: complete AST node types for AngelScript/Openplanet"
 ```
 
 ---
@@ -5347,7 +5347,7 @@ use crate::typedb::index::TypeIndex;
 /// 2. File-level globals
 /// 3. Module-level globals (all files)
 /// 4. Dependency-exported symbols
-/// 5. OpenPlanet API symbols (type DB)
+/// 5. Openplanet API symbols (type DB)
 /// 6. Namespace-qualified: skip to named namespace
 pub fn resolve_name<'a>(
     name: &str,
@@ -5897,7 +5897,7 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        tracing::info!("OpenPlanet LSP initialized");
+        tracing::info!("Openplanet LSP initialized");
     }
 
     async fn shutdown(&self) -> Result<()> {

@@ -1,4 +1,4 @@
-# OpenPlanet LSP — Specification
+# Openplanet LSP — Specification
 
 **Status:** draft-v0.5 (all sections drafted)
 **Stable path:** `specs/draft-v1.md`
@@ -6,13 +6,13 @@
 
 ## Source Inputs
 
-- `~/scrape/openplanet/` — 858 scraped OpenPlanet doc files (API, reference, tutorials)
+- `~/scrape/openplanet/` — 858 scraped Openplanet doc files (API, reference, tutorials)
 - `~/scrape/angelcode/` — 319 scraped AngelScript language docs
 - `~/src/openplanet/` — 154 real TM plugin source trees (ecosystem survey)
 - `~/src/openplanet/vscode-openplanet-angelscript/` — existing VS Code LSP (reference only; not forking)
 - User input (this conversation)
 
-**Source basis note:** Primary source evidence comes from scraped OpenPlanet developer docs and real plugin codebases. The existing VS Code LSP is used as a reference for what features exist, but not as an architectural or algorithmic influence. Claims about behavior are confirmed from source unless labeled otherwise.
+**Source basis note:** Primary source evidence comes from scraped Openplanet developer docs and real plugin codebases. The existing VS Code LSP is used as a reference for what features exist, but not as an architectural or algorithmic influence. Claims about behavior are confirmed from source unless labeled otherwise.
 
 ---
 
@@ -24,7 +24,7 @@
 | 2 | Scope + non-goals | reviewed | All blocking decisions resolved |
 | 3 | Users and actors | reviewed | Straightforward from scope |
 | 4 | Core workflows | drafting | Round 2 |
-| 5 | Concrete syntax (AngelScript/OpenPlanet) | drafting | Round 2 |
+| 5 | Concrete syntax (AngelScript/Openplanet) | drafting | Round 2 |
 | 6 | Domain-specific semantics | drafting | Round 2 |
 | 7 | Functional requirements | drafting | 37 requirements enumerated |
 | 8 | Data and state | drafting | Type DB, symbol table, deps, preprocessor, docs |
@@ -46,7 +46,7 @@
 - **D-003** Confirmed (user): **Generic stdio LSP** — editor-agnostic, works with any LSP client.
 - **D-004** Confirmed (user): Real plugin source files + API docs used as test fixtures; all errors must be accounted for.
 - **D-005** Confirmed (user): Primary game target **TMNEXT**. Type info JSON files share the same format across all games — LSP should support swapping game target. Preprocessor `#if` handling is the key difficulty.
-- **D-006** Confirmed (user): **Web Services API is out of scope** — no native support in OpenPlanet AngelScript.
+- **D-006** Confirmed (user): **Web Services API is out of scope** — no native support in Openplanet AngelScript.
 - **D-007** Confirmed (user): **info.toml must be parsed by the LSP** with error feedback (diagnostics on the TOML itself).
 
 ---
@@ -57,11 +57,11 @@
 
 ### Problem
 
-OpenPlanet plugin developers write AngelScript code targeting a large, evolving game API
+Openplanet plugin developers write AngelScript code targeting a large, evolving game API
 (TrackMania / ManiaPlanet). The development experience lacks a fast, accurate language server:
 
 - AngelScript is not a mainstream language — no general-purpose language servers cover it.
-- OpenPlanet extends AngelScript with a custom preprocessor, plugin lifecycle callbacks,
+- Openplanet extends AngelScript with a custom preprocessor, plugin lifecycle callbacks,
   attribute syntax (`[Setting ...]`), coroutine primitives (`startnew`, `yield`),
   and ~25 API namespaces spanning 500+ documented types.
 - Plugins are multi-file modules; cross-file type resolution is necessary.
@@ -72,12 +72,12 @@ OpenPlanet plugin developers write AngelScript code targeting a large, evolving 
 
 ### Goals
 
-1. Provide accurate, context-aware code completion for OpenPlanet API symbols.
+1. Provide accurate, context-aware code completion for Openplanet API symbols.
 2. Provide type-aware hover documentation.
 3. Provide go-to-definition and find-references across plugin source files.
 4. Surface diagnostics (type errors, undefined symbols, illegal API usage) against the
-   actual OpenPlanet API.
-5. Support the OpenPlanet preprocessor (`#if`/`#elif`/`#else`/`#endif` with game/platform
+   actual Openplanet API.
+5. Support the Openplanet preprocessor (`#if`/`#elif`/`#else`/`#endif` with game/platform
    defines) such that symbol visibility is correct per active define set.
 6. Parse `info.toml` and provide diagnostics on it (malformed TOML, invalid fields, etc.).
 7. Resolve plugin dependencies declared in `info.toml` and load their exported types.
@@ -93,7 +93,7 @@ OpenPlanet plugin developers write AngelScript code targeting a large, evolving 
 
 ### In Scope
 
-- **Language:** OpenPlanet's AngelScript dialect (not standard AngelScript, not Unreal AngelScript).
+- **Language:** Openplanet's AngelScript dialect (not standard AngelScript, not Unreal AngelScript).
 - **Implementation:** Rust, fresh build. No fork of existing tools.
 - **Transport:** Generic LSP over stdio. Editor-agnostic.
 - **Primary game target:** TMNEXT (TrackMania 2020).
@@ -107,13 +107,13 @@ OpenPlanet plugin developers write AngelScript code targeting a large, evolving 
   exports, defines, and other fields.
 - **Plugin dependencies:** Resolve `dependencies` and `optional_dependencies` from `info.toml`,
   locate dependency plugins, and load their `exports`/`shared_exports` for type resolution.
-- **Test fixtures:** Built from real TM plugin source trees and real OpenPlanet API documentation.
+- **Test fixtures:** Built from real TM plugin source trees and real Openplanet API documentation.
   Every diagnostic the LSP emits against fixtures must be accounted for (true positive or
   documented known issue).
 
 ### Non-Goals
 
-- **Web Services API (Nadeo REST endpoints):** No native OpenPlanet AngelScript support for these.
+- **Web Services API (Nadeo REST endpoints):** No native Openplanet AngelScript support for these.
   Out of scope entirely.
 - **Live game state introspection:** Out of scope for an LSP.
 - **Code formatting / style enforcement:** Not requested. Deferred.
@@ -129,13 +129,13 @@ OpenPlanet plugin developers write AngelScript code targeting a large, evolving 
 
 ### Primary User
 
-**OpenPlanet plugin developer** — writes AngelScript code in an LSP-capable editor
-(VS Code, Neovim, Helix, etc.) targeting TrackMania via OpenPlanet.
+**Openplanet plugin developer** — writes AngelScript code in an LSP-capable editor
+(VS Code, Neovim, Helix, etc.) targeting TrackMania via Openplanet.
 
 Typical characteristics:
 - Works in a plugin project directory containing `info.toml` and `.as` source files.
 - May depend on other installed plugins via `info.toml` dependencies.
-- Uses OpenPlanet API namespaces (`UI::`, `Net::`, `Math::`, `nvg::`, etc.) heavily.
+- Uses Openplanet API namespaces (`UI::`, `Net::`, `Math::`, `nvg::`, etc.) heavily.
 - Uses preprocessor `#if` for conditional compilation across game targets.
 - Expects fast feedback: completion as they type, instant diagnostics, quick navigation.
 
@@ -143,7 +143,7 @@ Typical characteristics:
 
 - **Editor client:** Any LSP-capable editor communicating via stdio. The LSP makes no
   assumptions about the client beyond standard LSP protocol support.
-- **OpenPlanet type database:** Pre-generated JSON files describing the game API.
+- **Openplanet type database:** Pre-generated JSON files describing the game API.
   The LSP reads these at startup; they are not generated by the LSP itself.
 - **Installed plugin ecosystem:** Other plugins on disk whose exports may need to be
   resolved for dependency type checking.
@@ -219,7 +219,7 @@ On `info.toml` change:
 
 **Layered configuration** (lowest → highest priority):
 
-1. **Auto-detect:** Try standard OpenPlanet installation paths:
+1. **Auto-detect:** Try standard Openplanet installation paths:
    - Windows: `%USERPROFILE%/OpenplanetNext/`
    - Linux (Wine): TBD (common Wine prefix paths)
    Locate `OpenplanetCore.json`, `OpenplanetNext.json`, and the `Plugins/` directory
@@ -253,13 +253,13 @@ to match a specific runtime target if desired.
 
 ---
 
-## 5. Concrete Syntax (AngelScript / OpenPlanet Dialect)
+## 5. Concrete Syntax (AngelScript / Openplanet Dialect)
 
 **Status:** drafting | Provenance: Confirmed (source)
 
 ### 5.1 AngelScript Base Syntax
 
-The LSP must parse the full AngelScript language as used by OpenPlanet. Key constructs:
+The LSP must parse the full AngelScript language as used by Openplanet. Key constructs:
 
 **Declarations:**
 - `class Name : Base { ... }` — classes with single inheritance
@@ -295,7 +295,7 @@ The LSP must parse the full AngelScript language as used by OpenPlanet. Key cons
 - `expr is null`, `expr !is null` — null checks
 - Member access: `obj.member`, `Namespace::member`
 - Array indexing: `arr[i]`
-- Lambda / inline functions (if supported by OpenPlanet's dialect)
+- Lambda / inline functions (if supported by Openplanet's dialect)
 
 **Statements:**
 - `if/else`, `for`, `while`, `do/while`, `switch/case/default`
@@ -307,7 +307,7 @@ The LSP must parse the full AngelScript language as used by OpenPlanet. Key cons
 - `//` line comments
 - `/* */` block comments
 
-### 5.2 OpenPlanet Extensions
+### 5.2 Openplanet Extensions
 
 **Preprocessor directives:**
 ```
@@ -337,7 +337,7 @@ The LSP must parse the full AngelScript language as used by OpenPlanet. Key cons
 [Persistent hidden]
 ```
 - Attributes precede a global variable or function declaration.
-- `[Setting ...]` — creates a user-visible setting in the OpenPlanet settings panel.
+- `[Setting ...]` — creates a user-visible setting in the Openplanet settings panel.
   Supported types: `bool`, `int*`, `uint*`, `float`, `double`, `string`, `vec2/3/4`,
   `int2/3`, `nat2/3`, `quat`, any enum.
 - `[SettingsTab ...]` — marks a function as a custom settings tab renderer.
@@ -405,7 +405,7 @@ The LSP must validate all fields, types, and structural constraints.
 ### 6.1 Type System
 
 **Primitive types** are built-in. All other types come from:
-1. The OpenPlanet type JSON database (API types: classes, enums, functions).
+1. The Openplanet type JSON database (API types: classes, enums, functions).
 2. User-defined types in `.as` source files.
 3. Dependency-exported types from other plugins.
 
@@ -463,7 +463,7 @@ in file1.as and `namespace A { }` in file2.as contribute to the same namespace.
 2. File-level globals (same file).
 3. Module-level globals (all files in the compilation unit).
 4. Dependency-exported symbols.
-5. OpenPlanet API symbols (from type JSON database).
+5. Openplanet API symbols (from type JSON database).
 6. Namespace-qualified lookup: `Namespace::Symbol` skips to the named namespace.
 
 ### 6.4 Dependency Type Visibility
@@ -507,7 +507,7 @@ Some callbacks have multiple valid signatures (e.g., `OnKeyPress` can return `vo
 
 ### 7.1 Parsing
 
-- **FR-01:** Parse the full AngelScript syntax as used by OpenPlanet (see Section 5).
+- **FR-01:** Parse the full AngelScript syntax as used by Openplanet (see Section 5).
 - **FR-02:** Handle incomplete/in-progress syntax gracefully — the parser must not crash
   or hang on partial input. Recovery should produce a partial AST for the valid portions.
 - **FR-03:** Preprocess files before parsing, evaluating `#if`/`#elif`/`#else`/`#endif`
@@ -582,7 +582,7 @@ Some callbacks have multiple valid signatures (e.g., `OnKeyPress` can return `vo
 
 ### 8.1 Type Database (from JSON)
 
-Loaded at startup from OpenPlanet JSON files. Schema per type JSON:
+Loaded at startup from Openplanet JSON files. Schema per type JSON:
 
 ```
 {
@@ -645,7 +645,7 @@ Per open document:
 - Protocol version: LSP 3.17+ (current stable).
 - Capabilities advertised at initialization (see Section 4.3 for the feature table).
 
-### 9.2 OpenPlanet Type JSON Files
+### 9.2 Openplanet Type JSON Files
 
 - Read at startup, reloaded on configuration change or manual reload command.
 - Files: `OpenplanetCore.json` (core API), game-specific file (e.g., `OpenplanetNext.json`).
@@ -688,7 +688,7 @@ Per open document:
 **Expert suggestion:** A hand-written recursive descent parser will give the best
 control over error recovery and incremental parsing, which are critical for LSP
 responsiveness. Tree-sitter is an alternative that provides incremental parsing
-out of the box, but writing a correct Tree-sitter grammar for AngelScript + OpenPlanet
+out of the box, but writing a correct Tree-sitter grammar for AngelScript + Openplanet
 extensions is nontrivial. _Recommendation: consider both; decide during implementation._
 
 ---
@@ -752,7 +752,7 @@ Custom LSP commands (invokable from editor command palette):
 - **C-PERF:** Must be fast, low memory, low CPU. Design for O(changed files) incremental
   updates, not O(all files).
 - **C-PROTO:** Must use LSP protocol over stdio. No editor-specific APIs.
-- **C-COMPAT:** Must handle OpenPlanet's AngelScript dialect — not standard AngelScript,
+- **C-COMPAT:** Must handle Openplanet's AngelScript dialect — not standard AngelScript,
   not Unreal AngelScript. Differences must be identified and handled.
 - **C-PARSE:** Parser must handle incomplete/malformed input without crashing or hanging.
   Error recovery is mandatory for an interactive LSP.
@@ -802,7 +802,7 @@ Custom LSP commands (invokable from editor command palette):
 
 ### 12.4 Configuration Edge Cases
 
-- **No OpenPlanet installation found:** Operate in degraded mode (see Section 10.4).
+- **No Openplanet installation found:** Operate in degraded mode (see Section 10.4).
 - **Type JSON file invalid/corrupt:** Report startup error, operate without type DB.
 - **Config file and init params conflict:** Init params win (highest priority).
 
@@ -824,7 +824,7 @@ Custom LSP commands (invokable from editor command palette):
 
 **AC-02:** For each fixture plugin, the LSP must produce a diagnostic report. Every
 diagnostic must be categorized:
-- **True positive:** A real error that OpenPlanet's compiler would also flag.
+- **True positive:** A real error that Openplanet's compiler would also flag.
 - **Known limitation:** A false positive or false negative with a documented tracking
   item explaining why and when it will be fixed.
 - **Zero unexamined diagnostics.** Any new diagnostic introduced by code changes must
@@ -871,17 +871,17 @@ invalid `info.toml` fields, unmatched preprocessor directives.
 - A-01: The LSP follows the Language Server Protocol specification (JSON-RPC over stdio).
 - A-02: `info.toml` presence defines the project root for workspace detection.
 - A-03: All `.as` files under the project root are part of the compilation unit (unless excluded by config).
-- A-05: `startnew()` and `yield()` are OpenPlanet-specific coroutine primitives (not standard AngelScript).
-- A-06: The OpenPlanet type JSON files are provided by an OpenPlanet installation, not bundled with the LSP.
+- A-05: `startnew()` and `yield()` are Openplanet-specific coroutine primitives (not standard AngelScript).
+- A-06: The Openplanet type JSON files are provided by an Openplanet installation, not bundled with the LSP.
 - A-07: The type JSON schema is `{ op, functions[], classes[], enums[] }` with namespaces, type IDs, args, descriptions. (Confirmed from source: existing extension parses this format.)
-- A-08: Dependency plugins are located in the OpenPlanet installation's Plugins directory (directories and `.op` archive files).
+- A-08: Dependency plugins are located in the Openplanet installation's Plugins directory (directories and `.op` archive files).
 - A-09: The LSP will need a configuration mechanism to know the paths to: type JSON files, installed plugins directory, and active define set.
 
 ### Confirmed
 
-- C-01: Test fixtures must use real TM plugin source files and real OpenPlanet API docs. (Confirmed (user))
+- C-01: Test fixtures must use real TM plugin source files and real Openplanet API docs. (Confirmed (user))
 - C-02: All LSP errors against fixtures must be accounted for — no silent misses. (Confirmed (user))
-- C-03: OpenPlanet attribute syntax `[Setting ...]`, `[Persistent ...]`, `[SettingsTab ...]` exists in real plugins. (Confirmed (source))
+- C-03: Openplanet attribute syntax `[Setting ...]`, `[Persistent ...]`, `[SettingsTab ...]` exists in real plugins. (Confirmed (source))
 - C-04: Plugin lifecycle callbacks: `Main()`, `Render()`, `RenderInterface()`, `RenderMenu()`, `RenderEarly()`, `Update(float dt)`, `OnKeyPress()`, `OnMouseButton()`, `OnMouseMove()`, `OnMouseWheel()`, `OnEnabled()`, `OnDisabled()`, `OnDestroyed()`, `OnSettingsChanged()`, `OnSettingsSave()`, `OnSettingsLoad()`, `OnLoadCallback(CMwNod@)`. (Confirmed (source))
 - C-05: The `funcdef` keyword is used for first-class function type declarations. (Confirmed (source))
 - C-06: `#if`/`#elif`/`#else`/`#endif` preprocessor with known defines (TMNEXT, DEV, MANIA64, etc.) (Confirmed (source))
@@ -901,7 +901,7 @@ invalid `info.toml` fields, unmatched preprocessor directives.
 - D-03: Code formatting.
 - D-04: Debugger/DAP integration.
 - D-05: Inactive preprocessor branch analysis (completion/navigation in `#else` branches).
-- D-06: Lambda/inline function syntax support (unclear if OpenPlanet supports this).
+- D-06: Lambda/inline function syntax support (unclear if Openplanet supports this).
 
 ---
 
@@ -912,7 +912,7 @@ invalid `info.toml` fields, unmatched preprocessor directives.
 See `.7/spec-drafting/provenance-log.md` for the full provenance table.
 
 **Summary of evidence basis:**
-- **858 scraped OpenPlanet doc files** provided API surface, callback signatures,
+- **858 scraped Openplanet doc files** provided API surface, callback signatures,
   preprocessor define lists, info.toml schema, settings attribute syntax.
 - **319 scraped AngelScript docs** provided base language syntax and semantics.
 - **154 real plugin source trees** provided ecosystem patterns, file structures,
@@ -931,8 +931,8 @@ See `.7/spec-drafting/provenance-log.md` for the full provenance table.
 
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|-----------|------------|
-| AngelScript grammar is large and under-documented; OpenPlanet extensions add complexity. Parser may take significant effort. | High | High | Start with a subset grammar covering the most common patterns from the 154-plugin survey. Expand iteratively. |
-| Type JSON schema may evolve across OpenPlanet versions without notice. | Medium | Medium | Version-check the `op` field. Log warnings for unknown fields rather than failing. |
+| AngelScript grammar is large and under-documented; Openplanet extensions add complexity. Parser may take significant effort. | High | High | Start with a subset grammar covering the most common patterns from the 154-plugin survey. Expand iteratively. |
+| Type JSON schema may evolve across Openplanet versions without notice. | Medium | Medium | Version-check the `op` field. Log warnings for unknown fields rather than failing. |
 | Real plugins may use undocumented language features or compiler quirks. | Medium | High | Fixture test suite will surface these. Document as known limitations until addressed. |
 | Dependency resolution requires reading `.op` ZIP archives, adding I/O complexity. | Low | High | Use a Rust ZIP library (`zip` crate). Cache extracted metadata. |
 | All-permissive default defines may cause false positives where game-specific code branches conflict. | Medium | Medium | Document the tradeoff. Users can narrow defines via config for specific targets. |

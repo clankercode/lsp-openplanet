@@ -1,6 +1,6 @@
 # showcase-diags
 
-Deliberately broken OpenPlanet plugin fixture for **openplanet-lsp** screenshots and CI.
+Deliberately broken Openplanet plugin fixture for **openplanet-lsp** screenshots and CI.
 
 ## Purpose
 

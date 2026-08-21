@@ -783,7 +783,7 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        tracing::info!("OpenPlanet LSP initialized");
+        tracing::info!("Openplanet LSP initialized");
         self.spawn_update_check();
     }
 

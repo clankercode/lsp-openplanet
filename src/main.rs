@@ -18,7 +18,7 @@ Found a mismatch with how Openplanet behaves in-game? Please open an issue:
 ";
 
 const HELP: &str = "\
-openplanet-lsp - Language Server Protocol for OpenPlanet AngelScript
+openplanet-lsp - Language Server Protocol for Openplanet AngelScript
 
 USAGE:
     openplanet-lsp [FLAGS]

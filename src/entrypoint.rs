@@ -54,7 +54,7 @@ pub fn watch_options_for_path(path: PathBuf) -> CheckOptions {
 /// Message when TTY bare launch finds no plugin.
 pub fn no_plugin_help_message() -> &'static str {
     "\
-No OpenPlanet plugin found (no info.toml at or above the current directory).
+No Openplanet plugin found (no info.toml at or above the current directory).
 
   • cd into a plugin and run `openplanet-lsp` again (starts the watch TUI)
   • or: openplanet-lsp tui [path/to/plugin]
