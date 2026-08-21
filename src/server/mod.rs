@@ -38,15 +38,45 @@ pub struct Backend {
     documents: DashMap<Url, String>,
     /// Cached analysis snapshot: rebuilt on every document lifecycle event
     /// (`did_open` / `did_change` / `did_close`). Requests between rebuilds
-    /// read the same consistent view (GH #39).
+    /// read the same consistent view (GH #39). Single-workspace view over
+    /// the sharded state below (spec: multi-root phase 2).
     snapshot: tokio::sync::RwLock<Arc<AnalysisSnapshot>>,
     workspace_root: tokio::sync::RwLock<Option<PathBuf>>,
     /// Effective plugin roots, set once at `initialize` (t2 hybrid):
     /// `config.plugin_roots` (init-option override) when non-empty, else
     /// `discover_plugin_roots` over the workspace folders (root_uri
-    /// fallback), else the opened folder itself. Phase 2 will shard the
-    /// backend per entry here; phase 1 only consumes the N=1 case.
+    /// fallback), else the opened folder itself.
     plugin_roots: tokio::sync::RwLock<Vec<PathBuf>>,
+    /// Sharded state (multi-root spec): one isolated workspace per effective
+    /// plugin root — own config, own snapshot, own diagnostics. The legacy
+    /// `snapshot` / `workspace_root` / `config` fields stay as the N=1 view;
+    /// feature handlers route through `workspace_for` per request URI.
+    workspaces: tokio::sync::RwLock<Vec<PluginWorkspace>>,
+}
+
+/// One isolated plugin workspace (multi-root spec: "one server, N isolated
+/// plugin workspaces"). Own manifest, deps, diagnostics — no cross-plugin
+/// resolution (t0); `workspace/symbol` unions across all of them (t8).
+pub struct PluginWorkspace {
+    /// Canonicalized dir containing `info.toml`.
+    pub root: PathBuf,
+    /// Per-root layered config (t5 ladder applied at load time).
+    pub config: LspConfig,
+    /// This workspace's analysis snapshot (parse + symbol pool).
+    pub snapshot: Arc<AnalysisSnapshot>,
+}
+
+impl Backend {
+    /// Test/introspection accessor: `(root, snapshot)` per live shard, in
+    /// shard order.
+    pub async fn workspace_snapshots(&self) -> Vec<(PathBuf, Arc<AnalysisSnapshot>)> {
+        self.workspaces
+            .read()
+            .await
+            .iter()
+            .map(|w| (w.root.clone(), w.snapshot.clone()))
+            .collect()
+    }
 }
 
 impl Backend {
@@ -62,6 +92,7 @@ impl Backend {
             ))),
             workspace_root: tokio::sync::RwLock::new(None),
             plugin_roots: tokio::sync::RwLock::new(Vec::new()),
+            workspaces: tokio::sync::RwLock::new(Vec::new()),
         }
     }
 
@@ -75,6 +106,81 @@ impl Backend {
                 uri.to_file_path().ok().map(|path| (path, source))
             })
             .collect()
+    }
+
+    /// Open documents that live under `root` (canonicalized prefix match) —
+    /// the symbol-bleed guard: each shard merges only its own documents.
+    fn open_documents_under(&self, root: &std::path::Path) -> Vec<(PathBuf, String)> {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        self.open_documents()
+            .into_iter()
+            .filter(|(path, _)| {
+                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                canon.starts_with(&root)
+            })
+            .collect()
+    }
+
+    /// Rebuild one shard's snapshot in place and return it.
+    async fn rebuild_workspace(&self, root: &std::path::Path) -> Option<Arc<AnalysisSnapshot>> {
+        let (config, root) = {
+            let ws = self.workspaces.read().await;
+            let shard = ws.iter().find(|w| w.root == root)?;
+            (shard.config.clone(), shard.root.clone())
+        };
+        let load =
+            crate::workspace::load::DependencySearch::with_defaults().finalize_with_config(&config);
+        let open = self.open_documents_under(&root);
+        let merged = match crate::workspace::load::load_plugin_workspace(&root, &load) {
+            Ok(disk) => crate::workspace::load::merge_open_documents(&disk, &open),
+            Err(err) => {
+                tracing::warn!("workspace load failed for {root:?}: {err}");
+                crate::workspace::load::PluginWorkspaceLoad {
+                    root: root.clone(),
+                    files: open_into_files(open),
+                    missing_required_dependencies: Vec::new(),
+                }
+            }
+        };
+        let snapshot = Arc::new(AnalysisSnapshot::from_load(&merged, &config));
+        let mut ws = self.workspaces.write().await;
+        if let Some(shard) = ws.iter_mut().find(|w| w.root == root) {
+            shard.snapshot = snapshot.clone();
+        }
+        // Keep the legacy N=1 view in sync when this is the primary shard.
+        if ws.len() == 1 {
+            *self.snapshot.write().await = snapshot.clone();
+        }
+        Some(snapshot)
+    }
+
+    /// Owning workspace for a document URI: canonicalized longest-root-prefix
+    /// match. `None` → stray document (per-request fallback parse, t4).
+    async fn workspace_root_for(&self, uri: &Url) -> Option<PathBuf> {
+        let path = uri.to_file_path().ok()?;
+        let path = path.canonicalize().unwrap_or(path);
+        let ws = self.workspaces.read().await;
+        ws.iter()
+            .filter(|w| path.starts_with(&w.root))
+            .max_by_key(|w| w.root.as_os_str().len())
+            .map(|w| w.root.clone())
+    }
+
+    /// Snapshot serving the given URI: the owning shard's snapshot. Strays
+    /// (t4) get an EMPTY workspace context — features answer from the
+    /// per-request owned parse only. With no shards at all (N=0, pre-init
+    /// unit tests), the legacy single-workspace view serves everything.
+    async fn snapshot_for(&self, uri: &Url) -> Arc<AnalysisSnapshot> {
+        if !self.workspaces.read().await.is_empty() {
+            if let Some(root) = self.workspace_root_for(uri).await {
+                let ws = self.workspaces.read().await;
+                if let Some(shard) = ws.iter().find(|w| w.root == root) {
+                    return shard.snapshot.clone();
+                }
+            }
+            return Arc::new(AnalysisSnapshot::from_files(&[], &LspConfig::default()));
+        }
+        self.snapshot.read().await.clone()
     }
 
     /// Build a workspace analysis snapshot: open documents overlaid on the
@@ -121,6 +227,142 @@ impl Backend {
     }
 
     async fn on_change(&self, uri: &Url, text: &str) {
+        // Sharded path (multi-root spec): rebuild ONLY the owning workspace.
+        if let Some(root) = self.workspace_root_for(uri).await {
+            let snapshot = self.rebuild_workspace(&root).await;
+            if let Some(snapshot) = snapshot {
+                let config = {
+                    let ws = self.workspaces.read().await;
+                    ws.iter().find(|w| w.root == root).map(|w| w.config.clone())
+                };
+                if let Some(config) = config {
+                    self.publish_sharded_diagnostics(uri, text, &snapshot, &config, &root)
+                        .await;
+                    return;
+                }
+            }
+        }
+        // Stray under no plugin root while shards exist (t4): per-request
+        // parse diagnostics only — NEVER the legacy parent-root view (that
+        // would merge sibling subtrees, the exact bug sharding fixes).
+        if !self.workspaces.read().await.is_empty() {
+            self.publish_stray_diagnostics(uri, text).await;
+            return;
+        }
+        self.on_change_legacy(uri, text).await;
+    }
+
+    /// Parse-level diagnostics for a stray document (owned one-file symbol
+    /// pool; no workspace context — t4).
+    async fn publish_stray_diagnostics(&self, uri: &Url, text: &str) {
+        let config = self.config.read().await.clone();
+        let type_index = self.type_index.read().await;
+        let analysis_owned = crate::analysis::DocumentAnalysis::analyze(text, &config.defines);
+        let mut symbols = crate::symbols::SymbolTable::new();
+        let fid = symbols.allocate_file_id();
+        let syms = crate::symbols::SymbolTable::extract_symbols(
+            fid,
+            analysis_owned.masked_source(),
+            &analysis_owned.file,
+        );
+        symbols.set_file_symbols(fid, syms);
+        let diags = diagnostics::compute_diagnostics_from_analysis(
+            uri,
+            &analysis_owned,
+            &config,
+            type_index.as_deref(),
+            &symbols,
+        );
+        self.client
+            .publish_diagnostics(uri.clone(), diags, None)
+            .await;
+    }
+
+    /// Diagnostics for a document owned by a shard: file diagnostics from the
+    /// shard snapshot, manifest diagnostics on the shard's own info.toml.
+    async fn publish_sharded_diagnostics(
+        &self,
+        uri: &Url,
+        text: &str,
+        snapshot: &Arc<AnalysisSnapshot>,
+        config: &LspConfig,
+        root: &std::path::Path,
+    ) {
+        let type_index = self.type_index.read().await;
+        let mut diags = match snapshot.analysis_of(uri) {
+            Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
+                uri,
+                analysis,
+                config,
+                type_index.as_deref(),
+                snapshot.symbols(),
+            ),
+            None => {
+                let analysis_owned =
+                    crate::analysis::DocumentAnalysis::analyze(text, &config.defines);
+                let mut symbols = crate::symbols::SymbolTable::new();
+                let fid = symbols.allocate_file_id();
+                let syms = crate::symbols::SymbolTable::extract_symbols(
+                    fid,
+                    analysis_owned.masked_source(),
+                    &analysis_owned.file,
+                );
+                symbols.set_file_symbols(fid, syms);
+                diagnostics::compute_diagnostics_from_analysis(
+                    uri,
+                    &analysis_owned,
+                    config,
+                    type_index.as_deref(),
+                    &symbols,
+                )
+            }
+        };
+        if uri.path().ends_with("info.toml") {
+            diags.extend(diagnostics::missing_required_dependency_diagnostics(
+                snapshot.missing_required_dependencies(),
+            ));
+        }
+        drop(type_index);
+        self.client
+            .publish_diagnostics(uri.clone(), diags, None)
+            .await;
+        if uri.path().ends_with("info.toml") {
+            return;
+        }
+        // Non-manifest files also refresh the owning workspace's manifest
+        // diagnostics (same shape as the legacy path).
+        let manifest_uri = Url::from_file_path(root.join("info.toml")).ok();
+        if let Some(manifest_uri) = manifest_uri {
+            let manifest_path = root.join("info.toml");
+            let manifest_source = self
+                .documents
+                .get(&manifest_uri)
+                .map(|document| document.value().clone())
+                .or_else(|| std::fs::read_to_string(manifest_path).ok());
+            let diagnostics = manifest_source
+                .as_deref()
+                .map(|source| {
+                    diagnostics::compute_manifest_diagnostics(
+                        &manifest_uri,
+                        source,
+                        config,
+                        snapshot.missing_required_dependencies(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    diagnostics::missing_required_dependency_diagnostics(
+                        snapshot.missing_required_dependencies(),
+                    )
+                });
+            self.client
+                .publish_diagnostics(manifest_uri, diagnostics, None)
+                .await;
+        }
+    }
+
+    /// Legacy single-workspace diagnostics path (pre-sharding behavior; used
+    /// for stray/untitled documents and the N=1 back-compat view).
+    async fn on_change_legacy(&self, uri: &Url, text: &str) {
         let snapshot = self.refresh_snapshot().await;
         let config = self.config.read().await;
         let type_index = self.type_index.read().await;
@@ -294,16 +536,51 @@ impl LanguageServer for Backend {
                 *self.workspace_root.write().await = Some(effective_roots[0].clone());
             }
             _ => {
-                // N>1: phase 1 keeps serving the opened folder as the one
-                // workspace root (zero regression); phase 2 will shard the
-                // backend per plugin root (per-root config + snapshots).
+                // N>1: sharded serving (phase 2) — `workspace_root` stays the
+                // opened folder for back-compat readers; feature handlers
+                // route per request URI through `workspaces`.
                 tracing::info!(
-                    "multiple plugin roots discovered; phase 1 serves the opened folder, phase 2 will shard: {:?}",
+                    "multiple plugin roots; serving N isolated workspaces: {:?}",
                     effective_roots
                 );
                 *self.workspace_root.write().await = root_path.clone();
             }
         }
+
+        // Shard: one isolated workspace per effective root (multi-root spec).
+        let init_options = params.initialization_options.as_ref();
+        let mut shards = Vec::with_capacity(effective_roots.len());
+        for root in &effective_roots {
+            let config = LspConfig::load(Some(root), init_options);
+            let load = crate::workspace::load::DependencySearch::with_defaults()
+                .finalize_with_config(&config);
+            let open = self.open_documents_under(root);
+            let disk = crate::workspace::load::load_plugin_workspace(root, &load);
+            let merged = match disk {
+                Ok(disk) => crate::workspace::load::merge_open_documents(&disk, &open),
+                Err(err) => {
+                    tracing::warn!("workspace load failed for {root:?}: {err}");
+                    crate::workspace::load::PluginWorkspaceLoad {
+                        root: root.clone(),
+                        files: open_into_files(open),
+                        missing_required_dependencies: Vec::new(),
+                    }
+                }
+            };
+            let snapshot = Arc::new(AnalysisSnapshot::from_load(&merged, &config));
+            shards.push(PluginWorkspace {
+                root: root.clone(),
+                config,
+                snapshot,
+            });
+        }
+        // The legacy single-workspace view mirrors the first shard (N=1 exact
+        // back-compat; N=0 stays empty).
+        if let Some(first) = shards.first() {
+            *self.snapshot.write().await = first.snapshot.clone();
+            *self.config.write().await = first.config.clone();
+        }
+        *self.workspaces.write().await = shards;
 
         // Load type database
         let config = self.config.read().await;
@@ -391,7 +668,14 @@ impl LanguageServer for Backend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.documents.remove(&params.text_document.uri);
         // The closed buffer no longer overlays disk; rebuild so features
-        // see the on-disk contents again.
+        // see the on-disk contents again. Only the owning shard (if any).
+        if let Some(root) = self.workspace_root_for(&params.text_document.uri).await {
+            self.rebuild_workspace(&root).await;
+            return;
+        }
+        if !self.workspaces.read().await.is_empty() {
+            return; // stray: no shard to rebuild.
+        }
         self.refresh_snapshot().await;
     }
 
@@ -403,7 +687,7 @@ impl LanguageServer for Backend {
             None => String::new(),
         };
         let type_index = self.type_index.read().await;
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
@@ -426,7 +710,7 @@ impl LanguageServer for Backend {
             None => String::new(),
         };
         let type_index = self.type_index.read().await;
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
@@ -444,7 +728,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
@@ -464,7 +748,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
@@ -488,7 +772,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         Ok(highlights::document_highlights(&analysis, pos))
@@ -500,7 +784,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         Ok(Some(folding::folding_ranges(&analysis)))
@@ -514,7 +798,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let type_index = self.type_index.read().await;
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
@@ -532,7 +816,7 @@ impl LanguageServer for Backend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let empty = crate::analysis::DocumentAnalysis::analyze_plain("");
         let analysis = snapshot.analysis_of(uri).unwrap_or(&empty);
         Ok(symbols::document_symbols(analysis))
@@ -542,13 +826,30 @@ impl LanguageServer for Backend {
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
-        let snapshot = self.snapshot.read().await.clone();
-        let files = snapshot.uri_map();
-        Ok(Some(symbols::workspace_symbols(
-            &params.query,
-            snapshot.symbols(),
-            &files,
-        )))
+        // t8 union: query ALL workspaces, merge into one flat result set.
+        let mut results = Vec::new();
+        {
+            let ws = self.workspaces.read().await;
+            for shard in ws.iter() {
+                let files = shard.snapshot.uri_map();
+                results.extend(symbols::workspace_symbols(
+                    &params.query,
+                    shard.snapshot.symbols(),
+                    &files,
+                ));
+            }
+        }
+        if results.is_empty() {
+            // No shards (N=0) — legacy single-workspace view.
+            let snapshot = self.snapshot.read().await.clone();
+            let files = snapshot.uri_map();
+            results.extend(symbols::workspace_symbols(
+                &params.query,
+                snapshot.symbols(),
+                &files,
+            ));
+        }
+        Ok(Some(results))
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -558,7 +859,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
@@ -580,7 +881,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let tokens = semantic_tokens::semantic_tokens(&analysis);
@@ -614,7 +915,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let type_index = self.type_index.read().await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
@@ -637,7 +938,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
@@ -656,7 +957,8 @@ impl LanguageServer for Backend {
         &self,
         params: CallHierarchyIncomingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
-        let snapshot = self.snapshot.read().await.clone();
+        let uri = &params.item.uri;
+        let snapshot = self.snapshot_for(uri).await;
         let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
@@ -672,7 +974,8 @@ impl LanguageServer for Backend {
         &self,
         params: CallHierarchyOutgoingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
-        let snapshot = self.snapshot.read().await.clone();
+        let uri = &params.item.uri;
+        let snapshot = self.snapshot_for(uri).await;
         let files = snapshot.uri_map();
         let ws_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
@@ -690,7 +993,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc.value().clone(),
             None => return Ok(None),
         };
-        let snapshot = self.snapshot.read().await.clone();
+        let snapshot = self.snapshot_for(uri).await;
         let type_index_guard = self.type_index.read().await;
         let type_index = type_index_guard.as_deref();
         let actions = code_actions::code_actions(
