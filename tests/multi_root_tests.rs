@@ -1,4 +1,4 @@
-//! Multi-root phase 2: N isolated plugin workspaces (spec
+//! Multi-root phases 2–3: N isolated plugin workspaces (spec
 //! `docs/superpowers/specs/2026-08-21-multi-root-plugin-workspaces.md`).
 //!
 //! Same harness shape as the smoke test in `integration_tests.rs`: real
@@ -14,6 +14,11 @@ use tower_lsp::{LanguageServer, LspService};
 
 use openplanet_lsp::analysis_snapshot::AnalysisSnapshot;
 use openplanet_lsp::server::Backend;
+
+/// Write a `.openplanet-lsp.toml` at `dir` with the given body.
+fn write_config(dir: &Path, body: &str) {
+    fs::write(dir.join(".openplanet-lsp.toml"), body).unwrap();
+}
 
 fn temp_parent(name: &str) -> PathBuf {
     let base =
@@ -81,7 +86,7 @@ async fn multi_root_isolation_sibling_symbols_do_not_resolve() {
     let a_main = Url::from_file_path(a_root.join("main.as")).unwrap();
     //              0123456789012345678
     let src = "void Call() { BFunc(); }\n";
-    open_doc(backend, &a_main, src).await;
+    open_doc(&backend, &a_main, src).await;
 
     // hover over `BFunc` at line 0, character 15
     let hover = backend
@@ -234,18 +239,19 @@ async fn multi_root_per_workspace_rebuild_pin() {
     );
     assert!(
         std::ptr::eq(&*before_b, &*after_b),
-        "B's snapshot Arc must remain untouched by A's edit"
+        "B's snapshot Arc must be untouched"
     );
 }
 
-/// (d) Stray `.as` at the parent level (under no plugin root): parse-level
-/// fallback only — no workspace symbols resolve.
+/// (d) Stray .as at parent: per-request fallback parse only (t4) — no
+/// workspace claims it.
 #[tokio::test(flavor = "current_thread")]
 async fn multi_root_stray_file_gets_fallback_parse_only() {
     let parent = temp_parent("stray");
     write_plugin(&parent, "plugin-a", "void AFunc() {}\n");
-    let stray = parent.join("stray.as");
-    fs::write(&stray, "void Call() { AFunc(); }\n").unwrap();
+    write_plugin(&parent, "plugin-b", "void BFunc() {}\n");
+    let stray_uri = Url::from_file_path(parent.join("scratch.as")).unwrap();
+    fs::write(parent.join("scratch.as"), "void AFunc() {}\n").unwrap();
 
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
@@ -254,11 +260,9 @@ async fn multi_root_stray_file_gets_fallback_parse_only() {
         .await
         .unwrap();
 
-    let stray_uri = Url::from_file_path(&stray).unwrap();
-    open_doc(backend, &stray_uri, "void Call() { AFunc(); }\n").await;
-
-    let hover = backend
-        .hover(HoverParams {
+    open_doc(&backend, &stray_uri, "void Call() { AFunc(); }\n").await;
+    let goto = backend
+        .goto_definition(GotoDefinitionParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier {
                     uri: stray_uri.clone(),
@@ -266,19 +270,18 @@ async fn multi_root_stray_file_gets_fallback_parse_only() {
                 position: pos(0, 15),
             },
             work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
         })
         .await
         .unwrap();
     assert!(
-        hover.is_none(),
-        "stray file must not resolve plugin workspace symbols"
+        goto.is_none(),
+        "stray files must not resolve workspace symbols (fallback parse only)"
     );
 }
 
-/// (e) Manifest routing: `info.toml` requests are served by the owning
-/// workspace's snapshot (helper for phase-4 diagnostics fan-out; here we pin
-/// that opening A's manifest doesn't blow up and the workspace set stays
-/// stable).
+/// (e) Manifest open is routed to owner: opening A's info.toml doesn't
+/// disturb the shard set.
 #[tokio::test(flavor = "current_thread")]
 async fn multi_root_manifest_open_is_routed_to_owner() {
     let parent = temp_parent("manifest");
@@ -293,7 +296,7 @@ async fn multi_root_manifest_open_is_routed_to_owner() {
         .unwrap();
 
     let manifest_uri = Url::from_file_path(a_root.join("info.toml")).unwrap();
-    open_doc(backend, &manifest_uri, "[meta]\n").await;
+    open_doc(&backend, &manifest_uri, "[meta]\n").await;
 
     let ws = backend.workspace_snapshots().await;
     assert_eq!(ws.len(), 2, "workspace set must stay stable at 2");

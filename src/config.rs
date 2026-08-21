@@ -30,6 +30,10 @@ pub struct LspConfig {
     /// discovery entirely (manual override for unusual trees — t2). Init
     /// option ONLY: there is deliberately no config-file key.
     pub plugin_roots: Vec<PathBuf>,
+    /// Additional LAST-priority dependency search dirs (multi-root t6:
+    /// the opened folder appended so declared sibling deps resolve).
+    /// Populated by the server, not config files.
+    pub extra_plugins_dirs: Vec<PathBuf>,
 }
 
 impl Default for LspConfig {
@@ -48,6 +52,7 @@ impl Default for LspConfig {
             source_paths: None,
             ignore_paths: None,
             plugin_roots: Vec::new(),
+            extra_plugins_dirs: Vec::new(),
         }
     }
 }
@@ -189,8 +194,23 @@ impl LspConfig {
         Self::defines_for_target("TMNEXT")
     }
 
-    /// Build config from layers: auto-detect → config file → init params
+    /// Build config from layers: auto-detect → parent (opened-folder) config
+    /// → config file → init params. The parent layer only applies when the
+    /// workspace root differs from the per-root path (multi-root t5).
     pub fn load(workspace_root: Option<&Path>, init_options: Option<&serde_json::Value>) -> Self {
+        Self::load_with_parent(workspace_root, None, init_options)
+    }
+
+    /// Multi-root aware load: `parent` is the opened folder hosting multiple
+    /// plugin roots. Ladder (lowest→highest): auto-detect defaults < parent
+    /// config < per-root config < user config < init options < manifest
+    /// defines. typedb settings stay global (resolved init > user > first
+    /// root) — per-root: defines, plugins_dir, source_paths, ignore_paths.
+    pub fn load_with_parent(
+        workspace_root: Option<&Path>,
+        parent: Option<&Path>,
+        init_options: Option<&serde_json::Value>,
+    ) -> Self {
         let mut config = Self {
             openplanet_dir: None,
             plugins_dir: None,
@@ -202,12 +222,20 @@ impl LspConfig {
             source_paths: None,
             ignore_paths: None,
             plugin_roots: Vec::new(),
+            extra_plugins_dirs: Vec::new(),
         };
 
         // Layer 1: Auto-detect
         config.auto_detect();
 
-        // Layer 2: Config file
+        // Layer 2a: Parent (opened-folder) config — base for all shards.
+        if let Some(parent) = parent {
+            if Some(parent) != workspace_root {
+                config.load_config_file(parent);
+            }
+        }
+
+        // Layer 2b: Per-root config.
         if let Some(root) = workspace_root {
             config.load_config_file(root);
         }

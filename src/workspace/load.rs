@@ -66,6 +66,14 @@ impl DependencySearch {
                 self.plugins_dirs.push(game_plugins_dir);
             }
         }
+        // Multi-root t6: extra dirs (e.g. the opened folder) go LAST so
+        // installed/configured plugins dirs keep priority and declared
+        // sibling deps still resolve.
+        for extra in &config.extra_plugins_dirs {
+            if !self.plugins_dirs.iter().any(|p| p == extra) {
+                self.plugins_dirs.push(extra.clone());
+            }
+        }
         if self.plugin_files_search_paths.is_empty() {
             self.plugin_files_search_paths.push(PathBuf::from("src"));
         }

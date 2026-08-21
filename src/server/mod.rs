@@ -77,6 +77,17 @@ impl Backend {
             .map(|w| (w.root.clone(), w.snapshot.clone()))
             .collect()
     }
+
+    /// Test/introspection accessor: `(root, config)` per live shard, in
+    /// shard order.
+    pub async fn workspace_configs(&self) -> Vec<(PathBuf, crate::config::LspConfig)> {
+        self.workspaces
+            .read()
+            .await
+            .iter()
+            .map(|w| (w.root.clone(), w.config.clone()))
+            .collect()
+    }
 }
 
 impl Backend {
@@ -549,9 +560,26 @@ impl LanguageServer for Backend {
 
         // Shard: one isolated workspace per effective root (multi-root spec).
         let init_options = params.initialization_options.as_ref();
+        // Parent (opened-folder) config base + LAST-priority sibling-dep
+        // search dir (t5/t6): applies when N>1 (root_path hosts the roots).
+        let n_roots = effective_roots.len();
+        let parent_config_base = if n_roots > 1 {
+            root_path.as_deref()
+        } else {
+            None
+        };
         let mut shards = Vec::with_capacity(effective_roots.len());
         for root in &effective_roots {
-            let config = LspConfig::load(Some(root), init_options);
+            let mut config =
+                LspConfig::load_with_parent(Some(root), parent_config_base, init_options);
+            if n_roots > 1 {
+                if let Some(parent) = &root_path {
+                    let canon = parent.canonicalize().unwrap_or_else(|_| parent.clone());
+                    if !config.extra_plugins_dirs.contains(&canon) {
+                        config.extra_plugins_dirs.push(canon);
+                    }
+                }
+            }
             let load = crate::workspace::load::DependencySearch::with_defaults()
                 .finalize_with_config(&config);
             let open = self.open_documents_under(root);
