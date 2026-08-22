@@ -3,7 +3,7 @@
 
 ## 2026-04-20, tm-draw-tests
 
-### Case 1: Named argument resolves to wrong parameter when skipping positional args
+### Case 1: Named argument resolves to wrong parameter when skipping positional args [FIXED: named args match by parameter name, skipping defaulted params]
 Plugin source (src/GraphTab.as:261, 266, 271, 276):
     void AddIndentedTooltip(const string &in msg, bool pushFont = false, float w = -1.0) { ... }
 
@@ -48,7 +48,7 @@ LSP previously reported 22 errors; after fixes → 4 empty-catch (B002) under
 
 ## 2026-08-12, tm-dashboard (Miss Dashboard 1.9.6)
 
-### Case: `nvg::Font` unknown type (FP)
+### Case: `nvg::Font` unknown type (FP) [FIXED: builtin type alias nvg::Font]
 Plugin: `nvg::Font g_font;` / `m_font` fields; `nvg::LoadFont` / `FontFace`.
 Core typedb (1.29.5): `nvg::LoadFont` → `int`, `FontFace(int)` — no `nvg::Font` class.
 Game compile: accepts `nvg::Font` (no diagnostic).
@@ -56,7 +56,7 @@ LSP: UnknownType. Fix: builtin type alias `nvg::Font`.
 
 ## 2026-08-22, tm-draw-tests (LSP FP vs game 1.29.5)
 
-### Case: single-arg value-type constructor is not treated as an implicit conversion
+### Case: single-arg value-type constructor is not treated as an implicit conversion [FIXED 2026-08-22: GH #54, d1090f3 — typedb-driven ctor conversions; fixture 54-ctor-implicit-conversion]
 Plugin source (src/DipsItem_Skel.as:112):
     mat3 rot = charRot * hatRot;
     return mat4::Translate(worldPos) * mat4::Inverse(rot);

@@ -3,7 +3,7 @@
 
 ## 2026-04-20, tm-control-mcp
 
-### Case 1: Empty `} catch { }` block parse error
+### Case 1: Empty `} catch { }` block parse error [FIXED 2026-08-23: B002 removed on OP 1.29.5+ — parser test_empty_catch_body_is_silent; empty catch is legal now]
 Plugin source:
     try { x = something(); } catch { }
 
@@ -16,7 +16,7 @@ Workaround: must put at least one token in the catch body, e.g.
 
 The LSP today does not flag empty catch bodies.
 
-### Case 2: string::IndexOf(string, int) overload does not exist
+### Case 2: string::IndexOf(string, int) overload does not exist [FIXED: arity check fires `function IndexOf expects 1 args, got 2`]
 Plugin source:
     int ix = head.IndexOf("name=\"", open);
 
@@ -28,7 +28,7 @@ The LSP should either surface the available overloads at the callsite
 or mark this as an error (it compiled cleanly under the LSP but failed
 the actual Angelscript compile).
 
-### Case 3: Function param `string` warning
+### Case 3: Function param `string` warning [FIXED: StringByValueParam warning parity]
 The LSP does not surface the "pass string by reference" sanity-check
 warning that the game compiler emits:
     MCP: Sanity check: Use 'const string &in x' to pass a string by reference
@@ -36,7 +36,7 @@ Would be nice to have parity so iteration avoids extra cycles.
 
 ## 2026-04-20, tm-agent
 
-### Case 4: UI::Selectable size-arg overload does not exist
+### Case 4: UI::Selectable size-arg overload does not exist [FIXED: `function Selectable expects 2..=3 args, got 4`]
 Plugin source:
     if (UI::Selectable(hitLabel, msg.expanded, 0, vec2(availW, rowH))) { ... }
 
@@ -56,7 +56,7 @@ The LSP today does not flag the missing 4-arg overload.
 
 ## 2026-04-20, tm-editor-plus-plus
 
-### Case 5: CGameCtnCollection has no `CollectionName` member
+### Case 5: CGameCtnCollection has no `CollectionName` member [FIXED: member checks on engine types, GH #50/#52 family]
 Plugin source:
     auto map = GetApp().RootMap;
     string collName = string(map.Collection.CollectionName);
@@ -75,7 +75,7 @@ The LSP today does not flag unknown members on nested Nod/Collection types.
 
 ## 2026-08-11, tm-editor-plus-plus
 
-### Case 6: Distinct enum types not interchangeable at call sites
+### Case 6: Distinct enum types not interchangeable at call sites [FIXED: verified on external-method path — `argument 3 of RemoveBlockSafe: expected CGameEditorPluginMap::ECardinalDirections, got CGameCtnBlock::ECardinalDirections`]
 Plugin source (Gizmo.as):
     pmt.RemoveBlockSafe(targetBlock.BlockInfo, coord, targetBlock.Direction);
 
@@ -96,7 +96,7 @@ Workaround / fix:
 
 ## 2026-08-14, tm-control-mcp (Openplanet.log 18:59–19:04, OP 1.29.5 next)
 
-### Case 7: Unary `!` on non-bool (Json::Value@ handle) — game rejects, LSP silent
+### Case 7: Unary `!` on non-bool (Json::Value@ handle) — game rejects, LSP silent [FIXED: IllegalUnaryOperand `illegal operation ! Json::Value@`]
 Plugin source (pre-fix AsyncDispatch.as:136, git 1e7ab7d):
     Json::Value@ result = CallTool(toolName, input);
     } else if (!result.Get("success", false)) {
@@ -116,7 +116,7 @@ for the handle case so far; probe before encoding the wider rule).
 Note: arg 2 (`false` → `const Json::Value&in`) was accepted by the game, so
 only the unary-`!` half is proven illegal.
 
-### Case 8: `shared` on global/namespace var — game parse error, LSP silent
+### Case 8: `shared` on global/namespace var — game parse error, LSP silent [FIXED: `shared is only valid on classes, interfaces, and functions`]
 Plugin source (interim 3598-byte AsyncDispatch.as, never committed; arithmetic
 proven: '=' at cols 42/38 with `shared ` prefix, byte delta 14 = 2×7):
     shared dictionary@ g_PendingRequests = dictionary();
@@ -135,7 +135,7 @@ Related issue class: none open; #31 covers different FPs.
 
 ## 2026-08-12, tm-dashboard
 
-### Case: Draw::GetWidth / Draw::GetHeight removed
+### Case: Draw::GetWidth / Draw::GetHeight removed [FIXED 2026-08-23: NoMatchingSymbol rule + relocation hints — GH #28/#27; fixture 28-removed-draw-api]
 Plugin source (Thing.as / SettingsWidgets.as):
     vec2 screenSize = vec2(Draw::GetWidth(), Draw::GetHeight());
 
@@ -154,7 +154,7 @@ Related: version-ranged API rules GH #18 (Draw removal / Display rename).
 All three below are false negatives: game rejected, LSP was silent. See GH #28
 (removed-API family) and GH #18 (version-ranged rules).
 
-### Case: Draw::MeasureString removed (same family as Draw::GetWidth/GetHeight, GH #28)
+### Case: Draw::MeasureString removed (same family as Draw::GetWidth/GetHeight, GH #28) [FIXED 2026-08-23: absent-namespace rule + UI::MeasureString hint]
 Plugin source (src/Node.as:242 and src/Node.as:978):
     textSize = Draw::MeasureString(label, g_NormFont, 16.);
 
@@ -168,7 +168,7 @@ there is no `ns == "Draw"` entry at all, so "namespace absent from typedb
 entirely" is a cheap, high-confidence trigger, distinct from
 "namespace exists but this member does not".
 
-### Case: UI::GetIO() does not exist — member missing from a KNOWN namespace
+### Case: UI::GetIO() does not exist — member missing from a KNOWN namespace [FIXED 2026-08-23: known-ns-unknown-member rule, near-name hints; fixture 28-removed-draw-api]
 Plugin source (src/GraphTab.as:361):
     vec2 delta = UI::GetIO().MouseDelta;
 
@@ -195,7 +195,7 @@ Fix: `Display::GetWidth()` / `Display::GetHeight()` (or `Display::GetSize()`).
 
 ## 2026-08-22, spike-live-add-kinematic-ao
 
-### Case: iso4 translation is get-only; `loc.tx += dx` fails
+### Case: iso4 translation is get-only; `loc.tx += dx` fails [FIXED 2026-08-23: ReadOnlyProperty diagnostic, synthesized get-only props from get_X-without-set_X; fixture 55-getonly-prop-assign]
 Plugin source:
     iso4 loc = Dev::ReadIso4(ptr);
     loc.tx += 8.0;
@@ -205,4 +205,15 @@ Compiler reports (game-side):
     Tools.as (242, 16) :  ERR : Compound assignments with property accessors require both get and set accessors
 
 Workaround: `vec3 pos = vec3(loc.tx + dx, loc.ty + dy, loc.tz + dz);` then write the vec3 (or rebuild iso4). Do not use `+=` on `iso4.tx/ty/tz`.
+The LSP today does not flag this.
+
+### Case: `auto ty = Reflection::GetType(...)` is a read-only handle [FIXED 2026-08-23: ReadOnlyReference on value-assign through Handle(Const(_)); `@ty =` rebind stays legal; fixture 56-readonly-handle-rebind]
+Plugin source:
+    auto ty = Reflection::GetType("NGameItem_SMgr");
+    if (ty is null) ty = Reflection::GetType("NSceneItem_SMgr");
+
+Compiler reports (game-side):
+    Scene.as (258, 28) :  ERR : Reference is read-only
+
+Workaround: rebind with `@ty = Reflection::GetType("NSceneItem_SMgr");` or use two locals.
 The LSP today does not flag this.
