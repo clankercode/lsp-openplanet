@@ -47,6 +47,7 @@ fn showcase_snapshot() -> Snapshot {
         format: openplanet_lsp::cli::CheckFormat::Plain,
         watch: false,
         warnings_as_errors: false,
+        extra_defines: Vec::new(),
     };
     let report = run_check(&options).expect("run_check showcase");
     assert!(

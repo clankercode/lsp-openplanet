@@ -440,6 +440,7 @@ mod tests {
             format: crate::cli::CheckFormat::Plain,
             watch: true,
             warnings_as_errors: false,
+            extra_defines: Vec::new(),
         }
     }
 

@@ -1,0 +1,5 @@
+[meta]
+name     = "Issue Repro 53 - --define flag"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"

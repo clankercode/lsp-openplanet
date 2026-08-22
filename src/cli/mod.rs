@@ -41,6 +41,10 @@ OPTIONS:
                         (short form -Werror; =true/=false also accepted).
                         Default exit code: 0 = clean or warnings-only,
                         1 = any error, 2 = usage failure
+    --define NAME       Add a preprocessor define on top of info.toml /
+                        config (short form -D; repeatable). Use to check
+                        branches the staged build enables but the source
+                        tree doesn't (e.g. -D DEV for #if DEV test files).
     --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
     --no-typedb         Run without Openplanet/Nadeo type database files
     --plugins-dir DIR   Directory to search for plugin dependencies
@@ -106,6 +110,11 @@ pub struct CheckOptions {
     /// (`--warnings-as-errors` / `-Werror`). Default exit contract stays:
     /// 0 = clean or warnings-only, 1 = any error, 2 = usage failure.
     pub warnings_as_errors: bool,
+    /// GH #53: extra preprocessor defines injected on top of the
+    /// manifest/config ladder (`--define NAME`, repeatable). Lets a
+    /// source-tree gate match the staged/dev compile (e.g. `build.sh dev`
+    /// writes `defines = ["DEV"]` only into the staged plugin).
+    pub extra_defines: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -162,6 +171,20 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 options.warnings_as_errors = true;
                 i += 1;
             }
+            "--define" | "-D" => {
+                let Some(value) = args.get(i + 1) else {
+                    return Err(CliError::Usage(
+                        "--define requires a symbol name argument".to_string(),
+                    ));
+                };
+                if value.is_empty() {
+                    return Err(CliError::Usage(
+                        "--define requires a non-empty symbol name".to_string(),
+                    ));
+                }
+                options.extra_defines.push(value.clone());
+                i += 2;
+            }
             _ if arg.starts_with("--warnings-as-errors=") => {
                 let value = arg.trim_start_matches("--warnings-as-errors=");
                 options.warnings_as_errors = match value {
@@ -173,6 +196,16 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                         )))
                     }
                 };
+                i += 1;
+            }
+            _ if arg.starts_with("--define=") => {
+                let value = arg.trim_start_matches("--define=");
+                if value.is_empty() {
+                    return Err(CliError::Usage(
+                        "--define requires a non-empty symbol name".to_string(),
+                    ));
+                }
+                options.extra_defines.push(value.to_string());
                 i += 1;
             }
             "--format" => {
@@ -304,6 +337,12 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         if let Ok(manifest) = Manifest::load(&manifest_path) {
             config.apply_manifest(&manifest);
         }
+    }
+
+    // GH #53: CLI --define flags land on top of the manifest/config ladder
+    // so a source-tree gate can match the staged/dev compile.
+    for define in &options.extra_defines {
+        config.defines.insert(define.clone());
     }
 
     let type_index = load_type_index(&config, options.no_typedb)?;
