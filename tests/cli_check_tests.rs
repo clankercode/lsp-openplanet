@@ -536,18 +536,161 @@ fn check_command_issue_repro_38_typedb_shadowed_class_is_clean() {
     );
 }
 
-/// GH #28: `Draw::GetWidth`/`GetHeight` were removed from the Openplanet
-/// API — the game compiler rejects them (`No matching symbol`) but the LSP
-/// silently accepts unknown `Ns::Fn` calls. OPEN (proper fix is #18
-/// version-ranged API rules). Un-ignore as part of the fix.
+/// GH #28 (+ #27): the game compiler rejects unknown `Ns::Fn` free calls —
+/// `No matching symbol 'Draw::GetWidth'` (namespace absent from typedb on
+/// 1.29.5) and `No matching symbol 'UI::GetIO'` (member missing from a
+/// KNOWN namespace). The LSP used to stay silent on both. Fixed — must
+/// keep flagging. Legal counterparts: `Display::GetWidth()` and `UI::Begin`
+/// stay silent, and unknown *user* namespaces (`MyHelpers::Foo()`) stay
+/// quiet too (no typedb evidence → no diagnostic).
 #[test]
-#[ignore = "GH #28 open — removed-API FN, blocked on #18 version-ranged rules"]
 fn check_command_issue_repro_28_removed_draw_api_diagnoses() {
     let (_, stdout, _) = run_issue_repro_typedb("28-removed-draw-api");
+    let flagged_draw = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:20") && l.contains("GetWidth") && l.contains("error"));
+    let flagged_getheight = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:21") && l.contains("GetHeight") && l.contains("error"));
+    let flagged_getio = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:27") && l.contains("GetIO") && l.contains("error"));
     assert!(
-        stdout.contains("GetWidth") && stdout.contains("GetHeight"),
-        "expected diagnostics naming Draw::GetWidth/GetHeight on issue-repro \
-         28-removed-draw-api; stdout={stdout:?}"
+        flagged_draw && flagged_getheight && flagged_getio,
+        "expected No-matching-symbol errors on Draw::GetWidth/GetHeight and UI::GetIO; stdout={stdout:?}"
+    );
+    // Relocation hint (GH #27): suggest the Display:: replacement for Draw::*.
+    let hinted = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:20") && l.contains("Display::GetWidth"));
+    assert!(
+        hinted,
+        "expected a relocation hint naming Display::GetWidth; stdout={stdout:?}"
+    );
+}
+
+/// GH #28 negative guard: unknown USER namespaces stay silent — the checker
+/// can't distinguish a plugin's own helper namespace from a typedb gap, and
+/// the game only rejects calls into *its* unknown API namespaces. Legal
+/// relocated (`Display::GetWidth`) and known-member (`UI::Begin`) calls
+/// stay clean too.
+#[test]
+fn check_command_issue_repro_28b_user_namespace_stays_silent() {
+    let (_, stdout, _) = run_issue_repro_typedb("28b-user-namespace-silent");
+    let flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:1") && l.contains("error"));
+    assert!(
+        !flagged,
+        "user-namespace calls and legal API calls must stay silent; stdout={stdout:?}"
+    );
+}
+
+/// Get-only virtual property writes (todo-cover-cases-next.txt,
+/// spike-live-add-kinematic-ao): `iso4.tx` is `get_tx()` only — the game
+/// rejects `loc.tx += 8.0` and `loc.tx = 3.0` with
+/// `The property has no set accessor` (and, for compound assigns,
+/// `Compound assignments with property accessors require both get and set
+/// accessors`). Reads and whole-struct assigns stay legal. Game-compiler
+/// ground truth: Tools.as (242,16), OP 1.29.5.
+#[test]
+fn check_command_issue_repro_55_getonly_prop_assign_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("55-getonly-prop-assign");
+    const MSG: &str = "The property";
+    let flagged_compound = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:12") && l.contains(MSG) && l.contains("no set accessor"));
+    let flagged_plain = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:13") && l.contains(MSG) && l.contains("no set accessor"));
+    assert!(
+        flagged_compound && flagged_plain,
+        "expected no-set-accessor errors on `loc.tx +=` and `loc.tx =`; stdout={stdout:?}"
+    );
+    // Legal: read (14), whole-struct assign (15), compound on a float local (16).
+    let legal_flagged = stdout.lines().any(|l| {
+        (l.contains("Main.as:14") || l.contains("Main.as:15") || l.contains("Main.as:16"))
+            && (l.contains("error") || l.contains("warning"))
+    });
+    assert!(
+        !legal_flagged,
+        "legal reads / whole-struct assigns must stay silent; stdout={stdout:?}"
+    );
+}
+
+/// Read-only handle rebind (todo-cover-cases-next.txt,
+/// spike-live-add-kinematic-ao): `auto ty = Reflection::GetType(…)`
+/// infers `const Reflection::MwClassInfo@`; a value-assign rebind
+/// (`ty = …`) is rejected by the game with `Reference is read-only`
+/// (Scene.as 258:28, OP 1.29.5). The `@ty = …` handle rebind is legal —
+/// the handle *slot* is mutable even when the referent is const.
+#[test]
+fn check_command_issue_repro_56_readonly_handle_rebind_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("56-readonly-handle-rebind");
+    let flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:13") && l.contains("read-only"));
+    assert!(
+        flagged,
+        "expected a read-only error on the `ty = …` value rebind; stdout={stdout:?}"
+    );
+    // Legal: `@ty = …` handle rebind on line 14 stays silent.
+    let legal_flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:14") && (l.contains("error") || l.contains("warning")));
+    assert!(
+        !legal_flagged,
+        "the `@ty = …` handle rebind must stay silent; stdout={stdout:?}"
+    );
+}
+
+/// GH #53: `check --define DEV` injects extra preprocessor defines so a
+/// source-tree gate matches the staged/dev compile. Without the flag the
+/// `#if DEV` branch stays dead (clean check); with it, the branch's
+/// undefined identifier must surface.
+#[test]
+fn check_command_issue_repro_53_define_flag_activates_branch() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/issue-repros/53-define-flag");
+    let base = |extra: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"));
+        cmd.env_remove("FORCE_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env("NO_COLOR", "1")
+            .arg("check");
+        for e in extra {
+            cmd.arg(e);
+        }
+        cmd.arg(&fixture);
+        let out = cmd.output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )
+    };
+    // Baseline: no --define → dead branch → clean.
+    let (ok, stdout) = base(&[]);
+    assert!(
+        ok && stdout.contains("0 diagnostics"),
+        "without --define the #if DEV branch must stay dead/clean; stdout={stdout:?}"
+    );
+    // With --define DEV → branch live → undefined identifier surfaces.
+    let (ok, stdout) = base(&["--define", "DEV"]);
+    let flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:12") && l.contains("error"));
+    assert!(
+        !ok && flagged,
+        "--define DEV must activate the #if DEV branch and surface its error; stdout={stdout:?}"
+    );
+    // = form parses too.
+    let (ok, stdout) = base(&["--define=DEV"]);
+    let flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:12") && l.contains("error"));
+    assert!(
+        !ok && flagged,
+        "--define=DEV must parse the same as --define DEV; stdout={stdout:?}"
     );
 }
 

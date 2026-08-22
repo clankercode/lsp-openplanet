@@ -557,6 +557,44 @@ impl<'a> GlobalScope<'a> {
             .unwrap_or(false)
     }
 
+    /// True when `obj_type` is an external typedb type whose property
+    /// `member` is a proven get-only virtual property (a synthesized
+    /// `writable: false` entry from a `get_X`-without-`set_X` pair —
+    /// e.g. `iso4.tx`). Walks the parent chain like `ext_lookup_member`.
+    /// Returns `false` for anything we can't positively classify
+    /// (workspace types, Nadeo props, unknown names).
+    pub fn external_member_is_readonly(&self, obj_type: &str, member: &str) -> bool {
+        if self.workspace_type_shadows(obj_type) {
+            return false;
+        }
+        let Some(ext) = self.external else {
+            return false;
+        };
+        let mut current = Self::resolve_external_type_name(ext, obj_type);
+        let mut hops = 0usize;
+        while let Some(name) = current.take() {
+            hops += 1;
+            if hops > 32 {
+                break;
+            }
+            let Some(info) = ext.lookup_type(&name) else {
+                return false;
+            };
+            for p in &info.properties {
+                if p.name == member {
+                    // Explicit props are real fields; only synthesized
+                    // get-only entries are read-only.
+                    return !p.writable;
+                }
+            }
+            current = info
+                .parent
+                .as_ref()
+                .and_then(|par| Self::resolve_external_type_name(ext, par));
+        }
+        false
+    }
+
     /// True when a Nadeo type has a non-empty `properties` + `methods`
     /// list in the typedb. A failed member lookup against such a type can
     /// be reported as `UndefinedMember` (trust positive completeness of

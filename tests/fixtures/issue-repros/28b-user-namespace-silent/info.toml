@@ -1,0 +1,5 @@
+[meta]
+name     = "Issue Repro 28b - User Namespace Silence"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"

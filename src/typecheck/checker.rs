@@ -128,6 +128,34 @@ pub enum TypeDiagnosticKind {
     /// `Can't find unambiguous implicit conversion to make both
     /// expressions have the same type`.
     TernaryNoCommonType,
+    /// GH #28 / #27: a free-function call `Ns::Fn(...)` the game rejects
+    /// with `No matching symbol 'Ns::Fn'`. Two high-confidence triggers,
+    /// both typedb-driven: (a) `Ns` is a KNOWN API namespace (appears as
+    /// functions[].ns in the typedb — e.g. `UI` with 237 fns on 1.29.5)
+    /// but `Ns::Fn` is not among its functions; (b) `Ns` is absent from
+    /// the typedb entirely AND is a known removed/game API namespace
+    /// (relocation table, e.g. `Draw` → `Display`). `hint` carries the
+    /// replacement when a relocation is known (GH #27).
+    NoMatchingSymbol {
+        qualified: String,
+        hint: Option<String>,
+    },
+    /// Get-only virtual property write (todo-cover-cases-next.txt,
+    /// spike-live-add-kinematic-ao): `iso4.tx` has `get_tx()` but no
+    /// `set_tx`. Game wording: `The property has no set accessor` (plus a
+    /// second line for compound assigns: `Compound assignments with
+    /// property accessors require both get and set accessors`).
+    ReadOnlyProperty {
+        property: String,
+        compound: bool,
+    },
+    /// Value-assign through a const handle (todo-cover-cases-next.txt,
+    /// spike-live-add-kinematic-ao): `auto ty = Reflection::GetType(…)`
+    /// infers `const MwClassInfo@`; `ty = …` compiles to an assign through
+    /// the reference, which the game rejects with
+    /// `Reference is read-only` (Scene.as 258:28, OP 1.29.5). The `@ty =`
+    /// handle rebind stays legal — the handle slot is mutable.
+    ReadOnlyReference,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -265,6 +293,30 @@ impl TypeDiagnostic {
             TypeDiagnosticKind::TernaryNoCommonType => {
                 // Exact game-compiler wording (RemoteBuild probe 2026-08-18).
                 "Can't find unambiguous implicit conversion to make both expressions have the same type".to_string()
+            }
+            TypeDiagnosticKind::NoMatchingSymbol { qualified, hint } => {
+                // Game wording: `No matching symbol 'Draw::GetWidth'` (OP
+                // 1.29.5). The hint appends the known relocation (GH #27).
+                let mut m = format!("No matching symbol '{qualified}'");
+                if let Some(h) = hint {
+                    m.push_str(&format!(" — use `{h}` instead"));
+                }
+                m
+            }
+            TypeDiagnosticKind::ReadOnlyProperty { property, compound } => {
+                // Game wording (OP 1.29.5, Tools.as 242:16). Compound
+                // assigns get the second line too.
+                let mut m = format!("The property '{property}' has no set accessor");
+                if *compound {
+                    m.push_str(
+                        "; compound assignments with property accessors require both get and set accessors",
+                    );
+                }
+                m
+            }
+            TypeDiagnosticKind::ReadOnlyReference => {
+                // Game wording (OP 1.29.5, Scene.as 258:28).
+                "Reference is read-only".to_string()
             }
         }
     }
@@ -2467,9 +2519,14 @@ impl<'a> Checker<'a> {
                 if self.scope.has_global_ident(&qual) {
                     return TypeRepr::Error(String::new());
                 }
-                // Fully qualified call-like path (`UX::SmallButton(...)`) —
-                // stay silent; we can't reliably distinguish user helper
-                // namespaces from external APIs yet.
+                // GH #28 / #27: the call resolved to nothing workspace-side
+                // and nothing external — consult the typedb before going
+                // silent. Known API namespace + missing member, or absent
+                // namespace + known removal, is a game-side `No matching
+                // symbol` rejection. Unknown user namespaces stay quiet.
+                if let Some(diag) = self.free_fn_no_matching_symbol(&qual, callee.span) {
+                    self.diagnostics.push(diag);
+                }
                 TypeRepr::Error(String::new())
             }
             _ => {
@@ -2482,6 +2539,61 @@ impl<'a> Checker<'a> {
 
     // ── Expression walker / minimal type derivation ─────────────────────────
 
+    /// GH #28 / #27: `Ns::Fn(...)` resolved to nothing. Decide whether the
+    /// typedb gives us enough confidence to diagnose the game-compiler
+    /// `No matching symbol 'Ns::Fn'` rejection:
+    ///
+    /// - `Ns` has functions in the typedb (known API namespace) but `Ns::Fn`
+    ///   is not among them → diagnose, optionally with near-name hints.
+    /// - `Ns` is absent from the typedb entirely AND sits in the
+    ///   removed-API relocation table (e.g. `Draw` on 1.29.5) → diagnose
+    ///   with the replacement hint (`Display::GetWidth`).
+    /// - Anything else (unknown user namespace) → stay silent; we can't
+    ///   distinguish a user helper namespace from a typedb gap.
+    fn free_fn_no_matching_symbol(&mut self, qual: &str, span: Span) -> Option<TypeDiagnostic> {
+        let idx = self.scope.external()?;
+        let (ns, _fn) = qual.split_once("::")?;
+        if idx.namespace_has_functions(ns) {
+            // Known API namespace: is the member really missing? The lookup
+            // already failed above (caller reached the silent path), but
+            // re-check to keep this helper self-contained.
+            if idx.lookup_function(qual).is_some() {
+                return None;
+            }
+            // Near-name candidates soften the diagnostic (typo support).
+            let members = idx.namespace_members(ns);
+            let near: Vec<&String> = members
+                .iter()
+                .filter(|m| edit_distance(m, _fn) <= 2 && !m.is_empty())
+                .take(3)
+                .collect();
+            let hint = if near.is_empty() {
+                None
+            } else {
+                Some(format!("{}::{}", ns, near[0]))
+            };
+            return Some(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::NoMatchingSymbol {
+                    qualified: qual.to_string(),
+                    hint,
+                },
+            });
+        }
+        if !idx.namespace_exists(ns) {
+            if let Some(hint) = removed_api_hint(qual) {
+                return Some(TypeDiagnostic {
+                    span,
+                    kind: TypeDiagnosticKind::NoMatchingSymbol {
+                        qualified: qual.to_string(),
+                        hint: Some(hint.to_string()),
+                    },
+                });
+            }
+        }
+        None
+    }
+
     fn expr_type(&mut self, expr: &Expr) -> TypeRepr {
         let ty = self.expr_type_inner(expr);
         if self.record_types {
@@ -2490,6 +2602,36 @@ impl<'a> Checker<'a> {
                 .insert((expr.span.start, expr.span.end), ty.clone());
         }
         ty
+    }
+
+    /// Get-only virtual property write guard (todo-cover-cases-next.txt,
+    /// spike-live-add-kinematic-ao). When the assignment LHS is a plain
+    /// `obj.prop` member expression whose receiver type is a typedb value
+    /// type with a get-only `prop` (e.g. `iso4.tx`), the game rejects the
+    /// store with `The property has no set accessor`. Only fires on the
+    /// external typedb's proven read-only set — workspace fields, Nadeo
+    /// props and unknown types stay silent.
+    fn check_readonly_prop_assign(&mut self, lhs: &Expr, compound: bool) {
+        let ExprKind::Member { object, member } = &lhs.kind else {
+            return;
+        };
+        // Compute the receiver type directly (the check-mode pass does not
+        // populate the span map). Member-access typing is read-only and
+        // idempotent, so walking the object again is safe.
+        let obj_ty = self.expr_type(object);
+        let Some(type_name) = Self::base_type_name(&obj_ty) else {
+            return;
+        };
+        let prop = member.text(self.source).to_string();
+        if self.scope.external_member_is_readonly(&type_name, &prop) {
+            self.diagnostics.push(TypeDiagnostic {
+                span: lhs.span,
+                kind: TypeDiagnosticKind::ReadOnlyProperty {
+                    property: format!("{type_name}.{prop}"),
+                    compound,
+                },
+            });
+        }
     }
 
     fn expr_type_inner(&mut self, expr: &Expr) -> TypeRepr {
@@ -2776,7 +2918,7 @@ impl<'a> Checker<'a> {
                 }
                 TypeRepr::Error(String::new())
             }
-            ExprKind::Assign { lhs, rhs, .. } => {
+            ExprKind::Assign { lhs, op, rhs } => {
                 if !matches!(
                     lhs.kind,
                     ExprKind::Ident(_)
@@ -2799,6 +2941,22 @@ impl<'a> Checker<'a> {
                         },
                     });
                 }
+                // Value-assign through a const handle (`auto ty =
+                // Reflection::GetType(…)` → `Handle(Const(…))`; then
+                // `ty = …`): the game rejects the implicit write-through
+                // with `Reference is read-only`. `@ty =` rebinds the slot
+                // and is legal (checked in the HandleAssign arm).
+                if matches!(&lhs_ty, TypeRepr::Handle(inner) if matches!(&**inner, TypeRepr::Const(_)))
+                {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: lhs.span,
+                        kind: TypeDiagnosticKind::ReadOnlyReference,
+                    });
+                }
+                // Get-only virtual property write (`iso4.tx = …` /
+                // `loc.tx += …`): the game rejects with
+                // `The property has no set accessor`.
+                self.check_readonly_prop_assign(lhs, !matches!(op, AssignOp::Assign));
                 TypeRepr::Error(String::new())
             }
             ExprKind::HandleAssign { lhs, rhs } => {
@@ -2964,6 +3122,38 @@ fn is_numeric_primitive(p: &PrimitiveType) -> bool {
 /// True if `p` is any integer primitive (signed or unsigned).
 fn is_integer(p: PrimitiveType) -> bool {
     is_signed_int(p) || is_unsigned_int(p)
+}
+
+/// GH #27 / #28: known API removals and relocations, verified against the
+/// live game (OP 1.29.5). Keyed by full qualified name; value is the
+/// replacement to hint. `Draw::*` wholesale moved to `Display::*` /
+/// `UI::*` — the namespace is absent from the 1.29.5 typedb entirely.
+fn removed_api_hint(qual: &str) -> Option<&'static str> {
+    match qual {
+        "Draw::GetWidth" => Some("Display::GetWidth"),
+        "Draw::GetHeight" => Some("Display::GetHeight"),
+        "Draw::MeasureString" => Some("UI::MeasureString"),
+        _ => None,
+    }
+}
+
+/// Levenshtein distance capped at `max` — small helper for near-name
+/// candidate hints. Returns `max + 1` when the strings are further apart.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (n, m) = (a.len(), b.len());
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut cur = vec![0usize; m + 1];
+    for i in 1..=n {
+        cur[0] = i;
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
 }
 
 /// True if the expression subtree contains an integer literal anywhere

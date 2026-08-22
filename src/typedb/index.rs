@@ -63,6 +63,11 @@ pub struct PropertyInfo {
     pub name: String,
     pub type_name: String,
     pub doc: Option<String>,
+    /// True when the typedb lists a `set_X` accessor (or a bare prop,
+    /// which is a real field and always writable). False for get-only
+    /// virtual properties (`iso4.get_tx` with no `set_tx`) — the game
+    /// rejects writes with `The property has no set accessor`.
+    pub writable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -192,7 +197,7 @@ impl TypeIndex {
 
         for cls in &db.classes {
             let qname = Self::qualify(&cls.ns, &cls.name);
-            let info = TypeInfo {
+            let mut info = TypeInfo {
                 name: cls.name.clone(),
                 namespace: cls.ns.clone(),
                 parent: cls.inherits.clone(),
@@ -223,12 +228,38 @@ impl TypeIndex {
                         name: p.name.clone(),
                         type_name: p.typedecl.clone(),
                         doc: p.desc.clone(),
+                        // Explicit props are real fields — always writable.
+                        writable: true,
                     })
                     .collect(),
                 ctor_conversions: single_arg_ctor_sources(cls),
                 doc: cls.desc.clone(),
                 source: TypeSource::Core,
             };
+            // Get-only virtual properties: a `get_X` method with no matching
+            // `set_X` synthesizes a read-only PropertyInfo entry so the
+            // checker can reject `obj.X = …` / `obj.X += …` with the game's
+            // `The property has no set accessor` (iso4.tx et al.).
+            let has_set: std::collections::HashSet<&str> = cls
+                .methods
+                .iter()
+                .filter_map(|m| m.name.strip_prefix("set_"))
+                .collect();
+            for m in &cls.methods {
+                if let Some(prop) = m.name.strip_prefix("get_") {
+                    if !prop.is_empty()
+                        && !has_set.contains(prop)
+                        && !info.properties.iter().any(|p| p.name == prop)
+                    {
+                        info.properties.push(PropertyInfo {
+                            name: prop.to_string(),
+                            type_name: m.returntypedecl.clone(),
+                            doc: m.desc.clone(),
+                            writable: false,
+                        });
+                    }
+                }
+            }
             self.types.insert(qname, info);
         }
 
@@ -262,6 +293,10 @@ impl TypeIndex {
                                 name: member.n.clone(),
                                 type_name: member.type_name().unwrap_or("").to_string(),
                                 doc: None,
+                                // Nadeo format exposes no accessor info;
+                                // assume writable (conservative — we only
+                                // hard-error on Core's proven get-only set).
+                                writable: true,
                             });
                         }
                         NadeoMemberKind::Method => {
@@ -301,6 +336,9 @@ impl TypeIndex {
                                     name: member.n.clone(),
                                     type_name: type_name.to_string(),
                                     doc: None,
+                                    // Nadeo enum members: no accessor info —
+                                    // assume writable (conservative).
+                                    writable: true,
                                 });
                             }
                         }
@@ -432,6 +470,21 @@ impl TypeIndex {
 
     pub fn type_count(&self) -> usize {
         self.types.len()
+    }
+
+    /// GH #28: does the typedb list at least one free function under `ns`?
+    /// True for API namespaces like `UI`, `Text`, `Math` — a call to a
+    /// `Ns::Fn` member that isn't in the DB is then a high-confidence miss.
+    pub fn namespace_has_functions(&self, ns: &str) -> bool {
+        let prefix = format!("{}::", ns);
+        self.functions.keys().any(|k| k.starts_with(&prefix))
+    }
+
+    /// GH #28: does the typedb know `ns` at all (functions, types, or
+    /// enums)? Absent + listed in the removed-API table (e.g. `Draw` on
+    /// 1.29.5) diagnoses; absent + unlisted is an unknown user namespace.
+    pub fn namespace_exists(&self, ns: &str) -> bool {
+        self.namespaces().iter().any(|n| n == ns)
     }
 
     pub fn function_count(&self) -> usize {

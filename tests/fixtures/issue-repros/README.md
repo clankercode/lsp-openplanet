@@ -59,11 +59,16 @@ Record the game verdict in the fixture's gate-test doc comment.
 | `46-mixin-consumer-member` | #46 | clean | fixed (8c13ef5) — active |
 | `44-indexed-handle-assign` | #44 | `not an l-value` (@-into-Json-index only) | fixed (70f3f97) — active |
 | `30-sibling-field-bare-ident` | #30 | `No matching symbol 'nod'` | fixed — active |
-| `28-removed-draw-api` | #28 | `No matching symbol 'Draw::GetWidth/GetHeight'` | open — ignored (blocked on #18) |
+| `28-removed-draw-api` | #28 | `No matching symbol 'Draw::GetWidth/GetHeight'` | fixed — active (see new row below for the 2026-08-23 extension) |
 | `38-typedb-shadowed-class` | #38 | clean | fixed (db6e46b) — active |
 | `52-engine-member-miss` | #52 repro 1 | `'FileName' is not a member of 'CGameCtnChallenge'` (line 11) | fixed (a970f2d) — active |
 | `52b-ternary-type-ambiguity` | #52 repro 2 | `Can't find unambiguous implicit conversion…` ×3 (13:19, 14:16, 15:17; 2026-08-18 probe) | fixed — active |
 | `54-ctor-implicit-conversion` | #54 | `No matching signatures to 'mat4::Inverse(vec3&)'` at 18:16 only — every mat3↔mat4 ctor conversion clean (2026-08-22 probe) | fixed — active |
+| `28-removed-draw-api` | #28 + #27 | `No matching symbol 'Draw::GetWidth/GetHeight'` (2026-08-22, todo-cover-cases) + `UI::GetIO` known-ns rule | fixed — active |
+| `28b-user-namespace-silent` | #28 | negative guard: user namespaces must stay silent | fixed — active |
+| `55-getonly-prop-assign` | todo-cover-cases (kinematic-ao) | `The property has no set accessor` ×2 on `iso4.tx` (Tools.as 242:16, 2026-08-22) | fixed — active |
+| `56-readonly-handle-rebind` | todo-cover-cases (kinematic-ao) | `Reference is read-only` on `ty =` value-assign (Scene.as 258:28, 2026-08-22) | fixed — active |
+| `53-define-flag` | #53 | `--define DEV` activates `#if DEV` branch (staged-compile parity) | fixed — active |
 
 GH #37 batch (game verdicts from the 2026-08-17 live probe):
 
