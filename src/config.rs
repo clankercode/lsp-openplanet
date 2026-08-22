@@ -194,6 +194,32 @@ impl LspConfig {
         Self::defines_for_target("TMNEXT")
     }
 
+    /// GH #45: the Openplanet install folder name for a game target.
+    /// `None` for targets with no Openplanet build (MP3, NATIONS_FOREVER)
+    /// — callers warn and fall back to the TMNEXT layout.
+    pub fn openplanet_folder_for_target(target: &str) -> Option<&'static str> {
+        match target {
+            "TMNEXT" => Some("OpenplanetNext"),
+            "MP4" | "MP40" | "MP41" => Some("OpenplanetMP4"),
+            "TURBO" => Some("OpenplanetTurbo"),
+            "UNITED" | "UNITED_FOREVER" => Some("OpenplanetUnited"),
+            _ => None,
+        }
+    }
+
+    /// GH #45: the game typedb filename inside the variant's install
+    /// folder. Targets without an Openplanet build fall back to the
+    /// TMNEXT database (warn-and-fallback per the issue).
+    pub fn game_json_filename_for_target(target: &str) -> &'static str {
+        match Self::openplanet_folder_for_target(target) {
+            Some("OpenplanetNext") => "OpenplanetNext.json",
+            Some("OpenplanetMP4") => "OpenplanetMP4.json",
+            Some("OpenplanetTurbo") => "OpenplanetTurbo.json",
+            Some("OpenplanetUnited") => "OpenplanetUnited.json",
+            _ => "OpenplanetNext.json",
+        }
+    }
+
     /// Build config from layers: auto-detect → parent (opened-folder) config
     /// → config file → init params. The parent layer only applies when the
     /// workspace root differs from the per-root path (multi-root t5).
@@ -254,6 +280,20 @@ impl LspConfig {
             config.defines = Self::defines_for_target(&config.game_target);
         }
 
+        // GH #45: the finalized target may expect a different install folder
+        // than the Layer-1 TMNEXT default — re-probe before deriving paths.
+        let auto_detected = config.openplanet_dir.clone();
+        config.recheck_variant_folder(auto_detected.as_deref());
+        if Self::openplanet_folder_for_target(&config.game_target).is_none() {
+            // No-build target (MP3 / NATIONS_FOREVER): warn here too —
+            // auto_detect couldn't know the final target yet.
+            eprintln!(
+                "warning: game target `{}` has no Openplanet build; \
+                 falling back to the OpenplanetNext layout",
+                config.game_target
+            );
+        }
+
         // Layer 4: Workspace manifest-derived defines. These are additive and
         // model how Openplanet compiles the plugin with dependency and
         // script-defined preprocessor symbols enabled.
@@ -264,7 +304,8 @@ impl LspConfig {
             }
         }
 
-        // Derive JSON paths from openplanet_dir if not set explicitly
+        // Derive JSON paths from openplanet_dir if not set explicitly.
+        // The game JSON follows the target's variant (GH #45).
         if let Some(op_dir) = &config.openplanet_dir {
             if config.core_json.is_none() {
                 let p = op_dir.join("OpenplanetCore.json");
@@ -273,7 +314,8 @@ impl LspConfig {
                 }
             }
             if config.game_json.is_none() {
-                let p = op_dir.join("OpenplanetNext.json");
+                let game_json_name = Self::game_json_filename_for_target(&config.game_target);
+                let p = op_dir.join(game_json_name);
                 if p.exists() {
                     config.game_json = Some(p);
                 }
@@ -313,9 +355,26 @@ impl LspConfig {
     }
 
     fn auto_detect(&mut self) {
+        // GH #45: auto-detection follows the game target's install folder.
+        // At this layer the target is still the default (TMNEXT) — config
+        // files / init options apply later and `recheck_variant_folder`
+        // re-probes when they changed it.
+        self.auto_detect_for_target("TMNEXT");
+    }
+
+    fn auto_detect_for_target(&mut self, target: &str) {
+        let Some(folder) = Self::openplanet_folder_for_target(target) else {
+            // MP3 / NATIONS_FOREVER: no Openplanet build exists. Warn and
+            // fall back to the TMNEXT layout (issue GH #45 table).
+            eprintln!(
+                "warning: game target `{target}` has no Openplanet build; \
+                 falling back to the OpenplanetNext layout"
+            );
+            return;
+        };
         // Windows-style path via HOME
         if let Ok(home) = std::env::var("USERPROFILE") {
-            let p = PathBuf::from(&home).join("OpenplanetNext");
+            let p = PathBuf::from(&home).join(folder);
             if p.exists() {
                 self.openplanet_dir = Some(p);
                 return;
@@ -323,9 +382,41 @@ impl LspConfig {
         }
         // Linux / generic HOME
         if let Ok(home) = std::env::var("HOME") {
-            let p = PathBuf::from(&home).join("OpenplanetNext");
+            let p = PathBuf::from(&home).join(folder);
             if p.exists() {
                 self.openplanet_dir = Some(p);
+            }
+        }
+    }
+
+    /// GH #45: after the config ladder finalizes `game_target`, re-probe
+    /// the variant folder when the auto-detected dir doesn't match. Only
+    /// an explicit `openplanet_dir` (config / init options) wins over the
+    /// variant probe; a default TMNEXT detection is replaced by the
+    /// variant folder when it exists.
+    fn recheck_variant_folder(&mut self, auto_detected: Option<&Path>) {
+        let folder = match Self::openplanet_folder_for_target(&self.game_target) {
+            Some(f) => f,
+            None => return, // no-build targets already warned in auto_detect
+        };
+        let current_matches = self
+            .openplanet_dir
+            .as_deref()
+            .is_some_and(|d| d.file_name().and_then(|n| n.to_str()) == Some(folder));
+        if current_matches {
+            return;
+        }
+        for var in ["USERPROFILE", "HOME"] {
+            if let Ok(home) = std::env::var(var) {
+                let p = PathBuf::from(&home).join(folder);
+                if p.exists() {
+                    // Replace the auto-detected dir only when it was the
+                    // Layer-1 default (not an explicit user override).
+                    if self.openplanet_dir.as_deref() == auto_detected {
+                        self.openplanet_dir = Some(p);
+                    }
+                    return;
+                }
             }
         }
     }
@@ -517,5 +608,111 @@ mod tests {
         let opts = serde_json::json!({ "plugin_roots": ["/tmp/ok", 42, null] });
         let config = LspConfig::load(None, Some(&opts));
         assert_eq!(config.plugin_roots, vec![PathBuf::from("/tmp/ok")]);
+    }
+
+    // ── GH #45: variant-aware folder / typedb selection ──────────────────
+
+    #[test]
+    fn test_variant_folder_names() {
+        // TMNEXT maps to the default layout.
+        assert_eq!(
+            LspConfig::openplanet_folder_for_target("TMNEXT").as_deref(),
+            Some("OpenplanetNext")
+        );
+        // MP4 family all map to the MP4 folder.
+        for t in ["MP4", "MP40", "MP41"] {
+            assert_eq!(
+                LspConfig::openplanet_folder_for_target(t).as_deref(),
+                Some("OpenplanetMP4"),
+                "target {t}"
+            );
+        }
+        assert_eq!(
+            LspConfig::openplanet_folder_for_target("TURBO").as_deref(),
+            Some("OpenplanetTurbo")
+        );
+        assert_eq!(
+            LspConfig::openplanet_folder_for_target("UNITED").as_deref(),
+            Some("OpenplanetUnited")
+        );
+        assert_eq!(
+            LspConfig::openplanet_folder_for_target("UNITED_FOREVER").as_deref(),
+            Some("OpenplanetUnited")
+        );
+        // MP3 / NATIONS_FOREVER have no Openplanet build → no folder.
+        assert_eq!(LspConfig::openplanet_folder_for_target("MP3"), None);
+        assert_eq!(
+            LspConfig::openplanet_folder_for_target("NATIONS_FOREVER"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_variant_game_json_names() {
+        assert_eq!(
+            LspConfig::game_json_filename_for_target("TMNEXT"),
+            "OpenplanetNext.json"
+        );
+        assert_eq!(
+            LspConfig::game_json_filename_for_target("MP4"),
+            "OpenplanetMP4.json"
+        );
+        assert_eq!(
+            LspConfig::game_json_filename_for_target("TURBO"),
+            "OpenplanetTurbo.json"
+        );
+        assert_eq!(
+            LspConfig::game_json_filename_for_target("UNITED"),
+            "OpenplanetUnited.json"
+        );
+        // Targets without an Openplanet build fall back to the TMNEXT DB
+        // (warn-and-fallback per the issue).
+        assert_eq!(
+            LspConfig::game_json_filename_for_target("MP3"),
+            "OpenplanetNext.json"
+        );
+    }
+
+    #[test]
+    fn test_game_json_derivation_uses_variant_folder() {
+        // Build a fake variant install: home/OpenplanetTurbo with the two
+        // JSON files, plus an OpenplanetNext alongside to prove selection.
+        let tmp = std::env::temp_dir().join(format!("oplsp-gh45-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let turbo = tmp.join("OpenplanetTurbo");
+        let next = tmp.join("OpenplanetNext");
+        std::fs::create_dir_all(&turbo).unwrap();
+        std::fs::create_dir_all(&next).unwrap();
+        std::fs::write(turbo.join("OpenplanetCore.json"), "{}").unwrap();
+        std::fs::write(turbo.join("OpenplanetTurbo.json"), "{}").unwrap();
+        std::fs::write(next.join("OpenplanetCore.json"), "{}").unwrap();
+        std::fs::write(next.join("OpenplanetNext.json"), "{}").unwrap();
+        std::fs::create_dir_all(turbo.join("Plugins")).unwrap();
+        std::fs::create_dir_all(next.join("Plugins")).unwrap();
+
+        // SAFETY for tests: scoped env mutation is fine here — cargo runs
+        // lib tests in one process, but this test owns a unique HOME value
+        // and config load is deterministic given HOME.
+        std::env::set_var("HOME", &tmp);
+        let opts = serde_json::json!({ "game_target": "TURBO" });
+        let config = LspConfig::load(None, Some(&opts));
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.openplanet_dir,
+            Some(turbo.clone()),
+            "TURBO target must pick the OpenplanetTurbo folder"
+        );
+        assert_eq!(
+            config.game_json,
+            Some(turbo.join("OpenplanetTurbo.json")),
+            "game_json must be the Turbo typedb"
+        );
+        assert_eq!(
+            config.plugins_dir,
+            Some(turbo.join("Plugins")),
+            "plugins_dir must derive from the variant folder"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
