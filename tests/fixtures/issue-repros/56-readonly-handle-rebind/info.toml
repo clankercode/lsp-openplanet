@@ -1,0 +1,5 @@
+[meta]
+name     = "Issue Repro 56 - Read-only handle rebind"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"

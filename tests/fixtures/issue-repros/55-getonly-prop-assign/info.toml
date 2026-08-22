@@ -1,0 +1,5 @@
+[meta]
+name     = "Issue Repro 55 - Get-only property assignment"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
