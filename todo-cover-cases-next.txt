@@ -148,3 +148,61 @@ Typedb: zero functions under `Draw`; replacements are `Display::GetWidth` /
 
 LSP today: silent (NamespaceAccess external miss stays quiet).
 Related: version-ranged API rules GH #18 (Draw removal / Display rename).
+
+## 2026-08-22, tm-draw-tests (game 1.29.5, plugin `test draw` 0.1.5)
+
+All three below are false negatives: game rejected, LSP was silent. See GH #28
+(removed-API family) and GH #18 (version-ranged rules).
+
+### Case: Draw::MeasureString removed (same family as Draw::GetWidth/GetHeight, GH #28)
+Plugin source (src/Node.as:242 and src/Node.as:978):
+    textSize = Draw::MeasureString(label, g_NormFont, 16.);
+
+Compiler reports (game-side):
+    Node.as (242, 24) :  ERR : No matching symbol 'Draw::MeasureString'
+    Node.as (978, 28) :  ERR : No matching symbol 'Draw::MeasureString'
+
+Fix: `UI::MeasureString(string, UI::Font@, float size [, float wrapWidth])`.
+The whole `Draw::` namespace is gone from OpenplanetCore.json on 1.29.5 —
+there is no `ns == "Draw"` entry at all, so "namespace absent from typedb
+entirely" is a cheap, high-confidence trigger, distinct from
+"namespace exists but this member does not".
+
+### Case: UI::GetIO() does not exist — member missing from a KNOWN namespace
+Plugin source (src/GraphTab.as:361):
+    vec2 delta = UI::GetIO().MouseDelta;
+
+Compiler reports (game-side):
+    GraphTab.as (361, 30) :  ERR : No matching symbol 'UI::GetIO'
+
+This is stronger than the "unknown user namespace, stay quiet" case #28 warns
+about: `UI` IS in the typedb (237 functions on 1.29.5), so a call to a `UI::`
+free function that is not in the typedb can be flagged with high confidence.
+Suggested rule: if `Ns` appears as a `functions[].ns` in the typedb and
+`Ns::Fn` does not, diagnose (and offer near-name candidates).
+Openplanet has no ImGui `GetIO()` equivalent; the per-frame mouse delta has to
+be derived from `UI::GetMouseDragDelta(button)` diffed against last frame.
+
+### Case: Draw::GetWidth / Draw::GetHeight (already GH #28, re-confirmed 1.29.5)
+Plugin source (src/Main.as:95):
+    g_screen = vec2(Draw::GetWidth(), Draw::GetHeight());
+
+Compiler reports (game-side):
+    Main.as (95, 21) :  ERR : No matching symbol 'Draw::GetWidth'
+    Main.as (95, 39) :  ERR : No matching symbol 'Draw::GetHeight'
+
+Fix: `Display::GetWidth()` / `Display::GetHeight()` (or `Display::GetSize()`).
+
+## 2026-08-22, spike-live-add-kinematic-ao
+
+### Case: iso4 translation is get-only; `loc.tx += dx` fails
+Plugin source:
+    iso4 loc = Dev::ReadIso4(ptr);
+    loc.tx += 8.0;
+
+Compiler reports (game-side):
+    Tools.as (242, 16) :  ERR : The property has no set accessor
+    Tools.as (242, 16) :  ERR : Compound assignments with property accessors require both get and set accessors
+
+Workaround: `vec3 pos = vec3(loc.tx + dx, loc.ty + dy, loc.tz + dz);` then write the vec3 (or rebuild iso4). Do not use `+=` on `iso4.tx/ty/tz`.
+The LSP today does not flag this.
