@@ -616,27 +616,27 @@ mod tests {
     fn test_variant_folder_names() {
         // TMNEXT maps to the default layout.
         assert_eq!(
-            LspConfig::openplanet_folder_for_target("TMNEXT").as_deref(),
+            LspConfig::openplanet_folder_for_target("TMNEXT"),
             Some("OpenplanetNext")
         );
         // MP4 family all map to the MP4 folder.
         for t in ["MP4", "MP40", "MP41"] {
             assert_eq!(
-                LspConfig::openplanet_folder_for_target(t).as_deref(),
+                LspConfig::openplanet_folder_for_target(t),
                 Some("OpenplanetMP4"),
                 "target {t}"
             );
         }
         assert_eq!(
-            LspConfig::openplanet_folder_for_target("TURBO").as_deref(),
+            LspConfig::openplanet_folder_for_target("TURBO"),
             Some("OpenplanetTurbo")
         );
         assert_eq!(
-            LspConfig::openplanet_folder_for_target("UNITED").as_deref(),
+            LspConfig::openplanet_folder_for_target("UNITED"),
             Some("OpenplanetUnited")
         );
         assert_eq!(
-            LspConfig::openplanet_folder_for_target("UNITED_FOREVER").as_deref(),
+            LspConfig::openplanet_folder_for_target("UNITED_FOREVER"),
             Some("OpenplanetUnited")
         );
         // MP3 / NATIONS_FOREVER have no Openplanet build → no folder.
