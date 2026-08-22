@@ -1276,9 +1276,10 @@ impl<'a> Checker<'a> {
     /// with `No matching signatures to 'int3(const nat3&)'`. Narrow rule,
     /// fleet-probed: only the nat↔int same-dimension family is flagged.
     /// Cross-type ctors that DO exist elsewhere (e.g. `quat(const vec3&)`,
-    /// `quat(const mat3&)`) must stay legal, and the typedb exposes no
-    /// per-ctor metadata (`behaviors` is not indexed), so anything beyond
-    /// the nat/int family is out of scope here.
+    /// `quat(const mat3&)`) must stay legal. GH #54 indexed the typedb's
+    /// `behaviors`, so a general "no single-arg ctor is registered" rule
+    /// could drive this check — deliberately not taken, because it would
+    /// start rejecting pairs no game probe has ruled on.
     fn check_math_value_ctor(&mut self, target: &TypeRepr, arg_tys: &[TypeRepr], span: Span) {
         let TypeRepr::Named(target_n) = target else {
             return;
@@ -1980,8 +1981,20 @@ impl<'a> Checker<'a> {
                             let is_unknown_workspace_arg = !arg_n.contains("::")
                                 && !self.scope.is_external_type(arg_n)
                                 && !self.scope.has_enum(arg_n);
+                            // GH #54: a single-argument constructor on the
+                            // PARAMETER's value type is an implicit
+                            // conversion in AngelScript — `mat4(const
+                            // mat3&in)` is what makes `mat4::Inverse(mat3)`
+                            // compile. Only value positions qualify: a
+                            // handle on either side can't be constructed
+                            // into or out of.
+                            let ctor_converts =
+                                !matches!(arg_ty.unwrap_const(), TypeRepr::Handle(_))
+                                    && !matches!(param_ty.unwrap_const(), TypeRepr::Handle(_))
+                                    && self.scope.external_ctor_converts(arg_n, param_n);
                             if !self.named_types_equivalent(arg_n, param_n)
                                 && !self.scope.is_external_derived_from(arg_n, param_n)
+                                && !ctor_converts
                                 // GH #23: an `auto` (or workspace-local class)
                                 // the typedb can't see has no ancestry to
                                 // compare — skip rather than FP. Qualified
@@ -5328,6 +5341,85 @@ void Main() {
                 expected_max: 3,
                 got: 4,
             }
+        );
+    }
+
+    /// GH #54: `mat4` registers `mat4(const mat3&in)`, so AngelScript
+    /// converts the argument by constructing the parameter's value type.
+    /// The relation is symmetric (`mat3(const mat4&in)` exists too).
+    #[test]
+    fn external_arg_single_arg_ctor_conversion_is_silent() {
+        let diags = check_with_typedb(
+            r#"
+            void f(mat3 rot, mat4 world) {
+                mat4 a = mat4::Inverse(rot);
+                mat3 b = mat3::Inverse(world);
+                quat q = Math::Slerp(quat(rot), quat(world), 0.5);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "single-arg ctor conversions must not fire ArgTypeMismatch, got {:?}",
+            diags
+        );
+    }
+
+    /// GH #54 negative: there is no `mat4(const vec3&in)` constructor, so
+    /// the mismatch must still fire. Guards the fix against blanket
+    /// silencing of Named/Named argument pairs.
+    #[test]
+    fn external_arg_without_ctor_conversion_still_fires() {
+        let diags = check_with_typedb(r#"void f(vec3 v) { mat4 a = mat4::Inverse(v); }"#);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected 1 ArgTypeMismatch for vec3 -> mat4 (no such ctor), got {:?}",
+            diags
+        );
+        assert_eq!(
+            bad[0].kind,
+            TypeDiagnosticKind::ArgTypeMismatch {
+                function_name: "Inverse".into(),
+                param_index: 0,
+                expected: "mat4".into(),
+                got: "vec3".into(),
+            }
+        );
+    }
+
+    /// GH #54: an exact argument type is matched directly, not through the
+    /// constructor path — the copy constructor is excluded from the typedb
+    /// conversion graph precisely so the two cannot be confused (see
+    /// `external_ctor_converts_follows_typedb_construct_behaviors`), and
+    /// the relaxation runs only *after* arity has already picked a unique
+    /// overload, so it can never re-point overload resolution.
+    #[test]
+    fn external_arg_exact_match_needs_no_ctor_conversion() {
+        let diags = check_with_typedb(
+            r#"
+            void f(mat4 world, vec3 a, vec3 b) {
+                mat4 inv = mat4::Inverse(world);
+                float d = Math::Distance(a, b);
+            }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "exact-match args must stay silent, got {:?}",
+            diags
         );
     }
 

@@ -485,6 +485,37 @@ impl<'a> GlobalScope<'a> {
         None
     }
 
+    /// GH #54: true when AngelScript can implicitly convert `from` into `to`
+    /// through a single-argument constructor registered on `to`.
+    ///
+    /// `mat4` registers `mat4(const mat3&in)`, so `mat4::Inverse(someMat3)`
+    /// compiles — AngelScript instantiates the destination value type from
+    /// the argument. The pairs come from the typedb's own `behaviors`
+    /// (`asBEHAVE_CONSTRUCT`, copy constructor excluded when the index is
+    /// built), never a hardcoded list, so every registered conversion is
+    /// covered and an exact match is still an exact match rather than a
+    /// "conversion".
+    ///
+    /// Both endpoints must be engine typedb types: a workspace class that
+    /// shadows an engine name (GH #38) carries none of these behaviors.
+    pub fn external_ctor_converts(&self, from: &str, to: &str) -> bool {
+        let Some(ext) = self.external else {
+            return false;
+        };
+        if self.workspace_type_shadows(from) || self.workspace_type_shadows(to) {
+            return false;
+        }
+        let Some(info) = self.external_type_info(to) else {
+            return false;
+        };
+        let Some(from_key) = Self::resolve_external_type_name(ext, from) else {
+            return false;
+        };
+        info.ctor_conversions.iter().any(|source| {
+            Self::resolve_external_type_name(ext, source).as_deref() == Some(from_key.as_str())
+        })
+    }
+
     /// Look up external type info by fully qualified name or Nadeo short name.
     fn external_type_info(&self, name: &str) -> Option<&crate::typedb::index::TypeInfo> {
         let ext = self.external?;
@@ -1361,6 +1392,72 @@ mod tests {
             scope.resolve_qualified_suffix("CGameEditorPluginMap::ECardinalDirections"),
             Some("Game::CGameEditorPluginMap::ECardinalDirections".to_string())
         );
+    }
+
+    /// GH #54: the conversion graph comes from the typedb's own
+    /// `asBEHAVE_CONSTRUCT` behaviors — `mat4(const mat3&in)` and its
+    /// symmetric partner exist, `mat4(const vec3&in)` does not.
+    #[test]
+    fn external_ctor_converts_follows_typedb_construct_behaviors() {
+        use crate::typedb::index::TypeIndex;
+
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+
+        // Registered single-arg ctors, both directions.
+        assert!(scope.external_ctor_converts("mat3", "mat4"));
+        assert!(scope.external_ctor_converts("mat4", "mat3"));
+        assert!(scope.external_ctor_converts("iso4", "mat4"));
+        assert!(scope.external_ctor_converts("mat3", "iso3"));
+        assert!(scope.external_ctor_converts("vec3", "quat"));
+        // Namespaced value types resolve by short name too.
+        assert!(scope.external_ctor_converts("vec4", "RGBAColor"));
+
+        // No such constructor.
+        assert!(!scope.external_ctor_converts("vec3", "mat4"));
+        assert!(!scope.external_ctor_converts("mat3", "vec3"));
+        assert!(!scope.external_ctor_converts("nat3", "int3"));
+
+        // The copy constructor is NOT a conversion: an exact match must be
+        // decided by type equality, never explained by this path.
+        assert!(!scope.external_ctor_converts("mat4", "mat4"));
+        assert!(!scope.external_ctor_converts("vec3", "vec3"));
+
+        // Reference (engine) types have no construct behaviors at all.
+        assert!(!scope.external_ctor_converts("CMwNod", "CGameCtnChallenge"));
+        assert!(!scope.external_ctor_converts("mat3", "NotARealType"));
+    }
+
+    /// A workspace class shadowing an engine value type (GH #38) must not
+    /// inherit the engine type's constructor conversions.
+    #[test]
+    fn external_ctor_converts_ignores_shadowed_types() {
+        use crate::typedb::index::TypeIndex;
+
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).unwrap();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![make_symbol(
+                "mat3",
+                SymbolKind::Class {
+                    parents: vec![],
+                    members: vec![],
+                },
+            )],
+        );
+        let scope = GlobalScope::new(&ws, Some(&idx));
+        assert!(!scope.external_ctor_converts("mat3", "mat4"));
     }
 
     #[test]

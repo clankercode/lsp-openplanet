@@ -56,7 +56,29 @@ pub struct CoreClass {
     #[serde(default)]
     pub props: Vec<CoreProp>,
     #[serde(default)]
+    pub behaviors: Vec<CoreBehavior>,
+    #[serde(default)]
     pub desc: Option<String>,
+}
+
+/// A registered object behavior. `kind` is AngelScript's `asEBehaviours`
+/// discriminant — `0` is `asBEHAVE_CONSTRUCT` (value-type constructor),
+/// `2` is `asBEHAVE_DESTRUCT`, `3` is `asBEHAVE_FACTORY` (reference-type
+/// factory). Only CONSTRUCT is consumed today (GH #54).
+#[derive(Debug, Deserialize)]
+pub struct CoreBehavior {
+    #[serde(rename = "type", default)]
+    pub kind: u32,
+    #[serde(default)]
+    pub func: Option<CoreBehaviorFunc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CoreBehaviorFunc {
+    #[serde(default)]
+    pub args: Vec<CoreArg>,
+    #[serde(default)]
+    pub decl: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

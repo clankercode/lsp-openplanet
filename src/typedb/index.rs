@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::core_format::CoreDatabase;
+use super::core_format::{CoreClass, CoreDatabase};
 use super::nadeo_format::{NadeoDatabase, NadeoEnumEntry, NadeoMemberKind, NadeoType};
 
 /// Merged type index combining Core API and Nadeo game engine types.
@@ -26,6 +26,15 @@ pub struct TypeInfo {
     pub parent: Option<String>,
     pub methods: Vec<MethodInfo>,
     pub properties: Vec<PropertyInfo>,
+    /// GH #54: parameter type of every *single-argument* construct behavior
+    /// (`asBEHAVE_CONSTRUCT`) registered on this type, minus the copy
+    /// constructor. AngelScript uses such a constructor as an implicit
+    /// conversion, so this is exactly the set of types it can convert *into*
+    /// this one in one step (`mat4` lists `mat3`, `iso4`). A registered
+    /// CONSTRUCT behavior implies a value type — reference types get
+    /// `asBEHAVE_FACTORY` instead — so no handle/reference type appears here.
+    /// Empty for Nadeo-sourced types (that format carries no behaviors).
+    pub ctor_conversions: Vec<String>,
     pub doc: Option<String>,
     pub source: TypeSource,
 }
@@ -216,6 +225,7 @@ impl TypeIndex {
                         doc: p.desc.clone(),
                     })
                     .collect(),
+                ctor_conversions: single_arg_ctor_sources(cls),
                 doc: cls.desc.clone(),
                 source: TypeSource::Core,
             };
@@ -320,6 +330,9 @@ impl TypeIndex {
                     parent: nadeo_type.parent.clone(),
                     methods,
                     properties,
+                    // The Nadeo dump carries no behaviors — engine classes are
+                    // reference types with no constructor conversions.
+                    ctor_conversions: Vec::new(),
                     doc: None,
                     source: TypeSource::Nadeo,
                 };
@@ -428,6 +441,35 @@ impl TypeIndex {
     pub fn enum_count(&self) -> usize {
         self.enums.len()
     }
+}
+
+/// AngelScript `asBEHAVE_CONSTRUCT` — the value-type constructor behavior.
+/// Reference types register `asBEHAVE_FACTORY` (3) instead, so a CONSTRUCT
+/// entry is itself the value-type signal.
+const AS_BEHAVE_CONSTRUCT: u32 = 0;
+
+/// GH #54: parameter types of `cls`'s single-argument constructors — the
+/// conversions AngelScript can synthesise *into* `cls`.
+///
+/// The copy constructor (`mat4(const mat4&in)`) is dropped: an argument of
+/// the type itself already matches directly, so keeping it would let a
+/// "constructor conversion" stand in for an exact match and blur the two.
+fn single_arg_ctor_sources(cls: &CoreClass) -> Vec<String> {
+    let self_qname = TypeIndex::qualify(&cls.ns, &cls.name);
+    let mut out = Vec::new();
+    for beh in &cls.behaviors {
+        if beh.kind != AS_BEHAVE_CONSTRUCT {
+            continue;
+        }
+        let Some(func) = &beh.func else { continue };
+        let [arg] = &func.args[..] else { continue };
+        let source = arg.typedecl.trim();
+        if source.is_empty() || source == self_qname || source == cls.name {
+            continue;
+        }
+        out.push(source.to_string());
+    }
+    out
 }
 
 fn member_inline_enum_values(raw: Option<&serde_json::Value>) -> Option<Vec<(String, i64)>> {

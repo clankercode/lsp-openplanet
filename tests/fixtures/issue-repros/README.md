@@ -63,6 +63,7 @@ Record the game verdict in the fixture's gate-test doc comment.
 | `38-typedb-shadowed-class` | #38 | clean | fixed (db6e46b) — active |
 | `52-engine-member-miss` | #52 repro 1 | `'FileName' is not a member of 'CGameCtnChallenge'` (line 11) | fixed (a970f2d) — active |
 | `52b-ternary-type-ambiguity` | #52 repro 2 | `Can't find unambiguous implicit conversion…` ×3 (13:19, 14:16, 15:17; 2026-08-18 probe) | fixed — active |
+| `54-ctor-implicit-conversion` | #54 | `No matching signatures to 'mat4::Inverse(vec3&)'` at 18:16 only — every mat3↔mat4 ctor conversion clean (2026-08-22 probe) | fixed — active |
 
 GH #37 batch (game verdicts from the 2026-08-17 live probe):
 

@@ -721,6 +721,36 @@ fn check_command_issue_repro_52b_ternary_type_ambiguity_diagnoses() {
     );
 }
 
+/// GH #54: a single-argument value-type constructor is an implicit
+/// conversion — `mat4(const mat3&in)` is registered, so
+/// `mat4::Inverse(someMat3)` compiles and the LSP must stay silent (it used
+/// to emit `expected mat4, got mat3`). The counterpart has no such ctor and
+/// must still flag. Game-compiler ground truth (RemoteBuild probe of this
+/// exact fixture, 2026-08-22): exactly ONE diagnostic, `(18,16) ERR: No
+/// matching signatures to 'mat4::Inverse(vec3&)'` — every conversion line
+/// compiles clean. Fixed — must stay clean on the legal lines.
+#[test]
+fn check_command_issue_repro_54_ctor_implicit_conversion_is_silent() {
+    let (_, stdout, _) = run_issue_repro_typedb("54-ctor-implicit-conversion");
+    // Legal: mat4(mat3) ctor conversion (12), mat3(mat4) (16), exact (17).
+    let legal_flagged = stdout.lines().any(|l| {
+        (l.contains("Main.as:12") || l.contains("Main.as:16") || l.contains("Main.as:17"))
+            && (l.contains("error") || l.contains("warning"))
+    });
+    assert!(
+        !legal_flagged,
+        "ctor-conversion and exact-match args must stay silent; stdout={stdout:?}"
+    );
+    // Negative: no `mat4(const vec3&in)` exists — the game rejects line 18.
+    let flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:18") && l.contains("error"));
+    assert!(
+        flagged,
+        "expected an error on `mat4::Inverse(vec3)` (no such ctor); stdout={stdout:?}"
+    );
+}
+
 /// GH #48: exit-code contract. Warnings-only → exit 0 by default;
 /// `--warnings-as-errors` / `-Werror` → exit 1 when warnings are present;
 /// errors always exit 1.

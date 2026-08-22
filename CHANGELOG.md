@@ -14,6 +14,17 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Fixed
+- **Single-arg constructor conversions in call arguments (GH #54)** — a
+  value type's one-argument constructor is an implicit conversion in
+  AngelScript, so `mat4::Inverse(someMat3)` compiles through
+  `mat4(const mat3&in)`. `check` no longer reports
+  `argument 1 of 'Inverse': expected 'mat4', got 'mat3'` for it. The
+  accepted pairs are read from the typedb's own `asBEHAVE_CONSTRUCT`
+  behaviors (copy constructors excluded), so every registered conversion
+  is covered — `mat3`/`mat4`/`iso3`/`iso4`/`quat`, `string`/`wstring`,
+  `RGBAColor` from `vec3`/`vec4`, `IO::File` from `string`, and the rest.
+  Argument types with no registered constructor still fail
+  (`mat4::Inverse(someVec3)`), game-verified by RemoteBuild probe.
 - **Ternary branch unification (GH #52 repro 2)** — a ternary whose
   branches have no unifiable common type now exits 1 with the game's
   exact error `Can't find unambiguous implicit conversion to make both
