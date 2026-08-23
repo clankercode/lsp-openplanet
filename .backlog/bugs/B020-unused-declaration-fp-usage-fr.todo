@@ -1,16 +1,14 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-23T17:52:39Z"
 depends_on: []
 estimate_hours: 3
 id: B020
 priority: critical
+started_at: null
 status: pending
-tags:
-    - analysis
-    - unused
-    - false-positive
-    - gh-60-followup
+tags: []
 title: 'Unused-declaration FP: usage from gitignored/ignore_paths files is invisible'
 updated_at: "2026-08-23T17:52:39Z"
 ---
@@ -90,3 +88,5 @@ warn, so the fix does not silently disarm the pass); class-member and enum-value
 usage from an omitted file; `honor_gitignore = false` unchanged.
 Guard: assert omitted files produce ZERO diagnostics of their own (no squiggles
 in gitignored files — the GH #60 goal must survive).
+
+GitHub issue: https://github.com/clankercode/lsp-openplanet/issues/61 (gh-61), filed 2026-08-24 with both repros and the two refuted alternatives.
