@@ -410,6 +410,12 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         }
     }
 
+    // Unused-declaration warnings (workspace view; own-manifest export
+    // files are exempt public API). ONE collect pass for the whole
+    // workspace — a per-file collect here would be O(files²) check runs.
+    let unused_usage =
+        crate::analysis::unused::WorkspaceUsage::collect(&snapshot, type_index.as_ref());
+
     for item in &load.files {
         if !item.report_diagnostics {
             continue;
@@ -437,14 +443,12 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
                 diagnostic,
             });
         }
-        // Unused-declaration warnings (workspace view; own-manifest export
-        // files are exempt public API).
         if let Some(file_id) = snapshot.file_id_of_path(&item.path) {
             for diagnostic in diagnostics::unused_declaration_diagnostics(
                 analysis.source.as_str(),
+                &unused_usage,
                 &snapshot,
                 file_id,
-                type_index.as_ref(),
                 snapshot.export_paths(),
             ) {
                 cli_diagnostics.push(CliDiagnostic {

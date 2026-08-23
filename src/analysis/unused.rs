@@ -130,6 +130,17 @@ pub fn unused_declarations(
     export_paths: &HashSet<std::path::PathBuf>,
 ) -> Vec<UnusedDeclaration> {
     let usage = WorkspaceUsage::collect(snapshot, external);
+    unused_declarations_with_usage(snapshot, &usage, export_paths)
+}
+
+/// Like [`unused_declarations`] but with the usage set supplied by the
+/// caller — the shape multi-file callers (CLI `check`) need so the
+/// collect pass runs once, not once per file.
+pub fn unused_declarations_with_usage(
+    snapshot: &AnalysisSnapshot,
+    usage: &WorkspaceUsage,
+    export_paths: &HashSet<std::path::PathBuf>,
+) -> Vec<UnusedDeclaration> {
     let mut out = Vec::new();
     let symbols = snapshot.symbols();
 
@@ -181,6 +192,17 @@ fn evaluate_symbol(
             }
         }
     };
+    // Constructors and destructors are invoked through the class name /
+    // lifetime syntax, which records the CLASS, not `Class::Ctor` — and
+    // overload-level usage can't be distinguished. Never warn on them.
+    if let SymbolKind::Function { .. } = &sym.kind {
+        if let Some((owner, member)) = sym.name.rsplit_once("::") {
+            let class = owner.rsplit("::").next().unwrap_or(owner);
+            if member == class || member.starts_with('~') {
+                return None;
+            }
+        }
+    }
 
     // `_`-prefixed declarations opt out (same convention as Rust/Python).
     if simple_name.starts_with('_') {

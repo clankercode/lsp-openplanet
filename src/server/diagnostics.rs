@@ -1,6 +1,6 @@
 use tower_lsp::lsp_types::*;
 
-use crate::analysis::unused::{unused_declarations, UnusedDeclaration};
+use crate::analysis::unused::UnusedDeclaration;
 use crate::analysis::DocumentAnalysis;
 use crate::config::LspConfig;
 use crate::symbols::SymbolTable;
@@ -149,24 +149,25 @@ fn compute_toml_diagnostics(source: &str, diagnostics: &mut Vec<Diagnostic>) {
 }
 
 /// Unused-declaration warnings for one file of a snapshot, converted to
-/// LSP diagnostics. `export_paths` are the plugin's own info.toml export
-/// files (public API — exempt). WARN severity, on the declaration span.
-///
-/// Callers pass the whole snapshot: usage collection must see every
-/// workspace file (sibling usage suppresses), then findings are filtered
-/// to `file_id`.
+/// LSP diagnostics, with usage PRE-COLLECTED by the caller (collecting
+/// runs a check pass over every workspace file — do it once per report,
+/// not once per file, or an N-file workspace pays N² passes).
+/// `export_paths` are the plugin's own info.toml export files (public
+/// API — exempt). WARN severity, on the declaration span.
 pub fn unused_declaration_diagnostics(
     source: &str,
+    usage: &crate::analysis::unused::WorkspaceUsage,
     snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
     file_id: usize,
-    external: Option<&TypeIndex>,
     export_paths: &std::collections::HashSet<std::path::PathBuf>,
 ) -> Vec<Diagnostic> {
-    unused_declarations(snapshot, external, export_paths)
-        .into_iter()
-        .filter(|u| u.file_id == file_id)
-        .map(|u| unused_to_diagnostic(source, &u))
-        .collect()
+    crate::analysis::unused::unused_declarations_with_usage(
+        snapshot, usage, export_paths,
+    )
+    .into_iter()
+    .filter(|u| u.file_id == file_id)
+    .map(|u| unused_to_diagnostic(source, &u))
+    .collect()
 }
 
 fn unused_to_diagnostic(source: &str, unused: &UnusedDeclaration) -> Diagnostic {
