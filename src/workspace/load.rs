@@ -31,13 +31,15 @@ pub struct PluginWorkspaceLoad {
     pub missing_required_dependencies: Vec<String>,
     /// True only when [`load_plugin_workspace`] walked a real plugin root,
     /// every declared dependency resolved — required, optional, and the
-    /// transitive `export_dependencies` of a resolved dep alike — no source
+    /// transitive `export_dependencies` of a resolved dep alike — every
+    /// resolved dependency contributed all of its declared exports, no source
     /// inclusion/exclusion filter was configured, AND gitignore honoring
     /// dropped no `.as` file. Diagnostics that read the absence of a name as
     /// a game-compiler rejection must gate on this (GH #58): an unreadable,
-    /// filtered-out or gitignored module file may declare the very symbol
-    /// being called (gitignore is a git concept, not a compile concept — the
-    /// game compiles generated-but-gitignored sources like any other), and
+    /// filtered-out or gitignored module file, or an unloaded dependency
+    /// export, may declare the very symbol being called (gitignore is a git
+    /// concept, not a compile concept — the game compiles
+    /// generated-but-gitignored sources like any other), and
     /// `LspConfig::apply_manifest` defines `DEPENDENCY_<ID>` for declared
     /// optional deps whether or not they resolved, so `#if`-guarded code the
     /// game would mask out stays live here. Every open-documents-only or
@@ -227,6 +229,7 @@ pub fn load_plugin_workspace(
     // dropped", NOT "honoring is enabled" — honoring is the default, so the
     // latter would disarm the rule in nearly every repo.
     let dependency_closure_complete = dep.unresolved.is_empty()
+        && dep.incomplete_export_surfaces.is_empty()
         && search.source_paths.is_none()
         && search.ignore_paths.is_none()
         && discovered.gitignore_excluded == 0;
@@ -310,6 +313,10 @@ struct DepLoad {
     /// Every declared dependency that failed to resolve, whatever its kind
     /// — drives `PluginWorkspaceLoad::dependency_closure_complete`.
     unresolved: Vec<String>,
+    /// Resolved dependencies with manifest-declared exports that were missing
+    /// or unreadable. Preserve the exact export names as evidence that their
+    /// namespace surface is incomplete.
+    incomplete_export_surfaces: Vec<(String, Vec<String>)>,
 }
 
 fn load_dependency_exports(
@@ -363,6 +370,11 @@ fn load_dependency_exports(
         }
         match resolve_in_dirs(&dep_id, plugins_dirs, plugin_files_search_paths) {
             Some(resolved) => {
+                if !resolved.unloaded_exports.is_empty() {
+                    result
+                        .incomplete_export_surfaces
+                        .push((dep_id.clone(), resolved.unloaded_exports.clone()));
+                }
                 push_export_sources(&resolved.export_files, &mut result, &mut seen_files)?;
                 // Recurse into the dep's own export_dependencies so nested
                 // exports resolve. These are treated as required-transitive
@@ -441,6 +453,8 @@ pub fn detect_trackmania_openplanet_plugins_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis_snapshot::AnalysisSnapshot;
+    use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticKind};
     use std::fs;
 
     fn temp_tree(name: &str) -> PathBuf {
@@ -819,6 +833,14 @@ dependencies = ["NoSearchPath"]
 
     /// Build a `.op` ZIP archive on disk containing `info.toml` + export files.
     fn write_op_archive(op_path: &Path, info_toml: &str, files: &[(&str, &str)]) {
+        let byte_files: Vec<_> = files
+            .iter()
+            .map(|(name, contents)| (*name, contents.as_bytes()))
+            .collect();
+        write_op_archive_bytes(op_path, info_toml, &byte_files);
+    }
+
+    fn write_op_archive_bytes(op_path: &Path, info_toml: &str, files: &[(&str, &[u8])]) {
         use std::io::Write;
         let f = fs::File::create(op_path).unwrap();
         let mut zip = zip::ZipWriter::new(f);
@@ -827,9 +849,149 @@ dependencies = ["NoSearchPath"]
         zip.write_all(info_toml.as_bytes()).unwrap();
         for (name, contents) in files {
             zip.start_file(name, opts).unwrap();
-            zip.write_all(contents.as_bytes()).unwrap();
+            zip.write_all(contents).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum DepExportShape {
+        Directory,
+        OpArchive,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SecondExportState {
+        Complete,
+        Missing,
+        Unreadable,
+    }
+
+    fn no_matching_symbols(load: &PluginWorkspaceLoad, main_path: &Path) -> Vec<String> {
+        let config = LspConfig::default();
+        let snapshot = AnalysisSnapshot::from_load(load, &config);
+        let main_path = main_path.canonicalize().unwrap();
+        let analysis = snapshot.analysis_at_path(&main_path).unwrap();
+        let scope = GlobalScope::new(snapshot.symbols(), None);
+        let mut checker = Checker::new(analysis.masked_source(), &scope);
+        checker.check_file(&analysis.file);
+        checker
+            .diagnostics
+            .into_iter()
+            .filter_map(|diagnostic| match diagnostic.kind {
+                TypeDiagnosticKind::NoMatchingSymbol { qualified, .. } => Some(qualified),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// GH #58: resolving a dependency is not enough to make its namespace
+    /// surface authoritative. Every declared export must also be readable.
+    /// A valid sibling export establishes `Ns`, while a missing or undecodable
+    /// export may contain `Ns::Fn`; B013 must therefore stay silent. The
+    /// complete control proves the same workspace remains armed when every
+    /// declared export was loaded.
+    #[test]
+    fn dependency_export_surface_must_be_complete_before_namespaces_are_authoritative() {
+        let shapes = [DepExportShape::Directory, DepExportShape::OpArchive];
+        let states = [
+            SecondExportState::Complete,
+            SecondExportState::Missing,
+            SecondExportState::Unreadable,
+        ];
+
+        for shape in shapes {
+            for state in states {
+                let base = temp_tree(&format!("dep-export-authority-{shape:?}-{state:?}"));
+                let deps = base.join("deps");
+                let consumer = base.join("consumer");
+                fs::create_dir_all(&deps).unwrap();
+                fs::create_dir_all(consumer.join("src")).unwrap();
+
+                let dep_manifest = r#"
+[meta]
+name = "Dependency Plugin"
+version = "0.1.0"
+[script]
+module = "DepPlugin"
+exports = ["Namespace.as", "PotentialFn.as"]
+"#;
+                match shape {
+                    DepExportShape::Directory => {
+                        let dep_root = deps.join("DepPlugin");
+                        fs::create_dir_all(dep_root.join("src")).unwrap();
+                        fs::write(dep_root.join("info.toml"), dep_manifest).unwrap();
+                        fs::write(
+                            dep_root.join("src/Namespace.as"),
+                            "namespace Ns { void Present() {} }\n",
+                        )
+                        .unwrap();
+                        match state {
+                            SecondExportState::Complete => fs::write(
+                                dep_root.join("src/PotentialFn.as"),
+                                "namespace Elsewhere { void Present() {} }\n",
+                            )
+                            .unwrap(),
+                            SecondExportState::Missing => {}
+                            SecondExportState::Unreadable => {
+                                fs::create_dir_all(dep_root.join("src/PotentialFn.as")).unwrap();
+                            }
+                        }
+                    }
+                    DepExportShape::OpArchive => {
+                        let namespace = b"namespace Ns { void Present() {} }\n".as_slice();
+                        let complete = b"namespace Elsewhere { void Present() {} }\n".as_slice();
+                        let unreadable = b"\xff\xfe\xfd".as_slice();
+                        let files = match state {
+                            SecondExportState::Complete => {
+                                vec![("Namespace.as", namespace), ("PotentialFn.as", complete)]
+                            }
+                            SecondExportState::Missing => vec![("Namespace.as", namespace)],
+                            SecondExportState::Unreadable => {
+                                vec![("Namespace.as", namespace), ("PotentialFn.as", unreadable)]
+                            }
+                        };
+                        write_op_archive_bytes(&deps.join("DepPlugin.op"), dep_manifest, &files);
+                    }
+                }
+
+                fs::write(
+                    consumer.join("info.toml"),
+                    "[meta]\nname = \"Consumer\"\nversion = \"0.1.0\"\n[script]\ndependencies = [\"DepPlugin\"]\n",
+                )
+                .unwrap();
+                let main_path = consumer.join("src/Main.as");
+                fs::write(
+                    &main_path,
+                    "void Main() {\n    Ns::Present();\n    Ns::Fn();\n}\n",
+                )
+                .unwrap();
+
+                let search = DependencySearch {
+                    plugins_dirs: vec![deps],
+                    plugin_files_search_paths: vec![PathBuf::from("src")],
+                    ..DependencySearch::with_defaults()
+                };
+                let load = load_plugin_workspace(&consumer, &search).unwrap();
+                let no_matches = no_matching_symbols(&load, &main_path);
+                let complete = matches!(state, SecondExportState::Complete);
+                assert_eq!(
+                    load.dependency_closure_complete, complete,
+                    "{shape:?}/{state:?}: authority must require every declared export"
+                );
+                assert!(
+                    !no_matches.iter().any(|name| name == "Ns::Present"),
+                    "{shape:?}/{state:?}: the loaded namespace member must resolve: {no_matches:?}"
+                );
+                assert_eq!(
+                    no_matches.iter().any(|name| name == "Ns::Fn"),
+                    complete,
+                    "{shape:?}/{state:?}: B013 must be armed exactly for the complete surface: {no_matches:?}"
+                );
+
+                let _ = fs::remove_dir_all(base);
+            }
+        }
     }
 
     /// GH #20: an installed dependency shipped as a `.op` ZIP archive must

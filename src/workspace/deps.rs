@@ -12,6 +12,10 @@ pub struct ResolvedDependency {
     /// is a pseudo-path `Archive.op::<entry>` (never read from disk) and the
     /// source was read from the ZIP in-memory.
     pub export_files: Vec<(PathBuf, String)>,
+    /// Manifest-declared exports that could not be included because they were
+    /// missing or unreadable. A consumer cannot treat this dependency's
+    /// namespace surface as authoritative while any entry is present.
+    pub unloaded_exports: Vec<String>,
 }
 
 /// Resolve a dependency by ID from the plugins directory.
@@ -71,12 +75,14 @@ fn resolve_by_normalized_name(
         if normalize_plugin_id(name) != id {
             continue;
         }
-        let export_files = collect_export_files(&path, &manifest, plugin_files_search_paths);
+        let (export_files, unloaded_exports) =
+            collect_export_files(&path, &manifest, plugin_files_search_paths);
         return Some(ResolvedDependency {
             id: id.to_string(),
             root: path,
             manifest,
             export_files,
+            unloaded_exports,
         });
     }
     None
@@ -103,12 +109,14 @@ fn resolve_by_manifest_module(
             continue;
         }
 
-        let export_files = collect_export_files(&path, &manifest, plugin_files_search_paths);
+        let (export_files, unloaded_exports) =
+            collect_export_files(&path, &manifest, plugin_files_search_paths);
         return Some(ResolvedDependency {
             id: id.to_string(),
             root: path,
             manifest,
             export_files,
+            unloaded_exports,
         });
     }
 
@@ -122,12 +130,14 @@ fn resolve_directory_plugin(
 ) -> Option<ResolvedDependency> {
     let manifest_path = root.join("info.toml");
     let manifest = Manifest::load(&manifest_path).ok()?;
-    let export_files = collect_export_files(root, &manifest, plugin_files_search_paths);
+    let (export_files, unloaded_exports) =
+        collect_export_files(root, &manifest, plugin_files_search_paths);
     Some(ResolvedDependency {
         id: id.to_string(),
         root: root.to_path_buf(),
         manifest,
         export_files,
+        unloaded_exports,
     })
 }
 
@@ -148,13 +158,15 @@ fn resolve_op_archive(id: &str, archive_path: &Path) -> Option<ResolvedDependenc
     // GH #20: read export entries straight from the ZIP in-memory. No extract
     // to disk; the path stored is a pseudo-path so the workspace dedup and
     // provenance still work without touching the filesystem.
-    let export_files = collect_op_export_files(archive_path, &mut archive, &manifest);
+    let (export_files, unloaded_exports) =
+        collect_op_export_files(archive_path, &mut archive, &manifest);
 
     Some(ResolvedDependency {
         id: id.to_string(),
         root: archive_path.to_path_buf(),
         manifest,
         export_files,
+        unloaded_exports,
     })
 }
 
@@ -162,10 +174,11 @@ fn collect_op_export_files(
     archive_path: &Path,
     archive: &mut zip::ZipArchive<std::fs::File>,
     manifest: &Manifest,
-) -> Vec<(PathBuf, String)> {
+) -> (Vec<(PathBuf, String)>, Vec<String>) {
     let mut files = Vec::new();
+    let mut unloaded = Vec::new();
     let Some(script) = &manifest.script else {
-        return files;
+        return (files, unloaded);
     };
     // Dedup names: a file listed in both exports and shared_exports would
     // otherwise be read+decoded twice from the ZIP (seen_files drops the
@@ -188,6 +201,7 @@ fn collect_op_export_files(
                 export,
                 archive_path.display()
             );
+            unloaded.push(export.to_string());
             continue;
         };
         let mut buf = String::new();
@@ -197,6 +211,7 @@ fn collect_op_export_files(
                 export,
                 archive_path.display()
             );
+            unloaded.push(export.to_string());
             continue;
         }
         // Pseudo-path: `<archive>.op::<entry>` — unambiguous, non-FS, unique
@@ -204,15 +219,16 @@ fn collect_op_export_files(
         let pseudo = PathBuf::from(format!("{}::{}", archive_path.display(), export));
         files.push((pseudo, buf));
     }
-    files
+    (files, unloaded)
 }
 
 fn collect_export_files(
     root: &Path,
     manifest: &Manifest,
     plugin_files_search_paths: &[PathBuf],
-) -> Vec<(PathBuf, String)> {
+) -> (Vec<(PathBuf, String)>, Vec<String>) {
     let mut files = Vec::new();
+    let mut unloaded = Vec::new();
     if let Some(script) = &manifest.script {
         for export in script.exports.iter().chain(script.shared_exports.iter()) {
             if let Some(path) = resolve_plugin_file(root, export, plugin_files_search_paths) {
@@ -223,12 +239,15 @@ fn collect_export_files(
                     Ok(source) => files.push((path, source)),
                     Err(e) => {
                         tracing::warn!("failed to read dep export {}: {e}", path.display());
+                        unloaded.push(export.clone());
                     }
                 }
+            } else {
+                unloaded.push(export.clone());
             }
         }
     }
-    files
+    (files, unloaded)
 }
 
 pub(crate) fn resolve_plugin_file(
