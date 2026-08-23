@@ -481,32 +481,36 @@ impl Backend {
         // resolution unless we're diagnosing the export file itself.
         let symbols_for_check =
             snapshot.table_for_own_file(crate::analysis_snapshot::FileRef::Uri(uri));
-        let mut diags = match snapshot.analysis_of(uri) {
-            Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
-                uri,
-                analysis,
-                config,
-                type_index.as_deref(),
-                &symbols_for_check,
-            ),
-            None => {
-                let analysis_owned =
-                    crate::analysis::DocumentAnalysis::analyze(text, &config.defines);
-                let mut symbols = crate::symbols::SymbolTable::new();
-                let fid = symbols.allocate_file_id();
-                let syms = crate::symbols::SymbolTable::extract_symbols(
-                    fid,
-                    analysis_owned.masked_source(),
-                    &analysis_owned.file,
-                );
-                symbols.set_file_symbols(fid, syms);
-                diagnostics::compute_diagnostics_from_analysis(
+        let mut diags = if snapshot.is_usage_only_uri(uri) {
+            Vec::new()
+        } else {
+            match snapshot.analysis_of(uri) {
+                Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
                     uri,
-                    &analysis_owned,
+                    analysis,
                     config,
                     type_index.as_deref(),
-                    &symbols,
-                )
+                    &symbols_for_check,
+                ),
+                None => {
+                    let analysis_owned =
+                        crate::analysis::DocumentAnalysis::analyze(text, &config.defines);
+                    let mut symbols = crate::symbols::SymbolTable::new();
+                    let fid = symbols.allocate_file_id();
+                    let syms = crate::symbols::SymbolTable::extract_symbols(
+                        fid,
+                        analysis_owned.masked_source(),
+                        &analysis_owned.file,
+                    );
+                    symbols.set_file_symbols(fid, syms);
+                    diagnostics::compute_diagnostics_from_analysis(
+                        uri,
+                        &analysis_owned,
+                        config,
+                        type_index.as_deref(),
+                        &symbols,
+                    )
+                }
             }
         };
         // Unused-declaration warnings (workspace view: sibling usage
@@ -600,35 +604,39 @@ impl Backend {
     ) {
         let config = self.config.read().await;
         let type_index = self.type_index.read().await;
-        let mut diags = match snapshot.analysis_of(uri) {
-            // Parsed as part of the snapshot build — reuse the analysis.
-            Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
-                uri,
-                analysis,
-                &config,
-                type_index.as_deref(),
-                snapshot.symbols(),
-            ),
-            // Not on disk (e.g. untitled documents) — parse on the fly
-            // with an owned one-file symbol pool.
-            None => {
-                let analysis_owned =
-                    crate::analysis::DocumentAnalysis::analyze(text, &config.defines);
-                let mut symbols = crate::symbols::SymbolTable::new();
-                let fid = symbols.allocate_file_id();
-                let syms = crate::symbols::SymbolTable::extract_symbols(
-                    fid,
-                    analysis_owned.masked_source(),
-                    &analysis_owned.file,
-                );
-                symbols.set_file_symbols(fid, syms);
-                diagnostics::compute_diagnostics_from_analysis(
+        let mut diags = if snapshot.is_usage_only_uri(uri) {
+            Vec::new()
+        } else {
+            match snapshot.analysis_of(uri) {
+                // Parsed as part of the snapshot build — reuse the analysis.
+                Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
                     uri,
-                    &analysis_owned,
+                    analysis,
                     &config,
                     type_index.as_deref(),
-                    &symbols,
-                )
+                    snapshot.symbols(),
+                ),
+                // Not on disk (e.g. untitled documents) — parse on the fly
+                // with an owned one-file symbol pool.
+                None => {
+                    let analysis_owned =
+                        crate::analysis::DocumentAnalysis::analyze(text, &config.defines);
+                    let mut symbols = crate::symbols::SymbolTable::new();
+                    let fid = symbols.allocate_file_id();
+                    let syms = crate::symbols::SymbolTable::extract_symbols(
+                        fid,
+                        analysis_owned.masked_source(),
+                        &analysis_owned.file,
+                    );
+                    symbols.set_file_symbols(fid, syms);
+                    diagnostics::compute_diagnostics_from_analysis(
+                        uri,
+                        &analysis_owned,
+                        &config,
+                        type_index.as_deref(),
+                        &symbols,
+                    )
+                }
             }
         };
         // Unused-declaration warnings — workspace view (same as sharded).
@@ -1472,8 +1480,11 @@ pub async fn run_stdio() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
     use std::fs;
     use std::path::Path;
+    use tower::{Service, ServiceExt};
+    use tower_lsp::jsonrpc::Request;
     use tower_lsp::lsp_types::WorkspaceFolder;
 
     fn temp_tree(name: &str) -> PathBuf {
@@ -1518,6 +1529,66 @@ mod tests {
 
     async fn workspace_root_of(backend: &Backend) -> Option<PathBuf> {
         backend.workspace_root.read().await.clone()
+    }
+
+    async fn initialize_service(service: &mut LspService<Backend>, params: InitializeParams) {
+        let request = Request::build("initialize")
+            .params(serde_json::to_value(params).unwrap())
+            .id(1)
+            .finish();
+        let response = service
+            .ready()
+            .await
+            .expect("service ready")
+            .call(request)
+            .await
+            .expect("initialize request succeeds");
+        assert!(response.is_some(), "initialize returns a response");
+    }
+
+    async fn capture_diagnostics_for<F>(
+        socket: &mut tower_lsp::ClientSocket,
+        uri: &Url,
+        event: F,
+    ) -> PublishDiagnosticsParams
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::pin!(event);
+            let mut event_done = false;
+            let mut wanted = None;
+            loop {
+                if event_done {
+                    if let Some(params) = wanted {
+                        return params;
+                    }
+                }
+                tokio::select! {
+                    _ = &mut event, if !event_done => {
+                        event_done = true;
+                    }
+                    request = socket.next() => {
+                        let request = request.expect("client socket remains open");
+                        if request.method() != "textDocument/publishDiagnostics" {
+                            continue;
+                        }
+                        let params: PublishDiagnosticsParams = serde_json::from_value(
+                            request
+                                .params()
+                                .expect("publishDiagnostics carries params")
+                                .clone(),
+                        )
+                        .expect("valid publishDiagnostics params");
+                        if &params.uri == uri {
+                            wanted = Some(params);
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("server publishes diagnostics before timeout")
     }
 
     #[tokio::test]
@@ -1717,5 +1788,169 @@ mod tests {
             "post-save snapshot missing ts_log"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn omitted_open_buffers_publish_no_diagnostics_across_lifecycle() {
+        let root = temp_tree("usage-only-diagnostics");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("generated")).unwrap();
+        write_info_toml(&root);
+        fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+        fs::write(
+            root.join(".openplanet-lsp.toml"),
+            "honor_gitignore = true\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/Main.as"),
+            "void UsedOnlyByOmitted() {}\nvoid Main() {}\n",
+        )
+        .unwrap();
+        let omitted_path = root.join("generated/Gen.as");
+        fs::write(&omitted_path, "void GenCaller() { UsedOnlyByOmitted(); }\n").unwrap();
+
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+        let omitted_uri = Url::from_file_path(&omitted_path).unwrap();
+
+        let parse_error =
+            "void GenCaller() { UsedOnlyByOmitted(); }\nvoid Dead() {}\nvoid Broken( {\n";
+        let diagnostics = capture_diagnostics_for(
+            &mut socket,
+            &omitted_uri,
+            backend.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: omitted_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: parse_error.into(),
+                },
+            }),
+        )
+        .await;
+        assert_eq!(
+            diagnostics.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "didOpen must publish an empty set for an omitted source"
+        );
+
+        let type_and_unused_errors = "void GenCaller() {\n\
+             UsedOnlyByOmitted();\n\
+             int wrong = \"text\";\n\
+         }\n\
+         void Dead() {}\n";
+        let diagnostics = capture_diagnostics_for(
+            &mut socket,
+            &omitted_uri,
+            backend.did_change(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: omitted_uri.clone(),
+                    version: 2,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: type_and_unused_errors.into(),
+                }],
+            }),
+        )
+        .await;
+        assert!(
+            diagnostics.diagnostics.is_empty(),
+            "didChange must publish an empty set for an omitted source"
+        );
+
+        let diagnostics = capture_diagnostics_for(
+            &mut socket,
+            &omitted_uri,
+            backend.did_save(DidSaveTextDocumentParams {
+                text_document: TextDocumentIdentifier {
+                    uri: omitted_uri.clone(),
+                },
+                text: None,
+            }),
+        )
+        .await;
+        assert!(
+            diagnostics.diagnostics.is_empty(),
+            "didSave must publish an empty set for an omitted source"
+        );
+
+        let snapshot = backend.snapshot_for(&omitted_uri).await;
+        assert!(snapshot.file_id_of(&omitted_uri).is_none());
+        assert!(snapshot.symbols().lookup("GenCaller").is_empty());
+        assert!(!snapshot.symbols().dependency_closure_complete());
+        let unused =
+            crate::analysis::unused::unused_declarations(&snapshot, None, snapshot.export_paths());
+        assert!(unused
+            .iter()
+            .all(|finding| finding.qualified_name != "UsedOnlyByOmitted"));
+
+        let new_path = root.join("src/NewUnsaved.as");
+        let new_uri = Url::from_file_path(&new_path).unwrap();
+        let diagnostics = capture_diagnostics_for(
+            &mut socket,
+            &new_uri,
+            backend.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: new_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: "void Broken( {\n".into(),
+                },
+            }),
+        )
+        .await;
+        assert!(
+            !diagnostics.diagnostics.is_empty(),
+            "a genuinely new non-omitted buffer keeps diagnostics"
+        );
+
+        // Exercise the legacy publisher too: the legacy N=1 mirror uses the
+        // same disk load/open overlay once shard state is absent.
+        backend.workspaces.write().await.clear();
+        let diagnostics = capture_diagnostics_for(
+            &mut socket,
+            &omitted_uri,
+            backend.did_change(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: omitted_uri.clone(),
+                    version: 3,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: parse_error.into(),
+                }],
+            }),
+        )
+        .await;
+        assert!(
+            diagnostics.diagnostics.is_empty(),
+            "legacy publisher must also suppress omitted-source diagnostics"
+        );
+
+        let untitled_uri = Url::parse("untitled:NewUnsaved.as").unwrap();
+        let diagnostics = capture_diagnostics_for(
+            &mut socket,
+            &untitled_uri,
+            backend.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: untitled_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: "void Broken( {\n".into(),
+                },
+            }),
+        )
+        .await;
+        assert!(
+            !diagnostics.diagnostics.is_empty(),
+            "the legacy one-file fallback stays active for a genuine untitled buffer"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
