@@ -1,0 +1,71 @@
+---
+complexity: medium
+created_at: "2026-08-23T15:53:23Z"
+depends_on: []
+estimate_hours: 4
+id: B017
+priority: high
+status: pending
+tags:
+    - config
+    - precedence
+    - followup
+title: Config ladders disagree on precedence; one bad key discards whole file
+updated_at: "2026-08-23T15:53:23Z"
+---
+Found while coordinating the GH #55/56/58/59/60 batch, 2026-08-24. Verified by
+reading src/config.rs on master @ 95d1d04. Pre-existing; not a regression.
+
+## Two config ladders, opposite precedence
+
+1. `UserPrefs::load` (src/config.rs:172-178) — user global FIRST, then
+   workspace: **workspace wins**. Carries `default_mode`, `warnings_as_errors`.
+   Its own doc comment still contains the unresolved note
+   "(later wins? workspace should win)".
+2. `LspConfig::load_with_parent` (src/config.rs:349-360) — parent config, then
+   per-root config, then `load_user_config_file()` LAST: **user global wins**.
+   Carries `openplanet_dir`, `plugins_dir`, `game_target`, `defines`,
+   `source_paths`, `ignore_paths`, `shortcut_*`, `define_matrix`, ...
+
+So a user-global `~/.config/openplanet-lsp/config.toml` with `source_paths` or
+`defines` silently overrides a plugin's own `.openplanet-lsp.toml`. Every other
+language tool (and the README's framing) puts project config above user config.
+The layer-2b comment even documents the ladder as "parent config < per-root
+config < user config", so the inversion is deliberate in code but almost
+certainly not intended as UX.
+
+## Impact
+- A machine-wide `source_paths = ["src"]` breaks every plugin whose sources live
+  elsewhere, with no local override possible.
+- The two ladders disagree, so `warnings_as_errors` and `source_paths` obey
+  opposite rules in the same file — undiscoverable without reading the source.
+- New keys are landing around this: `unused_callbacks` (B012/GH #56) and
+  `honor_gitignore` (B015/GH #60) both had to bypass the LspConfig ladder with a
+  dedicated resolver to get workspace-wins. That workaround is now duplicated.
+
+## Second, separate bug in the same area
+`load_config_file` / `load_user_config_file` / `UserPrefs::apply_file` all do
+`let Ok(cfg) = toml::from_str::<ConfigFile>(&contents) else { return }`. ONE
+mistyped key (e.g. `source_paths = "src"` instead of `["src"]`) silently discards
+the ENTIRE config file — every other key included — with no diagnostic. Users get
+"my config does nothing" with no way to tell why.
+
+## Work
+- Decide the intended precedence (recommend: init options > CLI flag >
+  per-root workspace > parent > user global > auto-detect) and make BOTH ladders
+  obey it. Fold the per-key resolvers added for `unused_callbacks` /
+  `honor_gitignore` back onto the shared path once it is correct.
+- Report unparseable/mistyped config: keep the lenient per-key read so one bad
+  key cannot nuke the file, and surface a diagnostic/warning naming the file, the
+  key, and the expected type.
+- Document the final ladder in README next to the config block.
+
+## Test plan (TDD, red first)
+Red: a workspace `.openplanet-lsp.toml` setting `source_paths = ["a"]` plus a
+user-global setting `source_paths = ["b"]` must resolve to `["a"]` (fails today);
+same for `defines`, `game_target`, `ignore_paths`. Variants: parent vs per-root in
+a multi-root workspace; init options still highest; CLI flag still beats config;
+one mistyped key leaves sibling keys in the SAME file effective (fails today);
+malformed TOML still degrades to defaults without panicking. Precedence tests
+must not mutate `$HOME` in-process (src/config.rs:1027 documents that as racy) —
+use pure resolver helpers.
