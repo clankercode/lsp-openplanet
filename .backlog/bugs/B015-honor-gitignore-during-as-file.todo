@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-23T15:05:03Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-23T16:03:51Z"
 complexity: medium
 created_at: "2026-08-23T15:04:50Z"
 depends_on: []
+duration_minutes: 58.80524354295
 estimate_hours: 4
 id: B015
 priority: medium
 started_at: "2026-08-23T15:05:03Z"
-status: in_progress
+status: done
 tags: []
 title: 'Honor .gitignore during .as file discovery (GH #60)'
-updated_at: "2026-08-23T15:05:03Z"
+updated_at: "2026-08-23T16:03:51Z"
 ---
 GH issue: https://github.com/clankercode/lsp-openplanet/issues/60 (gh-60)
 
