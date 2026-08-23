@@ -17,7 +17,7 @@
 //! * **Two adapters.** The LSP `Backend` and CLI `run_check` build and read
 //!   the same interface.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -93,6 +93,7 @@ impl AnalysisSnapshot {
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
+            export_paths: HashSet::new(),
         };
         Self::from_load(&load, config)
     }

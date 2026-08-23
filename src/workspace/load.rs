@@ -29,6 +29,10 @@ pub struct PluginWorkspaceLoad {
     pub files: Vec<WorkspaceSourceFile>,
     /// Required dependencies that could not be resolved in any plugins dir.
     pub missing_required_dependencies: Vec<String>,
+    /// Canonicalized absolute paths of files listed in this plugin's own
+    /// info.toml `[script]` `exports` + `shared_exports`; decls in these
+    /// files are public API and exempt from unused-declaration warnings.
+    pub export_paths: HashSet<PathBuf>,
 }
 
 /// Options controlling where dependency plugins are found.
@@ -108,6 +112,31 @@ fn source_file_included(root: &Path, path: &Path, search: &DependencySearch) -> 
     true
 }
 
+/// Canonicalized paths of this plugin's own `[script]` `exports` +
+/// `shared_exports` files (root-relative entries joined onto `root`).
+/// A listed file that is missing on disk still contributes its joined
+/// path (best-effort): canonicalize falls back to the uncanonicalized
+/// join, matching the dependency-export dedup key behavior above.
+fn own_export_paths(root: &Path) -> HashSet<PathBuf> {
+    let mut paths = HashSet::new();
+    let manifest_path = root.join("info.toml");
+    if !manifest_path.exists() {
+        return paths;
+    }
+    let Ok(manifest) = Manifest::load(&manifest_path) else {
+        return paths;
+    };
+    let Some(script) = &manifest.script else {
+        return paths;
+    };
+    for rel in script.exports.iter().chain(script.shared_exports.iter()) {
+        let joined = root.join(rel);
+        let canonical = joined.canonicalize().unwrap_or_else(|_| joined.clone());
+        paths.insert(canonical);
+    }
+    paths
+}
+
 /// Load plugin `.as` sources under `root` and dependency export files.
 pub fn load_plugin_workspace(
     root: &Path,
@@ -116,6 +145,8 @@ pub fn load_plugin_workspace(
     let root = root
         .canonicalize()
         .map_err(|e| format!("failed to resolve {}: {e}", root.display()))?;
+
+    let export_paths = own_export_paths(&root);
 
     let mut files = Vec::new();
     for path in project::discover_source_files(&root) {
@@ -152,6 +183,7 @@ pub fn load_plugin_workspace(
         root,
         files,
         missing_required_dependencies: dep.missing_required,
+        export_paths,
     })
 }
 
@@ -190,6 +222,7 @@ pub fn merge_open_documents(
         root: base.root.clone(),
         files,
         missing_required_dependencies: base.missing_required_dependencies.clone(),
+        export_paths: base.export_paths.clone(),
     }
 }
 
@@ -767,6 +800,112 @@ dependencies = ["MLFeedRaceData"]
             "HookEvent from nested export_dependency .op should be in symbol table"
         );
 
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// own exports: a plugin's own info.toml `exports` land in
+    /// `export_paths` as canonicalized absolute paths — the public-API
+    /// exemption source for the upcoming unused-declaration analysis.
+    #[test]
+    fn own_manifest_exports_collected_as_export_paths() {
+        let base = temp_tree("own-exp");
+        fs::create_dir_all(base.join("consumer/src")).unwrap();
+        fs::write(
+            base.join("consumer/info.toml"),
+            r#"
+[meta]
+name = "Consumer"
+version = "0.1.0"
+[script]
+exports = ["src/Export.as"]
+"#,
+        )
+        .unwrap();
+        fs::write(
+            base.join("consumer/src/Export.as"),
+            "namespace Consumer { class PubApi { int x; } }\n",
+        )
+        .unwrap();
+        fs::write(base.join("consumer/src/Main.as"), "void Main() {}\n").unwrap();
+
+        let load =
+            load_plugin_workspace(&base.join("consumer"), &DependencySearch::with_defaults())
+                .unwrap();
+        let expected = base.join("consumer/src/Export.as").canonicalize().unwrap();
+        assert!(
+            load.export_paths.contains(&expected),
+            "export_paths={:?} expected {expected:?}",
+            load.export_paths
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// No info.toml → no own export paths (empty set, load still succeeds).
+    #[test]
+    fn no_manifest_means_empty_export_paths() {
+        let base = temp_tree("own-none");
+        fs::create_dir_all(base.join("consumer/src")).unwrap();
+        fs::write(base.join("consumer/src/Main.as"), "void Main() {}\n").unwrap();
+
+        let load =
+            load_plugin_workspace(&base.join("consumer"), &DependencySearch::with_defaults())
+                .unwrap();
+        assert!(
+            load.export_paths.is_empty(),
+            "export_paths={:?} expected empty",
+            load.export_paths
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// shared_exports entries are collected too, alongside plain exports.
+    #[test]
+    fn shared_exports_also_collected() {
+        let base = temp_tree("own-shared");
+        fs::create_dir_all(base.join("consumer/src")).unwrap();
+        fs::write(
+            base.join("consumer/info.toml"),
+            r#"
+[meta]
+name = "Consumer"
+version = "0.1.0"
+[script]
+exports = ["src/Export.as"]
+shared_exports = ["src/SharedExport.as"]
+"#,
+        )
+        .unwrap();
+        fs::write(
+            base.join("consumer/src/Export.as"),
+            "namespace Consumer { class PubApi { int x; } }\n",
+        )
+        .unwrap();
+        fs::write(
+            base.join("consumer/src/SharedExport.as"),
+            "namespace Consumer { shared class HookApi { int y; } }\n",
+        )
+        .unwrap();
+        fs::write(base.join("consumer/src/Main.as"), "void Main() {}\n").unwrap();
+
+        let load =
+            load_plugin_workspace(&base.join("consumer"), &DependencySearch::with_defaults())
+                .unwrap();
+        let canon_root = base.join("consumer").canonicalize().unwrap();
+        let expected_export = canon_root.join("src/Export.as").canonicalize().unwrap();
+        let expected_shared = canon_root
+            .join("src/SharedExport.as")
+            .canonicalize()
+            .unwrap();
+        assert!(
+            load.export_paths.contains(&expected_export),
+            "export_paths={:?} expected {expected_export:?}",
+            load.export_paths
+        );
+        assert!(
+            load.export_paths.contains(&expected_shared),
+            "export_paths={:?} expected {expected_shared:?}",
+            load.export_paths
+        );
         let _ = fs::remove_dir_all(base);
     }
 }
