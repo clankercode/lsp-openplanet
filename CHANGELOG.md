@@ -14,6 +14,28 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **Unused-declaration warnings** — never-used declarations are flagged
+  with `warning` severity across the whole workspace: file-level decls
+  (functions, classes, interfaces, enums and their values, funcdefs,
+  globals, `import ... from` aliases) and class members (fields, methods,
+  properties). Usage is name-resolved, not text-matched, so sibling-file
+  references count; usage in dependency exports counts too. Exemptions:
+  Openplanet engine callbacks (`Main`, `Render*`, `OnKeyPress`, ...),
+  constructors/destructors, operator overloads (`op*`), `override`
+  methods (any ancestor declares the member), mixin classes and their
+  members, and declarations in the plugin's own `info.toml`
+  `exports`/`shared_exports` files (public API). Suppress per declaration
+  with a leading `_` in the name or a trailing
+  `// lsp: ignore unused` comment. Locals and parameters are deliberately
+  out of scope for this pass (GH #55).
+- **`warnings_as_errors` config option** — persist the
+  `check --warnings-as-errors` / `-Werror` behaviour in
+  `.openplanet-lsp.toml` (workspace) or
+  `~/.config/openplanet-lsp/config.toml` (user). Precedence: CLI flag
+  (including explicit `=false`) > workspace > user > default `false`.
+  Together with the new unused warnings this pins code standards per
+  project (GH #48 follow-up).
+
 - **Namespace-shortcut completions** — at identifier positions, functions
   from a configurable set of namespaces are offered fully qualified:
   typing `Beg` suggests `UI::Begin` (old vscode-openplanet-angelscript
