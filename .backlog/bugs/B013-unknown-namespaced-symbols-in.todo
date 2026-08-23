@@ -75,3 +75,60 @@ in a disjoint region (namespaced-call resolution ~L2930-3000 vs locals/usage
 recording ~L520-1000); rebase onto master before the final review gate. Files:
 src/typecheck/checker.rs, src/analysis_snapshot.rs / src/workspace/load.rs
 (module surface query), tests/.
+## Implementation notes (2026-08-24, lane B, branch fix/ns-unknown-symbols)
+
+Landed: b894040 (rule + tests), 4dab393 (docs), f3d5ae8 (authority fence).
+
+### Decision interpretations
+* Triggers (c) and (d) share ONE implementation. The pooled `SymbolTable`
+  IS own-module + resolved dependency export files, so "namespace declared
+  in a resolved dep's export surface" and "namespace declared in the own
+  module" are the same query. Openplanet cross-plugin access is by
+  `import ... from "Module"`, not `Module::Fn`, so a dep's namespace is a
+  namespace like any other; there is no separate module-name namespace to
+  query.
+* Extra fence beyond the bl body: the rule requires `Ns` NOT to be an
+  engine namespace (`is_engine_namespace`, the static Core/Nadeo list). A
+  plugin may add helpers to `namespace UI` and still call the real API,
+  which only the typedb knows — without that fence a check run with no
+  typedb would flag every real `UI::` call. The fence is also what lets the
+  rule work with no typedb loaded, which the motivating repro command needs
+  (`openplanet-lsp check /tmp/probe58`, no `--typedb-dir`).
+* Extra fence beyond the bl body: relative namespace resolution. Inside
+  `namespace Outer`, `Inner::Deep()` binds `Outer::Inner::Deep` even when a
+  top-level `Inner` exists; the rule walks the enclosing namespace stack
+  before firing.
+* `typedef` has no parser support in this repo, so the "typedef under the
+  ns" variant is covered by `funcdef` plus a funcdef-typed global instead.
+
+### Authority guard widened (decision 3 said "required dependency")
+Probing found a reproducible FP the required-only guard misses:
+`LspConfig::apply_manifest` defines `DEPENDENCY_<ID>` for every DECLARED
+dependency, resolved or not, so code behind `#if DEPENDENCY_MISSINGOPT`
+stays live when an OPTIONAL dep is not installed — while the game leaves
+that macro undefined and masks the block out. Same hole for a resolved
+dep's unresolved `export_dependencies` (previously only a `tracing::warn!`).
+The guard is now "every declared dependency resolved", carried as
+`PluginWorkspaceLoad::dependency_closure_complete`. That also closes a third
+hole: the server's open-documents-only fallbacks carried a real root with an
+empty missing-required list and would have claimed authority over a pool
+holding only the open buffers.
+
+Cost: a plugin with an uninstalled optional dependency loses the rule
+entirely (tm-dips-plus-plus here, whose loading-screen optional deps are not
+installed on this box).
+
+### Follow-ups worth their own tasks
+1. Align the define set with dependency resolution: `apply_manifest` should
+   define `DEPENDENCY_<ID>` only for deps that actually resolved (or the
+   preprocessor should carry per-region define provenance so a rule can be
+   suppressed just inside `#if DEPENDENCY_<unresolved>` regions). Either
+   would let this rule stay armed for plugins with uninstalled optional
+   deps, and fixes a define-set mismatch with the game that is independent
+   of this rule.
+2. Not gated, noted: `source_paths` / `ignore_paths` can drop own-module
+   files from the load, and a sibling file that momentarily fails to parse
+   loses its symbols. Both make the pool incomplete without breaking
+   `dependency_closure_complete`. The pre-existing `undefined identifier`
+   rule has the same exposure, so this is a general workspace-authority
+   question rather than one for this rule.
