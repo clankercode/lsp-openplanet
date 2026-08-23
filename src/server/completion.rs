@@ -346,7 +346,12 @@ fn complete_identifier(
             let source = analysis.masked_source();
             let start = source[..offset]
                 .rfind(|c: char| !is_ident_char(c))
-                .map_or(0, |i| i + 1);
+                .map_or(0, |i| {
+                    // `i` is the byte offset of the last non-ident char —
+                    // advance past its full UTF-8 width, not one byte, so
+                    // `start` stays on a char boundary.
+                    i + source[i..].chars().next().map_or(1, |c| c.len_utf8())
+                });
             let typed_prefix = source[start..offset].to_lowercase();
             add_shortcut_completions(
                 &mut items,
@@ -436,14 +441,21 @@ fn add_shortcut_completions(
 }
 
 /// Compact signature for the shortcut item's `detail` (e.g.
-/// `bool Begin(string title, bool& open)`).
+/// `bool Begin(string title, bool&out open)`).
 fn shortcut_detail(f: &crate::typedb::index::FunctionInfo) -> String {
     let params = f
         .params
         .iter()
-        .map(|p| match &p.name {
-            Some(name) => format!("{} {}", p.type_name, name),
-            None => p.type_name.clone(),
+        .map(|p| {
+            let ty = if p.is_out {
+                format!("{}&out", p.type_name)
+            } else {
+                p.type_name.clone()
+            };
+            match &p.name {
+                Some(name) => format!("{} {}", ty, name),
+                None => ty,
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -754,6 +766,21 @@ mod tests {
         let items = complete_with_shortcuts(src, "Beg", &idx, &["UI", "UI"], false);
         let count = items.iter().filter(|i| i.label == "UI::Begin").count();
         assert_eq!(count, 1, "duplicate UI::Begin items: {:?}", labels(&items));
+    }
+
+    #[test]
+    fn shortcut_completion_prefix_after_multibyte_char_does_not_panic() {
+        // The word-start scan must advance past the full UTF-8 width of a
+        // non-ASCII boundary char (e.g. a string containing é), not one
+        // byte — otherwise `source[start..]` slices mid-char and panics.
+        let src = "void f() { string s = \"é\"; Beg }";
+        let idx = index_with_ui();
+        let items = complete_with_shortcuts(src, "Beg", &idx, &["UI"], false);
+        assert!(
+            labels(&items).contains(&"UI::Begin"),
+            "missing UI::Begin after multibyte boundary: {:?}",
+            labels(&items)
+        );
     }
 
     #[test]
