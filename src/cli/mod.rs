@@ -14,6 +14,8 @@ use crate::workspace::load::{load_plugin_workspace, DependencySearch};
 use crate::workspace::manifest::Manifest;
 use crate::workspace::project;
 
+/// GH #57: define-matrix combo expansion, dedup, and labeling.
+pub mod matrix;
 mod pretty;
 pub mod watch;
 
@@ -31,10 +33,12 @@ ARGS:
 OPTIONS:
     -h, --help          Show this help message
     --watch             Live TUI: re-check on file changes (q quit · j/k · PgUp/PgDn · g/G · c density · r refresh)
-    --format FMT        One-shot output only: plain | pretty | auto (default: auto)
+    --format FMT        One-shot output only: plain | pretty | json | auto (default: auto)
                         auto → pretty when stdout is color-capable, else plain
                         plain → gcc-style path:line:col: severity: message
                         pretty → source excerpt + carets
+                        json → machine-readable report; each diagnostic has a
+                               combo field (define combos it fired in)
                         Ignored with --watch (TUI owns presentation)
     --warnings-as-errors
                         Exit 1 when any WARNING diagnostic is present
@@ -50,6 +54,9 @@ OPTIONS:
                         config (short form -D; repeatable). Use to check
                         branches the staged build enables but the source
                         tree doesn't (e.g. -D DEV for #if DEV test files).
+                        Any --define collapses the define matrix
+                        (define_matrix in .openplanet-lsp.toml) back to a
+                        single-combo run.
     --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
     --no-typedb         Run without Openplanet/Nadeo type database files
     --plugins-dir DIR   Directory to search for plugin dependencies
@@ -77,6 +84,10 @@ pub enum CheckFormat {
     Auto,
     Plain,
     Pretty,
+    /// GH #57: machine-readable JSON (one object: root, type_database_loaded,
+    /// diagnostics[]). Each diagnostic carries a "combo" array — the define
+    /// combos it fired in (empty = single-combo run).
+    Json,
 }
 
 impl CheckFormat {
@@ -85,8 +96,9 @@ impl CheckFormat {
             "auto" => Ok(Self::Auto),
             "plain" => Ok(Self::Plain),
             "pretty" => Ok(Self::Pretty),
+            "json" => Ok(Self::Json),
             other => Err(format!(
-                "unknown --format value '{other}' (expected plain, pretty, or auto)"
+                "unknown --format value '{other}' (expected plain, pretty, json, or auto)"
             )),
         }
     }
@@ -94,7 +106,7 @@ impl CheckFormat {
     /// Whether the pretty layout should be used given a color-capability bit.
     pub fn use_pretty(self, color_capable: bool) -> bool {
         match self {
-            Self::Plain => false,
+            Self::Plain | Self::Json => false,
             Self::Pretty => true,
             Self::Auto => color_capable,
         }
@@ -161,6 +173,10 @@ pub struct CheckReport {
 #[derive(Debug)]
 pub struct CliDiagnostic {
     pub path: PathBuf,
+    /// GH #57: the define combos this diagnostic fired in (each combo is a
+    /// sorted define list; `[]` = the base combo). Empty = single-combo
+    /// (non-matrix) run — formatters render no label in that case.
+    pub combos: Vec<Vec<String>>,
     pub diagnostic: Diagnostic,
 }
 
@@ -373,6 +389,22 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         }
     }
 
+    // GH #57: any --define flag collapses the define matrix — single-combo
+    // behavior (the base set plus the CLI defines), exactly like pre-matrix
+    // `check`.
+    let combos: Vec<Vec<String>> = if options.extra_defines.is_empty() {
+        matrix::expand_combinations(
+            &config.define_matrix,
+            &config.define_groups,
+            config.define_combinations.as_deref(),
+            config.define_matrix_max_combinations,
+        )
+        .map_err(CliError::Check)?
+    } else {
+        vec![Vec::new()]
+    };
+    let matrix_run = combos.len() > 1;
+
     // GH #53: CLI --define flags land on top of the manifest/config ladder
     // so a source-tree gate can match the staged/dev compile.
     for define in &options.extra_defines {
@@ -390,77 +422,117 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     }
     .finalize_with_config(&config);
 
+    // Define-independent: file discovery + source read. Shared by every
+    // combo (each combo re-parses with its own define set below).
     let load = load_plugin_workspace(&root, &search).map_err(CliError::Check)?;
-    // One snapshot: parse each file once, pool symbols (GH #39).
-    let snapshot = AnalysisSnapshot::from_load(&load, &config);
 
+    let manifest_path = root.join("info.toml");
     let mut cli_diagnostics = Vec::new();
 
+    for combo in &combos {
+        // Per-combo config: base define set + this combo's axis defines.
+        // Combo defines never leak into the shared base config.
+        let mut combo_config = config.clone();
+        combo_config.defines.extend(combo.iter().cloned());
+
+        // One snapshot per combo: `#if` masking is define-dependent, so
+        // parsing + symbol pooling must re-run (GH #39 / GH #57).
+        let snapshot = AnalysisSnapshot::from_load(&load, &combo_config);
+        let pass_start = cli_diagnostics.len();
+        collect_pass_diagnostics(
+            &load,
+            &snapshot,
+            &combo_config,
+            type_index.as_ref(),
+            &manifest_path,
+            &mut cli_diagnostics,
+        );
+        if matrix_run {
+            for diag in &mut cli_diagnostics[pass_start..] {
+                diag.combos.push(combo.clone());
+            }
+        }
+    }
+
+    // GH #57: a diagnostic firing in several combos is reported once,
+    // labeled with every combo it fired in.
+    let cli_diagnostics = matrix::merge_combo_diagnostics(cli_diagnostics);
+
+    Ok(CheckReport {
+        root: load.root,
+        diagnostics: cli_diagnostics,
+        type_database_loaded: type_index.is_some(),
+    })
+}
+
+/// One full analysis pass for a single define combo (GH #57): missing-dep
+/// errors, info.toml diagnostics, per-file diagnostics, and the
+/// workspace-wide unused-declaration warnings.
+fn collect_pass_diagnostics(
+    load: &crate::workspace::load::PluginWorkspaceLoad,
+    snapshot: &AnalysisSnapshot,
+    config: &LspConfig,
+    type_index: Option<&TypeIndex>,
+    manifest_path: &Path,
+    cli_diagnostics: &mut Vec<CliDiagnostic>,
+) {
     if !snapshot.missing_required_dependencies().is_empty() {
-        let manifest_path = load.root.join("info.toml");
         for diagnostic in diagnostics::missing_required_dependency_diagnostics(
             snapshot.missing_required_dependencies(),
         ) {
             cli_diagnostics.push(CliDiagnostic {
-                path: manifest_path.clone(),
+                path: manifest_path.to_path_buf(),
+                combos: Vec::new(),
                 diagnostic,
             });
         }
     }
 
     if manifest_path.exists() {
-        let source = std::fs::read_to_string(&manifest_path).map_err(|e| {
-            CliError::Check(format!("failed to read {}: {e}", manifest_path.display()))
-        })?;
-        let uri = Url::from_file_path(&manifest_path).map_err(|_| {
-            CliError::Check(format!(
-                "failed to create file URI for {}",
-                manifest_path.display()
-            ))
-        })?;
-        // The manifest is not an .as file — parse on the fly with an
-        // owned symbol pool.
-        let manifest_analysis =
-            crate::analysis::DocumentAnalysis::analyze(&source, &config.defines);
-        let mut manifest_symbols = crate::symbols::SymbolTable::new();
-        let mf_fid = manifest_symbols.allocate_file_id();
-        let mf_syms = crate::symbols::SymbolTable::extract_symbols(
-            mf_fid,
-            manifest_analysis.masked_source(),
-            &manifest_analysis.file,
-        );
-        manifest_symbols.set_file_symbols(mf_fid, mf_syms);
-        for diagnostic in diagnostics::compute_diagnostics_from_analysis(
-            &uri,
-            &manifest_analysis,
-            &config,
-            type_index.as_ref(),
-            &manifest_symbols,
-        ) {
-            cli_diagnostics.push(CliDiagnostic {
-                path: manifest_path.clone(),
-                diagnostic,
-            });
+        if let Ok(source) = std::fs::read_to_string(manifest_path) {
+            if let Ok(uri) = Url::from_file_path(manifest_path) {
+                // The manifest is not an .as file — parse on the fly with an
+                // owned symbol pool.
+                let manifest_analysis =
+                    crate::analysis::DocumentAnalysis::analyze(&source, &config.defines);
+                let mut manifest_symbols = crate::symbols::SymbolTable::new();
+                let mf_fid = manifest_symbols.allocate_file_id();
+                let mf_syms = crate::symbols::SymbolTable::extract_symbols(
+                    mf_fid,
+                    manifest_analysis.masked_source(),
+                    &manifest_analysis.file,
+                );
+                manifest_symbols.set_file_symbols(mf_fid, mf_syms);
+                for diagnostic in diagnostics::compute_diagnostics_from_analysis(
+                    &uri,
+                    &manifest_analysis,
+                    config,
+                    type_index,
+                    &manifest_symbols,
+                ) {
+                    cli_diagnostics.push(CliDiagnostic {
+                        path: manifest_path.to_path_buf(),
+                        combos: Vec::new(),
+                        diagnostic,
+                    });
+                }
+            }
         }
     }
 
     // Unused-declaration warnings (workspace view; own-manifest export
     // files are exempt public API). ONE collect pass for the whole
     // workspace — a per-file collect here would be O(files²) check runs.
-    let unused_usage =
-        crate::analysis::unused::WorkspaceUsage::collect(&snapshot, type_index.as_ref());
+    let unused_usage = crate::analysis::unused::WorkspaceUsage::collect(snapshot, type_index);
 
     for item in &load.files {
         if !item.report_diagnostics {
             continue;
         }
 
-        let uri = Url::from_file_path(&item.path).map_err(|_| {
-            CliError::Check(format!(
-                "failed to create file URI for {}",
-                item.path.display()
-            ))
-        })?;
+        let Ok(uri) = Url::from_file_path(&item.path) else {
+            continue;
+        };
         // Reuse the snapshot's per-file analysis instead of re-parsing.
         let analysis = snapshot
             .analysis_at_path(&item.path)
@@ -468,12 +540,13 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         for diagnostic in diagnostics::compute_diagnostics_from_analysis(
             &uri,
             analysis,
-            &config,
-            type_index.as_ref(),
+            config,
+            type_index,
             snapshot.symbols(),
         ) {
             cli_diagnostics.push(CliDiagnostic {
                 path: item.path.clone(),
+                combos: Vec::new(),
                 diagnostic,
             });
         }
@@ -481,23 +554,18 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
             for diagnostic in diagnostics::unused_declaration_diagnostics(
                 analysis.source.as_str(),
                 &unused_usage,
-                &snapshot,
+                snapshot,
                 file_id,
                 snapshot.export_paths(),
             ) {
                 cli_diagnostics.push(CliDiagnostic {
                     path: item.path.clone(),
+                    combos: Vec::new(),
                     diagnostic,
                 });
             }
         }
     }
-
-    Ok(CheckReport {
-        root: load.root,
-        diagnostics: cli_diagnostics,
-        type_database_loaded: type_index.is_some(),
-    })
 }
 
 /// Format a check report using env/TTY color and [`CheckFormat::Auto`].
@@ -518,6 +586,10 @@ pub fn format_check_report_for(report: &CheckReport, format: CheckFormat) -> Str
 /// inviting reports whenever the game's compile errors/warnings differ from
 /// this output (GH #45 follow-up).
 pub fn format_check_report_with(report: &CheckReport, color: bool, format: CheckFormat) -> String {
+    // GH #57: JSON is a data surface — no color, no human trailer.
+    if format == CheckFormat::Json {
+        return format_json(report);
+    }
     let body = if format.use_pretty(color) {
         pretty::format_pretty(report, color)
     } else {
@@ -538,6 +610,36 @@ fn mismatch_ask(color: bool) -> String {
         "\n{} Did Openplanet have different compile errors or warnings compared to openplanet-lsp output? Please log an issue: {}",
         crate::term::dim(color, "›"),
         ISSUE_URL
+    )
+}
+
+/// GH #57: machine-readable report. Each diagnostic carries a "combo"
+/// array (the define combos it fired in — the base combo is `[]`, empty
+/// array = single-combo run).
+fn format_json(report: &CheckReport) -> String {
+    let diagnostics: Vec<serde_json::Value> = report
+        .diagnostics
+        .iter()
+        .map(|item| {
+            let rel = item.path.strip_prefix(&report.root).unwrap_or(&item.path);
+            serde_json::json!({
+                "path": rel.display().to_string(),
+                "line": item.diagnostic.range.start.line + 1,
+                "col": item.diagnostic.range.start.character + 1,
+                "severity": severity_label(item.diagnostic.severity),
+                "message": item.diagnostic.message,
+                "combo": item.combos,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "root": report.root.display().to_string(),
+        "type_database_loaded": report.type_database_loaded,
+        "diagnostics": diagnostics,
+    });
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&doc).unwrap_or_default()
     )
 }
 
@@ -571,10 +673,13 @@ fn format_plain(report: &CheckReport, color: bool) -> String {
         };
 
         out.push_str(&format!(
-            "{}:{}: {}: {}\n",
+            "{}:{}: {}: {}{}\n",
             term::path(color, rel.display().to_string()),
             term::loc(color, format!("{line}:{col}")),
             sev_styled,
+            // GH #57: combo label ([DEV] / [seen in: {} | DEV]) — empty in
+            // single-combo runs.
+            matrix::combo_prefix(&item.combos),
             item.diagnostic.message
         ));
     }
@@ -669,7 +774,49 @@ mod tests {
         assert_eq!(CheckFormat::parse("auto").unwrap(), CheckFormat::Auto);
         assert_eq!(CheckFormat::parse("PLAIN").unwrap(), CheckFormat::Plain);
         assert_eq!(CheckFormat::parse("Pretty").unwrap(), CheckFormat::Pretty);
-        assert!(CheckFormat::parse("json").is_err());
+        assert_eq!(CheckFormat::parse("json").unwrap(), CheckFormat::Json);
+        assert!(CheckFormat::parse("yaml").is_err());
+    }
+
+    /// GH #57: JSON output labels each diagnostic with the combos it fired
+    /// in ("combo" field); single-combo runs emit an empty array.
+    #[test]
+    fn json_output_carries_combo_field() {
+        let mut report = trailer_report(1);
+        report.diagnostics[0].combos = vec![vec!["DEV".to_string()]];
+        let out = format_check_report_with(&report, false, CheckFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let diags = parsed["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0]["combo"], serde_json::json!([["DEV"]]));
+        assert_eq!(diags[0]["severity"], "error");
+
+        // No matrix run → "combo" is an empty array (still present).
+        let report = trailer_report(1);
+        let out = format_check_report_with(&report, false, CheckFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["diagnostics"][0]["combo"], serde_json::json!([]));
+    }
+
+    /// GH #57: plain output prefixes each diagnostic with its combo label.
+    #[test]
+    fn plain_output_labels_combos() {
+        let mut report = trailer_report(2);
+        report.diagnostics[0].combos = vec![vec!["DEV".to_string()]];
+        report.diagnostics[1].combos = vec![vec![], vec!["DEV".to_string()]];
+        let out = format_check_report_with(&report, false, CheckFormat::Plain);
+        assert!(
+            out.contains("error: [DEV] boom"),
+            "single-combo prefix, got: {out:?}"
+        );
+        assert!(
+            out.contains("error: [seen in: {} | DEV] boom"),
+            "multi-combo dedup prefix, got: {out:?}"
+        );
+
+        // No matrix run → no prefix (byte-identical to pre-matrix output).
+        let out = format_check_report_with(&trailer_report(1), false, CheckFormat::Plain);
+        assert!(out.contains("error: boom"), "no prefix: {out:?}");
     }
 
     #[test]
@@ -785,6 +932,7 @@ mod tests {
         let diagnostics = (0..diags)
             .map(|_| CliDiagnostic {
                 path: PathBuf::from("/tmp/plugin/src/Main.as"),
+                combos: Vec::new(),
                 diagnostic: Diagnostic {
                     severity: Some(DiagnosticSeverity::ERROR),
                     message: "boom".to_string(),

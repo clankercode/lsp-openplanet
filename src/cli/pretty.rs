@@ -149,8 +149,11 @@ fn format_diagnostic_block(
     };
 
     let mut out = String::new();
-    // header: path:line:col + severity
-    out.push_str(&format!("{path_s}:{loc_s}: {sev_styled}\n"));
+    // header: path:line:col + severity (+ GH #57 combo label, if any)
+    let combo = super::matrix::combo_prefix(&item.combos);
+    let combo = combo.trim_end();
+    let sep = if combo.is_empty() { "" } else { " " };
+    out.push_str(&format!("{path_s}:{loc_s}: {sev_styled}{sep}{combo}\n"));
 
     let source = source_cache
         .entry(item.path.clone())
@@ -258,6 +261,7 @@ pub(super) fn test_diag(
     use tower_lsp::lsp_types::Diagnostic;
     CliDiagnostic {
         path: path.into(),
+        combos: Vec::new(),
         diagnostic: Diagnostic {
             range: Range {
                 start: Position {

@@ -28,6 +28,21 @@ GitHub Release body to match this section (gh release edit).
   cross-file diagnostics work for symlinked workspaces too.
 
 ### Added
+- **Define matrix for `check`** — `define_matrix` in
+  `.openplanet-lsp.toml` lists preprocessor define axes that `check`
+  cross-multiplies on top of the base define set, running every combo
+  through the full analysis pipeline. Diagnostics are labeled with the
+  combo they fired in (`[DEV]`, `[seen in: {} | DEV]` in plain/pretty
+  output; a `"combo"` array in the new `--format json` report), and
+  duplicates across combos are merged into one entry. Supporting keys:
+  `define_groups` (mutually-exclusive defines — combos defining two
+  members of one group are skipped; the platform selectors
+  `{TMNEXT, MP4, TURBO}` form an implicit group whenever ≥2 are axes),
+  `define_combinations` (explicit pin list that replaces the
+  cross-product entirely), and `define_matrix_max_combinations`
+  (cap, default 16 — exceeding it is a hard error pointing at
+  `define_combinations`). Any `--define` CLI flag collapses the matrix
+  back to a single-combo run. LSP mode is untouched (GH #57).
 - **Unused-declaration warnings** — never-used declarations are flagged
   with `warning` severity across the whole workspace: file-level decls
   (functions, classes, interfaces, enums and their values, funcdefs,
