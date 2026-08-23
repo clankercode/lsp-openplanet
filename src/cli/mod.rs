@@ -9,7 +9,7 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::config::{LspConfig, UserPrefs};
 use crate::server::diagnostics;
-use crate::typedb::TypeIndex;
+use crate::typedb::{TypeDbMeta, TypeIndex};
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
 use crate::workspace::manifest::Manifest;
 use crate::workspace::project;
@@ -175,11 +175,67 @@ impl CheckOptions {
     }
 }
 
+/// GH #59: the build stamps of the type database a check run actually
+/// loaded. Surfaced in check output, the JSON report, and the server init
+/// log so "the DB says X" is never an invisible premise.
+///
+/// The two DBs carry different stamps: Core's `op` is the full Openplanet
+/// build string (with the build hash), the game dump's `op` is the bare
+/// game version and its `mp` is the dump timestamp.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypeDbVersions {
+    pub core_op: Option<String>,
+    pub game_op: Option<String>,
+    pub game_mp: Option<String>,
+}
+
+impl TypeDbVersions {
+    /// Best-effort read of both stamps.
+    ///
+    /// Only called after `TypeIndex::load` already succeeded on these paths,
+    /// so a probe failure means the file changed underfoot — report the
+    /// stamps we have rather than failing an otherwise-complete run.
+    pub fn probe(core: &Path, game: &Path) -> Self {
+        let core_meta = TypeDbMeta::probe(core).unwrap_or_default();
+        let game_meta = TypeDbMeta::probe(game).unwrap_or_default();
+        Self {
+            core_op: core_meta.op,
+            game_op: game_meta.op,
+            game_mp: game_meta.mp,
+        }
+    }
+
+    /// One line for check stderr and the server init log.
+    pub fn summary_line(&self) -> String {
+        let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "<none>".to_string());
+        format!(
+            "type db: op={}  game op={}  mp={}",
+            show(&self.core_op),
+            show(&self.game_op),
+            show(&self.game_mp)
+        )
+    }
+
+    /// Additive `typedb` object for the JSON report. `op`/`mp` are the
+    /// headline stamps (Core build, game dump time); `game_op` is the game
+    /// DB's own version string.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "op": self.core_op,
+            "mp": self.game_mp,
+            "game_op": self.game_op,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct CheckReport {
     pub root: PathBuf,
     pub diagnostics: Vec<CliDiagnostic>,
     pub type_database_loaded: bool,
+    /// GH #59: stamps of the loaded DB. `None` when no DB was loaded
+    /// (`--no-typedb`, or nothing resolved).
+    pub type_db: Option<TypeDbVersions>,
 }
 
 #[derive(Debug)]
@@ -428,6 +484,11 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     }
 
     let type_index = load_type_index(&config, options.no_typedb)?;
+    // GH #59: stamp the run with the DB build it judged the code against.
+    let type_db = match (type_index.as_ref(), &config.core_json, &config.game_json) {
+        (Some(_), Some(core), Some(game)) => Some(TypeDbVersions::probe(core, game)),
+        _ => None,
+    };
 
     let mut search = DependencySearch {
         plugins_dirs: options.plugins_dirs.clone(),
@@ -484,6 +545,7 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         root: load.root,
         diagnostics: cli_diagnostics,
         type_database_loaded: type_index.is_some(),
+        type_db,
     })
 }
 
@@ -660,11 +722,15 @@ fn format_json(report: &CheckReport) -> String {
             })
         })
         .collect();
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         "root": report.root.display().to_string(),
         "type_database_loaded": report.type_database_loaded,
         "diagnostics": diagnostics,
     });
+    // GH #59: additive — absent (not null) when no DB was loaded.
+    if let (Some(versions), Some(obj)) = (&report.type_db, doc.as_object_mut()) {
+        obj.insert("typedb".to_string(), versions.to_json());
+    }
     format!(
         "{}\n",
         serde_json::to_string_pretty(&doc).unwrap_or_default()
@@ -994,6 +1060,7 @@ mod tests {
             root: PathBuf::from("/tmp/plugin"),
             diagnostics,
             type_database_loaded: false,
+            type_db: None,
         }
     }
 
@@ -1013,6 +1080,88 @@ mod tests {
                 "{fmt:?} output must end with exactly the issue URL + one newline (no stray blank line): {out:?}"
             );
         }
+    }
+
+    /// GH #59: the version line names both DBs' stamps, and renders
+    /// `<none>` rather than dropping a field when a stamp is absent.
+    #[test]
+    fn type_db_versions_summary_line_renders_stamps() {
+        let full = TypeDbVersions {
+            core_op: Some("1.29.5 (next, Public, 1234ad9e)".into()),
+            game_op: Some("1.29.5".into()),
+            game_mp: Some("2026-02-03 03:51:19".into()),
+        };
+        let line = full.summary_line();
+        assert!(line.starts_with("type db: op=1.29.5 (next"), "{line}");
+        assert!(line.contains("game op=1.29.5"), "{line}");
+        assert!(line.contains("mp=2026-02-03 03:51:19"), "{line}");
+
+        // Core-only (no game dump stamps) still names what is missing.
+        let core_only = TypeDbVersions {
+            core_op: Some("1.29.5".into()),
+            ..Default::default()
+        };
+        let line = core_only.summary_line();
+        assert!(line.contains("game op=<none>"), "{line}");
+        assert!(line.contains("mp=<none>"), "{line}");
+
+        // Fully unstamped DBs: a line that says so, never an empty line.
+        assert_eq!(
+            TypeDbVersions::default().summary_line(),
+            "type db: op=<none>  game op=<none>  mp=<none>"
+        );
+    }
+
+    /// The JSON object keys are the report contract: `op`/`mp` headline the
+    /// Core build and the dump time, `game_op` carries the game DB version.
+    #[test]
+    fn type_db_versions_to_json_keys() {
+        let versions = TypeDbVersions {
+            core_op: Some("1.29.5 (next, Public, 1234ad9e)".into()),
+            game_op: Some("1.29.5".into()),
+            game_mp: Some("2026-02-03 03:51:19".into()),
+        };
+        let value = versions.to_json();
+        assert_eq!(value["op"], "1.29.5 (next, Public, 1234ad9e)");
+        assert_eq!(value["game_op"], "1.29.5");
+        assert_eq!(value["mp"], "2026-02-03 03:51:19");
+
+        // Absent stamps serialize as null (the key stays, so consumers can
+        // tell "no stamp in the DB" from "no DB loaded" — the latter drops
+        // the whole object).
+        let value = TypeDbVersions::default().to_json();
+        assert!(value["op"].is_null(), "{value}");
+        assert!(value["game_op"].is_null(), "{value}");
+    }
+
+    /// GH #59: the `typedb` object is purely additive — present with a DB,
+    /// entirely absent without one, and never disturbing the existing keys.
+    #[test]
+    fn json_report_typedb_field_is_additive() {
+        let mut report = trailer_report(1);
+        let out = format_check_report_with(&report, false, CheckFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(
+            parsed.get("typedb").is_none(),
+            "no DB loaded → no key at all: {out}"
+        );
+        assert_eq!(parsed["type_database_loaded"], false);
+        assert!(parsed["root"].is_string());
+        assert!(parsed["diagnostics"].is_array());
+
+        report.type_database_loaded = true;
+        report.type_db = Some(TypeDbVersions {
+            core_op: Some("1.29.5 (next, Public, 1234ad9e)".into()),
+            game_op: Some("1.29.5".into()),
+            game_mp: Some("2026-02-03 03:51:19".into()),
+        });
+        let out = format_check_report_with(&report, false, CheckFormat::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["typedb"]["game_op"], "1.29.5");
+        // Pre-existing keys unchanged.
+        assert_eq!(parsed["type_database_loaded"], true);
+        assert_eq!(parsed["diagnostics"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["diagnostics"][0]["severity"], "error");
     }
 
     /// Clean runs keep the ask too — missing diagnostics (false negatives,

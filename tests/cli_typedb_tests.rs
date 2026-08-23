@@ -310,3 +310,133 @@ fn typedb_unknown_option_is_a_usage_error() {
     let r = run(bin(), &["typedb", "status", "--fetch-from-web"]);
     assert_eq!(r.code, Some(2), "{}", r.all());
 }
+
+// === check-output / report visibility (task 3) ===
+
+/// Minimal plugin so `check` has a workspace root to resolve.
+fn tmp_plugin(tag: &str) -> PathBuf {
+    let root = tmp_dir(&format!("plugin-{tag}"));
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("info.toml"),
+        "[meta]\nname = \"TypeDb Fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/Main.as"), "void Main() { }\n").unwrap();
+    root
+}
+
+fn check_args(root: &PathBuf, extra: &[&str]) -> Vec<String> {
+    let mut args = vec![
+        "check".to_string(),
+        "--typedb-dir".to_string(),
+        fixture_typedb().to_str().unwrap().to_string(),
+        root.to_str().unwrap().to_string(),
+    ];
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args
+}
+
+fn run_owned(mut cmd: Command, args: &[String]) -> Run {
+    let out = cmd.args(args).output().unwrap();
+    Run {
+        code: out.status.code(),
+        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+    }
+}
+
+/// Every plain/pretty `check` run states which type-DB build it judged the
+/// code against — the invisibility GH #59 actually complains about.
+#[test]
+fn check_reports_loaded_type_db_version() {
+    let root = tmp_plugin("version-line");
+    for format in ["plain", "pretty", "auto"] {
+        let r = run_owned(
+            bin_without_install(&format!("version-{format}")),
+            &check_args(&root, &["--format", format]),
+        );
+        assert_eq!(r.code, Some(0), "{format}: {}", r.all());
+        assert!(
+            r.stderr.contains("type db: op=1.29.5"),
+            "{format} run must state the loaded DB build: {}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("mp=2026-02-03"),
+            "{format} run must state the game dump timestamp: {}",
+            r.stderr
+        );
+    }
+}
+
+/// The JSON report carries the stamps as an additive `typedb` object; the
+/// human line must not pollute the JSON surface.
+#[test]
+fn check_json_report_carries_typedb_object() {
+    let root = tmp_plugin("version-json");
+    let r = run_owned(
+        bin_without_install("version-json"),
+        &check_args(&root, &["--format", "json"]),
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let parsed: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("json report must parse ({e}): {}", r.stdout));
+    assert!(
+        parsed["typedb"]["op"]
+            .as_str()
+            .unwrap()
+            .starts_with("1.29.5"),
+        "typedb.op should be the Core build stamp: {}",
+        r.stdout
+    );
+    assert_eq!(parsed["typedb"]["game_op"], "1.29.5");
+    assert_eq!(parsed["typedb"]["mp"], "2026-02-03 03:51:19");
+    // Pre-existing keys stay untouched (the change is additive).
+    assert_eq!(parsed["type_database_loaded"], true);
+    assert!(parsed["diagnostics"].is_array());
+    assert!(
+        !r.stdout.contains("type db: op="),
+        "the human version line must stay off the JSON stdout surface: {}",
+        r.stdout
+    );
+}
+
+/// `--no-typedb` loads no DB, so there is no version to state and no field
+/// to emit — absent, not null.
+#[test]
+fn check_without_typedb_omits_version_line_and_field() {
+    let root = tmp_plugin("version-none");
+    let r = run_owned(
+        bin_without_install("version-none-plain"),
+        &check_args_no_typedb(&root, &["--format", "plain"]),
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        !r.stderr.contains("type db: op="),
+        "no DB loaded → no version line: {}",
+        r.stderr
+    );
+
+    let r = run_owned(
+        bin_without_install("version-none-json"),
+        &check_args_no_typedb(&root, &["--format", "json"]),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert!(
+        parsed.get("typedb").is_none(),
+        "no DB loaded → no typedb key at all: {}",
+        r.stdout
+    );
+    assert_eq!(parsed["type_database_loaded"], false);
+}
+
+fn check_args_no_typedb(root: &PathBuf, extra: &[&str]) -> Vec<String> {
+    let mut args = vec![
+        "check".to_string(),
+        "--no-typedb".to_string(),
+        root.to_str().unwrap().to_string(),
+    ];
+    args.extend(extra.iter().map(|s| s.to_string()));
+    args
+}

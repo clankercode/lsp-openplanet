@@ -225,6 +225,14 @@ fn run_check_command(args: &[String]) -> i32 {
             if !report.type_database_loaded && !options.no_typedb {
                 eprintln!("warning: type database not loaded; pass --typedb-dir or --no-typedb");
             }
+            // GH #59: state which DB build judged this code. Suppressed for
+            // --format json, where the report carries a `typedb` object
+            // instead (the JSON surface stays the machine contract).
+            if let Some(versions) = &report.type_db {
+                if options.format != cli::CheckFormat::Json {
+                    eprintln!("{}", versions.summary_line());
+                }
+            }
             print!("{}", cli::format_check_report_for(&report, options.format));
             let has_errors = report.diagnostics.iter().any(|item| {
                 let is_error = !matches!(
