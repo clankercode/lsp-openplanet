@@ -112,3 +112,5 @@ on tm-editor-plus-plus).
 
 Independent review: codex via `ccc @cx-reviewer` returned PASS with no fixes
 required, and independently re-verified tests, fixture baselines, and clippy.
+
+POST-MERGE: GH #60 shipped a reachable-by-default instance of a pre-existing unused-declaration FP - a declaration whose only callers live in gitignored files is reported never used. Tracked as B020 / GH #61 (usage-recording-only inclusion for omitted own-module files). Not a defect in the #60 implementation; the hole is in the unused-declaration usage join and reproduces via ignore_paths with no gitignore involved.
