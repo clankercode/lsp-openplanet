@@ -175,6 +175,7 @@ impl Backend {
                         dependency_closure_complete: false,
                         usage_only_sources: Vec::new(),
                         usage_only_sources_complete: true,
+                        usage_only_unreadable_paths: Vec::new(),
                         export_paths: HashSet::new(),
                         strict_export_paths: HashSet::new(),
                     }
@@ -294,6 +295,7 @@ impl Backend {
                     dependency_closure_complete: false,
                     usage_only_sources: Vec::new(),
                     usage_only_sources_complete: true,
+                    usage_only_unreadable_paths: Vec::new(),
                     export_paths: HashSet::new(),
                     strict_export_paths: HashSet::new(),
                 }
@@ -380,6 +382,7 @@ impl Backend {
                             dependency_closure_complete: false,
                             usage_only_sources: Vec::new(),
                             usage_only_sources_complete: true,
+                            usage_only_unreadable_paths: Vec::new(),
                             export_paths: HashSet::new(),
                             strict_export_paths: HashSet::new(),
                         }
@@ -394,6 +397,7 @@ impl Backend {
                 dependency_closure_complete: false,
                 usage_only_sources: Vec::new(),
                 usage_only_sources_complete: true,
+                usage_only_unreadable_paths: Vec::new(),
                 export_paths: HashSet::new(),
                 strict_export_paths: HashSet::new(),
             },

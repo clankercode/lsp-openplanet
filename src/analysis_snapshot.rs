@@ -168,6 +168,7 @@ impl AnalysisSnapshot {
             dependency_closure_complete: false,
             usage_only_sources: Vec::new(),
             usage_only_sources_complete: true,
+            usage_only_unreadable_paths: Vec::new(),
             export_paths: HashSet::new(),
             strict_export_paths: HashSet::new(),
         };
@@ -198,6 +199,7 @@ impl AnalysisSnapshot {
             dependency_closure_complete: false,
             usage_only_sources: usage_only.to_vec(),
             usage_only_sources_complete: true,
+            usage_only_unreadable_paths: Vec::new(),
             export_paths: HashSet::new(),
             strict_export_paths: HashSet::new(),
         };
@@ -221,6 +223,7 @@ impl AnalysisSnapshot {
             dependency_closure_complete: false,
             usage_only_sources: Vec::new(),
             usage_only_sources_complete: true,
+            usage_only_unreadable_paths: Vec::new(),
             export_paths: Default::default(),
             strict_export_paths: Default::default(),
         };

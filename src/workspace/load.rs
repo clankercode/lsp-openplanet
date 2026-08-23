@@ -97,6 +97,11 @@ pub struct PluginWorkspaceLoad {
     /// `dependency_closure_complete`: this only governs the unused-
     /// declaration pass and must not restore namespace authority.
     pub usage_only_sources_complete: bool,
+    /// Omitted paths that discovery found but the usage-only read lost to a
+    /// race or other I/O failure. Retained so an open live buffer for that
+    /// exact path can still be classified as usage-only and heal the
+    /// completeness bit without ever entering `files`.
+    pub usage_only_unreadable_paths: Vec<PathBuf>,
     /// Canonicalized absolute paths of files listed in `[script]` EXPORTS
     /// ONLY (not `shared_exports`). Game model: a strict export file is
     /// compiled into CONSUMERS only — its declarations do not exist in
@@ -260,11 +265,15 @@ fn load_plugin_workspace_with_source_reader(
     // GH #61: own-module files the checked set omits are still compiled by
     // the game, so they are read for usage recording only.
     let mut usage_only_sources = Vec::new();
-    let mut usage_only_sources_complete = true;
+    let mut usage_only_unreadable_paths = Vec::new();
     for path in discovered_files {
         if !source_file_included(&root, &path, search) {
-            usage_only_sources_complete &=
-                push_usage_only(&path, &mut usage_only_sources, read_source);
+            push_usage_only(
+                &path,
+                &mut usage_only_sources,
+                &mut usage_only_unreadable_paths,
+                read_source,
+            );
             continue;
         }
         let source =
@@ -276,9 +285,16 @@ fn load_plugin_workspace_with_source_reader(
         });
     }
     for path in &gitignore_excluded_files {
-        usage_only_sources_complete &= push_usage_only(path, &mut usage_only_sources, read_source);
+        push_usage_only(
+            path,
+            &mut usage_only_sources,
+            &mut usage_only_unreadable_paths,
+            read_source,
+        );
     }
     usage_only_sources.sort_by(|a, b| a.0.cmp(&b.0));
+    usage_only_unreadable_paths.sort();
+    let usage_only_sources_complete = usage_only_unreadable_paths.is_empty();
 
     let dep = load_dependency_exports(
         &root,
@@ -312,6 +328,7 @@ fn load_plugin_workspace_with_source_reader(
         dependency_closure_complete,
         usage_only_sources,
         usage_only_sources_complete,
+        usage_only_unreadable_paths,
         export_paths,
         strict_export_paths,
     })
@@ -326,19 +343,19 @@ fn load_plugin_workspace_with_source_reader(
 fn push_usage_only(
     path: &Path,
     out: &mut Vec<(PathBuf, String)>,
+    unreadable: &mut Vec<PathBuf>,
     read_source: &impl Fn(&Path) -> std::io::Result<String>,
-) -> bool {
+) {
     match read_source(path) {
         Ok(source) => {
             out.push((path.to_path_buf(), source));
-            true
         }
         Err(err) => {
+            unreadable.push(path.to_path_buf());
             tracing::debug!(
                 path = %path.display(),
                 "omitted own-module file is unreadable; declaration warnings fail closed: {err}"
             );
-            false
         }
     }
 }
@@ -363,6 +380,7 @@ pub fn merge_open_documents(
 ) -> PluginWorkspaceLoad {
     let mut files = base.files.clone();
     let mut usage_only_sources = base.usage_only_sources.clone();
+    let mut usage_only_unreadable_paths = base.usage_only_unreadable_paths.clone();
     for (path, source) in open {
         if let Some((_, omitted_source)) = usage_only_sources
             .iter_mut()
@@ -372,6 +390,17 @@ pub fn merge_open_documents(
             // The live buffer replaces the stale disk source, and repeated
             // entries retain the ordinary overlay rule that the last wins.
             *omitted_source = source.clone();
+            continue;
+        }
+        if let Some(index) = usage_only_unreadable_paths
+            .iter()
+            .position(|omitted_path| paths_equal(omitted_path, path))
+        {
+            // The disk read raced, but discovery still established that
+            // this path was omitted. A live buffer heals that one missing
+            // source while retaining the usage-only classification.
+            usage_only_unreadable_paths.remove(index);
+            usage_only_sources.push((path.clone(), source.clone()));
             continue;
         }
         if let Some(existing) = files.iter_mut().find(|f| paths_equal(&f.path, path)) {
@@ -385,13 +414,15 @@ pub fn merge_open_documents(
             });
         }
     }
+    usage_only_sources.sort_by(|a, b| a.0.cmp(&b.0));
     PluginWorkspaceLoad {
         root: base.root.clone(),
         files,
         missing_required_dependencies: base.missing_required_dependencies.clone(),
         dependency_closure_complete: base.dependency_closure_complete,
         usage_only_sources,
-        usage_only_sources_complete: base.usage_only_sources_complete,
+        usage_only_sources_complete: usage_only_unreadable_paths.is_empty(),
+        usage_only_unreadable_paths,
         export_paths: base.export_paths.clone(),
         strict_export_paths: base.strict_export_paths.clone(),
     }
@@ -1705,6 +1736,27 @@ shared_exports = ["src/SharedExport.as"]
         );
         let names = crate::analysis::unused::test_support::names(&report);
         assert_eq!(names, vec!["Helper::deadLocal", "Helper::p"]);
+
+        let healed = merge_open_documents(
+            &load,
+            &[(
+                omitted.clone(),
+                "void GenCaller() { UsedOnlyByOmitted(); }\n".to_string(),
+            )],
+        );
+        assert!(healed.usage_only_sources_complete);
+        assert!(
+            !healed
+                .files
+                .iter()
+                .any(|file| paths_equal(&file.path, &omitted)),
+            "a live buffer for a raced omitted path must remain usage-only"
+        );
+        assert!(healed
+            .usage_only_sources
+            .iter()
+            .any(|(path, source)| paths_equal(path, &omitted)
+                && source.contains("UsedOnlyByOmitted")));
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 }
