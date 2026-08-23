@@ -1606,3 +1606,91 @@ fn check_command_namespace_members_union_across_modules() {
     );
     let _ = fs::remove_dir_all(base);
 }
+
+/// GH #58 authority guard, optional-dependency half: `apply_manifest`
+/// defines `DEPENDENCY_<ID>` for every DECLARED dependency, resolved or
+/// not, so code behind `#if DEPENDENCY_MISSINGOPT` stays live even when the
+/// optional dep is not installed. The game would not define that macro and
+/// would mask the block out, so firing there is a false positive — an
+/// unresolved dependency of ANY kind must silence the rule.
+#[test]
+fn check_command_unknown_namespaced_symbol_silent_when_optional_dep_missing() {
+    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-opt-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("plugins")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"OptFP\"\nversion = \"0.1.0\"\n\n[script]\noptional_dependencies = [\"MissingOpt\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n#if DEPENDENCY_MISSINGOPT\n    Shared::FromTheOptionalDep();\n#endif\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("plugins"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("No matching symbol"),
+        "an unresolved optional dependency must silence the rule; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
+/// GH #58 authority guard, transitive half: a resolved dependency names an
+/// `export_dependency` that no plugins dir provides. Today that is only a
+/// `tracing::warn!`, not a missing-required entry — but the unreadable
+/// module may declare the member, so the rule must stay silent.
+#[test]
+fn check_command_unknown_namespaced_symbol_silent_when_nested_export_dep_missing() {
+    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-nest-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("deps/dep-plugin/src")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("deps/dep-plugin/info.toml"),
+        "[meta]\nname = \"Dependency Plugin\"\nversion = \"0.1.0\"\n\n[script]\nmodule = \"DepPlugin\"\nexports = [\"Export.as\"]\nexport_dependencies = [\"NestedMissing\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("deps/dep-plugin/src/Export.as"),
+        "namespace Shared {\n    import void FromDep() from \"DepPlugin\";\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"Consumer\"\nversion = \"0.1.0\"\n\n[script]\ndependencies = [\"DepPlugin\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n    Shared::MaybeInNestedMissing();\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("deps"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("No matching symbol"),
+        "an unresolved nested export_dependency must silence the rule; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
+}

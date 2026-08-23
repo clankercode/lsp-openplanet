@@ -85,11 +85,13 @@ impl AnalysisSnapshot {
             });
         }
         // GH #58: the pool is the plugin's complete module closure only
-        // when a real workspace root was walked AND every required
-        // dependency resolved. Diagnostics that read the absence of a name
-        // as a game-compiler rejection gate on this — an in-memory or
-        // open-documents-only pool never claims it.
-        if !load.root.as_os_str().is_empty() && load.missing_required_dependencies.is_empty() {
+        // when the loader walked a real root and every declared dependency
+        // resolved (optional and transitive export_dependencies included).
+        // Diagnostics that read the absence of a name as a game-compiler
+        // rejection gate on this — an in-memory pool, or the
+        // open-documents-only fallback the server builds when the disk load
+        // failed, never claims it.
+        if load.dependency_closure_complete {
             table.mark_dependency_closure_complete();
         }
         // Own-module view for diagnostics: identical pool except strict
@@ -138,6 +140,7 @@ impl AnalysisSnapshot {
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
+            dependency_closure_complete: false,
             export_paths: HashSet::new(),
             strict_export_paths: HashSet::new(),
         };
@@ -158,6 +161,7 @@ impl AnalysisSnapshot {
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
+            dependency_closure_complete: false,
             export_paths: Default::default(),
             strict_export_paths: Default::default(),
         };

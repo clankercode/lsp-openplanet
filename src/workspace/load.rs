@@ -29,6 +29,16 @@ pub struct PluginWorkspaceLoad {
     pub files: Vec<WorkspaceSourceFile>,
     /// Required dependencies that could not be resolved in any plugins dir.
     pub missing_required_dependencies: Vec<String>,
+    /// True only when [`load_plugin_workspace`] walked a real plugin root
+    /// AND every declared dependency resolved — required, optional, and the
+    /// transitive `export_dependencies` of a resolved dep alike. Diagnostics
+    /// that read the absence of a name as a game-compiler rejection must
+    /// gate on this (GH #58): an unreadable module may declare the very
+    /// symbol being called, and `LspConfig::apply_manifest` defines
+    /// `DEPENDENCY_<ID>` for declared optional deps whether or not they
+    /// resolved, so `#if`-guarded code the game would mask out stays live
+    /// here. Every open-documents-only fallback leaves it `false`.
+    pub dependency_closure_complete: bool,
     /// Canonicalized absolute paths of files listed in this plugin's own
     /// info.toml `[script]` `exports` + `shared_exports`; decls in these
     /// files are public API and exempt from unused-declaration warnings.
@@ -215,6 +225,7 @@ pub fn load_plugin_workspace(
         root,
         files,
         missing_required_dependencies: dep.missing_required,
+        dependency_closure_complete: dep.unresolved.is_empty(),
         export_paths,
         strict_export_paths,
     })
@@ -255,6 +266,7 @@ pub fn merge_open_documents(
         root: base.root.clone(),
         files,
         missing_required_dependencies: base.missing_required_dependencies.clone(),
+        dependency_closure_complete: base.dependency_closure_complete,
         export_paths: base.export_paths.clone(),
         strict_export_paths: base.strict_export_paths.clone(),
     }
@@ -274,6 +286,9 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 struct DepLoad {
     loaded_files: Vec<(PathBuf, String)>,
     missing_required: Vec<String>,
+    /// Every declared dependency that failed to resolve, whatever its kind
+    /// — drives `PluginWorkspaceLoad::dependency_closure_complete`.
+    unresolved: Vec<String>,
 }
 
 fn load_dependency_exports(
@@ -340,6 +355,10 @@ fn load_dependency_exports(
                 }
             }
             None => {
+                // Any unresolved dependency, whatever its kind, means the
+                // pooled symbol set is no longer the complete module
+                // closure (GH #58).
+                result.unresolved.push(dep_id.clone());
                 if is_required {
                     result.missing_required.push(dep_id);
                 } else if let Some(parent) = required_by {
