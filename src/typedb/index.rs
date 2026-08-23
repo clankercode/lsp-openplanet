@@ -361,8 +361,20 @@ impl TypeIndex {
     }
 
     fn add_nadeo(&mut self, db: &NadeoDatabase) {
-        for (ns_name, types) in &db.ns {
-            for (type_name, nadeo_type) in types {
+        // Deterministic registration order (GH #59): 66 inline member-enum
+        // type names collide within a module (15 different anonymous enums
+        // are all `Control::UnnamedEnum`), and the `or_insert` below keeps
+        // whichever arrives first. Iterating the `ns`/type HashMaps directly
+        // therefore made the loaded index — and anything derived from it —
+        // differ between two loads of the *same* file. Sorting both levels
+        // costs one 20-key and one per-module sort and makes `TypeIndex`
+        // a function of the file's contents again.
+        let mut modules: Vec<_> = db.ns.iter().collect();
+        modules.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (ns_name, types) in modules {
+            let mut type_entries: Vec<_> = types.iter().collect();
+            type_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (type_name, nadeo_type) in type_entries {
                 let qname = format!("{}::{}", ns_name, type_name);
                 let mut methods = Vec::new();
                 let mut properties = Vec::new();
@@ -601,6 +613,234 @@ impl TypeIndex {
     pub fn enum_count(&self) -> usize {
         self.enums.len()
     }
+}
+
+// === Symbol-level DB diff (GH #59) ===
+
+/// Which DB entry a diff row is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DbSymbolKind {
+    Class,
+    Enum,
+    Function,
+}
+
+impl DbSymbolKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Enum => "enum",
+            Self::Function => "function",
+        }
+    }
+}
+
+/// A qualified entry present in exactly one of the two DBs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DbSymbol {
+    pub kind: DbSymbolKind,
+    /// Fully qualified name (`Display::GetWidth`, `MwFoundations::CMwNod`).
+    pub name: String,
+}
+
+/// A qualified entry present in both DBs whose contents moved. `details`
+/// is the rendered symmetric difference of its facts, `-` lines (only in
+/// the old DB) before `+` lines (only in the new one).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DbChange {
+    pub kind: DbSymbolKind,
+    pub name: String,
+    pub details: Vec<String>,
+}
+
+/// Symbol-level parity report between two loaded type databases.
+///
+/// Every bucket is sorted, so the same pair of DBs always produces the
+/// same report (`HashMap` iteration order is not stable).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DbDiff {
+    pub added: Vec<DbSymbol>,
+    pub removed: Vec<DbSymbol>,
+    pub changed: Vec<DbChange>,
+}
+
+impl DbDiff {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
+    }
+
+    /// `(added, removed, changed)` entry counts.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        (self.added.len(), self.removed.len(), self.changed.len())
+    }
+}
+
+/// Diff two loaded type databases entry by entry.
+///
+/// Entries are keyed by qualified name across three kinds (classes, enums,
+/// function overload sets). A name in only one DB is added/removed; a name
+/// in both whose *facts* differ is changed.
+///
+/// "Facts" are the semantics the checker actually consumes — method and
+/// overload signatures (including `&out` flags and parameter defaults),
+/// property types and writability, inheritance, single-argument
+/// constructor conversions, and enum values. Anything the checker ignores
+/// (docs, ids, descriptions) is deliberately not compared, so a doc-only
+/// DB refresh reports zero drift.
+///
+/// Note: Core's top-level `funcdefs`/`props` are not part of [`TypeIndex`]
+/// and therefore not diffed here — [`TypeDbCounts`] tracks those.
+pub fn diff_indexes(old: &TypeIndex, new: &TypeIndex) -> DbDiff {
+    let mut diff = DbDiff::default();
+    diff_entries(
+        DbSymbolKind::Class,
+        &old.types,
+        &new.types,
+        class_facts,
+        &mut diff,
+    );
+    diff_entries(
+        DbSymbolKind::Enum,
+        &old.enums,
+        &new.enums,
+        enum_facts,
+        &mut diff,
+    );
+    diff_entries(
+        DbSymbolKind::Function,
+        &old.functions,
+        &new.functions,
+        overload_facts,
+        &mut diff,
+    );
+    diff.added.sort();
+    diff.removed.sort();
+    diff.changed.sort();
+    diff
+}
+
+/// Diff one keyed entry map, appending into the shared buckets.
+fn diff_entries<T>(
+    kind: DbSymbolKind,
+    old: &HashMap<String, T>,
+    new: &HashMap<String, T>,
+    facts: fn(&T) -> std::collections::BTreeSet<String>,
+    diff: &mut DbDiff,
+) {
+    for (name, entry) in old {
+        match new.get(name) {
+            None => diff.removed.push(DbSymbol {
+                kind,
+                name: name.clone(),
+            }),
+            Some(other) => {
+                let details = fact_delta(&facts(entry), &facts(other));
+                if !details.is_empty() {
+                    diff.changed.push(DbChange {
+                        kind,
+                        name: name.clone(),
+                        details,
+                    });
+                }
+            }
+        }
+    }
+    for name in new.keys() {
+        if !old.contains_key(name) {
+            diff.added.push(DbSymbol {
+                kind,
+                name: name.clone(),
+            });
+        }
+    }
+}
+
+/// Rendered symmetric difference: `- fact` for old-only, `+ fact` for
+/// new-only. Empty when the two fact sets match.
+fn fact_delta(
+    old: &std::collections::BTreeSet<String>,
+    new: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = old.difference(new).map(|f| format!("- {f}")).collect();
+    out.extend(new.difference(old).map(|f| format!("+ {f}")));
+    out
+}
+
+/// The Nadeo dump carries no return types (it uses numeric type ids), so an
+/// empty return renders as `?` on both sides rather than reading as drift.
+fn render_return(return_type: &str) -> &str {
+    if return_type.is_empty() {
+        "?"
+    } else {
+        return_type
+    }
+}
+
+fn render_params(params: &[ParamInfo]) -> String {
+    params
+        .iter()
+        .map(|p| {
+            let mut rendered = p.type_name.clone();
+            if p.is_out {
+                rendered.push_str(" &out");
+            }
+            if let Some(default) = &p.default {
+                rendered.push_str(&format!(" = {default}"));
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn class_facts(info: &TypeInfo) -> std::collections::BTreeSet<String> {
+    let mut facts = std::collections::BTreeSet::new();
+    if let Some(parent) = &info.parent {
+        facts.insert(format!("inherits {parent}"));
+    }
+    for method in &info.methods {
+        facts.insert(format!(
+            "method {}({}) -> {}{}",
+            method.name,
+            render_params(&method.params),
+            render_return(&method.return_type),
+            if method.is_const { " const" } else { "" }
+        ));
+    }
+    for prop in &info.properties {
+        facts.insert(format!(
+            "prop {}: {}{}",
+            prop.name,
+            prop.type_name,
+            if prop.writable { "" } else { " (get-only)" }
+        ));
+    }
+    for source in &info.ctor_conversions {
+        facts.insert(format!("ctor from {source}"));
+    }
+    facts
+}
+
+fn enum_facts(info: &EnumInfo) -> std::collections::BTreeSet<String> {
+    info.values
+        .iter()
+        .map(|(name, value)| format!("value {name} = {value}"))
+        .collect()
+}
+
+/// One fact per overload, so an added or dropped overload of an existing
+/// name reads as a change to that name rather than an add/remove.
+fn overload_facts(overloads: &Vec<FunctionInfo>) -> std::collections::BTreeSet<String> {
+    overloads
+        .iter()
+        .map(|func| {
+            format!(
+                "overload ({}) -> {}",
+                render_params(&func.params),
+                render_return(&func.return_type)
+            )
+        })
+        .collect()
 }
 
 /// AngelScript `asBEHAVE_CONSTRUCT` — the value-type constructor behavior.
@@ -990,5 +1230,489 @@ mod meta_tests {
         assert!(game.mp.is_some(), "game mp missing");
         assert!(game.counts.classes > 2000, "{:?}", game.counts);
         assert!(game.counts.ns_modules > 10, "{:?}", game.counts);
+    }
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    const EMPTY_NADEO: &str = r#"{"op":"1.0.0","ns":{}}"#;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "openplanet-lsp-typedb-diff-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn index_from(tag: &str, core: &str, nadeo: &str) -> TypeIndex {
+        let dir = tmp_dir(tag);
+        let core_path = dir.join("OpenplanetCore.json");
+        let nadeo_path = dir.join("OpenplanetNext.json");
+        std::fs::write(&core_path, core).unwrap();
+        std::fs::write(&nadeo_path, nadeo).unwrap();
+        TypeIndex::load(&core_path, &nadeo_path).unwrap()
+    }
+
+    fn core_index(tag: &str, core: &str) -> TypeIndex {
+        index_from(tag, core, EMPTY_NADEO)
+    }
+
+    /// `{"functions": [...]}` with one overload set.
+    fn core_with_function(args: &str, ret: &str) -> String {
+        format!(
+            r#"{{"op":"1.0.0","functions":[{{"ns":"UI","name":"Begin","returntypedecl":"{ret}","args":{args}}}]}}"#
+        )
+    }
+
+    fn names(symbols: &[DbSymbol]) -> Vec<String> {
+        symbols.iter().map(|s| s.name.clone()).collect()
+    }
+
+    // === no-change baseline ===
+
+    /// The property the whole pipeline rests on: a DB diffed against an
+    /// identical DB reports nothing.
+    #[test]
+    fn diff_identical_indexes_is_empty() {
+        let core = core_with_function(r#"[{"name":"label","typedecl":"string"}]"#, "bool");
+        let old = core_index("same-old", &core);
+        let new = core_index("same-new", &core);
+        let diff = diff_indexes(&old, &new);
+        assert!(diff.is_empty(), "{diff:?}");
+        assert_eq!(diff.counts(), (0, 0, 0));
+    }
+
+    /// The shipped fixtures diffed against themselves — the real-scale
+    /// no-op case (2585 engine classes) `just typedb-refresh` relies on.
+    #[test]
+    fn diff_repo_fixture_against_itself_is_empty() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let load = || {
+            TypeIndex::load(
+                &dir.join("OpenplanetCore.json"),
+                &dir.join("OpenplanetNext.json"),
+            )
+            .unwrap()
+        };
+        let diff = diff_indexes(&load(), &load());
+        assert_eq!(diff.counts(), (0, 0, 0), "{diff:?}");
+    }
+
+    // === added / removed ===
+
+    #[test]
+    fn diff_reports_removed_function() {
+        let old = core_index("rm-fn-old", &core_with_function("[]", "bool"));
+        let new = core_index("rm-fn-new", r#"{"op":"1.0.0","functions":[]}"#);
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(names(&diff.removed), vec!["UI::Begin"]);
+        assert_eq!(diff.removed[0].kind, DbSymbolKind::Function);
+        assert!(diff.added.is_empty() && diff.changed.is_empty(), "{diff:?}");
+    }
+
+    #[test]
+    fn diff_reports_added_function() {
+        let old = core_index("add-fn-old", r#"{"op":"1.0.0","functions":[]}"#);
+        let new = core_index("add-fn-new", &core_with_function("[]", "bool"));
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(names(&diff.added), vec!["UI::Begin"]);
+        assert!(
+            diff.removed.is_empty() && diff.changed.is_empty(),
+            "{diff:?}"
+        );
+    }
+
+    #[test]
+    fn diff_reports_added_and_removed_enum() {
+        let with_enum =
+            r#"{"op":"1.0.0","enums":[{"ns":"UI","name":"Cond","values":{"Always":{"v":0}}}]}"#;
+        let without = r#"{"op":"1.0.0","enums":[]}"#;
+
+        let diff = diff_indexes(
+            &core_index("add-en-old", without),
+            &core_index("add-en-new", with_enum),
+        );
+        assert_eq!(names(&diff.added), vec!["UI::Cond"]);
+        assert_eq!(diff.added[0].kind, DbSymbolKind::Enum);
+
+        let diff = diff_indexes(
+            &core_index("rm-en-old", with_enum),
+            &core_index("rm-en-new", without),
+        );
+        assert_eq!(names(&diff.removed), vec!["UI::Cond"]);
+    }
+
+    #[test]
+    fn diff_reports_added_and_removed_class() {
+        let with_class = r#"{"op":"1.0.0","classes":[{"ns":"Net","name":"HttpRequest"}]}"#;
+        let without = r#"{"op":"1.0.0","classes":[]}"#;
+
+        let diff = diff_indexes(
+            &core_index("add-cls-old", without),
+            &core_index("add-cls-new", with_class),
+        );
+        assert_eq!(names(&diff.added), vec!["Net::HttpRequest"]);
+        assert_eq!(diff.added[0].kind, DbSymbolKind::Class);
+
+        let diff = diff_indexes(
+            &core_index("rm-cls-old", with_class),
+            &core_index("rm-cls-new", without),
+        );
+        assert_eq!(names(&diff.removed), vec!["Net::HttpRequest"]);
+    }
+
+    /// Nadeo-side classes participate too — the 2585-class dump is where
+    /// engine-API drift shows up.
+    #[test]
+    fn diff_reports_removed_nadeo_class() {
+        let core = r#"{"op":"1.0.0"}"#;
+        let old = index_from(
+            "rm-nadeo-old",
+            core,
+            r#"{"op":"1.0.0","ns":{"MwFoundations":{"CMwNod":{"m":[]}}}}"#,
+        );
+        let new = index_from("rm-nadeo-new", core, EMPTY_NADEO);
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(names(&diff.removed), vec!["MwFoundations::CMwNod"]);
+    }
+
+    // === changed ===
+
+    /// An overload added under an existing name is a change, not an
+    /// addition — the name still resolves, its signature set moved.
+    #[test]
+    fn diff_reports_added_overload_as_change() {
+        let old = core_index("ovl-old", &core_with_function("[]", "bool"));
+        let new = core_index(
+            "ovl-new",
+            r#"{"op":"1.0.0","functions":[
+                {"ns":"UI","name":"Begin","returntypedecl":"bool","args":[]},
+                {"ns":"UI","name":"Begin","returntypedecl":"bool","args":[{"name":"label","typedecl":"string"}]}]}"#,
+        );
+        let diff = diff_indexes(&old, &new);
+        assert!(diff.added.is_empty() && diff.removed.is_empty(), "{diff:?}");
+        assert_eq!(diff.changed.len(), 1);
+        assert_eq!(diff.changed[0].name, "UI::Begin");
+        assert_eq!(diff.changed[0].kind, DbSymbolKind::Function);
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|d| d.starts_with('+') && d.contains("string")),
+            "{:?}",
+            diff.changed[0].details
+        );
+    }
+
+    #[test]
+    fn diff_reports_changed_function_return_type() {
+        let old = core_index("ret-old", &core_with_function("[]", "bool"));
+        let new = core_index("ret-new", &core_with_function("[]", "int"));
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        let details = &diff.changed[0].details;
+        assert!(
+            details
+                .iter()
+                .any(|d| d.starts_with('-') && d.contains("bool")),
+            "{details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|d| d.starts_with('+') && d.contains("int")),
+            "{details:?}"
+        );
+    }
+
+    /// A parameter default appearing or disappearing changes which calls
+    /// compile, so it counts as drift.
+    #[test]
+    fn diff_reports_changed_param_default() {
+        let old = core_index(
+            "def-old",
+            &core_with_function(r#"[{"name":"n","typedecl":"int"}]"#, "bool"),
+        );
+        let new = core_index(
+            "def-new",
+            &core_with_function(r#"[{"name":"n","typedecl":"int","default":"0"}]"#, "bool"),
+        );
+        assert_eq!(diff_indexes(&old, &new).counts(), (0, 0, 1));
+    }
+
+    /// `&out` (typeflags bit 2) decides whether an r-value argument binds
+    /// (GH #47) — a flag flip is drift.
+    #[test]
+    fn diff_reports_changed_out_parameter_flag() {
+        let old = core_index(
+            "out-old",
+            &core_with_function(r#"[{"name":"n","typedecl":"int","typeflags":0}]"#, "bool"),
+        );
+        let new = core_index(
+            "out-new",
+            &core_with_function(r#"[{"name":"n","typedecl":"int","typeflags":2}]"#, "bool"),
+        );
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert!(
+            diff.changed[0].details.iter().any(|d| d.contains("&out")),
+            "{:?}",
+            diff.changed[0].details
+        );
+    }
+
+    #[test]
+    fn diff_reports_changed_method_signature() {
+        let class = |args: &str| {
+            format!(
+                r#"{{"op":"1.0.0","classes":[{{"ns":"Net","name":"HttpRequest","methods":[{{"name":"Start","returntypedecl":"void","args":{args}}}]}}]}}"#
+            )
+        };
+        let old = core_index("meth-old", &class("[]"));
+        let new = core_index("meth-new", &class(r#"[{"name":"n","typedecl":"int"}]"#));
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert_eq!(diff.changed[0].name, "Net::HttpRequest");
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|d| d.contains("method Start")),
+            "{:?}",
+            diff.changed[0].details
+        );
+    }
+
+    #[test]
+    fn diff_reports_changed_property_type() {
+        let class = |ty: &str| {
+            format!(
+                r#"{{"op":"1.0.0","classes":[{{"ns":"Net","name":"HttpRequest","props":[{{"name":"Ready","typedecl":"{ty}"}}]}}]}}"#
+            )
+        };
+        let diff = diff_indexes(
+            &core_index("prop-old", &class("bool")),
+            &core_index("prop-new", &class("int")),
+        );
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|d| d.contains("prop Ready")),
+            "{:?}",
+            diff.changed[0].details
+        );
+    }
+
+    /// Losing a `set_` accessor turns a writable property read-only — the
+    /// game then rejects assignment, so it is drift the diff must show.
+    #[test]
+    fn diff_reports_property_losing_its_setter() {
+        let with_set = r#"{"op":"1.0.0","classes":[{"ns":"Math","name":"iso4","methods":[
+            {"name":"get_tx","returntypedecl":"float","args":[]},
+            {"name":"set_tx","returntypedecl":"void","args":[{"name":"v","typedecl":"float"}]}]}]}"#;
+        let without = r#"{"op":"1.0.0","classes":[{"ns":"Math","name":"iso4","methods":[
+            {"name":"get_tx","returntypedecl":"float","args":[]}]}]}"#;
+        let diff = diff_indexes(
+            &core_index("set-old", with_set),
+            &core_index("set-new", without),
+        );
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|d| d.contains("get-only")),
+            "{:?}",
+            diff.changed[0].details
+        );
+    }
+
+    #[test]
+    fn diff_reports_changed_class_parent() {
+        let class = |parent: &str| {
+            format!(
+                r#"{{"op":"1.0.0","classes":[{{"ns":"Net","name":"HttpRequest","inherits":"{parent}"}}]}}"#
+            )
+        };
+        let diff = diff_indexes(
+            &core_index("parent-old", &class("Base")),
+            &core_index("parent-new", &class("Other")),
+        );
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|d| d.contains("inherits")),
+            "{:?}",
+            diff.changed[0].details
+        );
+    }
+
+    /// Single-argument constructor behaviors are the implicit-conversion set
+    /// (GH #54) — gaining or losing one changes what compiles.
+    #[test]
+    fn diff_reports_changed_ctor_conversions() {
+        let class = |behaviors: &str| {
+            format!(
+                r#"{{"op":"1.0.0","classes":[{{"ns":"Math","name":"mat4","behaviors":{behaviors}}}]}}"#
+            )
+        };
+        let diff = diff_indexes(
+            &core_index("ctor-old", &class("[]")),
+            &core_index(
+                "ctor-new",
+                &class(r#"[{"type":0,"func":{"args":[{"typedecl":"mat3"}]}}]"#),
+            ),
+        );
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|d| d.contains("ctor from mat3")),
+            "{:?}",
+            diff.changed[0].details
+        );
+    }
+
+    #[test]
+    fn diff_reports_changed_enum_value() {
+        let en = |v: i64| {
+            format!(
+                r#"{{"op":"1.0.0","enums":[{{"ns":"UI","name":"Cond","values":{{"Always":{{"v":{v}}}}}}}]}}"#
+            )
+        };
+        let diff = diff_indexes(
+            &core_index("enval-old", &en(0)),
+            &core_index("enval-new", &en(1)),
+        );
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert_eq!(diff.changed[0].kind, DbSymbolKind::Enum);
+        assert!(
+            diff.changed[0].details.iter().any(|d| d.contains("Always")),
+            "{:?}",
+            diff.changed[0].details
+        );
+    }
+
+    #[test]
+    fn diff_reports_added_enum_member() {
+        let old = core_index(
+            "enmem-old",
+            r#"{"op":"1.0.0","enums":[{"ns":"UI","name":"Cond","values":{"Always":{"v":0}}}]}"#,
+        );
+        let new = core_index(
+            "enmem-new",
+            r#"{"op":"1.0.0","enums":[{"ns":"UI","name":"Cond","values":{"Always":{"v":0},"Once":{"v":1}}}]}"#,
+        );
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|d| d.starts_with('+') && d.contains("Once")),
+            "{:?}",
+            diff.changed[0].details
+        );
+    }
+
+    /// Regression guard for the load-order bug this diff surfaced: 66 inline
+    /// member-enum type names collide within a Nadeo module (15 distinct
+    /// anonymous enums are all `Control::UnnamedEnum`) and are resolved by
+    /// `or_insert`. Iterating the `ns`/type HashMaps directly made the loaded
+    /// index differ between two loads of the same bytes. Same file in ⇒ same
+    /// index out.
+    #[test]
+    fn loading_the_same_db_twice_yields_identical_enums() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let load = || {
+            TypeIndex::load(
+                &dir.join("OpenplanetCore.json"),
+                &dir.join("OpenplanetNext.json"),
+            )
+            .unwrap()
+        };
+        let facts = |index: &TypeIndex| {
+            let mut all: Vec<String> = index
+                .enums_iter()
+                .flat_map(|(qname, info)| {
+                    info.values
+                        .iter()
+                        .map(move |(name, v)| format!("{qname}::{name} = {v}"))
+                })
+                .collect();
+            all.sort();
+            all
+        };
+        let (a, b) = (load(), load());
+        let (fa, fb) = (facts(&a), facts(&b));
+        assert_eq!(
+            fa.len(),
+            fb.len(),
+            "enum value count must not depend on HashMap iteration order"
+        );
+        assert_eq!(fa, fb, "two loads of the same DB must agree");
+
+        // Colliding keys still resolve to exactly one entry — the point is
+        // that it is always the *same* one.
+        assert!(
+            a.lookup_enum("Control::UnnamedEnum").is_some(),
+            "the colliding key should still be registered"
+        );
+    }
+
+    // === ordering / shape ===
+
+    /// Output is sorted so a diff is stable across runs (HashMap iteration
+    /// order is not).
+    #[test]
+    fn diff_output_is_sorted_and_deterministic() {
+        let old = core_index("sort-old", r#"{"op":"1.0.0","classes":[]}"#);
+        let new = core_index(
+            "sort-new",
+            r#"{"op":"1.0.0","classes":[{"ns":"Z","name":"Zed"},{"ns":"A","name":"Ay"},{"ns":"M","name":"Em"}]}"#,
+        );
+        let first = diff_indexes(&old, &new);
+        assert_eq!(names(&first.added), vec!["A::Ay", "M::Em", "Z::Zed"]);
+        assert_eq!(first, diff_indexes(&old, &new), "diff must be stable");
+    }
+
+    /// Removals and additions across kinds are bucketed, not merged.
+    #[test]
+    fn diff_buckets_mixed_kinds_separately() {
+        let old = core_index(
+            "mix-old",
+            r#"{"op":"1.0.0","classes":[{"ns":"A","name":"Gone"}],"enums":[],"functions":[]}"#,
+        );
+        let new = core_index(
+            "mix-new",
+            r#"{"op":"1.0.0","classes":[],"enums":[{"ns":"B","name":"New","values":{}}],
+                "functions":[{"ns":"C","name":"Fresh","returntypedecl":"void","args":[]}]}"#,
+        );
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(diff.counts(), (2, 1, 0), "{diff:?}");
+        assert_eq!(
+            diff.added
+                .iter()
+                .map(|s| (s.kind, s.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (DbSymbolKind::Enum, "B::New"),
+                (DbSymbolKind::Function, "C::Fresh"),
+            ]
+        );
+        assert_eq!(names(&diff.removed), vec!["A::Gone"]);
     }
 }

@@ -440,3 +440,224 @@ fn check_args_no_typedb(root: &PathBuf, extra: &[&str]) -> Vec<String> {
     args.extend(extra.iter().map(|s| s.to_string()));
     args
 }
+
+// === diff (task 4) ===
+
+/// Minimal synthetic DB pair, so a diff case is a two-line edit rather than
+/// a doctored 2 MB dump.
+fn tmp_synthetic_db(tag: &str, core: &str) -> PathBuf {
+    let dir = tmp_dir(&format!("db-{tag}"));
+    fs::write(dir.join("OpenplanetCore.json"), core).unwrap();
+    fs::write(
+        dir.join("OpenplanetNext.json"),
+        r#"{"op":"1.29.5","mp":"2026-02-03 03:51:19","ns":{}}"#,
+    )
+    .unwrap();
+    dir
+}
+
+const SYNTH_CORE_WITH_FN: &str = r#"{"op":"1.29.5","functions":[
+    {"ns":"Display","name":"GetWidth","returntypedecl":"int","args":[]}],
+    "classes":[],"enums":[]}"#;
+const SYNTH_CORE_WITHOUT_FN: &str = r#"{"op":"1.29.5","functions":[],"classes":[],"enums":[]}"#;
+
+/// The property `just typedb-refresh` rests on: the shipped fixture diffed
+/// against a byte-identical copy reports nothing at all.
+#[test]
+fn typedb_diff_identical_dirs_report_no_changes() {
+    let copy = tmp_install("diff-same");
+    let r = run(
+        bin_without_install("diff-same"),
+        &[
+            "typedb",
+            "diff",
+            fixture_typedb().to_str().unwrap(),
+            copy.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        r.stdout.contains("0 added, 0 removed, 0 changed"),
+        "expected an all-zero summary: {}",
+        r.stdout
+    );
+}
+
+/// With one directory, NEW defaults to the auto-detected install — what
+/// `just typedb-diff` uses instead of hardcoding a home path.
+#[test]
+fn typedb_diff_defaults_new_dir_to_auto_detected_install() {
+    let home = tmp_dir("diff-home");
+    let install = home.join("OpenplanetNext");
+    fs::create_dir_all(&install).unwrap();
+    for name in ["OpenplanetCore.json", "OpenplanetNext.json"] {
+        fs::copy(fixture_typedb().join(name), install.join(name)).unwrap();
+    }
+    let mut cmd = bin();
+    cmd.env("HOME", &home).env("USERPROFILE", &home);
+    let r = run(cmd, &["typedb", "diff", fixture_typedb().to_str().unwrap()]);
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        r.stdout.contains("0 added, 0 removed, 0 changed"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("OpenplanetNext"),
+        "the resolved install should be named in the header: {}",
+        r.stdout
+    );
+}
+
+/// Without an install and without NEW_DIR there is nothing to compare
+/// against — a failure, not a zero diff.
+#[test]
+fn typedb_diff_without_new_dir_or_install_exits_one() {
+    let r = run(
+        bin_without_install("diff-noinstall"),
+        &["typedb", "diff", fixture_typedb().to_str().unwrap()],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert!(
+        r.stderr.contains("error:"),
+        "expected an error line: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn typedb_diff_reports_removed_and_added_symbols() {
+    let with_fn = tmp_synthetic_db("diff-with", SYNTH_CORE_WITH_FN);
+    let without_fn = tmp_synthetic_db("diff-without", SYNTH_CORE_WITHOUT_FN);
+
+    let r = run(
+        bin_without_install("diff-removed"),
+        &[
+            "typedb",
+            "diff",
+            with_fn.to_str().unwrap(),
+            without_fn.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        r.stdout.contains("0 added, 1 removed, 0 changed"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("Display::GetWidth"),
+        "the removed symbol must be named: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("function"),
+        "the removed symbol's kind must be named: {}",
+        r.stdout
+    );
+
+    // Reversed: the same edit read the other way is an addition.
+    let r = run(
+        bin_without_install("diff-added"),
+        &[
+            "typedb",
+            "diff",
+            without_fn.to_str().unwrap(),
+            with_fn.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        r.stdout.contains("1 added, 0 removed, 0 changed"),
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn typedb_diff_reports_changed_symbols_with_detail() {
+    let old = tmp_synthetic_db("diff-chg-old", SYNTH_CORE_WITH_FN);
+    let new = tmp_synthetic_db(
+        "diff-chg-new",
+        r#"{"op":"1.29.5","functions":[
+            {"ns":"Display","name":"GetWidth","returntypedecl":"uint","args":[]}],
+            "classes":[],"enums":[]}"#,
+    );
+    let r = run(
+        bin_without_install("diff-changed"),
+        &[
+            "typedb",
+            "diff",
+            old.to_str().unwrap(),
+            new.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        r.stdout.contains("0 added, 0 removed, 1 changed"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("- overload () -> int") && r.stdout.contains("+ overload () -> uint"),
+        "the changed signature must be shown both ways: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn typedb_diff_json_lists_every_bucket() {
+    let old = tmp_synthetic_db("diff-json-old", SYNTH_CORE_WITH_FN);
+    let new = tmp_synthetic_db("diff-json-new", SYNTH_CORE_WITHOUT_FN);
+    let r = run(
+        bin_without_install("diff-json"),
+        &[
+            "typedb",
+            "diff",
+            old.to_str().unwrap(),
+            new.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let parsed: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("diff --json must emit one object ({e}): {}", r.stdout));
+    assert_eq!(parsed["summary"]["removed"], 1);
+    assert_eq!(parsed["summary"]["added"], 0);
+    assert_eq!(parsed["summary"]["changed"], 0);
+    assert_eq!(parsed["removed"][0]["name"], "Display::GetWidth");
+    assert_eq!(parsed["removed"][0]["kind"], "function");
+    assert!(parsed["added"].is_array() && parsed["changed"].is_array());
+    assert!(parsed["old"].as_str().unwrap().contains("diff-json-old"));
+    assert!(parsed["new"].as_str().unwrap().contains("diff-json-new"));
+}
+
+#[test]
+fn typedb_diff_missing_dir_exits_one() {
+    let r = run(
+        bin_without_install("diff-missing"),
+        &[
+            "typedb",
+            "diff",
+            "/nonexistent-openplanet-dir",
+            fixture_typedb().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert!(r.stderr.contains("OpenplanetCore.json"), "{}", r.stderr);
+}
+
+#[test]
+fn typedb_diff_without_arguments_is_a_usage_error() {
+    let r = run(bin_without_install("diff-noargs"), &["typedb", "diff"]);
+    assert_eq!(r.code, Some(2), "{}", r.all());
+}
+
+#[test]
+fn typedb_diff_with_three_dirs_is_a_usage_error() {
+    let d = fixture_typedb().to_str().unwrap().to_string();
+    let r = run(
+        bin_without_install("diff-3dirs"),
+        &["typedb", "diff", &d, &d, &d],
+    );
+    assert_eq!(r.code, Some(2), "{}", r.all());
+}
