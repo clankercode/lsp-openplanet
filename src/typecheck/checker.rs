@@ -862,6 +862,31 @@ impl<'a> Checker<'a> {
                                     .entry(qual.clone())
                                     .or_default()
                                     .insert(method_name.clone());
+                                // AngelScript virtual-property accessors:
+                                // `get_X()`/`set_X()` expose member `X`, so
+                                // register the PROPERTY name as present too
+                                // (the accessor itself is also kept). This is
+                                // what lets `q.f0` resolve when the class
+                                // only declares `get_f0`/`set_f0` (E++
+                                // GameQuat, ClickFlags real-world shapes).
+                                // A const getter satisfies const receivers;
+                                // the property name inherits `is_const`.
+                                if let Some(prop) = method_name
+                                    .strip_prefix("get_")
+                                    .or_else(|| method_name.strip_prefix("set_"))
+                                {
+                                    if !prop.is_empty() {
+                                        self.file_class_methods
+                                            .entry(qual.clone())
+                                            .or_default()
+                                            .insert(prop.to_string());
+                                        if func.is_const {
+                                            self.file_const_methods
+                                                .insert((qual.clone(), prop.to_string()));
+                                        }
+                                        members.push((prop.to_string(), ret.clone()));
+                                    }
+                                }
                                 members.push((method_name, ret));
                             }
                             _ => {}
@@ -8198,6 +8223,108 @@ class C {
              void f() { Ctx@ c = Ctx(); int y = c.x; }",
         );
         assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    // === Virtual-property accessors on parentless classes (FP fix,
+    // 2026-08-23 review pass) ===
+    //
+    // AngelScript's get_/set_ convention: `obj.prop` is legal when the
+    // class declares `T get_prop()` and/or `set_prop(T v)`. The
+    // UndefinedMember gate must honor it — real-world FPs: E++
+    // ClickFlags.get_RMB → .RMB, GameQuat.get_f0 → .f0, AABB.get_pos →
+    // .pos; dips++ DonoCheerCount.get_TotalAmt → .TotalAmt (16 errors
+    // across the two fixture plugins).
+
+    /// RED: getter accessor satisfies a member read.
+    #[test]
+    fn getter_accessor_satisfies_member_read() {
+        let diags = check(
+            "class C { int flags; bool get_RMB() { return true; } } \
+             void f(const C &in c) { bool b = c.RMB; }",
+        );
+        assert!(
+            diags.is_empty(),
+            "get_RMB must satisfy .RMB, got {:?}",
+            diags
+        );
+    }
+
+    /// RED: setter accessor satisfies a member write/read reference.
+    #[test]
+    fn setter_accessor_satisfies_member_reference() {
+        let diags = check(
+            "class C { float q; void set_f0(float v) { q = v; } } \
+             void f(C@ c) { c.f0 = 1.0; }",
+        );
+        assert!(diags.is_empty(), "set_f0 must satisfy .f0, got {:?}", diags);
+    }
+
+    /// Getter + setter pair (the GameQuat.f0 shape): read and write both
+    /// satisfied.
+    #[test]
+    fn getter_setter_pair_satisfies_member() {
+        let diags = check(
+            "class Q { float q; float get_f0() const { return q; } void set_f0(float v) { q = v; } } \
+             void f(Q@ q) { float a = q.f0; q.f0 = a; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(
+                |d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { member, .. } if member == "f0"),
+            )
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "get/set pair must satisfy .f0, got {:?}",
+            diags
+        );
+    }
+
+    /// Accessors on the receiver class still fire for a DIFFERENT,
+    /// genuinely-missing member — the fix must not blanket-silence.
+    #[test]
+    fn accessor_present_but_other_member_still_fires() {
+        let diags = check(
+            "class C { int flags; bool get_RMB() { return true; } } \
+             void f(const C &in c) { bool b = c.Nope; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::UndefinedMember { object_type, member } if object_type == "C" && member == "Nope"
+                )
+            })
+            .collect();
+        assert_eq!(bad.len(), 1, "Nope must still fire, got {:?}", diags);
+    }
+
+    /// Method-call form `c.RMB()` invokes the non-const getter directly —
+    /// const-receiver rule still applies (game parity: direct accessor
+    /// call = normal method call). The property READ form stays silent
+    /// via the property registration; this variant pins the call form.
+    #[test]
+    fn accessor_only_method_call_on_const_receiver_fires() {
+        let diags = check(
+            "class C { int flags; bool get_RMB() { return true; } } \
+             void f(const C &in c) { c.RMB(); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { method, object_type } if method == "RMB" && object_type == "C"
+                )
+            })
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "const receiver + non-const accessor call must fire, got {:?}",
+            diags
+        );
     }
 
     /// this.bogus inside a method of a parentless class: same rule,
