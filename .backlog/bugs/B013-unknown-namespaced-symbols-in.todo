@@ -129,9 +129,7 @@ installed on this box).
    would let this rule stay armed for plugins with uninstalled optional
    deps, and fixes a define-set mismatch with the game that is independent
    of this rule.
-2. Not gated, noted: `source_paths` / `ignore_paths` can drop own-module
-   files from the load, and a sibling file that momentarily fails to parse
-   loses its symbols. Both make the pool incomplete without breaking
-   `dependency_closure_complete`. The pre-existing `undefined identifier`
-   rule has the same exposure, so this is a general workspace-authority
-   question rather than one for this rule.
+2. Not gated, noted: a sibling file that momentarily fails to parse can lose
+   its symbols, leaving the pooled source incomplete. The pre-existing
+   `undefined identifier` rule has the same exposure, so this is a general
+   workspace-authority question rather than one for this rule.
