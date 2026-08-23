@@ -58,3 +58,33 @@ live install.
 Lane C (parallel). Files: src/typedb/index.rs, src/cli/typedb_cmd.rs (new),
 src/cli/mod.rs, src/main.rs, src/server/mod.rs, justfile, .github/workflows/ci.yml,
 README.md, CHANGELOG.md, tests/cli_typedb_tests.rs (new).
+
+## COORDINATOR STATE 2026-08-24 04:40 (resume point)
+
+Branch feat/typedb-pipeline in .worktrees/gh59-typedb, HEAD f8858cc. LAST OPEN
+ISSUE of the GH #55/56/58/59/60 batch - #55, #56, #58, #60 are all merged and
+closed (master: 4871431, 78effb2, 5e18837).
+
+SETTLED DECISIONS (do not reopen):
+* The reviewer's hostile-concurrent-writer escalation is REJECTED; option 1
+  (trusted destination) stands. The ~250 lines of hand-written extern C FFI
+  (openat/renameat/O_NOFOLLOW inode pinning) it produced broke 4 of 6 shipped npm
+  targets (both darwin, both win32) and silently degraded the dry run there
+  ('2 of 2 files differ' against a byte-identical fixture). Replaced by a portable
+  atomic_copy (temp sibling + sync_all + rename), which keeps the guarantee that
+  matters: never publishing a truncated DB that parses as valid-but-empty JSON and
+  silently disables every type-aware diagnostic. Coordinator verified no
+  extern C/openat/renameat/O_NOFOLLOW remains in src/.
+* validate_refresh_destination is KEPT (refuses symlinked --into, symlinked or
+  non-regular target file, the source dir itself, and ~/OpenplanetNext).
+* The completions determinism fix carried in f52a007 is KEPT and needs its own
+  CHANGELOG line - namespace-shortcut completions share one sortText, so
+  construction order is directly observable LSP output and was inheriting HashMap
+  order. f52a007's subject buries it entirely.
+
+OUTSTANDING: rebase onto master (deliberately deferred while its fixer was live;
+conflicts expected in src/cli/mod.rs around run_check, plus CHANGELOG/README),
+then re-review verdict, then coordinator review + merge with Closes #59, then
+bl done B014. Falsifiable prediction on record: after rebase clippy should land
+exactly on master's 72 ^warning / 56 --> src / lib 50, because the branch's only
+delta today is a map_or in its stale pre-GH-#60 copy of src/workspace/project.rs.
