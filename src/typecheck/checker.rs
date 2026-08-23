@@ -1256,16 +1256,12 @@ impl<'a> Checker<'a> {
             Item::VarDecl(var) => self.check_var_decl_global(var),
             Item::Property(prop) => {
                 let prop_ty = self.resolve_type_expr(&prop.type_expr);
+                let prop_name = prop.name.text(self.source).to_string();
                 if let Some(body) = &prop.getter {
-                    self.push_frame();
-                    self.check_function_body(body);
-                    self.pop_frame();
+                    self.check_property_accessor_body(&prop_name, body, None);
                 }
                 if let Some((_, body)) = &prop.setter {
-                    self.push_frame();
-                    self.define_local("value".to_string(), prop_ty.clone(), prop.span);
-                    self.check_function_body(body);
-                    self.pop_frame();
+                    self.check_property_accessor_body(&prop_name, body, Some((prop_ty, prop.span)));
                 }
             }
             Item::Import(_) | Item::Error(_) => {}
@@ -1416,19 +1412,46 @@ impl<'a> Checker<'a> {
             }
             ClassMember::Property(prop) => {
                 let prop_ty = self.resolve_type_expr(&prop.type_expr);
+                let prop_name = prop.name.text(self.source).to_string();
                 if let Some(body) = &prop.getter {
-                    self.push_frame();
-                    self.check_function_body(body);
-                    self.pop_frame();
+                    self.check_property_accessor_body(&prop_name, body, None);
                 }
                 if let Some((_, body)) = &prop.setter {
-                    self.push_frame();
-                    self.define_local("value".to_string(), prop_ty.clone(), prop.span);
-                    self.check_function_body(body);
-                    self.pop_frame();
+                    self.check_property_accessor_body(&prop_name, body, Some((prop_ty, prop.span)));
                 }
             }
         }
+    }
+
+    /// Check one virtual-property accessor under the same local-declaration
+    /// context as an ordinary function body. The setter's synthetic `value`
+    /// is defined for type checking only; it has no source declaration and is
+    /// intentionally never passed to `record_local_decl`.
+    fn check_property_accessor_body(
+        &mut self,
+        property_name: &str,
+        body: &FunctionBody,
+        setter_value: Option<(TypeRepr, Span)>,
+    ) {
+        self.push_frame();
+        if let Some((ty, span)) = setter_value {
+            self.define_local("value".to_string(), ty, span);
+        }
+        let recording_ctx = self.local_decls.is_some();
+        if recording_ctx {
+            self.local_decl_fn_stack.push(LocalDeclFnCtx {
+                function: self.qualified_function_name(property_name),
+                is_top_level_free: false,
+                is_override: false,
+                owner_is_mixin: self.class_stack.last().is_some_and(|c| c.is_mixin),
+                body_end: body.span.end,
+            });
+        }
+        self.check_function_body(body);
+        if recording_ctx {
+            self.local_decl_fn_stack.pop();
+        }
+        self.pop_frame();
     }
 
     /// GH #37 slice 3: flag the second (and later) top-level free function

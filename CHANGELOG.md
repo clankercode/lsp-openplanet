@@ -120,8 +120,9 @@ GitHub Release body to match this section (gh release edit).
   members, and declarations in the plugin's own `info.toml`
   `exports`/`shared_exports` files (public API). Suppress per declaration
   with a leading `_` in the name or a trailing
-  `// lsp: ignore unused` comment. Locals and parameters are deliberately
-  out of scope for this pass (GH #55).
+  `// lsp: ignore unused` comment. This initial declaration-level slice
+  excluded locals and parameters; the GH #55 addition above now covers
+  function-body bindings too.
 - **`warnings_as_errors` config option** — persist the
   `check --warnings-as-errors` / `-Werror` behaviour in
   `.openplanet-lsp.toml` (workspace) or

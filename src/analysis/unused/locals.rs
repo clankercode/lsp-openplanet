@@ -28,6 +28,7 @@ use std::path::PathBuf;
 use super::{class_chain_declares, has_ignore_comment, tail_name, UnusedDeclaration};
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::lexer::{self, TokenKind};
+use crate::parser::ast::{Item, TypeExpr, TypeExprKind};
 use crate::symbols::scope::SymbolKind;
 use crate::symbols::SymbolTable;
 use crate::typecheck::checker::{LocalDeclKind, LocalDeclRecord};
@@ -153,6 +154,175 @@ fn ancestors_of(symbols: &SymbolTable, class_name: &str) -> Vec<String> {
     out
 }
 
+#[derive(Debug)]
+struct SourceType {
+    is_interface: bool,
+    parents: Vec<ScopedTypeName>,
+    methods: HashSet<String>,
+}
+
+#[derive(Debug)]
+struct ScopedTypeName {
+    written: String,
+    namespace: String,
+}
+
+/// `(class, member)` pairs whose signature is imposed by a workspace
+/// interface. Interface bases and methods are not retained in the pooled
+/// symbol table, so collect this deliberately narrow view from the AST.
+fn interface_implementations(snapshot: &AnalysisSnapshot) -> HashSet<(String, String)> {
+    let mut types = HashMap::new();
+    for file in snapshot.files() {
+        let source = file.analysis.masked_source();
+        collect_source_types(source, &file.analysis.file.items, "", &mut types);
+    }
+
+    let class_names: Vec<String> = types
+        .iter()
+        .filter(|(_, ty)| !ty.is_interface)
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut out = HashSet::new();
+    for class_name in class_names {
+        let Some(class) = types.get(&class_name) else {
+            continue;
+        };
+        let mut visited = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        for parent in &class.parents {
+            if let Some(parent) = resolve_source_type(&types, parent) {
+                queue.push_back(parent);
+            }
+        }
+        while let Some(ancestor_name) = queue.pop_front() {
+            if !visited.insert(ancestor_name.clone()) {
+                continue;
+            }
+            if visited.len() > 64 {
+                break;
+            }
+            let Some(ancestor) = types.get(&ancestor_name) else {
+                continue;
+            };
+            if ancestor.is_interface {
+                out.extend(
+                    ancestor
+                        .methods
+                        .iter()
+                        .map(|member| (class_name.clone(), member.clone())),
+                );
+            }
+            for parent in &ancestor.parents {
+                if let Some(parent) = resolve_source_type(&types, parent) {
+                    queue.push_back(parent);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn collect_source_types(
+    source: &str,
+    items: &[Item],
+    namespace: &str,
+    out: &mut HashMap<String, SourceType>,
+) {
+    let qualify = |name: &str| {
+        if namespace.is_empty() {
+            name.to_string()
+        } else {
+            format!("{namespace}::{name}")
+        }
+    };
+    for item in items {
+        match item {
+            Item::Class(class) => {
+                let name = qualify(class.name.text(source));
+                let entry = out.entry(name).or_insert_with(|| SourceType {
+                    is_interface: false,
+                    parents: Vec::new(),
+                    methods: HashSet::new(),
+                });
+                entry
+                    .parents
+                    .extend(class.base_classes.iter().filter_map(|base| {
+                        source_type_name(source, base).map(|written| ScopedTypeName {
+                            written,
+                            namespace: namespace.to_string(),
+                        })
+                    }));
+            }
+            Item::Interface(interface) => {
+                let name = qualify(interface.name.text(source));
+                let entry = out.entry(name).or_insert_with(|| SourceType {
+                    is_interface: true,
+                    parents: Vec::new(),
+                    methods: HashSet::new(),
+                });
+                entry.is_interface = true;
+                entry
+                    .parents
+                    .extend(interface.bases.iter().filter_map(|base| {
+                        source_type_name(source, base).map(|written| ScopedTypeName {
+                            written,
+                            namespace: namespace.to_string(),
+                        })
+                    }));
+                entry.methods.extend(
+                    interface
+                        .methods
+                        .iter()
+                        .map(|method| method.name.text(source).to_string()),
+                );
+            }
+            Item::Namespace(ns) => {
+                let nested = qualify(ns.name.text(source));
+                collect_source_types(source, &ns.items, &nested, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn source_type_name(source: &str, ty: &TypeExpr) -> Option<String> {
+    match &ty.kind {
+        TypeExprKind::Named(name) => Some(name.to_string(source)),
+        TypeExprKind::Handle(inner)
+        | TypeExprKind::Reference(inner, _)
+        | TypeExprKind::Const(inner) => source_type_name(source, inner),
+        TypeExprKind::Template(name, _) => Some(name.to_string(source)),
+        _ => None,
+    }
+}
+
+/// Resolve like a lexical type name, without a tail-name fallback. The
+/// latter would conflate `Api::Parent` with `Impl::Parent` and suppress a
+/// real warning merely because the short names collide.
+fn resolve_source_type(
+    types: &HashMap<String, SourceType>,
+    name: &ScopedTypeName,
+) -> Option<String> {
+    let mut namespace = name.namespace.as_str();
+    loop {
+        let candidate = if namespace.is_empty() {
+            name.written.clone()
+        } else {
+            format!("{namespace}::{}", name.written)
+        };
+        if types.contains_key(&candidate) {
+            return Some(candidate);
+        }
+        let Some((outer, _)) = namespace.rsplit_once("::") else {
+            break;
+        };
+        namespace = outer;
+    }
+    types
+        .contains_key(&name.written)
+        .then(|| name.written.clone())
+}
+
 /// Snapshot-wide inputs to the locals/params join, built ONCE per
 /// [`super::WorkspaceUsage`].
 ///
@@ -171,6 +341,8 @@ pub(super) struct LocalsInputs {
     value_refs: HashSet<String>,
     /// Workspace-wide base-of-a-virtual-pair set.
     overridden: HashSet<(String, String)>,
+    /// Workspace interface contracts recovered from the source AST.
+    interface_implementations: HashSet<(String, String)>,
 }
 
 impl LocalsInputs {
@@ -190,6 +362,7 @@ impl LocalsInputs {
             scans,
             value_refs,
             overridden: members_overridden_by_subclasses(snapshot.symbols()),
+            interface_implementations: interface_implementations(snapshot),
         }
     }
 }
@@ -235,6 +408,7 @@ pub(super) fn collect_unused_locals(
             scan: &inputs.scans[file_id],
             value_refs: &inputs.value_refs,
             overridden: &inputs.overridden,
+            interface_implementations: &inputs.interface_implementations,
             is_export_file: export_paths.contains(&file.path),
             symbols,
             unused_symbol_names,
@@ -258,6 +432,7 @@ struct FileCtx<'a> {
     value_refs: &'a HashSet<String>,
     /// Workspace-wide base-of-a-virtual-pair set.
     overridden: &'a HashSet<(String, String)>,
+    interface_implementations: &'a HashSet<(String, String)>,
     is_export_file: bool,
     symbols: &'a SymbolTable,
     unused_symbol_names: &'a HashSet<String>,
@@ -362,6 +537,12 @@ impl FileCtx<'_> {
         // An ancestor declaring the same member makes this an override /
         // interface implementation even without the `override` keyword.
         if class_chain_declares(self.symbols, owner, member) {
+            return true;
+        }
+        if self
+            .interface_implementations
+            .contains(&(owner.to_string(), member.to_string()))
+        {
             return true;
         }
         // …and a DESCENDANT declaring it makes this the base of a virtual
@@ -646,6 +827,30 @@ mod tests {
     }
 
     #[test]
+    fn interface_implementation_params_exempt_for_concrete_receiver() {
+        let report = report_of(
+            "interface IThing {\n    void Do(int a);\n}\nclass C : IThing {\n    void Do(int a) {}\n}\nvoid Main() { C c; c.Do(1); }\n",
+        );
+        assert_lacks(&report, "C::Do::a");
+    }
+
+    #[test]
+    fn inherited_interface_implementation_params_exempt() {
+        let report = report_of(
+            "interface IBase {\n    void Do(int a);\n}\ninterface IThing : IBase {}\nclass C : IThing {\n    void Do(int a) {}\n}\nvoid Main() { C c; c.Do(1); }\n",
+        );
+        assert_lacks(&report, "C::Do::a");
+    }
+
+    #[test]
+    fn same_short_name_in_another_namespace_is_not_an_interface_match() {
+        let report = report_of(
+            "namespace Api {\n    interface Parent { void Do(int a); }\n}\nnamespace Impl {\n    class Parent {}\n    class C : Parent { void Do(int a) {} }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
+        );
+        assert_has(&report, "Impl::C::Do::a");
+    }
+
+    #[test]
     fn params_of_bodyless_declarations_never_warn() {
         // Decision 2: imports, funcdefs and interface methods have no body.
         let report = report_of(
@@ -721,6 +926,30 @@ mod tests {
         for n in &report {
             assert!(!n.ends_with("::value"), "got {report:?}");
         }
+    }
+
+    #[test]
+    fn top_level_property_accessors_report_only_unused_locals() {
+        let report = report_of(
+            "int Thing {\n    get {\n        int deadGet = 1;\n        int liveGet = 2;\n        return liveGet;\n    }\n    set {\n        int deadSet = 1;\n        int liveSet = 2;\n        print(\"\" + liveSet);\n    }\n}\nvoid Main() { int _got = Thing; Thing = 1; }\n",
+        );
+        assert_has(&report, "Thing::deadGet");
+        assert_has(&report, "Thing::deadSet");
+        assert_lacks(&report, "Thing::liveGet");
+        assert_lacks(&report, "Thing::liveSet");
+        assert_lacks(&report, "Thing::value");
+    }
+
+    #[test]
+    fn class_property_accessors_report_only_unused_locals() {
+        let report = report_of(
+            "class C {\n    int Thing {\n        get {\n            int deadGet = 1;\n            int liveGet = 2;\n            return liveGet;\n        }\n        set {\n            int deadSet = 1;\n            int liveSet = 2;\n            print(\"\" + liveSet);\n        }\n    }\n}\nvoid Main() { C c; int _got = c.Thing; c.Thing = 1; }\n",
+        );
+        assert_has(&report, "C::Thing::deadGet");
+        assert_has(&report, "C::Thing::deadSet");
+        assert_lacks(&report, "C::Thing::liveGet");
+        assert_lacks(&report, "C::Thing::liveSet");
+        assert_lacks(&report, "C::Thing::value");
     }
 
     #[test]
