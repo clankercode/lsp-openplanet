@@ -1051,3 +1051,101 @@ fn typedb_refresh_leaves_unrelated_destination_files_alone() {
         vec!["OpenplanetCore.json", "OpenplanetNext.json", "README.md"]
     );
 }
+
+/// A source that is valid JSON but not a valid type DB (the Core format
+/// requires `op`) must be rejected *before* anything is written. `probe` only
+/// proves the file is JSON; without a real load a schema-invalid DB would land
+/// in the destination and only be caught later by the shape guard.
+#[test]
+fn typedb_refresh_rejects_schema_invalid_source_on_first_harvest() {
+    let install = tmp_dir("refresh-badschema-src");
+    fs::write(install.join("OpenplanetCore.json"), r#"{"functions":[]}"#).unwrap();
+    fs::copy(
+        fixture_typedb().join("OpenplanetNext.json"),
+        install.join("OpenplanetNext.json"),
+    )
+    .unwrap();
+    let into = tmp_dir("refresh-badschema-into");
+
+    for yes in [false, true] {
+        let mut args = vec![
+            "typedb".to_string(),
+            "refresh".to_string(),
+            "--from".to_string(),
+            install.to_str().unwrap().to_string(),
+            "--into".to_string(),
+            into.to_str().unwrap().to_string(),
+        ];
+        if yes {
+            args.push("--yes".to_string());
+        }
+        let r = run_owned(
+            bin_without_install(&format!("refresh-badschema-{yes}")),
+            &args,
+        );
+        assert_eq!(r.code, Some(1), "--yes={yes}: {}", r.all());
+        assert!(
+            r.stderr.contains("error:"),
+            "--yes={yes} must name the failure: {}",
+            r.stderr
+        );
+        assert!(
+            db_names(&into).is_empty(),
+            "--yes={yes} must write nothing: {:?}",
+            db_names(&into)
+        );
+    }
+}
+
+/// Same guard for a schema-invalid *game* dump (the Nadeo format requires
+/// `op` and `ns`).
+#[test]
+fn typedb_refresh_rejects_schema_invalid_game_dump_on_first_harvest() {
+    let install = tmp_dir("refresh-badgame-src");
+    fs::copy(
+        fixture_typedb().join("OpenplanetCore.json"),
+        install.join("OpenplanetCore.json"),
+    )
+    .unwrap();
+    fs::write(install.join("OpenplanetNext.json"), r#"{"op":"1.29.5"}"#).unwrap();
+    let into = tmp_dir("refresh-badgame-into");
+
+    let r = run(
+        bin_without_install("refresh-badgame"),
+        &[
+            "typedb",
+            "refresh",
+            "--from",
+            install.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert!(db_names(&into).is_empty(), "must write nothing");
+}
+
+/// `status --json` must be one pretty-printed object on every path, including
+/// the no-install path — a machine surface that changes shape is worse than
+/// one that is merely terse.
+#[test]
+fn typedb_status_json_is_pretty_printed_even_with_no_install() {
+    let r = run(
+        bin_without_install("status-json-none"),
+        &["typedb", "status", "--json"],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    let parsed: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("must still emit one JSON object ({e}): {}", r.stdout));
+    assert!(
+        parsed["core"].is_null() && parsed["game"].is_null(),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("\n  \"core\""),
+        "no-install --json must be pretty-printed like the success path: {:?}",
+        r.stdout
+    );
+}

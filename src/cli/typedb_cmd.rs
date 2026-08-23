@@ -13,13 +13,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "linux")]
-use std::ffi::CString;
-#[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, FromRawFd};
-#[cfg(target_os = "linux")]
-use std::os::unix::ffi::OsStrExt;
-
 use crate::config::LspConfig;
 use crate::typedb::index::{diff_indexes, DbDiff, DbSymbol};
 use crate::typedb::{TypeDbMeta, TypeIndex};
@@ -182,20 +175,10 @@ fn parse_status_args(args: &[String]) -> Result<Option<StatusArgs>, String> {
                 parsed.json = true;
                 i += 1;
             }
-            "--from" => {
-                let Some(value) = args.get(i + 1) else {
-                    return Err("--from requires a directory argument".to_string());
-                };
-                parsed.from = Some(PathBuf::from(value));
-                i += 2;
-            }
-            _ if arg.starts_with("--from=") => {
-                let value = arg.trim_start_matches("--from=");
-                if value.is_empty() {
-                    return Err("--from requires a directory argument".to_string());
-                }
-                parsed.from = Some(PathBuf::from(value));
-                i += 1;
+            _ if arg == "--from" || arg.starts_with("--from=") => {
+                let (dir, used) = take_dir_arg(args, i, "--from")?;
+                parsed.from = Some(dir);
+                i += used;
             }
             _ => {
                 return Err(format!(
@@ -222,7 +205,17 @@ fn run_status(args: &[String]) -> i32 {
         Ok(Some(pair)) => pair,
         Ok(None) => {
             if parsed.json {
-                println!("{}", serde_json::json!({"core": null, "game": null}));
+                // Same shape and same pretty-printing as the success path:
+                // a machine surface that changes formatting between paths is
+                // worse than one that is merely terse.
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "core": null,
+                        "game": null,
+                    }))
+                    .unwrap_or_default()
+                );
             }
             eprintln!("{NOT_FOUND_WARNING}");
             return 0;
@@ -596,24 +589,13 @@ fn run_refresh(args: &[String]) -> i32 {
         return fail(&err);
     }
 
-    // Hold an opened, non-following directory capability before any target
-    // probe or eventual write. An absent dry-run destination remains absent
-    // (the command must not create it), while `--yes` creates each component
-    // through no-follow `openat`/`mkdirat` traversal.
-    let destination = match RefreshDirectory::open(&into, parsed.yes) {
-        Ok(destination) => destination,
-        Err(err) => return fail(&err),
-    };
-    let target = destination
-        .as_ref()
-        .map(|dir| dir.pair(file_name_of(&source.core), file_name_of(&source.game)))
-        .unwrap_or_else(|| target_paths.clone());
+    let target = target_paths.clone();
 
     let mut out = String::new();
     out.push_str(&format!("source:  {}\n", pair_dir(&source)));
     out.push_str(&indent(&describe_pair(&source, &source_core, &source_game)));
 
-    let target_exists = destination.is_some() && target.core.is_file() && target.game.is_file();
+    let target_exists = target.core.is_file() && target.game.is_file();
     if target_exists {
         let (target_core, target_game) = match probe_pair(&target) {
             Ok(meta) => meta,
@@ -637,6 +619,15 @@ fn run_refresh(args: &[String]) -> i32 {
             (Err(err), _) | (_, Err(err)) => return fail(&err),
         }
     } else {
+        // First harvest: there is nothing to diff against, but the source
+        // must still survive a real load before we copy it. `probe` only
+        // proves the file is JSON — a schema-invalid DB would otherwise land
+        // in the destination and be caught later by the shape guard instead
+        // of here, where it is still harmless. The diff branch above already
+        // loads both sides, so this closes the only unvalidated write path.
+        if let Err(err) = load_index(&source) {
+            return fail(&err);
+        }
         out.push_str(&format!(
             "target:  {} (no existing type database — first harvest)\n",
             into.display()
@@ -650,14 +641,10 @@ fn run_refresh(args: &[String]) -> i32 {
         (source.core.as_path(), target.core.as_path()),
         (source.game.as_path(), target.game.as_path()),
     ];
-    let differing: Vec<&(&Path, &Path)> = if destination.is_some() {
-        files
-            .iter()
-            .filter(|(src, dst)| differs(src, dst))
-            .collect()
-    } else {
-        files.iter().collect()
-    };
+    let differing: Vec<&(&Path, &Path)> = files
+        .iter()
+        .filter(|(src, dst)| differs(src, dst))
+        .collect();
 
     out.push('\n');
     out.push_str(&format!(
@@ -683,9 +670,14 @@ fn run_refresh(args: &[String]) -> i32 {
         return 0;
     }
 
-    let destination = destination.expect("--yes opens a refresh destination");
+    // Created only now, so a dry run never makes a directory (the
+    // --yes-only write contract).
+    if let Err(err) = fs::create_dir_all(&into) {
+        print!("{out}");
+        return fail(&format!("failed to create {}: {err}", into.display()));
+    }
     for (src, dst) in &differing {
-        if let Err(err) = destination.atomic_copy(src, &file_name_of(dst)) {
+        if let Err(err) = atomic_copy(src, dst) {
             print!("{out}");
             return fail(&err);
         }
@@ -787,228 +779,65 @@ fn same_directory(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// A pinned destination directory. On Linux it is an `O_NOFOLLOW` directory
-/// descriptor, so a later replacement of the user-visible `--into` path
-/// cannot redirect a probe or write.
-struct RefreshDirectory {
-    #[cfg(target_os = "linux")]
-    dir: fs::File,
-}
+/// Copy `src` over `dst` without leaving a half-written database behind.
+///
+/// Writes a temporary sibling in the destination directory, flushes it, then
+/// renames it over `dst`. A same-directory rename replaces atomically on POSIX
+/// and on Windows, so a crash mid-copy leaves either the old file or the new
+/// one -- never a truncated DB, which would still parse as valid-but-empty
+/// JSON and silently disable every type-aware diagnostic.
+///
+/// Threat model, deliberately narrow: `typedb refresh --yes` is a maintainer
+/// command copying two files into a directory the caller named, normally this
+/// repo's own `tests/fixtures/typedb`. That destination is *trusted* -- anyone
+/// able to race writes into it can already edit those fixtures, or the build
+/// scripts beside them, directly, so no privilege boundary is crossed here.
+/// The guarantees worth paying for are the two honest-mistake failure modes:
+/// writing *through* a symlink out of the named directory (refused up front by
+/// [`validate_refresh_destination`]) and a torn file (handled here). Both are
+/// portable, which matters because this project ships linux/darwin/win32 on
+/// x64 and arm64 -- a Linux-only write path would break `--yes` on four of
+/// those six targets.
+fn atomic_copy(src: &Path, dst: &Path) -> Result<(), String> {
+    let dir = dst
+        .parent()
+        .ok_or_else(|| format!("destination {} has no parent directory", dst.display()))?;
+    let file_name = dst
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| format!("destination {} has no file name", dst.display()))?;
+    let temp = dir.join(format!(
+        ".{file_name}.typedb-refresh-{}",
+        std::process::id()
+    ));
 
-impl RefreshDirectory {
-    /// Return `None` for an absent dry-run destination, preserving dry runs'
-    /// no-directory-creation contract. `--yes` instead creates a directory
-    /// component-by-component without following symlinks.
-    fn open(path: &Path, create: bool) -> Result<Option<Self>, String> {
-        #[cfg(target_os = "linux")]
-        {
-            return open_refresh_directory_linux(path, create)
-                .map(|dir| dir.map(|dir| Self { dir }));
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            if create {
-                Err(format!(
-                    "refusing typedb refresh --yes into {}: this platform has no safe no-follow directory capability",
-                    path.display()
-                ))
-            } else {
-                Ok(None)
-            }
-        }
-    }
+    // A temp left behind by an earlier killed run must never be appended to.
+    let _ = fs::remove_file(&temp);
 
-    fn pair(&self, core_name: String, game_name: String) -> DbPair {
-        #[cfg(target_os = "linux")]
-        {
-            let root = format!("/proc/self/fd/{}", self.dir.as_raw_fd());
-            return DbPair {
-                core: PathBuf::from(&root).join(core_name),
-                game: PathBuf::from(root).join(game_name),
-            };
-        }
-        #[cfg(not(target_os = "linux"))]
-        unreachable!("unsupported platforms never construct RefreshDirectory")
-    }
-
-    /// Copy under the pinned directory, creating only a temporary sibling and
-    /// atomically replacing the final known filename via `renameat`.
-    fn atomic_copy(&self, src: &Path, name: &str) -> Result<(), String> {
-        #[cfg(target_os = "linux")]
-        {
-            return self.atomic_copy_linux(src, name);
-        }
-        #[cfg(not(target_os = "linux"))]
-        unreachable!("unsupported platforms never construct RefreshDirectory")
-    }
-}
-
-#[cfg(target_os = "linux")]
-const O_WRONLY: i32 = 0o1;
-#[cfg(target_os = "linux")]
-const O_CREAT: i32 = 0o100;
-#[cfg(target_os = "linux")]
-const O_EXCL: i32 = 0o200;
-#[cfg(target_os = "linux")]
-const O_DIRECTORY: i32 = 0o200000;
-#[cfg(target_os = "linux")]
-const O_NOFOLLOW: i32 = 0o400000;
-#[cfg(target_os = "linux")]
-const O_CLOEXEC: i32 = 0o2000000;
-
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn open(pathname: *const std::ffi::c_char, flags: i32, ...) -> i32;
-    fn openat(dirfd: i32, pathname: *const std::ffi::c_char, flags: i32, ...) -> i32;
-    fn mkdirat(dirfd: i32, pathname: *const std::ffi::c_char, mode: u32) -> i32;
-    fn renameat(
-        olddirfd: i32,
-        oldpath: *const std::ffi::c_char,
-        newdirfd: i32,
-        newpath: *const std::ffi::c_char,
-    ) -> i32;
-    fn unlinkat(dirfd: i32, pathname: *const std::ffi::c_char, flags: i32) -> i32;
-}
-
-#[cfg(target_os = "linux")]
-fn c_path(path: &std::ffi::OsStr) -> Result<CString, String> {
-    CString::new(path.as_bytes()).map_err(|_| "path contains a NUL byte".to_string())
-}
-
-#[cfg(target_os = "linux")]
-fn open_directory_at(dirfd: i32, name: &CString) -> io::Result<fs::File> {
-    let fd = unsafe { openat(dirfd, name.as_ptr(), O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) };
-    if fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(unsafe { fs::File::from_raw_fd(fd) })
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn open_refresh_directory_linux(path: &Path, create: bool) -> Result<Option<fs::File>, String> {
-    let root = if path.is_absolute() {
-        Path::new("/")
-    } else {
-        Path::new(".")
-    };
-    let root_name = c_path(root.as_os_str())?;
-    let root_fd = unsafe { open(root_name.as_ptr(), O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) };
-    if root_fd < 0 {
+    let write = (|| -> io::Result<()> {
+        let mut input = fs::File::open(src)?;
+        let mut output = fs::File::create(&temp)?;
+        io::copy(&mut input, &mut output)?;
+        // Durable before the rename: otherwise a crash can publish a short file.
+        output.sync_all()
+    })();
+    if let Err(err) = write {
+        let _ = fs::remove_file(&temp);
         return Err(format!(
-            "failed to open refresh root for {}: {}",
-            path.display(),
-            io::Error::last_os_error()
+            "failed to copy {} to {}: {err}",
+            src.display(),
+            temp.display()
         ));
     }
-    let mut current = unsafe { fs::File::from_raw_fd(root_fd) };
-    for component in path.components() {
-        use std::path::Component;
-        match component {
-            Component::RootDir | Component::CurDir => continue,
-            Component::Normal(name) => {
-                let name = c_path(name)?;
-                let next = match open_directory_at(current.as_raw_fd(), &name) {
-                    Ok(next) => next,
-                    Err(err) if err.kind() == io::ErrorKind::NotFound && create => {
-                        if unsafe { mkdirat(current.as_raw_fd(), name.as_ptr(), 0o755) } < 0 {
-                            let mkdir_err = io::Error::last_os_error();
-                            if mkdir_err.kind() != io::ErrorKind::AlreadyExists {
-                                return Err(format!(
-                                    "failed to create refresh directory {}: {mkdir_err}",
-                                    path.display()
-                                ));
-                            }
-                        }
-                        open_directory_at(current.as_raw_fd(), &name).map_err(|err| {
-                            format!(
-                                "refusing unsafe refresh directory {}: {err}",
-                                path.display()
-                            )
-                        })?
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-                    Err(err) => {
-                        return Err(format!(
-                            "refusing unsafe refresh directory {}: {err}",
-                            path.display()
-                        ))
-                    }
-                };
-                current = next;
-            }
-            Component::ParentDir | Component::Prefix(_) => {
-                return Err(format!(
-                    "refusing refresh destination {} with parent/prefix path components",
-                    path.display()
-                ));
-            }
-        }
-    }
-    Ok(Some(current))
-}
 
-#[cfg(target_os = "linux")]
-impl RefreshDirectory {
-    fn atomic_copy_linux(&self, src: &Path, name: &str) -> Result<(), String> {
-        let mut input = fs::File::open(src)
-            .map_err(|err| format!("failed to read source {}: {err}", src.display()))?;
-        let name = c_path(std::ffi::OsStr::new(name))?;
-        for attempt in 0..100 {
-            let temp_name = format!(
-                ".{}.typedb-refresh-{}-{attempt}",
-                name.to_string_lossy(),
-                std::process::id()
-            );
-            let temp = c_path(std::ffi::OsStr::new(&temp_name))?;
-            let fd = unsafe {
-                openat(
-                    self.dir.as_raw_fd(),
-                    temp.as_ptr(),
-                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
-                    0o600,
-                )
-            };
-            if fd < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::AlreadyExists {
-                    continue;
-                }
-                return Err(format!(
-                    "failed to create temporary database {temp_name}: {err}"
-                ));
-            }
-            let mut output = unsafe { fs::File::from_raw_fd(fd) };
-            let write_result = io::copy(&mut input, &mut output)
-                .and_then(|_| output.sync_all())
-                .map_err(|err| format!("failed to copy {} to {name:?}: {err}", src.display()));
-            drop(output);
-            if let Err(err) = write_result {
-                unsafe { unlinkat(self.dir.as_raw_fd(), temp.as_ptr(), 0) };
-                return Err(err);
-            }
-            if unsafe {
-                renameat(
-                    self.dir.as_raw_fd(),
-                    temp.as_ptr(),
-                    self.dir.as_raw_fd(),
-                    name.as_ptr(),
-                )
-            } < 0
-            {
-                let err = io::Error::last_os_error();
-                unsafe { unlinkat(self.dir.as_raw_fd(), temp.as_ptr(), 0) };
-                return Err(format!(
-                    "failed to atomically replace {name:?} from {}: {err}",
-                    src.display()
-                ));
-            }
-            return Ok(());
-        }
-        Err(format!(
-            "failed to create a unique temporary database for {name:?}"
-        ))
-    }
+    fs::rename(&temp, dst).map_err(|err| {
+        let _ = fs::remove_file(&temp);
+        format!(
+            "failed to replace {} with {}: {err}",
+            dst.display(),
+            temp.display()
+        )
+    })
 }
 
 /// True when `dst` is absent or its bytes differ from `src`.
@@ -1317,52 +1146,131 @@ mod tests {
         assert!(differs(&src, &dst));
     }
 
-    /// Validation alone is insufficient when the parent path can be swapped
-    /// before the copy opens its temp file. The write must stay in the
-    /// originally validated directory capability.
+    /// Atomic replacement: the destination ends up as either the old bytes or
+    /// the new ones, and no temporary sibling is left for the shape guard or a
+    /// later `differs()` byte-compare to trip over.
+    #[test]
+    fn atomic_copy_replaces_in_place_and_leaves_no_temp_file() {
+        let root = tmp_dir("atomic-copy");
+        let src = root.join("src.json");
+        let dst = root.join(CORE_DB_FILENAME);
+        std::fs::write(&src, "new bytes").unwrap();
+        std::fs::write(&dst, "old bytes").unwrap();
+
+        atomic_copy(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "new bytes");
+        let leftovers = temp_files(&root);
+        assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+    }
+
+    /// First harvest: the same call creates the destination when absent.
+    #[test]
+    fn atomic_copy_creates_absent_destination() {
+        let root = tmp_dir("atomic-copy-new");
+        let src = root.join("src.json");
+        std::fs::write(&src, "fresh").unwrap();
+        let dst = root.join(CORE_DB_FILENAME);
+        atomic_copy(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "fresh");
+    }
+
+    /// A leftover temp from an earlier killed run must not be appended to --
+    /// its bytes must not survive into the destination.
+    #[test]
+    fn atomic_copy_overwrites_stale_temp_from_a_killed_run() {
+        let root = tmp_dir("atomic-copy-stale");
+        let src = root.join("src.json");
+        std::fs::write(&src, "ab").unwrap();
+        let dst = root.join(CORE_DB_FILENAME);
+        let stale = root.join(format!(
+            ".{CORE_DB_FILENAME}.typedb-refresh-{}",
+            std::process::id()
+        ));
+        std::fs::write(&stale, "much longer stale content").unwrap();
+
+        atomic_copy(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "ab");
+        assert!(!stale.exists(), "stale temp should be gone");
+    }
+
+    /// A missing source errors, leaves no temp, and preserves the destination.
+    #[test]
+    fn atomic_copy_missing_source_errs_and_preserves_destination() {
+        let root = tmp_dir("atomic-copy-nosrc");
+        let dst = root.join(CORE_DB_FILENAME);
+        std::fs::write(&dst, "keep me").unwrap();
+        let err = atomic_copy(&root.join("absent.json"), &dst).unwrap_err();
+        assert!(err.contains("absent.json"), "{err}");
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "keep me");
+        assert!(temp_files(&root).is_empty(), "failed copy left a temp file");
+    }
+
+    /// A symlinked destination *directory* is refused before any write -- the
+    /// footgun the write path does defend: writing outside the named directory.
     #[cfg(unix)]
     #[test]
-    fn atomic_copy_does_not_follow_parent_symlink_swapped_after_validation() {
+    fn validate_refresh_destination_refuses_symlinked_directory() {
         use std::os::unix::fs::symlink;
 
-        let root = tmp_dir("parent-symlink-race");
+        let root = tmp_dir("symlink-dir");
         let source_dir = root.join("source");
+        let real = root.join("real");
+        let link = root.join("link");
         std::fs::create_dir_all(&source_dir).unwrap();
-        let source_file = source_dir.join(CORE_DB_FILENAME);
-        std::fs::write(&source_file, "safe bytes").unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, &link).unwrap();
 
+        let source = DbPair {
+            core: source_dir.join(CORE_DB_FILENAME),
+            game: source_dir.join("OpenplanetNext.json"),
+        };
+        let target = DbPair {
+            core: link.join(CORE_DB_FILENAME),
+            game: link.join("OpenplanetNext.json"),
+        };
+        let err = validate_refresh_destination(&source, &link, &target).unwrap_err();
+        assert!(err.contains("symbolic-link directory"), "{err}");
+    }
+
+    /// A symlinked destination *file* is refused too: following it would
+    /// rewrite something outside the named directory.
+    #[cfg(unix)]
+    #[test]
+    fn validate_refresh_destination_refuses_symlinked_target_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp_dir("symlink-file");
+        let source_dir = root.join("source");
         let into = root.join("into");
+        std::fs::create_dir_all(&source_dir).unwrap();
         std::fs::create_dir_all(&into).unwrap();
+        let outside = root.join("outside.json");
+        std::fs::write(&outside, "outside").unwrap();
+        symlink(&outside, into.join(CORE_DB_FILENAME)).unwrap();
+
+        let source = DbPair {
+            core: source_dir.join(CORE_DB_FILENAME),
+            game: source_dir.join("OpenplanetNext.json"),
+        };
         let target = DbPair {
             core: into.join(CORE_DB_FILENAME),
             game: into.join("OpenplanetNext.json"),
         };
-        let source = DbPair {
-            core: source_file.clone(),
-            game: source_dir.join("OpenplanetNext.json"),
-        };
-        validate_refresh_destination(&source, &into, &target).unwrap();
-        let destination = RefreshDirectory::open(&into, true).unwrap().unwrap();
+        let err = validate_refresh_destination(&source, &into, &target).unwrap_err();
+        assert!(err.contains("symbolic link destination"), "{err}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside");
+    }
 
-        let original = root.join("validated-into");
-        std::fs::rename(&into, &original).unwrap();
-        let external = root.join("external");
-        std::fs::create_dir_all(&external).unwrap();
-        std::fs::write(external.join(CORE_DB_FILENAME), "external bytes").unwrap();
-        symlink(&external, &into).unwrap();
-
-        destination
-            .atomic_copy(&source_file, CORE_DB_FILENAME)
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(external.join(CORE_DB_FILENAME)).unwrap(),
-            "external bytes",
-            "the swap must not redirect the refresh write"
-        );
-        assert_eq!(
-            std::fs::read_to_string(original.join(CORE_DB_FILENAME)).unwrap(),
-            "safe bytes"
-        );
+    /// Names of leftover refresh temp files in `dir`.
+    fn temp_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains("typedb-refresh"))
+            .collect()
     }
 
     #[test]

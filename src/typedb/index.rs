@@ -371,6 +371,15 @@ impl TypeIndex {
         // differ between two loads of the *same* file. Sorting both levels
         // costs one 20-key and one per-module sort and makes `TypeIndex`
         // a function of the file's contents again.
+        //
+        // KNOWN LIMITATION (tracked as B016, deliberately not fixed here):
+        // sorting makes the choice *stable*, not *complete*. Only one of the
+        // N enums sharing a colliding key is registered; the other 14
+        // `Control::UnnamedEnum` variants are still dropped, so their members
+        // do not resolve and `diff_indexes` cannot see them change. Splitting
+        // them onto distinct keys would change the name-resolution surface
+        // and move the false-positive fixture baselines, so it is its own
+        // task.
         let mut module_names: Vec<&String> = db.ns.keys().collect();
         module_names.sort();
         for ns_name in module_names {
@@ -821,8 +830,16 @@ impl DbDiff {
 /// (docs, ids, descriptions) is deliberately not compared, so a doc-only
 /// DB refresh reports zero drift.
 ///
-/// Note: Core's top-level `funcdefs`/`props` are not part of [`TypeIndex`]
-/// and therefore not diffed here — [`TypeDbCounts`] tracks those.
+/// Two limitations the caller should know about, because both mean a real
+/// change can go unreported:
+///
+/// * Core's top-level `funcdefs`/`props` are not part of [`TypeIndex`] and so
+///   are not diffed here — [`TypeDbCounts`] tracks their counts instead.
+/// * Anonymous engine enums that collide on one qualified key (15 distinct
+///   enums are all `Control::UnnamedEnum`) are only represented by whichever
+///   one `add_nadeo` registered, so a change to any of the others is
+///   invisible to this diff. See the KNOWN LIMITATION note in `add_nadeo`
+///   (tracked as B016).
 pub fn diff_indexes(old: &TypeIndex, new: &TypeIndex) -> DbDiff {
     let mut diff = DbDiff::default();
     diff_entries(
