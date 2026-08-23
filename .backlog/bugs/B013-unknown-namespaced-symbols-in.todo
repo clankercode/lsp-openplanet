@@ -77,9 +77,25 @@ src/typecheck/checker.rs, src/analysis_snapshot.rs / src/workspace/load.rs
 (module surface query), tests/.
 ## Implementation notes (2026-08-24, lane B, branch fix/ns-unknown-symbols)
 
-Landed: b894040 (rule + tests), 4dab393 (docs), f3d5ae8 (unresolved-dependency
-authority fence), 6a91423 (snapshot authority tests), 52a03a5 (typedef parser
-support + CLI coverage).
+Landed on branch `fix/ns-unknown-symbols`. NOTE: this branch was rebased
+twice, so any short SHA written below is stale — the durable reference is the
+commit SUBJECT. In order:
+
+  feat(typecheck): No matching symbol for workspace-declared namespaces
+  docs: record the GH #58 namespace rule
+  fix(workspace): any unresolved dependency breaks namespace-rule authority
+  bl append B013: GH #58 implementation notes and follow-ups
+  test(snapshot): pin the GH #58 dependency-closure authority seam
+  fix(parser): support typedef namespace symbols
+  fix(workspace): disarm namespace rule for filtered sources
+  docs(backlog): correct B013 source-completeness follow-up
+  docs: align namespace authority contract
+  bl append B013: fleet FP sweep evidence and reviewer outcome
+  fix(workspace): a gitignore exclusion breaks namespace-rule authority
+  test(workspace): pin the gitignore-count invariant and overlay authority
+  fix(workspace): disarm namespace checks for missing exports
+  fix(typecheck): fence Tests engine namespace
+  docs(typecheck): enumerate the namespace-authority conditions in one place
 
 ### Decision interpretations
 * Triggers (c) and (d) share ONE implementation. The pooled `SymbolTable`
@@ -100,7 +116,8 @@ support + CLI coverage).
   `namespace Outer`, `Inner::Deep()` binds `Outer::Inner::Deep` even when a
   top-level `Inner` exists; the rule walks the enclosing namespace stack
   before firing.
-* `typedef` now has parser and symbol-table support (52a03a5). The CLI
+* `typedef` now has parser and symbol-table support (`fix(parser): support
+  typedef namespace symbols`). The CLI
   regression verifies that a namespaced typedef parses and resolves without a
   `No matching symbol` diagnostic.
 
@@ -134,7 +151,8 @@ installed on this box).
    `undefined identifier` rule has the same exposure, so this is a general
    workspace-authority question rather than one for this rule.
 
-### Fleet FP sweep (2026-08-24, final binary at cd5b83b)
+### Fleet FP sweep (2026-08-24, binary built from `docs: align namespace
+### authority contract`)
 `openplanet-lsp check <plugin> --typedb-dir tests/fixtures/typedb` over all 28
 plugins in ~/OpenplanetNext/Plugins: 11 `No matching symbol` hits, every one
 from the PRE-EXISTING typedb triggers — `Text::Join` x5 (trigger a),
@@ -145,8 +163,8 @@ Archivist, `Backoff::NoSuchFunction58` on tournament-station itself) confirm
 the rule is armed on those plugins rather than vacuously silent.
 
 Reviewer: `ccc @cx-reviewer` review-and-fix loop returned PASS; its corrective
-commits are 52a03a5 (typedef), 20e08f0 (source-filter fence), 4a38bee and
-cd5b83b (doc alignment).
+commits are the typedef parser support, the source-filter disarm, and the two
+doc-alignment commits listed above.
 
 ### Rebase onto master (GH #60) — a third authority hole, 2026-08-24
 Rebased onto 5822455 (clean, no conflicts). GH #60's `honor_gitignore`
@@ -184,13 +202,15 @@ discovery walk and no `DiscoveryOptions`, so gitignore never filters dep files
 `ccc @cx-reviewer` pass 2 returned PASS on the rebased state. Two findings,
 both fixed by it and both verified independently here:
 
-* `3fde70e` — resolving a dependency was not enough. A dep whose declared
+* `fix(workspace): disarm namespace checks for missing exports` — resolving a
+  dependency was not enough. A dep whose declared
   `[script] exports`/`shared_exports` include a MISSING or UNREADABLE file
   still counted as authoritative, so its partial namespace surface produced
   false `No matching symbol`. `ResolvedDependency` now reports
   `unloaded_exports` (directory and `.op` shapes alike) and the loader tracks
   `incomplete_export_surfaces`.
-* `f8f72aa` — `Tests` is an Openplanet CORE namespace and was absent from
+* `fix(typecheck): fence Tests engine namespace` — `Tests` is an Openplanet
+  CORE namespace and was absent from
   `is_engine_namespace`, so a plugin-local `namespace Tests { … }` (a very
   likely name for test helpers) armed the rule against game-owned `Tests::`
   calls with no typedb loaded. Verified against the fixture typedb: `Tests`
