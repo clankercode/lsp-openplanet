@@ -106,6 +106,19 @@ default_mode = "tui"   # or "lsp"
 # Matrix size cap (default 16). A cross-product expanding past the cap is
 # a hard error — pin combos with define_combinations or raise the cap.
 # define_matrix_max_combinations = 16
+
+# Extra names the unused-declaration pass treats as runtime-invoked
+# callbacks, on top of the built-in Openplanet list (Main, Render,
+# OnKeyPress, ...). For frameworks that dispatch user-declared functions
+# by NAME REFLECTION — MLHook calling OnCounterUpdate, say — nothing in
+# the plugin references them, so a fixed list can't know they're live.
+# Entries are literal names or a single `*` wildcard: `On*`, `*Update`,
+# `On*Update`, or bare `*`. Not a glob, not a regex. Matches unqualified
+# names of free functions at file top level (class methods and namespaced
+# functions stay in scope), and exempts their parameters too. Additive —
+# it never drops the built-ins. Workspace .openplanet-lsp.toml wins over
+# the user config; lists don't merge, the winning file's list is the list.
+# unused_callbacks = ["OnCounterUpdate", "OnThing*"]
 #
 # Any `--define` CLI flag collapses the matrix back to a single-combo run.
 ```

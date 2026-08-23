@@ -40,6 +40,10 @@ GitHub Release body to match this section (gh release edit).
   `source_paths` / `ignore_paths` filter, a `.gitignore` that actually
   excluded a source file, an engine namespace, a nested path (`A::B::Fn`),
   or a name a sibling module contributes.
+- **`check` no longer joins the unused report once per file** — the
+  per-file diagnostics path asked for the whole workspace's findings and
+  filtered, an O(files²) join. It now asks per file: `check` on the
+  tm-editor-plus-plus fixture (≈300 files) drops from ~5.0s to ~0.6s.
 - **Workspace function return types are real types, not `<error>`** —
   free-function symbol extraction left `return_type` empty, so hovering
   a call to a workspace function (e.g. `ts_log(...)` declared in another
@@ -75,6 +79,33 @@ GitHub Release body to match this section (gh release edit).
   no longer flagged as unused declarations.
 
 ### Added
+- **`unused_callbacks` config key** (GH #56) — names the
+  unused-declaration pass should treat as runtime-invoked callbacks, for
+  frameworks that dispatch by name reflection (MLHook's
+  `OnCounterUpdate`), which a fixed list cannot cover. Entries are
+  literal names or a single `*` wildcard (`On*`, `*Update`, `On*Update`,
+  bare `*`) — not a glob, not a regex. Additive to the built-in
+  Openplanet callback list, never a replacement; matches unqualified
+  names of free functions at file top level and exempts their parameters
+  too. Workspace `.openplanet-lsp.toml` wins over the user config; lists
+  do not merge across levels.
+- **Unused locals and parameters** (GH #55) — the unused-declaration pass
+  now covers function-body bindings — "a local variable `x` is never
+  used", "a parameter `p` is never used" — with the same suppressions as
+  before (a leading `_`, or a trailing `// lsp: ignore unused`). Usage is
+  syntactic — any later mention in the enclosing function body counts, so
+  a write with no read is *used* — and the scan reads the unmasked source
+  so a mention inside an inactive `#if` branch still counts. Parameters
+  stay silent where the signature is imposed rather than chosen:
+  Openplanet callbacks, operator overloads, both halves of a virtual pair
+  (overrides and the base they override), interface implementations
+  (including inherited and partially-qualified contracts), mixin members,
+  lambdas, functions handed to a funcdef (handler tables, `startnew`
+  coroutines), no-op stubs whose body has zero statements, public-API
+  export files, and any declaration the pass already reports as unused.
+  Dogfooded over the `tm-*` fixtures across three rounds — 63 sites
+  classified by hand plus a mechanical screen over every emitted warning
+  — with no residual false positives, so the pass is on by default.
 - **Define matrix for `check`** — `define_matrix` in
   `.openplanet-lsp.toml` lists preprocessor define axes that `check`
   cross-multiplies on top of the base define set, running every combo
@@ -102,8 +133,9 @@ GitHub Release body to match this section (gh release edit).
   members, and declarations in the plugin's own `info.toml`
   `exports`/`shared_exports` files (public API). Suppress per declaration
   with a leading `_` in the name or a trailing
-  `// lsp: ignore unused` comment. Locals and parameters are deliberately
-  out of scope for this pass (GH #55).
+  `// lsp: ignore unused` comment. This initial declaration-level slice
+  excluded locals and parameters; the GH #55 addition above now covers
+  function-body bindings too.
 - **`warnings_as_errors` config option** — persist the
   `check --warnings-as-errors` / `-Werror` behaviour in
   `.openplanet-lsp.toml` (workspace) or

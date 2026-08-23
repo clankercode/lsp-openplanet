@@ -27,9 +27,10 @@ use std::path::Path;
 
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::symbols::scope::{Symbol, SymbolKind};
-use crate::symbols::SymbolTable;
 use crate::typecheck::checker::Checker;
 use crate::typecheck::GlobalScope;
+
+pub mod locals;
 
 /// Openplanet engine entry points / callbacks. Free functions with these
 /// exact names are invoked by the game / Openplanet runtime by name — a
@@ -65,11 +66,43 @@ fn is_openplanet_callback(simple_name: &str) -> bool {
     OPENPLANET_CALLBACKS.contains(&simple_name)
 }
 
+/// True when `name` is exempt as a runtime-invoked callback: a built-in
+/// engine callback, or a match against the project's `unused_callbacks`
+/// patterns (GH #56). `extra` only ever ADDS to the built-ins — dropping
+/// engine callbacks from the list would only manufacture false positives,
+/// so there is no switch to disable them.
+fn is_exempt_callback(name: &str, extra: &[String]) -> bool {
+    is_openplanet_callback(name) || extra.iter().any(|p| matches_callback_pattern(p, name))
+}
+
+/// Match one `unused_callbacks` entry against an unqualified name.
+///
+/// Deliberately not a glob and not a regex — the smallest syntax that
+/// covers reflective-dispatch naming, with no new dependency: a literal
+/// name, or a single `*` standing for any run of characters. That covers
+/// `OnCounterUpdate`, `On*`, `*Update`, `On*Update`, and bare `*`. An
+/// entry with two or more `*` is compared literally (unsupported syntax
+/// must not silently match everything).
+fn matches_callback_pattern(pattern: &str, name: &str) -> bool {
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return pattern == name;
+    };
+    if suffix.contains('*') {
+        return pattern == name;
+    }
+    name.len() >= prefix.len() + suffix.len() && name.starts_with(prefix) && name.ends_with(suffix)
+}
+
 /// Union of used workspace-qualified names across every file in a
-/// snapshot, keyed by the pooled symbol-table name convention.
+/// snapshot, keyed by the pooled symbol-table name convention, plus the
+/// local/parameter bindings the same pass walked (GH #55).
 #[derive(Debug, Default)]
 pub struct WorkspaceUsage {
     used: HashSet<String>,
+    /// Snapshot-wide inputs to the locals/params join (GH #55), built in
+    /// the same pass as `used` so the workspace is walked once — the join
+    /// itself runs once per reported file.
+    locals: locals::LocalsInputs,
 }
 
 impl WorkspaceUsage {
@@ -83,13 +116,17 @@ impl WorkspaceUsage {
         let symbols = snapshot.symbols();
         let scope = GlobalScope::new(symbols, external);
         let mut used = HashSet::new();
+        let mut local_decls = Vec::with_capacity(snapshot.files().len());
         for file in snapshot.files() {
-            let mut checker =
-                Checker::new(file.analysis.masked_source(), &scope).with_usage_recording();
+            let mut checker = Checker::new(file.analysis.masked_source(), &scope)
+                .with_usage_recording()
+                .with_local_decl_recording();
             checker.check_file(&file.analysis.file);
             used.extend(checker.take_used_names());
+            local_decls.push(checker.take_local_decls());
         }
-        Self { used }
+        let locals = locals::LocalsInputs::new(snapshot, external, local_decls);
+        Self { used, locals }
     }
 
     /// True when `qualified` (pooled-table name form) was used somewhere.
@@ -139,8 +176,8 @@ pub struct UnusedDeclaration {
 /// info.toml `[script] exports` + shared_exports files (canonicalized) —
 /// declarations in those files are public API and exempt.
 ///
-/// Locals and parameters are deliberately out of scope (deferred — see
-/// the tracking issue); this covers file-level decls and class members.
+/// Covers file-level declarations, class members, and — via
+/// [`locals`] — function-body locals and parameters (GH #55).
 pub fn unused_declarations(
     snapshot: &AnalysisSnapshot,
     external: Option<&crate::typedb::TypeIndex>,
@@ -158,10 +195,45 @@ pub fn unused_declarations_with_usage(
     usage: &WorkspaceUsage,
     export_paths: &HashSet<std::path::PathBuf>,
 ) -> Vec<UnusedDeclaration> {
+    unused_declarations_filtered(snapshot, usage, export_paths, None)
+}
+
+/// Findings for ONE file. The per-file diagnostics path (LSP publish,
+/// CLI `check`) asks per file, so joining the whole workspace and
+/// filtering afterwards costs O(files²).
+///
+/// Sound because every input is either workspace-wide and precomputed
+/// (`usage`) or file-local: a binding's enclosing function — and the
+/// class that owns it — are declared in the same file as the binding,
+/// so the no-double-warn gate only needs this file's findings.
+pub fn unused_declarations_for_file(
+    snapshot: &AnalysisSnapshot,
+    usage: &WorkspaceUsage,
+    export_paths: &HashSet<std::path::PathBuf>,
+    file_id: usize,
+) -> Vec<UnusedDeclaration> {
+    unused_declarations_filtered(snapshot, usage, export_paths, Some(file_id))
+}
+
+/// Shared body: `only` limits the walk to one file_id.
+fn unused_declarations_filtered(
+    snapshot: &AnalysisSnapshot,
+    usage: &WorkspaceUsage,
+    export_paths: &HashSet<std::path::PathBuf>,
+    only: Option<usize>,
+) -> Vec<UnusedDeclaration> {
     let mut out = Vec::new();
     let symbols = snapshot.symbols();
+    // GH #56: the project's extra callback patterns, shared by both
+    // consumers — the declaration gate below and the parameter gate in
+    // `locals`.
+    let extra = snapshot.unused_callbacks();
+    let exempt = |name: &str| is_exempt_callback(name, extra);
 
     for (file_id, file) in snapshot.files().iter().enumerate() {
+        if only.is_some_and(|want| want != file_id) {
+            continue;
+        }
         // Dependency export files contribute symbols and usage but are not
         // this plugin's code — never warn on them (report_diagnostics
         // already gates the diagnostics pipeline; same gate here).
@@ -174,11 +246,24 @@ pub fn unused_declarations_with_usage(
         }
         let source = file.analysis.masked_source();
         for sym in symbols.file_symbols(file_id) {
-            if let Some(unused) = evaluate_symbol(sym, usage, source, symbols) {
+            if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
                 out.push(unused);
             }
         }
     }
+
+    // Locals/parameters run second: the declaration-level findings are the
+    // no-double-warn gate for the bindings inside them (GH #55).
+    let reported: HashSet<String> = out.iter().map(|u| u.qualified_name.clone()).collect();
+    locals::collect_unused_locals(
+        snapshot,
+        &usage.locals,
+        export_paths,
+        &reported,
+        &exempt,
+        only,
+        &mut out,
+    );
     out
 }
 
@@ -189,7 +274,7 @@ fn evaluate_symbol(
     sym: &Symbol,
     usage: &WorkspaceUsage,
     source: &str,
-    symbols: &SymbolTable,
+    exempt_callback: &dyn Fn(&str) -> bool,
 ) -> Option<UnusedDeclaration> {
     let (kind, simple_name) = match &sym.kind {
         SymbolKind::Class { .. } => ("class", tail_name(&sym.name)),
@@ -238,16 +323,13 @@ fn evaluate_symbol(
         return None;
     }
 
-    // `override` methods are virtual dispatch: if ANY class in the parent
-    // chain declares a member with the same name, this decl is an
-    // override and its "use" is the base's (engine- or framework-invoked)
-    // — never warn. Parent names are short-form in the pooled table; the
-    // tail match mirrors `GlobalScope::workspace_class_member`'s walk.
+    // Inherited methods are virtual dispatch: their "use" is the base's
+    // (engine- or framework-invoked), so never warn. The locals input owns
+    // the same canonical source/external ancestry graph used for parameter
+    // exemptions; do not independently tail-resolve parent names here.
     if let SymbolKind::Function { .. } = &sym.kind {
-        if let Some((owner, member)) = sym.name.rsplit_once("::") {
-            if class_chain_declares(symbols, owner, member) {
-                return None;
-            }
+        if usage.locals.function_has_inherited_contract(&sym.name) {
+            return None;
         }
     }
 
@@ -274,7 +356,7 @@ fn evaluate_symbol(
     // (Class members and namespaced functions are never callbacks.)
     let is_free_function =
         matches!(sym.kind, SymbolKind::Function { .. }) && !sym.name.contains("::");
-    if is_free_function && is_openplanet_callback(simple_name) {
+    if is_free_function && exempt_callback(simple_name) {
         return None;
     }
 
@@ -294,57 +376,6 @@ fn evaluate_symbol(
 /// Last `::`-segment of a pooled-table qualified name.
 fn tail_name(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
-}
-
-/// True when `class_name` or any ancestor (via the pooled table's parent
-/// lists) declares a member named `member` — i.e. `Class::member` is an
-/// override. Cycle-guarded, depth-capped.
-fn class_chain_declares(symbols: &SymbolTable, class_name: &str, member: &str) -> bool {
-    let mut visited = std::collections::HashSet::new();
-    let mut queue = std::collections::VecDeque::from([class_name.to_string()]);
-    let mut hops = 0usize;
-    while let Some(class) = queue.pop_front() {
-        if !visited.insert(class.clone()) {
-            continue;
-        }
-        hops += 1;
-        if hops > 64 {
-            break;
-        }
-        for sym in symbols.lookup(&class) {
-            if let SymbolKind::Class { parents, .. } = &sym.kind {
-                for parent in parents {
-                    // Parents are stored as written (often short-form);
-                    // try exact then tail match.
-                    if !symbols.lookup(parent).is_empty() {
-                        queue.push_back(parent.clone());
-                    } else if let Some(tail) =
-                        symbols.lookup_tail(parent).first().map(|s| s.name.clone())
-                    {
-                        queue.push_back(tail);
-                    }
-                }
-            }
-        }
-        let qualified = format!("{}::{}", class, member);
-        if !symbols.lookup(&qualified).is_empty() {
-            // Declared on THIS class — only counts as an override when an
-            // ANCESTOR also declares it (sym itself is the decl under
-            // evaluation, at the front of the walk).
-            if class != class_name {
-                return true;
-            }
-        } else if class != class_name
-            && !symbols.lookup_tail(member).is_empty()
-            && symbols
-                .lookup_members(&class)
-                .iter()
-                .any(|s| s.name.ends_with(&format!("::{}", member)))
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// True when the line containing `offset` ends with an ignore marker
@@ -367,15 +398,16 @@ fn _file_path(snapshot: &AnalysisSnapshot, file_id: usize) -> Option<&Path> {
     snapshot.files().get(file_id).map(|f| f.path.as_path())
 }
 
+/// Test-only snapshot/report helpers, shared by this module's tests and
+/// [`locals`]'s.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
     use crate::analysis_snapshot::AnalysisSnapshot;
     use crate::config::LspConfig;
-    use std::collections::HashSet as StdHashSet;
     use std::path::PathBuf;
 
-    fn snap_of(files: &[(&str, &str)]) -> AnalysisSnapshot {
+    /// In-memory snapshot from `(path, source)` pairs.
+    pub fn snap_of(files: &[(&str, &str)]) -> AnalysisSnapshot {
         let inputs: Vec<(PathBuf, String)> = files
             .iter()
             .map(|(p, s)| (PathBuf::from(p), s.to_string()))
@@ -383,11 +415,35 @@ mod tests {
         AnalysisSnapshot::from_files(&inputs, &LspConfig::default())
     }
 
-    fn names(report: &[UnusedDeclaration]) -> Vec<String> {
+    /// In-memory snapshot with GH #56 `unused_callbacks` patterns set.
+    pub fn snap_of_with_callbacks(files: &[(&str, &str)], callbacks: &[&str]) -> AnalysisSnapshot {
+        let inputs: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(p, s)| (PathBuf::from(p), s.to_string()))
+            .collect();
+        let config = LspConfig {
+            unused_callbacks: callbacks.iter().map(|c| c.to_string()).collect(),
+            ..LspConfig::default()
+        };
+        AnalysisSnapshot::from_files(&inputs, &config)
+    }
+
+    /// Sorted qualified names of an unused report.
+    pub fn names(report: &[super::UnusedDeclaration]) -> Vec<String> {
         let mut v: Vec<String> = report.iter().map(|u| u.qualified_name.clone()).collect();
         v.sort();
         v
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{names, snap_of};
+    use super::*;
+    use crate::analysis_snapshot::AnalysisSnapshot;
+    use crate::config::LspConfig;
+    use std::collections::HashSet as StdHashSet;
+    use std::path::PathBuf;
 
     #[test]
     fn unused_free_function_warns() {
@@ -403,7 +459,10 @@ mod tests {
     fn cross_file_usage_suppresses() {
         let snap = snap_of(&[
             ("a.as", "int g_HelpVal = 1;\nvoid Dead() {}\n"),
-            ("b.as", "void Main() { int x = g_HelpVal; }\n"),
+            (
+                "b.as",
+                "void Main() { int x = g_HelpVal; print(\"\" + x); }\n",
+            ),
         ]);
         let report = unused_declarations(&snap, None, &StdHashSet::new());
         assert_eq!(names(&report), vec!["Dead"]);
@@ -539,6 +598,124 @@ mod tests {
             report
         );
         assert!(report.contains(&"Main2".to_string()), "got {:?}", report);
+    }
+
+    // ── GH #56: configurable callback exemptions ────────────────────────
+
+    /// Report for a one-file snapshot with `unused_callbacks` set.
+    fn report_with_callbacks(src: &str, callbacks: &[&str]) -> Vec<String> {
+        let snap = super::test_support::snap_of_with_callbacks(&[("a.as", src)], callbacks);
+        names(&unused_declarations(&snap, None, &StdHashSet::new()))
+    }
+
+    #[test]
+    fn configured_callback_exempts_the_function_and_its_params() {
+        // The issue's own case: MLHook dispatches `OnCounterUpdate` by
+        // name reflection, so nothing in the plugin calls it.
+        let src = "void OnCounterUpdate(const string &in name, int val) {}\nvoid Main() {}\n";
+        assert_eq!(
+            report_with_callbacks(src, &[]),
+            vec!["OnCounterUpdate"],
+            "control: unexempt, the function warns"
+        );
+        assert_eq!(
+            report_with_callbacks(src, &["OnCounterUpdate"]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn callback_patterns_cover_every_supported_wildcard_form() {
+        let src = "void OnCounterUpdate(int a) {}\nvoid Main() {}\n";
+        for pattern in [
+            "OnCounterUpdate", // literal
+            "On*",             // prefix
+            "*Update",         // suffix
+            "On*Update",       // both
+            "*",               // everything
+        ] {
+            assert_eq!(
+                report_with_callbacks(src, &[pattern]),
+                Vec::<String>::new(),
+                "pattern {pattern:?} must exempt OnCounterUpdate"
+            );
+        }
+    }
+
+    #[test]
+    fn non_matching_callback_patterns_still_warn() {
+        let src = "void OnCounterUpdate(int a) {}\nvoid Main() {}\n";
+        for pattern in [
+            "OnCounter",       // literal prefix is not a wildcard
+            "Update",          // literal suffix is not a wildcard
+            "On*Updated",      // suffix does not match
+            "Off*",            // prefix does not match
+            "On**Update",      // two `*` are unsupported → literal
+            "oncounterupdate", // case-sensitive
+        ] {
+            assert_eq!(
+                report_with_callbacks(src, &[pattern]),
+                vec!["OnCounterUpdate"],
+                "pattern {pattern:?} must NOT exempt OnCounterUpdate"
+            );
+        }
+    }
+
+    #[test]
+    fn wildcard_needs_room_for_prefix_and_suffix() {
+        // `On*Update` must not match "OnUpdate" by overlapping the two
+        // literal halves.
+        let src = "void OnUpdate(int a) {}\nvoid Main() {}\n";
+        assert_eq!(
+            report_with_callbacks(src, &["On*Update"]),
+            Vec::<String>::new(),
+            "prefix+suffix exactly spanning the name is a match"
+        );
+        let src = "void OnUpdat(int a) {}\nvoid Main() {}\n";
+        assert_eq!(
+            report_with_callbacks(src, &["On*Update"]),
+            vec!["OnUpdat"],
+            "a name shorter than prefix+suffix must not match"
+        );
+    }
+
+    #[test]
+    fn configured_callbacks_are_additive_to_the_builtins() {
+        // Setting the key must not replace `OPENPLANET_CALLBACKS`.
+        let src = "void Main() {}\nvoid RenderMenu() {}\nvoid OnCounterUpdate(int a) {}\n";
+        assert_eq!(
+            report_with_callbacks(src, &["OnCounterUpdate"]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_empty_callback_list_is_a_no_op() {
+        let src = "void Dead(int a) {}\nvoid Main() {}\n";
+        assert_eq!(report_with_callbacks(src, &[]), vec!["Dead"]);
+    }
+
+    #[test]
+    fn configured_callbacks_do_not_exempt_class_methods() {
+        // Decision 5: the patterns match free functions at file top level
+        // — the same population the built-in list applies to. MLHook
+        // dispatches free functions.
+        let src = "class C {\n    int keep;\n    void OnCounterUpdate(int a) {}\n}\nvoid Main() { C c; c.keep = 1; }\n";
+        let report = report_with_callbacks(src, &["OnCounterUpdate", "*"]);
+        assert!(
+            report.contains(&"C::OnCounterUpdate".to_string()),
+            "class methods stay in scope: {report:?}"
+        );
+    }
+
+    #[test]
+    fn configured_callbacks_do_not_exempt_namespaced_functions() {
+        let src = "namespace N {\n    void OnCounterUpdate(int a) {}\n}\nvoid Main() {}\n";
+        let report = report_with_callbacks(src, &["OnCounterUpdate", "*"]);
+        assert!(
+            report.contains(&"N::OnCounterUpdate".to_string()),
+            "namespaced functions stay in scope: {report:?}"
+        );
     }
 
     #[test]

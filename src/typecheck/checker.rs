@@ -478,6 +478,71 @@ struct ClassCtx {
     members: Vec<(String, TypeRepr)>,
 }
 
+/// What a [`LocalDeclRecord`] binds. Lambda parameters are deliberately
+/// absent: their signature is imposed by the funcdef the lambda is passed
+/// to, so an unused one is not the author's choice to fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalDeclKind {
+    /// A `VarDecl` statement inside a function body (block, loop init,
+    /// switch case, lambda body — any depth).
+    Local,
+    /// A named parameter of a function/method declaration *with a body*.
+    Param,
+}
+
+/// One local/parameter binding seen while checking, recorded for the
+/// unused-locals analysis (GH #55) when
+/// [`Checker::with_local_decl_recording`] is on.
+///
+/// The checker stays policy-free: it records every binding it walks and
+/// the context the analysis needs to apply exemptions
+/// (`crate::analysis::unused::locals`). Synthetic bindings with no source
+/// span of their own (the `value` of a property `set` accessor) are never
+/// recorded.
+#[derive(Debug, Clone)]
+pub struct LocalDeclRecord {
+    /// Identifier as written.
+    pub name: String,
+    /// Span of the declared identifier.
+    pub span: Span,
+    pub kind: LocalDeclKind,
+    /// Pooled-symbol-table name of the enclosing function: bare for a
+    /// free function, `Ns::F` inside a namespace, `Ns::Class::method` for
+    /// a method. Bindings inside a lambda are attributed to the function
+    /// that hosts the lambda.
+    pub function: String,
+    /// True when the enclosing function is a free function at file top
+    /// level (no namespace, no class) — the population the Openplanet
+    /// callback exemption applies to.
+    pub function_is_top_level_free: bool,
+    /// True when the enclosing function carries `override`.
+    pub function_is_override: bool,
+    /// True when the enclosing function is a member of a `mixin class`.
+    /// Mixin members splice into consuming classes by declaration, so
+    /// their signature is imposed by whatever consumes them.
+    pub function_owner_is_mixin: bool,
+    /// True when the enclosing function's body holds ZERO statements
+    /// (`{}` or `{ /* comment */ }`). A deliberate no-op stub still has
+    /// callers passing arguments, so its parameters are not the author's
+    /// to remove. `{ return; }` and `{ throw(...); }` are one statement
+    /// each and do NOT qualify.
+    pub function_body_is_empty: bool,
+    /// End offset of the enclosing function body. Upper bound of the
+    /// "mentioned again after its declaration" scan.
+    pub function_body_end: u32,
+}
+
+/// Enclosing-function context, pushed while recording local declarations.
+#[derive(Debug, Clone)]
+struct LocalDeclFnCtx {
+    function: String,
+    is_top_level_free: bool,
+    is_override: bool,
+    owner_is_mixin: bool,
+    body_is_empty: bool,
+    body_end: u32,
+}
+
 pub struct Checker<'a> {
     source: &'a str,
     scope: &'a GlobalScope<'a>,
@@ -534,6 +599,15 @@ pub struct Checker<'a> {
     /// resolve only against the external typedb are recorded too —
     /// harmless, since no workspace symbol exists to suppress.
     used_names: Option<std::collections::HashSet<String>>,
+    /// Local/parameter bindings walked in this file — the declaration
+    /// side of the unused-locals analysis (GH #55). `None` (the default)
+    /// disables recording so normal check passes pay nothing;
+    /// `with_local_decl_recording()` opts in.
+    local_decls: Option<Vec<LocalDeclRecord>>,
+    /// Enclosing-function context for `local_decls`, innermost last.
+    /// Only maintained while recording, and only for declarations that
+    /// have a body (a bodyless declaration binds nothing).
+    local_decl_fn_stack: Vec<LocalDeclFnCtx>,
 }
 
 impl<'a> Checker<'a> {
@@ -556,6 +630,8 @@ impl<'a> Checker<'a> {
             seen_function_sigs: std::collections::HashSet::new(),
             arith_suppress_add_mix: 0,
             used_names: None,
+            local_decls: None,
+            local_decl_fn_stack: Vec::new(),
         }
     }
 
@@ -581,6 +657,60 @@ impl<'a> Checker<'a> {
     /// `with_usage_recording`). Empty when recording was never enabled.
     pub fn take_used_names(&mut self) -> std::collections::HashSet<String> {
         self.used_names.take().unwrap_or_default()
+    }
+
+    /// Enable local/parameter declaration recording for the unused-locals
+    /// analysis (GH #55). Independent of `with_usage_recording`, though
+    /// the analysis turns both on in a single pass.
+    pub fn with_local_decl_recording(mut self) -> Self {
+        self.local_decls = Some(Vec::new());
+        self
+    }
+
+    /// Drain the recorded local/parameter declarations (requires
+    /// `with_local_decl_recording`). Empty when recording was never on.
+    pub fn take_local_decls(&mut self) -> Vec<LocalDeclRecord> {
+        self.local_decls.take().unwrap_or_default()
+    }
+
+    /// Record one local/parameter binding. No-op unless recording is on
+    /// and an enclosing function context exists (a body-less declaration
+    /// pushes no context, so its parameters are never recorded).
+    fn record_local_decl(&mut self, name: &str, span: Span, kind: LocalDeclKind) {
+        if self.local_decls.is_none() {
+            return;
+        }
+        let Some(ctx) = self.local_decl_fn_stack.last() else {
+            return;
+        };
+        let record = LocalDeclRecord {
+            name: name.to_string(),
+            span,
+            kind,
+            function: ctx.function.clone(),
+            function_is_top_level_free: ctx.is_top_level_free,
+            function_is_override: ctx.is_override,
+            function_owner_is_mixin: ctx.owner_is_mixin,
+            function_body_is_empty: ctx.body_is_empty,
+            function_body_end: ctx.body_end,
+        };
+        if let Some(out) = &mut self.local_decls {
+            out.push(record);
+        }
+    }
+
+    /// Pooled-table name of a function declared in the current
+    /// namespace/class context (`Ns::Class::method`, bare for a free
+    /// function). `ClassCtx::name` is already namespace-qualified.
+    fn qualified_function_name(&self, simple: &str) -> String {
+        if let Some(cls) = self.class_stack.last() {
+            return format!("{}::{}", cls.name, simple);
+        }
+        if self.namespace_stack.is_empty() {
+            simple.to_string()
+        } else {
+            format!("{}::{}", self.namespace_stack.join("::"), simple)
+        }
     }
 
     /// Record a single workspace-qualified name as used (no-op unless
@@ -1134,16 +1264,12 @@ impl<'a> Checker<'a> {
             Item::VarDecl(var) => self.check_var_decl_global(var),
             Item::Property(prop) => {
                 let prop_ty = self.resolve_type_expr(&prop.type_expr);
+                let prop_name = prop.name.text(self.source).to_string();
                 if let Some(body) = &prop.getter {
-                    self.push_frame();
-                    self.check_function_body(body);
-                    self.pop_frame();
+                    self.check_property_accessor_body(&prop_name, body, None);
                 }
                 if let Some((_, body)) = &prop.setter {
-                    self.push_frame();
-                    self.define_local("value".to_string(), prop_ty.clone(), prop.span);
-                    self.check_function_body(body);
-                    self.pop_frame();
+                    self.check_property_accessor_body(&prop_name, body, Some((prop_ty, prop.span)));
                 }
             }
             Item::Import(_) | Item::Error(_) => {}
@@ -1294,19 +1420,47 @@ impl<'a> Checker<'a> {
             }
             ClassMember::Property(prop) => {
                 let prop_ty = self.resolve_type_expr(&prop.type_expr);
+                let prop_name = prop.name.text(self.source).to_string();
                 if let Some(body) = &prop.getter {
-                    self.push_frame();
-                    self.check_function_body(body);
-                    self.pop_frame();
+                    self.check_property_accessor_body(&prop_name, body, None);
                 }
                 if let Some((_, body)) = &prop.setter {
-                    self.push_frame();
-                    self.define_local("value".to_string(), prop_ty.clone(), prop.span);
-                    self.check_function_body(body);
-                    self.pop_frame();
+                    self.check_property_accessor_body(&prop_name, body, Some((prop_ty, prop.span)));
                 }
             }
         }
+    }
+
+    /// Check one virtual-property accessor under the same local-declaration
+    /// context as an ordinary function body. The setter's synthetic `value`
+    /// is defined for type checking only; it has no source declaration and is
+    /// intentionally never passed to `record_local_decl`.
+    fn check_property_accessor_body(
+        &mut self,
+        property_name: &str,
+        body: &FunctionBody,
+        setter_value: Option<(TypeRepr, Span)>,
+    ) {
+        self.push_frame();
+        if let Some((ty, span)) = setter_value {
+            self.define_local("value".to_string(), ty, span);
+        }
+        let recording_ctx = self.local_decls.is_some();
+        if recording_ctx {
+            self.local_decl_fn_stack.push(LocalDeclFnCtx {
+                function: self.qualified_function_name(property_name),
+                is_top_level_free: false,
+                is_override: false,
+                owner_is_mixin: self.class_stack.last().is_some_and(|c| c.is_mixin),
+                body_is_empty: body.stmts.is_empty(),
+                body_end: body.span.end,
+            });
+        }
+        self.check_function_body(body);
+        if recording_ctx {
+            self.local_decl_fn_stack.pop();
+        }
+        self.pop_frame();
     }
 
     /// GH #37 slice 3: flag the second (and later) top-level free function
@@ -1352,12 +1506,29 @@ impl<'a> Checker<'a> {
         self.return_type_stack.push(ret_ty.clone());
         self.function_frame_starts.push(self.frames.len());
         self.push_frame();
+        // Unused-locals recording (GH #55): only declarations WITH a body
+        // bind anything, so a bodyless declaration pushes no context and
+        // its parameters are never recorded.
+        let recording_ctx = self.local_decls.is_some() && func.body.is_some();
+        if recording_ctx {
+            let simple = func.name.text(self.source).to_string();
+            let ctx = LocalDeclFnCtx {
+                function: self.qualified_function_name(&simple),
+                is_top_level_free: self.class_stack.is_empty() && self.namespace_stack.is_empty(),
+                is_override: func.is_override,
+                owner_is_mixin: self.class_stack.last().is_some_and(|c| c.is_mixin),
+                body_is_empty: func.body.as_ref().is_some_and(|b| b.stmts.is_empty()),
+                body_end: func.body.as_ref().map_or(func.span.end, |b| b.span.end),
+            };
+            self.local_decl_fn_stack.push(ctx);
+        }
         for p in &func.params {
             self.warn_string_by_value_param(p);
             let ty = self.resolve_type_expr(&p.type_expr);
             self.record_type_repr_uses(&ty);
             if let Some(name) = &p.name {
                 self.define_local(name.text(self.source).to_string(), ty, name.span);
+                self.record_local_decl(name.text(self.source), name.span, LocalDeclKind::Param);
             }
             if let Some(dv) = &p.default_value {
                 let _ = self.expr_type(dv);
@@ -1380,6 +1551,9 @@ impl<'a> Checker<'a> {
         self.pop_frame();
         self.function_frame_starts.pop();
         self.return_type_stack.pop();
+        if recording_ctx {
+            self.local_decl_fn_stack.pop();
+        }
     }
 
     /// B004: AngelScript/Openplanet sanity check — bare `string` (or
@@ -1556,6 +1730,7 @@ impl<'a> Checker<'a> {
                 declared_ty.clone()
             };
             self.define_local(d.name.text(self.source).to_string(), local_ty, d.name.span);
+            self.record_local_decl(d.name.text(self.source), d.name.span, LocalDeclKind::Local);
         }
     }
 
