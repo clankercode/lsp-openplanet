@@ -1,16 +1,18 @@
 ---
+claimed_at: "2026-08-23T15:05:03Z"
+claimed_by: cli-user
+completed_at: null
 complexity: high
 created_at: "2026-08-23T15:04:50Z"
 depends_on: []
 estimate_hours: 5
 id: B013
 priority: high
-status: pending
-tags:
-    - gh-58
-    - typecheck
+started_at: "2026-08-23T15:05:03Z"
+status: in_progress
+tags: []
 title: 'Unknown namespaced symbols in user namespaces stay silent (GH #58)'
-updated_at: "2026-08-23T15:04:50Z"
+updated_at: "2026-08-23T15:05:03Z"
 ---
 GH issue: https://github.com/clankercode/lsp-openplanet/issues/58 (gh-58)
 

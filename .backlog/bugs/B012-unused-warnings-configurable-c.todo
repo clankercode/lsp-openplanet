@@ -1,4 +1,6 @@
 ---
+claimed_at: "2026-08-23T15:05:03Z"
+claimed_by: cli-user
 completed_at: null
 complexity: low
 created_at: "2026-08-23T15:04:50Z"
@@ -7,11 +9,11 @@ depends_on:
 estimate_hours: 2
 id: B012
 priority: medium
-started_at: null
-status: pending
+started_at: "2026-08-23T15:05:03Z"
+status: in_progress
 tags: []
 title: 'Unused warnings: configurable callback/exemption list (GH #56)'
-updated_at: "2026-08-23T15:04:50Z"
+updated_at: "2026-08-23T15:05:03Z"
 ---
 GH issue: https://github.com/clankercode/lsp-openplanet/issues/56 (gh-56)
 
