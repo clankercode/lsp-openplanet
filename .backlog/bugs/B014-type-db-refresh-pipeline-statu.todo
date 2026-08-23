@@ -1,0 +1,59 @@
+---
+complexity: high
+created_at: "2026-08-23T15:04:50Z"
+depends_on: []
+estimate_hours: 6
+id: B014
+priority: medium
+status: pending
+tags:
+    - gh-59
+    - typedb
+    - cli
+title: 'Type-DB refresh pipeline: status/diff/refresh + version visibility (GH #59)'
+updated_at: "2026-08-23T15:04:50Z"
+---
+GH issue: https://github.com/clankercode/lsp-openplanet/issues/59 (gh-59)
+
+Verified still open 2026-08-24 @ 728c30d: `openplanet-lsp typedb status` →
+"unknown command: typedb"; no `src/cli/typedb_cmd.rs`, no `TypeDbMeta`.
+
+## DECISIONS (do not re-litigate)
+
+1. **Implement the existing plan verbatim**:
+   `./.hermes/plans/2026-08-23_202335-gh59-typedb-refresh-pipeline.md` — 7 tasks,
+   IGC-selected survivor I1 (local-harvest pipeline:
+   `typedb status|diff|refresh` + just recipes + CI shape guard + version
+   surfacing in check output and server init log).
+2. The plan's **premise corrections stand** and must be posted on the issue at
+   close-out: the fixture DB is NOT stale (byte-parity with the live 1.29.5
+   install), `Draw::GetWidth` was never in any DB (that family belongs to
+   `removed_api_hint`), and user-side freshness already works via GH #45
+   auto-detect. What #59 actually buys is visibility + a maintainer pipeline +
+   an anti-drift guard.
+3. **No network anywhere** (plan G3): harvest from a local install via `--from`,
+   never fetch. CI only shape-guards the fixtures.
+4. **`refresh` is dry-run by default**; `--yes` required to write, `--into`
+   always explicit (never an implicit default write path).
+5. **JSON report change is additive** (`"typedb": {"op":…, "mp":…}`); verify no
+   existing test asserts an exact key set before shipping.
+6. **Deferred (record in the close-out comment)**: per-game-version DB selection
+   (plan idea I6) — YAGNI until multi-install parity testing is real.
+
+## Test plan
+Per plan, red→green per task: `TypeDbMeta::probe` unit variants (Core shape, Next
+shape, missing fields, malformed JSON, missing file); `tests/cli_typedb_tests.rs`
+integration for status/diff/refresh incl. dry-run-writes-nothing, idempotent
+second `--yes`, corrupt file exit 1, missing install warning; shape-guard
+rejecting truncated/empty/op-less copies; help-surface test.
+
+## Verification gate
+`cargo test --locked` green; clippy `^src.*warning` count <= 53 baseline; FP
+fixtures byte-stable (tm-editor-plus-plus = 2 errors, tm-dips-plus-plus = 1);
+`just typedb-refresh` dry run reports 0 added / 0 removed / 0 changed against the
+live install.
+
+## Lane
+Lane C (parallel). Files: src/typedb/index.rs, src/cli/typedb_cmd.rs (new),
+src/cli/mod.rs, src/main.rs, src/server/mod.rs, justfile, .github/workflows/ci.yml,
+README.md, CHANGELOG.md, tests/cli_typedb_tests.rs (new).

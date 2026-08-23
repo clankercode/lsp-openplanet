@@ -12,3 +12,4 @@ bugs:
     - file: B011-unused-warnings-locals-and-fun.todo
     - file: B012-unused-warnings-configurable-c.todo
     - file: B013-unknown-namespaced-symbols-in.todo
+    - file: B014-type-db-refresh-pipeline-statu.todo
