@@ -38,6 +38,7 @@ notify = "6.1"
 notify-debouncer-mini = "0.4"
 crossterm = "0.29"
 ratatui = "0.30"
+ignore = "0.4"
 
 [dev-dependencies]
 insta = { version = "1", features = ["glob"] }
