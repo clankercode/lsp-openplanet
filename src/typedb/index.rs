@@ -94,6 +94,87 @@ pub enum TypeSource {
     Nadeo,
 }
 
+/// Version stamps + top-level shape of a type-DB JSON file (GH #59).
+///
+/// Both Openplanet DB formats carry a top-level `op` build string; only the
+/// Nadeo game dump carries `mp` (its own dump timestamp). Nothing else is
+/// deserialized — [`TypeDbMeta::probe`] reads the top level as an untyped
+/// `Value`, so a file the strict loaders would reject still yields a usable
+/// version stamp (and a shape the guard can reject with a real reason).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypeDbMeta {
+    /// `op` — the Openplanet build this DB was dumped from
+    /// (`"1.29.5 (next, Public, 1234ad9e)"` in Core, `"1.29.5"` in the dump).
+    /// `None` when absent or not a string.
+    pub op: Option<String>,
+    /// `mp` — the game dump timestamp. Nadeo format only; `None` for Core.
+    pub mp: Option<String>,
+    /// Top-level entry counts (the fixture shape guard's input).
+    pub counts: TypeDbCounts,
+}
+
+/// Top-level entry counts of a type-DB file. The Core format populates
+/// `functions`/`classes`/`enums`/`funcdefs`/`props`; the Nadeo dump
+/// populates `ns_modules` plus `classes` (summed across every module).
+///
+/// `funcdefs`/`props` are not part of [`TypeIndex`] — counting them here is
+/// how the pipeline notices drift in entries the checker never loads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypeDbCounts {
+    pub functions: usize,
+    pub classes: usize,
+    pub enums: usize,
+    pub funcdefs: usize,
+    pub props: usize,
+    pub ns_modules: usize,
+}
+
+impl TypeDbMeta {
+    /// Read the version stamps and top-level counts of `path`.
+    ///
+    /// Errors name the path: unreadable file, or JSON that does not parse
+    /// (including a truncated harvest, which must never look like an empty
+    /// DB). A well-formed file with no `op` is *not* an error — the shape
+    /// guard reports that, so `status` can still show what it found.
+    pub fn probe(path: &Path) -> Result<Self, String> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        let value: serde_json::Value = serde_json::from_str(&contents)
+            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+        Ok(Self::from_value(&value))
+    }
+
+    fn from_value(value: &serde_json::Value) -> Self {
+        let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        let array_len = |key: &str| {
+            value
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map_or(0, Vec::len)
+        };
+        let ns = value.get("ns").and_then(|v| v.as_object());
+        Self {
+            op: text("op"),
+            mp: text("mp"),
+            counts: TypeDbCounts {
+                functions: array_len("functions"),
+                // Core lists classes flat; the Nadeo dump nests them per module.
+                classes: array_len("classes")
+                    + ns.map_or(0, |modules| {
+                        modules
+                            .values()
+                            .map(|types| types.as_object().map_or(0, serde_json::Map::len))
+                            .sum()
+                    }),
+                enums: array_len("enums"),
+                funcdefs: array_len("funcdefs"),
+                props: array_len("props"),
+                ns_modules: ns.map_or(0, serde_json::Map::len),
+            },
+        }
+    }
+}
+
 impl Default for TypeIndex {
     fn default() -> Self {
         Self {
@@ -743,5 +824,171 @@ mod tests {
         let index = TypeIndex::load(&cp, &np).unwrap();
         let nod = index.lookup_type("MwFoundations::CMwNod");
         assert!(nod.is_some(), "expected CMwNod type");
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+
+    /// Unique tmp dir per test tag (the pid alone repeats across tests in
+    /// one binary).
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "openplanet-lsp-typedb-meta-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_db(tag: &str, name: &str, contents: &str) -> std::path::PathBuf {
+        let path = tmp_dir(tag).join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb")
+            .join(name)
+    }
+
+    #[test]
+    fn typedb_meta_probe_core_has_op_no_mp() {
+        let path = write_db(
+            "core-op",
+            "OpenplanetCore.json",
+            r#"{"op":"1.29.5 (next, Public, 1234ad9e)","functions":[],"classes":[],"enums":[]}"#,
+        );
+        let meta = TypeDbMeta::probe(&path).unwrap();
+        assert_eq!(meta.op.as_deref(), Some("1.29.5 (next, Public, 1234ad9e)"));
+        assert_eq!(meta.mp, None);
+    }
+
+    #[test]
+    fn typedb_meta_probe_next_has_op_and_mp() {
+        let path = write_db(
+            "next-op-mp",
+            "OpenplanetNext.json",
+            r#"{"op":"1.29.5","mp":"2026-02-03 03:51:19","ns":{}}"#,
+        );
+        let meta = TypeDbMeta::probe(&path).unwrap();
+        assert_eq!(meta.op.as_deref(), Some("1.29.5"));
+        assert_eq!(meta.mp.as_deref(), Some("2026-02-03 03:51:19"));
+    }
+
+    #[test]
+    fn typedb_meta_probe_missing_op_is_none_but_ok() {
+        let path = write_db("no-op", "OpenplanetCore.json", "{}");
+        let meta = TypeDbMeta::probe(&path).unwrap();
+        assert_eq!(meta.op, None);
+        assert_eq!(meta.mp, None);
+        assert_eq!(meta.counts, TypeDbCounts::default());
+    }
+
+    /// Non-string `op`/`mp` (a number, an object) is treated as absent
+    /// rather than an error — the file still parses as JSON.
+    #[test]
+    fn typedb_meta_probe_non_string_op_is_none() {
+        let path = write_db(
+            "num-op",
+            "OpenplanetCore.json",
+            r#"{"op":129,"mp":{"a":1}}"#,
+        );
+        let meta = TypeDbMeta::probe(&path).unwrap();
+        assert_eq!(meta.op, None);
+        assert_eq!(meta.mp, None);
+    }
+
+    #[test]
+    fn typedb_meta_probe_malformed_json_errs() {
+        let path = write_db("malformed", "OpenplanetCore.json", "not json");
+        let err = TypeDbMeta::probe(&path).unwrap_err();
+        assert!(
+            err.contains("OpenplanetCore.json"),
+            "error should name the file: {err}"
+        );
+    }
+
+    /// A truncated (mid-array) file is malformed JSON, not a silent empty DB.
+    #[test]
+    fn typedb_meta_probe_truncated_json_errs() {
+        let path = write_db(
+            "truncated",
+            "OpenplanetCore.json",
+            r#"{"op":"1.29.5","functions":[{"name":"Begin""#,
+        );
+        assert!(TypeDbMeta::probe(&path).is_err());
+    }
+
+    #[test]
+    fn typedb_meta_probe_missing_file_errs() {
+        let path = tmp_dir("missing").join("OpenplanetCore.json");
+        let err = TypeDbMeta::probe(&path).unwrap_err();
+        assert!(
+            err.contains("OpenplanetCore.json"),
+            "error should name the path: {err}"
+        );
+    }
+
+    #[test]
+    fn typedb_meta_probe_counts_core_shape() {
+        let path = write_db(
+            "core-counts",
+            "OpenplanetCore.json",
+            r#"{"op":"1.0.0",
+                "functions":[{"name":"A"},{"name":"B"}],
+                "classes":[{"name":"C"}],
+                "enums":[{"name":"E"},{"name":"F"},{"name":"G"}],
+                "funcdefs":[{"name":"D"}],
+                "props":[{"name":"P"},{"name":"Q"}]}"#,
+        );
+        let counts = TypeDbMeta::probe(&path).unwrap().counts;
+        assert_eq!(counts.functions, 2);
+        assert_eq!(counts.classes, 1);
+        assert_eq!(counts.enums, 3);
+        assert_eq!(counts.funcdefs, 1);
+        assert_eq!(counts.props, 2);
+        assert_eq!(counts.ns_modules, 0);
+    }
+
+    /// Nadeo dump: `classes` is the total across every `ns` module.
+    #[test]
+    fn typedb_meta_probe_counts_next_shape() {
+        let path = write_db(
+            "next-counts",
+            "OpenplanetNext.json",
+            r#"{"op":"1.0.0","mp":"2026-01-01 00:00:00",
+                "ns":{"MwFoundations":{"CMwNod":{}},
+                      "GameData":{"CGameCtnBlock":{},"CGameCtnChallenge":{}}}}"#,
+        );
+        let counts = TypeDbMeta::probe(&path).unwrap().counts;
+        assert_eq!(counts.ns_modules, 2);
+        assert_eq!(counts.classes, 3);
+        assert_eq!(counts.functions, 0);
+    }
+
+    /// The shipped fixtures are the canonical shape both formats must keep.
+    #[test]
+    fn typedb_meta_probe_reads_repo_fixtures() {
+        let core = TypeDbMeta::probe(&fixture("OpenplanetCore.json")).unwrap();
+        assert!(
+            core.op.as_deref().unwrap_or_default().starts_with("1."),
+            "core op: {:?}",
+            core.op
+        );
+        assert_eq!(core.mp, None, "Core format carries no `mp` stamp");
+        assert!(core.counts.functions > 700, "{:?}", core.counts);
+        assert!(core.counts.classes > 70, "{:?}", core.counts);
+        assert!(core.counts.enums > 70, "{:?}", core.counts);
+
+        let game = TypeDbMeta::probe(&fixture("OpenplanetNext.json")).unwrap();
+        assert!(game.op.is_some(), "game op missing");
+        assert!(game.mp.is_some(), "game mp missing");
+        assert!(game.counts.classes > 2000, "{:?}", game.counts);
+        assert!(game.counts.ns_modules > 10, "{:?}", game.counts);
     }
 }
