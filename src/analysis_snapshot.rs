@@ -64,6 +64,19 @@ pub struct AnalysisSnapshot {
     /// Cached own-module view (see `own_module_symbols`). Built eagerly
     /// in `from_load` when strict exports exist.
     own_module_symbols: Option<SymbolTable>,
+    /// GH #61: own-module `.as` files the checked set omitted (gitignored,
+    /// or filtered by `source_paths`/`ignore_paths`), as raw
+    /// `(path, source)` — the game compiles them, so the
+    /// unused-declaration pass records usage from them. Deliberately NOT
+    /// parsed here and NOT in `files`: they must contribute no
+    /// declarations and no diagnostics, and only the unused pass needs
+    /// them, so it pays the parse (`WorkspaceUsage::collect`) rather than
+    /// every snapshot rebuild.
+    usage_only_sources: Vec<(PathBuf, String)>,
+    /// The `#if` define set these files were parsed with, so the
+    /// usage-only sources above can be parsed on demand with the same
+    /// masking the checked files got.
+    defines: HashSet<String>,
     /// GH #56: `unused_callbacks` from the config ladder — extra names
     /// the unused-declaration pass treats as runtime-invoked callbacks.
     /// Carried here for the same reason as `export_paths`: it is a
@@ -126,6 +139,8 @@ impl AnalysisSnapshot {
             export_paths: load.export_paths.clone(),
             strict_export_paths: load.strict_export_paths.clone(),
             own_module_symbols,
+            usage_only_sources: load.usage_only_sources.clone(),
+            defines: config.defines.clone(),
             unused_callbacks: config.unused_callbacks.clone(),
         }
     }
@@ -146,6 +161,36 @@ impl AnalysisSnapshot {
                 .collect(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
+            usage_only_sources: Vec::new(),
+            export_paths: HashSet::new(),
+            strict_export_paths: HashSet::new(),
+        };
+        Self::from_load(&load, config)
+    }
+
+    /// Like [`Self::from_files`], but with own-module sources that were
+    /// OMITTED from the checked set (GH #61) — gitignored, or filtered out
+    /// by `source_paths`/`ignore_paths`. They contribute usage only: no
+    /// pooled declarations, no diagnostics, no file_id. The in-memory
+    /// surface for the disk behaviour `load_plugin_workspace` builds.
+    pub fn from_files_with_usage_only(
+        files: &[(PathBuf, String)],
+        usage_only: &[(PathBuf, String)],
+        config: &LspConfig,
+    ) -> Self {
+        let load = PluginWorkspaceLoad {
+            root: PathBuf::new(),
+            files: files
+                .iter()
+                .map(|(p, s)| WorkspaceSourceFile {
+                    path: p.clone(),
+                    source: s.clone(),
+                    report_diagnostics: true,
+                })
+                .collect(),
+            missing_required_dependencies: Vec::new(),
+            dependency_closure_complete: false,
+            usage_only_sources: usage_only.to_vec(),
             export_paths: HashSet::new(),
             strict_export_paths: HashSet::new(),
         };
@@ -167,6 +212,7 @@ impl AnalysisSnapshot {
                 .collect(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
+            usage_only_sources: Vec::new(),
             export_paths: Default::default(),
             strict_export_paths: Default::default(),
         };
@@ -193,6 +239,18 @@ impl AnalysisSnapshot {
     /// GH #56: extra callback-name patterns from the config ladder.
     pub fn unused_callbacks(&self) -> &[String] {
         &self.unused_callbacks
+    }
+
+    /// GH #61: own-module sources omitted from the checked set, for usage
+    /// recording only (see the field docs). Not parsed — the caller parses
+    /// with [`Self::defines`].
+    pub fn usage_only_sources(&self) -> &[(PathBuf, String)] {
+        &self.usage_only_sources
+    }
+
+    /// The `#if` define set this snapshot's files were parsed with.
+    pub fn defines(&self) -> &HashSet<String> {
+        &self.defines
     }
 
     /// Files in the snapshot, in file_id order.

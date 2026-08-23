@@ -75,6 +75,23 @@ pub struct PluginWorkspaceLoad {
     /// info.toml `[script]` `exports` + `shared_exports`; decls in these
     /// files are public API and exempt from unused-declaration warnings.
     pub export_paths: HashSet<PathBuf>,
+    /// GH #61: own-module `.as` files the checked set OMITTED — dropped by
+    /// gitignore honoring (GH #60), or filtered out by `source_paths` /
+    /// `ignore_paths` — read for USAGE RECORDING ONLY.
+    ///
+    /// The game compiles these files, so a declaration whose only callers
+    /// live here is genuinely used; leaving them out of the usage join
+    /// reports it "never used" (GH #61). They are kept OUT of `files`
+    /// rather than flagged inside it because they must contribute neither
+    /// declarations nor diagnostics: a gitignored dir in the real fleet is
+    /// predominantly a whole-tree COPY (`.worktrees/`, scratch probes), and
+    /// pooling duplicate declarations breaks usage attribution — measured,
+    /// and recorded as refuted alternative 1 on GH #61.
+    ///
+    /// Deliberately does NOT affect `dependency_closure_complete`: the GH
+    /// #58 namespace rule reads the ABSENCE of a declaration as a game
+    /// compile error, and these files still declare nothing we can see.
+    pub usage_only_sources: Vec<(PathBuf, String)>,
     /// Canonicalized absolute paths of files listed in `[script]` EXPORTS
     /// ONLY (not `shared_exports`). Game model: a strict export file is
     /// compiled into CONSUMERS only — its declarations do not exist in
@@ -222,10 +239,17 @@ pub fn load_plugin_workspace(
     let (export_paths, strict_export_paths) = (export_paths.0, export_paths.1);
 
     let discovery = project::DiscoveryOptions::from_honor_gitignore(search.honor_gitignore);
-    let discovered = project::discover(&root, discovery);
+    let project::Discovery {
+        files: discovered_files,
+        gitignore_excluded_files,
+    } = project::discover(&root, discovery);
     let mut files = Vec::new();
-    for path in discovered.files {
+    // GH #61: own-module files the checked set omits are still compiled by
+    // the game, so they are read for usage recording only.
+    let mut usage_only_sources = Vec::new();
+    for path in discovered_files {
         if !source_file_included(&root, &path, search) {
+            push_usage_only(&path, &mut usage_only_sources);
             continue;
         }
         let source = std::fs::read_to_string(&path)
@@ -236,6 +260,10 @@ pub fn load_plugin_workspace(
             report_diagnostics: true,
         });
     }
+    for path in &gitignore_excluded_files {
+        push_usage_only(path, &mut usage_only_sources);
+    }
+    usage_only_sources.sort_by(|a, b| a.0.cmp(&b.0));
 
     let dep = load_dependency_exports(
         &root,
@@ -249,7 +277,7 @@ pub fn load_plugin_workspace(
         && dep.incomplete_export_surfaces.is_empty() // (3)
         && search.source_paths.is_none() // (4)
         && search.ignore_paths.is_none() // (4)
-        && discovered.gitignore_excluded == 0; // (5)
+        && gitignore_excluded_files.is_empty(); // (5)
     for (path, source) in dep.loaded_files {
         // Avoid double-including if a dep export somehow lives under root.
         if files.iter().any(|f| f.path == path) {
@@ -267,9 +295,26 @@ pub fn load_plugin_workspace(
         files,
         missing_required_dependencies: dep.missing_required,
         dependency_closure_complete,
+        usage_only_sources,
         export_paths,
         strict_export_paths,
     })
+}
+
+/// Read one omitted own-module file for usage recording (GH #61).
+///
+/// Best-effort, unlike the CHECKED read above: an unreadable omitted file
+/// (broken symlink into a pruned worktree, permissions) must not fail the
+/// whole load, because it contributes nothing but usage. The worst case is
+/// the pre-GH-#61 behaviour for that one file.
+fn push_usage_only(path: &Path, out: &mut Vec<(PathBuf, String)>) {
+    match std::fs::read_to_string(path) {
+        Ok(source) => out.push((path.to_path_buf(), source)),
+        Err(err) => tracing::debug!(
+            path = %path.display(),
+            "omitted own-module file is unreadable; usage from it stays invisible: {err}"
+        ),
+    }
 }
 
 /// Build a pooled [`SymbolTable`] from a loaded plugin workspace.
@@ -303,11 +348,26 @@ pub fn merge_open_documents(
             });
         }
     }
+    // GH #61: an omitted file the user has OPEN was just pushed into `files`
+    // as a real reported file, so drop it from the usage-only set — its usage
+    // now comes from the live buffer, and keeping it would additionally
+    // re-parse the stale disk copy.
+    let usage_only_sources = base
+        .usage_only_sources
+        .iter()
+        .filter(|(path, _)| {
+            !open
+                .iter()
+                .any(|(open_path, _)| paths_equal(path, open_path))
+        })
+        .cloned()
+        .collect();
     PluginWorkspaceLoad {
         root: base.root.clone(),
         files,
         missing_required_dependencies: base.missing_required_dependencies.clone(),
         dependency_closure_complete: base.dependency_closure_complete,
+        usage_only_sources,
         export_paths: base.export_paths.clone(),
         strict_export_paths: base.strict_export_paths.clone(),
     }
@@ -1337,5 +1397,182 @@ shared_exports = ["src/SharedExport.as"]
         );
 
         let _ = fs::remove_dir_all(base);
+    }
+
+    /// Root-relative paths of the usage-only set (GH #61), sorted.
+    fn usage_only_rel_paths(load: &PluginWorkspaceLoad) -> Vec<String> {
+        let mut v: Vec<String> = load
+            .usage_only_sources
+            .iter()
+            .map(|(path, _)| {
+                path.strip_prefix(&load.root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// A plugin root with a caller of `UsedOnlyByOmitted` in `omitted/`.
+    /// `gitignore` is written verbatim (empty = no `.gitignore` at all).
+    fn omitted_caller_plugin(name: &str, gitignore: &str) -> PathBuf {
+        let root = temp_tree(name).join("plugin");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("omitted")).unwrap();
+        fs::write(
+            root.join("info.toml"),
+            "[meta]\nname = \"Omitted\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        if !gitignore.is_empty() {
+            fs::write(root.join(".gitignore"), gitignore).unwrap();
+        }
+        fs::write(
+            root.join("src/Main.as"),
+            "void UsedOnlyByOmitted() {}\nvoid Main() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("omitted/Gen.as"),
+            "void GenCaller() { UsedOnlyByOmitted(); }\n",
+        )
+        .unwrap();
+        root
+    }
+
+    /// GH #61: a gitignored own-module file is read for usage recording —
+    /// out of `files` (no declarations, no diagnostics), in
+    /// `usage_only_sources`.
+    #[test]
+    fn gitignored_own_module_file_becomes_a_usage_only_source() {
+        let root = omitted_caller_plugin("uo-gitignore", "omitted/\n");
+        let load = load_plugin_workspace(&root, &DependencySearch::with_defaults()).unwrap();
+        assert!(
+            !load.files.iter().any(|f| f.path.ends_with("Gen.as")),
+            "a gitignored file must stay out of the checked set"
+        );
+        assert_eq!(usage_only_rel_paths(&load), vec!["omitted/Gen.as"]);
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// The `ignore_paths` blocklist omits files the game compiles too —
+    /// which is why the FP predates GH #60.
+    #[test]
+    fn ignore_paths_files_become_usage_only_sources() {
+        let root = omitted_caller_plugin("uo-ignore-paths", "");
+        let search = DependencySearch {
+            ignore_paths: Some(vec![PathBuf::from("omitted")]),
+            ..DependencySearch::with_defaults()
+        };
+        let load = load_plugin_workspace(&root, &search).unwrap();
+        assert!(
+            !load.files.iter().any(|f| f.path.ends_with("Gen.as")),
+            "an ignore_paths file must stay out of the checked set"
+        );
+        assert_eq!(usage_only_rel_paths(&load), vec!["omitted/Gen.as"]);
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// The `source_paths` allowlist omits everything outside it.
+    #[test]
+    fn files_outside_source_paths_become_usage_only_sources() {
+        let root = omitted_caller_plugin("uo-source-paths", "");
+        let search = DependencySearch {
+            source_paths: Some(vec![PathBuf::from("src")]),
+            ..DependencySearch::with_defaults()
+        };
+        let load = load_plugin_workspace(&root, &search).unwrap();
+        assert_eq!(usage_only_rel_paths(&load), vec!["omitted/Gen.as"]);
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// A `.gitignore` NESTED below the root is honored by the discovery
+    /// walk, so its exclusions must reach the usage-only set too.
+    #[test]
+    fn nested_gitignore_exclusions_become_usage_only_sources() {
+        let root = omitted_caller_plugin("uo-nested", "");
+        fs::write(root.join("omitted/.gitignore"), "Gen.as\n").unwrap();
+        let load = load_plugin_workspace(&root, &DependencySearch::with_defaults()).unwrap();
+        assert_eq!(usage_only_rel_paths(&load), vec!["omitted/Gen.as"]);
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// `honor_gitignore = false` restores the plain walk: the file is
+    /// CHECKED, so there is nothing to record usage-only for.
+    #[test]
+    fn no_gitignore_honoring_leaves_the_usage_only_set_empty() {
+        let root = omitted_caller_plugin("uo-no-honor", "omitted/\n");
+        let search = DependencySearch {
+            honor_gitignore: Some(false),
+            ..DependencySearch::with_defaults()
+        };
+        let load = load_plugin_workspace(&root, &search).unwrap();
+        assert!(
+            load.files.iter().any(|f| f.path.ends_with("Gen.as")),
+            "the file must be checked when honoring is off"
+        );
+        assert_eq!(usage_only_rel_paths(&load), Vec::<String>::new());
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// The overwhelmingly common tree: nothing omitted, nothing to record.
+    #[test]
+    fn a_tree_with_no_omissions_has_no_usage_only_sources() {
+        let root = omitted_caller_plugin("uo-none", "");
+        let load = load_plugin_workspace(&root, &DependencySearch::with_defaults()).unwrap();
+        assert_eq!(usage_only_rel_paths(&load), Vec::<String>::new());
+        assert!(
+            load.dependency_closure_complete,
+            "an unfiltered tree keeps GH #58 authority"
+        );
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// GH #61 must not restore the GH #58 namespace authority the
+    /// omission cost: declarations in these files stay invisible, so
+    /// "no such member" remains unprovable.
+    #[test]
+    fn usage_only_sources_do_not_restore_namespace_authority() {
+        let root = omitted_caller_plugin("uo-authority", "omitted/\n");
+        let load = load_plugin_workspace(&root, &DependencySearch::with_defaults()).unwrap();
+        assert!(
+            !load.usage_only_sources.is_empty(),
+            "precondition: a file was omitted"
+        );
+        assert!(
+            !load.dependency_closure_complete,
+            "a usage-only file contributes no declarations, so authority stays lost"
+        );
+        let snap = AnalysisSnapshot::from_load(&load, &LspConfig::default());
+        assert!(
+            snap.symbols().lookup("GenCaller").is_empty(),
+            "a usage-only file must contribute no pooled declarations"
+        );
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Opening an omitted file in the editor makes it a real reported file
+    /// (pre-existing behaviour), so it must leave the usage-only set —
+    /// otherwise the stale disk copy is parsed a second time.
+    #[test]
+    fn opening_an_omitted_file_removes_it_from_the_usage_only_set() {
+        let root = omitted_caller_plugin("uo-open", "omitted/\n");
+        let load = load_plugin_workspace(&root, &DependencySearch::with_defaults()).unwrap();
+        assert_eq!(usage_only_rel_paths(&load), vec!["omitted/Gen.as"]);
+        let merged = merge_open_documents(
+            &load,
+            &[(
+                root.join("omitted/Gen.as"),
+                "void GenCaller() { UsedOnlyByOmitted(); }\n".to_string(),
+            )],
+        );
+        assert_eq!(usage_only_rel_paths(&merged), Vec::<String>::new());
+        assert!(
+            merged.files.iter().any(|f| f.path.ends_with("Gen.as")),
+            "the open buffer is a reported file"
+        );
+        let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 }
