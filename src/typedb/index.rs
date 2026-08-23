@@ -929,6 +929,7 @@ fn render_params(params: &[ParamInfo]) -> String {
 
 fn class_facts(info: &TypeInfo) -> BTreeSet<String> {
     let mut facts = BTreeSet::new();
+    facts.insert(format!("source {:?}", info.source));
     if let Some(parent) = &info.parent {
         facts.insert(format!("inherits {parent}"));
     }
@@ -1785,6 +1786,45 @@ mod diff_tests {
                 .any(|d| d.contains("prop Ready")),
             "{:?}",
             diff.changed[0].details
+        );
+    }
+
+    /// Checker behavior differs for Core and Nadeo classes, so ownership is
+    /// a semantic fact even when the visible member shape is identical.
+    #[test]
+    fn diff_reports_changed_class_source() {
+        let index_with_source = |source| {
+            let mut index = TypeIndex::new();
+            index.types.insert(
+                "Net::HttpRequest".to_string(),
+                TypeInfo {
+                    name: "HttpRequest".to_string(),
+                    namespace: Some("Net".to_string()),
+                    parent: None,
+                    methods: Vec::new(),
+                    properties: Vec::new(),
+                    ctor_conversions: Vec::new(),
+                    doc: None,
+                    source,
+                },
+            );
+            index
+        };
+        let diff = diff_indexes(
+            &index_with_source(TypeSource::Core),
+            &index_with_source(TypeSource::Nadeo),
+        );
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|line| line.contains("source Core"))
+                && diff.changed[0]
+                    .details
+                    .iter()
+                    .any(|line| line.contains("source Nadeo")),
+            "{diff:?}"
         );
     }
 
