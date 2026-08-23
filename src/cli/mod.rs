@@ -59,6 +59,12 @@ OPTIONS:
                         single-combo run.
     --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
     --no-typedb         Run without Openplanet/Nadeo type database files
+    --no-gitignore      Check .as files that .gitignore excludes. Discovery
+                        honors .gitignore at or below the plugin root by
+                        default; use this (or `honor_gitignore = false` in
+                        .openplanet-lsp.toml) when gitignored files are still
+                        compile-critical, e.g. generated sources. The flag
+                        wins over both config levels.
     --plugins-dir DIR   Directory to search for plugin dependencies
                         (may be specified multiple times)
     --plugin-files-search-path DIR
@@ -137,6 +143,10 @@ pub struct CheckOptions {
     /// source-tree gate match the staged/dev compile (e.g. `build.sh dev`
     /// writes `defines = ["DEV"]` only into the staged plugin).
     pub extra_defines: Vec<String>,
+    /// GH #60: `--no-gitignore` — discover `.as` files that `.gitignore`
+    /// excludes. Wins over `honor_gitignore` at both config levels. There is
+    /// no positive flag: honoring is already the default.
+    pub no_gitignore: bool,
 }
 
 impl CheckOptions {
@@ -211,6 +221,10 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
             }
             "--no-typedb" => {
                 options.no_typedb = true;
+                i += 1;
+            }
+            "--no-gitignore" => {
+                options.no_gitignore = true;
                 i += 1;
             }
             "--watch" => {
@@ -413,14 +427,20 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
 
     let type_index = load_type_index(&config, options.no_typedb)?;
 
-    let search = DependencySearch {
+    let mut search = DependencySearch {
         plugins_dirs: options.plugins_dirs.clone(),
         plugin_files_search_paths: options.plugin_files_search_paths.clone(),
         // Filled from config by finalize_with_config below.
         source_paths: None,
         ignore_paths: None,
+        honor_gitignore: None,
     }
     .finalize_with_config(&config);
+    // GH #60: the CLI flag is the top of the ladder — it beats a workspace or
+    // user-global `honor_gitignore = true`.
+    if options.no_gitignore {
+        search.honor_gitignore = Some(false);
+    }
 
     // Define-independent: file discovery + source read. Shared by every
     // combo (each combo re-parses with its own define set below).
@@ -900,6 +920,28 @@ mod tests {
 
     /// GH #48 follow-up: precedence contract —
     /// CLI flag > workspace config > user config > default(false).
+    /// GH #60: `--no-gitignore` is tracked on CheckOptions, absent by default,
+    /// and reaches the watch/TUI path through the same parse.
+    #[test]
+    fn parse_check_args_no_gitignore_flag() {
+        let opts = parse_check_args(&[]).unwrap();
+        assert!(!opts.no_gitignore, "absent flag must leave honoring on");
+
+        let opts = parse_check_args(&["--no-gitignore".to_string()]).unwrap();
+        assert!(opts.no_gitignore);
+
+        // Shared arg parsing: the watch/TUI entrypoint gets it too.
+        let opts =
+            parse_check_args(&["--watch".to_string(), "--no-gitignore".to_string()]).unwrap();
+        assert!(opts.watch && opts.no_gitignore);
+
+        // Order-independent, and it does not swallow the positional path.
+        let opts =
+            parse_check_args(&["--no-gitignore".to_string(), "some/dir".to_string()]).unwrap();
+        assert!(opts.no_gitignore);
+        assert_eq!(opts.path, PathBuf::from("some/dir"));
+    }
+
     #[test]
     fn resolve_warnings_as_errors_precedence() {
         let prefs_true = crate::config::UserPrefs {

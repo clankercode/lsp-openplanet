@@ -48,6 +48,7 @@ fn showcase_snapshot() -> Snapshot {
         watch: false,
         warnings_as_errors_flag: None,
         extra_defines: Vec::new(),
+        no_gitignore: false,
     };
     let report = run_check(&options).expect("run_check showcase");
     assert!(
