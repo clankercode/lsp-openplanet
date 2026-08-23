@@ -88,11 +88,14 @@ GitHub Release body to match this section (gh release edit).
   so a mention inside an inactive `#if` branch still counts. Parameters
   stay silent where the signature is imposed rather than chosen:
   Openplanet callbacks, operator overloads, both halves of a virtual pair
-  (overrides and the base they override), mixin members, lambdas,
-  functions handed to a funcdef (handler tables, `startnew` coroutines),
-  public-API export files, and any declaration the pass already reports
-  as unused. Dogfooded over the `tm-*` fixtures: 58 sites classified, no
-  false positives, so the pass is on by default.
+  (overrides and the base they override), interface implementations
+  (including inherited and partially-qualified contracts), mixin members,
+  lambdas, functions handed to a funcdef (handler tables, `startnew`
+  coroutines), no-op stubs whose body has zero statements, public-API
+  export files, and any declaration the pass already reports as unused.
+  Dogfooded over the `tm-*` fixtures across three rounds — 63 sites
+  classified by hand plus a mechanical screen over every emitted warning
+  — with no residual false positives, so the pass is on by default.
 - **Define matrix for `check`** — `define_matrix` in
   `.openplanet-lsp.toml` lists preprocessor define axes that `check`
   cross-multiplies on top of the base define set, running every combo

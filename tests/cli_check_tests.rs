@@ -101,6 +101,9 @@ fn check_command_reports_workspace_diagnostics() {
 #[test]
 fn check_command_exits_zero_when_clean() {
     let root = make_temp_plugin("clean");
+    // `_f`, not `f`: this local is genuinely unused (GH #55 warns on that)
+    // and only exists to make the call a statement. Do not "tidy" the
+    // prefix away — the subject here is the exit code, not the warning.
     fs::write(
         root.join("src/Main.as"),
         "class Foo {}\nFoo@ MakeFoo() { return null; }\nvoid Main() { Foo@ _f = MakeFoo(); }\n",
@@ -193,6 +196,8 @@ fn check_command_ignore_paths_omit_sibling_namespace_member_without_false_positi
 #[test]
 fn check_command_accepts_relative_plugin_path() {
     let root = make_temp_plugin("relative-clean");
+    // `_f`, not `f`: GH #55 unused-local suppression. The subject here is
+    // relative-path resolution, not the unused warning — keep the prefix.
     fs::write(
         root.join("src/Main.as"),
         "class Foo {}\nvoid Main() { Foo@ _f = Foo(); }\n",

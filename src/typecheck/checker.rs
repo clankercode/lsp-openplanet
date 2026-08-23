@@ -521,6 +521,12 @@ pub struct LocalDeclRecord {
     /// Mixin members splice into consuming classes by declaration, so
     /// their signature is imposed by whatever consumes them.
     pub function_owner_is_mixin: bool,
+    /// True when the enclosing function's body holds ZERO statements
+    /// (`{}` or `{ /* comment */ }`). A deliberate no-op stub still has
+    /// callers passing arguments, so its parameters are not the author's
+    /// to remove. `{ return; }` and `{ throw(...); }` are one statement
+    /// each and do NOT qualify.
+    pub function_body_is_empty: bool,
     /// End offset of the enclosing function body. Upper bound of the
     /// "mentioned again after its declaration" scan.
     pub function_body_end: u32,
@@ -533,6 +539,7 @@ struct LocalDeclFnCtx {
     is_top_level_free: bool,
     is_override: bool,
     owner_is_mixin: bool,
+    body_is_empty: bool,
     body_end: u32,
 }
 
@@ -684,6 +691,7 @@ impl<'a> Checker<'a> {
             function_is_top_level_free: ctx.is_top_level_free,
             function_is_override: ctx.is_override,
             function_owner_is_mixin: ctx.owner_is_mixin,
+            function_body_is_empty: ctx.body_is_empty,
             function_body_end: ctx.body_end,
         };
         if let Some(out) = &mut self.local_decls {
@@ -1444,6 +1452,7 @@ impl<'a> Checker<'a> {
                 is_top_level_free: false,
                 is_override: false,
                 owner_is_mixin: self.class_stack.last().is_some_and(|c| c.is_mixin),
+                body_is_empty: body.stmts.is_empty(),
                 body_end: body.span.end,
             });
         }
@@ -1508,6 +1517,7 @@ impl<'a> Checker<'a> {
                 is_top_level_free: self.class_stack.is_empty() && self.namespace_stack.is_empty(),
                 is_override: func.is_override,
                 owner_is_mixin: self.class_stack.last().is_some_and(|c| c.is_mixin),
+                body_is_empty: func.body.as_ref().is_some_and(|b| b.stmts.is_empty()),
                 body_end: func.body.as_ref().map_or(func.span.end, |b| b.span.end),
             };
             self.local_decl_fn_stack.push(ctx);

@@ -21,6 +21,11 @@
 //!
 //! Every heuristic errs toward marking a binding used: a missed warning
 //! is acceptable, a bogus one is not (`todo-false-positives.txt`).
+//!
+//! **Testing these exemptions:** pair every "this must not warn" assertion
+//! with a positive control. Two rules here have already been certified as
+//! working while dead, because the no-double-warn cascade suppressed the
+//! binding for an unrelated reason — see `assert_exempt_not_cascaded`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -606,6 +611,15 @@ impl FileCtx<'_> {
         if rec.function_owner_is_mixin {
             return true;
         }
+        // A no-op stub — zero statements in the body — still has callers
+        // passing arguments, so the author cannot drop the parameter. The
+        // `#if !DEV` / `#if DEV` variant pairs in tm-editor-plus-plus
+        // (`src/Dev.as:1757`) are the proof: the same signature is
+        // mandatory in the combo whose body is empty. `{ return; }` and
+        // `{ throw(...); }` are one statement each and stay in scope.
+        if rec.function_body_is_empty {
+            return true;
+        }
         let member = tail_name(&rec.function);
         // Engine/framework callbacks, invoked by name.
         if rec.function_is_top_level_free && (self.exempt_callbacks)(member) {
@@ -713,6 +727,27 @@ mod tests {
         );
     }
 
+    /// Assert `param` is suppressed by the exemption under test and NOT
+    /// by a confounder. The no-double-warn cascade suppresses every binding
+    /// of a declaration that is itself reported, so asserting only the
+    /// parameter's absence passes even when the exemption is dead code —
+    /// that is exactly how `interface_implementation_params_exempt`
+    /// certified a broken rule as working. Asserting the enclosing
+    /// declaration and each of its owners are absent too closes the hole.
+    fn assert_exempt_not_cascaded(report: &[String], param: &str) {
+        assert_lacks(report, param);
+        let mut owner = param.rsplit_once("::").map(|(o, _)| o);
+        while let Some(name) = owner {
+            assert!(
+                !report.iter().any(|n| n == name),
+                "`{param}` may be suppressed by the cascade rather than the \
+                 exemption under test: enclosing `{name}` is itself reported. \
+                 got {report:?}"
+            );
+            owner = name.rsplit_once("::").map(|(o, _)| o);
+        }
+    }
+
     fn assert_lacks(report: &[String], unwanted: &str) {
         assert!(
             !report.iter().any(|n| n == unwanted),
@@ -780,7 +815,7 @@ mod tests {
     fn for_init_var_used_by_condition_and_step() {
         // Decision 5: condition/step are the same scope — usage.
         assert_eq!(
-            report_of("void Main() {\n    for (uint i = 0; i < 3; i++) {}\n}\n"),
+            report_of("void Main() {\n    for (uint i = 0; i < 3; i++) { print(\"x\"); }\n}\n"),
             Vec::<String>::new()
         );
     }
@@ -858,7 +893,7 @@ mod tests {
     #[test]
     fn unused_param_of_used_function_warns() {
         assert_eq!(
-            report_of("void Helper(int a) {}\nvoid Main() { Helper(1); }\n"),
+            report_of("void Helper(int a) { print(\"x\"); }\nvoid Main() { Helper(1); }\n"),
             vec!["Helper::a"]
         );
     }
@@ -873,7 +908,7 @@ mod tests {
     #[test]
     fn param_of_unused_function_warns_only_at_the_declaration() {
         // Decision 2: an unused function already warns; no double-warn.
-        let report = report_of("void Dead(int a) {}\nvoid Main() {}\n");
+        let report = report_of("void Dead(int a) { print(\"x\"); }\nvoid Main() {}\n");
         assert_has(&report, "Dead");
         assert_lacks(&report, "Dead::a");
     }
@@ -901,7 +936,9 @@ mod tests {
             ("array<int>@ &in a", "", "Helper(null);"),
         ];
         for (param, prelude, call) in cases {
-            let src = format!("{prelude}void Helper({param}) {{}}\nvoid Main() {{ {call} }}\n");
+            let src = format!(
+                "{prelude}void Helper({param}) {{ print(\"x\"); }}\nvoid Main() {{ {call} }}\n"
+            );
             let report = report_of(&src);
             assert!(
                 report.iter().any(|n| n == "Helper::a"),
@@ -918,14 +955,16 @@ mod tests {
     fn openplanet_callback_params_exempt() {
         // Decision 3: signature imposed by the runtime, not the author.
         assert_eq!(
-            report_of("void OnKeyPress(bool down, VirtualKey key) {}\nvoid Main() {}\n"),
+            report_of(
+                "void OnKeyPress(bool down, VirtualKey key) { print(\"x\"); }\nvoid Main() {}\n"
+            ),
             Vec::<String>::new()
         );
     }
 
     #[test]
     fn every_openplanet_callback_params_exempt() {
-        let src = "void OnMouseButton(bool down, int button, int x, int y) {}\nvoid OnMouseMove(int x, int y) {}\nvoid OnKeyRelease(bool down, VirtualKey key) {}\nvoid OnError(const string &in msg) {}\nvoid Update(float dt) {}\nvoid Main() {}\n";
+        let src = "void OnMouseButton(bool down, int button, int x, int y) { print(\"x\"); }\nvoid OnMouseMove(int x, int y) { print(\"x\"); }\nvoid OnKeyRelease(bool down, VirtualKey key) { print(\"x\"); }\nvoid OnError(const string &in msg) { print(\"x\"); }\nvoid Update(float dt) { print(\"x\"); }\nvoid Main() {}\n";
         assert_eq!(report_of(src), Vec::<String>::new());
     }
 
@@ -940,7 +979,7 @@ mod tests {
     #[test]
     fn override_method_params_exempt() {
         let report = report_of(
-            "class Base {\n    void Do(int a) { print(\"\" + a); }\n}\nclass Derived : Base {\n    void Do(int a) override {}\n}\nvoid Main() { Derived _d; _d.Do(1); }\n",
+            "class Base {\n    void Do(int a) { print(\"\" + a); }\n}\nclass Derived : Base {\n    void Do(int a) override { print(\"x\"); }\n}\nvoid Main() { Derived _d; _d.Do(1); }\n",
         );
         assert_lacks(&report, "Derived::Do::a");
     }
@@ -948,7 +987,7 @@ mod tests {
     #[test]
     fn interface_implementation_params_exempt() {
         let report = report_of(
-            "interface IThing {\n    void Do(int a);\n}\nclass C : IThing {\n    void Do(int a) {}\n}\nvoid Main() { IThing@ _i = C(); _i.Do(1); }\n",
+            "interface IThing {\n    void Do(int a);\n}\nclass C : IThing {\n    void Do(int a) { print(\"x\"); }\n}\nvoid Main() { IThing@ _i = C(); _i.Do(1); }\n",
         );
         assert_lacks(&report, "C::Do::a");
         assert_lacks(&report, "IThing::Do::a");
@@ -957,7 +996,7 @@ mod tests {
     #[test]
     fn interface_implementation_params_exempt_for_concrete_receiver() {
         let report = report_of(
-            "interface IThing {\n    void Do(int a);\n}\nclass C : IThing {\n    void Do(int a) {}\n}\nvoid Main() { C c; c.Do(1); }\n",
+            "interface IThing {\n    void Do(int a);\n}\nclass C : IThing {\n    void Do(int a) { print(\"x\"); }\n}\nvoid Main() { C c; c.Do(1); }\n",
         );
         assert_lacks(&report, "C::Do::a");
     }
@@ -965,7 +1004,7 @@ mod tests {
     #[test]
     fn inherited_interface_implementation_params_exempt() {
         let report = report_of(
-            "interface IBase {\n    void Do(int a);\n}\ninterface IThing : IBase {}\nclass C : IThing {\n    void Do(int a) {}\n}\nvoid Main() { C c; c.Do(1); }\n",
+            "interface IBase {\n    void Do(int a);\n}\ninterface IThing : IBase {}\nclass C : IThing {\n    void Do(int a) { print(\"x\"); }\n}\nvoid Main() { C c; c.Do(1); }\n",
         );
         assert_lacks(&report, "C::Do::a");
     }
@@ -973,7 +1012,7 @@ mod tests {
     #[test]
     fn unique_cross_namespace_interface_tail_imposes_params() {
         let report = report_of(
-            "namespace Api {\n    interface IThing { void Do(int a); }\n}\nnamespace Impl {\n    class C : IThing { void Do(int a) {} }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
+            "namespace Api {\n    interface IThing { void Do(int a); }\n}\nnamespace Impl {\n    class C : IThing { void Do(int a) { print(\"x\"); } }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
         );
         assert_lacks(&report, "Impl::C::Do::a");
     }
@@ -981,7 +1020,7 @@ mod tests {
     #[test]
     fn ambiguous_cross_namespace_interface_tail_does_not_impose_params() {
         let report = report_of(
-            "namespace ApiA {\n    interface IThing { void Do(int a); }\n}\nnamespace ApiB {\n    interface IThing { void Do(int a); }\n}\nnamespace Impl {\n    class C : IThing { void Do(int a) {} }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
+            "namespace ApiA {\n    interface IThing { void Do(int a); }\n}\nnamespace ApiB {\n    interface IThing { void Do(int a); }\n}\nnamespace Impl {\n    class C : IThing { void Do(int a) { print(\"x\"); } }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
         );
         assert_has(&report, "Impl::C::Do::a");
     }
@@ -989,7 +1028,7 @@ mod tests {
     #[test]
     fn unique_partially_qualified_workspace_interface_imposes_params() {
         let report = report_of(
-            "namespace Api {\n    namespace Sub {\n        interface IThing { void Do(int a); }\n    }\n}\nclass C : Sub::IThing { void Do(int a) {} }\nvoid Main() { C c; c.Do(1); }\n",
+            "namespace Api {\n    namespace Sub {\n        interface IThing { void Do(int a); }\n    }\n}\nclass C : Sub::IThing { void Do(int a) { print(\"x\"); } }\nvoid Main() { C c; c.Do(1); }\n",
         );
         assert_lacks(&report, "C::Do::a");
     }
@@ -997,7 +1036,7 @@ mod tests {
     #[test]
     fn ambiguous_partially_qualified_workspace_interface_does_not_impose_params() {
         let report = report_of(
-            "namespace ApiA { namespace Sub { interface IThing { void Do(int a); } } }\nnamespace ApiB { namespace Sub { interface IThing { void Do(int a); } } }\nclass C : Sub::IThing { void Do(int a) {} }\nvoid Main() { C c; c.Do(1); }\n",
+            "namespace ApiA { namespace Sub { interface IThing { void Do(int a); } } }\nnamespace ApiB { namespace Sub { interface IThing { void Do(int a); } } }\nclass C : Sub::IThing { void Do(int a) { print(\"x\"); } }\nvoid Main() { C c; c.Do(1); }\n",
         );
         assert_has(&report, "C::Do::a");
     }
@@ -1013,7 +1052,7 @@ mod tests {
             ]
         }"#;
         let report = report_with_inline_typedb(
-            "class Unique : Api::IThing { void Do(int a) {} }\nclass Ambiguous : Sub::IThing { void Act(int a) {} }\nvoid Main() { Unique unique; unique.Do(1); Ambiguous ambiguous; ambiguous.Act(1); }\n",
+            "class Unique : Api::IThing { void Do(int a) { print(\"x\"); } }\nclass Ambiguous : Sub::IThing { void Act(int a) { print(\"x\"); } }\nvoid Main() { Unique unique; unique.Do(1); Ambiguous ambiguous; ambiguous.Act(1); }\n",
             core,
         );
         assert_lacks(&report, "Unique::Do::a");
@@ -1023,7 +1062,7 @@ mod tests {
     #[test]
     fn external_unqualified_parent_precedes_workspace_tail_collision() {
         let report = report_with_typedb(
-            "namespace Unrelated { class CGameApp {} }\nclass C : CGameApp { void ShowMenu(CGameMenu@ menu) {} }\nvoid Main() { C c; c.ShowMenu(null); }\n",
+            "namespace Unrelated { class CGameApp {} }\nclass C : CGameApp { void ShowMenu(CGameMenu@ menu) { print(\"x\"); } }\nvoid Main() { C c; c.ShowMenu(null); }\n",
         );
         assert_lacks(&report, "C::ShowMenu::menu");
     }
@@ -1031,7 +1070,7 @@ mod tests {
     #[test]
     fn external_typedb_base_contract_imposes_params() {
         let report = report_with_typedb(
-            "class Direct : CGameApp {\n    void ShowMenu(CGameMenu@ menu) {}\n}\nclass ThroughParent : CGameManialinkEntry {\n    bool HasClass(const string &in className) { return false; }\n}\nvoid Main() {\n    Direct direct;\n    direct.ShowMenu(null);\n    ThroughParent inherited;\n    bool _has = inherited.HasClass(\"x\");\n}\n",
+            "class Direct : CGameApp {\n    void ShowMenu(CGameMenu@ menu) { print(\"x\"); }\n}\nclass ThroughParent : CGameManialinkEntry {\n    bool HasClass(const string &in className) { return false; }\n}\nvoid Main() {\n    Direct direct;\n    direct.ShowMenu(null);\n    ThroughParent inherited;\n    bool _has = inherited.HasClass(\"x\");\n}\n",
         );
         assert_lacks(&report, "Direct::ShowMenu::menu");
         assert_lacks(&report, "ThroughParent::HasClass::className");
@@ -1040,7 +1079,7 @@ mod tests {
     #[test]
     fn same_short_name_in_another_namespace_is_not_an_interface_match() {
         let report = report_of(
-            "namespace Api {\n    interface Parent { void Do(int a); }\n}\nnamespace Impl {\n    class Parent {}\n    class C : Parent { void Do(int a) {} }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
+            "namespace Api {\n    interface Parent { void Do(int a); }\n}\nnamespace Impl {\n    class Parent {}\n    class C : Parent { void Do(int a) { print(\"x\"); } }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
         );
         assert_has(&report, "Impl::C::Do::a");
     }
@@ -1065,7 +1104,7 @@ mod tests {
         // Bodies are still this plugin's code.
         let snap = snap_of(&[
             ("Exports.as", "void PubApi(int a) {\n    int dead = 1;\n}\n"),
-            ("Main.as", "void Main() {}\n"),
+            ("Main.as", "void Main() { print(\"x\"); }\n"),
         ]);
         let exports: StdHashSet<PathBuf> = [PathBuf::from("Exports.as")].into_iter().collect();
         let report = names(&unused_declarations(&snap, None, &exports));
@@ -1075,27 +1114,30 @@ mod tests {
 
     #[test]
     fn method_params_warn_on_a_used_class() {
-        let report =
-            report_of("class C {\n    void M(int a) {}\n}\nvoid Main() { C c; c.M(1); }\n");
+        let report = report_of(
+            "class C {\n    void M(int a) { print(\"x\"); }\n}\nvoid Main() { C c; c.M(1); }\n",
+        );
         assert_has(&report, "C::M::a");
     }
 
     #[test]
     fn method_params_suppressed_when_the_method_is_unused() {
-        let report = report_of("class C {\n    void M(int a) {}\n}\nvoid Main() { C _c; }\n");
+        let report =
+            report_of("class C {\n    void M(int a) { print(\"x\"); }\n}\nvoid Main() { C _c; }\n");
         assert_has(&report, "C::M");
         assert_lacks(&report, "C::M::a");
     }
 
     #[test]
     fn constructor_params_warn_when_the_class_is_used() {
-        let report = report_of("class C {\n    C(int a) {}\n}\nvoid Main() { C _c(1); }\n");
+        let report =
+            report_of("class C {\n    C(int a) { print(\"x\"); }\n}\nvoid Main() { C _c(1); }\n");
         assert_has(&report, "C::C::a");
     }
 
     #[test]
     fn constructor_params_suppressed_when_the_class_is_unused() {
-        let report = report_of("class C {\n    C(int a) {}\n}\nvoid Main() {}\n");
+        let report = report_of("class C {\n    C(int a) { print(\"x\"); }\n}\nvoid Main() {}\n");
         assert_has(&report, "C");
         assert_lacks(&report, "C::C::a");
     }
@@ -1148,13 +1190,29 @@ mod tests {
     }
 
     #[test]
+    fn accessor_bodies_are_scoped_separately_from_each_other() {
+        // A property's getter and setter are two distinct bodies. A local
+        // declared in one and merely NAMED in the other is still unused —
+        // if the mention scan were bounded by the property span instead of
+        // the accessor body it would wrongly count as used.
+        let report = report_of(
+            "class C {\n    int _v;\n    int Thing {\n        get {\n            int fromGet = 1;\n            return _v;\n        }\n        set {\n            _v = value;\n            int fromSet = fromGet;\n        }\n    }\n}\nvoid Main() { C c; c.Thing = c.Thing; }\n",
+        );
+        assert_has(&report, "C::Thing::fromGet");
+        assert_lacks(&report, "C::Thing::value");
+    }
+
+    #[test]
     fn mixin_class_method_params_exempt() {
         // Mixin members splice into consuming classes by declaration;
         // the file-level pass already marks them used.
+        //
+        // The body must NOT be empty: a no-op stub is exempt on its own,
+        // which would let this pass without the mixin rule doing anything.
         let report = report_of(
-            "mixin class M {\n    void Do(int a) {}\n}\nclass C : M {}\nvoid Main() { C _c; }\n",
+            "mixin class M {\n    void Do(int a) { print(\"x\"); }\n}\nclass C : M {}\nvoid Main() { C _c; }\n",
         );
-        assert_lacks(&report, "M::Do::a");
+        assert_exempt_not_cascaded(&report, "M::Do::a");
     }
 
     #[test]
@@ -1186,6 +1244,28 @@ mod tests {
         let report = names(&unused_declarations(&snap, None, &StdHashSet::new()));
         assert_lacks(&report, "DepApi::a");
         assert_lacks(&report, "DepApi::dead");
+
+        // Positive control: the same source DOES warn once the file is
+        // this plugin's own, so the silence above is the
+        // report_diagnostics gate and not an unrecorded body.
+        let own = AnalysisSnapshot::from_files_with_flags(
+            &[
+                (
+                    PathBuf::from("own.as"),
+                    "void Main() { DepApi(1); }\n".to_string(),
+                    true,
+                ),
+                (
+                    PathBuf::from("dep.as"),
+                    "void DepApi(int a) {\n    int dead = 1;\n}\n".to_string(),
+                    true,
+                ),
+            ],
+            &LspConfig::default(),
+        );
+        let report = names(&unused_declarations(&own, None, &StdHashSet::new()));
+        assert_has(&report, "DepApi::a");
+        assert_has(&report, "DepApi::dead");
     }
 
     #[test]
@@ -1199,6 +1279,16 @@ mod tests {
         );
         let report = names(&unused_declarations(&snap, None, &StdHashSet::new()));
         assert_lacks(&report, "Main::x");
+
+        // Positive control: the same body parses and DOES warn once the
+        // stray token is gone, so the silence above is the parse-error
+        // gate rather than the binding never being recorded.
+        let clean = snap_of(&[("a.as", "void Main() {\n    int x = 1;\n}\n")]);
+        assert!(clean.files()[0].analysis.parse_errors.is_empty());
+        assert_has(
+            &names(&unused_declarations(&clean, None, &StdHashSet::new())),
+            "Main::x",
+        );
     }
 
     // ── FP classes found dogfooding (decision 6) ────────────────────────
@@ -1249,7 +1339,7 @@ mod tests {
     #[test]
     fn lexical_namespaced_virtual_pair_exempts_both_halves() {
         let report = report_of(
-            "namespace Wrong {\n    class Base {}\n}\nnamespace Right {\n    class Base { void Do(int a) {} }\n    class Derived : Base { void Do(int a) {} }\n}\nvoid Main() { Right::Base base; base.Do(1); Right::Derived derived; derived.Do(1); }\n",
+            "namespace Wrong {\n    class Base {}\n}\nnamespace Right {\n    class Base { void Do(int a) { print(\"x\"); } }\n    class Derived : Base { void Do(int a) { print(\"x\"); } }\n}\nvoid Main() { Right::Base base; base.Do(1); Right::Derived derived; derived.Do(1); }\n",
         );
         assert_lacks(&report, "Right::Base::Do::a");
         assert_lacks(&report, "Right::Derived::Do::a");
@@ -1258,7 +1348,7 @@ mod tests {
     #[test]
     fn partially_qualified_virtual_pair_exempts_both_halves() {
         let report = report_of(
-            "namespace Api {\n    namespace Core {\n        class Base { void Do(int a) {} }\n    }\n}\nclass Derived : Core::Base { void Do(int a) {} }\nvoid Main() { Api::Core::Base base; base.Do(1); Derived derived; derived.Do(1); }\n",
+            "namespace Api {\n    namespace Core {\n        class Base { void Do(int a) { print(\"x\"); } }\n    }\n}\nclass Derived : Core::Base { void Do(int a) { print(\"x\"); } }\nvoid Main() { Api::Core::Base base; base.Do(1); Derived derived; derived.Do(1); }\n",
         );
         assert_lacks(&report, "Api::Core::Base::Do::a");
         assert_lacks(&report, "Derived::Do::a");
@@ -1267,11 +1357,44 @@ mod tests {
     #[test]
     fn ambiguous_parent_does_not_create_virtual_pair_exemptions() {
         let report = report_of(
-            "namespace Left { class Base { void Do(int a) {} } }\nnamespace Right { class Base { void Do(int a) {} } }\nclass Derived : Base { void Do(int a) {} }\nvoid Main() { Left::Base left; left.Do(1); Right::Base right; right.Do(1); Derived derived; derived.Do(1); }\n",
+            "namespace Left { class Base { void Do(int a) { print(\"x\"); } } }\nnamespace Right { class Base { void Do(int a) { print(\"x\"); } } }\nclass Derived : Base { void Do(int a) { print(\"x\"); } }\nvoid Main() { Left::Base left; left.Do(1); Right::Base right; right.Do(1); Derived derived; derived.Do(1); }\n",
         );
         assert_has(&report, "Left::Base::Do::a");
         assert_has(&report, "Right::Base::Do::a");
         assert_has(&report, "Derived::Do::a");
+    }
+
+    #[test]
+    fn params_of_an_empty_bodied_stub_are_exempt() {
+        // A body with zero statements is a deliberate no-op; callers still
+        // pass the argument, so the parameter is not the author's to drop.
+        let exempt: &[&str] = &[
+            "void Helper(int a) {}",
+            "void Helper(int a) { /* nothing to do yet */ }",
+            "void Helper(int a) {\n    // TODO\n}",
+        ];
+        for decl in exempt {
+            let src = format!("{decl}\nvoid Main() {{ Helper(1); }}\n");
+            let report = report_of(&src);
+            assert!(
+                !report.iter().any(|n| n == "Helper::a"),
+                "empty body must exempt its params; decl={decl:?} got {report:?}"
+            );
+        }
+        // One statement is not an empty body.
+        let in_scope: &[&str] = &[
+            "void Helper(int a) { return; }",
+            "void Helper(int a) { throw(\"not implemented\"); }",
+            "void Helper(int a) { ; }",
+        ];
+        for decl in in_scope {
+            let src = format!("{decl}\nvoid Main() {{ Helper(1); }}\n");
+            let report = report_of(&src);
+            assert!(
+                report.iter().any(|n| n == "Helper::a"),
+                "a one-statement body stays in scope; decl={decl:?} got {report:?}"
+            );
+        }
     }
 
     #[test]
@@ -1281,13 +1404,13 @@ mod tests {
         // signature, not one the author chose.
         let cases: &[&str] = &[
             // funcdef "constructor" form
-            "funcdef void Handler(int);\nvoid OnThing(int a) {}\nvoid Main() { Handler@ _h = Handler(OnThing); }\n",
+            "funcdef void Handler(int);\nvoid OnThing(int a) { print(\"x\"); }\nvoid Main() { Handler@ _h = Handler(OnThing); }\n",
             // bare assignment
-            "funcdef void Handler(int);\nvoid OnThing(int a) {}\nvoid Main() { Handler@ _h = OnThing; }\n",
+            "funcdef void Handler(int);\nvoid OnThing(int a) { print(\"x\"); }\nvoid Main() { Handler@ _h = OnThing; }\n",
             // passed as a call argument
-            "funcdef void Handler(int);\nvoid Register(Handler@ h) { h(1); }\nvoid OnThing(int a) {}\nvoid Main() { Register(Handler(OnThing)); }\n",
+            "funcdef void Handler(int);\nvoid Register(Handler@ h) { h(1); }\nvoid OnThing(int a) { print(\"x\"); }\nvoid Main() { Register(Handler(OnThing)); }\n",
             // coroutine form, the common Openplanet idiom
-            "void OnThing(ref@ a) {}\nvoid Main() { startnew(CoroutineFuncUserdata(OnThing), null); }\n",
+            "void OnThing(ref@ a) { print(\"x\"); }\nvoid Main() { startnew(CoroutineFuncUserdata(OnThing), null); }\n",
         ];
         for src in cases {
             let report = report_of(src);
@@ -1301,7 +1424,7 @@ mod tests {
     #[test]
     fn method_params_exempt_when_the_method_is_referenced_as_a_value() {
         let report = report_of(
-            "funcdef void Handler(int);\nclass Server {\n    Handler@ h;\n    void Wire() { @h = Handler(OnThing); }\n    void OnThing(int a) {}\n}\nvoid Main() { Server s; s.Wire(); }\n",
+            "funcdef void Handler(int);\nclass Server {\n    Handler@ h;\n    void Wire() { @h = Handler(OnThing); }\n    void OnThing(int a) { print(\"x\"); }\n}\nvoid Main() { Server s; s.Wire(); }\n",
         );
         assert_lacks(&report, "Server::OnThing::a");
     }
@@ -1309,7 +1432,8 @@ mod tests {
     #[test]
     fn a_plainly_called_function_still_warns_on_params() {
         // Guard against the value-reference rule swallowing everything.
-        let report = report_of("void Helper(int a) {}\nvoid Main() { Helper(1); }\n");
+        let report =
+            report_of("void Helper(int a) { print(\"x\"); }\nvoid Main() { Helper(1); }\n");
         assert_has(&report, "Helper::a");
     }
 

@@ -19,6 +19,8 @@ namespace Repro {
 
     void Use() {
         g_Status.Set(StatusKind::B);  // GH #38: must stay silent
+        // `_b`: GH #55 unused-local suppression, not part of this repro —
+        // the subject is that the member access resolves silently.
         StatusKind _b = g_Status.Kind; // GH #38: must stay silent
     }
 }
