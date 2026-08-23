@@ -1209,3 +1209,26 @@ fn check_command_issue_repro_57_const_param_nonconst_method() {
     );
     assert!(!ok, "error-severity fixture must exit 1; stdout={stdout:?}");
 }
+
+/// Game-verified 2026-08-23: (1) unknown members on parentless script
+/// classes fail the game compile; (2) `.WithRunContext(` on an awaitable
+/// is a removed API (silent runtime no-op) — replacement
+/// `Meta::StartWithRunContext`. Fixture 58 carries both plus the
+/// real-member negative case.
+#[test]
+fn check_command_issue_repro_58_member_access_and_removed_api() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("58-member-access-checks");
+    assert!(
+        stdout.contains("type `SceneHandle` has no member `AssertSame`"),
+        "expected UndefinedMember in stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.contains("`awaitable.WithRunContext()` is no longer valid. Use `Meta::StartWithRunContext` instead"),
+        "expected removed-API hint in stdout={stdout:?} stderr={stderr:?}"
+    );
+    // `h.PayloadValid()` is a real member — must NOT be flagged.
+    assert!(
+        !stdout.contains("has no member `PayloadValid`"),
+        "real member must stay silent; stdout={stdout:?}"
+    );
+}

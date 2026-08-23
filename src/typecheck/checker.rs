@@ -32,6 +32,13 @@ pub enum TypeDiagnosticKind {
         object_type: String,
         member: String,
     },
+    /// Removed-API usage on the member path (GH #27/#28 family). The
+    /// member name compiles clean today but is a deprecated no-op at
+    /// runtime (e.g. `awaitable.WithRunContext`).
+    RemovedApiUsage {
+        member: String,
+        hint: String,
+    },
     MissingReturn {
         function_name: String,
     },
@@ -201,6 +208,12 @@ impl TypeDiagnostic {
                 object_type,
                 member,
             } => format!("type `{}` has no member `{}`", object_type, member),
+            TypeDiagnosticKind::RemovedApiUsage { member, hint } => format!(
+                // Match the runtime deprecation text shape (OP 1.29.5
+                // ScriptRuntime): "`awaitable.WithRunContext()` is no longer
+                // valid. Use Meta::StartWithRunContext instead."
+                "`awaitable.{member}()` is no longer valid. Use `{hint}` instead"
+            ),
             TypeDiagnosticKind::MissingReturn { function_name } => {
                 format!("function `{}` must return a value", function_name)
             }
@@ -1843,16 +1856,53 @@ impl<'a> Checker<'a> {
             // overloads etc.).
             return TypeRepr::Error(String::new());
         };
+        // Removed-API member names on engine types (GH #27/#28 family).
+        // `awaitable.WithRunContext` compiles clean but is a silent
+        // runtime no-op: the run context is discarded (game evidence
+        // 2026-08-23, DipsItemExperiment / MLFeedRaceData). Checked
+        // BEFORE any member lookup so it fires even where the typedb
+        // lacks member metadata — but only for the engine type.
+        if type_name == "awaitable"
+            && member_name == "WithRunContext"
+            && self.scope.is_external_type(&type_name)
+        {
+            self.diagnostics.push(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::RemovedApiUsage {
+                    member: member_name.clone(),
+                    hint: "Meta::StartWithRunContext".to_string(),
+                },
+            });
+            return TypeRepr::Error(String::new());
+        }
         // Same-file workspace classes: prefer the in-memory `file_classes`
         // index because it preserves full `TypeRepr` (including `Const`)
         // that `scope.lookup_member_type` strips to `Error("")` for
         // workspace hits. This is the const-wrapper preservation path
         // (iter 24) — do NOT reorder this below any other lookup.
-        if let Some((_, members)) = self.file_classes.get(&type_name) {
+        if let Some((parents, members)) = self.file_classes.get(&type_name) {
             for (mname, t) in members {
                 if mname == &member_name {
                     return Self::apply_receiver_const(t.clone(), receiver_const);
                 }
+            }
+            // Game parity (2026-08-23): the game compiler rejects unknown
+            // members on script classes. Fire only for classes with NO
+            // base classes — an unresolved parent could carry the member
+            // (cross-file bases, mixin consumers list the mixin in their
+            // bases: GH #46), and arrays/dictionaries/unresolvable
+            // receivers all stay silent (FP-hostile). Classes WITH bases
+            // fall through to the cross-file lookups below, which know
+            // how to resolve inherited members.
+            if parents.is_empty() {
+                self.diagnostics.push(TypeDiagnostic {
+                    span,
+                    kind: TypeDiagnosticKind::UndefinedMember {
+                        object_type: type_name.clone(),
+                        member: member_name.clone(),
+                    },
+                });
+                return TypeRepr::Error(String::new());
             }
         }
         if let Some(t) = self.scope.lookup_member_type(&type_name, &member_name) {
@@ -2642,6 +2692,27 @@ impl<'a> Checker<'a> {
                 // Resolved receiver type: `obj.member(...)` counts as a use
                 // of `Type::member` across the inheritance chain.
                 self.record_member_use_from_type(&type_name, &member_name);
+                // Removed-API member names on engine types (GH #27/#28
+                // family). `awaitable.WithRunContext` compiles clean but is
+                // a silent runtime no-op: the run context is discarded
+                // (game evidence 2026-08-23, DipsItemExperiment /
+                // MLFeedRaceData). Fires before arity/type machinery so the
+                // hint surfaces even where typedb member metadata is
+                // missing.
+                if type_name == "awaitable"
+                    && member_name == "WithRunContext"
+                    && self.scope.is_external_type(&type_name)
+                {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: callee.span,
+                        kind: TypeDiagnosticKind::RemovedApiUsage {
+                            member: member_name.clone(),
+                            hint: "Meta::StartWithRunContext".to_string(),
+                        },
+                    });
+                    self.walk_args(args);
+                    return TypeRepr::Error(String::new());
+                }
                 // B003: external method arity (unique + multi with no match).
                 // B007: after arity OK, type-check Named/primitive args against
                 // the unique matching overload's param types (incl. Nadeo).
@@ -2726,6 +2797,21 @@ impl<'a> Checker<'a> {
                 // (iter 28) flows into downstream arg-type checks.
                 if let Some(t) = self.scope.workspace_class_member(&type_name, &member_name) {
                     return t;
+                }
+                // Game parity (2026-08-23): unknown METHOD call on a
+                // PARENTLESS same-file workspace class — mirror of the
+                // gate in `member_access_type`. Classes with bases stay
+                // silent (unresolved parent could carry the method).
+                if let Some((parents, _)) = self.file_classes.get(&type_name) {
+                    if parents.is_empty() {
+                        self.diagnostics.push(TypeDiagnostic {
+                            span: callee.span,
+                            kind: TypeDiagnosticKind::UndefinedMember {
+                                object_type: type_name.clone(),
+                                member: member_name.clone(),
+                            },
+                        });
+                    }
                 }
                 if !self.scope.is_external_type(&type_name) {
                     return TypeRepr::Error(String::new());
@@ -4082,20 +4168,21 @@ void Main() {
 
     #[test]
     fn member_access_unknown_on_workspace_class_is_silent() {
-        // Workspace classes don't carry full member / parent-chain
-        // information across files yet, so a missing member on a
-        // workspace class should NOT emit UndefinedMember — it would
-        // produce pervasive false positives against real user code
-        // that inherits from unresolved base classes. Emission is
-        // reserved for external (typedb-backed) types.
+        // Policy FLIPPED 2026-08-23 (game parity, spike-live-add-kinematic-ao):
+        // the game compiler rejects unknown members on script classes, so a
+        // missing member on a PARENTLESS workspace class now emits
+        // UndefinedMember. Classes WITH bases stay silent (unresolved
+        // parents / mixins could carry the member — FP guard; cross-file
+        // bases resolve through the GlobalScope walk below this gate).
         let diags = check("class C { int x; void f() { int y = this.bogus; } }");
         let undef_member: Vec<_> = diags
             .iter()
             .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
             .collect();
-        assert!(
-            undef_member.is_empty(),
-            "expected no UndefinedMember diag, got {:?}",
+        assert_eq!(
+            undef_member.len(),
+            1,
+            "expected UndefinedMember on parentless class, got {:?}",
             diags
         );
     }
@@ -7645,6 +7732,28 @@ mod warn_flow_tests {
             .collect()
     }
 
+    /// Same as `check` but with the fixture typedb loaded — needed for
+    /// cases whose receiver types are engine types (`awaitable` etc.).
+    fn check_with_typedb(source: &str) -> Vec<TypeDiagnostic> {
+        use crate::typedb::TypeIndex;
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).expect("typedb fixtures must load");
+        let tokens = crate::lexer::tokenize_filtered(source);
+        let mut parser = crate::parser::Parser::new(&tokens, source);
+        let file = parser.parse_file();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, source, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, Some(&idx));
+        let mut checker = Checker::new(source, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
     /// Game probe 2026-08-17: inner-block `int x` hides outer `int x` →
     /// WARN at the INNER declarator with the game's exact wording.
     #[test]
@@ -8050,6 +8159,174 @@ class C {
         assert!(
             bad.is_empty(),
             "expected no NonConstMethodOnConstReceiver, got {:?}",
+            diags
+        );
+    }
+
+    // === GAP 1: unknown member on a parentless workspace class ===
+    //
+    // Game evidence (2026-08-23, spike-live-add-kinematic-ao): the game
+    // rejects `ctx.AssertSame(...)` on a user class with no such member.
+    // The LSP stays silent. Fire only for classes with NO base classes:
+    // a parent we can't resolve could carry the member (FP-hostile),
+    // and mixin consumers list the mixin in their bases (GH #46).
+
+    /// RED-1: unknown member on a parentless user class fires.
+    #[test]
+    fn unknown_member_on_parentless_workspace_class_fires() {
+        let diags = check(
+            "class Ctx { int x; } \
+             void f() { Ctx@ c = Ctx(); int y = c.bogus; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::UndefinedMember { object_type, member } if object_type == "Ctx" && member == "bogus"
+                )
+            })
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 UndefinedMember, got {:?}", diags);
+    }
+
+    /// Known member on the same class: silent (negative case).
+    #[test]
+    fn known_member_on_workspace_class_silent() {
+        let diags = check(
+            "class Ctx { int x; } \
+             void f() { Ctx@ c = Ctx(); int y = c.x; }",
+        );
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    /// this.bogus inside a method of a parentless class: same rule,
+    /// receiver resolves to the enclosing class.
+    #[test]
+    fn this_unknown_member_on_parentless_class_fires() {
+        let diags = check("class C { int x; void m() { int y = this.bogus; } }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::UndefinedMember { object_type, member } if object_type == "C" && member == "bogus"
+                )
+            })
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 UndefinedMember, got {:?}", diags);
+    }
+
+    /// A class WITH an (unresolvable) base class stays silent — the base
+    /// may carry the member cross-file.
+    #[test]
+    fn unknown_member_on_derived_class_stays_silent() {
+        let diags = check(
+            "class D : Base { int x; } \
+             void f() { D@ d = D(); int y = d.bogus; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "derived-class miss must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    /// A mixin's members must not be mis-flagged on the consuming class.
+    /// (The `UnknownType("Base")` on the mixin base name itself is
+    /// pre-existing single-file behavior — mixins aren't indexed as
+    /// classes — and is out of scope here.)
+    #[test]
+    fn mixin_consumer_members_not_flagged() {
+        let diags = check(
+            "mixin Base { int mval; } \
+             class D : Base { int x; } \
+             void f() { D@ d = D(); int y = d.mval; }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "mixin member access must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    // === GAP 2: awaitable.WithRunContext is a removed API ===
+    //
+    // Game evidence (2026-08-23, DipsItemExperiment/MLFeedRaceData):
+    // `.WithRunContext()` on an awaitable compiles clean but logs
+    // "[ScriptRuntime] [ERROR] DEPRECATED: awaitable.WithRunContext() is
+    // no longer valid. Use Meta::StartWithRunContext instead." — the run
+    // context is silently discarded. Same family as GH #27/#28
+    // (removed-API), detectable syntactically on the member path.
+
+    /// RED-2: `.WithRunContext(` on an `awaitable` receiver errors with
+    /// the replacement hint.
+    #[test]
+    fn awaitable_with_run_context_removed_api_fires() {
+        let diags = check_with_typedb(
+            r#"
+            void Worker() {}
+            void Main() { startnew(Worker).WithRunContext(Meta::RunContext::AfterMainLoop); }
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::RemovedApiUsage { member, hint }
+                        if member == "WithRunContext" && hint.contains("Meta::StartWithRunContext")
+                )
+            })
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 RemovedApiUsage, got {:?}", diags);
+    }
+
+    /// Other awaitable members must NOT fire (the type still exists and
+    /// has real methods — e.g. `Then`/`cancelling` usage stays legal).
+    #[test]
+    fn awaitable_other_members_stay_silent() {
+        let diags = check_with_typedb(
+            r#"
+            void Worker() {}
+            void Main() { startnew(Worker).Then(Other); }
+            void Other() {}
+            "#,
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::RemovedApiUsage { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no RemovedApiUsage for non-removed members, got {:?}",
+            diags
+        );
+    }
+
+    /// A user class with its own `WithRunContext` method is NOT the
+    /// removed API — member name alone must not fire.
+    #[test]
+    fn user_class_with_run_context_method_silent() {
+        let diags = check(
+            "class C { void WithRunContext(int x) { } } \
+             void f() { C@ c = C(); c.WithRunContext(3); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::RemovedApiUsage { .. }))
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "user-class WithRunContext must stay silent, got {:?}",
             diags
         );
     }
