@@ -103,7 +103,7 @@ fn check_command_exits_zero_when_clean() {
     let root = make_temp_plugin("clean");
     fs::write(
         root.join("src/Main.as"),
-        "class Foo {}\nFoo@ MakeFoo() { return null; }\n",
+        "class Foo {}\nFoo@ MakeFoo() { return null; }\nvoid Main() { Foo@ f = MakeFoo(); }\n",
     )
     .unwrap();
 
@@ -132,7 +132,11 @@ fn check_command_exits_zero_when_clean() {
 #[test]
 fn check_command_accepts_relative_plugin_path() {
     let root = make_temp_plugin("relative-clean");
-    fs::write(root.join("src/Main.as"), "class Foo {}\n").unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        "class Foo {}\nvoid Main() { Foo@ f = Foo(); }\n",
+    )
+    .unwrap();
     let parent = root.parent().unwrap();
     let relative = root.file_name().unwrap();
 

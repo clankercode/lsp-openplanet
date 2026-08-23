@@ -482,6 +482,15 @@ pub struct Checker<'a> {
     /// when the mix is topmost (or feeds a comparison). Depth counter so
     /// nested binary walks restore correctly.
     arith_suppress_add_mix: u32,
+    /// Workspace-qualified names recorded as *used* while checking this
+    /// file — the write side of the unused-declaration analysis. `None`
+    /// (the default) disables recording entirely so normal check passes
+    /// pay nothing; `with_usage_recording()` opts in. Names follow the
+    /// pooled symbol-table convention (bare for globals, qualified for
+    /// namespace members, `Class::member` for class members). Names that
+    /// resolve only against the external typedb are recorded too —
+    /// harmless, since no workspace symbol exists to suppress.
+    used_names: Option<std::collections::HashSet<String>>,
 }
 
 impl<'a> Checker<'a> {
@@ -502,6 +511,7 @@ impl<'a> Checker<'a> {
             record_types: false,
             seen_function_sigs: std::collections::HashSet::new(),
             arith_suppress_add_mix: 0,
+            used_names: None,
         }
     }
 
@@ -511,6 +521,167 @@ impl<'a> Checker<'a> {
     pub fn with_type_recording(mut self) -> Self {
         self.record_types = true;
         self
+    }
+
+    /// Enable workspace usage recording for the unused-declaration
+    /// analysis: every name that resolves against the workspace (or the
+    /// external typedb) while checking is collected and exposed via
+    /// [`Checker::take_used_names`]. Normal check passes keep the default
+    /// (recording off) and pay nothing.
+    pub fn with_usage_recording(mut self) -> Self {
+        self.used_names = Some(std::collections::HashSet::new());
+        self
+    }
+
+    /// Drain the recorded used-name set (requires
+    /// `with_usage_recording`). Empty when recording was never enabled.
+    pub fn take_used_names(&mut self) -> std::collections::HashSet<String> {
+        self.used_names.take().unwrap_or_default()
+    }
+
+    /// Record a single workspace-qualified name as used (no-op unless
+    /// usage recording is on). Every `::`-prefix of the name is recorded
+    /// too: using `Foo::StaticMethod` uses the class `Foo`, and using
+    /// `Color::Red` uses the enum type `Color`.
+    fn record_use(&mut self, name: &str) {
+        if let Some(set) = &mut self.used_names {
+            set.insert(name.to_string());
+            let mut start = 0;
+            while let Some(off) = name[start..].find("::") {
+                set.insert(name[..start + off].to_string());
+                start += off + 2;
+            }
+        }
+    }
+
+    /// Record every named type inside a resolved `TypeRepr` as used —
+    /// type-position references (`Foo@ x`, `array<Foo>`, `funcdef`
+    /// signatures, base classes) all count as uses of `Foo`.
+    fn record_type_repr_uses(&mut self, repr: &TypeRepr) {
+        if self.used_names.is_none() {
+            return;
+        }
+        let mut names = Vec::new();
+        fn collect(repr: &TypeRepr, names: &mut Vec<String>) {
+            match repr {
+                TypeRepr::Named(n) => names.push(n.clone()),
+                TypeRepr::Funcdef(n) => names.push(n.clone()),
+                TypeRepr::Generic { base, args } => {
+                    names.push(base.clone());
+                    for a in args {
+                        collect(a, names);
+                    }
+                }
+                TypeRepr::Handle(inner) | TypeRepr::Const(inner) | TypeRepr::Array(inner) => {
+                    collect(inner, names);
+                }
+                _ => {}
+            }
+        }
+        collect(repr, &mut names);
+        for n in names {
+            self.record_use(&n);
+        }
+    }
+
+    /// Record `name`, `get_name`, and `set_name` (virtual-property
+    /// accessor convention — `lookup_class_member` matches all three).
+    fn record_value_use_variants(&mut self, name: &str) {
+        if self.used_names.is_none() {
+            return;
+        }
+        self.record_use(name);
+        self.record_use(&format!("get_{}", name));
+        self.record_use(&format!("set_{}", name));
+    }
+
+    /// Record member usage for an explicit receiver whose base class name
+    /// is `type_name` (`obj.member`): marks `Type::member` used on every
+    /// class in the inheritance chain that declares it (workspace-wide,
+    /// so cross-file parents and dep-export bases are covered). Recording
+    /// all declaring ancestors over-marks rather than under-marks — a
+    /// false "unused" is far worse than a missed warning.
+    fn record_member_use_from_type(&mut self, type_name: &str, member: &str) {
+        if self.used_names.is_none() {
+            return;
+        }
+        let normalized = self.resolve_recording_class_name(type_name);
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::from([normalized]);
+        let mut hops = 0usize;
+        while let Some(class) = queue.pop_front() {
+            if !visited.insert(class.clone()) {
+                continue;
+            }
+            hops += 1;
+            if hops > 64 {
+                break;
+            }
+            for candidate in [
+                member,
+                &format!("get_{}", member),
+                &format!("set_{}", member),
+            ] {
+                let qualified = format!("{}::{}", class, candidate);
+                if !self.scope.workspace().lookup(&qualified).is_empty() {
+                    self.record_use(&qualified);
+                }
+            }
+            for parent in self.scope.workspace_class_parents(&class) {
+                queue.push_back(self.scope.normalize_class_name(&parent));
+            }
+        }
+    }
+
+    /// Record member usage resolved through implicit `this` (bare name
+    /// inside a class body). Same chain-walking discipline as
+    /// [`Self::record_member_use_from_type`], starting at the innermost
+    /// enclosing class.
+    fn record_implicit_member_use(&mut self, member: &str) {
+        if self.used_names.is_none() {
+            return;
+        }
+        let Some(cls) = self.current_class() else {
+            return;
+        };
+        let start = cls.name.clone();
+        self.record_member_use_from_type(&start, member);
+    }
+
+    /// Resolve a written type name to its pooled-table form for usage
+    /// recording, preferring WORKSPACE hits with the enclosing namespace
+    /// restored (`Status` inside `namespace Repro` → `Repro::Status`).
+    /// Unlike `GlobalScope::normalize_class_name`, workspace candidates
+    /// are tried BEFORE the external typedb — a plugin's own class that
+    /// shares a short name with an engine type must record against the
+    /// plugin's decl (GH #38 shadowing semantics).
+    fn resolve_recording_class_name(&self, type_name: &str) -> String {
+        if type_name.contains("::") {
+            if !self.scope.workspace().lookup_members(type_name).is_empty()
+                || !self.scope.workspace().lookup(type_name).is_empty()
+            {
+                return type_name.to_string();
+            }
+            return self.scope.normalize_class_name(type_name);
+        }
+        for depth in (1..=self.namespace_stack.len()).rev() {
+            let candidate = format!(
+                "{}::{}",
+                self.namespace_stack[..depth].join("::"),
+                type_name
+            );
+            if !self.scope.workspace().lookup_members(&candidate).is_empty()
+                || !self.scope.workspace().lookup(&candidate).is_empty()
+            {
+                return candidate;
+            }
+        }
+        if !self.scope.workspace().lookup_members(type_name).is_empty()
+            || !self.scope.workspace().lookup(type_name).is_empty()
+        {
+            return type_name.to_string();
+        }
+        self.scope.normalize_class_name(type_name)
     }
 
     /// Type recorded for the expression starting at `span_start`
@@ -838,6 +1009,9 @@ impl<'a> Checker<'a> {
                 kind: TypeDiagnosticKind::UnknownType(diag.unknown_name),
             });
         }
+        // Type-position reference: every named type inside the resolved
+        // repr counts as a use (unused-decl analysis).
+        self.record_type_repr_uses(&repr);
         repr
     }
 
@@ -890,7 +1064,10 @@ impl<'a> Checker<'a> {
 
     fn check_class_decl(&mut self, cls: &ClassDecl) {
         for base in &cls.base_classes {
-            let _ = self.resolve_type_expr(base);
+            // Base-class references are type uses (unused-decl) — recorded
+            // here so even a fully-unreferenced class contributes them.
+            let repr = self.resolve_type_expr(base);
+            self.record_type_repr_uses(&repr);
         }
 
         // Build the class context up front so every method sees the full
@@ -961,10 +1138,34 @@ impl<'a> Checker<'a> {
         }
 
         self.push_class(ClassCtx {
-            name: class_name,
+            name: class_name.clone(),
             is_mixin: cls.is_mixin,
             members,
         });
+
+        // Mixin classes are consumed structurally: their members splice
+        // into consuming classes by declaration, not by name reference.
+        // The unused-decl analysis must never warn on them — mark the
+        // mixin class and every member used.
+        if cls.is_mixin {
+            self.record_use(&class_name);
+            for member in &cls.members {
+                let mname = match member {
+                    ClassMember::Field(var) => var
+                        .declarators
+                        .iter()
+                        .map(|d| d.name.text(self.source).to_string())
+                        .collect::<Vec<_>>(),
+                    ClassMember::Method(f)
+                    | ClassMember::Constructor(f)
+                    | ClassMember::Destructor(f) => vec![f.name.text(self.source).to_string()],
+                    ClassMember::Property(prop) => vec![prop.name.text(self.source).to_string()],
+                };
+                for n in mname {
+                    self.record_use(&format!("{}::{}", class_name, n));
+                }
+            }
+        }
 
         for member in &cls.members {
             self.check_class_member(member);
@@ -988,7 +1189,8 @@ impl<'a> Checker<'a> {
             ClassMember::Field(var) => {
                 // A field does not get scope-tracked as a local; just
                 // resolve its declared type and check any initializer expr.
-                let _ = self.resolve_type_expr(&var.type_expr);
+                let ty = self.resolve_type_expr(&var.type_expr);
+                self.record_type_repr_uses(&ty);
                 for d in &var.declarators {
                     if let Some(init) = &d.init {
                         let _ = self.expr_type(init);
@@ -1055,12 +1257,17 @@ impl<'a> Checker<'a> {
 
     fn check_function_decl(&mut self, func: &FunctionDecl, enforce_return: bool) {
         let ret_ty = self.resolve_type_expr(&func.return_type);
+        // A function's return type and parameter types are uses of the
+        // named types inside them (unused-decl analysis) — recording here
+        // covers *unreferenced* functions too, whose bodies never run.
+        self.record_type_repr_uses(&ret_ty);
         self.return_type_stack.push(ret_ty.clone());
         self.function_frame_starts.push(self.frames.len());
         self.push_frame();
         for p in &func.params {
             self.warn_string_by_value_param(p);
             let ty = self.resolve_type_expr(&p.type_expr);
+            self.record_type_repr_uses(&ty);
             if let Some(name) = &p.name {
                 self.define_local(name.text(self.source).to_string(), ty, name.span);
             }
@@ -1225,7 +1432,10 @@ impl<'a> Checker<'a> {
     // ── Var decl (global / local split) ─────────────────────────────────────
 
     fn check_var_decl_global(&mut self, var: &VarDeclStmt) {
-        let _ = self.resolve_type_expr(&var.type_expr);
+        let ty = self.resolve_type_expr(&var.type_expr);
+        // Global variable types count as type uses even when the variable
+        // itself is never referenced (unused-decl analysis).
+        self.record_type_repr_uses(&ty);
         for d in &var.declarators {
             if let Some(init) = &d.init {
                 let _ = self.expr_type(init);
@@ -2280,6 +2490,7 @@ impl<'a> Checker<'a> {
                 //    return type (queries like hover read it); silence
                 //    sentinels here used to surface as `(local) <error>`.
                 if let Some(ty) = self.lookup_class_member(&name) {
+                    self.record_implicit_member_use(&name);
                     self.walk_args(args);
                     return ty;
                 }
@@ -2287,6 +2498,7 @@ impl<'a> Checker<'a> {
                     .current_class()
                     .and_then(|cls| self.scope.workspace_class_member(&cls.name, &name))
                 {
+                    self.record_implicit_member_use(&name);
                     self.walk_args(args);
                     return ty;
                 }
@@ -2299,6 +2511,7 @@ impl<'a> Checker<'a> {
                     let ns = self.namespace_stack[..depth].join("::");
                     let qualified = format!("{}::{}", ns, name);
                     if let Some(t) = self.scope.lookup_function_return(&qualified) {
+                        self.record_use(&qualified);
                         return self.resolve_workspace_function_call(
                             &name,
                             &qualified,
@@ -2308,16 +2521,19 @@ impl<'a> Checker<'a> {
                         );
                     }
                     if self.scope.has_type(&qualified) {
+                        self.record_use(&qualified);
                         self.walk_args(args);
                         return TypeRepr::Named(qualified);
                     }
                     if self.scope.has_global_ident(&qualified) {
+                        self.record_value_use_variants(&qualified);
                         self.walk_args(args);
                         return TypeRepr::Error(String::new());
                     }
                 }
                 // 4. Top-level function.
                 if let Some(t) = self.scope.lookup_function_return(&name) {
+                    self.record_use(&name);
                     return self.resolve_workspace_function_call(
                         &name,
                         &name,
@@ -2386,6 +2602,9 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Error(String::new());
                 };
+                // Resolved receiver type: `obj.member(...)` counts as a use
+                // of `Type::member` across the inheritance chain.
+                self.record_member_use_from_type(&type_name, &member_name);
                 // B003: external method arity (unique + multi with no match).
                 // B007: after arity OK, type-check Named/primitive args against
                 // the unique matching overload's param types (incl. Nadeo).
@@ -2486,6 +2705,7 @@ impl<'a> Checker<'a> {
                     // Workspace free functions: reuse the shared resolver
                     // (arg-count + overload path). External-only names fall
                     // through its 0-overload branch which checks typedb arity.
+                    self.record_use(&qual);
                     if !self.scope.lookup_function_overloads(&qual).is_empty() {
                         return self.resolve_workspace_function_call(
                             display,
@@ -2514,9 +2734,11 @@ impl<'a> Checker<'a> {
                 }
                 self.walk_args(args);
                 if self.scope.has_type(&qual) {
+                    self.record_use(&qual);
                     return TypeRepr::Named(qual);
                 }
                 if self.scope.has_global_ident(&qual) {
+                    self.record_value_use_variants(&qual);
                     return TypeRepr::Error(String::new());
                 }
                 // GH #28 / #27: the call resolved to nothing workspace-side
@@ -2655,12 +2877,16 @@ impl<'a> Checker<'a> {
                 }
                 // 2. Class member (implicit `this.`).
                 if let Some(ty) = self.lookup_class_member(&name) {
+                    // Resolved to a member of this class (or an ancestor):
+                    // counts as a use of that member (unused-decl).
+                    self.record_implicit_member_use(&name);
                     return ty;
                 }
                 if let Some(ty) = self
                     .current_class()
                     .and_then(|cls| self.scope.workspace_class_member(&cls.name, &name))
                 {
+                    self.record_implicit_member_use(&name);
                     return ty;
                 }
                 // 3. Namespace-scoped global: try progressively shorter
@@ -2670,20 +2896,24 @@ impl<'a> Checker<'a> {
                     let ns = self.namespace_stack[..depth].join("::");
                     let qualified = format!("{}::{}", ns, name);
                     if let Some(ty) = self.scope.lookup_global_value_type(&qualified) {
+                        self.record_value_use_variants(&qualified);
                         return ty;
                     }
                     if self.scope.has_global_ident(&qualified) {
                         // Known name without a stored value type — silence
                         // rather than Named(varName) which false-positives
                         // ArgTypeMismatch against real param types.
+                        self.record_value_use_variants(&qualified);
                         return TypeRepr::Error(String::new());
                     }
                 }
                 // 4. Global top-level lookup (vars, functions-as-values, enums).
                 if let Some(ty) = self.scope.lookup_global_value_type(&name) {
+                    self.record_value_use_variants(&name);
                     return ty;
                 }
                 if self.scope.has_global_ident(&name) {
+                    self.record_value_use_variants(&name);
                     return TypeRepr::Error(String::new());
                 }
                 // 5. AngelScript / Openplanet hardcoded builtins — silent.
@@ -2858,6 +3088,12 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Member { object, member } => {
                 let obj_ty = self.expr_type(object);
+                if let Some(type_name) = Self::base_type_name(&obj_ty) {
+                    // Field access through a typed receiver: counts as a
+                    // use of `Type::member` across the chain.
+                    let member_name = member.text(self.source).to_string();
+                    self.record_member_use_from_type(&type_name, &member_name);
+                }
                 self.member_access_type(&obj_ty, member, expr.span)
             }
             ExprKind::Index { object, index } => {
@@ -3072,8 +3308,26 @@ impl<'a> Checker<'a> {
             ExprKind::NamespaceAccess { path } => {
                 let qual = path.to_string(self.source);
                 if self.scope.has_type(&qual) {
+                    self.record_use(&qual);
                     TypeRepr::Named(qual)
                 } else {
+                    // Qualified VALUE reference (`Ns::g_Var`, `Color::Red`,
+                    // `Enum::Value`) — record the value name (plus accessor
+                    // variants). Try the written form first, then with the
+                    // enclosing namespace prefixes restored: inside
+                    // `namespace Repro`, a written `StatusKind::B` refers
+                    // to `Repro::StatusKind::B` in the pooled table.
+                    for depth in (0..=self.namespace_stack.len()).rev() {
+                        let candidate = if depth == 0 {
+                            qual.clone()
+                        } else {
+                            format!("{}::{}", self.namespace_stack[..depth].join("::"), qual)
+                        };
+                        if self.scope.has_global_ident(&candidate) {
+                            self.record_value_use_variants(&candidate);
+                            break;
+                        }
+                    }
                     TypeRepr::Error(String::new())
                 }
             }

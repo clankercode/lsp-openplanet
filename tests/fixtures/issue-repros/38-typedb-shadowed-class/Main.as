@@ -23,4 +23,4 @@ namespace Repro {
     }
 }
 
-void Main() {}
+void Main() { Repro::Use(); }

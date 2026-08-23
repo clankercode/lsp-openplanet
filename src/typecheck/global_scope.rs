@@ -52,6 +52,13 @@ impl<'a> GlobalScope<'a> {
         self.external
     }
 
+    /// The workspace symbol-table half of the merged view (unused-decl
+    /// usage recording needs exact-qualified-name existence checks while
+    /// walking inheritance chains).
+    pub fn workspace(&self) -> &'a SymbolTable {
+        self.workspace
+    }
+
     /// Resolve a source-level reference through the workspace half:
     /// exact qualified name, then bare tail, then qualified-tail match
     /// (`SymbolTable::lookup_reference`). One ladder, shared by every
@@ -1094,6 +1101,15 @@ impl<'a> GlobalScope<'a> {
 
     fn normalize_workspace_class_name(&self, name: &str) -> String {
         self.normalize_workspace_class_name_in_context(name, name)
+    }
+
+    /// Resolve a bare class name to its pooled-table qualified form
+    /// (e.g. `Status` inside `namespace Repro` → `Repro::Status`). Public
+    /// for the unused-decl usage recorder, which needs the same
+    /// normalization when walking inheritance chains from type text that
+    /// carries no namespace qualification.
+    pub fn normalize_class_name(&self, name: &str) -> String {
+        self.normalize_workspace_class_name(name)
     }
 
     fn normalize_workspace_class_name_in_context(

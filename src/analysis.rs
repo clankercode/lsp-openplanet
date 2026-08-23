@@ -5,6 +5,8 @@
 //! inputs. Workspace/dependency symbols stay outside this module (see
 //! [`crate::workspace::load`]); pair them at the call site.
 
+pub mod unused;
+
 use std::collections::HashSet;
 
 use crate::lexer::{self, Token};

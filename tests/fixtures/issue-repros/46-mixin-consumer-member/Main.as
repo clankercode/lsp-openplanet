@@ -5,7 +5,7 @@
 // `undefined identifier `tabs`` at the `tabs.Length` access below.
 
 class Tab {
-    void DrawWindow() {}
+    void DrawWindow(TabGroup@ group) { group.tabs.InsertLast(Tab()); }
 }
 
 mixin class HasGroupMeta {
@@ -19,4 +19,8 @@ class TabGroup : HasGroupMeta {
     Tab@[] tabs;
 }
 
-void Main() {}
+void Main() {
+    TabGroup@ g = TabGroup();
+    Tab t;
+    t.DrawWindow(g);
+}

@@ -45,6 +45,11 @@ pub struct AnalysisSnapshot {
     files: Vec<SnapshotFile>,
     symbols: SymbolTable,
     missing_required_dependencies: Vec<String>,
+    /// Canonicalized paths of this plugin's own info.toml `[script]`
+    /// exports + shared_exports files. Declarations inside them are
+    /// public API — exempt from unused-declaration warnings. Empty for
+    /// in-memory snapshots (no manifest to read).
+    export_paths: std::collections::HashSet<PathBuf>,
 }
 
 impl AnalysisSnapshot {
@@ -69,6 +74,7 @@ impl AnalysisSnapshot {
             files,
             symbols: table,
             missing_required_dependencies: load.missing_required_dependencies.clone(),
+            export_paths: std::collections::HashSet::new(),
         }
     }
 
@@ -84,6 +90,24 @@ impl AnalysisSnapshot {
                     path: p.clone(),
                     source: s.clone(),
                     report_diagnostics: true,
+                })
+                .collect(),
+            missing_required_dependencies: Vec::new(),
+        };
+        Self::from_load(&load, config)
+    }
+
+    /// Like [`Self::from_files`], but with an explicit `report_diagnostics`
+    /// flag per file (test surface for dependency-export behaviour).
+    pub fn from_files_with_flags(files: &[(PathBuf, String, bool)], config: &LspConfig) -> Self {
+        let load = PluginWorkspaceLoad {
+            root: PathBuf::new(),
+            files: files
+                .iter()
+                .map(|(p, s, report)| WorkspaceSourceFile {
+                    path: p.clone(),
+                    source: s.clone(),
+                    report_diagnostics: *report,
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
@@ -130,6 +154,29 @@ impl AnalysisSnapshot {
     /// Required dependencies that no plugins dir resolved.
     pub fn missing_required_dependencies(&self) -> &[String] {
         &self.missing_required_dependencies
+    }
+
+    /// Canonicalized own-manifest export file paths (public API — see
+    /// field docs). Empty until populated via [`Self::with_export_paths`].
+    pub fn export_paths(&self) -> &std::collections::HashSet<PathBuf> {
+        &self.export_paths
+    }
+
+    /// Attach the plugin's own-manifest export file paths (public API).
+    pub fn with_export_paths(mut self, export_paths: std::collections::HashSet<PathBuf>) -> Self {
+        self.export_paths = export_paths;
+        self
+    }
+
+    /// file_id (index into `files()`) of the file with this URI, when
+    /// present in the snapshot.
+    pub fn file_id_of(&self, uri: &Url) -> Option<usize> {
+        self.files.iter().position(|f| f.uri.as_ref() == Some(uri))
+    }
+
+    /// file_id of the file with this path, when present.
+    pub fn file_id_of_path(&self, path: &std::path::Path) -> Option<usize> {
+        self.files.iter().position(|f| f.path == path)
     }
 
     /// The checked view of one file (GH #42): run the checker with type

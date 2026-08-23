@@ -479,6 +479,17 @@ impl Backend {
                 )
             }
         };
+        // Unused-declaration warnings (workspace view: sibling usage
+        // suppresses; own-manifest export files are exempt public API).
+        if let Some(file_id) = snapshot.file_id_of(uri) {
+            diags.extend(diagnostics::unused_declaration_diagnostics(
+                text,
+                snapshot,
+                file_id,
+                type_index.as_deref(),
+                snapshot.export_paths(),
+            ));
+        }
         if uri.path().ends_with("info.toml") {
             diags.extend(diagnostics::missing_required_dependency_diagnostics(
                 snapshot.missing_required_dependencies(),
@@ -559,6 +570,16 @@ impl Backend {
                 )
             }
         };
+        // Unused-declaration warnings — workspace view (same as sharded).
+        if let Some(file_id) = snapshot.file_id_of(uri) {
+            diags.extend(diagnostics::unused_declaration_diagnostics(
+                text,
+                &snapshot,
+                file_id,
+                type_index.as_deref(),
+                snapshot.export_paths(),
+            ));
+        }
         if uri.path().ends_with("info.toml") {
             diags.extend(diagnostics::missing_required_dependency_diagnostics(
                 snapshot.missing_required_dependencies(),

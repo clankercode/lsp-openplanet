@@ -437,6 +437,22 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
                 diagnostic,
             });
         }
+        // Unused-declaration warnings (workspace view; own-manifest export
+        // files are exempt public API).
+        if let Some(file_id) = snapshot.file_id_of_path(&item.path) {
+            for diagnostic in diagnostics::unused_declaration_diagnostics(
+                analysis.source.as_str(),
+                &snapshot,
+                file_id,
+                type_index.as_ref(),
+                snapshot.export_paths(),
+            ) {
+                cli_diagnostics.push(CliDiagnostic {
+                    path: item.path.clone(),
+                    diagnostic,
+                });
+            }
+        }
     }
 
     Ok(CheckReport {

@@ -144,6 +144,15 @@ impl SymbolTable {
         self.files.values().flat_map(|f| f.symbols.iter())
     }
 
+    /// Symbols declared in one file, by file id (unused-decl analysis walks
+    /// per-file so findings carry a file_id).
+    pub fn file_symbols(&self, file_id: usize) -> &[Symbol] {
+        self.files
+            .get(&file_id)
+            .map(|f| f.symbols.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Symbols whose qualified name ends in `::tail`. Index-backed —
     /// O(candidates) instead of a linear scan of every workspace symbol
     /// (GH #41). Bare names (no `::`) are excluded: they're exact
