@@ -148,7 +148,7 @@ pub fn load_plugin_workspace(
         .canonicalize()
         .map_err(|e| format!("failed to resolve {}: {e}", root.display()))?;
 
-    let export_paths = own_export_paths(&root, &search);
+    let export_paths = own_export_paths(&root, search);
 
     let mut files = Vec::new();
     for path in project::discover_source_files(&root) {
