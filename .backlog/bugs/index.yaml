@@ -18,3 +18,4 @@ bugs:
     - file: B017-config-ladders-disagree-on-pre.todo
     - file: B018-lsp-overlay-diagnoses-gitignor.todo
     - file: B019-dependency-id-defined-for-unre.todo
+    - file: B020-unused-declaration-fp-usage-fr.todo

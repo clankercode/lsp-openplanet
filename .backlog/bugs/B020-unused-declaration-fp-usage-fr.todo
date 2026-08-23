@@ -1,0 +1,92 @@
+---
+complexity: medium
+created_at: "2026-08-23T17:52:39Z"
+depends_on: []
+estimate_hours: 3
+id: B020
+priority: critical
+status: pending
+tags:
+    - analysis
+    - unused
+    - false-positive
+    - gh-60-followup
+title: 'Unused-declaration FP: usage from gitignored/ignore_paths files is invisible'
+updated_at: "2026-08-23T17:52:39Z"
+---
+Found by the coordinator while parent-reviewing B011, 2026-08-24, immediately
+after B015/GH #60 merged. Reproduced on master @ 4871431 with the release binary.
+
+## The false positive
+A declaration whose ONLY callers live in omitted own-module files is reported
+"never used". The game compiles those files, so the warning is wrong.
+
+Via gitignore (default-on since GH #60 — no config needed):
+
+    info.toml, .gitignore = "generated/"
+    src/Main.as        void UsedOnlyByGenerated() {}
+    generated/Gen.as   void GenCaller() { UsedOnlyByGenerated(); }
+
+    $ openplanet-lsp check .
+    src/Main.as:2:1: warning: a function `UsedOnlyByGenerated` is never used
+
+`--no-gitignore` clears it (and correctly reports `GenCaller` instead).
+
+## It PREDATES GH #60 — verified
+The identical FP reproduces with no gitignore anywhere, via `ignore_paths`:
+
+    .openplanet-lsp.toml   ignore_paths = ["gen2"]
+    src/Main.as            void UsedOnlyByIgnored() {}
+    gen2/Gen.as            void GenCaller() { UsedOnlyByIgnored(); }
+    -> src/Main.as:2:1: warning: a function `UsedOnlyByIgnored` is never used
+
+So the defect is: **the unused-declaration usage join treats the VISIBLE file set
+as the whole compile set.** GH #60 did not introduce it; it made an existing hole
+reachable with no configuration, which is what raises the priority.
+
+## Design: include omitted own-module files for USAGE RECORDING ONLY
+Omitted own-module files should be parsed and fed to the usage-collection pass,
+but must NOT contribute declarations to the pooled symbol table and must NOT
+report diagnostics. `WorkspaceSourceFile.report_diagnostics` already models
+"contributes symbols only" for dependency exports; this needs the complement —
+"contributes usage only".
+
+Failure direction is correct: usage from a stale gitignored copy can MASK a
+genuine unused warning (a missed warning), which repo culture accepts, rather
+than manufacturing a bogus one.
+
+### Two alternatives, both refuted by measurement (do not revisit without new evidence)
+1. **Parse omitted files fully into the table** (the obvious fix) — REFUTED.
+   Gitignored dirs in the real fleet are predominantly whole-tree COPIES
+   (`.worktrees/`, `.scratch/research/lsp-probe/` — 26 and 22 files in
+   tm-control-mcp and tm-tournament-station). Probe: with a copy of
+   `src/Main.as` under `.worktrees/copy/`, `--no-gitignore` reports `Helper`
+   unused in BOTH trees even though each tree's `Boot()` calls it — duplicate
+   declarations break usage attribution, doubling and misattributing warnings.
+   This is exactly the noise GH #60 removed (tm-control-mcp 107 -> 35 warnings).
+2. **Disarm the unused pass whenever any own-module file is omitted** — REFUTED.
+   It would disable a shipped feature on every plugin that configures
+   `source_paths`/`ignore_paths`, which is many of them. A rule that goes
+   vacuously silent on real projects is worse than the FP.
+
+## Scope note
+Locals/parameters (B011) are NOT exposed: a local's usage is bounded by its own
+function body, so no other file can affect it. This is the file-level and
+class-member declaration pass only.
+
+The GH #58 namespace rule is a DIFFERENT hole with the same cause, already fenced
+separately on the B013 branch (authority disarms when files were omitted).
+Design (f) here does not restore its authority — declarations stay invisible — so
+that fence remains correct and must not be removed.
+
+## Test plan (TDD, red first)
+Red: the two probes above, as fixture tests — a gitignored caller and an
+`ignore_paths` caller must both leave the callee unwarned. Variants: caller in a
+`source_paths`-excluded dir; caller inside a nested `.gitignore`; usage via
+member access / type position / `import` alias rather than a call; a declaration
+used ONLY by a gitignored copy of itself (must not warn — masked, per the accepted
+direction); a genuinely unused declaration with omitted files present (must STILL
+warn, so the fix does not silently disarm the pass); class-member and enum-value
+usage from an omitted file; `honor_gitignore = false` unchanged.
+Guard: assert omitted files produce ZERO diagnostics of their own (no squiggles
+in gitignored files — the GH #60 goal must survive).
