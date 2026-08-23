@@ -17,6 +17,8 @@ use crate::workspace::project;
 /// GH #57: define-matrix combo expansion, dedup, and labeling.
 pub mod matrix;
 mod pretty;
+/// GH #59: `typedb status|diff|refresh` — the type-DB freshness pipeline.
+pub mod typedb_cmd;
 pub mod watch;
 
 const CHECK_HELP: &str = "\
