@@ -56,6 +56,13 @@ fn walk_folder(dir: &Path, depth: usize, seen: &mut HashSet<PathBuf>, roots: &mu
         }
         return;
     }
+    // Mark this dir visited before reading it so symlink cycles terminate
+    // (a → b → a: walking b finds link-a whose canonical target is a,
+    // already seen).
+    let dir_canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if !seen.insert(dir_canonical) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -63,12 +70,21 @@ fn walk_folder(dir: &Path, depth: usize, seen: &mut HashSet<PathBuf>, roots: &mu
     let entry_depth = depth + 1;
     let mut subdirs: Vec<(PathBuf, bool)> = Vec::new();
     for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
+        // DirEntry::file_type() and DirEntry::metadata() are both
+        // lstat-based: a symlink to a directory reports is_dir() == false.
+        // Plugin trees like dips++-all are symlink farms (opened folder →
+        // plugins living elsewhere), so classify symlinked entries with
+        // std::fs::metadata (stat — follows links).
+        let is_dir = match entry.file_type() {
+            Ok(ft) if ft.is_dir() => true,
+            Ok(ft) if ft.is_symlink() => std::fs::metadata(entry.path())
+                .map(|m| m.is_dir())
+                .unwrap_or(false),
+            _ => false,
         };
-        if !file_type.is_dir() {
+        if !is_dir {
             continue;
-        };
+        }
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -77,6 +93,14 @@ fn walk_folder(dir: &Path, depth: usize, seen: &mut HashSet<PathBuf>, roots: &mu
             continue;
         }
         if entry_depth > MAX_DEPTH {
+            continue;
+        }
+        // Loop guard: a symlink cycle (a → b → a) would recurse forever.
+        // Skip any dir whose canonical target we already visited/queued.
+        // (Canonicalizing every entry costs one stat per dir; discovery
+        // runs once per resharding and trees are shallow — acceptable.)
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.contains(&canonical) {
             continue;
         }
         // First-match stop: a dir containing info.toml is a root; do not
@@ -131,6 +155,62 @@ mod tests {
         assert_eq!(
             discover_plugin_roots(std::slice::from_ref(&base)),
             vec![canonic(&base)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_plugin_dirs_are_discovered() {
+        // dips++-all layout: the opened folder contains ONLY symlinks to
+        // plugin dirs elsewhere. DirEntry::file_type() is lstat-based, so
+        // symlink-to-dir must be followed explicitly or no roots are found.
+        let base = temp_tree("symlinked");
+        let real = base.join("elsewhere").join("real-plugin");
+        fs::create_dir_all(&real).unwrap();
+        write_info_toml(&real);
+        let opened = base.join("opened");
+        fs::create_dir_all(&opened).unwrap();
+        std::os::unix::fs::symlink(&real, opened.join("linked-plugin")).unwrap();
+
+        assert_eq!(
+            discover_plugin_roots(std::slice::from_ref(&opened)),
+            vec![canonic(&real)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loops_do_not_hang_discovery() {
+        // A symlink cycle (a -> b -> a) must not recurse forever: the
+        // canonical-path seen-set dedupes revisited dirs.
+        let base = temp_tree("symlink-loop");
+        let a = base.join("a");
+        let b = base.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        std::os::unix::fs::symlink(&b, a.join("link-b")).unwrap();
+        std::os::unix::fs::symlink(&a, b.join("link-a")).unwrap();
+        let plugin = a.join("plugin");
+        fs::create_dir_all(&plugin).unwrap();
+        write_info_toml(&plugin);
+
+        let roots = discover_plugin_roots(std::slice::from_ref(&base));
+        assert_eq!(roots, vec![canonic(&plugin)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_plugin_reachable_via_two_links_dedupes() {
+        let base = temp_tree("symlink-dup");
+        let real = base.join("real");
+        fs::create_dir_all(&real).unwrap();
+        write_info_toml(&real);
+        std::os::unix::fs::symlink(&real, base.join("link-one")).unwrap();
+        std::os::unix::fs::symlink(&real, base.join("link-two")).unwrap();
+
+        assert_eq!(
+            discover_plugin_roots(std::slice::from_ref(&base)),
+            vec![canonic(&real)]
         );
     }
 

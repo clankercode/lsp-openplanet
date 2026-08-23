@@ -13,6 +13,15 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Fixed
+- **Plugin-root discovery follows symlinks** — opening a folder whose
+  plugin dirs are symlinks (e.g. `dips++-all`, where every entry links to
+  a plugin living elsewhere) discovered zero roots and degraded to a
+  single manifest-less workspace: externals from the typedb still worked
+  but no local types, globals, or functions resolved. Discovery now
+  classifies symlinked entries via `stat` (not `lstat`) and guards
+  symlink cycles with a canonical-path seen set.
+
 ### Added
 - **Unused-declaration warnings** — never-used declarations are flagged
   with `warning` severity across the whole workspace: file-level decls
