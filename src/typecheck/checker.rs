@@ -3023,11 +3023,11 @@ impl<'a> Checker<'a> {
     /// 2. Engine namespaces (`UI`, `Math`, …) belong to triggers (a)/(b):
     ///    a plugin may add helpers to `namespace UI` while still calling
     ///    the real API, which only the typedb can confirm.
-    /// 3. The pooled table must be the complete dependency closure — a real
-    ///    disk workspace root was walked, every declared dependency resolved,
-    ///    and no `source_paths` / `ignore_paths` filter was configured
-    ///    ([`GlobalScope::workspace_closure_complete`]). An unread or
-    ///    filtered-out module file may contribute the member.
+    /// 3. The pooled table must be the plugin's complete compile surface
+    ///    ([`GlobalScope::workspace_closure_complete`]) — an unread module
+    ///    file may contribute the member. The five conditions behind that
+    ///    flag are enumerated on
+    ///    `workspace::load::PluginWorkspaceLoad::dependency_closure_complete`.
     /// 4. `Ns` must be declared as a namespace (a class is not one —
     ///    AngelScript has no statics, so `MyClass::Thing()` stays silent).
     /// 5. Nothing of ANY kind may match under it — function, class,
@@ -8019,6 +8019,40 @@ void Main() {
             1,
             "expected exactly one diagnostic for UI::GetIO, got {:?}",
             diags
+        );
+    }
+
+    /// Maintenance guard for the engine fence. `is_engine_namespace` is a
+    /// STATIC list — deliberately, so the GH #26 note stays stable across
+    /// typedb versions — but the GH #58 rule leans on it as the no-typedb
+    /// stand-in for "this namespace belongs to the engine". A Core namespace
+    /// missing from the list lets a plugin-local `namespace Tests { … }` arm
+    /// the rule against game-owned calls — the exact FP that added `Tests`.
+    /// Every leading segment the typedb knows must therefore be listed, so a
+    /// typedb refresh that introduces a namespace fails HERE rather than as a
+    /// false `No matching symbol` in someone's plugin.
+    #[test]
+    fn engine_namespace_list_covers_every_typedb_namespace() {
+        use crate::typedb::TypeIndex;
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).expect("typedb fixtures must load");
+        let missing: Vec<String> = idx
+            .namespaces()
+            .into_iter()
+            .filter_map(|ns| {
+                let leading = ns.split("::").next().unwrap_or(&ns).to_string();
+                (!is_engine_namespace(&leading)).then_some(leading)
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "typedb namespaces absent from is_engine_namespace: {:?} — add them, \
+             or a plugin declaring one of these arms the GH #58 rule against \
+             game-owned calls",
+            missing
         );
     }
 }

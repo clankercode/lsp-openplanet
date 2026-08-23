@@ -64,14 +64,16 @@ pub struct SymbolTable {
     /// hides them, game parity 2026-08-23). Mutation before pooling is
     /// complete; empty = no filtering.
     hidden_files: std::collections::HashSet<usize>,
-    /// True when this pool is the COMPLETE module closure for the plugin
-    /// being checked: a real disk workspace root was walked, every declared
-    /// dependency resolved, and no `source_paths` / `ignore_paths` filter
-    /// was configured. Only then is the absence of a name evidence that the
-    /// game compiler would reject it — AngelScript namespaces are open and
-    /// additive across modules, so an unread or filtered-out module file may
-    /// contribute the very member being called (GH #58). Defaults to false
-    /// so ad-hoc pools (single-file diagnostics, in-memory test tables)
+    /// True when this pool is the plugin's COMPLETE compile surface. Only
+    /// then is the absence of a name evidence that the game compiler would
+    /// reject it — AngelScript namespaces are open and additive across every
+    /// file the game compiles together, so one unread file may contribute the
+    /// very member being called (GH #58).
+    ///
+    /// The conditions are enumerated ONCE, on
+    /// `workspace::load::PluginWorkspaceLoad::dependency_closure_complete`;
+    /// do not restate them here, or the two copies will drift. Defaults to
+    /// false so ad-hoc pools (single-file diagnostics, in-memory test tables)
     /// never claim an authority they don't have.
     dependency_closure_complete: bool,
     next_file_id: usize,
@@ -219,11 +221,11 @@ impl SymbolTable {
         self.hidden_files.contains(&file_id)
     }
 
-    /// Declare this pool the complete module closure — see the
-    /// `dependency_closure_complete` field docs. Set by the snapshot builder
-    /// only when the loader walked a real disk workspace root, resolved every
-    /// declared dependency, and applied no `source_paths` / `ignore_paths`
-    /// filter; carried by `clone()` so the own-module view keeps it.
+    /// Declare this pool the complete compile surface — see the
+    /// `dependency_closure_complete` field docs, and the enumerated
+    /// conditions they point at. Set by the snapshot builder from the
+    /// loader's verdict; carried by `clone()` so the own-module view keeps
+    /// it.
     pub fn mark_dependency_closure_complete(&mut self) {
         self.dependency_closure_complete = true;
     }

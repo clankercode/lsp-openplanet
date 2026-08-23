@@ -179,3 +179,40 @@ explicit `[script] exports`/`shared_exports` paths via
 `deps::collect_export_files` -> `resolve_plugin_file`, read directly; no
 discovery walk and no `DiscoveryOptions`, so gitignore never filters dep files
 (`.op` archives read from the ZIP, likewise). No dep-side treatment needed.
+
+### Review pass 2 (post-rebase, PASS) + the five-condition list, 2026-08-24
+`ccc @cx-reviewer` pass 2 returned PASS on the rebased state. Two findings,
+both fixed by it and both verified independently here:
+
+* `3fde70e` — resolving a dependency was not enough. A dep whose declared
+  `[script] exports`/`shared_exports` include a MISSING or UNREADABLE file
+  still counted as authoritative, so its partial namespace surface produced
+  false `No matching symbol`. `ResolvedDependency` now reports
+  `unloaded_exports` (directory and `.op` shapes alike) and the loader tracks
+  `incomplete_export_surfaces`.
+* `f8f72aa` — `Tests` is an Openplanet CORE namespace and was absent from
+  `is_engine_namespace`, so a plugin-local `namespace Tests { … }` (a very
+  likely name for test helpers) armed the rule against game-owned `Tests::`
+  calls with no typedb loaded. Verified against the fixture typedb: `Tests`
+  really is there, and it was the ONLY gap — diffing all typedb leading
+  segments against the static list now yields nothing.
+
+Added here: `engine_namespace_list_covers_every_typedb_namespace`, a
+maintenance guard asserting every typedb namespace is in
+`is_engine_namespace`. A typedb refresh that adds a namespace now fails in
+CI rather than as a false `No matching symbol` in someone's plugin. Proven
+red by removing `Tests` (both it and the reviewer's regression fail), green
+when restored.
+
+The authority conditions are now enumerated ONCE, as a numbered list with a
+one-line "why" each, on
+`workspace::load::PluginWorkspaceLoad::dependency_closure_complete`; the
+predicate carries `// (n)` markers in the same order, and the mirrors in
+`symbols::table`, `analysis_snapshot` and `checker` point at that list
+instead of restating a subset (two of them had already drifted to a stale
+three-condition version). Five conditions: real disk root; every declared
+dependency resolved; every resolved dep contributed all declared exports; no
+`source_paths`/`ignore_paths`; gitignore dropped no `.as` file.
+
+Coordinator decision recorded: the `DEPENDENCY_<ID>`-define fix is B019, NOT
+this branch. The four/five-condition guard stays as-is here.
