@@ -21,6 +21,11 @@ GitHub Release body to match this section (gh release edit).
   but no local types, globals, or functions resolved. Discovery now
   classifies symlinked entries via `stat` (not `lstat`) and guards
   symlink cycles with a canonical-path seen set.
+- **Symlink-alias document URIs resolve to snapshot files** — a document
+  opened through a symlinked path now matches the snapshot entry loaded
+  via the canonical plugin root (exact URI match first, canonical-path
+  fallback), so type-recorded hover, unused-declaration warnings, and
+  cross-file diagnostics work for symlinked workspaces too.
 
 ### Added
 - **Unused-declaration warnings** — never-used declarations are flagged

@@ -139,10 +139,7 @@ impl AnalysisSnapshot {
 
     /// Analysis for one file, looked up by URI.
     pub fn analysis_of(&self, uri: &Url) -> Option<&DocumentAnalysis> {
-        self.files
-            .iter()
-            .find(|f| f.uri.as_ref() == Some(uri))
-            .map(|f| &f.analysis)
+        self.file_entry_of(uri).map(|f| &f.analysis)
     }
 
     /// Analysis for one file, looked up by path.
@@ -167,12 +164,36 @@ impl AnalysisSnapshot {
     /// file_id (index into `files()`) of the file with this URI, when
     /// present in the snapshot.
     pub fn file_id_of(&self, uri: &Url) -> Option<usize> {
-        self.files.iter().position(|f| f.uri.as_ref() == Some(uri))
+        self.files
+            .iter()
+            .position(|f| f.uri.as_ref() == Some(uri))
+            .or_else(|| {
+                let canon = canonical_file_path(uri)?;
+                self.files
+                    .iter()
+                    .position(|f| f.path.canonicalize().map(|p| p == canon).unwrap_or(false))
+            })
     }
 
     /// file_id of the file with this path, when present.
     pub fn file_id_of_path(&self, path: &std::path::Path) -> Option<usize> {
         self.files.iter().position(|f| f.path == path)
+    }
+
+    /// Snapshot file entry for `uri`: exact URI match first, then a
+    /// canonical-path fallback so documents opened through a symlinked
+    /// path (e.g. dips++-all) resolve to the same file the disk load
+    /// found via the canonical plugin root.
+    fn file_entry_of(&self, uri: &Url) -> Option<&SnapshotFile> {
+        self.files
+            .iter()
+            .find(|f| f.uri.as_ref() == Some(uri))
+            .or_else(|| {
+                let canon = canonical_file_path(uri)?;
+                self.files
+                    .iter()
+                    .find(|f| f.path.canonicalize().map(|p| p == canon).unwrap_or(false))
+            })
     }
 
     /// The checked view of one file (GH #42): run the checker with type
@@ -188,11 +209,7 @@ impl AnalysisSnapshot {
         uri: &Url,
         scope: &'s GlobalScope<'s>,
     ) -> Option<CheckedFile<'s>> {
-        let analysis = &self
-            .files
-            .iter()
-            .find(|f| f.uri.as_ref() == Some(uri))?
-            .analysis;
+        let analysis = &self.file_entry_of(uri)?.analysis;
         let mut checker = Checker::new(analysis.masked_source(), scope).with_type_recording();
         checker.check_file(&analysis.file);
         Some(CheckedFile {
@@ -201,6 +218,12 @@ impl AnalysisSnapshot {
             diagnostics: Vec::new(),
         })
     }
+}
+
+/// Canonicalized file path for a `file://` URI (None for non-file URIs or
+/// unresolvable paths).
+fn canonical_file_path(uri: &Url) -> Option<PathBuf> {
+    uri.to_file_path().ok()?.canonicalize().ok()
 }
 
 /// One file's checked view: the parse it was checked against plus the
@@ -280,6 +303,33 @@ mod tests {
         assert_eq!(map[&0].1.masked_source(), "int x;");
         let uri = map[&0].0.clone();
         assert!(snap.analysis_of(&uri).is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_uri_resolves_to_same_file() {
+        // dips++-all layout: snapshot paths come from the canonical
+        // plugin root, but the client opens documents through a symlink.
+        // analysis_of/file_id_of must fall back to canonical-path match.
+        let dir = std::env::temp_dir().join(format!("ols-snap-symlink-{}", std::process::id()));
+        let real_dir = dir.join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let real_path = real_dir.join("c.as");
+        std::fs::write(&real_path, "int x;").unwrap();
+        let link_dir = dir.join("linked");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+
+        let snap = AnalysisSnapshot::from_files(
+            &[(real_path.canonicalize().unwrap(), "int x;".to_string())],
+            &LspConfig::default(),
+        );
+        let alias_uri = Url::from_file_path(link_dir.join("c.as")).unwrap();
+        assert!(snap.analysis_of(&alias_uri).is_some());
+        assert_eq!(snap.file_id_of(&alias_uri), Some(0));
+        let symbols = snap.symbols();
+        let scope = crate::typecheck::global_scope::GlobalScope::new(symbols, None);
+        assert!(snap.checked_file(&alias_uri, &scope).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
