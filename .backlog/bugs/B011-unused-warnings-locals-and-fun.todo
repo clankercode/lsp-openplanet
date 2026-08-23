@@ -1,0 +1,69 @@
+---
+complexity: high
+created_at: "2026-08-23T15:04:50Z"
+depends_on: []
+estimate_hours: 6
+id: B011
+priority: medium
+status: pending
+tags:
+    - gh-55
+    - unused
+    - analysis
+title: 'Unused warnings: locals and function parameters (GH #55)'
+updated_at: "2026-08-23T15:04:50Z"
+---
+GH issue: https://github.com/clankercode/lsp-openplanet/issues/55 (gh-55)
+
+Verified still open 2026-08-24 @ 728c30d: `src/analysis/unused.rs:142` — "Locals and
+parameters are deliberately out of scope (deferred)". Probe (`/tmp/probe55`) with an
+unused local + unused param emits no local/param warning.
+
+## Scope
+Local-scope usage pass over function bodies: unused local variables and unused
+function/method parameters. Reuses `Checker::define_local`/`lookup_local` +
+`with_usage_recording`.
+
+## DECISIONS (do not re-litigate; rationale inline)
+
+1. **Read-vs-write**: warn only when the identifier is never *mentioned again*
+   anywhere after its declaration in the enclosing scope. A write-only local
+   (`x = 1;` with no read) counts as USED. Rationale: FP-hostile repo culture
+   (todo-false-positives.txt); dead-store analysis needs real flow analysis and
+   would misfire on `&out` params, loop accumulators, and `cast<>` temporaries.
+2. **Param cascade**: params warn only when the enclosing function is itself
+   *used* (an unused function already warns at the declaration level — no
+   double-warn). Params of declarations without bodies (imports, funcdefs,
+   interface methods, abstract/mixin decls) never warn.
+3. **Signature-fixed params never warn**: params of Openplanet callbacks
+   (`OPENPLANET_CALLBACKS` + the gh-56 config list), operator overloads, virtual
+   overrides / interface implementations, and functions in public-API export
+   files. Their signature is imposed by the caller, not chosen by the author.
+4. **Suppression**: same conventions as the file-level pass — leading `_` on the
+   identifier and trailing `// lsp: ignore unused` on the declaration line.
+5. **Loop/catch/for-init locals**: `for (uint i = 0; ...)` counts the condition
+   and increment as usage (they are in the same scope). A loop var never
+   mentioned outside the init still warns.
+6. **Enablement gate**: dogfood against `tests/fixtures/tm-*` (E++, dips++)
+   BEFORE flipping the default. Zero new FPs → default on. Any FP that is not
+   cleanly exemptable → ship behind config key `unused_locals` (top-level in
+   `.openplanet-lsp.toml`, tri-state like `warnings_as_errors`) defaulting to
+   FALSE, and record the FP in todo-false-positives.txt. Report which path was
+   taken.
+7. **Message wording** mirrors the existing pass: "a local variable `x` is never
+   used (suppress with a leading `_` or a trailing `// lsp: ignore unused`
+   comment)" / "a parameter `p` is never used (...)".
+
+## Test plan (TDD, red first)
+Generalized variants per AGENTS.md: unused local; used local; write-only local;
+`_`-prefixed; `// lsp: ignore unused`; shadowed local in nested block; loop var;
+param unused in used function (warns); param unused in unused function (single
+warn at decl only); `const T &in` / `T &out` / `T &` / `T@` / `T@ &in` param
+variants; callback param; override param; operator-overload param; method params
+on a used vs unused class; exports-file function params.
+
+## Lane
+Lane A, step 1 of 2. Landing this first shrinks gh-56 (the exemption list gets a
+second consumer: params). Files: src/analysis/unused.rs, src/typecheck/checker.rs
+(locals usage recording), src/server/diagnostics.rs (message plumbing if needed),
+tests/.
