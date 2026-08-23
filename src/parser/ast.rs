@@ -403,6 +403,14 @@ pub struct FuncdefDecl {
     pub params: Vec<Param>,
 }
 
+/// A type alias declaration: `typedef ExistingType Alias;`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedefDecl {
+    pub span: Span,
+    pub target_type: TypeExpr,
+    pub name: Ident,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDecl {
     pub span: Span,
@@ -492,6 +500,7 @@ pub enum Item {
     Enum(EnumDecl),
     Namespace(NamespaceDecl),
     Funcdef(FuncdefDecl),
+    Typedef(TypedefDecl),
     Function(FunctionDecl),
     VarDecl(VarDeclStmt),
     Property(PropertyDecl),

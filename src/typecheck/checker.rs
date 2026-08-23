@@ -1127,6 +1127,9 @@ impl<'a> Checker<'a> {
                     let _ = self.resolve_type_expr(&p.type_expr);
                 }
             }
+            Item::Typedef(td) => {
+                let _ = self.resolve_type_expr(&td.target_type);
+            }
             Item::VarDecl(var) => self.check_var_decl_global(var),
             Item::Property(prop) => {
                 let prop_ty = self.resolve_type_expr(&prop.type_expr);

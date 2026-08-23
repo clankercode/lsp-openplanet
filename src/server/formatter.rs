@@ -108,6 +108,10 @@ impl<'a> Formatter<'a> {
                 self.write_indent();
                 self.write_condensed(self.span_text(fd.span));
             }
+            Item::Typedef(td) => {
+                self.write_indent();
+                self.write_condensed(self.span_text(td.span));
+            }
             Item::Property(p) => self.property_decl(p),
             Item::Import(imp) => {
                 self.write_indent();

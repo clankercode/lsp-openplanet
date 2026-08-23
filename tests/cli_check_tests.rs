@@ -1694,3 +1694,37 @@ fn check_command_unknown_namespaced_symbol_silent_when_nested_export_dep_missing
     );
     let _ = fs::remove_dir_all(base);
 }
+
+/// GH #58 decision 4: every declaration kind a namespace can contribute
+/// participates in its additive member surface. In particular, a typedef is
+/// both legal AngelScript syntax and a type name that a namespaced cast must
+/// resolve without a parser error or a `No matching symbol` diagnostic.
+#[test]
+fn check_command_namespaced_typedef_resolves_without_parse_or_symbol_error() {
+    let root = make_temp_plugin("namespace-typedef");
+    fs::write(
+        root.join("src/Main.as"),
+        "namespace Names {\n    typedef int Alias;\n}\n\nvoid Main() {\n    Names::Alias(0);\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "a namespaced typedef cast must be clean; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.contains("parse error") && !stdout.contains("No matching symbol 'Names::Alias'"),
+        "typedef must parse and resolve as a namespace member; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}

@@ -462,6 +462,23 @@ impl SymbolTable {
                     doc: None,
                 });
             }
+            ast::Item::Typedef(td) => {
+                let name = qualify(td.name.text(source));
+                out.push(Symbol {
+                    name,
+                    // A typedef is a first-class type name. The current
+                    // symbol surface already represents user-defined
+                    // type-only aliases with `Funcdef`, so use that category
+                    // rather than widening it for one declaration form.
+                    kind: SymbolKind::Funcdef {
+                        return_type: td.target_type.span.text(source).to_string(),
+                        params: Vec::new(),
+                    },
+                    span: td.span,
+                    file_id,
+                    doc: None,
+                });
+            }
             ast::Item::Function(func) => {
                 let name = qualify(func.name.text(source));
                 let (params, min_args) = extract_params(source, &func.params);

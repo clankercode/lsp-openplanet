@@ -182,6 +182,7 @@ impl IdentClassifier {
                     }
                 }
             }
+            Item::Typedef(td) => self.mark(td.name.span, TT_TYPE, 0),
             Item::Function(f) => {
                 self.mark(f.name.span, TT_FUNCTION, 0);
                 self.classify_fn_inner(f);
