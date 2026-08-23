@@ -728,6 +728,58 @@ fn typedb_refresh_dry_run_reports_and_writes_nothing() {
     );
 }
 
+/// A refresh never treats an existing DB-name symlink as a destination. This
+/// is deliberately true in both dry-run and apply modes: reporting a diff by
+/// following the link would make a later `--yes` invocation unsafe.
+#[cfg(unix)]
+#[test]
+fn typedb_refresh_rejects_each_destination_symlink_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let install = tmp_install("refresh-symlink-src");
+    for name in ["OpenplanetCore.json", "OpenplanetNext.json"] {
+        for yes in [false, true] {
+            let tag = format!("refresh-symlink-{}-{yes}", name.trim_end_matches(".json"));
+            let root = tmp_dir(&tag);
+            let into = root.join("into");
+            fs::create_dir_all(&into).unwrap();
+            let external = root.join("external.json");
+            fs::write(&external, "must remain untouched").unwrap();
+            let linked_destination = into.join(name);
+            symlink(&external, &linked_destination).unwrap();
+
+            let mut args = vec![
+                "typedb",
+                "refresh",
+                "--from",
+                install.to_str().unwrap(),
+                "--into",
+                into.to_str().unwrap(),
+            ];
+            if yes {
+                args.push("--yes");
+            }
+            let r = run(bin_without_install(&tag), &args);
+
+            assert_eq!(r.code, Some(1), "{name}, --yes={yes}: {}", r.all());
+            assert_eq!(
+                fs::read_to_string(&external).unwrap(),
+                "must remain untouched"
+            );
+            assert!(
+                r.stderr.contains(linked_destination.to_str().unwrap()),
+                "failure must name the unsafe path: {}",
+                r.stderr
+            );
+            assert!(
+                r.stderr.contains("symbolic link") && r.stderr.contains("remove it"),
+                "failure must explain the unsafe entry and recovery: {}",
+                r.stderr
+            );
+        }
+    }
+}
+
 /// `--yes` copies both files byte-for-byte; a second run has nothing to do.
 #[test]
 fn typedb_refresh_yes_copies_then_is_idempotent() {

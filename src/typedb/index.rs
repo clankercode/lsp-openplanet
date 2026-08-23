@@ -205,19 +205,20 @@ impl TypeIndex {
     /// `add_*` path once all insertions are done.
     fn build_short_type_index(&mut self) {
         self.short_type_index.clear();
-        for qname in self.types.keys() {
-            let short = qname.rsplit("::").next().unwrap_or(qname).to_string();
-            self.short_type_index
-                .entry(short)
-                .or_default()
-                .push(qname.clone());
-        }
-        for qname in self.enums.keys() {
-            let short = qname.rsplit("::").next().unwrap_or(qname).to_string();
-            self.short_type_index
-                .entry(short)
-                .or_default()
-                .push(qname.clone());
+        let mut names: Vec<String> = self
+            .types
+            .keys()
+            .chain(self.enums.keys())
+            .cloned()
+            .collect();
+        names.sort();
+        for qname in names {
+            let short = qname
+                .rsplit("::")
+                .next()
+                .unwrap_or(qname.as_str())
+                .to_string();
+            self.short_type_index.entry(short).or_default().push(qname);
         }
     }
 
@@ -226,9 +227,8 @@ impl TypeIndex {
     /// reference fails to resolve under any active namespace prefix.
     ///
     /// The slice is empty when the short name is unknown. Callers should
-    /// prefer the first match (stable insertion order is not guaranteed
-    /// because of `HashMap`, but duplicate short names in the Nadeo DB are
-    /// vanishingly rare — see tests).
+    /// prefer the first match, which is the lexicographically first qualified
+    /// name when the tail is ambiguous.
     pub fn find_by_short_name(&self, short: &str) -> &[String] {
         self.short_type_index
             .get(short)
@@ -241,7 +241,9 @@ impl TypeIndex {
     /// Used by "did you mean" quick-fixes to enumerate known external type and
     /// enum names for distance comparisons. Does not include global functions.
     pub fn all_short_names(&self) -> Vec<String> {
-        self.short_type_index.keys().cloned().collect()
+        let mut names: Vec<String> = self.short_type_index.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     fn qualify(ns: &Option<String>, name: &str) -> String {
@@ -908,7 +910,11 @@ fn render_params(params: &[ParamInfo]) -> String {
     params
         .iter()
         .map(|p| {
-            let mut rendered = p.type_name.clone();
+            let mut rendered = format!(
+                "{}: {}",
+                p.name.as_deref().unwrap_or("<unnamed>"),
+                p.type_name
+            );
             if p.is_out {
                 rendered.push_str(" &out");
             }
@@ -1098,6 +1104,65 @@ mod tests {
         assert!(
             !hits.is_empty(),
             "expected at least one match for CGameCtnEditorFree"
+        );
+    }
+
+    /// Short-name buckets are a resolution seam: duplicated tails must have
+    /// a stable first candidate across independent loads, not HashMap order.
+    #[test]
+    fn short_name_buckets_and_resolution_are_sorted_across_loads() {
+        let core = r#"{"op":"1.0.0","classes":[
+            {"ns":"Zeta","name":"Shared"},
+            {"ns":"Alpha","name":"Shared"},
+            {"ns":"Middle","name":"Other"},
+            {"ns":"Names","name":"Zulu"},
+            {"ns":"Names","name":"Alpha"},
+            {"ns":"Names","name":"Echo"},
+            {"ns":"Names","name":"Bravo"},
+            {"ns":"Names","name":"Kilo"},
+            {"ns":"Names","name":"Delta"},
+            {"ns":"Names","name":"Foxtrot"}]}
+        "#;
+        let load = |tag: &str| {
+            let dir = std::env::temp_dir().join(format!(
+                "openplanet-lsp-typedb-short-order-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("OpenplanetCore.json"), core).unwrap();
+            std::fs::write(dir.join("OpenplanetNext.json"), r#"{"op":"1.0.0","ns":{}}"#).unwrap();
+            TypeIndex::load(
+                &dir.join("OpenplanetCore.json"),
+                &dir.join("OpenplanetNext.json"),
+            )
+            .unwrap()
+        };
+        let first = load("first");
+        let second = load("second");
+        let expected = vec!["Alpha::Shared".to_string(), "Zeta::Shared".to_string()];
+
+        assert_eq!(first.find_by_short_name("Shared"), expected.as_slice());
+        assert_eq!(second.find_by_short_name("Shared"), expected.as_slice());
+        assert_eq!(
+            first.find_by_short_name("Shared").first(),
+            Some(&"Alpha::Shared".to_string()),
+            "the first bucket entry is GlobalScope's deterministic fallback"
+        );
+        assert_eq!(
+            first.all_short_names(),
+            vec![
+                "Alpha".to_string(),
+                "Bravo".to_string(),
+                "Delta".to_string(),
+                "Echo".to_string(),
+                "Foxtrot".to_string(),
+                "Kilo".to_string(),
+                "Other".to_string(),
+                "Shared".to_string(),
+                "Zulu".to_string(),
+            ],
+            "the user-visible suggestion names are deterministic too"
         );
     }
 
@@ -1560,6 +1625,47 @@ mod diff_tests {
         );
     }
 
+    /// Named arguments are part of the checker-facing call contract, so a
+    /// rename changes a free-function overload even when its types do not.
+    #[test]
+    fn diff_reports_changed_free_function_parameter_name() {
+        let old = core_index(
+            "fn-param-name-old",
+            &core_with_function(r#"[{"name":"label","typedecl":"string"}]"#, "bool"),
+        );
+        let new = core_index(
+            "fn-param-name-new",
+            &core_with_function(r#"[{"name":"title","typedecl":"string"}]"#, "bool"),
+        );
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|line| line.contains("label"))
+                && diff.changed[0]
+                    .details
+                    .iter()
+                    .any(|line| line.contains("title")),
+            "{diff:?}"
+        );
+
+        let unnamed = core_index(
+            "fn-param-name-unnamed",
+            &core_with_function(r#"[{"typedecl":"string"}]"#, "bool"),
+        );
+        let absence = diff_indexes(&old, &unnamed);
+        assert_eq!(absence.counts(), (0, 0, 1), "{absence:?}");
+        assert!(
+            absence.changed[0]
+                .details
+                .iter()
+                .any(|line| line.contains("<unnamed>: string")),
+            "{absence:?}"
+        );
+    }
+
     /// A parameter default appearing or disappearing changes which calls
     /// compile, so it counts as drift.
     #[test]
@@ -1616,6 +1722,48 @@ mod diff_tests {
             "{:?}",
             diff.changed[0].details
         );
+    }
+
+    /// Method parameter names participate in named-argument checking just as
+    /// free-function names do.
+    #[test]
+    fn diff_reports_changed_method_parameter_name() {
+        let class = |arg_name: &str| {
+            format!(
+                r#"{{"op":"1.0.0","classes":[{{"ns":"Net","name":"HttpRequest","methods":[{{"name":"Start","returntypedecl":"void","args":[{{"name":"{arg_name}","typedecl":"int"}}]}}]}}]}}"#
+            )
+        };
+        let diff = diff_indexes(
+            &core_index("meth-param-name-old", &class("port")),
+            &core_index("meth-param-name-new", &class("channel")),
+        );
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert!(
+            diff.changed[0]
+                .details
+                .iter()
+                .any(|line| line.contains("port"))
+                && diff.changed[0]
+                    .details
+                    .iter()
+                    .any(|line| line.contains("channel")),
+            "{diff:?}"
+        );
+    }
+
+    /// Descriptions are deliberately outside checker semantics: a doc-only
+    /// refresh must remain an empty diff even as parameter names are tracked.
+    #[test]
+    fn diff_ignores_doc_only_function_change() {
+        let old = core_index(
+            "fn-doc-old",
+            r#"{"op":"1.0.0","functions":[{"ns":"UI","name":"Begin","returntypedecl":"bool","desc":"old docs","args":[{"name":"label","typedecl":"string"}]}]}"#,
+        );
+        let new = core_index(
+            "fn-doc-new",
+            r#"{"op":"1.0.0","functions":[{"ns":"UI","name":"Begin","returntypedecl":"bool","desc":"new docs","args":[{"name":"label","typedecl":"string"}]}]}"#,
+        );
+        assert!(diff_indexes(&old, &new).is_empty());
     }
 
     #[test]

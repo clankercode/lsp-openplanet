@@ -9,6 +9,8 @@
 //! auto-detect ladder ([`LspConfig::load`], GH #45), or a directory the user
 //! names. There is no upstream download endpoint and nothing here fetches.
 
+use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::config::LspConfig;
@@ -583,6 +585,9 @@ fn run_refresh(args: &[String]) -> i32 {
         core: into.join(file_name_of(&source.core)),
         game: into.join(file_name_of(&source.game)),
     };
+    if let Err(err) = validate_refresh_destination(&source, &into, &target) {
+        return fail(&err);
+    }
 
     let mut out = String::new();
     out.push_str(&format!("source:  {}\n", pair_dir(&source)));
@@ -646,18 +651,14 @@ fn run_refresh(args: &[String]) -> i32 {
         return 0;
     }
 
-    if let Err(err) = std::fs::create_dir_all(&into) {
+    if let Err(err) = fs::create_dir_all(&into) {
         print!("{out}");
         return fail(&format!("failed to create {}: {err}", into.display()));
     }
     for (src, dst) in &differing {
-        if let Err(err) = std::fs::copy(src, dst) {
+        if let Err(err) = atomic_copy(src, dst) {
             print!("{out}");
-            return fail(&format!(
-                "failed to copy {} to {}: {err}",
-                src.display(),
-                dst.display()
-            ));
+            return fail(&err);
         }
     }
     out.push_str(&format!(
@@ -679,9 +680,146 @@ fn file_name_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Refuse destination shapes that could redirect a probe, diff, or write out
+/// of the explicitly named `--into` directory. The final write still uses an
+/// atomic rename so a symlink swapped in after this check is replaced rather
+/// than followed.
+fn validate_refresh_destination(
+    source: &DbPair,
+    into: &Path,
+    target: &DbPair,
+) -> Result<(), String> {
+    if let Ok(meta) = fs::symlink_metadata(into) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "refusing to write through symbolic-link directory {}; remove it and use a real directory before retrying",
+                into.display()
+            ));
+        }
+        if !meta.is_dir() {
+            return Err(format!(
+                "refusing destination {}: it is not a directory; remove it and use a directory before retrying",
+                into.display()
+            ));
+        }
+    }
+
+    let source_dir = source.core.parent().unwrap_or(source.core.as_path());
+    if same_directory(source_dir, into) {
+        return Err(format!(
+            "refusing to refresh into source directory {}; choose a separate --into directory",
+            into.display()
+        ));
+    }
+    for home in [std::env::var_os("HOME"), std::env::var_os("USERPROFILE")]
+        .into_iter()
+        .flatten()
+    {
+        let install = PathBuf::from(home).join("OpenplanetNext");
+        if same_directory(&install, into) {
+            return Err(format!(
+                "refusing to refresh into Openplanet install {}; choose a separate --into directory",
+                into.display()
+            ));
+        }
+    }
+
+    for path in [&target.core, &target.game] {
+        match fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "refusing symbolic link destination {}; remove it and replace it with a regular file before retrying",
+                    path.display()
+                ));
+            }
+            Ok(meta) if !meta.is_file() => {
+                return Err(format!(
+                    "refusing unsafe destination {}; remove it and use a regular file before retrying",
+                    path.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to inspect destination {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn same_directory(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// Copy to a uniquely-created sibling, then atomically replace the named DB.
+/// Renaming never follows a destination symlink, so there is no check-to-copy
+/// window where a hostile link can redirect the write.
+fn atomic_copy(src: &Path, dst: &Path) -> Result<(), String> {
+    let parent = dst
+        .parent()
+        .ok_or_else(|| format!("destination {} has no parent directory", dst.display()))?;
+    let name = dst
+        .file_name()
+        .ok_or_else(|| format!("destination {} has no filename", dst.display()))?
+        .to_string_lossy();
+    let mut input = fs::File::open(src)
+        .map_err(|err| format!("failed to read source {}: {err}", src.display()))?;
+
+    for attempt in 0..100 {
+        let temp = parent.join(format!(
+            ".{name}.typedb-refresh-{}-{attempt}",
+            std::process::id()
+        ));
+        let mut output = match OpenOptions::new().write(true).create_new(true).open(&temp) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(format!(
+                    "failed to create temporary database {}: {err}",
+                    temp.display()
+                ));
+            }
+        };
+        let write_result = io::copy(&mut input, &mut output)
+            .and_then(|_| output.sync_all())
+            .map_err(|err| {
+                format!(
+                    "failed to copy {} to {}: {err}",
+                    src.display(),
+                    temp.display()
+                )
+            });
+        drop(output);
+        if let Err(err) = write_result {
+            let _ = fs::remove_file(&temp);
+            return Err(err);
+        }
+        if let Err(err) = fs::rename(&temp, dst) {
+            let _ = fs::remove_file(&temp);
+            return Err(format!(
+                "failed to atomically replace {} from {}: {err}",
+                dst.display(),
+                src.display()
+            ));
+        }
+        return Ok(());
+    }
+    Err(format!(
+        "failed to create a unique temporary database beside {}",
+        dst.display()
+    ))
+}
+
 /// True when `dst` is absent or its bytes differ from `src`.
 fn differs(src: &Path, dst: &Path) -> bool {
-    match (std::fs::read(src), std::fs::read(dst)) {
+    match (fs::read(src), fs::read(dst)) {
         (Ok(a), Ok(b)) => a != b,
         _ => true,
     }
