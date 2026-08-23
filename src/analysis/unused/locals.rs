@@ -334,96 +334,117 @@ fn source_type_name(source: &str, ty: &TypeExpr) -> Option<String> {
     }
 }
 
-/// Resolve like the workspace type resolver: lexical candidates first,
-/// followed by an exact global name, then an unqualified tail only when it
-/// has one canonical candidate. Ambiguous tails must stay unresolved rather
-/// than suppress a warning based on arbitrary hash-map order.
-fn resolve_source_type(
-    types: &HashMap<String, SourceType>,
-    name: &ScopedTypeName,
-) -> Option<String> {
-    let mut namespace = name.namespace.as_str();
-    loop {
-        let candidate = if namespace.is_empty() {
-            name.written.clone()
-        } else {
-            format!("{namespace}::{}", name.written)
-        };
-        if types.contains_key(&candidate) {
-            return Some(candidate);
-        }
-        let Some((outer, _)) = namespace.rsplit_once("::") else {
-            break;
-        };
-        namespace = outer;
-    }
-    if types.contains_key(&name.written) {
-        return Some(name.written.clone());
-    }
-    if name.written.contains("::") {
-        return None;
-    }
-    let mut matches = types
-        .keys()
-        .filter(|candidate| tail_name(candidate) == name.written);
-    let only = matches.next()?.clone();
-    matches.next().is_none().then_some(only)
+enum ContractMatch {
+    Missing,
+    Unique(ContractAncestor),
+    Ambiguous,
 }
 
+fn unique_contract_match(mut candidates: impl Iterator<Item = ContractAncestor>) -> ContractMatch {
+    let Some(first) = candidates.next() else {
+        return ContractMatch::Missing;
+    };
+    if candidates.next().is_some() {
+        ContractMatch::Ambiguous
+    } else {
+        ContractMatch::Unique(first)
+    }
+}
+
+fn matches_fallback(candidate: &str, written: &str) -> bool {
+    if written.contains("::") {
+        candidate.ends_with(&format!("::{written}"))
+    } else {
+        tail_name(candidate) == written
+    }
+}
+
+fn exact_contract_candidate(
+    types: &HashMap<String, SourceType>,
+    external: Option<&TypeIndex>,
+    candidate: &str,
+) -> Option<ContractAncestor> {
+    if types.contains_key(candidate) {
+        return Some(ContractAncestor::Source(candidate.to_string()));
+    }
+    external
+        .filter(|index| index.lookup_type(candidate).is_some())
+        .map(|_| ContractAncestor::External(candidate.to_string()))
+}
+
+fn fallback_source_contract(types: &HashMap<String, SourceType>, written: &str) -> ContractMatch {
+    unique_contract_match(
+        types
+            .keys()
+            .filter(|candidate| matches_fallback(candidate, written))
+            .map(|candidate| ContractAncestor::Source(candidate.clone())),
+    )
+}
+
+fn fallback_external_contract(external: &TypeIndex, written: &str) -> ContractMatch {
+    let short = tail_name(written);
+    unique_contract_match(
+        external
+            .find_by_short_name(short)
+            .iter()
+            .filter(|candidate| {
+                external.lookup_type(candidate).is_some() && matches_fallback(candidate, written)
+            })
+            .map(|candidate| ContractAncestor::External(candidate.clone())),
+    )
+}
+
+/// Mirror `TypeResolver::resolve_named` for source-declared parents: exact
+/// name, active namespace prefixes, then external-first suffix resolution
+/// and workspace fallback. Unlike the main resolver's legacy first-match
+/// behavior, each fallback tier refuses ambiguity because this pass must not
+/// suppress a warning based on map iteration order.
 fn resolve_contract_parent(
     types: &HashMap<String, SourceType>,
     external: Option<&TypeIndex>,
     name: &ScopedTypeName,
 ) -> Option<ContractAncestor> {
-    if let Some(source) = resolve_source_type(types, name) {
-        return Some(ContractAncestor::Source(source));
+    if let Some(exact) = exact_contract_candidate(types, external, &name.written) {
+        return Some(exact);
     }
-    // An ambiguous workspace tail must not fall through to a coincidental
-    // external short-name match: the source resolver could not choose a
-    // canonical parent, so neither can this exemption pass.
-    if !name.written.contains("::")
-        && types
-            .keys()
-            .filter(|candidate| tail_name(candidate) == name.written)
-            .take(2)
-            .count()
-            > 1
-    {
-        return None;
+    let mut namespace = name.namespace.as_str();
+    while !namespace.is_empty() {
+        let candidate = format!("{namespace}::{}", name.written);
+        if let Some(lexical) = exact_contract_candidate(types, external, &candidate) {
+            return Some(lexical);
+        }
+        namespace = namespace.rsplit_once("::").map_or("", |(outer, _)| outer);
     }
-    external
-        .and_then(|index| resolve_external_type(index, name))
-        .map(ContractAncestor::External)
+    if let Some(external) = external {
+        match fallback_external_contract(external, &name.written) {
+            ContractMatch::Unique(found) => return Some(found),
+            ContractMatch::Ambiguous => return None,
+            ContractMatch::Missing => {}
+        }
+    }
+    match fallback_source_contract(types, &name.written) {
+        ContractMatch::Unique(found) => Some(found),
+        ContractMatch::Missing | ContractMatch::Ambiguous => None,
+    }
 }
 
 fn resolve_external_type(external: &TypeIndex, name: &ScopedTypeName) -> Option<String> {
-    let mut namespace = name.namespace.as_str();
-    loop {
-        let candidate = if namespace.is_empty() {
-            name.written.clone()
-        } else {
-            format!("{namespace}::{}", name.written)
-        };
-        if external.lookup_type(&candidate).is_some() {
-            return Some(candidate);
-        }
-        let Some((outer, _)) = namespace.rsplit_once("::") else {
-            break;
-        };
-        namespace = outer;
-    }
     if external.lookup_type(&name.written).is_some() {
         return Some(name.written.clone());
     }
-    if name.written.contains("::") {
-        return None;
+    let mut namespace = name.namespace.as_str();
+    while !namespace.is_empty() {
+        let candidate = format!("{namespace}::{}", name.written);
+        if external.lookup_type(&candidate).is_some() {
+            return Some(candidate);
+        }
+        namespace = namespace.rsplit_once("::").map_or("", |(outer, _)| outer);
     }
-    let mut matches = external
-        .find_by_short_name(&name.written)
-        .iter()
-        .filter(|candidate| external.lookup_type(candidate).is_some());
-    let only = matches.next()?.clone();
-    matches.next().is_none().then_some(only)
+    match fallback_external_contract(external, &name.written) {
+        ContractMatch::Unique(ContractAncestor::External(found)) => Some(found),
+        ContractMatch::Missing | ContractMatch::Ambiguous => None,
+        ContractMatch::Unique(ContractAncestor::Source(_)) => unreachable!(),
+    }
 }
 
 /// Snapshot-wide inputs to the locals/params join, built ONCE per
@@ -691,6 +712,27 @@ mod tests {
         let core = root.join("tests/fixtures/typedb/OpenplanetCore.json");
         let next = root.join("tests/fixtures/typedb/OpenplanetNext.json");
         let index = TypeIndex::load(&core, &next).expect("typedb fixtures must load");
+        let snap = snap_of(&[("a.as", src)]);
+        names(&unused_declarations(
+            &snap,
+            Some(&index),
+            &StdHashSet::new(),
+        ))
+    }
+
+    fn report_with_inline_typedb(src: &str, core_json: &str) -> Vec<String> {
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "openplanet-lsp-unused-contracts-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture_dir);
+        std::fs::create_dir_all(&fixture_dir).expect("fixture directory must be created");
+        let core = fixture_dir.join("Core.json");
+        let next = fixture_dir.join("Next.json");
+        std::fs::write(&core, core_json).expect("Core fixture must be written");
+        std::fs::write(&next, r#"{"op":"test","ns":{}}"#).expect("Next fixture must be written");
+        let index = TypeIndex::load(&core, &next).expect("inline typedb fixture must load");
+        std::fs::remove_dir_all(&fixture_dir).expect("fixture directory must be removed");
         let snap = snap_of(&[("a.as", src)]);
         names(&unused_declarations(
             &snap,
@@ -977,6 +1019,48 @@ mod tests {
             "namespace ApiA {\n    interface IThing { void Do(int a); }\n}\nnamespace ApiB {\n    interface IThing { void Do(int a); }\n}\nnamespace Impl {\n    class C : IThing { void Do(int a) {} }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
         );
         assert_has(&report, "Impl::C::Do::a");
+    }
+
+    #[test]
+    fn unique_partially_qualified_workspace_interface_imposes_params() {
+        let report = report_of(
+            "namespace Api {\n    namespace Sub {\n        interface IThing { void Do(int a); }\n    }\n}\nclass C : Sub::IThing { void Do(int a) {} }\nvoid Main() { C c; c.Do(1); }\n",
+        );
+        assert_lacks(&report, "C::Do::a");
+    }
+
+    #[test]
+    fn ambiguous_partially_qualified_workspace_interface_does_not_impose_params() {
+        let report = report_of(
+            "namespace ApiA { namespace Sub { interface IThing { void Do(int a); } } }\nnamespace ApiB { namespace Sub { interface IThing { void Do(int a); } } }\nclass C : Sub::IThing { void Do(int a) {} }\nvoid Main() { C c; c.Do(1); }\n",
+        );
+        assert_has(&report, "C::Do::a");
+    }
+
+    #[test]
+    fn external_partially_qualified_suffix_requires_a_unique_contract() {
+        let core = r#"{
+            "op": "test",
+            "classes": [
+                {"ns":"Vendor","name":"Api::IThing","methods":[{"name":"Do"}]},
+                {"ns":"VendorA","name":"Sub::IThing","methods":[{"name":"Act"}]},
+                {"ns":"VendorB","name":"Sub::IThing","methods":[{"name":"Act"}]}
+            ]
+        }"#;
+        let report = report_with_inline_typedb(
+            "class Unique : Api::IThing { void Do(int a) {} }\nclass Ambiguous : Sub::IThing { void Act(int a) {} }\nvoid Main() { Unique unique; unique.Do(1); Ambiguous ambiguous; ambiguous.Act(1); }\n",
+            core,
+        );
+        assert_lacks(&report, "Unique::Do::a");
+        assert_has(&report, "Ambiguous::Act::a");
+    }
+
+    #[test]
+    fn external_unqualified_parent_precedes_workspace_tail_collision() {
+        let report = report_with_typedb(
+            "namespace Unrelated { class CGameApp {} }\nclass C : CGameApp { void ShowMenu(CGameMenu@ menu) {} }\nvoid Main() { C c; c.ShowMenu(null); }\n",
+        );
+        assert_lacks(&report, "C::ShowMenu::menu");
     }
 
     #[test]
