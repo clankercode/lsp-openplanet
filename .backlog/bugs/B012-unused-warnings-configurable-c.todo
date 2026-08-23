@@ -1,0 +1,56 @@
+---
+complexity: low
+created_at: "2026-08-23T15:04:50Z"
+depends_on: []
+estimate_hours: 2
+id: B012
+priority: medium
+status: pending
+tags:
+    - gh-56
+    - unused
+    - config
+title: 'Unused warnings: configurable callback/exemption list (GH #56)'
+updated_at: "2026-08-23T15:04:50Z"
+---
+GH issue: https://github.com/clankercode/lsp-openplanet/issues/56 (gh-56)
+
+Verified still open 2026-08-24 @ 728c30d: no `unused_callbacks` key exists in
+`src/config.rs`; the exemption list is hardcoded (`OPENPLANET_CALLBACKS`,
+src/analysis/unused.rs:44+).
+
+## DECISIONS (do not re-litigate)
+
+1. **Implement now, despite the issue's "do not implement until a real FP is
+   observed"**: the issue itself records a real one (MLHook name-reflection
+   dispatch of `OnCounterUpdate`), and gh-55 adds a second consumer of the list
+   (param exemptions). User asked for it in this batch.
+2. **Key**: top-level `unused_callbacks = ["OnCounterUpdate", "OnThing*"]` in
+   `.openplanet-lsp.toml` / user global config — the config file is flat (no
+   sections); it sits beside `source_paths` / `ignore_paths`.
+3. **Additive, never replacing**: entries extend `OPENPLANET_CALLBACKS`. There is
+   no "disable defaults" switch (contrast `shortcut_disable_default_namespaces`)
+   — dropping engine callbacks from the exemption list only manufactures FPs.
+4. **Pattern syntax**: literal names plus a single `*` wildcard (prefix `Foo*`,
+   suffix `*Update`, and bare `*` matching everything). NOT full glob, NOT regex.
+   Rationale: smallest surface that covers reflective-dispatch naming
+   conventions; no new dependency.
+5. **Match target**: unqualified names of **free functions declared at file top
+   level** — same population the hardcoded list applies to. Class methods are out
+   of scope (MLHook dispatches free functions); revisit only on a real FP.
+6. **Precedence**: standard ladder — workspace `.openplanet-lsp.toml` wins over
+   user global when both set the key (same rule as `warnings_as_errors`). Lists
+   do not merge across levels; the winning file's list is the list.
+7. **Docs**: README config block + CHANGELOG entry.
+
+## Test plan (TDD, red first)
+Variants: literal name exempts; prefix `On*`; suffix `*Update`; bare `*`;
+non-matching name still warns; hardcoded defaults still exempt when the key is
+set; class method with a matching name still warns (decision 5); workspace file
+overrides user global; malformed values (non-array, non-string entries) ignored
+without panicking; empty list is a no-op.
+
+## Lane
+Lane A, step 2 of 2 — depends on gh-55 (shared files: src/analysis/unused.rs;
+gh-55 adds the param consumer of this list). Files: src/config.rs,
+src/analysis/unused.rs, README.md, CHANGELOG.md, tests/.

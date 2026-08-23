@@ -10,3 +10,4 @@ bugs:
     - file: B009-i1-deepen-document-analysis-in.todo
     - file: B010-i2-i3-deepen-call-site-checkin.todo
     - file: B011-unused-warnings-locals-and-fun.todo
+    - file: B012-unused-warnings-configurable-c.todo
