@@ -117,6 +117,23 @@ fn typedb_status_accepts_equals_form_of_from() {
     assert!(r.stdout.contains("op=1.29.5"), "{}", r.stdout);
 }
 
+/// A space-separated directory value cannot be another option. In particular,
+/// `--json` must remain an option instead of becoming a literal `--from` path.
+#[test]
+fn typedb_status_rejects_option_as_separated_from_value() {
+    let r = run(
+        bin_without_install("status-from-option"),
+        &["typedb", "status", "--from", "--json"],
+    );
+    assert_eq!(r.code, Some(2), "{}", r.all());
+    assert!(
+        r.stderr.contains("--from requires a directory argument"),
+        "the usage error must identify the missing --from value: {}",
+        r.stderr
+    );
+    assert!(r.stdout.is_empty(), "a malformed status command must not emit JSON: {}", r.stdout);
+}
+
 /// No install anywhere: a warning, not a failure — `check` degrades the same
 /// way (`type database not loaded`).
 #[test]
@@ -691,6 +708,56 @@ fn typedb_refresh_requires_into() {
         r.stderr.contains("--into"),
         "the usage error must name --into: {}",
         r.stderr
+    );
+}
+
+/// A space-separated `--into` value cannot swallow `--yes`; malformed input
+/// must stop before refresh resolves, diffs, or writes the literal `--yes`
+/// directory.
+#[test]
+fn typedb_refresh_rejects_option_as_separated_into_value_without_side_effects() {
+    let install = tmp_install("refresh-into-option");
+    let accidental_destination = Path::new("--yes");
+    assert!(
+        !accidental_destination.exists(),
+        "test requires no pre-existing accidental --yes destination"
+    );
+    let source_before = [
+        fs::read(install.join("OpenplanetCore.json")).unwrap(),
+        fs::read(install.join("OpenplanetNext.json")).unwrap(),
+    ];
+
+    let r = run(
+        bin_without_install("refresh-into-option"),
+        &[
+            "typedb",
+            "refresh",
+            "--from",
+            install.to_str().unwrap(),
+            "--into",
+            "--yes",
+        ],
+    );
+
+    assert_eq!(r.code, Some(2), "{}", r.all());
+    assert!(
+        r.stderr.contains("--into requires a directory argument"),
+        "the usage error must identify the missing --into value: {}",
+        r.stderr
+    );
+    assert!(
+        !accidental_destination.exists(),
+        "malformed refresh must not create its swallowed option as a destination"
+    );
+    assert_eq!(
+        source_before[0],
+        fs::read(install.join("OpenplanetCore.json")).unwrap(),
+        "malformed refresh must not alter source DBs"
+    );
+    assert_eq!(
+        source_before[1],
+        fs::read(install.join("OpenplanetNext.json")).unwrap(),
+        "malformed refresh must not alter source DBs"
     );
 }
 

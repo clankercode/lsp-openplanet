@@ -515,6 +515,9 @@ fn take_dir_arg(args: &[String], i: usize, flag: &str) -> Result<(PathBuf, usize
         return Ok((PathBuf::from(value), 1));
     }
     let value = args.get(i + 1).ok_or_else(missing)?;
+    if value.starts_with("--") {
+        return Err(missing());
+    }
     Ok((PathBuf::from(value), 2))
 }
 
@@ -1117,10 +1120,17 @@ mod tests {
 
     #[test]
     fn take_dir_arg_space_and_equals_forms() {
-        let args: Vec<String> = ["--from", "/a", "--into=/b", "--into"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = [
+            "--from",
+            "/a",
+            "--into=/b",
+            "--from=--json",
+            "--into=--yes",
+            "--into",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         assert_eq!(
             take_dir_arg(&args, 0, "--from").unwrap(),
             (PathBuf::from("/a"), 2)
@@ -1129,8 +1139,18 @@ mod tests {
             take_dir_arg(&args, 2, "--into").unwrap(),
             (PathBuf::from("/b"), 1)
         );
+        // Equals form deliberately accepts unusual directory names beginning
+        // with `--`; only a separate option-like value is ambiguous.
+        assert_eq!(
+            take_dir_arg(&args, 3, "--from").unwrap(),
+            (PathBuf::from("--json"), 1)
+        );
+        assert_eq!(
+            take_dir_arg(&args, 4, "--into").unwrap(),
+            (PathBuf::from("--yes"), 1)
+        );
         // Trailing flag with no value.
-        assert!(take_dir_arg(&args, 3, "--into").is_err());
+        assert!(take_dir_arg(&args, 5, "--into").is_err());
     }
 
     #[test]
