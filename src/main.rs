@@ -211,6 +211,10 @@ fn run_check_command(args: &[String]) -> i32 {
         };
     }
 
+    // GH #48: effective warnings-as-errors resolves the precedence
+    // CLI flag > workspace .openplanet-lsp.toml > user config > false.
+    let warnings_as_errors = options.resolve_warnings_as_errors_with_config();
+
     match cli::run_check(&options) {
         Ok(report) => {
             if !report.type_database_loaded && !options.no_typedb {
@@ -228,8 +232,9 @@ fn run_check_command(args: &[String]) -> i32 {
                     item.diagnostic.severity,
                     Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
                 );
-                // GH #48: with --warnings-as-errors, warnings also fail the run.
-                is_error || (options.warnings_as_errors && is_warning)
+                // GH #48: with --warnings-as-errors (or the config key),
+                // warnings also fail the run.
+                is_error || (warnings_as_errors && is_warning)
             });
             if has_errors {
                 1

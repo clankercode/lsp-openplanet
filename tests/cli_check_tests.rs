@@ -975,6 +975,116 @@ fn check_command_exit_codes_and_warnings_as_errors() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// GH #48 follow-up: `warnings_as_errors` as a persistent config option.
+/// Precedence: CLI flag > workspace `.openplanet-lsp.toml` > user global
+/// config (`$HOME/.config/openplanet-lsp/config.toml`) > default(false).
+/// Runs the real binary as a subprocess so $HOME can be pinned per case
+/// (deterministic — no dependence on the dev machine's user config).
+#[test]
+fn check_command_warnings_as_errors_config_precedence() {
+    // Warnings-only plugin (Signed/Unsigned mismatch, GH #37 warning class).
+    let root = make_temp_plugin("gh48-werror-config");
+    std::fs::write(
+        root.join("Main.as"),
+        "void Main() {\n    int i = 0;\n    uint u = 1;\n    if (i < u) {\n        u = u + 1;\n    }\n}\n",
+    )
+    .unwrap();
+
+    // Fake $HOME with a user-global config setting warnings_as_errors.
+    let home =
+        std::env::temp_dir().join(format!("openplanet-lsp-gh48-home-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(home.join(".config/openplanet-lsp")).unwrap();
+
+    let run = |home_value: Option<&std::path::Path>, extra: &[&str]| {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"));
+        cmd.arg("check").arg("--no-typedb").arg(&root);
+        for a in extra {
+            cmd.arg(a);
+        }
+        if let Some(h) = home_value {
+            cmd.env("HOME", h);
+        }
+        cmd.env_remove("FORCE_COLOR")
+            .env_remove("CLICOLOR_FORCE")
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap()
+    };
+
+    // Sanity: warnings-only, no config anywhere → exit 0.
+    let out = run(None, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "no config, no flag: warnings-only must exit 0; stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // ── User-global layer ──────────────────────────────────────────────
+    fs::write(
+        home.join(".config/openplanet-lsp/config.toml"),
+        "warnings_as_errors = true\n",
+    )
+    .unwrap();
+
+    // Flag absent + user config true → exit 1.
+    let out = run(Some(&home), &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "user config warnings_as_errors=true (flag absent) must exit 1 on warnings"
+    );
+
+    // Explicit --warnings-as-errors=false beats user config true → exit 0.
+    let out = run(Some(&home), &["--warnings-as-errors=false"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "--warnings-as-errors=false must override user config true"
+    );
+
+    // ── Workspace layer (beats user global) ────────────────────────────
+    fs::write(
+        root.join(".openplanet-lsp.toml"),
+        "warnings_as_errors = true\n",
+    )
+    .unwrap();
+
+    // Workspace true + user config true, flag absent → exit 1 (workspace
+    // still consulted even though the user layer already says true).
+    let out = run(Some(&home), &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "workspace warnings_as_errors=true (flag absent) must exit 1 on warnings"
+    );
+
+    // Workspace false beats user global true → exit 0.
+    fs::write(
+        root.join(".openplanet-lsp.toml"),
+        "warnings_as_errors = false\n",
+    )
+    .unwrap();
+    let out = run(Some(&home), &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "workspace warnings_as_errors=false must override user config true"
+    );
+
+    // Flag true beats workspace false → exit 1.
+    let out = run(Some(&home), &["--warnings-as-errors"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "--warnings-as-errors must override workspace warnings_as_errors=false"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
 // ── GH #37: warning-parity batch ────────────────────────────────────────
 // Game-compiler ground truth for every class captured via live RemoteBuild
 // probe 2026-08-17 (see issue comments). These gates assert the game's

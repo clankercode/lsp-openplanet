@@ -74,7 +74,7 @@ impl AnalysisSnapshot {
             files,
             symbols: table,
             missing_required_dependencies: load.missing_required_dependencies.clone(),
-            export_paths: std::collections::HashSet::new(),
+            export_paths: load.export_paths.clone(),
         }
     }
 
@@ -112,6 +112,7 @@ impl AnalysisSnapshot {
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
+            export_paths: Default::default(),
         };
         Self::from_load(&load, config)
     }
@@ -158,15 +159,9 @@ impl AnalysisSnapshot {
     }
 
     /// Canonicalized own-manifest export file paths (public API — see
-    /// field docs). Empty until populated via [`Self::with_export_paths`].
+    /// field docs). Populated by `from_load` from the workspace loader.
     pub fn export_paths(&self) -> &std::collections::HashSet<PathBuf> {
         &self.export_paths
-    }
-
-    /// Attach the plugin's own-manifest export file paths (public API).
-    pub fn with_export_paths(mut self, export_paths: std::collections::HashSet<PathBuf>) -> Self {
-        self.export_paths = export_paths;
-        self
     }
 
     /// file_id (index into `files()`) of the file with this URI, when

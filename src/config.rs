@@ -96,6 +96,10 @@ struct ConfigFile {
     shortcut_disable_default_namespaces: Option<bool>,
     /// Include enums + enum values in shortcut completions.
     shortcut_match_enums: Option<bool>,
+    /// GH #48 follow-up: make WARNING diagnostics fail `check` (exit 1).
+    /// CLI `--warnings-as-errors`/`-Werror` (incl. `=false`) wins over this;
+    /// workspace `.openplanet-lsp.toml` wins over the user config.
+    warnings_as_errors: Option<bool>,
 }
 
 /// How bare TTY launches behave when no subcommand is given.
@@ -120,6 +124,11 @@ impl DefaultMode {
 #[derive(Debug, Clone, Default)]
 pub struct UserPrefs {
     pub default_mode: DefaultMode,
+    /// GH #48 follow-up: `warnings_as_errors` from the config ladder
+    /// (workspace `.openplanet-lsp.toml` over `~/.config/openplanet-lsp/
+    /// config.toml`). The CLI flag — including an explicit `=false` —
+    /// still takes precedence over this.
+    pub warnings_as_errors: bool,
 }
 
 impl UserPrefs {
@@ -155,6 +164,9 @@ impl UserPrefs {
         };
         if let Some(mode) = cfg.default_mode.as_deref().and_then(DefaultMode::parse) {
             self.default_mode = mode;
+        }
+        if let Some(w) = cfg.warnings_as_errors {
+            self.warnings_as_errors = w;
         }
     }
 }
@@ -866,4 +878,48 @@ shortcut_match_enums = true
         assert_eq!(cfg.shortcut_namespace_list(), vec!["Data"]);
         assert!(cfg.shortcut_match_enums);
     }
+
+    /// GH #48 follow-up: `warnings_as_errors` config key reaches UserPrefs
+    /// through the workspace `.openplanet-lsp.toml` layer. Both cases are
+    /// deterministic without pinning $HOME because the workspace layer is
+    /// applied last — it wins over any user-global value.
+    #[test]
+    fn test_user_prefs_warnings_as_errors_from_workspace_toml() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-wae-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let ws_true = tmp.join("ws-true");
+        std::fs::create_dir_all(&ws_true).unwrap();
+        std::fs::write(
+            ws_true.join(".openplanet-lsp.toml"),
+            "warnings_as_errors = true\n",
+        )
+        .unwrap();
+        assert!(
+            UserPrefs::load(Some(&ws_true)).warnings_as_errors,
+            "workspace warnings_as_errors = true must reach UserPrefs"
+        );
+
+        // Explicit false must not coerce to true (regression guard for the
+        // key being honored as written).
+        let ws_false = tmp.join("ws-false");
+        std::fs::create_dir_all(&ws_false).unwrap();
+        std::fs::write(
+            ws_false.join(".openplanet-lsp.toml"),
+            "warnings_as_errors = false\n",
+        )
+        .unwrap();
+        assert!(
+            !UserPrefs::load(Some(&ws_false)).warnings_as_errors,
+            "workspace warnings_as_errors = false must stay false"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // NOTE: the user-global layer ($HOME/.config/openplanet-lsp/config.toml)
+    // is deliberately NOT unit-tested here — mutating $HOME in-process races
+    // with `test_game_json_derivation_uses_variant_folder` above (lib tests
+    // share one process). It's covered end-to-end by the subprocess tests in
+    // tests/cli_check_tests.rs, which own their environment.
 }

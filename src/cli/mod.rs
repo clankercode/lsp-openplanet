@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
-use crate::config::LspConfig;
+use crate::config::{LspConfig, UserPrefs};
 use crate::server::diagnostics;
 use crate::typedb::TypeIndex;
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
@@ -39,6 +39,11 @@ OPTIONS:
     --warnings-as-errors
                         Exit 1 when any WARNING diagnostic is present
                         (short form -Werror; =true/=false also accepted).
+                        May also be pinned via `warnings_as_errors = true`
+                        in .openplanet-lsp.toml or the user config
+                        (~/.config/openplanet-lsp/config.toml); workspace
+                        wins over user. An explicit =false flag overrides
+                        a config `true`.
                         Default exit code: 0 = clean or warnings-only,
                         1 = any error, 2 = usage failure
     --define NAME       Add a preprocessor define on top of info.toml /
@@ -107,14 +112,43 @@ pub struct CheckOptions {
     /// Live TUI mode (`check --watch`).
     pub watch: bool,
     /// GH #48: treat WARNING diagnostics as errors for the exit code
-    /// (`--warnings-as-errors` / `-Werror`). Default exit contract stays:
-    /// 0 = clean or warnings-only, 1 = any error, 2 = usage failure.
-    pub warnings_as_errors: bool,
+    /// (`--warnings-as-errors` / `-Werror`, =true/=false accepted).
+    /// `None` = flag absent → falls back to the config ladder
+    /// (`warnings_as_errors` in workspace `.openplanet-lsp.toml`, then the
+    /// user config). An explicit `Some(false)` overrides config `true`.
+    /// See [`CheckOptions::resolve_warnings_as_errors`]. Default exit
+    /// contract stays: 0 = clean or warnings-only, 1 = any error,
+    /// 2 = usage failure.
+    pub warnings_as_errors_flag: Option<bool>,
     /// GH #53: extra preprocessor defines injected on top of the
     /// manifest/config ladder (`--define NAME`, repeatable). Lets a
     /// source-tree gate match the staged/dev compile (e.g. `build.sh dev`
     /// writes `defines = ["DEV"]` only into the staged plugin).
     pub extra_defines: Vec<String>,
+}
+
+impl CheckOptions {
+    /// Effective `warnings_as_errors` for the run's exit code, resolving
+    /// the precedence CLI flag > workspace `.openplanet-lsp.toml` > user
+    /// global config > default(false) (GH #48 follow-up).
+    ///
+    /// The flag is tracked as `Option<bool>` so an explicit
+    /// `--warnings-as-errors=false` can override a config `true`; a bare
+    /// `--warnings-as-errors` / `-Werror` / `=true` is `Some(true)`.
+    pub fn resolve_warnings_as_errors(&self, prefs: &UserPrefs) -> bool {
+        self.warnings_as_errors_flag
+            .unwrap_or(prefs.warnings_as_errors)
+    }
+
+    /// [`Self::resolve_warnings_as_errors`] with the config ladder loaded
+    /// from the resolved plugin root (walks up from `options.path` for
+    /// info.toml, exactly like the rest of `run_check`). The user-global
+    /// layer reads `$HOME/.config/openplanet-lsp/config.toml`.
+    pub fn resolve_warnings_as_errors_with_config(&self) -> bool {
+        let workspace_root = project::find_workspace_root(&self.path);
+        let prefs = UserPrefs::load(workspace_root.as_deref());
+        self.resolve_warnings_as_errors(&prefs)
+    }
 }
 
 #[derive(Debug)]
@@ -168,7 +202,7 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 i += 1;
             }
             "--warnings-as-errors" | "-Werror" => {
-                options.warnings_as_errors = true;
+                options.warnings_as_errors_flag = Some(true);
                 i += 1;
             }
             "--define" | "-D" => {
@@ -187,7 +221,7 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
             }
             _ if arg.starts_with("--warnings-as-errors=") => {
                 let value = arg.trim_start_matches("--warnings-as-errors=");
-                options.warnings_as_errors = match value {
+                options.warnings_as_errors_flag = Some(match value {
                     "true" | "1" => true,
                     "false" | "0" => false,
                     other => {
@@ -195,7 +229,7 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                             "--warnings-as-errors accepts true or false, got `{other}`"
                         )))
                     }
-                };
+                });
                 i += 1;
             }
             _ if arg.starts_with("--define=") => {
@@ -676,6 +710,74 @@ mod tests {
 
         let opts = parse_check_args(&[".".into()]).unwrap();
         assert_eq!(opts.format, CheckFormat::Auto);
+    }
+
+    /// GH #48: the parse tracks the flag as Option<bool> so an explicit
+    /// `=false` is distinguishable from "flag absent" (config fallback).
+    #[test]
+    fn parse_check_args_warnings_as_errors_flag_tracking() {
+        // Absent → None (falls back to the config ladder).
+        let opts = parse_check_args(&[".".into()]).unwrap();
+        assert_eq!(opts.warnings_as_errors_flag, None);
+
+        // Bare flag and -Werror → Some(true).
+        let opts = parse_check_args(&["--warnings-as-errors".into(), ".".into()]).unwrap();
+        assert_eq!(opts.warnings_as_errors_flag, Some(true));
+        let opts = parse_check_args(&["-Werror".into(), ".".into()]).unwrap();
+        assert_eq!(opts.warnings_as_errors_flag, Some(true));
+
+        // Explicit values round-trip (false stays distinguishable from None).
+        let opts = parse_check_args(&["--warnings-as-errors=true".into(), ".".into()]).unwrap();
+        assert_eq!(opts.warnings_as_errors_flag, Some(true));
+        let opts = parse_check_args(&["--warnings-as-errors=false".into(), ".".into()]).unwrap();
+        assert_eq!(opts.warnings_as_errors_flag, Some(false));
+
+        // Last flag wins, matching the pre-Option behavior.
+        let opts = parse_check_args(&[
+            "--warnings-as-errors=true".into(),
+            "--warnings-as-errors=false".into(),
+            ".".into(),
+        ])
+        .unwrap();
+        assert_eq!(opts.warnings_as_errors_flag, Some(false));
+
+        // Invalid value is still a usage error.
+        assert!(parse_check_args(&["--warnings-as-errors=banana".into(), ".".into()]).is_err());
+    }
+
+    /// GH #48 follow-up: precedence contract —
+    /// CLI flag > workspace config > user config > default(false).
+    #[test]
+    fn resolve_warnings_as_errors_precedence() {
+        let prefs_true = crate::config::UserPrefs {
+            warnings_as_errors: true,
+            ..Default::default()
+        };
+        let prefs_false = crate::config::UserPrefs {
+            warnings_as_errors: false,
+            ..Default::default()
+        };
+
+        let opts = |flag: Option<&str>| -> CheckOptions {
+            match flag {
+                Some(f) => parse_check_args(&[f.to_string(), ".".into()]).unwrap(),
+                None => CheckOptions::default(),
+            }
+        };
+
+        // Default: no flag, no config → false.
+        assert!(!opts(None).resolve_warnings_as_errors(&prefs_false));
+        // Flag absent + config true → true (config wins by default).
+        assert!(opts(None).resolve_warnings_as_errors(&prefs_true));
+        // Flag true beats config false.
+        assert!(opts(Some("--warnings-as-errors")).resolve_warnings_as_errors(&prefs_false));
+        // Flag true beats config true (same result).
+        assert!(opts(Some("--warnings-as-errors")).resolve_warnings_as_errors(&prefs_true));
+        // Explicit =false beats config true — the reason the flag is an
+        // Option<bool>.
+        assert!(!opts(Some("--warnings-as-errors=false")).resolve_warnings_as_errors(&prefs_true));
+        // =false with config false stays false.
+        assert!(!opts(Some("--warnings-as-errors=false")).resolve_warnings_as_errors(&prefs_false));
     }
 
     fn trailer_report(diags: usize) -> CheckReport {

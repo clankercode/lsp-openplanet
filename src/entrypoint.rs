@@ -137,6 +137,7 @@ mod tests {
         fs::write(dir.join("info.toml"), "[meta]\nname=\"x\"\n").unwrap();
         let prefs = UserPrefs {
             default_mode: DefaultMode::Lsp,
+            warnings_as_errors: false,
         };
         assert_eq!(decide_bare_launch(true, &dir, &prefs), LaunchAction::Lsp);
         let _ = fs::remove_dir_all(dir);
