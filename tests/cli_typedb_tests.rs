@@ -10,7 +10,7 @@
 //! in CI.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn bin() -> Command {
@@ -326,7 +326,7 @@ fn tmp_plugin(tag: &str) -> PathBuf {
     root
 }
 
-fn check_args(root: &PathBuf, extra: &[&str]) -> Vec<String> {
+fn check_args(root: &Path, extra: &[&str]) -> Vec<String> {
     let mut args = vec![
         "check".to_string(),
         "--typedb-dir".to_string(),
@@ -431,7 +431,7 @@ fn check_without_typedb_omits_version_line_and_field() {
     assert_eq!(parsed["type_database_loaded"], false);
 }
 
-fn check_args_no_typedb(root: &PathBuf, extra: &[&str]) -> Vec<String> {
+fn check_args_no_typedb(root: &Path, extra: &[&str]) -> Vec<String> {
     let mut args = vec![
         "check".to_string(),
         "--no-typedb".to_string(),
@@ -664,7 +664,7 @@ fn typedb_diff_with_three_dirs_is_a_usage_error() {
 
 // === refresh (task 5) ===
 
-fn db_names(dir: &PathBuf) -> Vec<String> {
+fn db_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .map(|entries| {
             entries

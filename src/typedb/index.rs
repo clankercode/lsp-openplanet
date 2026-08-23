@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use super::core_format::{CoreClass, CoreDatabase};
@@ -369,12 +369,14 @@ impl TypeIndex {
         // differ between two loads of the *same* file. Sorting both levels
         // costs one 20-key and one per-module sort and makes `TypeIndex`
         // a function of the file's contents again.
-        let mut modules: Vec<_> = db.ns.iter().collect();
-        modules.sort_by(|(a, _), (b, _)| a.cmp(b));
-        for (ns_name, types) in modules {
-            let mut type_entries: Vec<_> = types.iter().collect();
-            type_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-            for (type_name, nadeo_type) in type_entries {
+        let mut module_names: Vec<&String> = db.ns.keys().collect();
+        module_names.sort();
+        for ns_name in module_names {
+            let types = &db.ns[ns_name];
+            let mut type_names: Vec<&String> = types.keys().collect();
+            type_names.sort();
+            for type_name in type_names {
+                let nadeo_type = &types[type_name];
                 let qname = format!("{}::{}", ns_name, type_name);
                 let mut methods = Vec::new();
                 let mut properties = Vec::new();
@@ -839,7 +841,7 @@ pub fn diff_indexes(old: &TypeIndex, new: &TypeIndex) -> DbDiff {
         DbSymbolKind::Function,
         &old.functions,
         &new.functions,
-        overload_facts,
+        |overloads: &Vec<FunctionInfo>| overload_facts(overloads),
         &mut diff,
     );
     diff.added.sort();
@@ -853,7 +855,7 @@ fn diff_entries<T>(
     kind: DbSymbolKind,
     old: &HashMap<String, T>,
     new: &HashMap<String, T>,
-    facts: fn(&T) -> std::collections::BTreeSet<String>,
+    facts: impl Fn(&T) -> BTreeSet<String>,
     diff: &mut DbDiff,
 ) {
     for (name, entry) in old {
@@ -886,10 +888,7 @@ fn diff_entries<T>(
 
 /// Rendered symmetric difference: `- fact` for old-only, `+ fact` for
 /// new-only. Empty when the two fact sets match.
-fn fact_delta(
-    old: &std::collections::BTreeSet<String>,
-    new: &std::collections::BTreeSet<String>,
-) -> Vec<String> {
+fn fact_delta(old: &BTreeSet<String>, new: &BTreeSet<String>) -> Vec<String> {
     let mut out: Vec<String> = old.difference(new).map(|f| format!("- {f}")).collect();
     out.extend(new.difference(old).map(|f| format!("+ {f}")));
     out
@@ -922,8 +921,8 @@ fn render_params(params: &[ParamInfo]) -> String {
         .join(", ")
 }
 
-fn class_facts(info: &TypeInfo) -> std::collections::BTreeSet<String> {
-    let mut facts = std::collections::BTreeSet::new();
+fn class_facts(info: &TypeInfo) -> BTreeSet<String> {
+    let mut facts = BTreeSet::new();
     if let Some(parent) = &info.parent {
         facts.insert(format!("inherits {parent}"));
     }
@@ -950,7 +949,7 @@ fn class_facts(info: &TypeInfo) -> std::collections::BTreeSet<String> {
     facts
 }
 
-fn enum_facts(info: &EnumInfo) -> std::collections::BTreeSet<String> {
+fn enum_facts(info: &EnumInfo) -> BTreeSet<String> {
     info.values
         .iter()
         .map(|(name, value)| format!("value {name} = {value}"))
@@ -959,7 +958,7 @@ fn enum_facts(info: &EnumInfo) -> std::collections::BTreeSet<String> {
 
 /// One fact per overload, so an added or dropped overload of an existing
 /// name reads as a change to that name rather than an add/remove.
-fn overload_facts(overloads: &Vec<FunctionInfo>) -> std::collections::BTreeSet<String> {
+fn overload_facts(overloads: &[FunctionInfo]) -> BTreeSet<String> {
     overloads
         .iter()
         .map(|func| {

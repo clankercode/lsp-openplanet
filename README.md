@@ -261,6 +261,75 @@ Useful options (see `--help` for the full list):
 | `--no-typedb` | Skip type DB (parse-only / limited checks) |
 | `--plugins-dir <DIR>` | Extra Openplanet plugins dir for dependency exports |
 
+Unless `--no-typedb` is passed, every run states which type database it used
+— see [`typedb`](#typedb--type-db-freshness) below.
+
+### `typedb` — type-DB freshness
+
+The checker judges your code against Openplanet's own type databases
+(`OpenplanetCore.json` + the game dump, e.g. `OpenplanetNext.json`). When the
+DB and the running game disagree, the LSP is *confidently wrong* rather than
+merely silent — so which DB loaded is worth being able to see.
+
+**You normally need to do nothing.** `openplanet-lsp` auto-detects your
+Openplanet install (`~/OpenplanetNext`, or the variant folder matching
+`game_target`) and reads its DBs directly. Openplanet refreshes those files
+on game launch, so your checks already track your own game build. Every
+`check` run now says which one it used:
+
+```
+type db: op=1.29.5 (next, Public, 1234ad9e)  game op=1.29.5  mp=2026-02-03 03:51:19
+```
+
+`--format json` carries the same stamps as a `typedb` object
+(`op`, `mp`, `game_op`) instead, and the language server logs the line at init.
+
+```bash
+openplanet-lsp typedb status                     # which DBs resolve, and from what build
+openplanet-lsp typedb status --from ~/OpenplanetTurbo
+openplanet-lsp typedb status --json
+
+# symbol-level parity: what changed between two DB directories
+# (NEW_DIR defaults to the auto-detected install)
+openplanet-lsp typedb diff tests/fixtures/typedb
+openplanet-lsp typedb diff OLD_DIR NEW_DIR --json
+
+# harvest both DBs out of a local install (DRY RUN by default)
+openplanet-lsp typedb refresh --into tests/fixtures/typedb
+openplanet-lsp typedb refresh --into tests/fixtures/typedb --yes
+```
+
+`diff` compares what the checker actually consumes — method and overload
+signatures (including `&out` flags and parameter defaults), property types
+and writability, inheritance, single-argument constructor conversions, and
+enum values. A doc-only DB refresh therefore reports zero drift.
+
+**Nothing in this command family touches the network.** There is no upstream
+DB download endpoint; DBs are only ever read from a local install. `refresh`
+writes nothing without `--yes`, requires an explicit `--into` (no implicit
+write path), only ever writes the two known filenames, and never deletes.
+
+#### Maintainer flow (repo fixture DBs)
+
+The repo ships fixture DBs under `tests/fixtures/typedb` for tests and
+`--typedb-dir`. To bring them up to a newer game build:
+
+```bash
+just typedb-refresh         # dry run: shows the symbol diff, writes nothing
+just typedb-refresh-apply   # writes the two files
+just test                   # includes the fixture shape guard
+```
+
+`just typedb-diff` is the parity check on its own, and `just typedb-guard`
+runs the anti-drift guard (also a named CI step): version stamps must look
+like versions, entry counts must clear floors, and both files must survive a
+full load. That catches the dangerous case — a well-formed but *empty* DB
+that parses, loads, and silently disables every type-aware diagnostic.
+
+Per-game-version DB selection (keeping several game builds' DBs side by side)
+is deliberately not implemented: `game_target` already selects the install
+folder, and everyone has exactly one install.
+
 ### `update` — self-update
 
 ```bash
