@@ -3022,10 +3022,11 @@ impl<'a> Checker<'a> {
     /// 2. Engine namespaces (`UI`, `Math`, …) belong to triggers (a)/(b):
     ///    a plugin may add helpers to `namespace UI` while still calling
     ///    the real API, which only the typedb can confirm.
-    /// 3. The pooled table must be the complete dependency closure — a
-    ///    workspace root was walked and every required dependency resolved
-    ///    ([`GlobalScope::workspace_closure_complete`]). A module we could
-    ///    not read may contribute the member.
+    /// 3. The pooled table must be the complete dependency closure — a real
+    ///    disk workspace root was walked, every declared dependency resolved,
+    ///    and no `source_paths` / `ignore_paths` filter was configured
+    ///    ([`GlobalScope::workspace_closure_complete`]). An unread or
+    ///    filtered-out module file may contribute the member.
     /// 4. `Ns` must be declared as a namespace (a class is not one —
     ///    AngelScript has no statics, so `MyClass::Thing()` stays silent).
     /// 5. Nothing of ANY kind may match under it — function, class,

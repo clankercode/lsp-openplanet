@@ -84,13 +84,14 @@ impl AnalysisSnapshot {
                 report_diagnostics: wf.report_diagnostics,
             });
         }
-        // GH #58: the pool is the plugin's complete module closure only
-        // when the loader walked a real root and every declared dependency
-        // resolved (optional and transitive export_dependencies included).
-        // Diagnostics that read the absence of a name as a game-compiler
-        // rejection gate on this — an in-memory pool, or the
-        // open-documents-only fallback the server builds when the disk load
-        // failed, never claims it.
+        // GH #58: the pool is the plugin's complete module closure only when
+        // the loader walked a real disk root, every declared dependency
+        // resolved (optional and transitive export_dependencies included),
+        // and no `source_paths` / `ignore_paths` filter omitted own-module
+        // sources. Diagnostics that read the absence of a name as a
+        // game-compiler rejection gate on this — an in-memory pool, a
+        // filtered source pool, or the open-documents-only fallback the
+        // server builds when the disk load failed, never claims it.
         if load.dependency_closure_complete {
             table.mark_dependency_closure_complete();
         }
