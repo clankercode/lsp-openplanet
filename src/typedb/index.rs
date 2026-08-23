@@ -615,6 +615,135 @@ impl TypeIndex {
     }
 }
 
+// === Fixture shape guard (GH #59) ===
+
+/// Floors the shipped Core DB must clear. Set well below the real figures
+/// (854 / 75 / 71 on Openplanet 1.29.5) so a genuine API shrink does not
+/// trip them, but far above anything a truncated or partial harvest yields.
+pub const MIN_CORE_FUNCTIONS: usize = 700;
+pub const MIN_CORE_CLASSES: usize = 70;
+pub const MIN_CORE_ENUMS: usize = 70;
+/// Floor for the Nadeo engine dump (2585 classes on 1.29.5).
+pub const MIN_GAME_CLASSES: usize = 2000;
+
+/// Does `op` start with a `major.minor.patch` version?
+///
+/// The Core stamp carries build metadata after a space
+/// (`"1.29.5 (next, Public, 1234ad9e)"`), so only the first whitespace-
+/// delimited token is checked. Deliberately not a version *ordering* —
+/// the stamps are compared for equality only (GH #59: no semver ordering).
+fn looks_like_version(op: &str) -> bool {
+    let head = op.split_whitespace().next().unwrap_or_default();
+    let parts: Vec<&str> = head.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Anti-drift guard for the type-DB files this repo ships (GH #59, goal G2).
+///
+/// Returns every problem found rather than the first, so one CI failure
+/// tells the maintainer everything that is wrong with a bad harvest. The
+/// checks are deliberately cheap and offline: version stamps, top-level
+/// entry floors, and a full [`TypeIndex::load`].
+///
+/// The dangerous failure this exists for is not a truncated file (which
+/// errors loudly) but a *well-formed empty* one: it parses, it loads, and
+/// it silently disables every type-aware diagnostic.
+pub fn check_typedb_shape(core_path: &Path, game_path: &Path) -> Result<(), Vec<String>> {
+    let mut problems = Vec::new();
+
+    let core = probe_for_guard(core_path, &mut problems);
+    let game = probe_for_guard(game_path, &mut problems);
+
+    if let Some(core) = &core {
+        check_op(core_path, &core.op, &mut problems);
+        let counts = &core.counts;
+        check_floor(
+            core_path,
+            "functions",
+            counts.functions,
+            MIN_CORE_FUNCTIONS,
+            &mut problems,
+        );
+        check_floor(
+            core_path,
+            "classes",
+            counts.classes,
+            MIN_CORE_CLASSES,
+            &mut problems,
+        );
+        check_floor(
+            core_path,
+            "enums",
+            counts.enums,
+            MIN_CORE_ENUMS,
+            &mut problems,
+        );
+    }
+    if let Some(game) = &game {
+        check_op(game_path, &game.op, &mut problems);
+        check_floor(
+            game_path,
+            "classes",
+            game.counts.classes,
+            MIN_GAME_CLASSES,
+            &mut problems,
+        );
+    }
+
+    // The strict loaders reject shapes `probe` tolerates, so load both for
+    // real — this is what the LSP itself will do.
+    if core.is_some() && game.is_some() {
+        if let Err(err) = TypeIndex::load(core_path, game_path) {
+            problems.push(format!("TypeIndex::load failed: {err}"));
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+fn probe_for_guard(path: &Path, problems: &mut Vec<String>) -> Option<TypeDbMeta> {
+    match TypeDbMeta::probe(path) {
+        Ok(meta) => Some(meta),
+        Err(err) => {
+            problems.push(err);
+            None
+        }
+    }
+}
+
+fn check_op(path: &Path, op: &Option<String>, problems: &mut Vec<String>) {
+    let label = file_label(path);
+    match op {
+        None => problems.push(format!("{label}: missing `op` version stamp")),
+        Some(op) if !looks_like_version(op) => problems.push(format!(
+            "{label}: `op` is not a major.minor.patch version: {op:?}"
+        )),
+        Some(_) => {}
+    }
+}
+
+fn check_floor(path: &Path, what: &str, actual: usize, floor: usize, problems: &mut Vec<String>) {
+    if actual < floor {
+        problems.push(format!(
+            "{}: only {actual} {what} (expected at least {floor}) — truncated or partial harvest?",
+            file_label(path)
+        ));
+    }
+}
+
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 // === Symbol-level DB diff (GH #59) ===
 
 /// Which DB entry a diff row is about.
@@ -1714,5 +1843,171 @@ mod diff_tests {
             ]
         );
         assert_eq!(names(&diff.removed), vec!["A::Gone"]);
+    }
+}
+
+#[cfg(test)]
+mod shape_guard_tests {
+    use super::*;
+
+    fn fixture_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb")
+    }
+
+    fn fixture_core() -> std::path::PathBuf {
+        fixture_dir().join("OpenplanetCore.json")
+    }
+
+    fn fixture_game() -> std::path::PathBuf {
+        fixture_dir().join("OpenplanetNext.json")
+    }
+
+    fn tmp_file(tag: &str, name: &str, contents: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "openplanet-lsp-typedb-shape-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// The anti-drift tripwire itself: the DBs this repo ships must always
+    /// pass. A failure here means a corrupt or truncated harvest landed.
+    #[test]
+    fn typedb_shape_guard_accepts_repo_fixtures() {
+        if let Err(problems) = check_typedb_shape(&fixture_core(), &fixture_game()) {
+            panic!(
+                "shipped fixture DBs failed the shape guard:\n  {}",
+                problems.join("\n  ")
+            );
+        }
+    }
+
+    #[test]
+    fn typedb_shape_guard_rejects_truncated_core() {
+        let core = tmp_file(
+            "trunc-core",
+            "OpenplanetCore.json",
+            r#"{"op":"1.29.5","functions":[{"name":"Begin""#,
+        );
+        let problems = check_typedb_shape(&core, &fixture_game()).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("OpenplanetCore.json")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn typedb_shape_guard_rejects_truncated_game_dump() {
+        let game = tmp_file(
+            "trunc-game",
+            "OpenplanetNext.json",
+            r#"{"op":"1.29.5","ns":{"MwFoundations":{"CMwNod""#,
+        );
+        let problems = check_typedb_shape(&fixture_core(), &game).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("OpenplanetNext.json")),
+            "{problems:?}"
+        );
+    }
+
+    /// A well-formed but empty DB is the dangerous case: it parses, loads,
+    /// and silently disables every type-aware diagnostic.
+    #[test]
+    fn typedb_shape_guard_rejects_empty_core() {
+        let core = tmp_file(
+            "empty-core",
+            "OpenplanetCore.json",
+            r#"{"op":"1.29.5","functions":[],"classes":[],"enums":[]}"#,
+        );
+        let problems = check_typedb_shape(&core, &fixture_game()).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("functions")),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("classes")),
+            "{problems:?}"
+        );
+        assert!(problems.iter().any(|p| p.contains("enums")), "{problems:?}");
+    }
+
+    #[test]
+    fn typedb_shape_guard_rejects_empty_game_dump() {
+        let game = tmp_file(
+            "empty-game",
+            "OpenplanetNext.json",
+            r#"{"op":"1.29.5","mp":"2026-02-03 03:51:19","ns":{}}"#,
+        );
+        let problems = check_typedb_shape(&fixture_core(), &game).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.contains("classes")),
+            "{problems:?}"
+        );
+    }
+
+    /// A partial harvest that keeps *some* entries is still a regression —
+    /// the thresholds are floors, not emptiness checks.
+    #[test]
+    fn typedb_shape_guard_rejects_partially_harvested_core() {
+        let core = tmp_file(
+            "partial-core",
+            "OpenplanetCore.json",
+            r#"{"op":"1.29.5",
+                "functions":[{"ns":"UI","name":"Begin"}],
+                "classes":[{"ns":"Net","name":"HttpRequest"}],
+                "enums":[{"ns":"UI","name":"Cond","values":{}}]}"#,
+        );
+        let problems = check_typedb_shape(&core, &fixture_game()).unwrap_err();
+        assert!(problems.len() >= 3, "{problems:?}");
+    }
+
+    #[test]
+    fn typedb_shape_guard_rejects_missing_op() {
+        let core = tmp_file(
+            "no-op",
+            "OpenplanetCore.json",
+            r#"{"functions":[],"classes":[],"enums":[]}"#,
+        );
+        let problems = check_typedb_shape(&core, &fixture_game()).unwrap_err();
+        assert!(problems.iter().any(|p| p.contains("op")), "{problems:?}");
+    }
+
+    /// `op` must look like a version, so a placeholder or a truncated stamp
+    /// does not pass as one.
+    #[test]
+    fn typedb_shape_guard_rejects_non_version_op() {
+        for bad in ["dev", "1.29", "v1.29.5", "", "next"] {
+            let core = tmp_file(
+                "bad-op",
+                "OpenplanetCore.json",
+                &format!(r#"{{"op":"{bad}","functions":[],"classes":[],"enums":[]}}"#),
+            );
+            let problems = check_typedb_shape(&core, &fixture_game()).unwrap_err();
+            assert!(
+                problems.iter().any(|p| p.contains("op")),
+                "op {bad:?} should be rejected: {problems:?}"
+            );
+        }
+    }
+
+    /// Both real stamps pass the version check, including Core's trailing
+    /// build metadata.
+    #[test]
+    fn typedb_shape_guard_accepts_real_op_stamp_shapes() {
+        for good in ["1.29.5", "1.29.5 (next, Public, 1234ad9e)", "2.0.10"] {
+            assert!(looks_like_version(good), "{good:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn typedb_shape_guard_rejects_missing_file() {
+        let missing = std::env::temp_dir().join("openplanet-lsp-no-such-db.json");
+        let problems = check_typedb_shape(&missing, &fixture_game()).unwrap_err();
+        assert!(!problems.is_empty(), "{problems:?}");
     }
 }

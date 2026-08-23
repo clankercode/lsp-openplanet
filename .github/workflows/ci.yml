@@ -17,6 +17,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --locked
+      # GH #59: the shipped type-DB fixtures are the checker's source of
+      # truth. This rides the run above but is named so a corrupt or
+      # truncated harvest shows up as its own failing check rather than one
+      # line inside the suite. Offline — no DB is ever fetched in CI.
+      - name: Type-DB fixture shape guard
+        run: cargo test --locked --lib typedb_shape_guard
       - name: Release build (smoke)
         run: cargo build --release --locked
 

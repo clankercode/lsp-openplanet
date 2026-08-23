@@ -49,6 +49,30 @@ check-showcase:
       --typedb-dir {{typedb}} \
       {{showcase}}
 
+# Show resolved type-DB paths + versions (auto-detect, or pass --from DIR)
+typedb-status:
+    cargo build
+    ./target/debug/{{bin}} typedb status
+
+# Parity diff: repo fixture DBs vs the auto-detected local install
+typedb-diff:
+    cargo build
+    ./target/debug/{{bin}} typedb diff {{typedb}}
+
+# Refresh repo fixture DBs from the local install — DRY RUN (shows the diff only)
+typedb-refresh:
+    cargo build
+    ./target/debug/{{bin}} typedb refresh --into {{typedb}}
+
+# Same, but actually write the files (review `just typedb-refresh` first)
+typedb-refresh-apply:
+    cargo build
+    ./target/debug/{{bin}} typedb refresh --into {{typedb}} --yes
+
+# Anti-drift guard for the shipped fixture DBs (also runs inside `just test`)
+typedb-guard:
+    cargo test --locked --lib typedb_shape_guard
+
 # Watch TUI on showcase fixture
 watch-showcase:
     cargo build --release
