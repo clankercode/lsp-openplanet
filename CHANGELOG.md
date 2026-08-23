@@ -13,6 +13,21 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Changed
+- **`.as` discovery honors `.gitignore` (GH #60)** — files excluded by
+  `.gitignore` rules at or below the plugin root (plus a root-local
+  `.git/info/exclude`) are no longer parsed or diagnosed. This matches
+  rust-analyzer / gopls / tsc: a file you believe is excluded should not
+  produce squiggles, and in real trees it drops second copies of a plugin's
+  own sources (`.worktrees/`, scratch probe dirs) that collided with the
+  real ones. Rules above the plugin root are never read, and a global
+  gitignore / `.ignore` file is not consulted, so nothing invisible to the
+  repo can shrink the checked set. `.git` directory contents are never
+  discovered on either path. Opt out with `honor_gitignore = false` in
+  `.openplanet-lsp.toml` (workspace wins over the user config) or
+  `check --no-gitignore` (wins over both) when gitignored files are still
+  compile-critical. `RUST_LOG=debug` logs how many files were excluded.
+
 ### Fixed
 - **Workspace function return types are real types, not `<error>`** —
   free-function symbol extraction left `return_type` empty, so hovering
