@@ -58,6 +58,16 @@ pub enum TypeDiagnosticKind {
     ConstViolation {
         detail: String,
     },
+    /// Game parity (2026-08-23, spike-live-add-kinematic-ao HatDump.as:60):
+    /// invoking a non-const method on a `const T &in` receiver fails the
+    /// game compile — `No matching signatures to 'T::M() const'`. Only
+    /// workspace-local classes have reliable const metadata (external
+    /// typedb methods don't carry a const flag), so the rule is scoped
+    /// there. Const-method calls and non-const receivers are legal.
+    NonConstMethodOnConstReceiver {
+        method: String,
+        object_type: String,
+    },
     /// Game sanity check: bare `string` params should be `const string &in`.
     StringByValueParam {
         param_name: String,
@@ -237,6 +247,12 @@ impl TypeDiagnostic {
             TypeDiagnosticKind::ConstViolation { detail } => {
                 format!("const violation: {}", detail)
             }
+            TypeDiagnosticKind::NonConstMethodOnConstReceiver { method, object_type } => format!(
+                // Match the game compiler's failure class ("No matching
+                // signatures to 'T::M() const'") while naming the fix.
+                "no matching signatures to '{}::{}() const' — add a trailing `const` to the method or take a non-const reference",
+                object_type, method
+            ),
             TypeDiagnosticKind::StringByValueParam { param_name } => {
                 // Match Openplanet 1.29.5 compiler wording exactly (RemoteBuild probe).
                 let base = if param_name.is_empty() {
@@ -456,6 +472,10 @@ pub struct Checker<'a> {
     /// invoked on a const receiver, the return type is wrapped in
     /// `Const(_)`; a const method leaves the return type untouched.
     file_const_methods: std::collections::HashSet<(String, String)>,
+    /// Per-class METHOD name sets for same-file classes (fields excluded).
+    /// `file_classes` mixes fields and methods; the const-receiver rule
+    /// (NonConstMethodOnConstReceiver) must only fire for methods.
+    file_class_methods: std::collections::HashMap<String, std::collections::HashSet<String>>,
     return_type_stack: Vec<TypeRepr>,
     /// Stack of `frames.len()` values at each function/lambda entry —
     /// marks the first frame owned by the innermost function so shadow
@@ -503,6 +523,7 @@ impl<'a> Checker<'a> {
             namespace_stack: Vec::new(),
             file_classes: std::collections::HashMap::new(),
             file_const_methods: std::collections::HashSet::new(),
+            file_class_methods: std::collections::HashMap::new(),
             return_type_stack: Vec::new(),
             function_frame_starts: Vec::new(),
             diagnostics: Vec::new(),
@@ -723,6 +744,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// True when `class_name` declares a METHOD named `method_name` in the
+    /// same file (fields don't count — `file_classes` mixes both, and a
+    /// field shadowing a method name must not trigger the const-receiver
+    /// diagnostic). Used by the NonConstMethodOnConstReceiver rule.
+    fn file_has_method(&self, class_name: &str, method_name: &str) -> bool {
+        self.file_class_methods
+            .get(class_name)
+            .is_some_and(|names| names.contains(method_name))
+    }
+
     fn index_file_classes(&mut self, items: &[Item], ns: Option<&str>) {
         for item in items {
             match item {
@@ -812,6 +843,12 @@ impl<'a> Checker<'a> {
                                     self.file_const_methods
                                         .insert((qual.clone(), method_name.clone()));
                                 }
+                                // Method-name index for the const-receiver
+                                // rule (fields never enter this set).
+                                self.file_class_methods
+                                    .entry(qual.clone())
+                                    .or_default()
+                                    .insert(method_name.clone());
                                 members.push((method_name, ret));
                             }
                             _ => {}
@@ -2648,6 +2685,25 @@ impl<'a> Checker<'a> {
                         if mname == &member_name {
                             let ret = t.clone();
                             if receiver_const && !method_is_const {
+                                // Game parity (HatDump.as:60): a non-const
+                                // method invoked on a const receiver fails
+                                // the game compile. `file_const_methods`
+                                // only records CONST methods, and fields
+                                // never reach this arm with a method name
+                                // collision — but distinguish methods from
+                                // fields explicitly so a field shadowing a
+                                // method name can't mis-fire: check the
+                                // member is actually a METHOD of this class
+                                // before diagnosing.
+                                if self.file_has_method(&type_name, &member_name) {
+                                    self.diagnostics.push(TypeDiagnostic {
+                                        span: callee.span,
+                                        kind: TypeDiagnosticKind::NonConstMethodOnConstReceiver {
+                                            method: member_name.clone(),
+                                            object_type: type_name.clone(),
+                                        },
+                                    });
+                                }
                                 return Self::apply_receiver_const(ret, true);
                             }
                             return ret;
@@ -7825,6 +7881,175 @@ class C {
                 .iter()
                 .any(|d| matches!(&d.kind, TypeDiagnosticKind::MissingReturn { .. })),
             "got {:?}",
+            diags
+        );
+    }
+
+    // === Const-receiver non-const-method calls (game parity, 2026-08-23) ===
+    //
+    // Game evidence (spike-live-add-kinematic-ao, HatDump.as:60):
+    //   class SceneHandle { bool PayloadValid() { return true; } }
+    //   Json::Value HandleJson(const SceneHandle &in h) { h.PayloadValid(); }
+    //   → ERR : No matching signatures to 'SceneHandle::PayloadValid() const'
+    //
+    // Variant matrix per AGENTS.md: fire on const-ref receiver + non-const
+    // method; stay silent for every other receiver/method combination.
+
+    /// RED-1: the reported case — non-const method on `const T &in`.
+    #[test]
+    fn nonconst_method_on_const_ref_param_fires() {
+        let diags = check(
+            "class C { bool M() { return true; } } \
+             void f(const C &in h) { h.M(); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 diagnostic, got {:?}", diags);
+    }
+
+    /// Const method on const receiver: legal, must stay silent.
+    #[test]
+    fn const_method_on_const_ref_param_ok() {
+        let diags = check(
+            "class C { bool M() const { return true; } } \
+             void f(const C &in h) { h.M(); }",
+        );
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    /// Non-const method on a plain (non-const) reference: legal.
+    #[test]
+    fn nonconst_method_on_plain_ref_param_ok() {
+        let diags = check(
+            "class C { bool M() { return true; } } \
+             void f(C &in h) { h.M(); }",
+        );
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    /// Non-const method on a value parameter `T h`: legal (caller copy).
+    #[test]
+    fn nonconst_method_on_value_param_ok() {
+        let diags = check(
+            "class C { bool M() { return true; } } \
+             void f(C h) { h.M(); }",
+        );
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    /// `T@` handle receiver (non-const pointee): rebindable handle, the
+    /// object itself is not const — legal.
+    #[test]
+    fn nonconst_method_on_handle_param_ok() {
+        let diags = check(
+            "class C { bool M() { return true; } } \
+             void f(C@ h) { h.M(); }",
+        );
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    /// `const T@ &in` — handle to a CONST pointee: the object contents
+    /// are const, so a non-const method call must fire (same rule as
+    /// `const T &in`).
+    #[test]
+    fn nonconst_method_on_const_handle_param_fires() {
+        let diags = check(
+            "class C { bool M() { return true; } } \
+             void f(const C@ &in h) { h.M(); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 diagnostic, got {:?}", diags);
+    }
+
+    /// Local `const T` local variable receiver: contents are const.
+    #[test]
+    fn nonconst_method_on_const_local_fires() {
+        let diags = check(
+            "class C { bool M() { return true; } } \
+             void f() { const C c = C(); c.M(); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 diagnostic, got {:?}", diags);
+    }
+
+    /// Field access on a const receiver is NOT a method call — the
+    /// existing ConstViolation machinery handles writes; reads are legal.
+    #[test]
+    fn field_read_on_const_receiver_ok() {
+        let diags = check(
+            "class C { int x; } \
+             void f(const C &in h) { int y = h.x; }",
+        );
+        assert!(diags.is_empty(), "expected no diagnostics, got {:?}", diags);
+    }
+
+    /// Inherited non-const method through a const receiver of the PARENT
+    /// type: parent class is in the same file — the rule must fire there
+    /// too (same-file parent, resolved qualname).
+    #[test]
+    fn inherited_nonconst_method_const_receiver_fires() {
+        let diags = check(
+            "class B { bool M() { return true; } } \
+             class D : B {} \
+             void f(const B &in h) { h.M(); }",
+        );
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .collect();
+        assert_eq!(bad.len(), 1, "expected 1 diagnostic, got {:?}", diags);
+    }
+
+    /// Cross-FILE workspace method (pooled table only, no same-file
+    /// metadata): conservatively silent — we can't see the const-qualifier
+    /// from here without full cross-file method metadata.
+    #[test]
+    fn cross_file_method_const_receiver_silent() {
+        // Method lives in another file: single-file `check` can't see it.
+        // The class is unknown here, so the receiver type resolves to
+        // Error and the rule must not fire (only UnknownType may appear,
+        // which is pre-existing behavior for unknown types in params).
+        let diags = check("void f(const C &in h) { h.M(); }");
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "expected no NonConstMethodOnConstReceiver, got {:?}",
             diags
         );
     }

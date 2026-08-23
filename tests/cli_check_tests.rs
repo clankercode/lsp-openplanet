@@ -1193,3 +1193,19 @@ fn check_command_issue_repro_37f_sign_change_warns() {
     );
     assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
 }
+
+/// Game-verified 2026-08-23 (spike-live-add-kinematic-ao, HatDump.as:60):
+/// a non-const method invoked on a `const T &in` receiver fails the game
+/// compile with "No matching signatures to 'SceneHandle::PayloadValid()
+/// const'". The fixture carries the exact reported shape plus the
+/// const-method and handle-receiver silent variants; the const-param call
+/// site must error (exit 1) while the rest stays quiet.
+#[test]
+fn check_command_issue_repro_57_const_param_nonconst_method() {
+    let (ok, stdout, stderr) = run_issue_repro("57-const-param-nonconst-method");
+    assert!(
+        stdout.contains("no matching signatures to 'SceneHandle::PayloadValid() const'"),
+        "expected const-receiver error in stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(!ok, "error-severity fixture must exit 1; stdout={stdout:?}");
+}
