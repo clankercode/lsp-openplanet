@@ -25,6 +25,12 @@ pub struct LspConfig {
     /// Blocklist of root-relative dirs to skip (from `.openplanet-lsp.toml`
     /// `ignore_paths`). Only consulted when `source_paths` is `None`.
     pub ignore_paths: Option<Vec<PathBuf>>,
+    /// GH #60: skip `.as` files excluded by `.gitignore` rules at or below
+    /// the plugin root during discovery (`honor_gitignore`). Tri-state so a
+    /// workspace `.openplanet-lsp.toml` beats the user global; `None` =
+    /// unset → the default (enabled). Read via
+    /// [`LspConfig::honor_gitignore_enabled`].
+    pub honor_gitignore: Option<bool>,
     /// Explicit plugin-root override (initializationOptions `plugin_roots`,
     /// a non-empty string array). When non-empty, replaces server-side root
     /// discovery entirely (manual override for unusual trees — t2). Init
@@ -82,6 +88,7 @@ impl Default for LspConfig {
             defines_overridden: false,
             source_paths: None,
             ignore_paths: None,
+            honor_gitignore: None,
             plugin_roots: Vec::new(),
             extra_plugins_dirs: Vec::new(),
             shortcut_namespaces: None,
@@ -111,6 +118,10 @@ struct ConfigFile {
     /// (e.g. `["OtherPacks", "vendor"]`). Only used when `source_paths` is
     /// absent. Absent (and no `source_paths`) → check every `.as` under root.
     ignore_paths: Option<Vec<String>>,
+    /// GH #60: honor `.gitignore` during `.as` discovery. Default `true`
+    /// (absent = enabled). Workspace `.openplanet-lsp.toml` wins over the
+    /// user config; CLI `--no-gitignore` wins over both.
+    honor_gitignore: Option<bool>,
     /// Completion-shortcut namespaces (e.g. `["UX", "MathX", "Net"]`).
     /// Replaces the default `["UX", "MathX"]` when present.
     shortcut_namespaces: Option<Vec<String>>,
@@ -332,6 +343,7 @@ impl LspConfig {
             defines_overridden: false,
             source_paths: None,
             ignore_paths: None,
+            honor_gitignore: None,
             plugin_roots: Vec::new(),
             extra_plugins_dirs: Vec::new(),
             shortcut_namespaces: None,
@@ -523,6 +535,12 @@ impl LspConfig {
     }
 
     fn load_user_config_file(&mut self) {
+        // GH #60: the user global is applied AFTER the workspace layers in
+        // this ladder, so a repo-local `honor_gitignore` would otherwise lose
+        // to it. Which files get checked is a per-repo decision (the same rule
+        // `warnings_as_errors` follows), so a workspace-set value is restored
+        // afterwards. The rest of the keys keep their existing precedence.
+        let workspace_honor_gitignore = self.honor_gitignore;
         if let Ok(home) = std::env::var("HOME") {
             let path = PathBuf::from(home).join(".config/openplanet-lsp/config.toml");
             if let Ok(contents) = std::fs::read_to_string(&path) {
@@ -531,6 +549,16 @@ impl LspConfig {
                 }
             }
         }
+        if workspace_honor_gitignore.is_some() {
+            self.honor_gitignore = workspace_honor_gitignore;
+        }
+    }
+
+    /// Effective `honor_gitignore` (GH #60): unset means enabled. The CLI
+    /// `--no-gitignore` flag overrides this at the call site.
+    pub fn honor_gitignore_enabled(&self) -> bool {
+        self.honor_gitignore
+            .unwrap_or(crate::workspace::project::DEFAULT_HONOR_GITIGNORE)
     }
 
     fn apply_config_file(&mut self, cfg: ConfigFile) {
@@ -552,6 +580,9 @@ impl LspConfig {
         }
         if let Some(ignore_paths) = cfg.ignore_paths {
             self.ignore_paths = Some(ignore_paths.into_iter().map(PathBuf::from).collect());
+        }
+        if let Some(honor) = cfg.honor_gitignore {
+            self.honor_gitignore = Some(honor);
         }
         if let Some(namespaces) = cfg.shortcut_namespaces {
             self.shortcut_namespaces = Some(namespaces);
