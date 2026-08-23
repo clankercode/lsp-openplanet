@@ -50,6 +50,13 @@ pub struct AnalysisSnapshot {
     /// public API — exempt from unused-declaration warnings. Empty for
     /// in-memory snapshots (no manifest to read).
     export_paths: std::collections::HashSet<PathBuf>,
+    /// Strict `[script]` EXPORTS only (no shared_exports). Files here
+    /// compile into CONSUMERS only — their declarations do not resolve
+    /// in the defining plugin's own module (game parity 2026-08-23).
+    strict_export_paths: std::collections::HashSet<PathBuf>,
+    /// Cached own-module view (see `own_module_symbols`). Built eagerly
+    /// in `from_load` when strict exports exist.
+    own_module_symbols: Option<SymbolTable>,
 }
 
 impl AnalysisSnapshot {
@@ -70,11 +77,34 @@ impl AnalysisSnapshot {
                 report_diagnostics: wf.report_diagnostics,
             });
         }
+        // Own-module view for diagnostics: identical pool except strict
+        // export files hidden from name resolution (game parity
+        // 2026-08-23 — export decls are consumer-only).
+        let strict_ids: HashSet<usize> = files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                let canonical = f.path.canonicalize().unwrap_or_else(|_| f.path.clone());
+                load.strict_export_paths.contains(&canonical)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let own_module_symbols = if strict_ids.is_empty() {
+            None
+        } else {
+            let mut own = table.clone();
+            for fid in strict_ids {
+                own.hide_file(fid);
+            }
+            Some(own)
+        };
         Self {
             files,
             symbols: table,
             missing_required_dependencies: load.missing_required_dependencies.clone(),
             export_paths: load.export_paths.clone(),
+            strict_export_paths: load.strict_export_paths.clone(),
+            own_module_symbols,
         }
     }
 
@@ -94,6 +124,7 @@ impl AnalysisSnapshot {
                 .collect(),
             missing_required_dependencies: Vec::new(),
             export_paths: HashSet::new(),
+            strict_export_paths: HashSet::new(),
         };
         Self::from_load(&load, config)
     }
@@ -113,6 +144,7 @@ impl AnalysisSnapshot {
                 .collect(),
             missing_required_dependencies: Vec::new(),
             export_paths: Default::default(),
+            strict_export_paths: Default::default(),
         };
         Self::from_load(&load, config)
     }
@@ -120,6 +152,18 @@ impl AnalysisSnapshot {
     /// Pooled workspace symbols (file_id == index into `files()`).
     pub fn symbols(&self) -> &SymbolTable {
         &self.symbols
+    }
+
+    /// The defining plugin's OWN-module symbol view: pooled symbols with
+    /// strict `[script]` exports files hidden. Game model: a strict
+    /// export file is compiled into consumers only, so its declarations
+    /// do not resolve in the defining plugin's own module (bodies there
+    /// = game "No matching symbol"). Shared exports stay visible (the
+    /// game compiles them into the defining plugin too). `None` when
+    /// nothing is strict-exported (identical view — callers fall back
+    /// to `symbols()`). Built eagerly in `from_load`.
+    pub fn own_module_symbols(&self) -> Option<&SymbolTable> {
+        self.own_module_symbols.as_ref()
     }
 
     /// Files in the snapshot, in file_id order.
@@ -159,6 +203,28 @@ impl AnalysisSnapshot {
     /// field docs). Populated by `from_load` from the workspace loader.
     pub fn export_paths(&self) -> &std::collections::HashSet<PathBuf> {
         &self.export_paths
+    }
+
+    /// Strict own-manifest EXPORTS paths (no shared_exports) — decls in
+    /// these files are consumer-only and hidden from the defining
+    /// plugin's own module view (game parity 2026-08-23).
+    pub fn strict_export_paths(&self) -> &std::collections::HashSet<PathBuf> {
+        &self.strict_export_paths
+    }
+
+    /// File ids (index into `files()`) whose path is a STRICT export
+    /// file — see `strict_export_paths`. Empty when the manifest lists
+    /// none (in-memory snapshots).
+    pub fn strict_export_file_ids(&self) -> Vec<usize> {
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                let canonical = f.path.canonicalize().unwrap_or_else(|_| f.path.clone());
+                self.strict_export_paths.contains(&canonical)
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// file_id (index into `files()`) of the file with this URI, when

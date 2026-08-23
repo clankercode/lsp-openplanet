@@ -33,6 +33,13 @@ pub struct PluginWorkspaceLoad {
     /// info.toml `[script]` `exports` + `shared_exports`; decls in these
     /// files are public API and exempt from unused-declaration warnings.
     pub export_paths: HashSet<PathBuf>,
+    /// Canonicalized absolute paths of files listed in `[script]` EXPORTS
+    /// ONLY (not `shared_exports`). Game model: a strict export file is
+    /// compiled into CONSUMERS only — its declarations do not exist in
+    /// the defining plugin's own module (bodies there = game compile
+    /// error "No matching symbol"). `shared_exports` compile into the
+    /// defining plugin too, so they stay out of this set.
+    pub strict_export_paths: HashSet<PathBuf>,
 }
 
 /// Options controlling where dependency plugins are found.
@@ -118,25 +125,36 @@ fn source_file_included(root: &Path, path: &Path, search: &DependencySearch) -> 
 /// files search paths (`src/` etc.). A listed file missing everywhere
 /// still contributes its root-joined path (best-effort) so future file
 /// creation doesn't silently lose the exemption.
-fn own_export_paths(root: &Path, search: &DependencySearch) -> HashSet<PathBuf> {
+fn own_export_paths(
+    root: &Path,
+    search: &DependencySearch,
+) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
     let mut paths = HashSet::new();
+    let mut strict = HashSet::new();
     let manifest_path = root.join("info.toml");
     if !manifest_path.exists() {
-        return paths;
+        return (paths, strict);
     }
     let Ok(manifest) = Manifest::load(&manifest_path) else {
-        return paths;
+        return (paths, strict);
     };
     let Some(script) = &manifest.script else {
-        return paths;
+        return (paths, strict);
     };
-    for rel in script.exports.iter().chain(script.shared_exports.iter()) {
+    let insert = |rel: &String, set: &mut HashSet<PathBuf>| {
         let resolved = resolve_plugin_file(root, rel, &search.plugin_files_search_paths)
             .unwrap_or_else(|| root.join(rel));
         let canonical = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
-        paths.insert(canonical);
+        set.insert(canonical);
+    };
+    for rel in &script.exports {
+        insert(rel, &mut paths);
+        insert(rel, &mut strict);
     }
-    paths
+    for rel in &script.shared_exports {
+        insert(rel, &mut paths);
+    }
+    (paths, strict)
 }
 
 /// Load plugin `.as` sources under `root` and dependency export files.
@@ -149,6 +167,7 @@ pub fn load_plugin_workspace(
         .map_err(|e| format!("failed to resolve {}: {e}", root.display()))?;
 
     let export_paths = own_export_paths(&root, search);
+    let (export_paths, strict_export_paths) = (export_paths.0, export_paths.1);
 
     let mut files = Vec::new();
     for path in project::discover_source_files(&root) {
@@ -186,6 +205,7 @@ pub fn load_plugin_workspace(
         files,
         missing_required_dependencies: dep.missing_required,
         export_paths,
+        strict_export_paths,
     })
 }
 
@@ -225,6 +245,7 @@ pub fn merge_open_documents(
         files,
         missing_required_dependencies: base.missing_required_dependencies.clone(),
         export_paths: base.export_paths.clone(),
+        strict_export_paths: base.strict_export_paths.clone(),
     }
 }
 

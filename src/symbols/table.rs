@@ -40,14 +40,14 @@ fn extract_params(source: &str, params: &[ast::Param]) -> (Vec<(String, String)>
 }
 
 /// Per-file symbol contributions
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FileSymbols {
     pub file_id: usize,
     pub symbols: Vec<Symbol>,
 }
 
 /// Workspace-wide symbol table
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SymbolTable {
     /// file_id → file symbols
     files: HashMap<usize, FileSymbols>,
@@ -59,6 +59,11 @@ pub struct SymbolTable {
     /// every `::`-prefix → symbols registered under it. Backs
     /// `lookup_members` (GH #41).
     member_index: HashMap<String, Vec<(usize, usize)>>,
+    /// File ids hidden from lookups (strict own-`exports` files — decls
+    /// there are consumer-only; the defining plugin's own module view
+    /// hides them, game parity 2026-08-23). Mutation before pooling is
+    /// complete; empty = no filtering.
+    hidden_files: std::collections::HashSet<usize>,
     next_file_id: usize,
 }
 
@@ -134,6 +139,7 @@ impl SymbolTable {
             .map(|entries| {
                 entries
                     .iter()
+                    .filter(|(fid, _)| !self.hidden_files.contains(fid))
                     .filter_map(|(file_id, idx)| self.files.get(file_id)?.symbols.get(*idx))
                     .collect()
             })
@@ -141,7 +147,10 @@ impl SymbolTable {
     }
 
     pub fn all_symbols(&self) -> impl Iterator<Item = &Symbol> {
-        self.files.values().flat_map(|f| f.symbols.iter())
+        self.files
+            .values()
+            .filter(|f| !self.hidden_files.contains(&f.file_id))
+            .flat_map(|f| f.symbols.iter())
     }
 
     /// Symbols declared in one file, by file id (unused-decl analysis walks
@@ -162,6 +171,7 @@ impl SymbolTable {
         let entries = self.tail_index.get(tail).unwrap_or(&empty);
         entries
             .iter()
+            .filter(|(fid, _)| !self.hidden_files.contains(fid))
             .filter_map(|(file_id, idx)| self.files.get(file_id)?.symbols.get(*idx))
             .collect()
     }
@@ -174,8 +184,29 @@ impl SymbolTable {
         let entries = self.member_index.get(owner).unwrap_or(&empty);
         entries
             .iter()
+            .filter(|(fid, _)| !self.hidden_files.contains(fid))
             .filter_map(|(file_id, idx)| self.files.get(file_id)?.symbols.get(*idx))
             .collect()
+    }
+
+    /// Hide a file's symbols from lookups (strict own-`exports` files —
+    /// consumer-only decls, game parity 2026-08-23). `file_symbols` and
+    /// other by-id accessors stay unfiltered so unused-decl analysis and
+    /// hover still see them; only name-resolution lookups are affected.
+    pub fn hide_file(&mut self, file_id: usize) {
+        self.hidden_files.insert(file_id);
+    }
+
+    /// Reverse of [`Self::hide_file`] — a file always sees its own
+    /// declarations (an export file's `import … from "Mod";` decls
+    /// resolve within itself).
+    pub fn unhide_file(&mut self, file_id: usize) {
+        self.hidden_files.remove(&file_id);
+    }
+
+    /// True when `file_id` is currently hidden from lookups.
+    pub fn is_file_hidden(&self, file_id: usize) -> bool {
+        self.hidden_files.contains(&file_id)
     }
 
     /// Resolve a source-level reference by the same ladder the checker

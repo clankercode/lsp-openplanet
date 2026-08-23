@@ -173,6 +173,7 @@ impl Backend {
                         files: open_into_files(open),
                         missing_required_dependencies: Vec::new(),
                         export_paths: HashSet::new(),
+                        strict_export_paths: HashSet::new(),
                     }
                 }
             };
@@ -288,6 +289,7 @@ impl Backend {
                     files: open_into_files(open),
                     missing_required_dependencies: Vec::new(),
                     export_paths: HashSet::new(),
+                    strict_export_paths: HashSet::new(),
                 }
             }
         };
@@ -370,6 +372,7 @@ impl Backend {
                             files: open_into_files(open),
                             missing_required_dependencies: Vec::new(),
                             export_paths: HashSet::new(),
+                            strict_export_paths: HashSet::new(),
                         }
                     }
                 }
@@ -380,6 +383,7 @@ impl Backend {
                 files: open_into_files(open),
                 missing_required_dependencies: Vec::new(),
                 export_paths: HashSet::new(),
+                strict_export_paths: HashSet::new(),
             },
         };
 
@@ -456,13 +460,27 @@ impl Backend {
         root: &std::path::Path,
     ) {
         let type_index = self.type_index.read().await;
+        // Own-module symbol view: strict export files' decls are
+        // consumer-only (game parity 2026-08-23) — hide them from name
+        // resolution unless we're diagnosing the export file itself.
+        let own_view;
+        let symbols_for_check = match (snapshot.own_module_symbols(), snapshot.file_id_of(uri)) {
+            (Some(own), Some(fid)) if own.is_file_hidden(fid) => {
+                let mut unhidden = own.clone();
+                unhidden.unhide_file(fid);
+                own_view = unhidden;
+                &own_view
+            }
+            (Some(own), _) => own,
+            (None, _) => snapshot.symbols(),
+        };
         let mut diags = match snapshot.analysis_of(uri) {
             Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
                 uri,
                 analysis,
                 config,
                 type_index.as_deref(),
-                snapshot.symbols(),
+                symbols_for_check,
             ),
             None => {
                 let analysis_owned =
