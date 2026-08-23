@@ -1,0 +1,75 @@
+---
+complexity: high
+created_at: "2026-08-23T15:04:50Z"
+depends_on: []
+estimate_hours: 5
+id: B013
+priority: high
+status: pending
+tags:
+    - gh-58
+    - typecheck
+title: 'Unknown namespaced symbols in user namespaces stay silent (GH #58)'
+updated_at: "2026-08-23T15:04:50Z"
+---
+GH issue: https://github.com/clankercode/lsp-openplanet/issues/58 (gh-58)
+
+Verified still open 2026-08-24 @ 728c30d. Probe `/tmp/probe58`:
+`namespace TournamentStation { void Known() {} }` + a call to
+`TournamentStation::SendEvent("split", "{}")` → 0 errors (only an unrelated
+unused warning). The game reports `No matching symbol 'TournamentStation::SendEvent'`.
+Today's `NoMatchingSymbol` (src/typecheck/checker.rs:149) fires only for typedb-known
+namespaces (trigger a) and known removed-API namespaces (trigger b).
+
+## DECISIONS (do not re-litigate)
+
+1. **Implement both proposal triggers**, as new high-confidence cases beside the
+   existing two:
+   - (c) `Ns` is a **known module name** in the workspace dependency closure (own
+     module or a resolved dep's module) and `Ns::Fn` is absent from that module's
+     exported/importable surface → diagnose.
+   - (d) `Ns` is a **namespace declared inside the workspace** (pooled symbol
+     table holds `Ns::…` entries) and `Fn` is absent under it → diagnose.
+2. **Do NOT gate (d) on near-name candidates existing.** The issue's own repro
+   (`SendEvent` vs a namespace containing only `Known`) has no near name; gating
+   on it would leave the motivating case silent. Near-name candidates only
+   populate the `hint`, exactly like the existing `UI::GetIO` rule.
+3. **Authority guard (the FP fence)**: stay silent whenever the namespace's
+   symbol set is not authoritative —
+   - the snapshot reports a **missing/unresolved required dependency** (a dep we
+     could not read may declare `Ns::Fn`; AngelScript namespaces are open and
+     additive across modules), or
+   - `Ns` also exists in the typedb (that path is already covered by trigger a),
+     or
+   - `Ns` is a nested/partial match only (e.g. `A::B::Fn` where only `A::` is
+     known) — first release handles single-segment namespaces; deeper nesting
+     stays silent.
+4. **All symbol kinds count as resolution**, not just functions: a class, enum,
+   enum value, typedef, funcdef, or global variable named `Fn` under `Ns` makes
+   `Ns::Fn(...)` resolvable (value-type constructor / enum use). Only diagnose
+   when nothing of any kind matches.
+5. **Severity/wording**: error, reusing `TypeDiagnosticKind::NoMatchingSymbol`
+   with game wording `No matching symbol 'Ns::Fn'`; `hint` = nearest candidate
+   under that namespace when one is within edit distance of the existing
+   near-name helper.
+6. **Out of scope**: exports-file body-vs-`import`-decl semantics (separate case
+   in todo-cover-cases-next.txt); unqualified globals (already covered by
+   `undefined identifier`).
+
+## Test plan (TDD, red first)
+Variants: unknown fn in own-plugin namespace (the repro) → error; existing fn in
+same ns → clean; class/enum/typedef/global under the ns → clean; namespace
+declared in a sibling file of the same module → clean when the fn exists, error
+when it does not; namespace declared only in a resolved dependency's exports →
+error on unknown member; **missing required dependency present → silent**
+(authority guard); unknown ns entirely absent from workspace and typedb → silent
+(today's behavior, GH #28); typedb namespace (`UI::Nope`) → still the existing
+trigger-a error, not doubled; nested `A::B::Fn` → silent; near-name candidate
+produces a hint.
+
+## Lane
+Lane B (parallel with A/C/D). Overlaps `src/typecheck/checker.rs` with gh-55 but
+in a disjoint region (namespaced-call resolution ~L2930-3000 vs locals/usage
+recording ~L520-1000); rebase onto master before the final review gate. Files:
+src/typecheck/checker.rs, src/analysis_snapshot.rs / src/workspace/load.rs
+(module surface query), tests/.

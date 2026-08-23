@@ -11,3 +11,4 @@ bugs:
     - file: B010-i2-i3-deepen-call-site-checkin.todo
     - file: B011-unused-warnings-locals-and-fun.todo
     - file: B012-unused-warnings-configurable-c.todo
+    - file: B013-unknown-namespaced-symbols-in.todo
