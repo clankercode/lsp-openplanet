@@ -463,24 +463,15 @@ impl Backend {
         // Own-module symbol view: strict export files' decls are
         // consumer-only (game parity 2026-08-23) — hide them from name
         // resolution unless we're diagnosing the export file itself.
-        let own_view;
-        let symbols_for_check = match (snapshot.own_module_symbols(), snapshot.file_id_of(uri)) {
-            (Some(own), Some(fid)) if own.is_file_hidden(fid) => {
-                let mut unhidden = own.clone();
-                unhidden.unhide_file(fid);
-                own_view = unhidden;
-                &own_view
-            }
-            (Some(own), _) => own,
-            (None, _) => snapshot.symbols(),
-        };
+        let symbols_for_check =
+            snapshot.table_for_own_file(crate::analysis_snapshot::FileRef::Uri(uri));
         let mut diags = match snapshot.analysis_of(uri) {
             Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
                 uri,
                 analysis,
                 config,
                 type_index.as_deref(),
-                symbols_for_check,
+                &symbols_for_check,
             ),
             None => {
                 let analysis_owned =

@@ -40,6 +40,13 @@ pub struct SnapshotFile {
     pub report_diagnostics: bool,
 }
 
+/// Address a snapshot file by path or by URI — input to
+/// [`AnalysisSnapshot::table_for_own_file`].
+pub enum FileRef<'a> {
+    Path(&'a std::path::Path),
+    Uri(&'a Url),
+}
+
 /// The workspace-level analysis view (see module docs).
 pub struct AnalysisSnapshot {
     files: Vec<SnapshotFile>,
@@ -212,19 +219,33 @@ impl AnalysisSnapshot {
         &self.strict_export_paths
     }
 
-    /// File ids (index into `files()`) whose path is a STRICT export
-    /// file — see `strict_export_paths`. Empty when the manifest lists
-    /// none (in-memory snapshots).
-    pub fn strict_export_file_ids(&self) -> Vec<usize> {
-        self.files
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| {
-                let canonical = f.path.canonicalize().unwrap_or_else(|_| f.path.clone());
-                self.strict_export_paths.contains(&canonical)
-            })
-            .map(|(i, _)| i)
-            .collect()
+    /// The symbol table to use when CHECKING one of this plugin's own
+    /// files: the own-module view (strict export decls hidden) unless
+    /// `path` is itself a strict export file — a file always sees its
+    /// own declarations, so an un-hidden copy is built in that case.
+    /// Falls back to the full pooled table when nothing is
+    /// strict-exported. Shared by the CLI check loop and the server's
+    /// diagnostics publish path; owns the un-hidden copy when one is
+    /// needed so callers don't duplicate the dance.
+    pub fn table_for_own_file(
+        &self,
+        path_or_uri: FileRef<'_>,
+    ) -> std::borrow::Cow<'_, SymbolTable> {
+        let Some(own) = self.own_module_symbols.as_ref() else {
+            return std::borrow::Cow::Borrowed(&self.symbols);
+        };
+        let fid = match path_or_uri {
+            FileRef::Path(p) => self.file_id_of_path(p),
+            FileRef::Uri(u) => self.file_id_of(u),
+        };
+        match fid {
+            Some(fid) if own.is_file_hidden(fid) => {
+                let mut unhidden = own.clone();
+                unhidden.unhide_file(fid);
+                std::borrow::Cow::Owned(unhidden)
+            }
+            _ => std::borrow::Cow::Borrowed(own),
+        }
     }
 
     /// file_id (index into `files()`) of the file with this URI, when
