@@ -125,6 +125,27 @@ impl WorkspaceUsage {
             used.extend(checker.take_used_names());
             local_decls.push(checker.take_local_decls());
         }
+        // GH #61: own-module files the checked set OMITTED — gitignored
+        // (GH #60), or filtered out by `source_paths` / `ignore_paths`.
+        // The game compiles them, so the visible file set is not the whole
+        // compile set and a declaration whose only callers live there was
+        // being reported "never used".
+        //
+        // They contribute usage and nothing else:
+        //
+        // * no reported declarations — the join walks `snapshot.files()`
+        //   and `snapshot.symbols()`, and these files are in neither, so
+        //   nothing of theirs can be warned about and no file_id shifts;
+        // * no local/parameter records — `local_decls` is indexed by
+        //   file_id, and a local's usage is bounded by its own function
+        //   body anyway, so no other file can affect it (B011 scope note);
+        // * no effect on the GH #58 namespace authority, which the loader
+        //   already gave up for exactly this omission.
+        //
+        // Parsed here rather than in the snapshot so only this pass pays
+        // for them, with the snapshot's own define set so `#if` masking
+        // matches what the checked files got.
+        used.extend(usage_from_omitted_files(snapshot, external));
         let locals = locals::LocalsInputs::new(snapshot, external, local_decls);
         Self { used, locals }
     }
@@ -155,6 +176,77 @@ impl WorkspaceUsage {
     pub fn used_names(&self) -> &HashSet<String> {
         &self.used
     }
+}
+
+/// Usage recorded from the own-module files the checked set omitted
+/// (GH #61) — see the call site in [`WorkspaceUsage::collect`].
+///
+/// The pass runs against a SCRATCH symbol table: the pooled workspace
+/// symbols plus the NON-COLLIDING declarations of these files, under
+/// file_ids past the end of the snapshot. The scratch table lives only for
+/// the duration of this function and the join never sees it — pooling
+/// omitted declarations for real is refuted alternative 1 on GH #61.
+///
+/// Their own declarations are needed to RESOLVE their bodies: a generated
+/// subclass calling an inherited member (`class Derived : Base` …
+/// `Hook()`) records nothing at all unless `Derived` resolves, and that
+/// silent miss leaves the very false positive this change is fixing.
+///
+/// Which is why the COLLISION filter is load-bearing, not tidiness. A
+/// gitignored dir in the real fleet is predominantly a whole-tree COPY,
+/// and a duplicate declaration makes the copy's own calls ambiguous:
+/// measured here, `Dead()` inside a stale copy of `Main.as` records
+/// nothing once both `Dead`s are in the table, so the masking that keeps
+/// the copy from manufacturing warnings is lost. Skipping any declaration
+/// the pooled table already has means a pure copy adds nothing at all and
+/// resolves against the originals, while a genuinely new declaration
+/// (that generated subclass) still gets added.
+fn usage_from_omitted_files(
+    snapshot: &AnalysisSnapshot,
+    external: Option<&crate::typedb::TypeIndex>,
+) -> HashSet<String> {
+    let mut used = HashSet::new();
+    let sources = snapshot.usage_only_sources();
+    if sources.is_empty() {
+        return used;
+    }
+    let parsed: Vec<(&Path, crate::analysis::DocumentAnalysis)> = sources
+        .iter()
+        .map(|(path, source)| {
+            (
+                path.as_path(),
+                crate::analysis::DocumentAnalysis::analyze(source, snapshot.defines()),
+            )
+        })
+        .collect();
+    let pooled = snapshot.symbols();
+    let mut scratch = pooled.clone();
+    let first_scratch_id = snapshot.files().len();
+    for (offset, (_, analysis)) in parsed.iter().enumerate() {
+        let file_id = first_scratch_id + offset;
+        let symbols: Vec<_> = crate::symbols::SymbolTable::extract_symbols(
+            file_id,
+            analysis.masked_source(),
+            &analysis.file,
+        )
+        .into_iter()
+        .filter(|sym| pooled.lookup(&sym.name).is_empty())
+        .collect();
+        scratch.set_file_symbols(file_id, symbols);
+    }
+    let scope = GlobalScope::new(&scratch, external);
+    for (path, analysis) in &parsed {
+        let mut checker = Checker::new(analysis.masked_source(), &scope).with_usage_recording();
+        checker.check_file(&analysis.file);
+        let names = checker.take_used_names();
+        tracing::trace!(
+            path = %path.display(),
+            recorded = names.len(),
+            "recorded usage from an omitted own-module file"
+        );
+        used.extend(names);
+    }
+    used
 }
 
 /// One unused-declaration finding, in symbol-table shape.
@@ -976,6 +1068,28 @@ mod omitted_own_module_usage {
             out,
             vec!["Dead"],
             "exactly one finding, from the checked tree"
+        );
+    }
+
+    /// Both halves of the collision filter at once, on the shape that
+    /// actually occurs: a whole-tree copy that has GAINED a subclass.
+    /// The copy's duplicate declarations must stay out of the scratch
+    /// table (or its own calls go ambiguous and stop masking), while the
+    /// new `Derived` must go in (or `Hook()` never resolves).
+    #[test]
+    fn an_omitted_copy_that_added_a_subclass_credits_only_the_new_usage() {
+        let checked = "class Base {\n    void Hook() {}\n}\nvoid Dead() {}\nvoid Main() {}\n";
+        let out = report(
+            &[("src/Main.as", checked)],
+            &[(
+                ".worktrees/copy/src/Main.as",
+                &format!("{checked}class Derived : Base {{\n    void Go() {{ Hook(); }}\n}}\n"),
+            )],
+        );
+        assert_eq!(
+            out,
+            vec!["Dead"],
+            "the copy credits the inherited call and nothing else"
         );
     }
 
