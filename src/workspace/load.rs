@@ -1106,4 +1106,57 @@ shared_exports = ["src/SharedExport.as"]
         );
         let _ = fs::remove_dir_all(base);
     }
+    /// GH #58 x GH #60: an open buffer arriving through the LSP overlay must
+    /// not restore a claim of authority the disk load already gave up. A
+    /// gitignored own-module file is missing from the pool whether or not the
+    /// editor happens to have one of them open, so `merge_open_documents`
+    /// carries the flag through untouched in both directions.
+    #[test]
+    fn open_document_overlay_cannot_restore_lost_authority() {
+        let base = temp_tree("overlay-authority");
+        let root = base.join("plugin");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("info.toml"),
+            "[meta]\nname = \"Overlay\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+        fs::create_dir_all(root.join("generated")).unwrap();
+        fs::write(root.join("generated/Gen.as"), "void Gen() {}\n").unwrap();
+
+        // No .gitignore yet: the disk load is the complete closure, and an
+        // overlay for a brand-new unsaved file keeps it complete (the pool is
+        // a superset of the disk one).
+        let search = DependencySearch::with_defaults();
+        let clean = load_plugin_workspace(&root, &search).unwrap();
+        assert!(clean.dependency_closure_complete, "no filtering configured");
+        let merged = merge_open_documents(
+            &clean,
+            &[(root.join("src/Unsaved.as"), "void Unsaved() {}".to_string())],
+        );
+        assert!(
+            merged.dependency_closure_complete,
+            "an extra open buffer cannot make a complete closure incomplete"
+        );
+
+        // Now gitignore the generated dir. Authority is lost, and opening the
+        // excluded file in the editor must not win it back.
+        fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+        let filtered = load_plugin_workspace(&root, &search).unwrap();
+        assert!(
+            !filtered.dependency_closure_complete,
+            "a gitignore exclusion must break authority"
+        );
+        let merged = merge_open_documents(
+            &filtered,
+            &[(root.join("generated/Gen.as"), "void Gen() {}".to_string())],
+        );
+        assert!(
+            !merged.dependency_closure_complete,
+            "opening one excluded file does not restore the missing surface"
+        );
+
+        let _ = fs::remove_dir_all(base);
+    }
 }

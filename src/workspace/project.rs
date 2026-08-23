@@ -451,4 +451,55 @@ mod tests {
             0
         );
     }
+    /// The invariant the GH #58 authority fence rests on: `kept + excluded`
+    /// must equal what the non-honoring walk returns, so a dropped file is
+    /// always visible in the count. Exercised on a tree with a nested
+    /// `.gitignore`, a negation, an ignored directory the walker never
+    /// descends into, a hidden dir and a `.git/info/exclude` entry — the
+    /// cases where a hand-written baseline walk would drift from the
+    /// `ignore` crate's semantics.
+    #[test]
+    fn kept_plus_excluded_equals_the_unfiltered_walk() {
+        let root = temp_tree("count-invariant");
+        write(&root, ".gitignore", "generated/\n*.gen.as\n!Keep.gen.as\n");
+        write(&root, ".git/info/exclude", "Excluded.as\n");
+        write(&root, "src/Main.as", "void Main() {}\n");
+        write(&root, "src/Keep.gen.as", "void Keep() {}\n");
+        write(&root, "src/Drop.gen.as", "void Drop() {}\n");
+        write(&root, "src/Excluded.as", "void Excluded() {}\n");
+        write(&root, "src/.gitignore", "Nested.as\n");
+        write(&root, "src/Nested.as", "void Nested() {}\n");
+        write(&root, "generated/A.as", "void A() {}\n");
+        write(&root, "generated/deep/B.as", "void B() {}\n");
+        write(&root, ".hidden/Hidden.as", "void Hidden() {}\n");
+
+        let honoring = discover(&root, DiscoveryOptions::default());
+        let unfiltered = discover(
+            &root,
+            DiscoveryOptions {
+                honor_gitignore: false,
+            },
+        );
+        assert_eq!(
+            honoring.files.len() + honoring.gitignore_excluded,
+            unfiltered.files.len(),
+            "kept {:?} + excluded {} must account for every unfiltered file {:?}",
+            honoring.files,
+            honoring.gitignore_excluded,
+            unfiltered.files
+        );
+        assert!(
+            honoring.gitignore_excluded > 0,
+            "this tree really does exclude files: {:?}",
+            honoring.files
+        );
+        // The negation must survive: `Keep.gen.as` stays, `Drop.gen.as` goes.
+        let kept: Vec<String> = honoring
+            .files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(kept.contains(&"Keep.gen.as".to_string()), "{kept:?}");
+        assert!(!kept.contains(&"Drop.gen.as".to_string()), "{kept:?}");
+    }
 }
