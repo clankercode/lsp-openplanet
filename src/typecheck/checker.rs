@@ -419,6 +419,7 @@ fn is_engine_namespace(prefix: &str) -> bool {
             | "Regex"
             | "SQLite"
             | "Settings"
+            | "Tests"
             | "Text"
             | "Time"
             | "UI"
@@ -7911,6 +7912,22 @@ void Main() {
         assert!(
             no_matching_symbols(&diags).is_empty(),
             "engine namespaces must stay with the typedb triggers, got {:?}",
+            diags
+        );
+    }
+
+    /// `Tests` is an Openplanet Core namespace too. A plugin-local helper
+    /// declaration must not arm workspace-only errors for game-owned call
+    /// shapes when the typedb is unavailable.
+    #[test]
+    fn tests_engine_namespace_declared_in_workspace_stays_silent() {
+        let diags = check_closed_workspace(
+            r#"namespace Tests { void LocalHelper() {} }
+               void Main() { Tests::LocalHelper(); Tests::GameOwnedCallShape(); }"#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "the Tests engine namespace must stay with typedb triggers, got {:?}",
             diags
         );
     }
