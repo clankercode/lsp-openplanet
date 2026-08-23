@@ -232,3 +232,33 @@ Workaround / fix:
     None needed -- the game compiler catches it. But this is a plain
     unresolved-symbol case, cheap to detect statically, and it cost a
     build/reload round trip to discover.
+
+## 2026-08-23, tm-tournament-station
+
+### Case 3: call to an undefined namespaced function is not flagged
+Plugin source:
+    namespace Identity { /* NextAccountId does not exist */ }
+    // in another file:
+    s.Check(Identity::NextAccountId("wsid-a", "", 5) == "", "...");
+
+Compiler reports (game-side):
+    Identity_Test.as (19, 17) :  ERR : No matching symbol 'Identity::NextAccountId'
+    (six occurrences, one per call site)
+
+openplanet-lsp reports:
+    0 errors. The whole file passes clean.
+
+Workaround / fix:
+    None available; the game compiler is the only check that catches it. This
+    makes red-first TDD in this codebase depend on a full build + hot reload
+    cycle, since the cheap check cannot produce the red.
+
+The LSP today does not flag this.
+
+### Case 4: nested plugin discovery has no opt-out (usability, not a miss)
+`openplanet-lsp check .` on a plugin whose repo contains research fixtures with
+their own info.toml (here: gitignored copies under .scratch/research/) checks
+those too. 16 warnings from stale fixtures drown out any real one, and there is
+no --exclude and no exclude key in .openplanet-lsp.toml. Either an exclude
+setting, or not descending into nested plugin roots below the PATH argument,
+would fix it.
