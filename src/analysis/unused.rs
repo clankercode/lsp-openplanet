@@ -66,6 +66,33 @@ fn is_openplanet_callback(simple_name: &str) -> bool {
     OPENPLANET_CALLBACKS.contains(&simple_name)
 }
 
+/// True when `name` is exempt as a runtime-invoked callback: a built-in
+/// engine callback, or a match against the project's `unused_callbacks`
+/// patterns (GH #56). `extra` only ever ADDS to the built-ins — dropping
+/// engine callbacks from the list would only manufacture false positives,
+/// so there is no switch to disable them.
+fn is_exempt_callback(name: &str, extra: &[String]) -> bool {
+    is_openplanet_callback(name) || extra.iter().any(|p| matches_callback_pattern(p, name))
+}
+
+/// Match one `unused_callbacks` entry against an unqualified name.
+///
+/// Deliberately not a glob and not a regex — the smallest syntax that
+/// covers reflective-dispatch naming, with no new dependency: a literal
+/// name, or a single `*` standing for any run of characters. That covers
+/// `OnCounterUpdate`, `On*`, `*Update`, `On*Update`, and bare `*`. An
+/// entry with two or more `*` is compared literally (unsupported syntax
+/// must not silently match everything).
+fn matches_callback_pattern(pattern: &str, name: &str) -> bool {
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return pattern == name;
+    };
+    if suffix.contains('*') {
+        return pattern == name;
+    }
+    name.len() >= prefix.len() + suffix.len() && name.starts_with(prefix) && name.ends_with(suffix)
+}
+
 /// Union of used workspace-qualified names across every file in a
 /// snapshot, keyed by the pooled symbol-table name convention, plus the
 /// local/parameter bindings the same pass walked (GH #55).
@@ -197,6 +224,11 @@ fn unused_declarations_filtered(
 ) -> Vec<UnusedDeclaration> {
     let mut out = Vec::new();
     let symbols = snapshot.symbols();
+    // GH #56: the project's extra callback patterns, shared by both
+    // consumers — the declaration gate below and the parameter gate in
+    // `locals`.
+    let extra = snapshot.unused_callbacks();
+    let exempt = |name: &str| is_exempt_callback(name, extra);
 
     for (file_id, file) in snapshot.files().iter().enumerate() {
         if only.is_some_and(|want| want != file_id) {
@@ -214,7 +246,7 @@ fn unused_declarations_filtered(
         }
         let source = file.analysis.masked_source();
         for sym in symbols.file_symbols(file_id) {
-            if let Some(unused) = evaluate_symbol(sym, usage, source) {
+            if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
                 out.push(unused);
             }
         }
@@ -228,7 +260,7 @@ fn unused_declarations_filtered(
         &usage.locals,
         export_paths,
         &reported,
-        &is_openplanet_callback,
+        &exempt,
         only,
         &mut out,
     );
@@ -242,6 +274,7 @@ fn evaluate_symbol(
     sym: &Symbol,
     usage: &WorkspaceUsage,
     source: &str,
+    exempt_callback: &dyn Fn(&str) -> bool,
 ) -> Option<UnusedDeclaration> {
     let (kind, simple_name) = match &sym.kind {
         SymbolKind::Class { .. } => ("class", tail_name(&sym.name)),
@@ -323,7 +356,7 @@ fn evaluate_symbol(
     // (Class members and namespaced functions are never callbacks.)
     let is_free_function =
         matches!(sym.kind, SymbolKind::Function { .. }) && !sym.name.contains("::");
-    if is_free_function && is_openplanet_callback(simple_name) {
+    if is_free_function && exempt_callback(simple_name) {
         return None;
     }
 
@@ -380,6 +413,19 @@ pub(crate) mod test_support {
             .map(|(p, s)| (PathBuf::from(p), s.to_string()))
             .collect();
         AnalysisSnapshot::from_files(&inputs, &LspConfig::default())
+    }
+
+    /// In-memory snapshot with GH #56 `unused_callbacks` patterns set.
+    pub fn snap_of_with_callbacks(files: &[(&str, &str)], callbacks: &[&str]) -> AnalysisSnapshot {
+        let inputs: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(p, s)| (PathBuf::from(p), s.to_string()))
+            .collect();
+        let config = LspConfig {
+            unused_callbacks: callbacks.iter().map(|c| c.to_string()).collect(),
+            ..LspConfig::default()
+        };
+        AnalysisSnapshot::from_files(&inputs, &config)
     }
 
     /// Sorted qualified names of an unused report.
@@ -552,6 +598,124 @@ mod tests {
             report
         );
         assert!(report.contains(&"Main2".to_string()), "got {:?}", report);
+    }
+
+    // ── GH #56: configurable callback exemptions ────────────────────────
+
+    /// Report for a one-file snapshot with `unused_callbacks` set.
+    fn report_with_callbacks(src: &str, callbacks: &[&str]) -> Vec<String> {
+        let snap = super::test_support::snap_of_with_callbacks(&[("a.as", src)], callbacks);
+        names(&unused_declarations(&snap, None, &StdHashSet::new()))
+    }
+
+    #[test]
+    fn configured_callback_exempts_the_function_and_its_params() {
+        // The issue's own case: MLHook dispatches `OnCounterUpdate` by
+        // name reflection, so nothing in the plugin calls it.
+        let src = "void OnCounterUpdate(const string &in name, int val) {}\nvoid Main() {}\n";
+        assert_eq!(
+            report_with_callbacks(src, &[]),
+            vec!["OnCounterUpdate"],
+            "control: unexempt, the function warns"
+        );
+        assert_eq!(
+            report_with_callbacks(src, &["OnCounterUpdate"]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn callback_patterns_cover_every_supported_wildcard_form() {
+        let src = "void OnCounterUpdate(int a) {}\nvoid Main() {}\n";
+        for pattern in [
+            "OnCounterUpdate", // literal
+            "On*",             // prefix
+            "*Update",         // suffix
+            "On*Update",       // both
+            "*",               // everything
+        ] {
+            assert_eq!(
+                report_with_callbacks(src, &[pattern]),
+                Vec::<String>::new(),
+                "pattern {pattern:?} must exempt OnCounterUpdate"
+            );
+        }
+    }
+
+    #[test]
+    fn non_matching_callback_patterns_still_warn() {
+        let src = "void OnCounterUpdate(int a) {}\nvoid Main() {}\n";
+        for pattern in [
+            "OnCounter",       // literal prefix is not a wildcard
+            "Update",          // literal suffix is not a wildcard
+            "On*Updated",      // suffix does not match
+            "Off*",            // prefix does not match
+            "On**Update",      // two `*` are unsupported → literal
+            "oncounterupdate", // case-sensitive
+        ] {
+            assert_eq!(
+                report_with_callbacks(src, &[pattern]),
+                vec!["OnCounterUpdate"],
+                "pattern {pattern:?} must NOT exempt OnCounterUpdate"
+            );
+        }
+    }
+
+    #[test]
+    fn wildcard_needs_room_for_prefix_and_suffix() {
+        // `On*Update` must not match "OnUpdate" by overlapping the two
+        // literal halves.
+        let src = "void OnUpdate(int a) {}\nvoid Main() {}\n";
+        assert_eq!(
+            report_with_callbacks(src, &["On*Update"]),
+            Vec::<String>::new(),
+            "prefix+suffix exactly spanning the name is a match"
+        );
+        let src = "void OnUpdat(int a) {}\nvoid Main() {}\n";
+        assert_eq!(
+            report_with_callbacks(src, &["On*Update"]),
+            vec!["OnUpdat"],
+            "a name shorter than prefix+suffix must not match"
+        );
+    }
+
+    #[test]
+    fn configured_callbacks_are_additive_to_the_builtins() {
+        // Setting the key must not replace `OPENPLANET_CALLBACKS`.
+        let src = "void Main() {}\nvoid RenderMenu() {}\nvoid OnCounterUpdate(int a) {}\n";
+        assert_eq!(
+            report_with_callbacks(src, &["OnCounterUpdate"]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_empty_callback_list_is_a_no_op() {
+        let src = "void Dead(int a) {}\nvoid Main() {}\n";
+        assert_eq!(report_with_callbacks(src, &[]), vec!["Dead"]);
+    }
+
+    #[test]
+    fn configured_callbacks_do_not_exempt_class_methods() {
+        // Decision 5: the patterns match free functions at file top level
+        // — the same population the built-in list applies to. MLHook
+        // dispatches free functions.
+        let src = "class C {\n    int keep;\n    void OnCounterUpdate(int a) {}\n}\nvoid Main() { C c; c.keep = 1; }\n";
+        let report = report_with_callbacks(src, &["OnCounterUpdate", "*"]);
+        assert!(
+            report.contains(&"C::OnCounterUpdate".to_string()),
+            "class methods stay in scope: {report:?}"
+        );
+    }
+
+    #[test]
+    fn configured_callbacks_do_not_exempt_namespaced_functions() {
+        let src = "namespace N {\n    void OnCounterUpdate(int a) {}\n}\nvoid Main() {}\n";
+        let report = report_with_callbacks(src, &["OnCounterUpdate", "*"]);
+        assert!(
+            report.contains(&"N::OnCounterUpdate".to_string()),
+            "namespaced functions stay in scope: {report:?}"
+        );
     }
 
     #[test]

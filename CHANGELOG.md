@@ -79,6 +79,16 @@ GitHub Release body to match this section (gh release edit).
   no longer flagged as unused declarations.
 
 ### Added
+- **`unused_callbacks` config key** (GH #56) — names the
+  unused-declaration pass should treat as runtime-invoked callbacks, for
+  frameworks that dispatch by name reflection (MLHook's
+  `OnCounterUpdate`), which a fixed list cannot cover. Entries are
+  literal names or a single `*` wildcard (`On*`, `*Update`, `On*Update`,
+  bare `*`) — not a glob, not a regex. Additive to the built-in
+  Openplanet callback list, never a replacement; matches unqualified
+  names of free functions at file top level and exempts their parameters
+  too. Workspace `.openplanet-lsp.toml` wins over the user config; lists
+  do not merge across levels.
 - **Unused locals and parameters** (GH #55) — the unused-declaration pass
   now covers function-body bindings — "a local variable `x` is never
   used", "a parameter `p` is never used" — with the same suppressions as

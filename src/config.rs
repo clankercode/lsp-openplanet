@@ -71,6 +71,13 @@ pub struct LspConfig {
     /// GH #57: matrix size cap (`define_matrix_max_combinations`).
     /// Cross-product exceeding the cap is a hard CLI error.
     pub define_matrix_max_combinations: usize,
+    /// GH #56: extra names the unused-declaration pass treats as
+    /// runtime-invoked callbacks (`unused_callbacks`), on top of the
+    /// built-in `OPENPLANET_CALLBACKS`. Frameworks that dispatch by name
+    /// reflection (MLHook's `OnCounterUpdate`) are invisible to a fixed
+    /// list. Resolved by [`LspConfig::resolve_unused_callbacks`] — empty
+    /// when no config file sets the key.
+    pub unused_callbacks: Vec<String>,
 }
 
 impl Default for LspConfig {
@@ -98,6 +105,7 @@ impl Default for LspConfig {
             define_groups: Vec::new(),
             define_combinations: None,
             define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
+            unused_callbacks: Vec::new(),
         }
     }
 }
@@ -353,6 +361,7 @@ impl LspConfig {
             define_groups: Vec::new(),
             define_combinations: None,
             define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
+            unused_callbacks: Vec::new(),
         };
 
         // Layer 1: Auto-detect
@@ -370,6 +379,17 @@ impl LspConfig {
             config.load_config_file(root);
         }
         config.load_user_config_file();
+
+        // GH #56: `unused_callbacks` does NOT follow the ladder above.
+        // That ladder applies the user-global file LAST, so user-global
+        // wins; this key follows the `warnings_as_errors` precedence
+        // instead (workspace overrides user-global), which is what a
+        // per-project exemption list has to do.
+        config.unused_callbacks = Self::resolve_unused_callbacks(
+            Self::user_config_path().as_deref(),
+            parent.filter(|p| Some(*p) != workspace_root),
+            workspace_root,
+        );
 
         // Layer 3: Init params (highest priority)
         if let Some(opts) = init_options {
@@ -523,6 +543,56 @@ impl LspConfig {
                 }
             }
         }
+    }
+
+    /// `~/.config/openplanet-lsp/config.toml`, when `$HOME` is set.
+    fn user_config_path() -> Option<PathBuf> {
+        std::env::var("HOME")
+            .ok()
+            .map(|home| PathBuf::from(home).join(".config/openplanet-lsp/config.toml"))
+    }
+
+    /// GH #56: resolve `unused_callbacks` across the config ladder in
+    /// ASCENDING precedence — user global, then the opened-folder parent,
+    /// then the plugin root. The last file that *sets* the key wins;
+    /// lists never merge, so the winning file's list is the whole list
+    /// (there is deliberately no "disable the defaults" switch — dropping
+    /// engine callbacks from the exemption list only manufactures false
+    /// positives).
+    fn resolve_unused_callbacks(
+        user: Option<&Path>,
+        parent: Option<&Path>,
+        root: Option<&Path>,
+    ) -> Vec<String> {
+        let ladder = [
+            user.map(Path::to_path_buf),
+            parent.map(|p| p.join(".openplanet-lsp.toml")),
+            root.map(|r| r.join(".openplanet-lsp.toml")),
+        ];
+        ladder
+            .iter()
+            .flatten()
+            .filter_map(|p| Self::unused_callbacks_in_file(p))
+            .next_back()
+            .unwrap_or_default()
+    }
+
+    /// Read `unused_callbacks` out of one TOML file, leniently: `None`
+    /// when the file is missing, unparseable, or the key is absent or not
+    /// an array. Non-string entries are dropped rather than rejecting the
+    /// list. Parsed off a raw `toml::Table` on purpose — deserializing
+    /// `ConfigFile` discards the WHOLE file on any type error, so a typo
+    /// here would silently drop every other key in it.
+    fn unused_callbacks_in_file(path: &Path) -> Option<Vec<String>> {
+        let contents = std::fs::read_to_string(path).ok()?;
+        let table: toml::Table = toml::from_str(&contents).ok()?;
+        let entries = table.get("unused_callbacks")?.as_array()?;
+        Some(
+            entries
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+        )
     }
 
     fn load_config_file(&mut self, workspace_root: &Path) {
@@ -1049,6 +1119,118 @@ shortcut_match_enums = true
             !UserPrefs::load(Some(&ws_false)).warnings_as_errors,
             "workspace warnings_as_errors = false must stay false"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// GH #56: `unused_callbacks` precedence. Tested through the pure
+    /// resolver rather than `load_with_parent` so the "user global" leg
+    /// is a temp file — mutating $HOME in-process races the tests above.
+    #[test]
+    fn unused_callbacks_workspace_overrides_user_global() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-uc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let user = tmp.join("user.toml");
+        let ws = tmp.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(&user, "unused_callbacks = [\"FromUser\"]\n").unwrap();
+
+        // User global alone.
+        assert_eq!(
+            LspConfig::resolve_unused_callbacks(Some(&user), None, None),
+            vec!["FromUser".to_string()]
+        );
+
+        // Workspace wins outright — lists do not merge.
+        std::fs::write(
+            ws.join(".openplanet-lsp.toml"),
+            "unused_callbacks = [\"FromWorkspace\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LspConfig::resolve_unused_callbacks(Some(&user), None, Some(&ws)),
+            vec!["FromWorkspace".to_string()]
+        );
+
+        // An explicitly EMPTY workspace list still wins.
+        std::fs::write(ws.join(".openplanet-lsp.toml"), "unused_callbacks = []\n").unwrap();
+        assert!(LspConfig::resolve_unused_callbacks(Some(&user), None, Some(&ws)).is_empty());
+
+        // Workspace file that does not mention the key falls through.
+        std::fs::write(ws.join(".openplanet-lsp.toml"), "game_target = \"MP4\"\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_unused_callbacks(Some(&user), None, Some(&ws)),
+            vec!["FromUser".to_string()]
+        );
+
+        // Plugin root beats the opened-folder parent.
+        let parent = tmp.join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::write(
+            parent.join(".openplanet-lsp.toml"),
+            "unused_callbacks = [\"FromParent\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join(".openplanet-lsp.toml"),
+            "unused_callbacks = [\"FromRoot\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LspConfig::resolve_unused_callbacks(Some(&user), Some(&parent), Some(&ws)),
+            vec!["FromRoot".to_string()]
+        );
+        assert_eq!(
+            LspConfig::resolve_unused_callbacks(Some(&user), Some(&parent), None),
+            vec!["FromParent".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Malformed values are ignored, never panic, and never poison the
+    /// other keys in the same file.
+    #[test]
+    fn unused_callbacks_malformed_values_are_ignored() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-ucbad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let cases: &[(&str, &str, Vec<String>)] = &[
+            ("not-an-array", "unused_callbacks = \"OnThing\"\n", vec![]),
+            ("a-number", "unused_callbacks = 7\n", vec![]),
+            ("a-table", "unused_callbacks = { a = 1 }\n", vec![]),
+            (
+                "mixed-entries",
+                "unused_callbacks = [\"Keep\", 7, true, \"Also\"]\n",
+                vec!["Keep".to_string(), "Also".to_string()],
+            ),
+            ("absent", "game_target = \"MP4\"\n", vec![]),
+            ("unparseable", "this is not toml =\n", vec![]),
+            ("empty-list", "unused_callbacks = []\n", vec![]),
+        ];
+        for (name, body, want) in cases {
+            let dir = tmp.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(".openplanet-lsp.toml"), body).unwrap();
+            assert_eq!(
+                LspConfig::resolve_unused_callbacks(None, None, Some(&dir)),
+                *want,
+                "case {name}"
+            );
+        }
+
+        // A malformed `unused_callbacks` must not drop sibling keys.
+        let dir = tmp.join("sibling-keys-survive");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".openplanet-lsp.toml"),
+            "game_target = \"MP4\"\nunused_callbacks = 7\n",
+        )
+        .unwrap();
+        let mut cfg = LspConfig::default();
+        cfg.load_config_file(&dir);
+        assert_eq!(cfg.game_target, "MP4");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

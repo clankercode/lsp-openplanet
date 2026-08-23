@@ -64,6 +64,12 @@ pub struct AnalysisSnapshot {
     /// Cached own-module view (see `own_module_symbols`). Built eagerly
     /// in `from_load` when strict exports exist.
     own_module_symbols: Option<SymbolTable>,
+    /// GH #56: `unused_callbacks` from the config ladder — extra names
+    /// the unused-declaration pass treats as runtime-invoked callbacks.
+    /// Carried here for the same reason as `export_paths`: it is a
+    /// config-derived policy input the unused analysis needs, and routing
+    /// it through the snapshot keeps every caller's signature unchanged.
+    unused_callbacks: Vec<String>,
 }
 
 impl AnalysisSnapshot {
@@ -120,6 +126,7 @@ impl AnalysisSnapshot {
             export_paths: load.export_paths.clone(),
             strict_export_paths: load.strict_export_paths.clone(),
             own_module_symbols,
+            unused_callbacks: config.unused_callbacks.clone(),
         }
     }
 
@@ -181,6 +188,11 @@ impl AnalysisSnapshot {
     /// to `symbols()`). Built eagerly in `from_load`.
     pub fn own_module_symbols(&self) -> Option<&SymbolTable> {
         self.own_module_symbols.as_ref()
+    }
+
+    /// GH #56: extra callback-name patterns from the config ladder.
+    pub fn unused_callbacks(&self) -> &[String] {
+        &self.unused_callbacks
     }
 
     /// Files in the snapshot, in file_id order.
