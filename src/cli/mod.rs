@@ -918,8 +918,6 @@ mod tests {
         assert!(parse_check_args(&["--warnings-as-errors=banana".into(), ".".into()]).is_err());
     }
 
-    /// GH #48 follow-up: precedence contract —
-    /// CLI flag > workspace config > user config > default(false).
     /// GH #60: `--no-gitignore` is tracked on CheckOptions, absent by default,
     /// and reaches the watch/TUI path through the same parse.
     #[test]
@@ -942,6 +940,8 @@ mod tests {
         assert_eq!(opts.path, PathBuf::from("some/dir"));
     }
 
+    /// GH #48 follow-up: precedence contract —
+    /// CLI flag > workspace config > user config > default(false).
     #[test]
     fn resolve_warnings_as_errors_precedence() {
         let prefs_true = crate::config::UserPrefs {
