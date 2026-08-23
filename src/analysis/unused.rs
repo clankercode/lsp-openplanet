@@ -182,7 +182,15 @@ fn evaluate_symbol(
         SymbolKind::Namespace => return None, // namespaces are open; skip
         SymbolKind::Funcdef { .. } => ("funcdef", tail_name(&sym.name)),
         SymbolKind::EnumValue { .. } => ("enum value", tail_name(&sym.name)),
-        SymbolKind::Variable { .. } => ("global", tail_name(&sym.name)),
+        SymbolKind::Variable { .. } => {
+            // `Class::field` in the pooled table = class member; a bare
+            // name = file-level global.
+            if sym.name.contains("::") {
+                ("field", tail_name(&sym.name))
+            } else {
+                ("global", tail_name(&sym.name))
+            }
+        }
         SymbolKind::Function { imported, .. } => {
             if *imported {
                 // `import ... from` alias: usage is recorded when the
