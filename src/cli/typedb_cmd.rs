@@ -142,11 +142,7 @@ pub fn run_typedb_command(args: &[String]) -> i32 {
         }
         Some("status") => run_status(&args[1..]),
         Some("diff") => run_diff(&args[1..]),
-        // Implemented in the next step of GH #59 (task 5).
-        Some("refresh") => {
-            eprintln!("typedb refresh: not implemented yet (GH #59)");
-            2
-        }
+        Some("refresh") => run_refresh(&args[1..]),
         Some(other) => usage_error(&format!("unknown typedb subcommand: {other}")),
         None => usage_error("typedb requires a subcommand"),
     }
@@ -497,6 +493,207 @@ fn diff_json(old: &DbPair, new: &DbPair, diff: &DbDiff) -> serde_json::Value {
     })
 }
 
+// === refresh ===
+
+#[derive(Debug, Default)]
+struct RefreshArgs {
+    from: Option<PathBuf>,
+    into: Option<PathBuf>,
+    yes: bool,
+}
+
+/// Read a `--flag DIR` / `--flag=DIR` pair at `args[i]`, returning the value
+/// and how many arguments it consumed.
+fn take_dir_arg(args: &[String], i: usize, flag: &str) -> Result<(PathBuf, usize), String> {
+    let missing = || format!("{flag} requires a directory argument");
+    if let Some(value) = args[i].strip_prefix(&format!("{flag}=")) {
+        if value.is_empty() {
+            return Err(missing());
+        }
+        return Ok((PathBuf::from(value), 1));
+    }
+    let value = args.get(i + 1).ok_or_else(missing)?;
+    Ok((PathBuf::from(value), 2))
+}
+
+fn parse_refresh_args(args: &[String]) -> Result<Option<RefreshArgs>, String> {
+    let mut parsed = RefreshArgs::default();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "--help" | "-h" => return Ok(None),
+            "--yes" => {
+                parsed.yes = true;
+                i += 1;
+            }
+            _ if arg == "--from" || arg.starts_with("--from=") => {
+                let (dir, used) = take_dir_arg(args, i, "--from")?;
+                parsed.from = Some(dir);
+                i += used;
+            }
+            _ if arg == "--into" || arg.starts_with("--into=") => {
+                let (dir, used) = take_dir_arg(args, i, "--into")?;
+                parsed.into = Some(dir);
+                i += used;
+            }
+            _ => {
+                return Err(format!(
+                    "unknown typedb refresh argument: {arg}\n\
+                     Run `openplanet-lsp typedb --help` for usage."
+                ))
+            }
+        }
+    }
+    if parsed.into.is_none() {
+        // GH #59 decision: never an implicit write path.
+        return Err(
+            "typedb refresh requires --into DIR (there is no default write path)".to_string(),
+        );
+    }
+    Ok(Some(parsed))
+}
+
+fn run_refresh(args: &[String]) -> i32 {
+    let parsed = match parse_refresh_args(args) {
+        Ok(Some(parsed)) => parsed,
+        Ok(None) => {
+            print!("{TYPEDB_HELP}");
+            return 0;
+        }
+        Err(err) => return usage_error(&err),
+    };
+    let into = parsed.into.expect("parse guarantees --into");
+
+    let source = match DbPair::resolve(parsed.from.as_deref()) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            return fail("no Openplanet install auto-detected; pass --from DIR");
+        }
+        Err(err) => return fail(&err),
+    };
+    let (source_core, source_game) = match probe_pair(&source) {
+        Ok(meta) => meta,
+        Err(err) => return fail(&err),
+    };
+
+    // The destination mirrors the source's filenames, so a Turbo/MP4 harvest
+    // is not silently renamed to the Next dump.
+    let target = DbPair {
+        core: into.join(file_name_of(&source.core)),
+        game: into.join(file_name_of(&source.game)),
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("source:  {}\n", pair_dir(&source)));
+    out.push_str(&indent(&describe_pair(&source, &source_core, &source_game)));
+
+    let target_exists = target.core.is_file() && target.game.is_file();
+    if target_exists {
+        let (target_core, target_game) = match probe_pair(&target) {
+            Ok(meta) => meta,
+            Err(err) => return fail(&err),
+        };
+        out.push_str(&format!("target:  {}\n", into.display()));
+        out.push_str(&indent(&describe_pair(&target, &target_core, &target_game)));
+        out.push('\n');
+        match (load_index(&target), load_index(&source)) {
+            (Ok(old), Ok(new)) => {
+                out.push_str(&render_diff(&target, &source, &diff_indexes(&old, &new)));
+            }
+            (Err(err), _) | (_, Err(err)) => return fail(&err),
+        }
+    } else {
+        out.push_str(&format!(
+            "target:  {} (no existing type database — first harvest)\n",
+            into.display()
+        ));
+    }
+
+    // Byte comparison decides what actually needs writing: an `op`-identical
+    // re-dump with no symbol drift can still differ byte-wise, and a
+    // byte-identical file never needs a write.
+    let files: Vec<(&Path, &Path)> = vec![
+        (source.core.as_path(), target.core.as_path()),
+        (source.game.as_path(), target.game.as_path()),
+    ];
+    let differing: Vec<&(&Path, &Path)> = files
+        .iter()
+        .filter(|(src, dst)| differs(src, dst))
+        .collect();
+
+    out.push('\n');
+    out.push_str(&format!(
+        "{} of {} files differ",
+        differing.len(),
+        files.len()
+    ));
+
+    if differing.is_empty() {
+        out.push_str("; nothing to write\n");
+        print!("{out}");
+        return 0;
+    }
+    out.push('\n');
+
+    if !parsed.yes {
+        out.push_str(&format!(
+            "dry run: nothing written (pass --yes to copy {} into {})\n",
+            plural_files(differing.len()),
+            into.display()
+        ));
+        print!("{out}");
+        return 0;
+    }
+
+    if let Err(err) = std::fs::create_dir_all(&into) {
+        print!("{out}");
+        return fail(&format!("failed to create {}: {err}", into.display()));
+    }
+    for (src, dst) in &differing {
+        if let Err(err) = std::fs::copy(src, dst) {
+            print!("{out}");
+            return fail(&format!(
+                "failed to copy {} to {}: {err}",
+                src.display(),
+                dst.display()
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "wrote {} into {}\n",
+        plural_files(differing.len()),
+        into.display()
+    ));
+    print!("{out}");
+    0
+}
+
+fn plural_files(n: usize) -> String {
+    format!("{n} file{}", if n == 1 { "" } else { "s" })
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// True when `dst` is absent or its bytes differ from `src`.
+fn differs(src: &Path, dst: &Path) -> bool {
+    match (std::fs::read(src), std::fs::read(dst)) {
+        (Ok(a), Ok(b)) => a != b,
+        _ => true,
+    }
+}
+
+fn indent(block: &str) -> String {
+    block
+        .lines()
+        .map(|line| format!("  {line}\n"))
+        .collect::<String>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +916,86 @@ mod tests {
         assert_eq!(value["removed"][0]["name"], "Display::GetWidth");
         assert_eq!(value["summary"]["removed"], 1);
         assert!(value["added"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_refresh_args_variants() {
+        let parse = |args: &[&str]| {
+            parse_refresh_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+        };
+        let a = parse(&["--into", "/out"]).unwrap().unwrap();
+        assert_eq!(a.into, Some(PathBuf::from("/out")));
+        assert_eq!(a.from, None, "source defaults to auto-detect");
+        assert!(!a.yes, "dry run is the default");
+
+        let a = parse(&["--from=/install", "--into=/out", "--yes"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.from, Some(PathBuf::from("/install")));
+        assert_eq!(a.into, Some(PathBuf::from("/out")));
+        assert!(a.yes);
+
+        // Order does not matter.
+        let a = parse(&["--yes", "--into", "/out", "--from", "/install"])
+            .unwrap()
+            .unwrap();
+        assert!(a.yes && a.from == Some(PathBuf::from("/install")));
+
+        assert!(parse(&["--help"]).unwrap().is_none());
+        // --into is mandatory: no implicit write path.
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["--from", "/install"]).is_err());
+        assert!(parse(&["--yes"]).is_err());
+        // Malformed / unknown.
+        assert!(parse(&["--into"]).is_err());
+        assert!(parse(&["--into="]).is_err());
+        assert!(parse(&["--into", "/out", "--from="]).is_err());
+        assert!(parse(&["--into", "/out", "--fetch"]).is_err());
+        assert!(parse(&["--into", "/out", "/positional"]).is_err());
+    }
+
+    #[test]
+    fn take_dir_arg_space_and_equals_forms() {
+        let args: Vec<String> = ["--from", "/a", "--into=/b", "--into"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            take_dir_arg(&args, 0, "--from").unwrap(),
+            (PathBuf::from("/a"), 2)
+        );
+        assert_eq!(
+            take_dir_arg(&args, 2, "--into").unwrap(),
+            (PathBuf::from("/b"), 1)
+        );
+        // Trailing flag with no value.
+        assert!(take_dir_arg(&args, 3, "--into").is_err());
+    }
+
+    #[test]
+    fn differs_treats_missing_destination_as_different() {
+        let dir = tmp_dir("differs");
+        let src = dir.join("a.json");
+        let dst = dir.join("b.json");
+        std::fs::write(&src, "same").unwrap();
+        assert!(differs(&src, &dst), "absent destination differs");
+        std::fs::write(&dst, "same").unwrap();
+        assert!(!differs(&src, &dst));
+        std::fs::write(&dst, "other").unwrap();
+        assert!(differs(&src, &dst));
+    }
+
+    #[test]
+    fn plural_files_agrees_with_count() {
+        assert_eq!(plural_files(0), "0 files");
+        assert_eq!(plural_files(1), "1 file");
+        assert_eq!(plural_files(2), "2 files");
+    }
+
+    #[test]
+    fn indent_prefixes_every_line() {
+        assert_eq!(indent("a\nb\n"), "  a\n  b\n");
+        assert_eq!(indent(""), "");
     }
 
     #[test]

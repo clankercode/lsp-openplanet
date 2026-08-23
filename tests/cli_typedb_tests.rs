@@ -661,3 +661,341 @@ fn typedb_diff_with_three_dirs_is_a_usage_error() {
     );
     assert_eq!(r.code, Some(2), "{}", r.all());
 }
+
+// === refresh (task 5) ===
+
+fn db_names(dir: &PathBuf) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// `--into` is mandatory: there is no implicit write path anywhere in the
+/// pipeline.
+#[test]
+fn typedb_refresh_requires_into() {
+    let install = tmp_install("refresh-nointo");
+    let r = run(
+        bin_without_install("refresh-nointo"),
+        &["typedb", "refresh", "--from", install.to_str().unwrap()],
+    );
+    assert_eq!(r.code, Some(2), "{}", r.all());
+    assert!(
+        r.stderr.contains("--into"),
+        "the usage error must name --into: {}",
+        r.stderr
+    );
+}
+
+/// Default is a dry run: it reports, and writes nothing — not even the
+/// destination directory.
+#[test]
+fn typedb_refresh_dry_run_reports_and_writes_nothing() {
+    let install = tmp_install("refresh-dry-src");
+    let into = tmp_dir("refresh-dry-into").join("nested-out");
+    let r = run(
+        bin_without_install("refresh-dry"),
+        &[
+            "typedb",
+            "refresh",
+            "--from",
+            install.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        r.stdout.contains("dry run") && r.stdout.contains("--yes"),
+        "a dry run must say so and name the escape hatch: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("op=1.29.5"),
+        "both sides' stamps must be shown: {}",
+        r.stdout
+    );
+    assert!(
+        !into.exists(),
+        "a dry run must not even create the destination directory"
+    );
+}
+
+/// `--yes` copies both files byte-for-byte; a second run has nothing to do.
+#[test]
+fn typedb_refresh_yes_copies_then_is_idempotent() {
+    let install = tmp_install("refresh-yes-src");
+    let into = tmp_dir("refresh-yes-into").join("out");
+
+    let r = run(
+        bin_without_install("refresh-yes-1"),
+        &[
+            "typedb",
+            "refresh",
+            "--from",
+            install.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        r.stdout.contains("wrote 2 files"),
+        "expected a write report: {}",
+        r.stdout
+    );
+    assert_eq!(
+        db_names(&into),
+        vec!["OpenplanetCore.json", "OpenplanetNext.json"],
+        "exactly the two known filenames, nothing else"
+    );
+    for name in ["OpenplanetCore.json", "OpenplanetNext.json"] {
+        assert_eq!(
+            fs::read(install.join(name)).unwrap(),
+            fs::read(into.join(name)).unwrap(),
+            "{name} must be copied byte-for-byte"
+        );
+    }
+
+    // Second run: identical bytes, so nothing to write.
+    let r = run(
+        bin_without_install("refresh-yes-2"),
+        &[
+            "typedb",
+            "refresh",
+            "--from",
+            install.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        r.stdout.contains("0 added, 0 removed, 0 changed"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("0 of 2 files differ"),
+        "an idempotent run must say nothing differs: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("wrote "),
+        "nothing should be rewritten: {}",
+        r.stdout
+    );
+}
+
+/// The point of the pipeline: a drifted target is reported symbol by symbol
+/// before anything is written, and is clean afterwards.
+#[test]
+fn typedb_refresh_reports_symbol_drift_then_resolves_it() {
+    let install = tmp_synthetic_db("refresh-drift-src", SYNTH_CORE_WITH_FN);
+    let into = tmp_synthetic_db("refresh-drift-into", SYNTH_CORE_WITHOUT_FN);
+
+    let args = |yes: bool| {
+        let mut v = vec![
+            "typedb".to_string(),
+            "refresh".to_string(),
+            "--from".to_string(),
+            install.to_str().unwrap().to_string(),
+            "--into".to_string(),
+            into.to_str().unwrap().to_string(),
+        ];
+        if yes {
+            v.push("--yes".to_string());
+        }
+        v
+    };
+
+    let r = run_owned(bin_without_install("refresh-drift-dry"), &args(false));
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        r.stdout.contains("Display::GetWidth"),
+        "the drifted symbol must be named before writing: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("1 added, 0 removed, 0 changed"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("1 of 2 files differ"), "{}", r.stdout);
+    // Still untouched.
+    assert_eq!(
+        fs::read_to_string(into.join("OpenplanetCore.json")).unwrap(),
+        SYNTH_CORE_WITHOUT_FN
+    );
+
+    let r = run_owned(bin_without_install("refresh-drift-apply"), &args(true));
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.stdout.contains("wrote 1 file"), "{}", r.stdout);
+    assert_eq!(
+        fs::read(install.join("OpenplanetCore.json")).unwrap(),
+        fs::read(into.join("OpenplanetCore.json")).unwrap()
+    );
+
+    let r = run_owned(bin_without_install("refresh-drift-after"), &args(false));
+    assert!(
+        r.stdout.contains("0 added, 0 removed, 0 changed"),
+        "{}",
+        r.stdout
+    );
+}
+
+/// A destination with no DB yet is a first harvest, not a diff against
+/// nothing.
+#[test]
+fn typedb_refresh_first_harvest_into_empty_dir() {
+    let install = tmp_install("refresh-first-src");
+    let into = tmp_dir("refresh-first-into");
+    let r = run(
+        bin_without_install("refresh-first"),
+        &[
+            "typedb",
+            "refresh",
+            "--from",
+            install.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(
+        r.stdout.contains("first harvest"),
+        "an empty destination should be called out: {}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("2 of 2 files differ"), "{}", r.stdout);
+    assert!(db_names(&into).is_empty(), "dry run must write nothing");
+}
+
+#[test]
+fn typedb_refresh_missing_source_exits_one() {
+    let into = tmp_dir("refresh-badsrc-into");
+    let r = run(
+        bin_without_install("refresh-badsrc"),
+        &[
+            "typedb",
+            "refresh",
+            "--from",
+            "/nonexistent-openplanet-install",
+            "--into",
+            into.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert!(r.stderr.contains("OpenplanetCore.json"), "{}", r.stderr);
+    assert!(
+        db_names(&into).is_empty(),
+        "a failed run must write nothing"
+    );
+}
+
+#[test]
+fn typedb_refresh_without_from_or_install_exits_one() {
+    let into = tmp_dir("refresh-noinstall-into");
+    let r = run(
+        bin_without_install("refresh-noinstall"),
+        &["typedb", "refresh", "--into", into.to_str().unwrap()],
+    );
+    assert_eq!(r.code, Some(1), "{}", r.all());
+    assert!(
+        r.stderr.contains("--from"),
+        "the error must name the escape hatch: {}",
+        r.stderr
+    );
+}
+
+/// Equals forms of both directory flags.
+#[test]
+fn typedb_refresh_accepts_equals_form_of_flags() {
+    let install = tmp_install("refresh-eq-src");
+    let into = tmp_dir("refresh-eq-into");
+    let r = run_owned(
+        bin_without_install("refresh-eq"),
+        &[
+            "typedb".to_string(),
+            "refresh".to_string(),
+            format!("--from={}", install.to_str().unwrap()),
+            format!("--into={}", into.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert!(r.stdout.contains("dry run"), "{}", r.stdout);
+}
+
+/// A non-TMNEXT source dump is harvested under its own filename — the
+/// destination mirrors the variant rather than renaming it to Next.
+#[test]
+fn typedb_refresh_preserves_variant_dump_filename() {
+    let install = tmp_dir("refresh-variant-src");
+    fs::copy(
+        fixture_typedb().join("OpenplanetCore.json"),
+        install.join("OpenplanetCore.json"),
+    )
+    .unwrap();
+    fs::copy(
+        fixture_typedb().join("OpenplanetNext.json"),
+        install.join("OpenplanetTurbo.json"),
+    )
+    .unwrap();
+    let into = tmp_dir("refresh-variant-into");
+    let r = run(
+        bin_without_install("refresh-variant"),
+        &[
+            "typedb",
+            "refresh",
+            "--from",
+            install.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert_eq!(
+        db_names(&into),
+        vec!["OpenplanetCore.json", "OpenplanetTurbo.json"]
+    );
+}
+
+/// Refresh never deletes: an unrelated file in the destination survives.
+#[test]
+fn typedb_refresh_leaves_unrelated_destination_files_alone() {
+    let install = tmp_install("refresh-keep-src");
+    let into = tmp_dir("refresh-keep-into");
+    fs::write(into.join("README.md"), "keep me").unwrap();
+    let r = run(
+        bin_without_install("refresh-keep"),
+        &[
+            "typedb",
+            "refresh",
+            "--from",
+            install.to_str().unwrap(),
+            "--into",
+            into.to_str().unwrap(),
+            "--yes",
+        ],
+    );
+    assert_eq!(r.code, Some(0), "{}", r.all());
+    assert_eq!(
+        fs::read_to_string(into.join("README.md")).unwrap(),
+        "keep me"
+    );
+    assert_eq!(
+        db_names(&into),
+        vec!["OpenplanetCore.json", "OpenplanetNext.json", "README.md"]
+    );
+}
