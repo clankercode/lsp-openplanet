@@ -339,8 +339,8 @@ fn complete_identifier(
     // parity): functions (and optionally enums/enum-values) from a small
     // configured set of namespaces appear at identifier positions, labelled
     // fully qualified (`UI::Begin`) but filtered by the bare member name
-    // (`filterText = "Begin"`), so typing `Beg` surfaces `UI::Begin`.
-    // Sorted after everything else (`sortText = "z"`).
+    // name (`filterText = "Begin"`), so typing `Beg` surfaces `UI::Begin`.
+    // Sorted after everything else (`SHORTCUT_SORT_TEXT`).
     if let Some(index) = type_index {
         if !shortcut_namespaces.is_empty() {
             let source = analysis.masked_source();
@@ -365,6 +365,11 @@ fn complete_identifier(
 
     items
 }
+
+/// Namespace-shortcut items sort after ordinary completions: ordinary
+/// items carry no `sortText` (client sorts by label), so a prefix beyond
+/// any plausible label start keeps shortcuts at the bottom.
+const SHORTCUT_SORT_TEXT: &str = "zz_shortcut_";
 
 /// Append namespace-shortcut completions for the configured namespaces.
 /// Members whose name does not start with `typed_prefix` (case-insensitive)
@@ -391,13 +396,23 @@ fn add_shortcut_completions(
             if existing.contains(qname) || !seen.insert(qname.clone()) {
                 continue;
             }
-            let first = &overloads[0];
             items.push(CompletionItem {
                 label: qname.clone(),
-                kind: Some(CompletionItemKind::METHOD),
+                kind: Some(CompletionItemKind::FUNCTION),
                 filter_text: Some(short.to_string()),
-                sort_text: Some("z".to_string()),
-                detail: Some(shortcut_detail(first)),
+                sort_text: Some(SHORTCUT_SORT_TEXT.to_string()),
+                detail: Some(shortcut_detail(&overloads[0])),
+                label_details: Some(CompletionItemLabelDetails {
+                    detail: Some(if overloads[0].params.is_empty() {
+                        "()".to_string()
+                    } else {
+                        "(…)".to_string()
+                    }),
+                    description: Some(overloads[0].return_type.clone()),
+                }),
+                documentation: shortcut_documentation(overloads),
+                // `(` commits a function item — natural next keystroke.
+                commit_characters: Some(vec!["(".to_string()]),
                 ..Default::default()
             });
         }
@@ -415,11 +430,12 @@ fn add_shortcut_completions(
                         label: qname.clone(),
                         kind: Some(CompletionItemKind::ENUM),
                         filter_text: Some(short.to_string()),
-                        sort_text: Some("z".to_string()),
+                        sort_text: Some(SHORTCUT_SORT_TEXT.to_string()),
+                        detail: Some(format!("enum ({} values)", info.values.len())),
                         ..Default::default()
                     });
                 }
-                for (value, _) in &info.values {
+                for (value, int_value) in &info.values {
                     if !value.to_lowercase().starts_with(typed_prefix) {
                         continue;
                     }
@@ -431,7 +447,8 @@ fn add_shortcut_completions(
                         label,
                         kind: Some(CompletionItemKind::ENUM_MEMBER),
                         filter_text: Some(value.clone()),
-                        sort_text: Some("z".to_string()),
+                        sort_text: Some(SHORTCUT_SORT_TEXT.to_string()),
+                        detail: Some(format!("{} = {}", qname, int_value)),
                         ..Default::default()
                     });
                 }
@@ -460,6 +477,33 @@ fn shortcut_detail(f: &crate::typedb::index::FunctionInfo) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{} {}({})", f.return_type, f.name, params)
+}
+
+/// Markdown doc for a shortcut function item: first overload's typedb
+/// description plus all overload signatures. `None` when there is no doc
+/// and only one overload (detail already shows its signature).
+fn shortcut_documentation(
+    overloads: &[crate::typedb::index::FunctionInfo],
+) -> Option<Documentation> {
+    let doc = overloads.iter().find_map(|f| f.doc.clone());
+    if doc.is_none() && overloads.len() == 1 {
+        return None;
+    }
+    let mut md = String::new();
+    if let Some(doc) = doc {
+        md.push_str(&doc);
+        md.push_str("\n\n");
+    }
+    md.push_str("```angelscript\n");
+    for f in overloads {
+        md.push_str(&shortcut_detail(f));
+        md.push('\n');
+    }
+    md.push_str("```");
+    Some(Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value: md,
+    }))
 }
 
 fn make_item(label: &str, kind: CompletionItemKind) -> CompletionItem {
@@ -676,8 +720,81 @@ mod tests {
             .find(|i| i.label == "UI::Begin")
             .expect("UI::Begin item");
         assert_eq!(item.filter_text.as_deref(), Some("Begin"));
-        assert_eq!(item.sort_text.as_deref(), Some("z"));
-        assert_eq!(item.kind, Some(CompletionItemKind::METHOD));
+        assert_eq!(item.sort_text.as_deref(), Some(SHORTCUT_SORT_TEXT));
+        assert_eq!(item.kind, Some(CompletionItemKind::FUNCTION));
+        // `(` commits the item (old-extension bracket-complete QoL).
+        assert_eq!(
+            item.commit_characters.as_deref(),
+            Some(["(".to_string()].as_slice())
+        );
+        // Label details: params marker + return type.
+        let ld = item.label_details.as_ref().expect("label details");
+        assert_eq!(ld.detail.as_deref(), Some("()"));
+        assert_eq!(ld.description.as_deref(), Some("bool"));
+    }
+
+    #[test]
+    fn shortcut_completion_enum_items_have_detail() {
+        let src = "void f() { Win }";
+        let idx = index_with_ui();
+        let items = complete_with_shortcuts(src, "Win", &idx, &["UI"], true);
+        let item = items
+            .iter()
+            .find(|i| i.label == "UI::WindowFlags")
+            .expect("enum item");
+        assert_eq!(item.detail.as_deref(), Some("enum (1 values)"));
+
+        let src2 = "void f() { NoTit }";
+        let items2 = complete_with_shortcuts(src2, "NoTit", &idx, &["UI"], true);
+        let value_item = items2
+            .iter()
+            .find(|i| i.label == "UI::WindowFlags::NoTitleBar")
+            .expect("enum value item");
+        assert_eq!(value_item.detail.as_deref(), Some("UI::WindowFlags = 1"));
+    }
+
+    #[test]
+    fn shortcut_completion_documents_all_overloads() {
+        // UI::Begin has two overloads in the fixture index — the doc must
+        // list both signatures, not just the first.
+        let mut idx = crate::typedb::TypeIndex::new();
+        let db: crate::typedb::core_format::CoreDatabase =
+            serde_json::from_value(serde_json::json!({
+                "op": "1.0",
+                "functions": [
+                    {"ns": "UI", "name": "Begin", "returntypedecl": "bool",
+                     "args": [{"name": "title", "typedecl": "string"}],
+                     "desc": "Start a window."},
+                    {"ns": "UI", "name": "Begin", "returntypedecl": "bool",
+                     "args": [{"name": "title", "typedecl": "string"}, {"typedecl": "int"}]}
+                ]
+            }))
+            .expect("fake core db");
+        idx.add_core(&db);
+        let src = "void f() { Beg }";
+        let items = complete_with_shortcuts(src, "Beg", &idx, &["UI"], false);
+        let item = items
+            .iter()
+            .find(|i| i.label == "UI::Begin")
+            .expect("UI::Begin item");
+        let Some(Documentation::MarkupContent(md)) = &item.documentation else {
+            panic!("expected markdown documentation: {:?}", item.documentation);
+        };
+        assert!(
+            md.value.contains("Start a window."),
+            "doc text: {}",
+            md.value
+        );
+        assert!(
+            md.value.contains("bool Begin(string title)"),
+            "overload 1: {}",
+            md.value
+        );
+        assert!(
+            md.value.contains("bool Begin(string title, int)"),
+            "overload 2: {}",
+            md.value
+        );
     }
 
     #[test]

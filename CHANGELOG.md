@@ -46,7 +46,11 @@ GitHub Release body to match this section (gh release edit).
   `shortcut_disable_default_namespaces` (drop UI/Math entirely),
   `shortcut_match_enums` (also suggest enums and enum values from those
   namespaces; off by default). Namespace variables are not matchable —
-  the typedb has no global-variable data source.
+  the typedb has no global-variable data source. Shortcut items carry
+  `(` as a commit character, label details (params marker + return
+  type), markdown documentation with all overload signatures, and a
+  dedicated `zz_shortcut_` sort prefix so they always rank below
+  in-scope completions.
 
 ### Fixed
 - **Single-arg constructor conversions in call arguments (GH #54)** — a
