@@ -29,6 +29,17 @@ GitHub Release body to match this section (gh release edit).
   compile-critical. `RUST_LOG=debug` logs how many files were excluded.
 
 ### Fixed
+- **"Never used" no longer fires when the only caller is in a file we
+  skipped** (GH #61) — a declaration whose callers all live in own-module
+  files left out of the checked set (excluded by `.gitignore`, or filtered
+  out by `source_paths` / `ignore_paths`) was reported "never used". The
+  game compiles those files, so the warning was wrong. They are now read
+  for that one purpose: the unused pass records what they reference. Their
+  declarations stay invisible, they still produce no diagnostics of their
+  own, and the namespace rule above stays disarmed for them. Cost is
+  proportional to how much was omitted and nothing at all when nothing was
+  (`check` on a 262-file plugin: unchanged at ~0.5s, ~0.74s with a
+  gitignored second copy of the whole tree beside it).
 - **Unknown members of your own namespaces are now flagged** (GH #58) —
   `TournamentStation::SendEvent(...)` where nothing named `SendEvent`
   exists under that namespace is a game compile error
