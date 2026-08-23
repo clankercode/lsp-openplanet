@@ -73,6 +73,10 @@ pub struct AnalysisSnapshot {
     /// them, so it pays the parse (`WorkspaceUsage::collect`) rather than
     /// every snapshot rebuild.
     usage_only_sources: Vec<(PathBuf, String)>,
+    /// True when every omitted source above was readable. This controls
+    /// only declaration-level unused warnings; locals/parameters remain
+    /// sound because their usage is function-local.
+    usage_only_sources_complete: bool,
     /// The `#if` define set these files were parsed with, so the
     /// usage-only sources above can be parsed on demand with the same
     /// masking the checked files got.
@@ -140,6 +144,7 @@ impl AnalysisSnapshot {
             strict_export_paths: load.strict_export_paths.clone(),
             own_module_symbols,
             usage_only_sources: load.usage_only_sources.clone(),
+            usage_only_sources_complete: load.usage_only_sources_complete,
             defines: config.defines.clone(),
             unused_callbacks: config.unused_callbacks.clone(),
         }
@@ -162,6 +167,7 @@ impl AnalysisSnapshot {
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
             usage_only_sources: Vec::new(),
+            usage_only_sources_complete: true,
             export_paths: HashSet::new(),
             strict_export_paths: HashSet::new(),
         };
@@ -191,6 +197,7 @@ impl AnalysisSnapshot {
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
             usage_only_sources: usage_only.to_vec(),
+            usage_only_sources_complete: true,
             export_paths: HashSet::new(),
             strict_export_paths: HashSet::new(),
         };
@@ -213,6 +220,7 @@ impl AnalysisSnapshot {
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
             usage_only_sources: Vec::new(),
+            usage_only_sources_complete: true,
             export_paths: Default::default(),
             strict_export_paths: Default::default(),
         };
@@ -246,6 +254,12 @@ impl AnalysisSnapshot {
     /// with [`Self::defines`].
     pub fn usage_only_sources(&self) -> &[(PathBuf, String)] {
         &self.usage_only_sources
+    }
+
+    /// Whether every omitted own-module source was readable when the
+    /// workspace load was built.
+    pub fn usage_only_sources_complete(&self) -> bool {
+        self.usage_only_sources_complete
     }
 
     /// The `#if` define set this snapshot's files were parsed with.

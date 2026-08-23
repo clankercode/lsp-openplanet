@@ -797,7 +797,7 @@ impl<'a> Checker<'a> {
                 &format!("set_{}", member),
             ] {
                 let qualified = format!("{}::{}", class, candidate);
-                if !self.scope.workspace().lookup(&qualified).is_empty() {
+                if !self.scope.lookup_workspace(&qualified).is_empty() {
                     self.record_use(&qualified);
                 }
             }
@@ -831,8 +831,8 @@ impl<'a> Checker<'a> {
     /// plugin's decl (GH #38 shadowing semantics).
     fn resolve_recording_class_name(&self, type_name: &str) -> String {
         if type_name.contains("::") {
-            if !self.scope.workspace().lookup_members(type_name).is_empty()
-                || !self.scope.workspace().lookup(type_name).is_empty()
+            if !self.scope.lookup_workspace_members(type_name).is_empty()
+                || !self.scope.lookup_workspace(type_name).is_empty()
             {
                 return type_name.to_string();
             }
@@ -844,14 +844,14 @@ impl<'a> Checker<'a> {
                 self.namespace_stack[..depth].join("::"),
                 type_name
             );
-            if !self.scope.workspace().lookup_members(&candidate).is_empty()
-                || !self.scope.workspace().lookup(&candidate).is_empty()
+            if !self.scope.lookup_workspace_members(&candidate).is_empty()
+                || !self.scope.lookup_workspace(&candidate).is_empty()
             {
                 return candidate;
             }
         }
-        if !self.scope.workspace().lookup_members(type_name).is_empty()
-            || !self.scope.workspace().lookup(type_name).is_empty()
+        if !self.scope.lookup_workspace_members(type_name).is_empty()
+            || !self.scope.lookup_workspace(type_name).is_empty()
         {
             return type_name.to_string();
         }

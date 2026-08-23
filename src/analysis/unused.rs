@@ -181,11 +181,13 @@ impl WorkspaceUsage {
 /// Usage recorded from the own-module files the checked set omitted
 /// (GH #61) — see the call site in [`WorkspaceUsage::collect`].
 ///
-/// The pass runs against a SCRATCH symbol table: the pooled workspace
-/// symbols plus the NON-COLLIDING declarations of these files, under
-/// file_ids past the end of the snapshot. The scratch table lives only for
-/// the duration of this function and the join never sees it — pooling
-/// omitted declarations for real is refuted alternative 1 on GH #61.
+/// The pass runs against a borrowed overlay: the pooled workspace table plus
+/// a small supplemental table containing the NON-COLLIDING declarations of
+/// these files. The supplement lives only for this function and the join
+/// never sees it — pooling omitted declarations for real is refuted
+/// alternative 1 on GH #61. Keeping the tables separate is also important
+/// for scale: cost is proportional to omitted inputs, never a clone of the
+/// full visible symbol table.
 ///
 /// Their own declarations are needed to RESOLVE their bodies: a generated
 /// subclass calling an inherited member (`class Derived : Base` …
@@ -220,10 +222,10 @@ fn usage_from_omitted_files(
         })
         .collect();
     let pooled = snapshot.symbols();
-    let mut scratch = pooled.clone();
-    let first_scratch_id = snapshot.files().len();
+    let mut supplemental = crate::symbols::SymbolTable::new();
+    let first_supplemental_id = snapshot.files().len();
     for (offset, (_, analysis)) in parsed.iter().enumerate() {
-        let file_id = first_scratch_id + offset;
+        let file_id = first_supplemental_id + offset;
         let symbols: Vec<_> = crate::symbols::SymbolTable::extract_symbols(
             file_id,
             analysis.masked_source(),
@@ -232,9 +234,9 @@ fn usage_from_omitted_files(
         .into_iter()
         .filter(|sym| pooled.lookup(&sym.name).is_empty())
         .collect();
-        scratch.set_file_symbols(file_id, symbols);
+        supplemental.set_file_symbols(file_id, symbols);
     }
-    let scope = GlobalScope::new(&scratch, external);
+    let scope = GlobalScope::with_supplemental(pooled, &supplemental, external);
     for (path, analysis) in &parsed {
         let mut checker = Checker::new(analysis.masked_source(), &scope).with_usage_recording();
         checker.check_file(&analysis.file);
@@ -315,31 +317,38 @@ fn unused_declarations_filtered(
     only: Option<usize>,
 ) -> Vec<UnusedDeclaration> {
     let mut out = Vec::new();
-    let symbols = snapshot.symbols();
     // GH #56: the project's extra callback patterns, shared by both
     // consumers — the declaration gate below and the parameter gate in
     // `locals`.
     let extra = snapshot.unused_callbacks();
     let exempt = |name: &str| is_exempt_callback(name, extra);
 
-    for (file_id, file) in snapshot.files().iter().enumerate() {
-        if only.is_some_and(|want| want != file_id) {
-            continue;
-        }
-        // Dependency export files contribute symbols and usage but are not
-        // this plugin's code — never warn on them (report_diagnostics
-        // already gates the diagnostics pipeline; same gate here).
-        if !file.report_diagnostics {
-            continue;
-        }
-        // The plugin's own export files are public API.
-        if export_paths.contains(&file.path) {
-            continue;
-        }
-        let source = file.analysis.masked_source();
-        for sym in symbols.file_symbols(file_id) {
-            if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
-                out.push(unused);
+    // An unreadable omitted source may contain a use of any file-level or
+    // class-member declaration, so those warnings fail closed. This is not
+    // the broad "any omission disarms the rule" alternative: readable
+    // omissions keep the declaration pass fully active, and locals/params
+    // below remain sound because their usage is bounded by their function.
+    if snapshot.usage_only_sources_complete() {
+        let symbols = snapshot.symbols();
+        for (file_id, file) in snapshot.files().iter().enumerate() {
+            if only.is_some_and(|want| want != file_id) {
+                continue;
+            }
+            // Dependency export files contribute symbols and usage but are not
+            // this plugin's code — never warn on them (report_diagnostics
+            // already gates the diagnostics pipeline; same gate here).
+            if !file.report_diagnostics {
+                continue;
+            }
+            // The plugin's own export files are public API.
+            if export_paths.contains(&file.path) {
+                continue;
+            }
+            let source = file.analysis.masked_source();
+            for sym in symbols.file_symbols(file_id) {
+                if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
+                    out.push(unused);
+                }
             }
         }
     }
@@ -1073,7 +1082,7 @@ mod omitted_own_module_usage {
 
     /// Both halves of the collision filter at once, on the shape that
     /// actually occurs: a whole-tree copy that has GAINED a subclass.
-    /// The copy's duplicate declarations must stay out of the scratch
+    /// The copy's duplicate declarations must stay out of the supplemental
     /// table (or its own calls go ambiguous and stop masking), while the
     /// new `Derived` must go in (or `Hook()` never resolves).
     #[test]
@@ -1090,6 +1099,29 @@ mod omitted_own_module_usage {
             out,
             vec!["Dead"],
             "the copy credits the inherited call and nothing else"
+        );
+    }
+
+    /// A supplemental class is distinct by exact qualified name even when
+    /// its bare tail collides with a pooled class. Filtering on a broad
+    /// reference lookup would drop `Generated::Base` and lose its inherited
+    /// member usage; only exact qualified collisions are duplicates.
+    #[test]
+    fn partial_class_name_collision_keeps_supplemental_member_resolution() {
+        assert_eq!(
+            report(
+                &[(
+                    "src/Main.as",
+                    "namespace Live { class Base { void Hook() {} } }\nvoid Main() {}\n"
+                )],
+                &[(
+                    "generated/Gen.as",
+                    "namespace Generated {\n\
+                         class Base : Live::Base { void Go() { Hook(); } }\n\
+                     }\n"
+                )],
+            ),
+            Vec::<String>::new()
         );
     }
 
