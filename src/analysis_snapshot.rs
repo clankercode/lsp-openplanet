@@ -84,6 +84,14 @@ impl AnalysisSnapshot {
                 report_diagnostics: wf.report_diagnostics,
             });
         }
+        // GH #58: the pool is the plugin's complete module closure only
+        // when a real workspace root was walked AND every required
+        // dependency resolved. Diagnostics that read the absence of a name
+        // as a game-compiler rejection gate on this — an in-memory or
+        // open-documents-only pool never claims it.
+        if !load.root.as_os_str().is_empty() && load.missing_required_dependencies.is_empty() {
+            table.mark_dependency_closure_complete();
+        }
         // Own-module view for diagnostics: identical pool except strict
         // export files hidden from name resolution (game parity
         // 2026-08-23 — export decls are consumer-only).

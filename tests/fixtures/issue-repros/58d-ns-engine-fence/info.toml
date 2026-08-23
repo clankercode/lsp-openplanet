@@ -1,0 +1,5 @@
+[meta]
+name     = "Issue Repro 58d - Engine Namespace Fence"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"

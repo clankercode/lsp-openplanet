@@ -67,6 +67,56 @@ impl<'a> GlobalScope<'a> {
         self.workspace.lookup_reference(name)
     }
 
+    /// True when the workspace half is the plugin's COMPLETE module
+    /// closure (see [`SymbolTable::dependency_closure_complete`]). Only
+    /// then does "absent from the pool" mean "the game compiler would
+    /// reject it" — GH #58.
+    pub fn workspace_closure_complete(&self) -> bool {
+        self.workspace.dependency_closure_complete()
+    }
+
+    /// True when the workspace declares `qualified` as a namespace
+    /// (`namespace Ns { … }` in any pooled file). Namespaces are the only
+    /// qualifier AngelScript resolves free calls through, so this is the
+    /// gate for the workspace `No matching symbol` rule (GH #58).
+    pub fn workspace_namespace_declared(&self, qualified: &str) -> bool {
+        !qualified.is_empty()
+            && self
+                .workspace
+                .lookup(qualified)
+                .iter()
+                .any(|s| matches!(s.kind, SymbolKind::Namespace))
+    }
+
+    /// True when the workspace pool holds ANY symbol under the exact
+    /// qualified name — function, class, interface, enum, enum value,
+    /// funcdef, namespace or variable. GH #58 decision 4: every kind
+    /// counts as resolution for `Ns::Fn(...)`, so only a name matching
+    /// nothing is a game-compiler rejection.
+    pub fn workspace_declares_any(&self, qualified: &str) -> bool {
+        !self.workspace.lookup(qualified).is_empty()
+    }
+
+    /// Direct child names declared under `ns` in the workspace — one
+    /// `::`-segment deep only, so `Ns::Class::method` contributes `Class`
+    /// and not `method`. Backs the near-name hint on the workspace
+    /// `No matching symbol` rule (GH #58), mirroring the typedb
+    /// `UI::GetIO` path.
+    pub fn workspace_namespace_member_names(&self, ns: &str) -> Vec<String> {
+        let prefix = format!("{ns}::");
+        let mut names: Vec<String> = self
+            .workspace
+            .lookup_members(ns)
+            .iter()
+            .filter_map(|s| s.name.strip_prefix(&prefix))
+            .filter(|rest| !rest.contains("::") && !rest.is_empty())
+            .map(|rest| rest.to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// True if the qualified name refers to a type (class / interface /
     /// funcdef-as-type) in either the workspace or the external index.
     pub fn has_type(&self, qualified: &str) -> bool {

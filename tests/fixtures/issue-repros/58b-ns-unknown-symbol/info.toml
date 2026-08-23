@@ -1,0 +1,5 @@
+[meta]
+name     = "Issue Repro 58b - Namespaced Unknown Symbol"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"

@@ -64,6 +64,15 @@ pub struct SymbolTable {
     /// hides them, game parity 2026-08-23). Mutation before pooling is
     /// complete; empty = no filtering.
     hidden_files: std::collections::HashSet<usize>,
+    /// True when this pool is the COMPLETE module closure for the plugin
+    /// being checked: a real workspace root was walked and every required
+    /// dependency resolved. Only then is the absence of a name evidence
+    /// that the game compiler would reject it — AngelScript namespaces are
+    /// open and additive across modules, so a module we could not read may
+    /// contribute the very member being called (GH #58). Defaults to false
+    /// so ad-hoc pools (single-file diagnostics, in-memory test tables)
+    /// never claim an authority they don't have.
+    dependency_closure_complete: bool,
     next_file_id: usize,
 }
 
@@ -207,6 +216,22 @@ impl SymbolTable {
     /// True when `file_id` is currently hidden from lookups.
     pub fn is_file_hidden(&self, file_id: usize) -> bool {
         self.hidden_files.contains(&file_id)
+    }
+
+    /// Declare this pool the complete module closure — see the
+    /// `dependency_closure_complete` field docs. Set by the snapshot
+    /// builder when a workspace root was walked and every required
+    /// dependency resolved; carried by `clone()` so the own-module view
+    /// keeps it.
+    pub fn mark_dependency_closure_complete(&mut self) {
+        self.dependency_closure_complete = true;
+    }
+
+    /// True when this pool is the complete module closure (see the field
+    /// docs). Diagnostics that treat a missing name as a game-compiler
+    /// rejection must gate on this.
+    pub fn dependency_closure_complete(&self) -> bool {
+        self.dependency_closure_complete
     }
 
     /// Resolve a source-level reference by the same ladder the checker
