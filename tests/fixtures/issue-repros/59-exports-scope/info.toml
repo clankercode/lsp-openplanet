@@ -1,0 +1,7 @@
+[meta]
+name = "ExportsScope"
+version = "0.1.0"
+
+[script]
+module = "T"
+exports = ["Exports_Bodies.as"]

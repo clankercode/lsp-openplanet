@@ -1193,3 +1193,42 @@ fn check_command_issue_repro_37f_sign_change_warns() {
     );
     assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
 }
+
+/// Game-verified 2026-08-23: a strict `[script] exports` file compiles
+/// into CONSUMERS only — function bodies written there do NOT resolve in
+/// the defining plugin's own module (game: "No matching symbol"). The
+/// sibling caller must now error.
+#[test]
+fn check_command_issue_repro_59_exports_bodies_dont_resolve_internally() {
+    let (ok, stdout, stderr) = run_issue_repro("59-exports-scope");
+    assert!(
+        stdout.contains("No matching symbol 'SendEvent'")
+            || stdout.contains("undefined identifier `SendEvent`"),
+        "expected unresolved SendEvent in stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(!ok, "must exit 1 (error severity); stdout={stdout:?}");
+}
+
+/// The CORRECT pattern stays clean: strict export file carries only
+/// `import … from "T";` decls, bodies live in ordinary files,
+/// shared_exports stay visible internally. Error-severity diagnostics
+/// (undefined symbol / No matching symbol) must NOT appear; warnings
+/// (e.g. the pre-existing unused-decl quirk on import/decl pairs,
+/// verified identical on master 0f059f5) are out of scope.
+#[test]
+fn check_command_issue_repro_60_exports_correct_pattern_clean() {
+    let (ok, stdout, stderr) = run_issue_repro("60-exports-correct-pattern");
+    assert!(
+        !stdout.contains("undefined identifier"),
+        "no scoping errors expected; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.contains("No matching symbol"),
+        "no scoping errors expected; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.contains("unknown type"),
+        "shared exports must resolve; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
+}

@@ -465,12 +465,31 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         let analysis = snapshot
             .analysis_at_path(&item.path)
             .expect("snapshot contains every loaded file");
+        // Own-module symbol view: strict export files' decls are
+        // consumer-only (game parity 2026-08-23) — hide them from name
+        // resolution unless we're checking the export file itself (its
+        // own import decls must resolve within it).
+        let own_view;
+        let table_for_check = match snapshot.own_module_symbols() {
+            Some(own) => {
+                own_view = match snapshot.file_id_of_path(&item.path) {
+                    Some(fid) if own.is_file_hidden(fid) => {
+                        let mut unhidden = own.clone();
+                        unhidden.unhide_file(fid);
+                        unhidden
+                    }
+                    _ => own.clone(),
+                };
+                &own_view
+            }
+            None => snapshot.symbols(),
+        };
         for diagnostic in diagnostics::compute_diagnostics_from_analysis(
             &uri,
             analysis,
             &config,
             type_index.as_ref(),
-            snapshot.symbols(),
+            table_for_check,
         ) {
             cli_diagnostics.push(CliDiagnostic {
                 path: item.path.clone(),
