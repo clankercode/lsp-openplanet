@@ -56,6 +56,23 @@ default_mode = "tui"   # or "lsp"
 # source_paths = ["src"]
 # ignore_paths = ["OtherPacks", "vendor"]
 
+# Honor .gitignore during .as discovery (default true). Files excluded by
+# .gitignore rules at or below the plugin root -- plus a root-local
+# .git/info/exclude -- are not parsed or diagnosed, matching what other
+# language tooling (rust-analyzer, gopls, tsc) does: a file you believe is
+# excluded should not produce squiggles. In practice this drops second copies
+# of your own sources (.worktrees/, scratch probe dirs) that otherwise collide
+# with the real ones. Rules ABOVE the plugin root are never read -- a plugin
+# inside a bigger repo keeps its own checked set -- and a global gitignore or a
+# `.ignore` file is not consulted, so nothing invisible to your repo can shrink
+# the set. Set false when gitignored files are still COMPILE-CRITICAL, e.g.
+# dev-loop codegen output written into the tree but never committed; the CLI
+# flag `check --no-gitignore` does the same for one run. Workspace
+# .openplanet-lsp.toml wins over the user config; the flag wins over both.
+# Orthogonal to the two lists above: the checked set is
+# discovered - gitignored - ignore_paths (or intersected with source_paths).
+# honor_gitignore = true
+
 # Namespace-shortcut completions (old vscode-openplanet-angelscript QoL):
 # typing `Beg` suggests `UI::Begin` etc. at identifier positions. Built-in
 # defaults are `UI` + `Math`; `shortcut_namespaces` sets your own custom

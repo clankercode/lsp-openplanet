@@ -53,6 +53,12 @@ pub struct DependencySearch {
     /// Blocklist of root-relative dirs to skip (only when `source_paths` is
     /// `None`). From `.openplanet-lsp.toml` `ignore_paths`.
     pub ignore_paths: Option<Vec<PathBuf>>,
+    /// GH #60: skip `.as` files excluded by `.gitignore` rules at or below the
+    /// plugin root. `None` = the default (enabled); `Some(false)` is the
+    /// `honor_gitignore = false` config or a `--no-gitignore` CLI flag.
+    /// Orthogonal to the two lists above — the checked set is
+    /// discovered − gitignored − `ignore_paths` (or ∩ `source_paths`).
+    pub honor_gitignore: Option<bool>,
 }
 
 impl DependencySearch {
@@ -62,6 +68,7 @@ impl DependencySearch {
             plugin_files_search_paths: vec![PathBuf::from("src")],
             source_paths: None,
             ignore_paths: None,
+            honor_gitignore: None,
         }
     }
 
@@ -91,6 +98,9 @@ impl DependencySearch {
         // Carry source inclusion/exclusion from config (allowlist wins).
         self.source_paths = config.source_paths.clone();
         self.ignore_paths = config.ignore_paths.clone();
+        // GH #60: gitignore honoring rides the same config ladder. A CLI
+        // `--no-gitignore` is applied by the caller, after this.
+        self.honor_gitignore = config.honor_gitignore;
         self
     }
 }
@@ -169,8 +179,9 @@ pub fn load_plugin_workspace(
     let export_paths = own_export_paths(&root, search);
     let (export_paths, strict_export_paths) = (export_paths.0, export_paths.1);
 
+    let discovery = project::DiscoveryOptions::from_honor_gitignore(search.honor_gitignore);
     let mut files = Vec::new();
-    for path in project::discover_source_files(&root) {
+    for path in project::discover_source_files_with(&root, discovery) {
         if !source_file_included(&root, &path, search) {
             continue;
         }
@@ -401,6 +412,87 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         base
+    }
+
+    /// GH #60: `honor_gitignore` rides the config ladder into the shared
+    /// discovery seam. This is the LSP server's exact path — the Backend
+    /// builds its search with `with_defaults().finalize_with_config(...)`, so
+    /// server and CLI cannot diverge on which files get checked.
+    #[test]
+    fn finalize_with_config_carries_honor_gitignore() {
+        let mut config = LspConfig::default();
+        assert_eq!(config.honor_gitignore, None, "default is unset");
+        assert!(
+            DependencySearch::with_defaults()
+                .finalize_with_config(&config)
+                .honor_gitignore
+                .is_none(),
+            "unset config must leave the search at the default"
+        );
+
+        for honor in [Some(true), Some(false)] {
+            config.honor_gitignore = honor;
+            assert_eq!(
+                DependencySearch::with_defaults()
+                    .finalize_with_config(&config)
+                    .honor_gitignore,
+                honor,
+                "config honor_gitignore = {honor:?} must reach DependencySearch"
+            );
+        }
+    }
+
+    /// The tri-state resolves to the product default when unset, and the
+    /// discovery seam agrees with `LspConfig::honor_gitignore_enabled`.
+    #[test]
+    fn honor_gitignore_tri_state_resolves_to_enabled_by_default() {
+        let mut config = LspConfig::default();
+        assert!(config.honor_gitignore_enabled());
+        assert!(project::DiscoveryOptions::from_honor_gitignore(None).honor_gitignore);
+
+        config.honor_gitignore = Some(false);
+        assert!(!config.honor_gitignore_enabled());
+        assert!(!project::DiscoveryOptions::from_honor_gitignore(Some(false)).honor_gitignore);
+    }
+
+    /// A gitignored file is dropped from the loaded workspace, and
+    /// `honor_gitignore: Some(false)` puts it back — asserted through
+    /// `load_plugin_workspace` (the seam both CLI and server call).
+    #[test]
+    fn load_plugin_workspace_applies_gitignore() {
+        let base = std::env::temp_dir().join(format!(
+            "openplanet-lsp-load-gitignore-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::create_dir_all(base.join("generated")).unwrap();
+        std::fs::write(base.join("info.toml"), "[meta]\n").unwrap();
+        std::fs::write(base.join(".gitignore"), "generated/\n").unwrap();
+        std::fs::write(base.join("src/Main.as"), "void Main() {}\n").unwrap();
+        std::fs::write(base.join("generated/Gen.as"), "void Gen() {}\n").unwrap();
+
+        let loaded_names = |honor_gitignore: Option<bool>| {
+            let search = DependencySearch {
+                honor_gitignore,
+                ..DependencySearch::with_defaults()
+            };
+            let mut names: Vec<String> = load_plugin_workspace(&base, &search)
+                .unwrap()
+                .files
+                .iter()
+                .filter_map(|f| f.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect();
+            names.sort();
+            names
+        };
+
+        assert_eq!(loaded_names(None), vec!["Main.as".to_string()]);
+        assert_eq!(loaded_names(Some(true)), vec!["Main.as".to_string()]);
+        assert_eq!(
+            loaded_names(Some(false)),
+            vec!["Gen.as".to_string(), "Main.as".to_string()]
+        );
     }
 
     #[test]
