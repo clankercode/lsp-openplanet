@@ -1,15 +1,15 @@
 ---
+completed_at: null
 complexity: low
 created_at: "2026-08-23T15:04:50Z"
-depends_on: []
+depends_on:
+    - B011
 estimate_hours: 2
 id: B012
 priority: medium
+started_at: null
 status: pending
-tags:
-    - gh-56
-    - unused
-    - config
+tags: []
 title: 'Unused warnings: configurable callback/exemption list (GH #56)'
 updated_at: "2026-08-23T15:04:50Z"
 ---
