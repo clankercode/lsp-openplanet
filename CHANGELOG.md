@@ -13,6 +13,18 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Added
+- **Namespace-shortcut completions** — at identifier positions, functions
+  from a configurable set of namespaces are offered fully qualified:
+  typing `Beg` suggests `UI::Begin` (old vscode-openplanet-angelscript
+  QoL parity). Items are labelled `NS::Member`, filter on the bare member
+  name, and sort after in-scope completions. Defaults: `UI` and `Math`
+  built in, plus `UX` and `MathX` as custom defaults. Config (dotfile or
+  init options): `shortcut_namespaces` (replaces the UX/MathX default),
+  `shortcut_disable_default_namespaces` (drop UI/Math entirely),
+  `shortcut_match_enums` (also suggest enums and enum values from those
+  namespaces; off by default).
+
 ### Fixed
 - **Single-arg constructor conversions in call arguments (GH #54)** — a
   value type's one-argument constructor is an implicit conversion in

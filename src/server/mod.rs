@@ -329,6 +329,22 @@ impl Backend {
         self.snapshot.read().await.clone()
     }
 
+    /// Config serving the given URI: the owning shard's layered config, or
+    /// the legacy single-workspace config when no shards exist. Strays (t4)
+    /// fall back to the legacy view — matching `snapshot_for`'s behavior of
+    /// answering from the per-request context only.
+    async fn config_for(&self, uri: &Url) -> LspConfig {
+        if !self.workspaces.read().await.is_empty() {
+            if let Some(root) = self.workspace_root_for(uri).await {
+                let ws = self.workspaces.read().await;
+                if let Some(shard) = ws.iter().find(|w| w.root == root) {
+                    return shard.config.clone();
+                }
+            }
+        }
+        self.config.read().await.clone()
+    }
+
     /// Build a workspace analysis snapshot: open documents overlaid on the
     /// on-disk plugin workspace (plugin sources + dependency exports).
     /// Shared path with CLI `check`; the snapshot owns parse + symbol
@@ -878,6 +894,8 @@ impl LanguageServer for Backend {
         };
         let type_index = self.type_index.read().await;
         let snapshot = self.snapshot_for(uri).await;
+        let cfg = self.config_for(uri).await;
+        let shortcut_namespaces = cfg.shortcut_namespace_list();
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
@@ -888,6 +906,8 @@ impl LanguageServer for Backend {
             pos,
             type_index.as_deref(),
             Some(snapshot.symbols()),
+            &shortcut_namespaces,
+            cfg.shortcut_match_enums,
         );
         Ok(Some(CompletionResponse::Array(items)))
     }

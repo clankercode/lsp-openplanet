@@ -34,6 +34,19 @@ pub struct LspConfig {
     /// the opened folder appended so declared sibling deps resolve).
     /// Populated by the server, not config files.
     pub extra_plugins_dirs: Vec<PathBuf>,
+    /// Custom namespaces for completion shortcuts (e.g. `["UX", "MathX"]`
+    /// → `UX::DrawGrid` appears when typing `Dra`). `None` = default
+    /// `["UX", "MathX"]`; explicit setting replaces the default. Combined
+    /// with the built-in defaults `["UI", "Math"]` unless
+    /// `shortcut_disable_default_namespaces` is set.
+    pub shortcut_namespaces: Option<Vec<String>>,
+    /// When true, only `shortcut_namespaces` (if any) get shortcut
+    /// completions — the built-in `UI`/`Math` defaults are dropped.
+    pub shortcut_disable_default_namespaces: bool,
+    /// Also offer enum types and enum values from the shortcut namespaces
+    /// (e.g. `UI::WindowFlags`, `UI::WindowFlags::NoTitleBar`). Off by
+    /// default; functions are always matched.
+    pub shortcut_match_enums: bool,
 }
 
 impl Default for LspConfig {
@@ -53,6 +66,9 @@ impl Default for LspConfig {
             ignore_paths: None,
             plugin_roots: Vec::new(),
             extra_plugins_dirs: Vec::new(),
+            shortcut_namespaces: None,
+            shortcut_disable_default_namespaces: false,
+            shortcut_match_enums: false,
         }
     }
 }
@@ -69,10 +85,17 @@ struct ConfigFile {
     /// `["src"]`). When set, ONLY these are checked. Takes precedence over
     /// `ignore_paths`. Absent → fall through to `ignore_paths`, else check all.
     source_paths: Option<Vec<String>>,
-    /// Blocklist of root-relative dirs to skip when checking `.as` files
+    /// Blocklist of root-relative dirs to skip when checking `.as` files in
     /// (e.g. `["OtherPacks", "vendor"]`). Only used when `source_paths` is
     /// absent. Absent (and no `source_paths`) → check every `.as` under root.
     ignore_paths: Option<Vec<String>>,
+    /// Completion-shortcut namespaces (e.g. `["UX", "MathX", "Net"]`).
+    /// Replaces the default `["UX", "MathX"]` when present.
+    shortcut_namespaces: Option<Vec<String>>,
+    /// Drop the built-in `UI`/`Math` shortcut namespaces.
+    shortcut_disable_default_namespaces: Option<bool>,
+    /// Include enums + enum values in shortcut completions.
+    shortcut_match_enums: Option<bool>,
 }
 
 /// How bare TTY launches behave when no subcommand is given.
@@ -220,6 +243,22 @@ impl LspConfig {
         }
     }
 
+    /// The namespaces offered as completion shortcuts at identifier
+    /// positions (old vscode-openplanet-angelscript parity): built-in
+    /// `UI`/`Math` unless disabled, plus `shortcut_namespaces` (default
+    /// `UX`/`MathX`).
+    pub fn shortcut_namespace_list(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if !self.shortcut_disable_default_namespaces {
+            out.extend(["UI".to_string(), "Math".to_string()]);
+        }
+        match &self.shortcut_namespaces {
+            Some(custom) => out.extend(custom.iter().cloned()),
+            None => out.extend(["UX".to_string(), "MathX".to_string()]),
+        }
+        out
+    }
+
     /// Build config from layers: auto-detect → parent (opened-folder) config
     /// → config file → init params. The parent layer only applies when the
     /// workspace root differs from the per-root path (multi-root t5).
@@ -249,6 +288,9 @@ impl LspConfig {
             ignore_paths: None,
             plugin_roots: Vec::new(),
             extra_plugins_dirs: Vec::new(),
+            shortcut_namespaces: None,
+            shortcut_disable_default_namespaces: false,
+            shortcut_match_enums: false,
         };
 
         // Layer 1: Auto-detect
@@ -461,6 +503,15 @@ impl LspConfig {
         if let Some(ignore_paths) = cfg.ignore_paths {
             self.ignore_paths = Some(ignore_paths.into_iter().map(PathBuf::from).collect());
         }
+        if let Some(namespaces) = cfg.shortcut_namespaces {
+            self.shortcut_namespaces = Some(namespaces);
+        }
+        if let Some(disable) = cfg.shortcut_disable_default_namespaces {
+            self.shortcut_disable_default_namespaces = disable;
+        }
+        if let Some(match_enums) = cfg.shortcut_match_enums {
+            self.shortcut_match_enums = match_enums;
+        }
     }
 
     fn apply_init_options(&mut self, opts: &serde_json::Value) {
@@ -483,6 +534,23 @@ impl LspConfig {
         // Plugin-root override (t2): non-empty string array replaces
         // server-side discovery. Empty / absent / non-string entries never
         // produce an override (empty stays empty → discovery runs).
+        if let Some(namespaces) = opts.get("shortcut_namespaces").and_then(|v| v.as_array()) {
+            self.shortcut_namespaces = Some(
+                namespaces
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+            );
+        }
+        if let Some(disable) = opts
+            .get("shortcut_disable_default_namespaces")
+            .and_then(|v| v.as_bool())
+        {
+            self.shortcut_disable_default_namespaces = disable;
+        }
+        if let Some(match_enums) = opts.get("shortcut_match_enums").and_then(|v| v.as_bool()) {
+            self.shortcut_match_enums = match_enums;
+        }
         if let Some(roots) = opts.get("plugin_roots").and_then(|v| v.as_array()) {
             let parsed: Vec<PathBuf> = roots
                 .iter()
@@ -714,5 +782,88 @@ mod tests {
             "plugins_dir must derive from the variant folder"
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // === Namespace-shortcut config (completion QoL) ===
+
+    #[test]
+    fn shortcut_namespace_list_default_includes_builtins_and_custom_defaults() {
+        let cfg = LspConfig::default();
+        assert_eq!(
+            cfg.shortcut_namespace_list(),
+            vec!["UI", "Math", "UX", "MathX"]
+        );
+        assert!(!cfg.shortcut_match_enums);
+    }
+
+    #[test]
+    fn shortcut_namespace_list_custom_replaces_custom_defaults() {
+        let cfg = LspConfig {
+            shortcut_namespaces: Some(vec!["Net".to_string(), "Audio".to_string()]),
+            ..LspConfig::default()
+        };
+        assert_eq!(
+            cfg.shortcut_namespace_list(),
+            vec!["UI", "Math", "Net", "Audio"]
+        );
+    }
+
+    #[test]
+    fn shortcut_namespace_list_disable_defaults_keeps_custom_only() {
+        let cfg = LspConfig {
+            shortcut_disable_default_namespaces: true,
+            shortcut_namespaces: Some(vec!["UX".to_string()]),
+            ..LspConfig::default()
+        };
+        assert_eq!(cfg.shortcut_namespace_list(), vec!["UX"]);
+    }
+
+    #[test]
+    fn shortcut_namespace_list_disable_defaults_with_no_custom_is_empty() {
+        let cfg = LspConfig {
+            shortcut_disable_default_namespaces: true,
+            shortcut_namespaces: Some(Vec::new()),
+            ..LspConfig::default()
+        };
+        assert!(cfg.shortcut_namespace_list().is_empty());
+    }
+
+    #[test]
+    fn shortcut_namespace_list_disable_defaults_alone_keeps_custom_defaults() {
+        let cfg = LspConfig {
+            shortcut_disable_default_namespaces: true,
+            ..LspConfig::default()
+        };
+        assert_eq!(cfg.shortcut_namespace_list(), vec!["UX", "MathX"]);
+    }
+
+    #[test]
+    fn shortcut_settings_parse_from_config_file() {
+        let tmp = std::env::temp_dir().join(format!("opl-shortcut-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            r#"shortcut_namespaces = ["Net", "Audio"]
+shortcut_disable_default_namespaces = true
+shortcut_match_enums = true
+"#,
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert_eq!(cfg.shortcut_namespace_list(), vec!["Net", "Audio"]);
+        assert!(cfg.shortcut_match_enums);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn shortcut_settings_parse_from_init_options() {
+        let opts = serde_json::json!({
+            "shortcut_namespaces": ["Data"],
+            "shortcut_disable_default_namespaces": true,
+            "shortcut_match_enums": true
+        });
+        let cfg = LspConfig::load(None, Some(&opts));
+        assert_eq!(cfg.shortcut_namespace_list(), vec!["Data"]);
+        assert!(cfg.shortcut_match_enums);
     }
 }

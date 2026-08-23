@@ -55,6 +55,16 @@ default_mode = "tui"   # or "lsp"
 # neither, every .as under the root is checked (safe default).
 # source_paths = ["src"]
 # ignore_paths = ["OtherPacks", "vendor"]
+
+# Namespace-shortcut completions (old vscode-openplanet-angelscript QoL):
+# typing `Beg` suggests `UI::Begin` etc. at identifier positions. Built-in
+# defaults are `UI` + `Math`; `shortcut_namespaces` adds your own (defaults
+# to `UX` + `MathX` when unset — set it explicitly to replace). Set
+# `shortcut_disable_default_namespaces = true` to drop UI/Math entirely;
+# `shortcut_match_enums = true` also suggests enums and enum values.
+# shortcut_namespaces = ["UX", "MathX", "Net"]
+# shortcut_disable_default_namespaces = false
+# shortcut_match_enums = false
 ```
 
 Point your editor’s AngelScript / Openplanet language client at the binary

@@ -170,7 +170,7 @@ impl TypeIndex {
         }
     }
 
-    fn add_core(&mut self, db: &CoreDatabase) {
+    pub(crate) fn add_core(&mut self, db: &CoreDatabase) {
         for func in &db.functions {
             let qname = Self::qualify(&func.ns, &func.name);
             let info = FunctionInfo {
@@ -411,6 +411,32 @@ impl TypeIndex {
     /// Iterate all known enums by qualified name.
     pub fn enums_iter(&self) -> impl Iterator<Item = (&String, &EnumInfo)> {
         self.enums.iter()
+    }
+
+    /// Iterate all function overload sets directly under `namespace`
+    /// (e.g., `UI` → `UI::Begin` but not `UI::Layout::Foo`). Used by
+    /// namespace-shortcut completions.
+    pub fn namespace_functions(
+        &self,
+        namespace: &str,
+    ) -> impl Iterator<Item = (&String, &Vec<FunctionInfo>)> {
+        let prefix = format!("{}::", namespace);
+        self.functions.iter().filter(move |(qname, _)| {
+            qname
+                .strip_prefix(&prefix)
+                .is_some_and(|rest| !rest.contains("::"))
+        })
+    }
+
+    /// Iterate all enums directly under `namespace` (qualified name → info).
+    /// Used by namespace-shortcut completions when enum matching is enabled.
+    pub fn namespace_enums(&self, namespace: &str) -> impl Iterator<Item = (&String, &EnumInfo)> {
+        let prefix = format!("{}::", namespace);
+        self.enums.iter().filter(move |(qname, _)| {
+            qname
+                .strip_prefix(&prefix)
+                .is_some_and(|rest| !rest.contains("::"))
+        })
     }
 
     /// Get all member names for namespace completion (e.g., after "UI::")
