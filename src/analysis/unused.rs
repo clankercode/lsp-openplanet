@@ -99,7 +99,7 @@ impl WorkspaceUsage {
             used.extend(checker.take_used_names());
             local_decls.push(checker.take_local_decls());
         }
-        let locals = locals::LocalsInputs::new(snapshot, local_decls);
+        let locals = locals::LocalsInputs::new(snapshot, external, local_decls);
         Self { used, locals }
     }
 

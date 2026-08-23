@@ -32,6 +32,7 @@ use crate::parser::ast::{Item, TypeExpr, TypeExprKind};
 use crate::symbols::scope::SymbolKind;
 use crate::symbols::SymbolTable;
 use crate::typecheck::checker::{LocalDeclKind, LocalDeclRecord};
+use crate::typedb::TypeIndex;
 
 /// One file's identifier tokens, indexed for the two syntactic questions
 /// this module asks.
@@ -167,10 +168,20 @@ struct ScopedTypeName {
     namespace: String,
 }
 
-/// `(class, member)` pairs whose signature is imposed by a workspace
-/// interface. Interface bases and methods are not retained in the pooled
-/// symbol table, so collect this deliberately narrow view from the AST.
-fn interface_implementations(snapshot: &AnalysisSnapshot) -> HashSet<(String, String)> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ContractAncestor {
+    Source(String),
+    External(String),
+}
+
+/// `(class, member)` pairs whose signature is imposed by an inherited
+/// workspace-interface or external typedb contract. Workspace interface
+/// bases/methods are recovered from the AST because the pooled symbol table
+/// does not retain them; external parents/methods come from the typedb.
+fn inherited_contracts(
+    snapshot: &AnalysisSnapshot,
+    external: Option<&TypeIndex>,
+) -> HashSet<(String, String)> {
     let mut types = HashMap::new();
     for file in snapshot.files() {
         let source = file.analysis.masked_source();
@@ -190,31 +201,58 @@ fn interface_implementations(snapshot: &AnalysisSnapshot) -> HashSet<(String, St
         let mut visited = HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         for parent in &class.parents {
-            if let Some(parent) = resolve_source_type(&types, parent) {
+            if let Some(parent) = resolve_contract_parent(&types, external, parent) {
                 queue.push_back(parent);
             }
         }
-        while let Some(ancestor_name) = queue.pop_front() {
-            if !visited.insert(ancestor_name.clone()) {
+        while let Some(ancestor) = queue.pop_front() {
+            if !visited.insert(ancestor.clone()) {
                 continue;
             }
             if visited.len() > 64 {
                 break;
             }
-            let Some(ancestor) = types.get(&ancestor_name) else {
-                continue;
-            };
-            if ancestor.is_interface {
-                out.extend(
-                    ancestor
-                        .methods
-                        .iter()
-                        .map(|member| (class_name.clone(), member.clone())),
-                );
-            }
-            for parent in &ancestor.parents {
-                if let Some(parent) = resolve_source_type(&types, parent) {
-                    queue.push_back(parent);
+            match ancestor {
+                ContractAncestor::Source(ancestor_name) => {
+                    let Some(ancestor) = types.get(&ancestor_name) else {
+                        continue;
+                    };
+                    if ancestor.is_interface {
+                        out.extend(
+                            ancestor
+                                .methods
+                                .iter()
+                                .map(|member| (class_name.clone(), member.clone())),
+                        );
+                    }
+                    for parent in &ancestor.parents {
+                        if let Some(parent) = resolve_contract_parent(&types, external, parent) {
+                            queue.push_back(parent);
+                        }
+                    }
+                }
+                ContractAncestor::External(ancestor_name) => {
+                    let Some(external) = external else {
+                        continue;
+                    };
+                    let Some(ancestor) = external.lookup_type(&ancestor_name) else {
+                        continue;
+                    };
+                    out.extend(
+                        ancestor
+                            .methods
+                            .iter()
+                            .map(|member| (class_name.clone(), member.name.clone())),
+                    );
+                    if let Some(parent) = &ancestor.parent {
+                        let parent = ScopedTypeName {
+                            written: parent.clone(),
+                            namespace: ancestor.namespace.clone().unwrap_or_default(),
+                        };
+                        if let Some(parent) = resolve_external_type(external, &parent) {
+                            queue.push_back(ContractAncestor::External(parent));
+                        }
+                    }
                 }
             }
         }
@@ -296,9 +334,10 @@ fn source_type_name(source: &str, ty: &TypeExpr) -> Option<String> {
     }
 }
 
-/// Resolve like a lexical type name, without a tail-name fallback. The
-/// latter would conflate `Api::Parent` with `Impl::Parent` and suppress a
-/// real warning merely because the short names collide.
+/// Resolve like the workspace type resolver: lexical candidates first,
+/// followed by an exact global name, then an unqualified tail only when it
+/// has one canonical candidate. Ambiguous tails must stay unresolved rather
+/// than suppress a warning based on arbitrary hash-map order.
 fn resolve_source_type(
     types: &HashMap<String, SourceType>,
     name: &ScopedTypeName,
@@ -318,9 +357,73 @@ fn resolve_source_type(
         };
         namespace = outer;
     }
-    types
-        .contains_key(&name.written)
-        .then(|| name.written.clone())
+    if types.contains_key(&name.written) {
+        return Some(name.written.clone());
+    }
+    if name.written.contains("::") {
+        return None;
+    }
+    let mut matches = types
+        .keys()
+        .filter(|candidate| tail_name(candidate) == name.written);
+    let only = matches.next()?.clone();
+    matches.next().is_none().then_some(only)
+}
+
+fn resolve_contract_parent(
+    types: &HashMap<String, SourceType>,
+    external: Option<&TypeIndex>,
+    name: &ScopedTypeName,
+) -> Option<ContractAncestor> {
+    if let Some(source) = resolve_source_type(types, name) {
+        return Some(ContractAncestor::Source(source));
+    }
+    // An ambiguous workspace tail must not fall through to a coincidental
+    // external short-name match: the source resolver could not choose a
+    // canonical parent, so neither can this exemption pass.
+    if !name.written.contains("::")
+        && types
+            .keys()
+            .filter(|candidate| tail_name(candidate) == name.written)
+            .take(2)
+            .count()
+            > 1
+    {
+        return None;
+    }
+    external
+        .and_then(|index| resolve_external_type(index, name))
+        .map(ContractAncestor::External)
+}
+
+fn resolve_external_type(external: &TypeIndex, name: &ScopedTypeName) -> Option<String> {
+    let mut namespace = name.namespace.as_str();
+    loop {
+        let candidate = if namespace.is_empty() {
+            name.written.clone()
+        } else {
+            format!("{namespace}::{}", name.written)
+        };
+        if external.lookup_type(&candidate).is_some() {
+            return Some(candidate);
+        }
+        let Some((outer, _)) = namespace.rsplit_once("::") else {
+            break;
+        };
+        namespace = outer;
+    }
+    if external.lookup_type(&name.written).is_some() {
+        return Some(name.written.clone());
+    }
+    if name.written.contains("::") {
+        return None;
+    }
+    let mut matches = external
+        .find_by_short_name(&name.written)
+        .iter()
+        .filter(|candidate| external.lookup_type(candidate).is_some());
+    let only = matches.next()?.clone();
+    matches.next().is_none().then_some(only)
 }
 
 /// Snapshot-wide inputs to the locals/params join, built ONCE per
@@ -341,13 +444,17 @@ pub(super) struct LocalsInputs {
     value_refs: HashSet<String>,
     /// Workspace-wide base-of-a-virtual-pair set.
     overridden: HashSet<(String, String)>,
-    /// Workspace interface contracts recovered from the source AST.
-    interface_implementations: HashSet<(String, String)>,
+    /// Workspace-interface and external inherited contracts.
+    inherited_contracts: HashSet<(String, String)>,
 }
 
 impl LocalsInputs {
     /// `decls` come from the same check pass that collects usage.
-    pub(super) fn new(snapshot: &AnalysisSnapshot, decls: Vec<Vec<LocalDeclRecord>>) -> Self {
+    pub(super) fn new(
+        snapshot: &AnalysisSnapshot,
+        external: Option<&TypeIndex>,
+        decls: Vec<Vec<LocalDeclRecord>>,
+    ) -> Self {
         let scans: Vec<FileScan> = snapshot
             .files()
             .iter()
@@ -362,7 +469,7 @@ impl LocalsInputs {
             scans,
             value_refs,
             overridden: members_overridden_by_subclasses(snapshot.symbols()),
-            interface_implementations: interface_implementations(snapshot),
+            inherited_contracts: inherited_contracts(snapshot, external),
         }
     }
 }
@@ -408,7 +515,7 @@ pub(super) fn collect_unused_locals(
             scan: &inputs.scans[file_id],
             value_refs: &inputs.value_refs,
             overridden: &inputs.overridden,
-            interface_implementations: &inputs.interface_implementations,
+            inherited_contracts: &inputs.inherited_contracts,
             is_export_file: export_paths.contains(&file.path),
             symbols,
             unused_symbol_names,
@@ -432,7 +539,7 @@ struct FileCtx<'a> {
     value_refs: &'a HashSet<String>,
     /// Workspace-wide base-of-a-virtual-pair set.
     overridden: &'a HashSet<(String, String)>,
-    interface_implementations: &'a HashSet<(String, String)>,
+    inherited_contracts: &'a HashSet<(String, String)>,
     is_export_file: bool,
     symbols: &'a SymbolTable,
     unused_symbol_names: &'a HashSet<String>,
@@ -540,7 +647,7 @@ impl FileCtx<'_> {
             return true;
         }
         if self
-            .interface_implementations
+            .inherited_contracts
             .contains(&(owner.to_string(), member.to_string()))
         {
             return true;
@@ -569,6 +676,7 @@ mod tests {
     use crate::analysis::unused::unused_declarations;
     use crate::analysis_snapshot::AnalysisSnapshot;
     use crate::config::LspConfig;
+    use crate::typedb::TypeIndex;
     use std::collections::HashSet as StdHashSet;
     use std::path::PathBuf;
 
@@ -576,6 +684,19 @@ mod tests {
     fn report_of(src: &str) -> Vec<String> {
         let snap = snap_of(&[("a.as", src)]);
         names(&unused_declarations(&snap, None, &StdHashSet::new()))
+    }
+
+    fn report_with_typedb(src: &str) -> Vec<String> {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let core = root.join("tests/fixtures/typedb/OpenplanetCore.json");
+        let next = root.join("tests/fixtures/typedb/OpenplanetNext.json");
+        let index = TypeIndex::load(&core, &next).expect("typedb fixtures must load");
+        let snap = snap_of(&[("a.as", src)]);
+        names(&unused_declarations(
+            &snap,
+            Some(&index),
+            &StdHashSet::new(),
+        ))
     }
 
     fn assert_has(report: &[String], want: &str) {
@@ -840,6 +961,31 @@ mod tests {
             "interface IBase {\n    void Do(int a);\n}\ninterface IThing : IBase {}\nclass C : IThing {\n    void Do(int a) {}\n}\nvoid Main() { C c; c.Do(1); }\n",
         );
         assert_lacks(&report, "C::Do::a");
+    }
+
+    #[test]
+    fn unique_cross_namespace_interface_tail_imposes_params() {
+        let report = report_of(
+            "namespace Api {\n    interface IThing { void Do(int a); }\n}\nnamespace Impl {\n    class C : IThing { void Do(int a) {} }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
+        );
+        assert_lacks(&report, "Impl::C::Do::a");
+    }
+
+    #[test]
+    fn ambiguous_cross_namespace_interface_tail_does_not_impose_params() {
+        let report = report_of(
+            "namespace ApiA {\n    interface IThing { void Do(int a); }\n}\nnamespace ApiB {\n    interface IThing { void Do(int a); }\n}\nnamespace Impl {\n    class C : IThing { void Do(int a) {} }\n}\nvoid Main() { Impl::C c; c.Do(1); }\n",
+        );
+        assert_has(&report, "Impl::C::Do::a");
+    }
+
+    #[test]
+    fn external_typedb_base_contract_imposes_params() {
+        let report = report_with_typedb(
+            "class Direct : CGameApp {\n    void ShowMenu(CGameMenu@ menu) {}\n}\nclass ThroughParent : CGameManialinkEntry {\n    bool HasClass(const string &in className) { return false; }\n}\nvoid Main() {\n    Direct direct;\n    direct.ShowMenu(null);\n    ThroughParent inherited;\n    bool _has = inherited.HasClass(\"x\");\n}\n",
+        );
+        assert_lacks(&report, "Direct::ShowMenu::menu");
+        assert_lacks(&report, "ThroughParent::HasClass::className");
     }
 
     #[test]
