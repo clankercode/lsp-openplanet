@@ -27,7 +27,6 @@ use std::path::Path;
 
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::symbols::scope::{Symbol, SymbolKind};
-use crate::symbols::SymbolTable;
 use crate::typecheck::checker::Checker;
 use crate::typecheck::GlobalScope;
 
@@ -215,7 +214,7 @@ fn unused_declarations_filtered(
         }
         let source = file.analysis.masked_source();
         for sym in symbols.file_symbols(file_id) {
-            if let Some(unused) = evaluate_symbol(sym, usage, source, symbols) {
+            if let Some(unused) = evaluate_symbol(sym, usage, source) {
                 out.push(unused);
             }
         }
@@ -243,7 +242,6 @@ fn evaluate_symbol(
     sym: &Symbol,
     usage: &WorkspaceUsage,
     source: &str,
-    symbols: &SymbolTable,
 ) -> Option<UnusedDeclaration> {
     let (kind, simple_name) = match &sym.kind {
         SymbolKind::Class { .. } => ("class", tail_name(&sym.name)),
@@ -292,16 +290,13 @@ fn evaluate_symbol(
         return None;
     }
 
-    // `override` methods are virtual dispatch: if ANY class in the parent
-    // chain declares a member with the same name, this decl is an
-    // override and its "use" is the base's (engine- or framework-invoked)
-    // — never warn. Parent names are short-form in the pooled table; the
-    // tail match mirrors `GlobalScope::workspace_class_member`'s walk.
+    // Inherited methods are virtual dispatch: their "use" is the base's
+    // (engine- or framework-invoked), so never warn. The locals input owns
+    // the same canonical source/external ancestry graph used for parameter
+    // exemptions; do not independently tail-resolve parent names here.
     if let SymbolKind::Function { .. } = &sym.kind {
-        if let Some((owner, member)) = sym.name.rsplit_once("::") {
-            if class_chain_declares(symbols, owner, member) {
-                return None;
-            }
+        if usage.locals.function_has_inherited_contract(&sym.name) {
+            return None;
         }
     }
 
@@ -348,57 +343,6 @@ fn evaluate_symbol(
 /// Last `::`-segment of a pooled-table qualified name.
 fn tail_name(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
-}
-
-/// True when `class_name` or any ancestor (via the pooled table's parent
-/// lists) declares a member named `member` — i.e. `Class::member` is an
-/// override. Cycle-guarded, depth-capped.
-fn class_chain_declares(symbols: &SymbolTable, class_name: &str, member: &str) -> bool {
-    let mut visited = std::collections::HashSet::new();
-    let mut queue = std::collections::VecDeque::from([class_name.to_string()]);
-    let mut hops = 0usize;
-    while let Some(class) = queue.pop_front() {
-        if !visited.insert(class.clone()) {
-            continue;
-        }
-        hops += 1;
-        if hops > 64 {
-            break;
-        }
-        for sym in symbols.lookup(&class) {
-            if let SymbolKind::Class { parents, .. } = &sym.kind {
-                for parent in parents {
-                    // Parents are stored as written (often short-form);
-                    // try exact then tail match.
-                    if !symbols.lookup(parent).is_empty() {
-                        queue.push_back(parent.clone());
-                    } else if let Some(tail) =
-                        symbols.lookup_tail(parent).first().map(|s| s.name.clone())
-                    {
-                        queue.push_back(tail);
-                    }
-                }
-            }
-        }
-        let qualified = format!("{}::{}", class, member);
-        if !symbols.lookup(&qualified).is_empty() {
-            // Declared on THIS class — only counts as an override when an
-            // ANCESTOR also declares it (sym itself is the decl under
-            // evaluation, at the front of the walk).
-            if class != class_name {
-                return true;
-            }
-        } else if class != class_name
-            && !symbols.lookup_tail(member).is_empty()
-            && symbols
-                .lookup_members(&class)
-                .iter()
-                .any(|s| s.name.ends_with(&format!("::{}", member)))
-        {
-            return true;
-        }
-    }
-    false
 }
 
 /// True when the line containing `offset` ends with an ignore marker

@@ -25,10 +25,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use super::{class_chain_declares, has_ignore_comment, tail_name, UnusedDeclaration};
+use super::{has_ignore_comment, tail_name, UnusedDeclaration};
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::lexer::{self, TokenKind};
-use crate::parser::ast::{Item, TypeExpr, TypeExprKind};
+use crate::parser::ast::{ClassMember, Item, TypeExpr, TypeExprKind};
 use crate::symbols::scope::SymbolKind;
 use crate::symbols::SymbolTable;
 use crate::typecheck::checker::{LocalDeclKind, LocalDeclRecord};
@@ -94,67 +94,6 @@ impl FileScan {
     }
 }
 
-/// `(class, member)` pairs a *subclass* re-declares — the base half of a
-/// virtual pair. [`class_chain_declares`] covers the derived half; an
-/// abstract base stub (`void Render(Vis@ v) { throw("not implemented"); }`)
-/// needs this one, because the descendants fix its signature.
-fn members_overridden_by_subclasses(symbols: &SymbolTable) -> HashSet<(String, String)> {
-    let mut out = HashSet::new();
-    for sym in symbols.all_symbols() {
-        if !matches!(sym.kind, SymbolKind::Class { .. }) {
-            continue;
-        }
-        let ancestors = ancestors_of(symbols, &sym.name);
-        if ancestors.is_empty() {
-            continue;
-        }
-        // `SymbolKind::Class::members` is not populated by the extractor;
-        // the pooled `Class::member` entries are the member list.
-        for member_sym in symbols.lookup_members(&sym.name) {
-            let member = tail_name(&member_sym.name);
-            for ancestor in &ancestors {
-                if !symbols.lookup(&format!("{ancestor}::{member}")).is_empty() {
-                    out.insert((ancestor.clone(), member.to_string()));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Ancestor class/interface names of `class_name`, exclusive. Parents are
-/// stored as written (often short-form), so an exact lookup is tried
-/// first and a tail match second — the same resolution
-/// [`class_chain_declares`] uses. Cycle-guarded, depth-capped.
-fn ancestors_of(symbols: &SymbolTable, class_name: &str) -> Vec<String> {
-    let mut visited = HashSet::from([class_name.to_string()]);
-    let mut queue = std::collections::VecDeque::from([class_name.to_string()]);
-    let mut out = Vec::new();
-    while let Some(class) = queue.pop_front() {
-        if out.len() > 64 {
-            break;
-        }
-        for sym in symbols.lookup(&class) {
-            let SymbolKind::Class { parents, .. } = &sym.kind else {
-                continue;
-            };
-            for parent in parents {
-                let resolved = if symbols.lookup(parent).is_empty() {
-                    symbols.lookup_tail(parent).first().map(|s| s.name.clone())
-                } else {
-                    Some(parent.clone())
-                };
-                let Some(resolved) = resolved else { continue };
-                if visited.insert(resolved.clone()) {
-                    out.push(resolved.clone());
-                    queue.push_back(resolved);
-                }
-            }
-        }
-    }
-    out
-}
-
 #[derive(Debug)]
 struct SourceType {
     is_interface: bool,
@@ -174,14 +113,23 @@ enum ContractAncestor {
     External(String),
 }
 
-/// `(class, member)` pairs whose signature is imposed by an inherited
-/// workspace-interface or external typedb contract. Workspace interface
-/// bases/methods are recovered from the AST because the pooled symbol table
-/// does not retain them; external parents/methods come from the typedb.
+#[derive(Debug, Default)]
+struct SignatureContracts {
+    /// `(derived class, inherited member)` — derived/interface/external half.
+    inherited: HashSet<(String, String)>,
+    /// `(base class, overridden member)` — base half fixed by a descendant.
+    overridden: HashSet<(String, String)>,
+}
+
+/// Signature contracts imposed by inherited workspace class/interface or
+/// external typedb methods. Workspace ancestry and methods are recovered
+/// from the AST because the pooled symbol table loses interface detail and
+/// cannot resolve ambiguous parent tails safely; external contracts come
+/// from the typedb.
 fn inherited_contracts(
     snapshot: &AnalysisSnapshot,
     external: Option<&TypeIndex>,
-) -> HashSet<(String, String)> {
+) -> SignatureContracts {
     let mut types = HashMap::new();
     for file in snapshot.files() {
         let source = file.analysis.masked_source();
@@ -193,7 +141,7 @@ fn inherited_contracts(
         .filter(|(_, ty)| !ty.is_interface)
         .map(|(name, _)| name.clone())
         .collect();
-    let mut out = HashSet::new();
+    let mut out = SignatureContracts::default();
     for class_name in class_names {
         let Some(class) = types.get(&class_name) else {
             continue;
@@ -217,12 +165,18 @@ fn inherited_contracts(
                     let Some(ancestor) = types.get(&ancestor_name) else {
                         continue;
                     };
-                    if ancestor.is_interface {
-                        out.extend(
-                            ancestor
+                    out.inherited.extend(
+                        ancestor
+                            .methods
+                            .iter()
+                            .map(|member| (class_name.clone(), member.clone())),
+                    );
+                    if !ancestor.is_interface {
+                        out.overridden.extend(
+                            class
                                 .methods
-                                .iter()
-                                .map(|member| (class_name.clone(), member.clone())),
+                                .intersection(&ancestor.methods)
+                                .map(|member| (ancestor_name.clone(), member.clone())),
                         );
                     }
                     for parent in &ancestor.parents {
@@ -238,7 +192,7 @@ fn inherited_contracts(
                     let Some(ancestor) = external.lookup_type(&ancestor_name) else {
                         continue;
                     };
-                    out.extend(
+                    out.inherited.extend(
                         ancestor
                             .methods
                             .iter()
@@ -289,6 +243,14 @@ fn collect_source_types(
                             written,
                             namespace: namespace.to_string(),
                         })
+                    }));
+                entry
+                    .methods
+                    .extend(class.members.iter().filter_map(|member| {
+                        let ClassMember::Method(method) = member else {
+                            return None;
+                        };
+                        Some(method.name.text(source).to_string())
                     }));
             }
             Item::Interface(interface) => {
@@ -465,7 +427,7 @@ pub(super) struct LocalsInputs {
     value_refs: HashSet<String>,
     /// Workspace-wide base-of-a-virtual-pair set.
     overridden: HashSet<(String, String)>,
-    /// Workspace-interface and external inherited contracts.
+    /// Workspace class/interface and external inherited contracts.
     inherited_contracts: HashSet<(String, String)>,
 }
 
@@ -485,13 +447,21 @@ impl LocalsInputs {
             .iter()
             .flat_map(|s| s.value_refs.iter().cloned())
             .collect();
+        let contracts = inherited_contracts(snapshot, external);
         Self {
             decls,
             scans,
             value_refs,
-            overridden: members_overridden_by_subclasses(snapshot.symbols()),
-            inherited_contracts: inherited_contracts(snapshot, external),
+            overridden: contracts.overridden,
+            inherited_contracts: contracts.inherited,
         }
+    }
+
+    pub(super) fn function_has_inherited_contract(&self, function: &str) -> bool {
+        function.rsplit_once("::").is_some_and(|(owner, member)| {
+            self.inherited_contracts
+                .contains(&(owner.to_string(), member.to_string()))
+        })
     }
 }
 
@@ -660,11 +630,6 @@ impl FileCtx<'_> {
         // Operator overloads / conversions are invoked through operator
         // syntax; their signature is the language's, not the author's.
         if member.starts_with("op") {
-            return true;
-        }
-        // An ancestor declaring the same member makes this an override /
-        // interface implementation even without the `override` keyword.
-        if class_chain_declares(self.symbols, owner, member) {
             return true;
         }
         if self
@@ -1279,6 +1244,34 @@ mod tests {
             "class Base {\n    string Describe(int i) { return \"base\"; }\n}\nclass Mid : Base {}\nclass Leaf : Mid {\n    string Describe(int i) override { return \"\" + i; }\n}\nvoid Main() { Base@ b = Leaf(); print(b.Describe(1)); }\n",
         );
         assert_lacks(&report, "Base::Describe::i");
+    }
+
+    #[test]
+    fn lexical_namespaced_virtual_pair_exempts_both_halves() {
+        let report = report_of(
+            "namespace Wrong {\n    class Base {}\n}\nnamespace Right {\n    class Base { void Do(int a) {} }\n    class Derived : Base { void Do(int a) {} }\n}\nvoid Main() { Right::Base base; base.Do(1); Right::Derived derived; derived.Do(1); }\n",
+        );
+        assert_lacks(&report, "Right::Base::Do::a");
+        assert_lacks(&report, "Right::Derived::Do::a");
+    }
+
+    #[test]
+    fn partially_qualified_virtual_pair_exempts_both_halves() {
+        let report = report_of(
+            "namespace Api {\n    namespace Core {\n        class Base { void Do(int a) {} }\n    }\n}\nclass Derived : Core::Base { void Do(int a) {} }\nvoid Main() { Api::Core::Base base; base.Do(1); Derived derived; derived.Do(1); }\n",
+        );
+        assert_lacks(&report, "Api::Core::Base::Do::a");
+        assert_lacks(&report, "Derived::Do::a");
+    }
+
+    #[test]
+    fn ambiguous_parent_does_not_create_virtual_pair_exemptions() {
+        let report = report_of(
+            "namespace Left { class Base { void Do(int a) {} } }\nnamespace Right { class Base { void Do(int a) {} } }\nclass Derived : Base { void Do(int a) {} }\nvoid Main() { Left::Base left; left.Do(1); Right::Base right; right.Do(1); Derived derived; derived.Do(1); }\n",
+        );
+        assert_has(&report, "Left::Base::Do::a");
+        assert_has(&report, "Right::Base::Do::a");
+        assert_has(&report, "Derived::Do::a");
     }
 
     #[test]
