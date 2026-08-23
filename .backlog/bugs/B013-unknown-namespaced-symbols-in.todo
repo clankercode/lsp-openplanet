@@ -77,7 +77,9 @@ src/typecheck/checker.rs, src/analysis_snapshot.rs / src/workspace/load.rs
 (module surface query), tests/.
 ## Implementation notes (2026-08-24, lane B, branch fix/ns-unknown-symbols)
 
-Landed: b894040 (rule + tests), 4dab393 (docs), f3d5ae8 (authority fence).
+Landed: b894040 (rule + tests), 4dab393 (docs), f3d5ae8 (unresolved-dependency
+authority fence), 6a91423 (snapshot authority tests), 52a03a5 (typedef parser
+support + CLI coverage).
 
 ### Decision interpretations
 * Triggers (c) and (d) share ONE implementation. The pooled `SymbolTable`
@@ -98,8 +100,9 @@ Landed: b894040 (rule + tests), 4dab393 (docs), f3d5ae8 (authority fence).
   `namespace Outer`, `Inner::Deep()` binds `Outer::Inner::Deep` even when a
   top-level `Inner` exists; the rule walks the enclosing namespace stack
   before firing.
-* `typedef` has no parser support in this repo, so the "typedef under the
-  ns" variant is covered by `funcdef` plus a funcdef-typed global instead.
+* `typedef` now has parser and symbol-table support (52a03a5). The CLI
+  regression verifies that a namespaced typedef parses and resolves without a
+  `No matching symbol` diagnostic.
 
 ### Authority guard widened (decision 3 said "required dependency")
 Probing found a reproducible FP the required-only guard misses:

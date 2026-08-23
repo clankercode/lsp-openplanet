@@ -29,15 +29,17 @@ pub struct PluginWorkspaceLoad {
     pub files: Vec<WorkspaceSourceFile>,
     /// Required dependencies that could not be resolved in any plugins dir.
     pub missing_required_dependencies: Vec<String>,
-    /// True only when [`load_plugin_workspace`] walked a real plugin root
-    /// AND every declared dependency resolved — required, optional, and the
-    /// transitive `export_dependencies` of a resolved dep alike. Diagnostics
-    /// that read the absence of a name as a game-compiler rejection must
-    /// gate on this (GH #58): an unreadable module may declare the very
-    /// symbol being called, and `LspConfig::apply_manifest` defines
+    /// True only when [`load_plugin_workspace`] walked a real plugin root,
+    /// every declared dependency resolved — required, optional, and the
+    /// transitive `export_dependencies` of a resolved dep alike — AND no
+    /// source inclusion/exclusion filter was configured. Diagnostics that
+    /// read the absence of a name as a game-compiler rejection must gate on
+    /// this (GH #58): an unreadable or filtered-out module file may declare
+    /// the very symbol being called, and `LspConfig::apply_manifest` defines
     /// `DEPENDENCY_<ID>` for declared optional deps whether or not they
     /// resolved, so `#if`-guarded code the game would mask out stays live
-    /// here. Every open-documents-only fallback leaves it `false`.
+    /// here. Every open-documents-only or filtered-source fallback leaves it
+    /// `false`.
     pub dependency_closure_complete: bool,
     /// Canonicalized absolute paths of files listed in this plugin's own
     /// info.toml `[script]` `exports` + `shared_exports`; decls in these
@@ -209,6 +211,11 @@ pub fn load_plugin_workspace(
         &search.plugins_dirs,
         &search.plugin_files_search_paths,
     )?;
+    // A configured source filter deliberately omits own-module files. Since
+    // AngelScript namespaces are open and additive across those files, the
+    // pooled table cannot authoritatively prove an absent member is invalid.
+    let dependency_closure_complete =
+        dep.unresolved.is_empty() && search.source_paths.is_none() && search.ignore_paths.is_none();
     for (path, source) in dep.loaded_files {
         // Avoid double-including if a dep export somehow lives under root.
         if files.iter().any(|f| f.path == path) {
@@ -225,7 +232,7 @@ pub fn load_plugin_workspace(
         root,
         files,
         missing_required_dependencies: dep.missing_required,
-        dependency_closure_complete: dep.unresolved.is_empty(),
+        dependency_closure_complete,
         export_paths,
         strict_export_paths,
     })
@@ -750,6 +757,49 @@ dependencies = ["NoSearchPath"]
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         let rel = loaded_rel_paths(&load, &base);
         assert_eq!(rel, vec!["src/Main.as".to_string()], "{rel:?}");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A source filter deliberately drops own-module files from the pooled
+    /// table, so an absent namespace member no longer proves the game would
+    /// reject it. Presence of either config key is enough to break authority,
+    /// including an explicitly empty list.
+    #[test]
+    fn source_filter_config_breaks_dependency_closure_authority() {
+        let base = temp_tree("sp-closure-authority");
+        multi_dir_consumer(&base);
+
+        let cases = [
+            ("unfiltered", None, None, true),
+            (
+                "source allowlist",
+                Some(vec![PathBuf::from("src")]),
+                None,
+                false,
+            ),
+            ("empty source allowlist", Some(Vec::new()), None, false),
+            (
+                "ignore blocklist",
+                None,
+                Some(vec![PathBuf::from("OtherPacks")]),
+                false,
+            ),
+            ("empty ignore blocklist", None, Some(Vec::new()), false),
+        ];
+
+        for (name, source_paths, ignore_paths, expected) in cases {
+            let search = DependencySearch {
+                source_paths,
+                ignore_paths,
+                ..DependencySearch::with_defaults()
+            };
+            let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
+            assert_eq!(
+                load.dependency_closure_complete, expected,
+                "{name}: source filtering must make the module surface non-authoritative"
+            );
+        }
+
         let _ = fs::remove_dir_all(base);
     }
 

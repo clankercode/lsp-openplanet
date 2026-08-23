@@ -129,6 +129,67 @@ fn check_command_exits_zero_when_clean() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// A source filter can omit a sibling file that contributes to an open
+/// AngelScript namespace. The real plugin module still includes that file, so
+/// `check` must not claim its remaining namespace surface is authoritative.
+fn assert_omitted_own_module_namespace_member_stays_silent(name: &str, config: &str) {
+    let root = make_temp_plugin(name);
+    fs::create_dir_all(root.join("omitted")).unwrap();
+    fs::write(root.join(".openplanet-lsp.toml"), config).unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+namespace Shared { void Present() {} }
+void Main() {
+    Shared::Present();
+    Shared::FromOmittedOwnModuleFile();
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("omitted/Contribution.as"),
+        "namespace Shared { void FromOmittedOwnModuleFile() {} }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stdout.contains("No matching symbol 'Shared::FromOmittedOwnModuleFile'"),
+        "an omitted sibling can extend Shared in the real module; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        output.status.success(),
+        "the source filter must not turn an omitted sibling declaration into a diagnostic; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn check_command_source_paths_omit_sibling_namespace_member_without_false_positive() {
+    assert_omitted_own_module_namespace_member_stays_silent(
+        "source-paths-namespace-authority",
+        "source_paths = [\"src\"]\n",
+    );
+}
+
+#[test]
+fn check_command_ignore_paths_omit_sibling_namespace_member_without_false_positive() {
+    assert_omitted_own_module_namespace_member_stays_silent(
+        "ignore-paths-namespace-authority",
+        "ignore_paths = [\"omitted\"]\n",
+    );
+}
+
 #[test]
 fn check_command_accepts_relative_plugin_path() {
     let root = make_temp_plugin("relative-clean");
