@@ -68,3 +68,46 @@ still discovered; `.git` dir contents never parsed.
 Lane D (parallel). Overlaps only `src/config.rs` (additive key) with gh-56.
 Files: src/workspace/project.rs, src/workspace/load.rs, src/config.rs,
 src/cli/mod.rs (flag), Cargo.toml, README.md, CHANGELOG.md, tests/.
+
+
+## Progress (lane D, 2026-08-24)
+
+Implemented on branch `feat/honor-gitignore` (5 commits, 4e91512..d3e772e).
+All 8 DECISIONS implemented as written. Gates: `cargo test --locked` green
+(729 lib + 26 gitignore CLI + 2 gitignore server + all other suites); clippy
+72 warnings / 53 in src (baseline 73/54 -- one pre-existing `map_or` warning
+fixed, zero new); all five FP fixture baselines byte-identical.
+
+Two implementation notes beyond the decision list:
+
+1. `LspConfig`'s ladder applies the USER-GLOBAL config AFTER the workspace
+   layers (config.rs `load_with_parent`: parent -> per-root -> user), the
+   opposite of `UserPrefs`. Decision 1 mandates workspace-wins, so
+   `load_user_config_file` snapshots and restores a workspace-set
+   `honor_gitignore`. Other keys keep their existing (user-global-wins)
+   precedence -- changing them was out of scope. Both directions are covered
+   by tests and the restore line is mutation-verified.
+
+2. `.git` directory contents are now skipped on BOTH discovery paths, not
+   only the gitignore-honoring one. Leaving `.git` walkable under
+   `--no-gitignore` would be a gratuitous inconsistency, and git never tracks
+   its own metadata. Zero practical impact (`.as` files do not live in `.git`).
+
+Deliberately out of scope, worth a follow-up ticket: opening a gitignored
+`.as` file in an EDITOR still yields diagnostics. `Backend::on_change` routes
+by path prefix, not file-set membership, so the buffer is checked against a
+snapshot that no longer contains its gitignored siblings' declarations --
+which can surface new false positives for anyone who gitignores
+compile-critical sources AND opens them. That is decision 4's
+"discovery only" boundary, and `honor_gitignore = false` is the escape hatch,
+but the overlay inconsistency is real.
+
+Real-world measurement across 147 local plugins: 48 of 1872 `.as` files are
+gitignored, all in two plugins, and all of them second copies of the plugin's
+own sources (`.worktrees/`, `.scratch/` probe dirs). tm-control-mcp drops
+107 -> 35 warnings, tm-tournament-station 16 -> 0. Exclusion counts match
+`git check-ignore` exactly (26 and 22). No timing regression (4.94s vs 5.11s
+on tm-editor-plus-plus).
+
+Independent review: codex via `ccc @cx-reviewer` returned PASS with no fixes
+required, and independently re-verified tests, fixture baselines, and clippy.
