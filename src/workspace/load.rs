@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::config::LspConfig;
 use crate::symbols::SymbolTable;
 use crate::typecheck::build_plugin_symbol_table;
-use crate::workspace::deps::resolve_dependency;
+use crate::workspace::deps::{resolve_dependency, resolve_plugin_file};
 use crate::workspace::manifest::Manifest;
 use crate::workspace::project;
 
@@ -112,12 +112,13 @@ fn source_file_included(root: &Path, path: &Path, search: &DependencySearch) -> 
     true
 }
 
-/// Canonicalized paths of this plugin's own `[script]` `exports` +
-/// `shared_exports` files (root-relative entries joined onto `root`).
-/// A listed file that is missing on disk still contributes its joined
-/// path (best-effort): canonicalize falls back to the uncanonicalized
-/// join, matching the dependency-export dedup key behavior above.
-fn own_export_paths(root: &Path) -> HashSet<PathBuf> {
+/// Canonicalized paths of this plugin's own `[script]` `exports` +`
+/// `shared_exports` files. Entries resolve by the same rule as dep
+/// exports (`resolve_plugin_file`): root-join first, then the plugin
+/// files search paths (`src/` etc.). A listed file missing everywhere
+/// still contributes its root-joined path (best-effort) so future file
+/// creation doesn't silently lose the exemption.
+fn own_export_paths(root: &Path, search: &DependencySearch) -> HashSet<PathBuf> {
     let mut paths = HashSet::new();
     let manifest_path = root.join("info.toml");
     if !manifest_path.exists() {
@@ -130,8 +131,9 @@ fn own_export_paths(root: &Path) -> HashSet<PathBuf> {
         return paths;
     };
     for rel in script.exports.iter().chain(script.shared_exports.iter()) {
-        let joined = root.join(rel);
-        let canonical = joined.canonicalize().unwrap_or_else(|_| joined.clone());
+        let resolved = resolve_plugin_file(root, rel, &search.plugin_files_search_paths)
+            .unwrap_or_else(|| root.join(rel));
+        let canonical = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
         paths.insert(canonical);
     }
     paths
@@ -146,7 +148,7 @@ pub fn load_plugin_workspace(
         .canonicalize()
         .map_err(|e| format!("failed to resolve {}: {e}", root.display()))?;
 
-    let export_paths = own_export_paths(&root);
+    let export_paths = own_export_paths(&root, &search);
 
     let mut files = Vec::new();
     for path in project::discover_source_files(&root) {

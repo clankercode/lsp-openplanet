@@ -231,7 +231,7 @@ fn collect_export_files(
     files
 }
 
-fn resolve_plugin_file(
+pub(crate) fn resolve_plugin_file(
     root: &Path,
     file: &str,
     plugin_files_search_paths: &[PathBuf],
