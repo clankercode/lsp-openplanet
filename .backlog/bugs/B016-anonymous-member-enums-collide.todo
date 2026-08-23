@@ -1,0 +1,66 @@
+---
+complexity: high
+created_at: "2026-08-23T15:50:55Z"
+depends_on: []
+estimate_hours: 4
+id: B016
+priority: medium
+status: pending
+tags:
+    - typedb
+    - followup
+    - gh-59-followup
+title: Anonymous member enums collide to Module::UnnamedEnum (Nadeo DB data loss)
+updated_at: "2026-08-23T15:50:55Z"
+---
+Found while implementing B014 (GH #59 typedb pipeline), 2026-08-24. NOT a
+regression — pre-existing since the Nadeo-DB loader was written.
+
+## Symptom
+Inline/anonymous member enums in `OpenplanetNext.json` have no distinct name, so
+the loader keys them all as `<Module>::UnnamedEnum`. 66 inline member-enum type
+names collide within Nadeo modules — e.g. 15 distinct anonymous enums all key to
+`Control::UnnamedEnum`. Whichever one lands first via `or_insert` wins; the other
+14 are silently dropped from the index.
+
+## Already fixed (partially) on branch feat/typedb-pipeline
+`add_nadeo` now registers modules and types in sorted name order
+(`src/typedb/index.rs`), so a given DB always yields the SAME index — the
+determinism half is fixed and guarded by
+`loading_the_same_db_twice_yields_identical_enums`. Before that fix, two loads of
+identical bytes produced different indexes (HashMap iteration order), which made
+`typedb diff` report 8 phantom changed enums when diffing the fixture against
+itself.
+
+## Still open: the data loss
+Only one of each collision group is queryable. Consequences: enum values from the
+dropped enums are unknown to the checker (missed diagnostics, and possibly wrong
+`No matching symbol` / unknown-member behaviour if any rule ever treats the
+Nadeo enum surface as authoritative), and completion misses them.
+
+## Why it was NOT fixed on that branch (decision)
+Splitting distinct anonymous enums onto separate keys changes the name-resolution
+surface and therefore risks moving the FP baselines (tm-editor-plus-plus 2 errors
+/ 1428 warnings, tm-dips-plus-plus 1 error / 258 warnings). That is its own
+red/green + dogfood exercise, not a rider on a pipeline branch.
+
+## Work
+- Key inline member enums by their declaring context (e.g. `Module::Class::Field`
+  or a synthesized `Module::Class_FieldEnum`) instead of `Module::UnnamedEnum`.
+- Decide and document what the checker should accept for such an enum's values
+  (they are reachable in-game via the member's type).
+- Regenerate/verify counts: 66 colliding names, `Control` worst at 15.
+- Gate: FP fixture error counts unchanged; run the tm-* fixtures and explain any
+  warning-count delta.
+
+## Test plan (TDD, red first)
+Red: load the fixture Next DB and assert every distinct inline member enum is
+independently queryable (assert count == 66 distinct keys, not 1-per-module);
+assert a specific known collision group (Control's 15) all resolve. Variants:
+enum with duplicate value names across two collided enums; a collided enum whose
+values are referenced from a fixture plugin; determinism guard still green.
+
+## Provenance
+Discovered by the B014 lane's own plan-mandated test
+(`diff_repo_fixture_against_itself_is_empty` reporting `(0, 0, 8)`), which is
+exactly the tripwire GH #59 was asked to build.

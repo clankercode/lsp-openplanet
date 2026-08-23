@@ -14,3 +14,4 @@ bugs:
     - file: B013-unknown-namespaced-symbols-in.todo
     - file: B014-type-db-refresh-pipeline-statu.todo
     - file: B015-honor-gitignore-during-as-file.todo
+    - file: B016-anonymous-member-enums-collide.todo
