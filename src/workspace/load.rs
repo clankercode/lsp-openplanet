@@ -31,15 +31,22 @@ pub struct PluginWorkspaceLoad {
     pub missing_required_dependencies: Vec<String>,
     /// True only when [`load_plugin_workspace`] walked a real plugin root,
     /// every declared dependency resolved — required, optional, and the
-    /// transitive `export_dependencies` of a resolved dep alike — AND no
-    /// source inclusion/exclusion filter was configured. Diagnostics that
-    /// read the absence of a name as a game-compiler rejection must gate on
-    /// this (GH #58): an unreadable or filtered-out module file may declare
-    /// the very symbol being called, and `LspConfig::apply_manifest` defines
-    /// `DEPENDENCY_<ID>` for declared optional deps whether or not they
-    /// resolved, so `#if`-guarded code the game would mask out stays live
-    /// here. Every open-documents-only or filtered-source fallback leaves it
-    /// `false`.
+    /// transitive `export_dependencies` of a resolved dep alike — no source
+    /// inclusion/exclusion filter was configured, AND gitignore honoring
+    /// dropped no `.as` file. Diagnostics that read the absence of a name as
+    /// a game-compiler rejection must gate on this (GH #58): an unreadable,
+    /// filtered-out or gitignored module file may declare the very symbol
+    /// being called (gitignore is a git concept, not a compile concept — the
+    /// game compiles generated-but-gitignored sources like any other), and
+    /// `LspConfig::apply_manifest` defines `DEPENDENCY_<ID>` for declared
+    /// optional deps whether or not they resolved, so `#if`-guarded code the
+    /// game would mask out stays live here. Every open-documents-only or
+    /// filtered-source fallback leaves it `false`.
+    ///
+    /// Dependency files are NOT affected by gitignore: a resolved dep
+    /// contributes only its explicit `[script] exports`/`shared_exports`
+    /// paths, read directly by `deps::collect_export_files`, never through
+    /// the discovery walk.
     pub dependency_closure_complete: bool,
     /// Canonicalized absolute paths of files listed in this plugin's own
     /// info.toml `[script]` `exports` + `shared_exports`; decls in these
@@ -192,8 +199,9 @@ pub fn load_plugin_workspace(
     let (export_paths, strict_export_paths) = (export_paths.0, export_paths.1);
 
     let discovery = project::DiscoveryOptions::from_honor_gitignore(search.honor_gitignore);
+    let discovered = project::discover(&root, discovery);
     let mut files = Vec::new();
-    for path in project::discover_source_files_with(&root, discovery) {
+    for path in discovered.files {
         if !source_file_included(&root, &path, search) {
             continue;
         }
@@ -211,11 +219,17 @@ pub fn load_plugin_workspace(
         &search.plugins_dirs,
         &search.plugin_files_search_paths,
     )?;
-    // A configured source filter deliberately omits own-module files. Since
+    // A configured source filter deliberately omits own-module files, and
+    // gitignore honoring drops them a step earlier still, at discovery. Since
     // AngelScript namespaces are open and additive across those files, the
     // pooled table cannot authoritatively prove an absent member is invalid.
-    let dependency_closure_complete =
-        dep.unresolved.is_empty() && search.source_paths.is_none() && search.ignore_paths.is_none();
+    // Note the gitignore condition is "at least one file was actually
+    // dropped", NOT "honoring is enabled" — honoring is the default, so the
+    // latter would disarm the rule in nearly every repo.
+    let dependency_closure_complete = dep.unresolved.is_empty()
+        && search.source_paths.is_none()
+        && search.ignore_paths.is_none()
+        && discovered.gitignore_excluded == 0;
     for (path, source) in dep.loaded_files {
         // Avoid double-including if a dep export somehow lives under root.
         if files.iter().any(|f| f.path == path) {

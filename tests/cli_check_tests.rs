@@ -1789,3 +1789,95 @@ fn check_command_namespaced_typedef_resolves_without_parse_or_symbol_error() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+/// Write a plugin whose `.gitignore` line is caller-chosen: `generated/Gen.as`
+/// contributes `Shared::FromGenerated`, `src/Main.as` calls it plus a member
+/// nothing declares. Shared by the GH #58 × GH #60 authority triplet.
+fn gitignore_authority_plugin(name: &str, gitignore: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("openplanet-lsp-{}-{}", name, std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("generated")).unwrap();
+    fs::write(
+        root.join("info.toml"),
+        "[meta]\nname = \"GitignoreAuthority\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(root.join(".gitignore"), gitignore).unwrap();
+    fs::write(
+        root.join("generated/Gen.as"),
+        "namespace Shared {\n    void FromGenerated() {}\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n    Shared::FromGenerated();\n    Shared::DeclaredNowhere();\n}\n",
+    )
+    .unwrap();
+    root
+}
+
+fn check_plugin(root: &std::path::Path, extra_args: &[&str]) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"));
+    cmd.env("NO_COLOR", "1").arg("check").arg("--no-typedb");
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    let output = cmd.arg(root).output().unwrap();
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// GH #58 × GH #60: gitignore honoring drops `.as` files at DISCOVERY time,
+/// before any `source_paths` / `ignore_paths` filter runs. The game compiles
+/// those files regardless — gitignore is a git concept, not a compile concept
+/// — so a namespace member declared only in a gitignored file is legal, and
+/// the pooled table is no longer an authoritative surface for that namespace.
+/// The whole rule must go silent for the plugin.
+#[test]
+fn check_command_namespaced_symbol_silent_when_gitignore_excluded_a_source() {
+    let root = gitignore_authority_plugin("gitignore-authority", "generated/\n");
+    let stdout = check_plugin(&root, &[]);
+    assert!(
+        !stdout.contains("No matching symbol"),
+        "a gitignore-excluded own-module file must silence the rule; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The same plugin with `--no-gitignore`: the generated file is discovered, so
+/// `Shared::FromGenerated` resolves for the ordinary reason AND the surface is
+/// authoritative again — the member nothing declares still errors. This is the
+/// non-vacuity half of the fence.
+#[test]
+fn check_command_namespaced_symbol_armed_when_gitignore_honoring_is_disabled() {
+    let root = gitignore_authority_plugin("gitignore-disabled", "generated/\n");
+    let stdout = check_plugin(&root, &["--no-gitignore"]);
+    assert!(
+        !stdout.contains("No matching symbol 'Shared::FromGenerated'"),
+        "the discovered generated declaration must resolve; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("No matching symbol 'Shared::DeclaredNowhere'"),
+        "with nothing excluded the rule must stay armed; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Honoring gitignore is the DEFAULT, so "honoring is on" cannot be the
+/// disarm condition — that would silence the rule in nearly every repo. Only
+/// an actual exclusion breaks authority: a `.gitignore` that matches no `.as`
+/// file leaves the rule armed.
+#[test]
+fn check_command_namespaced_symbol_armed_when_gitignore_excludes_nothing() {
+    let root = gitignore_authority_plugin("gitignore-noop", "*.log\nbuild/\n");
+    let stdout = check_plugin(&root, &[]);
+    assert!(
+        stdout.contains("No matching symbol 'Shared::DeclaredNowhere'"),
+        "a gitignore that excludes no .as file must leave the rule armed; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("No matching symbol 'Shared::FromGenerated'"),
+        "the discovered generated declaration must resolve; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}

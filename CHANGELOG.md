@@ -36,8 +36,10 @@ GitHub Release body to match this section (gh release edit).
   silently. Fires for any namespace declared in the plugin's own module or
   in a resolved dependency's export surface, with a near-name hint when
   one is close. Stays silent whenever the symbol set is not authoritative:
-  a required dependency that did not resolve, an engine namespace, a
-  nested path (`A::B::Fn`), or a name a sibling module contributes.
+  a dependency that did not resolve (optional ones included), a
+  `source_paths` / `ignore_paths` filter, a `.gitignore` that actually
+  excluded a source file, an engine namespace, a nested path (`A::B::Fn`),
+  or a name a sibling module contributes.
 - **Workspace function return types are real types, not `<error>`** —
   free-function symbol extraction left `return_type` empty, so hovering
   a call to a workspace function (e.g. `ts_log(...)` declared in another

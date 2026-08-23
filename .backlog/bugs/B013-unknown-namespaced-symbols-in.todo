@@ -147,3 +147,35 @@ the rule is armed on those plugins rather than vacuously silent.
 Reviewer: `ccc @cx-reviewer` review-and-fix loop returned PASS; its corrective
 commits are 52a03a5 (typedef), 20e08f0 (source-filter fence), 4a38bee and
 cd5b83b (doc alignment).
+
+### Rebase onto master (GH #60) — a third authority hole, 2026-08-24
+Rebased onto 5822455 (clean, no conflicts). GH #60's `honor_gitignore`
+(DEFAULT ON) drops `.as` files at DISCOVERY time, before `source_file_included`
+runs, so `dependency_closure_complete` could be true while the pool was missing
+own-module files. The game compiles gitignored files — gitignore is a git
+concept, not a compile concept — so a namespace member declared only in a
+generated-but-gitignored source was reported as `No matching symbol`.
+Reproduced, then fenced.
+
+The condition is "at least one `.as` file was actually dropped", NOT "honoring
+is enabled": honoring is the default, so gating on the flag would disarm the
+rule in nearly every repo — a vacuously silent rule is worse than the bug.
+`project::discover` now returns a `Discovery { files, gitignore_excluded }`
+unconditionally; `load_plugin_workspace` folds the count into
+`dependency_closure_complete`. `log_excluded_count` keeps its DEBUG gate but no
+longer re-derives the number (it no longer runs a walk of its own).
+
+The baseline for the count comes from the SAME `ignore::WalkBuilder` with only
+`git_ignore`/`git_exclude` flipped off, not from `discover_recursive` — one
+traversal engine for both passes, so the count cannot drift from the kept set
+and the crate's symlink-loop handling applies to both.
+
+Cost, measured on tests/fixtures/tm-editor-plus-plus (263 `.as` files, release):
+honoring walk 1.28 ms, baseline walk 0.65 ms, `discover()` total 2.24 ms,
+against a ~4.7 s full check — the extra pass is ~0.01% of a check.
+
+Dependency side checked: NOT affected. A resolved dep contributes only its
+explicit `[script] exports`/`shared_exports` paths via
+`deps::collect_export_files` -> `resolve_plugin_file`, read directly; no
+discovery walk and no `DiscoveryOptions`, so gitignore never filters dep files
+(`.op` archives read from the ZIP, likewise). No dep-side treatment needed.
