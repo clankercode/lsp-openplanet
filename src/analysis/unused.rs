@@ -34,14 +34,30 @@ use crate::typecheck::GlobalScope;
 /// Openplanet engine entry points / callbacks. Free functions with these
 /// exact names are invoked by the game / Openplanet runtime by name — a
 /// `Main()` no plugin calls is still the plugin's entry point.
+///
+/// Source: the Openplanet scripting documentation (plugin lifecycle
+/// callbacks + `Meta::Plugin`-invoked hooks). Deliberately exhaustive —
+/// false positives here are harmless (no warning), false negatives
+/// produce wrong "unused" squiggles on real engine callbacks.
 pub const OPENPLANET_CALLBACKS: &[&str] = &[
     "Main",
     "Render",
-    "RenderMenu",
+    "RenderEarly",
     "RenderInterface",
-    "OnKeyPress",
-    "OnSettingsChanged",
+    "RenderMenu",
+    "RenderMenuMain",
+    "Update",
     "OnDestroyed",
+    "OnDisabled",
+    "OnEnabled",
+    "OnError",
+    "OnKeyPress",
+    "OnKeyRelease",
+    "OnMouseButton",
+    "OnMouseMove",
+    "OnSettingsChanged",
+    "OnSettingsLoad",
+    "OnSettingsSave",
 ];
 
 /// True for free functions the Openplanet runtime invokes by name.
@@ -399,6 +415,17 @@ mod tests {
             "a.as",
             "void Main() {}\nvoid RenderMenu() {}\nvoid OnKeyPress(VirtualKey k) {}\n",
         )]);
+        let report = unused_declarations(&snap, None, &StdHashSet::new());
+        assert!(report.is_empty(), "got {:?}", names(&report));
+    }
+
+    #[test]
+    fn full_callback_surface_exempt() {
+        // Every documented engine callback: dips++ uses OnDisabled /
+        // OnMouseMove / OnMouseButton / RenderEarly / RenderMenuMain and
+        // they must never be flagged (GH: user report, Aug 2026).
+        let src = "void OnDisabled() {}\nvoid OnEnabled() {}\nvoid OnDestroyed() {}\nvoid OnError(const string &in msg) {}\nvoid OnMouseButton(bool down, int button) {}\nvoid OnMouseMove(int x, int y) {}\nvoid OnKeyRelease(VirtualKey k) {}\nvoid OnSettingsChanged() {}\nvoid OnSettingsLoad() {}\nvoid OnSettingsSave() {}\nvoid Render() {}\nvoid RenderEarly() {}\nvoid RenderInterface() {}\nvoid RenderMenuMain() {}\nvoid Update(float dt) {}\n";
+        let snap = snap_of(&[("a.as", src)]);
         let report = unused_declarations(&snap, None, &StdHashSet::new());
         assert!(report.is_empty(), "got {:?}", names(&report));
     }

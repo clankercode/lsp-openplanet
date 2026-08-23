@@ -68,7 +68,7 @@ fn walk_folder(dir: &Path, depth: usize, seen: &mut HashSet<PathBuf>, roots: &mu
     };
     // Entries of a dir at `depth` sit at depth+1; the cap applies to them.
     let entry_depth = depth + 1;
-    let mut subdirs: Vec<(PathBuf, bool)> = Vec::new();
+    let mut subdirs: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
     for entry in entries.flatten() {
         // DirEntry::file_type() and DirEntry::metadata() are both
         // lstat-based: a symlink to a directory reports is_dir() == false.
@@ -106,15 +106,14 @@ fn walk_folder(dir: &Path, depth: usize, seen: &mut HashSet<PathBuf>, roots: &mu
         // First-match stop: a dir containing info.toml is a root; do not
         // descend into it (nested info.toml under a root is unreachable).
         let is_root = path.join("info.toml").is_file();
-        subdirs.push((path, is_root));
+        subdirs.push((path, canonical, is_root));
     }
     // Deterministic order regardless of readdir ordering: collect first, then
     // sort by path, then classify (roots appended in sorted order; non-roots
     // recursed into in sorted order).
     subdirs.sort();
-    for (path, is_root) in subdirs {
+    for (path, canonical, is_root) in subdirs {
         if is_root {
-            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
             if seen.insert(canonical.clone()) {
                 roots.push(canonical);
             }

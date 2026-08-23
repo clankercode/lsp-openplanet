@@ -161,13 +161,11 @@ pub fn unused_declaration_diagnostics(
     file_id: usize,
     export_paths: &std::collections::HashSet<std::path::PathBuf>,
 ) -> Vec<Diagnostic> {
-    crate::analysis::unused::unused_declarations_with_usage(
-        snapshot, usage, export_paths,
-    )
-    .into_iter()
-    .filter(|u| u.file_id == file_id)
-    .map(|u| unused_to_diagnostic(source, &u))
-    .collect()
+    crate::analysis::unused::unused_declarations_with_usage(snapshot, usage, export_paths)
+        .into_iter()
+        .filter(|u| u.file_id == file_id)
+        .map(|u| unused_to_diagnostic(source, &u))
+        .collect()
 }
 
 fn unused_to_diagnostic(source: &str, unused: &UnusedDeclaration) -> Diagnostic {

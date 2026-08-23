@@ -26,6 +26,15 @@ GitHub Release body to match this section (gh release edit).
   via the canonical plugin root (exact URI match first, canonical-path
   fallback), so type-recorded hover, unused-declaration warnings, and
   cross-file diagnostics work for symlinked workspaces too.
+- **Manifest diagnostics publish to the open document's URI** — when
+  `info.toml` is open through a symlink-alias path, manifest squiggles
+  now land on that URI (using the live buffer content) instead of the
+  canonical alias the client may never have opened.
+- **Engine callback list completed** — `OnDisabled`, `OnEnabled`,
+  `OnError`, `OnMouseButton`, `OnMouseMove`, `OnKeyRelease`,
+  `OnSettingsLoad`, `OnSettingsSave`, `RenderEarly`, `RenderMenuMain`,
+  and `Update` are now recognized as Openplanet engine entry points and
+  no longer flagged as unused declarations.
 
 ### Added
 - **Unused-declaration warnings** — never-used declarations are flagged

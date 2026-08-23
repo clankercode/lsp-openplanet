@@ -487,10 +487,8 @@ impl Backend {
         // Unused-declaration warnings (workspace view: sibling usage
         // suppresses; own-manifest export files are exempt public API).
         if let Some(file_id) = snapshot.file_id_of(uri) {
-            let usage = crate::analysis::unused::WorkspaceUsage::collect(
-                snapshot,
-                type_index.as_deref(),
-            );
+            let usage =
+                crate::analysis::unused::WorkspaceUsage::collect(snapshot, type_index.as_deref());
             diags.extend(diagnostics::unused_declaration_diagnostics(
                 text,
                 &usage,
@@ -516,16 +514,33 @@ impl Backend {
         let manifest_uri = Url::from_file_path(root.join("info.toml")).ok();
         if let Some(manifest_uri) = manifest_uri {
             let manifest_path = root.join("info.toml");
+            // The client may have the manifest open through a symlink-alias
+            // URI (dips++-all layout) — the canonical `manifest_uri` lookup
+            // misses then. Prefer whichever URI the client actually opened
+            // so diagnostics land on the visible document (and the open
+            // buffer's content is used, not the disk copy).
+            let open_manifest_uri = {
+                let canon = manifest_path.canonicalize().ok();
+                self.documents.iter().find_map(|entry| {
+                    let doc_uri = entry.key();
+                    if *doc_uri == manifest_uri {
+                        return Some(doc_uri.clone());
+                    }
+                    let doc_path = doc_uri.to_file_path().ok()?.canonicalize().ok()?;
+                    (Some(&doc_path) == canon.as_ref()).then(|| doc_uri.clone())
+                })
+            };
+            let publish_uri = open_manifest_uri.unwrap_or_else(|| manifest_uri.clone());
             let manifest_source = self
                 .documents
-                .get(&manifest_uri)
+                .get(&publish_uri)
                 .map(|document| document.value().clone())
                 .or_else(|| std::fs::read_to_string(manifest_path).ok());
             let diagnostics = manifest_source
                 .as_deref()
                 .map(|source| {
                     diagnostics::compute_manifest_diagnostics(
-                        &manifest_uri,
+                        &publish_uri,
                         source,
                         config,
                         snapshot.missing_required_dependencies(),
@@ -537,7 +552,7 @@ impl Backend {
                     )
                 });
             self.client
-                .publish_diagnostics(manifest_uri, diagnostics, None)
+                .publish_diagnostics(publish_uri, diagnostics, None)
                 .await;
         }
     }
