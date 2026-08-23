@@ -14,6 +14,18 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Fixed
+- **Workspace function return types are real types, not `<error>`** —
+  free-function symbol extraction left `return_type` empty, so hovering
+  a call to a workspace function (e.g. `ts_log(...)` declared in another
+  file) rendered `(local) <error> name`. Extraction now records the
+  declared return type and `GlobalScope::lookup_function_return` parses
+  it, so hover shows `(local) void ts_log`.
+- **Saving a file refreshes sibling diagnostics** — the server now
+  handles `textDocument/didSave` (advertised in capabilities): the
+  owning shard rebuilds and every open document in it republishes
+  diagnostics, so declaring a symbol in one file clears "undefined
+  identifier" squiggles in the files that use it without needing an
+  edit there.
 - **Plugin-root discovery follows symlinks** — opening a folder whose
   plugin dirs are symlinks (e.g. `dips++-all`, where every entry links to
   a plugin living elsewhere) discovered zero roots and degraded to a

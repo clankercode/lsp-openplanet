@@ -1190,9 +1190,17 @@ impl<'a> GlobalScope<'a> {
                 }
             }
         }
-        // Workspace fallback: just silence with Error.
-        if lookup_workspace_function_property(&self.workspace, qualified).is_some() {
-            return Some(TypeRepr::Error(String::new()));
+        // Workspace fallback: the symbol table stores the declared return
+        // type string — parse it (e.g. `void` → Primitive(Void)) instead
+        // of silencing with Error, which surfaced as `(local) <error>`
+        // hover on workspace function calls.
+        if let Some(s) = lookup_workspace_function_property(&self.workspace, qualified) {
+            return match &s.kind {
+                SymbolKind::Function { return_type, .. } => {
+                    Some(TypeRepr::parse_type_string(return_type))
+                }
+                _ => Some(TypeRepr::Error(String::new())),
+            };
         }
         None
     }

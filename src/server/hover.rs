@@ -392,6 +392,48 @@ mod tests {
     }
 
     #[test]
+    fn hover_workspace_void_call_shows_return_type_not_error() {
+        // Cross-file call of a workspace `void` function: the checker
+        // records the callee span with the resolved return type — `void`,
+        // never `<error>` (user report: `(local) <error> ts_log` after
+        // declaring the callee in another file).
+        let dir = std::env::temp_dir().join(format!("ols-hover-wsfn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("A.as");
+        let b = dir.join("B.as");
+        let src_a = "void caller() {\n    ts_log(\"x\");\n}";
+        std::fs::write(&a, src_a).unwrap();
+        std::fs::write(&b, "void ts_log(const string &in s) {}").unwrap();
+        let snap = crate::analysis_snapshot::AnalysisSnapshot::from_files(
+            &[
+                (a, src_a.to_string()),
+                (b, "void ts_log(const string &in s) {}".to_string()),
+            ],
+            &crate::config::LspConfig::default(),
+        );
+        let (uri, analysis) = snap
+            .uri_map()
+            .into_iter()
+            .find(|(_, (u, _))| u.path().ends_with("A.as"))
+            .map(|(_, (u, an))| (u, an))
+            .expect("A.as in snapshot");
+        let scope = GlobalScope::new(snap.symbols(), None);
+        let checked = snap.checked_file(&uri, &scope).expect("checked view");
+        let pos = pos_of(src_a, "ts_log", 1);
+        let h = hover(analysis, Some(&checked), pos, &scope).expect("hover");
+        let HoverContents::Markup(m) = h.contents else {
+            panic!("expected markdown hover")
+        };
+        assert!(
+            !m.value.contains("<error>"),
+            "hover showed <error>: {:?}",
+            m.value
+        );
+        assert!(m.value.contains("ts_log"), "missing name: {:?}", m.value);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn hover_shows_class_field() {
         let src = "class C { int field; void m() { field; } }";
         let pos = pos_of(src, "field", 2);

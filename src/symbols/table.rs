@@ -443,7 +443,7 @@ impl SymbolTable {
                 out.push(Symbol {
                     name,
                     kind: SymbolKind::Function {
-                        return_type: String::new(),
+                        return_type: func.return_type.span.text(source).to_string(),
                         params,
                         min_args,
                         imported: false,

@@ -804,8 +804,18 @@ impl LanguageServer for Backend {
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::FULL),
+                        // Save triggers a rebuild of the owning shard so
+                        // sibling files that referenced a just-declared
+                        // symbol refresh their diagnostics without needing
+                        // an edit (user report: squiggles stuck until the
+                        // referencing file was touched).
+                        save: Some(TextDocumentSyncSaveOptions::Supported(true)),
+                        ..Default::default()
+                    },
                 )),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".into(), ":".into(), "@".into(), "#".into()]),
@@ -890,6 +900,48 @@ impl LanguageServer for Backend {
             return; // stray: no shard to rebuild.
         }
         self.refresh_snapshot().await;
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let uri = params.text_document.uri;
+        // Disk now matches the open buffer (or nearly — a watcher event may
+        // follow with the same effect). Rebuild the owning shard so pooled
+        // symbols/parses pick up the save, then republish diagnostics for
+        // EVERY open document in the shard: a save that declares a symbol
+        // clears the "undefined identifier" squiggles in sibling files
+        // without them needing an edit.
+        if let Some(root) = self.workspace_root_for(&uri).await {
+            if let Some(snapshot) = self.rebuild_workspace(&root).await {
+                let config = self.config_for(&uri).await;
+                let docs: Vec<(Url, String)> = self
+                    .documents
+                    .iter()
+                    .map(|e| (e.key().clone(), e.value().clone()))
+                    .collect();
+                for (doc_uri, text) in docs {
+                    if self.workspace_root_for(&doc_uri).await.as_ref() == Some(&root) {
+                        self.publish_sharded_diagnostics(
+                            &doc_uri, &text, &snapshot, &config, &root,
+                        )
+                        .await;
+                    }
+                }
+            }
+            return;
+        }
+        if !self.workspaces.read().await.is_empty() {
+            return; // stray: no shard to rebuild.
+        }
+        // Legacy single-workspace: refresh, then republish every open doc.
+        self.refresh_snapshot().await;
+        let docs: Vec<(Url, String)> = self
+            .documents
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        for (doc_uri, text) in docs {
+            self.on_change_legacy(&doc_uri, &text).await;
+        }
     }
 
     /// t9: manifest/file watcher events. `**/info.toml` events re-shard
@@ -1552,5 +1604,81 @@ mod tests {
 
         assert_eq!(workspace_root_of(backend).await, Some(canonic(&plugin)));
         assert_eq!(roots_of(backend).await, vec![canonic(&plugin)]);
+    }
+
+    #[tokio::test]
+    async fn did_save_rebuilds_shard_so_new_symbols_resolve() {
+        // User flow: A.as calls ts_log (undeclared) → declare it in B.as →
+        // save B.as. Hover over the call in A must resolve immediately —
+        // no edit to A required.
+        let dir = temp_tree("did-save");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        write_info_toml(&dir);
+        let a_path = dir.join("src").join("A.as");
+        let b_path = dir.join("src").join("B.as");
+        let a_src = "void caller() {\n    ts_log(\"x\");\n}\n";
+        fs::write(&a_path, a_src).unwrap();
+        fs::write(&b_path, "void helper() {}\n").unwrap();
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&dir, Some(vec![dir.clone()])))
+            .await
+            .expect("initialize");
+        let a_uri = Url::from_file_path(&a_path).unwrap();
+        let b_uri = Url::from_file_path(&b_path).unwrap();
+        backend
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: a_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: a_src.to_string(),
+                },
+            })
+            .await;
+        backend
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: b_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: "void helper() {}\n".to_string(),
+                },
+            })
+            .await;
+
+        // Declare ts_log in B.as (buffer + disk), then save B.
+        let b_new = "void helper() {}\nvoid ts_log(const string &in s) {}\n";
+        fs::write(&b_path, b_new).unwrap();
+        backend
+            .did_change(DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: b_uri.clone(),
+                    version: 2,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: b_new.to_string(),
+                }],
+            })
+            .await;
+        backend
+            .did_save(DidSaveTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: b_uri.clone() },
+                text: None,
+            })
+            .await;
+
+        // Hover the call site in A: the snapshot serving A must know ts_log.
+        let snapshot = backend.snapshot_for(&a_uri).await;
+        let symbols = snapshot.symbols();
+        assert!(
+            !symbols.lookup("ts_log").is_empty(),
+            "post-save snapshot missing ts_log"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
