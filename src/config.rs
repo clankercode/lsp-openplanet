@@ -47,6 +47,24 @@ pub struct LspConfig {
     /// (e.g. `UI::WindowFlags`, `UI::WindowFlags::NoTitleBar`). Off by
     /// default; functions are always matched.
     pub shortcut_match_enums: bool,
+    /// GH #57: define-matrix axes (`.openplanet-lsp.toml` `define_matrix`).
+    /// Each axis is toggled on/off on top of the base define set → the CLI
+    /// `check` runs every combo through the full pipeline. Empty = single
+    /// pass (current behavior). CLI-only: the LSP server keeps one live
+    /// define set.
+    pub define_matrix: Vec<String>,
+    /// GH #57: mutually-exclusive define groups (`define_groups`). At most
+    /// one member of a group is defined per combo; violating combos are
+    /// skipped (never analyzed). The platform selectors {TMNEXT, MP4,
+    /// TURBO} form an implicit group whenever ≥2 of them are axes.
+    pub define_groups: Vec<Vec<String>>,
+    /// GH #57: explicit combo pin list (`define_combinations`). When set
+    /// (even `[]`), the cross-product is skipped entirely and ONLY these
+    /// combos are checked.
+    pub define_combinations: Option<Vec<Vec<String>>>,
+    /// GH #57: matrix size cap (`define_matrix_max_combinations`).
+    /// Cross-product exceeding the cap is a hard CLI error.
+    pub define_matrix_max_combinations: usize,
 }
 
 impl Default for LspConfig {
@@ -69,6 +87,10 @@ impl Default for LspConfig {
             shortcut_namespaces: None,
             shortcut_disable_default_namespaces: false,
             shortcut_match_enums: false,
+            define_matrix: Vec::new(),
+            define_groups: Vec::new(),
+            define_combinations: None,
+            define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
         }
     }
 }
@@ -100,6 +122,18 @@ struct ConfigFile {
     /// CLI `--warnings-as-errors`/`-Werror` (incl. `=false`) wins over this;
     /// workspace `.openplanet-lsp.toml` wins over the user config.
     warnings_as_errors: Option<bool>,
+    /// GH #57: define-matrix axes (e.g. `["DEV", "DEPENDENCY_MLHOOK"]`).
+    /// CLI `check` cross-multiplies them on top of the base define set.
+    define_matrix: Option<Vec<String>>,
+    /// GH #57: mutually-exclusive define groups (e.g.
+    /// `[["TMNEXT", "MP4", "TURBO"]]`); combos defining two members of one
+    /// group are skipped.
+    define_groups: Option<Vec<Vec<String>>>,
+    /// GH #57: explicit combo pin list; when present the cross-product is
+    /// skipped and ONLY these combos are checked.
+    define_combinations: Option<Vec<Vec<String>>>,
+    /// GH #57: matrix size cap (default 16); exceeding it is a hard error.
+    define_matrix_max_combinations: Option<usize>,
 }
 
 /// How bare TTY launches behave when no subcommand is given.
@@ -303,6 +337,10 @@ impl LspConfig {
             shortcut_namespaces: None,
             shortcut_disable_default_namespaces: false,
             shortcut_match_enums: false,
+            define_matrix: Vec::new(),
+            define_groups: Vec::new(),
+            define_combinations: None,
+            define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
         };
 
         // Layer 1: Auto-detect
@@ -524,6 +562,18 @@ impl LspConfig {
         if let Some(match_enums) = cfg.shortcut_match_enums {
             self.shortcut_match_enums = match_enums;
         }
+        if let Some(axes) = cfg.define_matrix {
+            self.define_matrix = axes;
+        }
+        if let Some(groups) = cfg.define_groups {
+            self.define_groups = groups;
+        }
+        if let Some(combos) = cfg.define_combinations {
+            self.define_combinations = Some(combos);
+        }
+        if let Some(max) = cfg.define_matrix_max_combinations {
+            self.define_matrix_max_combinations = max;
+        }
     }
 
     fn apply_init_options(&mut self, opts: &serde_json::Value) {
@@ -688,6 +738,61 @@ mod tests {
         let opts = serde_json::json!({ "plugin_roots": ["/tmp/ok", 42, null] });
         let config = LspConfig::load(None, Some(&opts));
         assert_eq!(config.plugin_roots, vec![PathBuf::from("/tmp/ok")]);
+    }
+
+    // ── GH #57: define matrix config keys ───────────────────────────────
+
+    #[test]
+    fn define_matrix_keys_default_off() {
+        let cfg = LspConfig::default();
+        assert!(cfg.define_matrix.is_empty());
+        assert!(cfg.define_groups.is_empty());
+        assert!(cfg.define_combinations.is_none());
+        assert_eq!(cfg.define_matrix_max_combinations, 16);
+    }
+
+    #[test]
+    fn define_matrix_keys_parse_from_config_file() {
+        let tmp = std::env::temp_dir().join(format!("opl-defmatrix-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            r#"define_matrix = ["DEV", "DEPENDENCY_MLHOOK"]
+define_groups = [["A", "B"]]
+define_matrix_max_combinations = 32
+"#,
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert_eq!(cfg.define_matrix, vec!["DEV", "DEPENDENCY_MLHOOK"]);
+        assert_eq!(cfg.define_groups, vec![vec!["A", "B"]]);
+        assert_eq!(cfg.define_combinations, None);
+        assert_eq!(cfg.define_matrix_max_combinations, 32);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn define_combinations_parse_from_config_file() {
+        let tmp = std::env::temp_dir().join(format!("opl-defcombos-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            r#"define_combinations = [[], ["DEV"], ["DEV", "DEPENDENCY_MLHOOK"]]
+"#,
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert_eq!(
+            cfg.define_combinations,
+            Some(vec![
+                Vec::<String>::new(),
+                vec!["DEV".to_string()],
+                vec!["DEV".to_string(), "DEPENDENCY_MLHOOK".to_string()],
+            ])
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // ── GH #45: variant-aware folder / typedb selection ──────────────────

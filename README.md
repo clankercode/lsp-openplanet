@@ -67,6 +67,30 @@ default_mode = "tui"   # or "lsp"
 # shortcut_namespaces = ["UX", "MathX", "Net"]
 # shortcut_disable_default_namespaces = false
 # shortcut_match_enums = false
+
+# Define matrix (CLI `check` only; the LSP server keeps one live define
+# set). define_matrix lists axes toggled on/off on top of the base define
+# set — check runs the cross-product of all combos through the full
+# pipeline. Diagnostics are labeled with the combo they fired in
+# ([DEV] / [seen in: {} | DEV] in plain/pretty output, a "combo" array
+# in --format json), and duplicates across combos are merged into one
+# entry. The platform selectors {TMNEXT, MP4, TURBO} form an implicit
+# mutually-exclusive group whenever ≥2 of them are axes.
+# define_matrix = ["DEV", "DEPENDENCY_MLHOOK"]
+
+# Mutually-exclusive define groups: at most one member is defined per
+# combo; violating combos are skipped (never analyzed).
+# define_groups = [["FEATURE_A", "FEATURE_B"]]
+
+# Explicit combo pin list: when present (even []), the cross-product is
+# skipped entirely and ONLY these combos are checked.
+# define_combinations = [[], ["DEV"], ["DEV", "DEPENDENCY_MLHOOK"]]
+
+# Matrix size cap (default 16). A cross-product expanding past the cap is
+# a hard error — pin combos with define_combinations or raise the cap.
+# define_matrix_max_combinations = 16
+#
+# Any `--define` CLI flag collapses the matrix back to a single-combo run.
 ```
 
 Point your editor’s AngelScript / Openplanet language client at the binary

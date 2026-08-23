@@ -217,3 +217,18 @@ Compiler reports (game-side):
 
 Workaround: rebind with `@ty = Reflection::GetType("NSceneItem_SMgr");` or use two locals.
 The LSP today does not flag this.
+
+### Case 2: undefined namespaced function is not flagged
+Plugin source:
+    // MatchGuard has no IsSafeForDirectiveTimed
+    s.Check(!MatchGuard::IsSafeForDirectiveTimed(MatchGuard::Ctx::Menu, false, false, 0), "...");
+
+Compiler reports (game-side):
+    MatchGuard_Test.as (65, 18) :  ERR : No matching symbol 'MatchGuard::IsSafeForDirectiveTimed'
+
+openplanet-lsp check reported 0 errors on the same bytes.
+
+Workaround / fix:
+    None needed -- the game compiler catches it. But this is a plain
+    unresolved-symbol case, cheap to detect statically, and it cost a
+    build/reload round trip to discover.
