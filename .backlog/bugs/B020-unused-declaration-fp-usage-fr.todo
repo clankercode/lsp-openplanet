@@ -130,3 +130,35 @@ GH #58 fence untouched: `dependency_closure_complete` still gates on the
 omission, and `usage_only_sources_do_not_restore_namespace_authority` pins it.
 
 Independent ccc review launched, verdict pending.
+
+## COORDINATOR STATE 2026-08-24 04:40 (resume point)
+
+Branch fix/usage-only-omitted-files in .worktrees/gh61-usage-only, 3 commits on
+4a3b5c4: eb79bfd (red tests) -> 7a8517b (fix) -> 0d9d0c6 (docs).
+
+APPROVED by coordinator: the scratch-symbol-table deviation. Omitted files' own
+NON-COLLIDING declarations are added to a scratch table (file_ids past the end of
+the snapshot, alive for one function, never seen by the join) so their bodies
+RESOLVE - without that, a generated subclass calling an inherited member records
+nothing and the FP survives. The collision filter is load-bearing: skipping any
+decl the pooled table already has means a whole-tree copy contributes nothing and
+resolves against the originals, which is what keeps refuted-alternative-1's
+duplicate-declaration defect from reappearing.
+
+VERIFIED INDEPENDENTLY by the coordinator (not from the lane's report):
+985 tests / 0 failures; probe-x (gitignore FP) 0 diagnostics; probe-y
+(ignore_paths FP) 0 diagnostics; non-vacuity - a genuinely unused decl in a
+workspace WITH omitted files still warns; GH #60's goal preserved - a gitignored
+file holding both a dead function and a type error emits nothing of its own.
+Fleet dogfood by the lane: 153 roots, exactly 1 delta, a true positive
+(tm-music-mania AddTurboToAudioPackRegistry, only caller in a source_paths-
+excluded dir), 0 new warnings.
+
+BLOCKED ON: the lane's independent ccc review verdict (was pid 1997652). Merge is
+deliberately held for it because GH #56/B012 shipped without a verdict when the
+coordinator removed that worktree mid-review. Do NOT merge without it.
+
+NEXT STEPS: (1) review verdict + fixes; (2) coordinator final review + merge with
+Closes #61; (3) bl done B020; (4) retrospective independent review of the B012
+code as it sits on master (resolve_unused_callbacks + matcher + wiring) - owed,
+scope it to that only; (5) delete branch backup/pre-rebase-80f25e5.
