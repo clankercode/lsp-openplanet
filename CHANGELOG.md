@@ -23,7 +23,8 @@ GitHub Release body to match this section (gh release edit).
   init options): `shortcut_namespaces` (replaces the UX/MathX default),
   `shortcut_disable_default_namespaces` (drop UI/Math entirely),
   `shortcut_match_enums` (also suggest enums and enum values from those
-  namespaces; off by default).
+  namespaces; off by default). Namespace variables are not matchable —
+  the typedb has no global-variable data source.
 
 ### Fixed
 - **Single-arg constructor conversions in call arguments (GH #54)** — a

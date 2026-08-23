@@ -58,10 +58,12 @@ default_mode = "tui"   # or "lsp"
 
 # Namespace-shortcut completions (old vscode-openplanet-angelscript QoL):
 # typing `Beg` suggests `UI::Begin` etc. at identifier positions. Built-in
-# defaults are `UI` + `Math`; `shortcut_namespaces` adds your own (defaults
-# to `UX` + `MathX` when unset — set it explicitly to replace). Set
-# `shortcut_disable_default_namespaces = true` to drop UI/Math entirely;
-# `shortcut_match_enums = true` also suggests enums and enum values.
+# defaults are `UI` + `Math`; `shortcut_namespaces` sets your own custom
+# list, replacing the default `UX` + `MathX`. Set
+# `shortcut_disable_default_namespaces = true` to drop UI/Math entirely
+# (leaving only your custom list, or none); `shortcut_match_enums = true`
+# also suggests enums and enum values. Namespace variables are never
+# matched — the typedb has no global-variable data source.
 # shortcut_namespaces = ["UX", "MathX", "Net"]
 # shortcut_disable_default_namespaces = false
 # shortcut_match_enums = false
