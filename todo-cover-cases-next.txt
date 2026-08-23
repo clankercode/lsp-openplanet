@@ -262,3 +262,25 @@ those too. 16 warnings from stale fixtures drown out any real one, and there is
 no --exclude and no exclude key in .openplanet-lsp.toml. Either an exclude
 setting, or not descending into nested plugin roots below the PATH argument,
 would fix it.
+
+## 2026-08-24, tm-tournament-station
+
+### Case 1: reserved keyword as a local variable name
+Plugin source:
+    string Words(const string &in s) {
+        string out;          // 'out' is reserved (in/out/inout parameter refs)
+        out += "x";
+        return out;
+    }
+
+Compiler reports (game-side):
+    TextConditional_Test.as (5, 16) : ERR : Expected ';'
+    TextConditional_Test.as (5, 16) : ERR : Instead found reserved keyword 'out'
+    ...cascading "Expected expression value" at every later use.
+
+Workaround / fix:
+    Rename the local (e.g. `plain`). Same applies to `in` and `inout`.
+
+The LSP today does not flag this. `openplanet-lsp check` on the same tree
+reported only the pre-existing fixture warnings and said nothing about the
+declaration, so the first signal was a full stage-and-reload cycle.
