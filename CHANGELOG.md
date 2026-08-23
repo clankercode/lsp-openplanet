@@ -40,6 +40,10 @@ GitHub Release body to match this section (gh release edit).
   `source_paths` / `ignore_paths` filter, a `.gitignore` that actually
   excluded a source file, an engine namespace, a nested path (`A::B::Fn`),
   or a name a sibling module contributes.
+- **`check` no longer joins the unused report once per file** — the
+  per-file diagnostics path asked for the whole workspace's findings and
+  filtered, an O(files²) join. It now asks per file: `check` on the
+  tm-editor-plus-plus fixture (≈300 files) drops from ~5.0s to ~0.6s.
 - **Workspace function return types are real types, not `<error>`** —
   free-function symbol extraction left `return_type` empty, so hovering
   a call to a workspace function (e.g. `ts_log(...)` declared in another
@@ -75,6 +79,20 @@ GitHub Release body to match this section (gh release edit).
   no longer flagged as unused declarations.
 
 ### Added
+- **Unused locals and parameters** (GH #55) — the unused-declaration pass
+  now covers function-body bindings — "a local variable `x` is never
+  used", "a parameter `p` is never used" — with the same suppressions as
+  before (a leading `_`, or a trailing `// lsp: ignore unused`). Usage is
+  syntactic — any later mention in the enclosing function body counts, so
+  a write with no read is *used* — and the scan reads the unmasked source
+  so a mention inside an inactive `#if` branch still counts. Parameters
+  stay silent where the signature is imposed rather than chosen:
+  Openplanet callbacks, operator overloads, both halves of a virtual pair
+  (overrides and the base they override), mixin members, lambdas,
+  functions handed to a funcdef (handler tables, `startnew` coroutines),
+  public-API export files, and any declaration the pass already reports
+  as unused. Dogfooded over the `tm-*` fixtures: 58 sites classified, no
+  false positives, so the pass is on by default.
 - **Define matrix for `check`** — `define_matrix` in
   `.openplanet-lsp.toml` lists preprocessor define axes that `check`
   cross-multiplies on top of the base define set, running every combo

@@ -31,6 +31,8 @@ use crate::symbols::SymbolTable;
 use crate::typecheck::checker::Checker;
 use crate::typecheck::GlobalScope;
 
+pub mod locals;
+
 /// Openplanet engine entry points / callbacks. Free functions with these
 /// exact names are invoked by the game / Openplanet runtime by name — a
 /// `Main()` no plugin calls is still the plugin's entry point.
@@ -66,10 +68,15 @@ fn is_openplanet_callback(simple_name: &str) -> bool {
 }
 
 /// Union of used workspace-qualified names across every file in a
-/// snapshot, keyed by the pooled symbol-table name convention.
+/// snapshot, keyed by the pooled symbol-table name convention, plus the
+/// local/parameter bindings the same pass walked (GH #55).
 #[derive(Debug, Default)]
 pub struct WorkspaceUsage {
     used: HashSet<String>,
+    /// Snapshot-wide inputs to the locals/params join (GH #55), built in
+    /// the same pass as `used` so the workspace is walked once — the join
+    /// itself runs once per reported file.
+    locals: locals::LocalsInputs,
 }
 
 impl WorkspaceUsage {
@@ -83,13 +90,17 @@ impl WorkspaceUsage {
         let symbols = snapshot.symbols();
         let scope = GlobalScope::new(symbols, external);
         let mut used = HashSet::new();
+        let mut local_decls = Vec::with_capacity(snapshot.files().len());
         for file in snapshot.files() {
-            let mut checker =
-                Checker::new(file.analysis.masked_source(), &scope).with_usage_recording();
+            let mut checker = Checker::new(file.analysis.masked_source(), &scope)
+                .with_usage_recording()
+                .with_local_decl_recording();
             checker.check_file(&file.analysis.file);
             used.extend(checker.take_used_names());
+            local_decls.push(checker.take_local_decls());
         }
-        Self { used }
+        let locals = locals::LocalsInputs::new(snapshot, local_decls);
+        Self { used, locals }
     }
 
     /// True when `qualified` (pooled-table name form) was used somewhere.
@@ -139,8 +150,8 @@ pub struct UnusedDeclaration {
 /// info.toml `[script] exports` + shared_exports files (canonicalized) —
 /// declarations in those files are public API and exempt.
 ///
-/// Locals and parameters are deliberately out of scope (deferred — see
-/// the tracking issue); this covers file-level decls and class members.
+/// Covers file-level declarations, class members, and — via
+/// [`locals`] — function-body locals and parameters (GH #55).
 pub fn unused_declarations(
     snapshot: &AnalysisSnapshot,
     external: Option<&crate::typedb::TypeIndex>,
@@ -158,10 +169,40 @@ pub fn unused_declarations_with_usage(
     usage: &WorkspaceUsage,
     export_paths: &HashSet<std::path::PathBuf>,
 ) -> Vec<UnusedDeclaration> {
+    unused_declarations_filtered(snapshot, usage, export_paths, None)
+}
+
+/// Findings for ONE file. The per-file diagnostics path (LSP publish,
+/// CLI `check`) asks per file, so joining the whole workspace and
+/// filtering afterwards costs O(files²).
+///
+/// Sound because every input is either workspace-wide and precomputed
+/// (`usage`) or file-local: a binding's enclosing function — and the
+/// class that owns it — are declared in the same file as the binding,
+/// so the no-double-warn gate only needs this file's findings.
+pub fn unused_declarations_for_file(
+    snapshot: &AnalysisSnapshot,
+    usage: &WorkspaceUsage,
+    export_paths: &HashSet<std::path::PathBuf>,
+    file_id: usize,
+) -> Vec<UnusedDeclaration> {
+    unused_declarations_filtered(snapshot, usage, export_paths, Some(file_id))
+}
+
+/// Shared body: `only` limits the walk to one file_id.
+fn unused_declarations_filtered(
+    snapshot: &AnalysisSnapshot,
+    usage: &WorkspaceUsage,
+    export_paths: &HashSet<std::path::PathBuf>,
+    only: Option<usize>,
+) -> Vec<UnusedDeclaration> {
     let mut out = Vec::new();
     let symbols = snapshot.symbols();
 
     for (file_id, file) in snapshot.files().iter().enumerate() {
+        if only.is_some_and(|want| want != file_id) {
+            continue;
+        }
         // Dependency export files contribute symbols and usage but are not
         // this plugin's code — never warn on them (report_diagnostics
         // already gates the diagnostics pipeline; same gate here).
@@ -179,6 +220,19 @@ pub fn unused_declarations_with_usage(
             }
         }
     }
+
+    // Locals/parameters run second: the declaration-level findings are the
+    // no-double-warn gate for the bindings inside them (GH #55).
+    let reported: HashSet<String> = out.iter().map(|u| u.qualified_name.clone()).collect();
+    locals::collect_unused_locals(
+        snapshot,
+        &usage.locals,
+        export_paths,
+        &reported,
+        &is_openplanet_callback,
+        only,
+        &mut out,
+    );
     out
 }
 
@@ -367,15 +421,16 @@ fn _file_path(snapshot: &AnalysisSnapshot, file_id: usize) -> Option<&Path> {
     snapshot.files().get(file_id).map(|f| f.path.as_path())
 }
 
+/// Test-only snapshot/report helpers, shared by this module's tests and
+/// [`locals`]'s.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
     use crate::analysis_snapshot::AnalysisSnapshot;
     use crate::config::LspConfig;
-    use std::collections::HashSet as StdHashSet;
     use std::path::PathBuf;
 
-    fn snap_of(files: &[(&str, &str)]) -> AnalysisSnapshot {
+    /// In-memory snapshot from `(path, source)` pairs.
+    pub fn snap_of(files: &[(&str, &str)]) -> AnalysisSnapshot {
         let inputs: Vec<(PathBuf, String)> = files
             .iter()
             .map(|(p, s)| (PathBuf::from(p), s.to_string()))
@@ -383,11 +438,22 @@ mod tests {
         AnalysisSnapshot::from_files(&inputs, &LspConfig::default())
     }
 
-    fn names(report: &[UnusedDeclaration]) -> Vec<String> {
+    /// Sorted qualified names of an unused report.
+    pub fn names(report: &[super::UnusedDeclaration]) -> Vec<String> {
         let mut v: Vec<String> = report.iter().map(|u| u.qualified_name.clone()).collect();
         v.sort();
         v
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{names, snap_of};
+    use super::*;
+    use crate::analysis_snapshot::AnalysisSnapshot;
+    use crate::config::LspConfig;
+    use std::collections::HashSet as StdHashSet;
+    use std::path::PathBuf;
 
     #[test]
     fn unused_free_function_warns() {
@@ -403,7 +469,10 @@ mod tests {
     fn cross_file_usage_suppresses() {
         let snap = snap_of(&[
             ("a.as", "int g_HelpVal = 1;\nvoid Dead() {}\n"),
-            ("b.as", "void Main() { int x = g_HelpVal; }\n"),
+            (
+                "b.as",
+                "void Main() { int x = g_HelpVal; print(\"\" + x); }\n",
+            ),
         ]);
         let report = unused_declarations(&snap, None, &StdHashSet::new());
         assert_eq!(names(&report), vec!["Dead"]);

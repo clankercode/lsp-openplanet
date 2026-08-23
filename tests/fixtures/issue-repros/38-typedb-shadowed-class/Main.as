@@ -19,7 +19,7 @@ namespace Repro {
 
     void Use() {
         g_Status.Set(StatusKind::B);  // GH #38: must stay silent
-        StatusKind b = g_Status.Kind; // GH #38: must stay silent
+        StatusKind _b = g_Status.Kind; // GH #38: must stay silent
     }
 }
 
