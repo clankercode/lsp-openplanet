@@ -133,3 +133,17 @@ installed on this box).
    its symbols, leaving the pooled source incomplete. The pre-existing
    `undefined identifier` rule has the same exposure, so this is a general
    workspace-authority question rather than one for this rule.
+
+### Fleet FP sweep (2026-08-24, final binary at cd5b83b)
+`openplanet-lsp check <plugin> --typedb-dir tests/fixtures/typedb` over all 28
+plugins in ~/OpenplanetNext/Plugins: 11 `No matching symbol` hits, every one
+from the PRE-EXISTING typedb triggers — `Text::Join` x5 (trigger a),
+`Draw::GetWidth`/`GetHeight` x4 (trigger b), `UI::InputTextCallback` x2
+(trigger a). Zero firings of the new workspace triggers. Positive controls
+(`Blocks::NoSuchFunction58` on Editor/E++, `LocalStats::NoSuchFunction58` on
+Archivist, `Backoff::NoSuchFunction58` on tournament-station itself) confirm
+the rule is armed on those plugins rather than vacuously silent.
+
+Reviewer: `ccc @cx-reviewer` review-and-fix loop returned PASS; its corrective
+commits are 52a03a5 (typedef), 20e08f0 (source-filter fence), 4a38bee and
+cd5b83b (doc alignment).
