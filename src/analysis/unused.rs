@@ -158,7 +158,7 @@ pub fn unused_declarations_with_usage(
         }
         let source = file.analysis.masked_source();
         for sym in symbols.file_symbols(file_id) {
-            if let Some(unused) = evaluate_symbol(sym, &usage, source, symbols) {
+            if let Some(unused) = evaluate_symbol(sym, usage, source, symbols) {
                 out.push(unused);
             }
         }
@@ -311,7 +311,7 @@ fn class_chain_declares(symbols: &SymbolTable, class_name: &str, member: &str) -
                 return true;
             }
         } else if class != class_name
-            && !symbols.lookup_tail(&member).is_empty()
+            && !symbols.lookup_tail(member).is_empty()
             && symbols
                 .lookup_members(&class)
                 .iter()
