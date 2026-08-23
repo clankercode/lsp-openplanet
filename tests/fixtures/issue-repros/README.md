@@ -65,7 +65,10 @@ Record the game verdict in the fixture's gate-test doc comment.
 | `52b-ternary-type-ambiguity` | #52 repro 2 | `Can't find unambiguous implicit conversion…` ×3 (13:19, 14:16, 15:17; 2026-08-18 probe) | fixed — active |
 | `54-ctor-implicit-conversion` | #54 | `No matching signatures to 'mat4::Inverse(vec3&)'` at 18:16 only — every mat3↔mat4 ctor conversion clean (2026-08-22 probe) | fixed — active |
 | `28-removed-draw-api` | #28 + #27 | `No matching symbol 'Draw::GetWidth/GetHeight'` (2026-08-22, todo-cover-cases) + `UI::GetIO` known-ns rule | fixed — active |
-| `28b-user-namespace-silent` | #28 | negative guard: user namespaces must stay silent | fixed — active |
+| `28b-user-namespace-silent` | #28 | negative guard: namespaces with no authoritative surface must stay silent (narrowed by #58) | fixed — active |
+| `58b-ns-unknown-symbol` | #58 | `No matching symbol 'TournamentStation::SendEvent'` (tournament-station, 2026-08-23) | fixed — active |
+| `58c-ns-relative-nested` | #58 | FP fences: relative namespace resolution + nested paths stay silent | fixed — active |
+| `58d-ns-engine-fence` | #58 | FP fence: engine namespaces stay silent with no typedb loaded (run via `--no-typedb`) | fixed — active |
 | `55-getonly-prop-assign` | todo-cover-cases (kinematic-ao) | `The property has no set accessor` ×2 on `iso4.tx` (Tools.as 242:16, 2026-08-22) | fixed — active |
 | `56-readonly-handle-rebind` | todo-cover-cases (kinematic-ao) | `Reference is read-only` on `ty =` value-assign (Scene.as 258:28, 2026-08-22) | fixed — active |
 | `53-define-flag` | #53 | `--define DEV` activates `#if DEV` branch (staged-compile parity) | fixed — active |

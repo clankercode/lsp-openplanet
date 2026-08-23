@@ -249,11 +249,13 @@ openplanet-lsp reports:
     0 errors. The whole file passes clean.
 
 Workaround / fix:
-    None available; the game compiler is the only check that catches it. This
-    makes red-first TDD in this codebase depend on a full build + hot reload
-    cycle, since the cheap check cannot produce the red.
-
-The LSP today does not flag this.
+    FIXED 2026-08-24 (GH #58, B013). `Ns::Fn(...)` now errors when `Ns` is a
+    namespace declared in the plugin's own module or in a resolved
+    dependency's export surface and nothing of any kind named `Fn` sits
+    under it. Fences (all silent): unresolved required dependency, engine
+    namespace, nested path `A::B::Fn`, relative resolution from an enclosing
+    namespace. Fixtures: tests/fixtures/issue-repros/58b-ns-unknown-symbol,
+    58c-ns-relative-nested, 58d-ns-engine-fence.
 
 ### Case 4: nested plugin discovery has no opt-out (usability, not a miss)
 `openplanet-lsp check .` on a plugin whose repo contains research fixtures with

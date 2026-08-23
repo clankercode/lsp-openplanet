@@ -172,6 +172,7 @@ impl Backend {
                         root: root.clone(),
                         files: open_into_files(open),
                         missing_required_dependencies: Vec::new(),
+                        dependency_closure_complete: false,
                         export_paths: HashSet::new(),
                         strict_export_paths: HashSet::new(),
                     }
@@ -288,6 +289,7 @@ impl Backend {
                     root: root.clone(),
                     files: open_into_files(open),
                     missing_required_dependencies: Vec::new(),
+                    dependency_closure_complete: false,
                     export_paths: HashSet::new(),
                     strict_export_paths: HashSet::new(),
                 }
@@ -371,6 +373,7 @@ impl Backend {
                             root: root.clone(),
                             files: open_into_files(open),
                             missing_required_dependencies: Vec::new(),
+                            dependency_closure_complete: false,
                             export_paths: HashSet::new(),
                             strict_export_paths: HashSet::new(),
                         }
@@ -382,6 +385,7 @@ impl Backend {
                 root: PathBuf::new(),
                 files: open_into_files(open),
                 missing_required_dependencies: Vec::new(),
+                dependency_closure_complete: false,
                 export_paths: HashSet::new(),
                 strict_export_paths: HashSet::new(),
             },

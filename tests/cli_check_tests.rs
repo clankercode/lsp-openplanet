@@ -129,6 +129,67 @@ fn check_command_exits_zero_when_clean() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// A source filter can omit a sibling file that contributes to an open
+/// AngelScript namespace. The real plugin module still includes that file, so
+/// `check` must not claim its remaining namespace surface is authoritative.
+fn assert_omitted_own_module_namespace_member_stays_silent(name: &str, config: &str) {
+    let root = make_temp_plugin(name);
+    fs::create_dir_all(root.join("omitted")).unwrap();
+    fs::write(root.join(".openplanet-lsp.toml"), config).unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+namespace Shared { void Present() {} }
+void Main() {
+    Shared::Present();
+    Shared::FromOmittedOwnModuleFile();
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("omitted/Contribution.as"),
+        "namespace Shared { void FromOmittedOwnModuleFile() {} }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stdout.contains("No matching symbol 'Shared::FromOmittedOwnModuleFile'"),
+        "an omitted sibling can extend Shared in the real module; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        output.status.success(),
+        "the source filter must not turn an omitted sibling declaration into a diagnostic; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn check_command_source_paths_omit_sibling_namespace_member_without_false_positive() {
+    assert_omitted_own_module_namespace_member_stays_silent(
+        "source-paths-namespace-authority",
+        "source_paths = [\"src\"]\n",
+    );
+}
+
+#[test]
+fn check_command_ignore_paths_omit_sibling_namespace_member_without_false_positive() {
+    assert_omitted_own_module_namespace_member_stays_silent(
+        "ignore-paths-namespace-authority",
+        "ignore_paths = [\"omitted\"]\n",
+    );
+}
+
 #[test]
 fn check_command_accepts_relative_plugin_path() {
     let root = make_temp_plugin("relative-clean");
@@ -573,20 +634,29 @@ fn check_command_issue_repro_28_removed_draw_api_diagnoses() {
     );
 }
 
-/// GH #28 negative guard: unknown USER namespaces stay silent — the checker
-/// can't distinguish a plugin's own helper namespace from a typedb gap, and
-/// the game only rejects calls into *its* unknown API namespaces. Legal
-/// relocated (`Display::GetWidth`) and known-member (`UI::Begin`) calls
-/// stay clean too.
+/// GH #28 negative guard, narrowed by GH #58: a namespace the checker has
+/// no authoritative surface for stays silent (`NotDeclaredAnywhere::Foo` —
+/// absent from both workspace and typedb), and legal relocated
+/// (`Display::GetWidth`) / known-member (`UI::Begin`) calls stay clean. A
+/// namespace DECLARED in the workspace is authoritative once the dependency
+/// closure is complete, so its unknown member now errors (GH #58).
 #[test]
 fn check_command_issue_repro_28b_user_namespace_stays_silent() {
     let (_, stdout, _) = run_issue_repro_typedb("28b-user-namespace-silent");
-    let flagged = stdout
-        .lines()
-        .any(|l| l.contains("Main.as:1") && l.contains("error"));
+    for line in ["Main.as:17", "Main.as:19", "Main.as:20", "Main.as:21"] {
+        assert!(
+            !stdout
+                .lines()
+                .any(|l| l.contains(line) && l.contains("error")),
+            "{line} must stay silent; stdout={stdout:?}"
+        );
+    }
+    let flagged = stdout.lines().any(|l| {
+        l.contains("Main.as:18") && l.contains("No matching symbol 'MyHelpers::NotInDbEither'")
+    });
     assert!(
-        !flagged,
-        "user-namespace calls and legal API calls must stay silent; stdout={stdout:?}"
+        flagged,
+        "GH #58: an unknown member of a workspace-declared namespace must error; stdout={stdout:?}"
     );
 }
 
@@ -1270,4 +1340,544 @@ fn check_command_issue_repro_60_exports_correct_pattern_clean() {
         "shared exports must resolve; stdout={stdout:?} stderr={stderr:?}"
     );
     assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
+}
+
+/// GH #58: a call to a namespace-qualified symbol that exists nowhere in
+/// the workspace is a game compile error the LSP used to miss —
+/// `No matching symbol 'TournamentStation::SendEvent'` (tournament-station,
+/// 2026-08-23). The namespace is declared in a sibling file, so this covers
+/// the cross-file half too. Every resolvable form under the same namespace
+/// (function, class-as-type, value-type ctor, enum cast, funcdef-typed
+/// global, plain global) must stay silent.
+#[test]
+fn check_command_issue_repro_58b_unknown_namespaced_symbol_diagnoses() {
+    let (_, stdout, _) = run_issue_repro_typedb("58b-ns-unknown-symbol");
+    let flagged = stdout.lines().any(|l| {
+        l.contains("Main.as:7")
+            && l.contains("error")
+            && l.contains("No matching symbol 'TournamentStation::SendEvent'")
+    });
+    assert!(
+        flagged,
+        "expected a No-matching-symbol error on TournamentStation::SendEvent; stdout={stdout:?}"
+    );
+    for line in [
+        "Main.as:8",
+        "Main.as:9",
+        "Main.as:10",
+        "Main.as:11",
+        "Main.as:12",
+        "Main.as:13",
+    ] {
+        assert!(
+            !stdout
+                .lines()
+                .any(|l| l.contains(line) && l.contains("error")),
+            "resolvable namespace member on {line} must stay silent; stdout={stdout:?}"
+        );
+    }
+}
+
+/// GH #58, hint half: a near-name candidate under the same namespace is
+/// named in the message, mirroring the typedb `UI::GetIO` rule. The
+/// motivating repro has NO near name, so the hint is additive only —
+/// never a gate on the diagnostic (B013 decision 2).
+#[test]
+fn check_command_issue_repro_58b_near_name_hint_names_candidate() {
+    let (_, stdout, _) = run_issue_repro_typedb("58b-ns-unknown-symbol");
+    let hinted = stdout.lines().any(|l| {
+        l.contains("Main.as:14")
+            && l.contains("No matching symbol 'Hints::Refrsh'")
+            && l.contains("Hints::Refresh")
+    });
+    assert!(
+        hinted,
+        "expected a near-name hint naming Hints::Refresh; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout
+            .lines()
+            .any(|l| l.contains("Main.as:15") && l.contains("error")),
+        "the correctly spelled call must stay silent; stdout={stdout:?}"
+    );
+}
+
+/// GH #58 false-positive fences: AngelScript resolves a qualified call
+/// RELATIVE to the enclosing namespace first (`Inner::Deep()` inside
+/// `Outer` binds `Outer::Inner::Deep`), and only single-segment namespaces
+/// are authoritative in this release (`Outer::Inner::Nope` stays silent).
+#[test]
+fn check_command_issue_repro_58c_relative_and_nested_namespaces_stay_silent() {
+    let (_, stdout, _) = run_issue_repro_typedb("58c-ns-relative-nested");
+    for line in [
+        "Main.as:19",
+        "Main.as:20",
+        "Main.as:25",
+        "Main.as:26",
+        "Main.as:27",
+    ] {
+        assert!(
+            !stdout
+                .lines()
+                .any(|l| l.contains(line) && l.contains("error")),
+            "relative/nested namespace resolution on {line} must stay silent; stdout={stdout:?}"
+        );
+    }
+    let flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:28") && l.contains("No matching symbol 'Inner::Nope'"));
+    assert!(
+        flagged,
+        "expected an error for Inner::Nope on the top-level namespace; stdout={stdout:?}"
+    );
+}
+
+/// GH #58: the workspace half of the rule needs no typedb — but an ENGINE
+/// namespace the plugin also adds helpers to (`namespace UI { … }`) must
+/// stay silent without one, because only the typedb knows the real API
+/// surface (`UI::Begin`).
+#[test]
+fn check_command_issue_repro_58d_engine_namespace_fence_without_typedb() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/issue-repros/58d-ns-engine-fence");
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&fixture)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in ["Main.as:14", "Main.as:15", "Main.as:16"] {
+        assert!(
+            !stdout
+                .lines()
+                .any(|l| l.contains(line) && l.contains("error")),
+            "engine-namespace call on {line} must stay silent with no typedb; stdout={stdout:?}"
+        );
+    }
+    let flagged = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:17") && l.contains("No matching symbol 'Local::Nope'"));
+    assert!(
+        flagged,
+        "expected an error for Local::Nope with no typedb loaded; stdout={stdout:?}"
+    );
+}
+
+/// GH #58 trigger (c): the namespace is declared only in a RESOLVED
+/// dependency's export surface. That surface is authoritative for a
+/// consumer (the game compiles exactly those files into it), so an unknown
+/// member is a real `No matching symbol`; the exported one stays silent.
+#[test]
+fn check_command_unknown_member_of_dependency_namespace_diagnoses() {
+    let base = std::env::temp_dir().join(format!("openplanet-lsp-dep-ns-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("deps/dep-plugin/src")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("deps/dep-plugin/info.toml"),
+        "[meta]\nname = \"Dependency Plugin\"\nversion = \"0.1.0\"\n\n[script]\nmodule = \"DepPlugin\"\nexports = [\"Export.as\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("deps/dep-plugin/src/Export.as"),
+        "namespace DepPlugin {\n    import void Hello() from \"DepPlugin\";\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"Consumer\"\nversion = \"0.1.0\"\n\n[script]\ndependencies = [\"DepPlugin\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "void Main() {\n    DepPlugin::Hello();\n    DepPlugin::NotExported();\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("deps"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No matching symbol 'DepPlugin::NotExported'"),
+        "expected an error for a member absent from the dep export surface; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout
+            .lines()
+            .any(|l| l.contains("Main.as:2") && l.contains("error")),
+        "the exported member must stay silent; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
+/// GH #58 authority guard (B013 decision 3): when a REQUIRED dependency
+/// cannot be resolved, the workspace symbol set is not authoritative —
+/// the missing dep may declare the very member being called (AngelScript
+/// namespaces are open and additive across modules), so the rule stays
+/// silent even though the namespace is declared locally.
+#[test]
+fn check_command_unknown_namespaced_symbol_silent_when_required_dep_missing() {
+    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-nodep-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("plugins")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"Consumer\"\nversion = \"0.1.0\"\n\n[script]\ndependencies = [\"NoSuchDep\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "namespace Shared {\n    void Known() {}\n}\n\nvoid Main() {\n    Shared::Known();\n    Shared::MaybeInTheMissingDep();\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("plugins"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("No matching symbol"),
+        "an unresolved required dependency must silence the rule; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("NoSuchDep"),
+        "the missing-dependency error itself must still be reported; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
+/// GH #58 with the exports machinery in play: a namespace declared across a
+/// strict `[script] exports` file, a `shared_exports` file and an ordinary
+/// source file resolves for every member any of those contributes (the
+/// own-module view keeps shared exports visible and the real body lives in
+/// the ordinary file). Only members nothing contributes are errors.
+#[test]
+fn check_command_namespaced_symbol_across_export_files() {
+    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-exp-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("src")).unwrap();
+    fs::write(
+        base.join("info.toml"),
+        "[meta]\nname = \"ExportNs\"\nversion = \"0.1.0\"\n\n[script]\nmodule = \"T\"\nexports = [\"Exports_Decls.as\"]\nshared_exports = [\"Shared_Ns.as\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("src/Exports_Decls.as"),
+        "namespace Api {\n    import void Send() from \"T\";\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("src/Shared_Ns.as"),
+        "namespace Shared {\n    void Helper() {}\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("src/Main.as"),
+        "namespace Api {\n    void Send() {}\n}\n\nvoid Main() {\n    Api::Send();\n    Shared::Helper();\n    Shared::Nope();\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&base)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No matching symbol 'Shared::Nope'"),
+        "expected an error for the member nothing declares; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("No matching symbol 'Api::Send'")
+            && !stdout.contains("No matching symbol 'Shared::Helper'"),
+        "members contributed by any pooled file must resolve; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
+/// GH #58: AngelScript namespaces are ADDITIVE across modules — a resolved
+/// dependency's export surface and the consumer's own files both contribute
+/// to `namespace Shared`, and a member from either side resolves. Only a
+/// name neither declares is a `No matching symbol`.
+#[test]
+fn check_command_namespace_members_union_across_modules() {
+    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-add-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("deps/dep-plugin/src")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("deps/dep-plugin/info.toml"),
+        "[meta]\nname = \"Dependency Plugin\"\nversion = \"0.1.0\"\n\n[script]\nmodule = \"DepPlugin\"\nexports = [\"Export.as\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("deps/dep-plugin/src/Export.as"),
+        "namespace Shared {\n    import void FromDep() from \"DepPlugin\";\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"Consumer\"\nversion = \"0.1.0\"\n\n[script]\ndependencies = [\"DepPlugin\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "namespace Shared {\n    void FromOwn() {}\n}\n\nvoid Main() {\n    Shared::FromOwn();\n    Shared::FromDep();\n    Shared::FromNeither();\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("deps"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No matching symbol 'Shared::FromNeither'"),
+        "expected an error for the member neither module declares; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("No matching symbol 'Shared::FromOwn'")
+            && !stdout.contains("No matching symbol 'Shared::FromDep'"),
+        "additive namespace members from either module must resolve; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
+/// GH #58 authority guard, optional-dependency half: `apply_manifest`
+/// defines `DEPENDENCY_<ID>` for every DECLARED dependency, resolved or
+/// not, so code behind `#if DEPENDENCY_MISSINGOPT` stays live even when the
+/// optional dep is not installed. The game would not define that macro and
+/// would mask the block out, so firing there is a false positive — an
+/// unresolved dependency of ANY kind must silence the rule.
+#[test]
+fn check_command_unknown_namespaced_symbol_silent_when_optional_dep_missing() {
+    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-opt-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("plugins")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"OptFP\"\nversion = \"0.1.0\"\n\n[script]\noptional_dependencies = [\"MissingOpt\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n#if DEPENDENCY_MISSINGOPT\n    Shared::FromTheOptionalDep();\n#endif\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("plugins"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("No matching symbol"),
+        "an unresolved optional dependency must silence the rule; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
+/// GH #58 authority guard, transitive half: a resolved dependency names an
+/// `export_dependency` that no plugins dir provides. Today that is only a
+/// `tracing::warn!`, not a missing-required entry — but the unreadable
+/// module may declare the member, so the rule must stay silent.
+#[test]
+fn check_command_unknown_namespaced_symbol_silent_when_nested_export_dep_missing() {
+    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-nest-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("deps/dep-plugin/src")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("deps/dep-plugin/info.toml"),
+        "[meta]\nname = \"Dependency Plugin\"\nversion = \"0.1.0\"\n\n[script]\nmodule = \"DepPlugin\"\nexports = [\"Export.as\"]\nexport_dependencies = [\"NestedMissing\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("deps/dep-plugin/src/Export.as"),
+        "namespace Shared {\n    import void FromDep() from \"DepPlugin\";\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"Consumer\"\nversion = \"0.1.0\"\n\n[script]\ndependencies = [\"DepPlugin\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n    Shared::MaybeInNestedMissing();\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("deps"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("No matching symbol"),
+        "an unresolved nested export_dependency must silence the rule; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
+/// GH #58 decision 4: every declaration kind a namespace can contribute
+/// participates in its additive member surface. In particular, a typedef is
+/// both legal AngelScript syntax and a type name that a namespaced cast must
+/// resolve without a parser error or a `No matching symbol` diagnostic.
+#[test]
+fn check_command_namespaced_typedef_resolves_without_parse_or_symbol_error() {
+    let root = make_temp_plugin("namespace-typedef");
+    fs::write(
+        root.join("src/Main.as"),
+        "namespace Names {\n    typedef int Alias;\n}\n\nvoid Main() {\n    Names::Alias(0);\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "a namespaced typedef cast must be clean; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stdout.contains("parse error") && !stdout.contains("No matching symbol 'Names::Alias'"),
+        "typedef must parse and resolve as a namespace member; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Write a plugin whose `.gitignore` line is caller-chosen: `generated/Gen.as`
+/// contributes `Shared::FromGenerated`, `src/Main.as` calls it plus a member
+/// nothing declares. Shared by the GH #58 × GH #60 authority triplet.
+fn gitignore_authority_plugin(name: &str, gitignore: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("openplanet-lsp-{}-{}", name, std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("generated")).unwrap();
+    fs::write(
+        root.join("info.toml"),
+        "[meta]\nname = \"GitignoreAuthority\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(root.join(".gitignore"), gitignore).unwrap();
+    fs::write(
+        root.join("generated/Gen.as"),
+        "namespace Shared {\n    void FromGenerated() {}\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n    Shared::FromGenerated();\n    Shared::DeclaredNowhere();\n}\n",
+    )
+    .unwrap();
+    root
+}
+
+fn check_plugin(root: &std::path::Path, extra_args: &[&str]) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"));
+    cmd.env("NO_COLOR", "1").arg("check").arg("--no-typedb");
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    let output = cmd.arg(root).output().unwrap();
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// GH #58 × GH #60: gitignore honoring drops `.as` files at DISCOVERY time,
+/// before any `source_paths` / `ignore_paths` filter runs. The game compiles
+/// those files regardless — gitignore is a git concept, not a compile concept
+/// — so a namespace member declared only in a gitignored file is legal, and
+/// the pooled table is no longer an authoritative surface for that namespace.
+/// The whole rule must go silent for the plugin.
+#[test]
+fn check_command_namespaced_symbol_silent_when_gitignore_excluded_a_source() {
+    let root = gitignore_authority_plugin("gitignore-authority", "generated/\n");
+    let stdout = check_plugin(&root, &[]);
+    assert!(
+        !stdout.contains("No matching symbol"),
+        "a gitignore-excluded own-module file must silence the rule; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// The same plugin with `--no-gitignore`: the generated file is discovered, so
+/// `Shared::FromGenerated` resolves for the ordinary reason AND the surface is
+/// authoritative again — the member nothing declares still errors. This is the
+/// non-vacuity half of the fence.
+#[test]
+fn check_command_namespaced_symbol_armed_when_gitignore_honoring_is_disabled() {
+    let root = gitignore_authority_plugin("gitignore-disabled", "generated/\n");
+    let stdout = check_plugin(&root, &["--no-gitignore"]);
+    assert!(
+        !stdout.contains("No matching symbol 'Shared::FromGenerated'"),
+        "the discovered generated declaration must resolve; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("No matching symbol 'Shared::DeclaredNowhere'"),
+        "with nothing excluded the rule must stay armed; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Honoring gitignore is the DEFAULT, so "honoring is on" cannot be the
+/// disarm condition — that would silence the rule in nearly every repo. Only
+/// an actual exclusion breaks authority: a `.gitignore` that matches no `.as`
+/// file leaves the rule armed.
+#[test]
+fn check_command_namespaced_symbol_armed_when_gitignore_excludes_nothing() {
+    let root = gitignore_authority_plugin("gitignore-noop", "*.log\nbuild/\n");
+    let stdout = check_plugin(&root, &[]);
+    assert!(
+        stdout.contains("No matching symbol 'Shared::DeclaredNowhere'"),
+        "a gitignore that excludes no .as file must leave the rule armed; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("No matching symbol 'Shared::FromGenerated'"),
+        "the discovered generated declaration must resolve; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
 }

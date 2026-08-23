@@ -75,3 +75,164 @@ in a disjoint region (namespaced-call resolution ~L2930-3000 vs locals/usage
 recording ~L520-1000); rebase onto master before the final review gate. Files:
 src/typecheck/checker.rs, src/analysis_snapshot.rs / src/workspace/load.rs
 (module surface query), tests/.
+## Implementation notes (2026-08-24, lane B, branch fix/ns-unknown-symbols)
+
+Landed on branch `fix/ns-unknown-symbols`. NOTE: this branch was rebased
+twice, so any short SHA written below is stale — the durable reference is the
+commit SUBJECT. In order:
+
+  feat(typecheck): No matching symbol for workspace-declared namespaces
+  docs: record the GH #58 namespace rule
+  fix(workspace): any unresolved dependency breaks namespace-rule authority
+  bl append B013: GH #58 implementation notes and follow-ups
+  test(snapshot): pin the GH #58 dependency-closure authority seam
+  fix(parser): support typedef namespace symbols
+  fix(workspace): disarm namespace rule for filtered sources
+  docs(backlog): correct B013 source-completeness follow-up
+  docs: align namespace authority contract
+  bl append B013: fleet FP sweep evidence and reviewer outcome
+  fix(workspace): a gitignore exclusion breaks namespace-rule authority
+  test(workspace): pin the gitignore-count invariant and overlay authority
+  fix(workspace): disarm namespace checks for missing exports
+  fix(typecheck): fence Tests engine namespace
+  docs(typecheck): enumerate the namespace-authority conditions in one place
+
+### Decision interpretations
+* Triggers (c) and (d) share ONE implementation. The pooled `SymbolTable`
+  IS own-module + resolved dependency export files, so "namespace declared
+  in a resolved dep's export surface" and "namespace declared in the own
+  module" are the same query. Openplanet cross-plugin access is by
+  `import ... from "Module"`, not `Module::Fn`, so a dep's namespace is a
+  namespace like any other; there is no separate module-name namespace to
+  query.
+* Extra fence beyond the bl body: the rule requires `Ns` NOT to be an
+  engine namespace (`is_engine_namespace`, the static Core/Nadeo list). A
+  plugin may add helpers to `namespace UI` and still call the real API,
+  which only the typedb knows — without that fence a check run with no
+  typedb would flag every real `UI::` call. The fence is also what lets the
+  rule work with no typedb loaded, which the motivating repro command needs
+  (`openplanet-lsp check /tmp/probe58`, no `--typedb-dir`).
+* Extra fence beyond the bl body: relative namespace resolution. Inside
+  `namespace Outer`, `Inner::Deep()` binds `Outer::Inner::Deep` even when a
+  top-level `Inner` exists; the rule walks the enclosing namespace stack
+  before firing.
+* `typedef` now has parser and symbol-table support (`fix(parser): support
+  typedef namespace symbols`). The CLI
+  regression verifies that a namespaced typedef parses and resolves without a
+  `No matching symbol` diagnostic.
+
+### Authority guard widened (decision 3 said "required dependency")
+Probing found a reproducible FP the required-only guard misses:
+`LspConfig::apply_manifest` defines `DEPENDENCY_<ID>` for every DECLARED
+dependency, resolved or not, so code behind `#if DEPENDENCY_MISSINGOPT`
+stays live when an OPTIONAL dep is not installed — while the game leaves
+that macro undefined and masks the block out. Same hole for a resolved
+dep's unresolved `export_dependencies` (previously only a `tracing::warn!`).
+The guard is now "every declared dependency resolved", carried as
+`PluginWorkspaceLoad::dependency_closure_complete`. That also closes a third
+hole: the server's open-documents-only fallbacks carried a real root with an
+empty missing-required list and would have claimed authority over a pool
+holding only the open buffers.
+
+Cost: a plugin with an uninstalled optional dependency loses the rule
+entirely (tm-dips-plus-plus here, whose loading-screen optional deps are not
+installed on this box).
+
+### Follow-ups worth their own tasks
+1. Align the define set with dependency resolution: `apply_manifest` should
+   define `DEPENDENCY_<ID>` only for deps that actually resolved (or the
+   preprocessor should carry per-region define provenance so a rule can be
+   suppressed just inside `#if DEPENDENCY_<unresolved>` regions). Either
+   would let this rule stay armed for plugins with uninstalled optional
+   deps, and fixes a define-set mismatch with the game that is independent
+   of this rule.
+2. Not gated, noted: a sibling file that momentarily fails to parse can lose
+   its symbols, leaving the pooled source incomplete. The pre-existing
+   `undefined identifier` rule has the same exposure, so this is a general
+   workspace-authority question rather than one for this rule.
+
+### Fleet FP sweep (2026-08-24, binary built from `docs: align namespace
+### authority contract`)
+`openplanet-lsp check <plugin> --typedb-dir tests/fixtures/typedb` over all 28
+plugins in ~/OpenplanetNext/Plugins: 11 `No matching symbol` hits, every one
+from the PRE-EXISTING typedb triggers — `Text::Join` x5 (trigger a),
+`Draw::GetWidth`/`GetHeight` x4 (trigger b), `UI::InputTextCallback` x2
+(trigger a). Zero firings of the new workspace triggers. Positive controls
+(`Blocks::NoSuchFunction58` on Editor/E++, `LocalStats::NoSuchFunction58` on
+Archivist, `Backoff::NoSuchFunction58` on tournament-station itself) confirm
+the rule is armed on those plugins rather than vacuously silent.
+
+Reviewer: `ccc @cx-reviewer` review-and-fix loop returned PASS; its corrective
+commits are the typedef parser support, the source-filter disarm, and the two
+doc-alignment commits listed above.
+
+### Rebase onto master (GH #60) — a third authority hole, 2026-08-24
+Rebased onto 5822455 (clean, no conflicts). GH #60's `honor_gitignore`
+(DEFAULT ON) drops `.as` files at DISCOVERY time, before `source_file_included`
+runs, so `dependency_closure_complete` could be true while the pool was missing
+own-module files. The game compiles gitignored files — gitignore is a git
+concept, not a compile concept — so a namespace member declared only in a
+generated-but-gitignored source was reported as `No matching symbol`.
+Reproduced, then fenced.
+
+The condition is "at least one `.as` file was actually dropped", NOT "honoring
+is enabled": honoring is the default, so gating on the flag would disarm the
+rule in nearly every repo — a vacuously silent rule is worse than the bug.
+`project::discover` now returns a `Discovery { files, gitignore_excluded }`
+unconditionally; `load_plugin_workspace` folds the count into
+`dependency_closure_complete`. `log_excluded_count` keeps its DEBUG gate but no
+longer re-derives the number (it no longer runs a walk of its own).
+
+The baseline for the count comes from the SAME `ignore::WalkBuilder` with only
+`git_ignore`/`git_exclude` flipped off, not from `discover_recursive` — one
+traversal engine for both passes, so the count cannot drift from the kept set
+and the crate's symlink-loop handling applies to both.
+
+Cost, measured on tests/fixtures/tm-editor-plus-plus (263 `.as` files, release):
+honoring walk 1.28 ms, baseline walk 0.65 ms, `discover()` total 2.24 ms,
+against a ~4.7 s full check — the extra pass is ~0.01% of a check.
+
+Dependency side checked: NOT affected. A resolved dep contributes only its
+explicit `[script] exports`/`shared_exports` paths via
+`deps::collect_export_files` -> `resolve_plugin_file`, read directly; no
+discovery walk and no `DiscoveryOptions`, so gitignore never filters dep files
+(`.op` archives read from the ZIP, likewise). No dep-side treatment needed.
+
+### Review pass 2 (post-rebase, PASS) + the five-condition list, 2026-08-24
+`ccc @cx-reviewer` pass 2 returned PASS on the rebased state. Two findings,
+both fixed by it and both verified independently here:
+
+* `fix(workspace): disarm namespace checks for missing exports` — resolving a
+  dependency was not enough. A dep whose declared
+  `[script] exports`/`shared_exports` include a MISSING or UNREADABLE file
+  still counted as authoritative, so its partial namespace surface produced
+  false `No matching symbol`. `ResolvedDependency` now reports
+  `unloaded_exports` (directory and `.op` shapes alike) and the loader tracks
+  `incomplete_export_surfaces`.
+* `fix(typecheck): fence Tests engine namespace` — `Tests` is an Openplanet
+  CORE namespace and was absent from
+  `is_engine_namespace`, so a plugin-local `namespace Tests { … }` (a very
+  likely name for test helpers) armed the rule against game-owned `Tests::`
+  calls with no typedb loaded. Verified against the fixture typedb: `Tests`
+  really is there, and it was the ONLY gap — diffing all typedb leading
+  segments against the static list now yields nothing.
+
+Added here: `engine_namespace_list_covers_every_typedb_namespace`, a
+maintenance guard asserting every typedb namespace is in
+`is_engine_namespace`. A typedb refresh that adds a namespace now fails in
+CI rather than as a false `No matching symbol` in someone's plugin. Proven
+red by removing `Tests` (both it and the reviewer's regression fail), green
+when restored.
+
+The authority conditions are now enumerated ONCE, as a numbered list with a
+one-line "why" each, on
+`workspace::load::PluginWorkspaceLoad::dependency_closure_complete`; the
+predicate carries `// (n)` markers in the same order, and the mirrors in
+`symbols::table`, `analysis_snapshot` and `checker` point at that list
+instead of restating a subset (two of them had already drifted to a stale
+three-condition version). Five conditions: real disk root; every declared
+dependency resolved; every resolved dep contributed all declared exports; no
+`source_paths`/`ignore_paths`; gitignore dropped no `.as` file.
+
+Coordinator decision recorded: the `DEPENDENCY_<ID>`-define fix is B019, NOT
+this branch. The four/five-condition guard stays as-is here.

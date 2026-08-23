@@ -84,6 +84,14 @@ impl AnalysisSnapshot {
                 report_diagnostics: wf.report_diagnostics,
             });
         }
+        // GH #58: carry the loader's verdict on whether these sources are
+        // the plugin's complete compile surface. The conditions behind it are
+        // enumerated on `PluginWorkspaceLoad::dependency_closure_complete` —
+        // this is a pass-through, not a second place to decide. An in-memory
+        // pool and the server's open-documents-only fallback never claim it.
+        if load.dependency_closure_complete {
+            table.mark_dependency_closure_complete();
+        }
         // Own-module view for diagnostics: identical pool except strict
         // export files hidden from name resolution (game parity
         // 2026-08-23 — export decls are consumer-only).
@@ -130,6 +138,7 @@ impl AnalysisSnapshot {
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
+            dependency_closure_complete: false,
             export_paths: HashSet::new(),
             strict_export_paths: HashSet::new(),
         };
@@ -150,6 +159,7 @@ impl AnalysisSnapshot {
                 })
                 .collect(),
             missing_required_dependencies: Vec::new(),
+            dependency_closure_complete: false,
             export_paths: Default::default(),
             strict_export_paths: Default::default(),
         };
@@ -439,5 +449,110 @@ mod tests {
         // The use of `x` in `int y = x` sits at offset 33.
         let ty = checked.type_at_offset(33).expect("x recorded");
         assert_eq!(ty.display(), "int");
+    }
+    /// Helper: a throwaway plugin root on disk. `script` is appended to
+    /// `info.toml` verbatim (empty = no `[script]` section).
+    fn temp_plugin(name: &str, script: &str, files: &[(&str, &str)]) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("ols-snap-closure-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("info.toml"),
+            format!("[meta]\nname = \"{name}\"\nversion = \"0.1.0\"\n{script}"),
+        )
+        .unwrap();
+        for (rel, src) in files {
+            std::fs::write(root.join(rel), src).unwrap();
+        }
+        root
+    }
+
+    fn load_of(root: &std::path::Path) -> crate::workspace::load::PluginWorkspaceLoad {
+        crate::workspace::load::load_plugin_workspace(
+            root,
+            &crate::workspace::load::DependencySearch::with_defaults(),
+        )
+        .expect("temp plugin loads")
+    }
+
+    /// GH #58: a real disk load with every declared dependency resolved is
+    /// the complete module closure, so the pooled table carries the
+    /// authority the workspace `No matching symbol` rule gates on.
+    #[test]
+    fn disk_load_marks_dependency_closure_complete() {
+        let root = temp_plugin("Closed", "", &[("src/Main.as", "void Main() {}\n")]);
+        let snap = AnalysisSnapshot::from_load(&load_of(&root), &LspConfig::default());
+        assert!(
+            snap.symbols().dependency_closure_complete(),
+            "a dependency-free disk load is the complete closure"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An unresolved dependency of ANY kind breaks the closure — an
+    /// optional one included, because `LspConfig::apply_manifest` defines
+    /// `DEPENDENCY_<ID>` for it regardless, keeping `#if`-guarded code the
+    /// game would mask out live in our view (GH #58).
+    #[test]
+    fn unresolved_optional_dependency_breaks_closure() {
+        let root = temp_plugin(
+            "OptDep",
+            "\n[script]\noptional_dependencies = [\"ZzzNoSuchOptDep99\"]\n",
+            &[("src/Main.as", "void Main() {}\n")],
+        );
+        let snap = AnalysisSnapshot::from_load(&load_of(&root), &LspConfig::default());
+        assert!(
+            !snap.symbols().dependency_closure_complete(),
+            "an unresolved optional dependency must break the closure"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The own-module view (and the un-hidden copy built for a strict
+    /// export file) must carry the closure flag — otherwise the rule would
+    /// silently disarm for exactly the files that need it (GH #58).
+    #[test]
+    fn own_module_views_keep_the_closure_flag() {
+        let root = temp_plugin(
+            "Exporter",
+            "\n[script]\nmodule = \"T\"\nexports = [\"Exports.as\"]\n",
+            &[
+                ("src/Exports.as", "import void Send() from \"T\";\n"),
+                ("src/Main.as", "void Send() {}\nvoid Main() { Send(); }\n"),
+            ],
+        );
+        let snap = AnalysisSnapshot::from_load(&load_of(&root), &LspConfig::default());
+        assert!(
+            snap.own_module_symbols().is_some(),
+            "a strict export file must produce an own-module view"
+        );
+        for rel in ["src/Main.as", "src/Exports.as"] {
+            let path = root.join(rel);
+            let table = snap.table_for_own_file(FileRef::Path(&path));
+            assert!(
+                table.dependency_closure_complete(),
+                "{rel}: own-module view lost the closure flag"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// In-memory snapshots (the test surface, and the server's
+    /// open-documents-only fallback) pool a partial view and must never
+    /// claim the closure (GH #58).
+    #[test]
+    fn in_memory_snapshot_is_never_closure_complete() {
+        let snap = AnalysisSnapshot::from_files(
+            &[(
+                PathBuf::from("a.as"),
+                "namespace N { void F() {} }".to_string(),
+            )],
+            &LspConfig::default(),
+        );
+        assert!(
+            !snap.symbols().dependency_closure_complete(),
+            "an in-memory pool must not claim the dependency closure"
+        );
     }
 }

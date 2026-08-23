@@ -68,6 +68,7 @@ pub enum TokenKind {
     KwEnum,
     KwNamespace,
     KwFuncdef,
+    KwTypedef,
     /// `function` — used as a contextual keyword for anonymous function
     /// literals: `someCall(function() { ... })`. The lexer always tokenizes
     /// the bare word `function` as this keyword.
@@ -209,6 +210,7 @@ pub fn keyword_lookup(text: &str) -> TokenKind {
         "enum" => TokenKind::KwEnum,
         "namespace" => TokenKind::KwNamespace,
         "funcdef" => TokenKind::KwFuncdef,
+        "typedef" => TokenKind::KwTypedef,
         "function" => TokenKind::KwFunction,
         "mixin" => TokenKind::KwMixin,
         "shared" => TokenKind::KwShared,
@@ -271,6 +273,7 @@ mod tests {
         assert_eq!(keyword_lookup("class"), TokenKind::KwClass);
         assert_eq!(keyword_lookup("int64"), TokenKind::KwInt64);
         assert_eq!(keyword_lookup("funcdef"), TokenKind::KwFuncdef);
+        assert_eq!(keyword_lookup("typedef"), TokenKind::KwTypedef);
         assert_eq!(keyword_lookup("myVar"), TokenKind::Ident);
         assert_eq!(keyword_lookup("void"), TokenKind::KwVoid);
         assert_eq!(keyword_lookup("is"), TokenKind::KwIs);

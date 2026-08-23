@@ -516,6 +516,10 @@ impl<'a> Parser<'a> {
                 let decl = self.parse_funcdef_decl()?;
                 Ok(Item::Funcdef(decl))
             }
+            TokenKind::KwTypedef => {
+                let decl = self.parse_typedef_decl()?;
+                Ok(Item::Typedef(decl))
+            }
             TokenKind::KwImport => {
                 let decl = self.parse_import_decl()?;
                 Ok(Item::Import(decl))
@@ -863,6 +867,22 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parse a type alias: `typedef ExistingType Alias;`.
+    fn parse_typedef_decl(&mut self) -> Result<TypedefDecl, ParseError> {
+        let start = self.current_span().start;
+        self.expect(TokenKind::KwTypedef)?;
+        let target_type = self.parse_type_expr()?;
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::Semi)?;
+        let span = self.span_from(start);
+
+        Ok(TypedefDecl {
+            span,
+            target_type,
+            name,
+        })
+    }
+
     /// Parse an import declaration. Two forms:
     /// 1. `import "path" [as Alias];`
     /// 2. `import RetType Name(params) from "module";`
@@ -1070,6 +1090,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::KwEnum
                 | TokenKind::KwNamespace
                 | TokenKind::KwFuncdef
+                | TokenKind::KwTypedef
                 | TokenKind::KwImport => return,
                 TokenKind::Eof => return,
                 _ => {

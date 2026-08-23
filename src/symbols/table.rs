@@ -64,6 +64,18 @@ pub struct SymbolTable {
     /// hides them, game parity 2026-08-23). Mutation before pooling is
     /// complete; empty = no filtering.
     hidden_files: std::collections::HashSet<usize>,
+    /// True when this pool is the plugin's COMPLETE compile surface. Only
+    /// then is the absence of a name evidence that the game compiler would
+    /// reject it — AngelScript namespaces are open and additive across every
+    /// file the game compiles together, so one unread file may contribute the
+    /// very member being called (GH #58).
+    ///
+    /// The conditions are enumerated ONCE, on
+    /// `workspace::load::PluginWorkspaceLoad::dependency_closure_complete`;
+    /// do not restate them here, or the two copies will drift. Defaults to
+    /// false so ad-hoc pools (single-file diagnostics, in-memory test tables)
+    /// never claim an authority they don't have.
+    dependency_closure_complete: bool,
     next_file_id: usize,
 }
 
@@ -207,6 +219,22 @@ impl SymbolTable {
     /// True when `file_id` is currently hidden from lookups.
     pub fn is_file_hidden(&self, file_id: usize) -> bool {
         self.hidden_files.contains(&file_id)
+    }
+
+    /// Declare this pool the complete compile surface — see the
+    /// `dependency_closure_complete` field docs, and the enumerated
+    /// conditions they point at. Set by the snapshot builder from the
+    /// loader's verdict; carried by `clone()` so the own-module view keeps
+    /// it.
+    pub fn mark_dependency_closure_complete(&mut self) {
+        self.dependency_closure_complete = true;
+    }
+
+    /// True when this pool is the complete module closure (see the field
+    /// docs). Diagnostics that treat a missing name as a game-compiler
+    /// rejection must gate on this.
+    pub fn dependency_closure_complete(&self) -> bool {
+        self.dependency_closure_complete
     }
 
     /// Resolve a source-level reference by the same ladder the checker
@@ -433,6 +461,23 @@ impl SymbolTable {
                         params: Vec::new(),
                     },
                     span: fd.span,
+                    file_id,
+                    doc: None,
+                });
+            }
+            ast::Item::Typedef(td) => {
+                let name = qualify(td.name.text(source));
+                out.push(Symbol {
+                    name,
+                    // A typedef is a first-class type name. The current
+                    // symbol surface already represents user-defined
+                    // type-only aliases with `Funcdef`, so use that category
+                    // rather than widening it for one declaration form.
+                    kind: SymbolKind::Funcdef {
+                        return_type: td.target_type.span.text(source).to_string(),
+                        params: Vec::new(),
+                    },
+                    span: td.span,
                     file_id,
                     doc: None,
                 });

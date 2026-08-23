@@ -145,14 +145,23 @@ pub enum TypeDiagnosticKind {
     /// `Can't find unambiguous implicit conversion to make both
     /// expressions have the same type`.
     TernaryNoCommonType,
-    /// GH #28 / #27: a free-function call `Ns::Fn(...)` the game rejects
-    /// with `No matching symbol 'Ns::Fn'`. Two high-confidence triggers,
-    /// both typedb-driven: (a) `Ns` is a KNOWN API namespace (appears as
-    /// functions[].ns in the typedb — e.g. `UI` with 237 fns on 1.29.5)
+    /// GH #28 / #27 / #58: a free-function call `Ns::Fn(...)` the game
+    /// rejects with `No matching symbol 'Ns::Fn'`. Four high-confidence
+    /// triggers. Typedb-driven: (a) `Ns` is a KNOWN API namespace (appears
+    /// as functions[].ns in the typedb — e.g. `UI` with 237 fns on 1.29.5)
     /// but `Ns::Fn` is not among its functions; (b) `Ns` is absent from
     /// the typedb entirely AND is a known removed/game API namespace
-    /// (relocation table, e.g. `Draw` → `Display`). `hint` carries the
-    /// replacement when a relocation is known (GH #27).
+    /// (relocation table, e.g. `Draw` → `Display`). Workspace-driven
+    /// (GH #58): (c) `Ns` is a namespace declared in a resolved
+    /// dependency's export surface — exactly the files the game compiles
+    /// into a consumer — and nothing named `Fn` sits under it; (d) `Ns` is
+    /// a namespace declared in the plugin's own module with the same
+    /// result. (c) and (d) share one implementation because the pooled
+    /// table IS own-module + resolved dep exports; both require the
+    /// dependency closure to be complete (see
+    /// `workspace_ns_no_matching_symbol` for the full fence list).
+    /// `hint` carries the known relocation (GH #27) or the nearest
+    /// candidate name under the namespace.
     NoMatchingSymbol {
         qualified: String,
         hint: Option<String>,
@@ -410,6 +419,7 @@ fn is_engine_namespace(prefix: &str) -> bool {
             | "Regex"
             | "SQLite"
             | "Settings"
+            | "Tests"
             | "Text"
             | "Time"
             | "UI"
@@ -1117,6 +1127,9 @@ impl<'a> Checker<'a> {
                 for p in &fd.params {
                     let _ = self.resolve_type_expr(&p.type_expr);
                 }
+            }
+            Item::Typedef(td) => {
+                let _ = self.resolve_type_expr(&td.target_type);
             }
             Item::VarDecl(var) => self.check_var_decl_global(var),
             Item::Property(prop) => {
@@ -2928,59 +2941,164 @@ impl<'a> Checker<'a> {
 
     // ── Expression walker / minimal type derivation ─────────────────────────
 
-    /// GH #28 / #27: `Ns::Fn(...)` resolved to nothing. Decide whether the
-    /// typedb gives us enough confidence to diagnose the game-compiler
-    /// `No matching symbol 'Ns::Fn'` rejection:
+    /// GH #28 / #27 / #58: `Ns::Fn(...)` resolved to nothing. Decide
+    /// whether we have enough confidence to diagnose the game-compiler
+    /// `No matching symbol 'Ns::Fn'` rejection.
+    ///
+    /// The typedb owns every namespace it knows about — it is the only
+    /// authority on the engine API surface — so its two triggers run first
+    /// and, when `Ns` is a typedb namespace, they alone decide:
     ///
     /// - `Ns` has functions in the typedb (known API namespace) but `Ns::Fn`
     ///   is not among them → diagnose, optionally with near-name hints.
     /// - `Ns` is absent from the typedb entirely AND sits in the
     ///   removed-API relocation table (e.g. `Draw` on 1.29.5) → diagnose
     ///   with the replacement hint (`Display::GetWidth`).
-    /// - Anything else (unknown user namespace) → stay silent; we can't
-    ///   distinguish a user helper namespace from a typedb gap.
+    ///
+    /// Otherwise the workspace half gets a turn
+    /// ([`Self::workspace_ns_no_matching_symbol`], GH #58).
     fn free_fn_no_matching_symbol(&mut self, qual: &str, span: Span) -> Option<TypeDiagnostic> {
-        let idx = self.scope.external()?;
-        let (ns, _fn) = qual.split_once("::")?;
-        if idx.namespace_has_functions(ns) {
-            // Known API namespace: is the member really missing? The lookup
-            // already failed above (caller reached the silent path), but
-            // re-check to keep this helper self-contained.
-            if idx.lookup_function(qual).is_some() {
-                return None;
-            }
-            // Near-name candidates soften the diagnostic (typo support).
-            let members = idx.namespace_members(ns);
-            let near: Vec<&String> = members
-                .iter()
-                .filter(|m| edit_distance(m, _fn) <= 2 && !m.is_empty())
-                .take(3)
-                .collect();
-            let hint = if near.is_empty() {
-                None
-            } else {
-                Some(format!("{}::{}", ns, near[0]))
-            };
-            return Some(TypeDiagnostic {
-                span,
-                kind: TypeDiagnosticKind::NoMatchingSymbol {
-                    qualified: qual.to_string(),
-                    hint,
-                },
-            });
-        }
-        if !idx.namespace_exists(ns) {
-            if let Some(hint) = removed_api_hint(qual) {
+        let (ns, member) = qual.split_once("::")?;
+        if let Some(idx) = self.scope.external() {
+            if idx.namespace_has_functions(ns) {
+                // Known API namespace: is the member really missing? The
+                // lookup already failed above (caller reached the silent
+                // path), but re-check to keep this helper self-contained.
+                if idx.lookup_function(qual).is_some() {
+                    return None;
+                }
+                // Near-name candidates soften the diagnostic (typo support).
+                let members = idx.namespace_members(ns);
+                let near: Vec<&String> = members
+                    .iter()
+                    .filter(|m| edit_distance(m, member) <= 2 && !m.is_empty())
+                    .take(3)
+                    .collect();
+                let hint = if near.is_empty() {
+                    None
+                } else {
+                    Some(format!("{}::{}", ns, near[0]))
+                };
                 return Some(TypeDiagnostic {
                     span,
                     kind: TypeDiagnosticKind::NoMatchingSymbol {
                         qualified: qual.to_string(),
-                        hint: Some(hint.to_string()),
+                        hint,
                     },
                 });
             }
+            if !idx.namespace_exists(ns) {
+                if let Some(hint) = removed_api_hint(qual) {
+                    return Some(TypeDiagnostic {
+                        span,
+                        kind: TypeDiagnosticKind::NoMatchingSymbol {
+                            qualified: qual.to_string(),
+                            hint: Some(hint.to_string()),
+                        },
+                    });
+                }
+            } else {
+                // A typedb namespace with no functions (types/enums only):
+                // trigger (a) already had its say. Don't let the workspace
+                // rule second-guess the engine API surface.
+                return None;
+            }
         }
-        None
+        self.workspace_ns_no_matching_symbol(qual, ns, member, span)
+    }
+
+    /// GH #58 triggers (c)+(d): `Ns::Fn(...)` where `Ns` is a namespace the
+    /// WORKSPACE declares — the plugin's own module or a resolved
+    /// dependency's export surface, which is exactly the set of files the
+    /// game compiles together. When nothing named `Fn` sits under `Ns`, the
+    /// game rejects the call (`No matching symbol 'TournamentStation::SendEvent'`,
+    /// tournament-station 2026-08-23).
+    ///
+    /// AngelScript namespaces are open and additive across modules, so
+    /// silence is the correct answer whenever the symbol set is not
+    /// authoritative. The fences, in order:
+    ///
+    /// 1. `Ns` and `Fn` must both be non-empty, and `Fn` must be a single
+    ///    segment — deeper paths (`A::B::Fn`) stay silent in this release.
+    /// 2. Engine namespaces (`UI`, `Math`, …) belong to triggers (a)/(b):
+    ///    a plugin may add helpers to `namespace UI` while still calling
+    ///    the real API, which only the typedb can confirm.
+    /// 3. The pooled table must be the plugin's complete compile surface
+    ///    ([`GlobalScope::workspace_closure_complete`]) — an unread module
+    ///    file may contribute the member. The five conditions behind that
+    ///    flag are enumerated on
+    ///    `workspace::load::PluginWorkspaceLoad::dependency_closure_complete`.
+    /// 4. `Ns` must be declared as a namespace (a class is not one —
+    ///    AngelScript has no statics, so `MyClass::Thing()` stays silent).
+    /// 5. Nothing of ANY kind may match under it — function, class,
+    ///    interface, enum, enum value, funcdef, namespace or global
+    ///    variable, plus `get_`/`set_` virtual-property accessors.
+    /// 6. Relative resolution must fail too: inside `namespace Outer`,
+    ///    `Inner::Deep()` binds `Outer::Inner::Deep` even when a top-level
+    ///    `Inner` exists.
+    fn workspace_ns_no_matching_symbol(
+        &self,
+        qual: &str,
+        ns: &str,
+        member: &str,
+        span: Span,
+    ) -> Option<TypeDiagnostic> {
+        if ns.is_empty() || member.is_empty() || member.contains("::") {
+            return None;
+        }
+        if is_engine_namespace(ns) {
+            return None;
+        }
+        if !self.scope.workspace_closure_complete() {
+            return None;
+        }
+        if !self.scope.workspace_namespace_declared(ns) {
+            return None;
+        }
+        if self.workspace_ns_resolves(ns, member) {
+            return None;
+        }
+        // Relative resolution from each enclosing namespace prefix.
+        for depth in (1..=self.namespace_stack.len()).rev() {
+            let prefix = self.namespace_stack[..depth].join("::");
+            let relative_ns = format!("{prefix}::{ns}");
+            if self.scope.workspace_namespace_declared(&relative_ns)
+                || self.workspace_ns_resolves(&relative_ns, member)
+            {
+                return None;
+            }
+        }
+        // Near-name candidate, exactly like the typedb `UI::GetIO` path.
+        // Additive only — it never gates the diagnostic (the motivating
+        // repro has no near name at all).
+        let hint = self
+            .scope
+            .workspace_namespace_member_names(ns)
+            .into_iter()
+            .filter(|m| edit_distance(m, member) <= 2)
+            .min_by_key(|m| edit_distance(m, member))
+            .map(|m| format!("{ns}::{m}"));
+        Some(TypeDiagnostic {
+            span,
+            kind: TypeDiagnosticKind::NoMatchingSymbol {
+                qualified: qual.to_string(),
+                hint,
+            },
+        })
+    }
+
+    /// True when the workspace declares anything named `member` under the
+    /// namespace `ns` — any symbol kind (GH #58 decision 4), including a
+    /// `get_`/`set_` virtual-property accessor pair.
+    fn workspace_ns_resolves(&self, ns: &str, member: &str) -> bool {
+        self.scope
+            .workspace_declares_any(&format!("{ns}::{member}"))
+            || self
+                .scope
+                .workspace_declares_any(&format!("{ns}::get_{member}"))
+            || self
+                .scope
+                .workspace_declares_any(&format!("{ns}::set_{member}"))
     }
 
     fn expr_type(&mut self, expr: &Expr) -> TypeRepr {
@@ -3942,6 +4060,37 @@ mod tests {
         let mut checker = Checker::new(source, &scope);
         checker.check_file(&file);
         checker.diagnostics
+    }
+
+    /// Like `check`, but the pooled workspace table is marked as the
+    /// COMPLETE dependency closure — the authority the GH #58 workspace
+    /// `No matching symbol` rule requires (B013 decision 3).
+    fn check_closed_workspace(source: &str) -> Vec<TypeDiagnostic> {
+        let tokens = tokenize_filtered(source);
+        let mut parser = Parser::new(&tokens, source);
+        let file = parser.parse_file();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, source, &file);
+        ws.set_file_symbols(fid, syms);
+        ws.mark_dependency_closure_complete();
+        let scope = GlobalScope::new(&ws, None);
+        let mut checker = Checker::new(source, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    /// Qualified names (and hints) the `No matching symbol` rule flagged.
+    fn no_matching_symbols(diags: &[TypeDiagnostic]) -> Vec<(String, Option<String>)> {
+        diags
+            .iter()
+            .filter_map(|d| match &d.kind {
+                TypeDiagnosticKind::NoMatchingSymbol { qualified, hint } => {
+                    Some((qualified.clone(), hint.clone()))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Like `check`, but loads the Openplanet Core + Nadeo fixtures so
@@ -7668,6 +7817,242 @@ void Main() {
         assert!(
             diags.is_empty(),
             "methods are out of scope for this rule, got {diags:?}"
+        );
+    }
+
+    // ── GH #58: workspace-declared namespaces (B013) ───────────────────────
+
+    /// The motivating repro: `Ns` is declared in the workspace, `Ns::Fn`
+    /// matches nothing under it, and the pool is the complete dependency
+    /// closure — the game rejects it with `No matching symbol 'Ns::Fn'`.
+    #[test]
+    fn workspace_namespace_unknown_member_diagnoses() {
+        let diags = check_closed_workspace(
+            r#"namespace TournamentStation { void Known() {} }
+               void Main() { TournamentStation::SendEvent("split", "{}"); }"#,
+        );
+        assert_eq!(
+            no_matching_symbols(&diags),
+            vec![("TournamentStation::SendEvent".to_string(), None)],
+            "expected exactly one No-matching-symbol, got {:?}",
+            diags
+        );
+    }
+
+    /// Authority guard (B013 decision 3): an incomplete pool — no workspace
+    /// root, or an unresolved required dependency — must stay silent. The
+    /// module we could not read may contribute the member (AngelScript
+    /// namespaces are open and additive).
+    #[test]
+    fn workspace_namespace_unknown_member_silent_without_closure() {
+        let diags = check(
+            r#"namespace TournamentStation { void Known() {} }
+               void Main() { TournamentStation::SendEvent("split", "{}"); }"#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "a non-authoritative pool must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    /// Every symbol kind under the namespace counts as resolution
+    /// (B013 decision 4): function, class, enum, funcdef-typed global and
+    /// plain global all make `Ns::Name(...)` resolvable.
+    #[test]
+    fn workspace_namespace_resolvable_members_stay_silent() {
+        let diags = check_closed_workspace(
+            r#"namespace N {
+                   void Fn() {}
+                   funcdef void Cb();
+                   Cb@ Hook = null;
+                   int Count = 0;
+                   class Widget { int V; }
+                   enum Mode { Idle }
+               }
+               void Main() {
+                   N::Fn();
+                   N::Widget();
+                   N::Mode(0);
+                   N::Hook();
+                   int c = N::Count;
+               }"#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "resolvable members must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    /// A virtual property under the namespace resolves through its
+    /// `get_`/`set_` accessors, same as the member gates elsewhere.
+    #[test]
+    fn workspace_namespace_virtual_property_accessor_stays_silent() {
+        let diags = check_closed_workspace(
+            r#"namespace N { int get_Speed() { return 1; } }
+               void Main() { int s = N::Speed(); }"#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "a get_ accessor must resolve the property name, got {:?}",
+            diags
+        );
+    }
+
+    /// Engine namespaces belong to the typedb-driven triggers — a plugin
+    /// that adds helpers to `namespace UI` must not turn every real `UI::`
+    /// call into an error when no typedb is loaded.
+    #[test]
+    fn engine_namespace_declared_in_workspace_stays_silent() {
+        let diags = check_closed_workspace(
+            r#"namespace UI { void MyHelper() {} }
+               void Main() { UI::MyHelper(); UI::Begin("x"); }"#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "engine namespaces must stay with the typedb triggers, got {:?}",
+            diags
+        );
+    }
+
+    /// `Tests` is an Openplanet Core namespace too. A plugin-local helper
+    /// declaration must not arm workspace-only errors for game-owned call
+    /// shapes when the typedb is unavailable.
+    #[test]
+    fn tests_engine_namespace_declared_in_workspace_stays_silent() {
+        let diags = check_closed_workspace(
+            r#"namespace Tests { void LocalHelper() {} }
+               void Main() { Tests::LocalHelper(); Tests::GameOwnedCallShape(); }"#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "the Tests engine namespace must stay with typedb triggers, got {:?}",
+            diags
+        );
+    }
+
+    /// AngelScript resolves a qualified call relative to the enclosing
+    /// namespace first: inside `Outer`, `Inner::Deep()` binds
+    /// `Outer::Inner::Deep` even though a top-level `Inner` also exists.
+    #[test]
+    fn relative_namespace_resolution_stays_silent() {
+        let diags = check_closed_workspace(
+            r#"namespace Outer { namespace Inner { void Deep() {} } }
+               namespace Inner { void Shallow() {} }
+               namespace Outer { void Use() { Inner::Deep(); } }"#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "relative namespace resolution must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    /// Only single-segment namespaces are authoritative in this release —
+    /// a deeper path stays silent (B013 decision 3).
+    #[test]
+    fn nested_namespace_path_stays_silent() {
+        let diags = check_closed_workspace(
+            r#"namespace Outer { namespace Inner { void Deep() {} } }
+               void Main() { Outer::Inner::Nope(); }"#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "nested namespace paths must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    /// A namespace absent from both the workspace and the typedb keeps the
+    /// GH #28 silence — there is nothing authoritative to check against.
+    #[test]
+    fn undeclared_namespace_stays_silent() {
+        let diags = check_closed_workspace("void Main() { NotDeclaredAnywhere::Foo(); }");
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "undeclared namespaces must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    /// A class is not a namespace — AngelScript has no statics, so
+    /// `MyClass::Thing()` stays silent rather than guessing.
+    #[test]
+    fn class_qualified_call_stays_silent() {
+        let diags = check_closed_workspace(
+            "class MyClass { void Thing() {} } void Main() { MyClass::Thing(); }",
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "class-qualified calls must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    /// Near-name candidates under the namespace populate the hint, exactly
+    /// like the typedb `UI::GetIO` rule. The hint is additive — it never
+    /// gates the diagnostic (B013 decision 2).
+    #[test]
+    fn workspace_namespace_near_name_populates_hint() {
+        let diags = check_closed_workspace(
+            "namespace Hints { void Refresh() {} } void Main() { Hints::Refrsh(); }",
+        );
+        assert_eq!(
+            no_matching_symbols(&diags),
+            vec![(
+                "Hints::Refrsh".to_string(),
+                Some("Hints::Refresh".to_string())
+            )],
+            "expected a near-name hint, got {:?}",
+            diags
+        );
+    }
+
+    /// The typedb triggers still own their namespaces — `UI::GetIO` fires
+    /// once (trigger a), never twice.
+    #[test]
+    fn typedb_namespace_member_miss_fires_once() {
+        let diags = check_with_typedb("void Main() { UI::GetIO(); }");
+        assert_eq!(
+            no_matching_symbols(&diags).len(),
+            1,
+            "expected exactly one diagnostic for UI::GetIO, got {:?}",
+            diags
+        );
+    }
+
+    /// Maintenance guard for the engine fence. `is_engine_namespace` is a
+    /// STATIC list — deliberately, so the GH #26 note stays stable across
+    /// typedb versions — but the GH #58 rule leans on it as the no-typedb
+    /// stand-in for "this namespace belongs to the engine". A Core namespace
+    /// missing from the list lets a plugin-local `namespace Tests { … }` arm
+    /// the rule against game-owned calls — the exact FP that added `Tests`.
+    /// Every leading segment the typedb knows must therefore be listed, so a
+    /// typedb refresh that introduces a namespace fails HERE rather than as a
+    /// false `No matching symbol` in someone's plugin.
+    #[test]
+    fn engine_namespace_list_covers_every_typedb_namespace() {
+        use crate::typedb::TypeIndex;
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).expect("typedb fixtures must load");
+        let missing: Vec<String> = idx
+            .namespaces()
+            .into_iter()
+            .filter_map(|ns| {
+                let leading = ns.split("::").next().unwrap_or(&ns).to_string();
+                (!is_engine_namespace(&leading)).then_some(leading)
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "typedb namespaces absent from is_engine_namespace: {:?} — add them, \
+             or a plugin declaring one of these arms the GH #58 rule against \
+             game-owned calls",
+            missing
         );
     }
 }
