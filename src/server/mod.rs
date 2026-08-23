@@ -15,6 +15,7 @@ pub mod symbols;
 #[cfg(test)]
 pub mod test_support;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -171,6 +172,7 @@ impl Backend {
                         root: root.clone(),
                         files: open_into_files(open),
                         missing_required_dependencies: Vec::new(),
+                        export_paths: HashSet::new(),
                     }
                 }
             };
@@ -285,6 +287,7 @@ impl Backend {
                     root: root.clone(),
                     files: open_into_files(open),
                     missing_required_dependencies: Vec::new(),
+                    export_paths: HashSet::new(),
                 }
             }
         };
@@ -350,6 +353,7 @@ impl Backend {
                             root: root.clone(),
                             files: open_into_files(open),
                             missing_required_dependencies: Vec::new(),
+                            export_paths: HashSet::new(),
                         }
                     }
                 }
@@ -359,6 +363,7 @@ impl Backend {
                 root: PathBuf::new(),
                 files: open_into_files(open),
                 missing_required_dependencies: Vec::new(),
+                export_paths: HashSet::new(),
             },
         };
 
