@@ -1,0 +1,73 @@
+---
+complexity: medium
+created_at: "2026-08-23T15:57:51Z"
+depends_on: []
+estimate_hours: 3
+id: B018
+priority: medium
+status: pending
+tags:
+    - server
+    - gitignore
+    - followup
+    - gh-60-followup
+title: LSP overlay diagnoses gitignored files (routes by path prefix, not snapshot membership)
+updated_at: "2026-08-23T15:57:51Z"
+---
+Found by the B015 lane (GH #60) and independently by its codex reviewer,
+2026-08-24. Deliberately scoped OUT of B015, which covers discovery only
+(B015 decision 4).
+
+## Symptom
+With `honor_gitignore` enabled (the new default), a gitignored `.as` file is no
+longer part of the snapshot's file set — but opening that file in an editor still
+produces diagnostics. `Backend::on_change` routes an open buffer to a workspace
+by PATH PREFIX, not by file-set membership, so the buffer is checked against a
+snapshot that does not contain its gitignored siblings' declarations.
+
+## Why it matters
+The failure mode is NEW false positives, which is the failure mode this repo
+cares about most: a plugin that gitignores compile-critical sources (dev-loop
+codegen output is the motivating case in GH #60) gets undefined-identifier /
+unknown-type squiggles on the very file the author opened, because its siblings
+are invisible to the snapshot. CLI `check` and the editor now disagree about
+what is being compiled.
+
+## Escape hatch that exists today
+`honor_gitignore = false` (or `--no-gitignore` for the CLI) restores the old
+behaviour on both paths, so nobody is stuck — but the default configuration is
+internally inconsistent, and the inconsistency is silent.
+
+## Candidate resolutions (decide, don't assume)
+1. **Route by membership**: if the opened buffer is not in the snapshot's file
+   set, do not publish diagnostics for it at all (publish an empty set), so the
+   editor matches `check`. Simple, and arguably the honest reading of "this file
+   is excluded".
+2. **Publish one informational diagnostic** on line 1 saying the file is excluded
+   by `.gitignore` and naming the escape hatch, instead of a body of bogus
+   errors. More discoverable, more intrusive.
+3. **Include the opened buffer in its own snapshot** as an overlay member even
+   when gitignored, so it type-checks against the real workspace. Keeps
+   diagnostics useful, but re-introduces exactly the squiggles-on-an-excluded-
+   file surprise GH #60 set out to remove.
+Recommend 1 with a `tracing::info!` naming the file and the escape hatch, then
+revisit if a user asks for 3.
+
+## Work
+- Decide the resolution above; the choice is a UX decision, not a mechanical fix.
+- Make `Backend::on_change` (and the didOpen/didSave paths) consult snapshot
+  membership rather than path prefix.
+- Check the same question for `compute_diagnostics` single-file mode.
+
+## Test plan (TDD, red first)
+Red: a server test that opens a gitignored `.as` file in a workspace whose
+`.gitignore` excludes it, and asserts the chosen behaviour (no diagnostics under
+resolution 1) — fails today, which is the point. Variants: gitignored file whose
+siblings define the symbols it uses (the FP case); `honor_gitignore = false`
+restores full diagnostics; `--no-gitignore`-equivalent server setting; a NON
+gitignored file in the same workspace still diagnoses normally (guard against
+over-suppression); didSave and didChange both behave the same.
+
+## Provenance
+tests/gitignore_server_tests.rs (added by B015) pins the discovery half of this
+on the server path; the overlay half is what remains.
