@@ -386,8 +386,8 @@ fn add_shortcut_completions(
     let mut seen = std::collections::HashSet::new();
 
     for ns in namespaces {
-        let mut functions: Vec<_> = index.namespace_functions(ns).into_iter().collect();
-        functions.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let mut functions: Vec<_> = index.namespace_functions(ns).collect();
+        functions.sort_by_key(|(qname, _)| *qname);
         for (qname, overloads) in functions {
             let Some(short) = qname.strip_prefix(&format!("{}::", ns)) else {
                 continue;
@@ -420,8 +420,8 @@ fn add_shortcut_completions(
         }
 
         if match_enums {
-            let mut enums: Vec<_> = index.namespace_enums(ns).into_iter().collect();
-            enums.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let mut enums: Vec<_> = index.namespace_enums(ns).collect();
+            enums.sort_by_key(|(qname, _)| *qname);
             for (qname, info) in enums {
                 let Some(short) = qname.strip_prefix(&format!("{}::", ns)) else {
                     continue;
