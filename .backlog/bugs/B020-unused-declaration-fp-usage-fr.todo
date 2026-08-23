@@ -90,3 +90,43 @@ Guard: assert omitted files produce ZERO diagnostics of their own (no squiggles
 in gitignored files — the GH #60 goal must survive).
 
 GitHub issue: https://github.com/clankercode/lsp-openplanet/issues/61 (gh-61), filed 2026-08-24 with both repros and the two refuted alternatives.
+
+
+2026-08-24 laneA-unused progress (worktree .worktrees/gh61-usage-only, branch
+fix/usage-only-omitted-files, 3 commits on master 4a3b5c4):
+
+* eb79bfd red tests + inert plumbing. Both repros reproduced as tests, exact
+  issue wording: "src/Main.as:1:1: warning: a function `UsedOnlyByOmitted` is
+  never used". 9 in-memory cases red, 4 CLI end-to-end red, controls green.
+* 7a8517b green. `WorkspaceUsage::collect` records usage from
+  `snapshot.usage_only_sources()`.
+* 0d9d0c6 README + CHANGELOG.
+
+Design as specified (usage recording only), with ONE addition worth flagging:
+the pass runs against a SCRATCH symbol table — pooled symbols plus the omitted
+files' NON-COLLIDING declarations, file_ids past the end of the snapshot, alive
+for one function, never seen by the join. Without their own declarations an
+omitted file's body does not resolve, so a generated subclass calling an
+inherited member (`class Derived : Base` ... `Hook()`) records nothing and the
+FP survives. The collision filter came out of a red test, not taste: with both
+`Dead`s in the table a stale copy's own `Dead()` call records nothing and the
+masking that stops whole-tree copies manufacturing warnings is lost — refuted
+alternative 1's defect in miniature. Skipping any decl the pooled table already
+has means a pure copy adds nothing and resolves against the originals, while a
+genuinely new decl still goes in.
+
+Evidence: 849 lib + 60 cli_check tests, 0 failures. Clippy 56 `--> src`
+warnings, one FEWER than baseline, none in touched files. Both release-binary
+repros now clean; `--no-gitignore` unchanged (still reports `GenCaller`).
+Fleet dogfood over 153 real plugin roots: exactly ONE delta, tm-music-mania
+63 -> 62 warnings, a textbook true positive — `AddTurboToAudioPackRegistry` is
+declared in src/PackRegistry.as and its only caller is OtherPacks/TurboAssets.as,
+which `source_paths = ["src"]` excludes. Zero new warnings anywhere in the fleet.
+Perf: unchanged when nothing is omitted (262-file plugin 0.50s -> 0.46s); worst
+case with a gitignored whole-tree copy beside it 0.53s -> 0.74s, proportional to
+the omitted count.
+
+GH #58 fence untouched: `dependency_closure_complete` still gates on the
+omission, and `usage_only_sources_do_not_restore_namespace_authority` pins it.
+
+Independent ccc review launched, verdict pending.
