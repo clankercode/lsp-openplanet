@@ -430,6 +430,9 @@ mod tests {
             m.value
         );
         assert!(m.value.contains("ts_log"), "missing name: {:?}", m.value);
+        // Positive pin: the recorded return type is `void`, not a
+        // placeholder — CHANGELOG promises `(local) void ts_log`.
+        assert!(m.value.contains("void"), "missing void: {:?}", m.value);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

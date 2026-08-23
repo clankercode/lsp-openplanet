@@ -570,6 +570,18 @@ impl Backend {
     /// for stray/untitled documents and the N=1 back-compat view).
     async fn on_change_legacy(&self, uri: &Url, text: &str) {
         let snapshot = self.refresh_snapshot().await;
+        self.publish_legacy_diagnostics(uri, text, &snapshot).await;
+    }
+
+    /// Legacy single-workspace diagnostics publish from a prebuilt
+    /// snapshot (GH: didSave republishes every open doc — rebuilding the
+    /// snapshot per doc would make one Ctrl+S cost M+1 full loads).
+    async fn publish_legacy_diagnostics(
+        &self,
+        uri: &Url,
+        text: &str,
+        snapshot: &Arc<AnalysisSnapshot>,
+    ) {
         let config = self.config.read().await;
         let type_index = self.type_index.read().await;
         let mut diags = match snapshot.analysis_of(uri) {
@@ -932,15 +944,18 @@ impl LanguageServer for Backend {
         if !self.workspaces.read().await.is_empty() {
             return; // stray: no shard to rebuild.
         }
-        // Legacy single-workspace: refresh, then republish every open doc.
-        self.refresh_snapshot().await;
+        // Legacy single-workspace: ONE snapshot refresh, then publish
+        // every open doc from it (not on_change_legacy — that refreshes
+        // per call and would make one save cost M+1 full workspace loads).
+        let snapshot = self.refresh_snapshot().await;
         let docs: Vec<(Url, String)> = self
             .documents
             .iter()
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
         for (doc_uri, text) in docs {
-            self.on_change_legacy(&doc_uri, &text).await;
+            self.publish_legacy_diagnostics(&doc_uri, &text, &snapshot)
+                .await;
         }
     }
 
@@ -960,10 +975,16 @@ impl LanguageServer for Backend {
             return;
         }
         // Non-manifest events: rebuild the owning workspace of each changed
-        // file (disk contents changed outside the editor).
+        // file (disk contents changed outside the editor). Dedup by root —
+        // a single save can arrive as didSave AND a watcher event, and a
+        // multi-file client save reports one event per file; rebuilding the
+        // same shard repeatedly is pure waste.
+        let mut rebuilt = std::collections::HashSet::new();
         for event in &params.changes {
             if let Some(root) = self.workspace_root_for(&event.uri).await {
-                self.rebuild_workspace(&root).await;
+                if rebuilt.insert(root.clone()) {
+                    self.rebuild_workspace(&root).await;
+                }
             }
         }
     }
