@@ -129,10 +129,12 @@ fn discover_respecting_gitignore(root: &Path, files: &mut Vec<PathBuf>) {
         .filter_entry(|entry| entry.file_name() != GIT_DIR)
         .build();
     for entry in walker.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
+        // The walker already resolved the file type (following links, since
+        // `follow_links` is on), so reuse it rather than paying another stat.
+        if entry.file_type().is_none_or(|ft| ft.is_dir()) {
             continue;
         }
+        let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "as") {
             files.push(path.to_path_buf());
         }
@@ -141,8 +143,13 @@ fn discover_respecting_gitignore(root: &Path, files: &mut Vec<PathBuf>) {
 
 /// Debug-log how many `.as` files the gitignore filter removed. Silently
 /// dropping a compile-critical file is the failure mode that matters here, so
-/// the exclusion is inspectable (`RUST_LOG=debug`). The comparison walk only
-/// runs when DEBUG is actually enabled.
+/// the exclusion is inspectable (`RUST_LOG=debug`).
+///
+/// The count is NOT free: it is derived by running the plain walk a SECOND
+/// time and diffing the totals, because the `ignore` walker never reports the
+/// entries it filtered out. That second walk is why the whole thing is gated
+/// on DEBUG being enabled — do not move this call out from behind the gate,
+/// and do not assume the number is available at no cost.
 fn log_excluded_count(root: &Path, options: DiscoveryOptions, kept: usize) {
     if !options.honor_gitignore || !tracing::enabled!(tracing::Level::DEBUG) {
         return;
