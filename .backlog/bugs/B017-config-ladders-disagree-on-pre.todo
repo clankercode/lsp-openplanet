@@ -1,15 +1,14 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-23T15:53:23Z"
 depends_on: []
 estimate_hours: 4
 id: B017
 priority: high
+started_at: null
 status: pending
-tags:
-    - config
-    - precedence
-    - followup
+tags: []
 title: Config ladders disagree on precedence; one bad key discards whole file
 updated_at: "2026-08-23T15:53:23Z"
 ---
@@ -69,3 +68,30 @@ one mistyped key leaves sibling keys in the SAME file effective (fails today);
 malformed TOML still degrades to defaults without panicking. Precedence tests
 must not mutate `$HOME` in-process (src/config.rs:1027 documents that as racy) —
 use pure resolver helpers.
+
+## Scope detail (from the B011 lane, 2026-08-24)
+
+Every key `apply_config_file` handles inverts, not just the ones named above:
+it is 15 unconditional `if let Some(x) = cfg.field { self.field = x }` writes —
+openplanet_dir, plugins_dir, game_target, defines, source_paths, ignore_paths,
+shortcut_namespaces, shortcut_disable_default_namespaces, shortcut_match_enums,
+define_matrix, define_groups, define_combinations,
+define_matrix_max_combinations.
+
+The inversion matches its own doc comment (src/config.rs:316, 'parent config <
+per-root config < user config'), so it is deliberate in this ladder rather than a
+typo. The defect is that it is deliberately one way here and deliberately the
+opposite in UserPrefs::load — a user-global `source_paths = ["src"]` silently
+overrides every project's own value.
+
+Whole-file-discard sites, precisely: src/config.rs:196 (UserPrefs::apply_file),
+:519 (load_config_file), :529 (load_user_config_file). `game_target = 7` in a
+config file therefore also disables source_paths, defines and the entire matrix
+config, with no diagnostic, while the LSP appears to work.
+
+Kept as ONE task rather than split: both defects live in the same ~20 lines of
+config loading, and fixing precedence without fixing the silent discard would
+leave the ladder correct but still untestable from a user's point of view.
+The per-key resolvers added for unused_callbacks (B012) and honor_gitignore
+(B015) both sidestep both defects by construction and should fold back onto the
+shared path once it is correct.
