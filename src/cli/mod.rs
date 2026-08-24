@@ -297,6 +297,36 @@ impl std::fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
+/// Read `--flag VALUE` / `--flag=VALUE` at `args[i]`.
+///
+/// A separated value starting with `--` is a usage error (same policy as
+/// `typedb_cmd::take_dir_arg`). When `allow_option_like_equals` is false,
+/// `--flag=--x` is rejected too (`--define` / `--format`).
+fn take_value_arg<'a>(
+    args: &'a [String],
+    i: usize,
+    flag: &str,
+    missing: &str,
+    allow_option_like_equals: bool,
+) -> Result<(&'a str, usize), CliError> {
+    if let Some(value) = args[i].strip_prefix(&format!("{flag}=")) {
+        if value.is_empty() {
+            return Err(CliError::Usage(missing.to_string()));
+        }
+        if !allow_option_like_equals && value.starts_with("--") {
+            return Err(CliError::Usage(missing.to_string()));
+        }
+        return Ok((value, 1));
+    }
+    let value = args
+        .get(i + 1)
+        .ok_or_else(|| CliError::Usage(missing.to_string()))?;
+    if value.starts_with("--") {
+        return Err(CliError::Usage(missing.to_string()));
+    }
+    Ok((value.as_str(), 2))
+}
+
 pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
     let mut options = CheckOptions::default();
     options.plugin_files_search_paths = vec![PathBuf::from("src")];
@@ -322,31 +352,35 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 options.unused_flag = Some(UnusedLevel::Ignore);
                 i += 1;
             }
-            "--unused" => {
-                let Some(value) = args.get(i + 1) else {
-                    return Err(CliError::Usage(
-                        "--unused requires a value (ignore, warn, or error)".to_string(),
-                    ));
-                };
+            _ if arg == "--unused" || arg.starts_with("--unused=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--unused",
+                    "--unused requires a value (ignore, warn, or error)",
+                    true,
+                )?;
                 options.unused_flag = Some(UnusedLevel::parse(value).ok_or_else(|| {
                     CliError::Usage(format!(
                         "unknown --unused value '{value}' (expected ignore, warn, or error)"
                     ))
                 })?);
-                i += 2;
+                i += used;
             }
-            "--errors" => {
-                let Some(value) = args.get(i + 1) else {
-                    return Err(CliError::Usage(
-                        "--errors requires a value (last, first, or off)".to_string(),
-                    ));
-                };
+            _ if arg == "--errors" || arg.starts_with("--errors=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--errors",
+                    "--errors requires a value (last, first, or off)",
+                    true,
+                )?;
                 options.errors_flag = Some(ErrorGroup::parse(value).ok_or_else(|| {
                     CliError::Usage(format!(
                         "unknown --errors value '{value}' (expected last, first, or off)"
                     ))
                 })?);
-                i += 2;
+                i += used;
             }
             "--watch" => {
                 options.watch = true;
@@ -356,19 +390,27 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 options.warnings_as_errors_flag = Some(true);
                 i += 1;
             }
-            "--define" | "-D" => {
-                let Some(value) = args.get(i + 1) else {
+            _ if arg == "--define" || arg == "-D" || arg.starts_with("--define=") => {
+                if arg == "--define=" {
                     return Err(CliError::Usage(
-                        "--define requires a symbol name argument".to_string(),
+                        "--define requires a non-empty symbol name".to_string(),
                     ));
-                };
+                }
+                let flag = if arg == "-D" { "-D" } else { "--define" };
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    flag,
+                    "--define requires a symbol name argument",
+                    false,
+                )?;
                 if value.is_empty() {
                     return Err(CliError::Usage(
                         "--define requires a non-empty symbol name".to_string(),
                     ));
                 }
-                options.extra_defines.push(value.clone());
-                i += 2;
+                options.extra_defines.push(value.to_string());
+                i += used;
             }
             _ if arg.starts_with("--warnings-as-errors=") => {
                 let value = arg.trim_start_matches("--warnings-as-errors=");
@@ -383,125 +425,54 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 });
                 i += 1;
             }
-            _ if arg.starts_with("--unused=") => {
-                let value = arg.trim_start_matches("--unused=");
-                if value.is_empty() {
-                    return Err(CliError::Usage(
-                        "--unused requires a value (ignore, warn, or error)".to_string(),
-                    ));
-                }
-                options.unused_flag = Some(UnusedLevel::parse(value).ok_or_else(|| {
-                    CliError::Usage(format!(
-                        "unknown --unused value '{value}' (expected ignore, warn, or error)"
-                    ))
-                })?);
-                i += 1;
-            }
-            _ if arg.starts_with("--errors=") => {
-                let value = arg.trim_start_matches("--errors=");
-                if value.is_empty() {
-                    return Err(CliError::Usage(
-                        "--errors requires a value (last, first, or off)".to_string(),
-                    ));
-                }
-                options.errors_flag = Some(ErrorGroup::parse(value).ok_or_else(|| {
-                    CliError::Usage(format!(
-                        "unknown --errors value '{value}' (expected last, first, or off)"
-                    ))
-                })?);
-                i += 1;
-            }
-            _ if arg.starts_with("--define=") => {
-                let value = arg.trim_start_matches("--define=");
-                if value.is_empty() {
-                    return Err(CliError::Usage(
-                        "--define requires a non-empty symbol name".to_string(),
-                    ));
-                }
-                options.extra_defines.push(value.to_string());
-                i += 1;
-            }
-            "--format" => {
-                let Some(value) = args.get(i + 1) else {
-                    return Err(CliError::Usage(
-                        "--format requires a value (plain, pretty, or auto)".to_string(),
-                    ));
-                };
+            _ if arg == "--format" || arg.starts_with("--format=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--format",
+                    "--format requires a value (plain, pretty, or auto)",
+                    false,
+                )?;
                 options.format = CheckFormat::parse(value).map_err(CliError::Usage)?;
-                i += 2;
+                i += used;
             }
-            _ if arg.starts_with("--format=") => {
-                let value = arg.trim_start_matches("--format=");
-                if value.is_empty() {
-                    return Err(CliError::Usage(
-                        "--format requires a value (plain, pretty, or auto)".to_string(),
-                    ));
-                }
-                options.format = CheckFormat::parse(value).map_err(CliError::Usage)?;
-                i += 1;
-            }
-            "--typedb-dir" => {
-                let Some(value) = args.get(i + 1) else {
-                    return Err(CliError::Usage(
-                        "--typedb-dir requires a directory argument".to_string(),
-                    ));
-                };
+            _ if arg == "--typedb-dir" || arg.starts_with("--typedb-dir=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--typedb-dir",
+                    "--typedb-dir requires a directory argument",
+                    true,
+                )?;
                 options.typedb_dir = Some(PathBuf::from(value));
-                i += 2;
+                i += used;
             }
-            "--plugins-dir" => {
-                let Some(value) = args.get(i + 1) else {
-                    return Err(CliError::Usage(
-                        "--plugins-dir requires a directory argument".to_string(),
-                    ));
-                };
+            _ if arg == "--plugins-dir" || arg.starts_with("--plugins-dir=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--plugins-dir",
+                    "--plugins-dir requires a directory argument",
+                    true,
+                )?;
                 options.plugins_dirs.push(PathBuf::from(value));
-                i += 2;
+                i += used;
             }
-            "--plugin-files-search-path" => {
-                let Some(value) = args.get(i + 1) else {
-                    return Err(CliError::Usage(
-                        "--plugin-files-search-path requires a directory argument".to_string(),
-                    ));
-                };
+            _ if arg == "--plugin-files-search-path"
+                || arg.starts_with("--plugin-files-search-path=") =>
+            {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--plugin-files-search-path",
+                    "--plugin-files-search-path requires a directory argument",
+                    true,
+                )?;
                 if options.plugin_files_search_paths == [PathBuf::from("src")] {
                     options.plugin_files_search_paths.clear();
                 }
                 options.plugin_files_search_paths.push(PathBuf::from(value));
-                i += 2;
-            }
-            _ if arg.starts_with("--typedb-dir=") => {
-                let value = arg.trim_start_matches("--typedb-dir=");
-                if value.is_empty() {
-                    return Err(CliError::Usage(
-                        "--typedb-dir requires a directory argument".to_string(),
-                    ));
-                }
-                options.typedb_dir = Some(PathBuf::from(value));
-                i += 1;
-            }
-            _ if arg.starts_with("--plugins-dir=") => {
-                let value = arg.trim_start_matches("--plugins-dir=");
-                if value.is_empty() {
-                    return Err(CliError::Usage(
-                        "--plugins-dir requires a directory argument".to_string(),
-                    ));
-                }
-                options.plugins_dirs.push(PathBuf::from(value));
-                i += 1;
-            }
-            _ if arg.starts_with("--plugin-files-search-path=") => {
-                let value = arg.trim_start_matches("--plugin-files-search-path=");
-                if value.is_empty() {
-                    return Err(CliError::Usage(
-                        "--plugin-files-search-path requires a directory argument".to_string(),
-                    ));
-                }
-                if options.plugin_files_search_paths == [PathBuf::from("src")] {
-                    options.plugin_files_search_paths.clear();
-                }
-                options.plugin_files_search_paths.push(PathBuf::from(value));
-                i += 1;
+                i += used;
             }
             _ if arg.starts_with('-') => {
                 return Err(CliError::Usage(format!(
@@ -1538,5 +1509,202 @@ mod tests {
         cfg.errors = ErrorGroup::Off;
         let opts = parse_check_args(&["--errors".into(), "first".into()]).unwrap();
         assert_eq!(opts.resolve_errors(&cfg), ErrorGroup::First);
+    }
+
+    fn usage_msg(args: &[&str]) -> String {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        match parse_check_args(&args) {
+            Err(CliError::Usage(msg)) => msg,
+            other => panic!("expected CliError::Usage, got {other:?}"),
+        }
+    }
+
+    /// GH #62: `--typedb-dir --no-typedb <path>` must not treat `--no-typedb`
+    /// as the directory (that used to try loading `--no-typedb/OpenplanetCore.json`).
+    #[test]
+    fn parse_check_args_typedb_dir_rejects_following_flag() {
+        let msg = usage_msg(&["--typedb-dir", "--no-typedb", "tests/fixtures/tm-counter"]);
+        assert!(
+            msg.contains("--typedb-dir requires a directory argument"),
+            "{msg}"
+        );
+    }
+
+    /// GH #62: `--plugins-dir --no-typedb <path>` used to continue with a junk
+    /// search path instead of a usage error.
+    #[test]
+    fn parse_check_args_plugins_dir_rejects_following_flag() {
+        let msg = usage_msg(&["--plugins-dir", "--no-typedb", "tests/fixtures/tm-counter"]);
+        assert!(
+            msg.contains("--plugins-dir requires a directory argument"),
+            "{msg}"
+        );
+    }
+
+    /// GH #62: `--plugin-files-search-path --watch <path>` used to treat
+    /// `--watch` as a search root.
+    #[test]
+    fn parse_check_args_plugin_files_search_path_rejects_following_flag() {
+        let msg = usage_msg(&[
+            "--plugin-files-search-path",
+            "--watch",
+            "tests/fixtures/tm-counter",
+        ]);
+        assert!(
+            msg.contains("--plugin-files-search-path requires a directory argument"),
+            "{msg}"
+        );
+    }
+
+    /// GH #62: a define named `--no-typedb` is nonsense; space form is usage.
+    #[test]
+    fn parse_check_args_define_rejects_following_flag() {
+        let msg = usage_msg(&["--define", "--no-typedb", "tests/fixtures/tm-counter"]);
+        assert!(
+            msg.contains("--define requires a symbol name argument"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("unknown"),
+            "must be the missing-arg path, not a later error: {msg}"
+        );
+    }
+
+    /// GH #62: `--format --json` must be the flag-swallowed usage error, not
+    /// `unknown --format value '--json'`.
+    #[test]
+    fn parse_check_args_format_rejects_following_flag() {
+        let msg = usage_msg(&["--format", "--json", "tests/fixtures/tm-counter"]);
+        assert!(
+            msg.contains("--format requires a value"),
+            "flag-swallowed usage, got: {msg}"
+        );
+        assert!(
+            !msg.contains("unknown --format"),
+            "must not take the unknown-format path: {msg}"
+        );
+    }
+
+    /// Path flags keep `--flag=--weird`; only a *separated* `--` value is
+    /// ambiguous. Mutation: a `---` guard would still accept these.
+    #[test]
+    fn parse_check_args_path_flags_accept_equals_option_like_value() {
+        let opts = parse_check_args(&["--typedb-dir=--weird".into(), ".".into()]).unwrap();
+        assert_eq!(opts.typedb_dir, Some(PathBuf::from("--weird")));
+
+        let opts = parse_check_args(&["--plugins-dir=--weird".into(), ".".into()]).unwrap();
+        assert_eq!(opts.plugins_dirs, vec![PathBuf::from("--weird")]);
+
+        let opts =
+            parse_check_args(&["--plugin-files-search-path=--weird".into(), ".".into()]).unwrap();
+        assert_eq!(
+            opts.plugin_files_search_paths,
+            vec![PathBuf::from("--weird")]
+        );
+    }
+
+    /// `--define` / `--format`: option-like values are rejected in the `=`
+    /// form too. A define named `--x` is nonsense; `--format=--json` must
+    /// not become "unknown format".
+    #[test]
+    fn parse_check_args_define_and_format_reject_equals_option_like_value() {
+        let msg = usage_msg(&["--define=--x", "."]);
+        assert!(
+            msg.contains("--define requires a symbol name argument")
+                || msg.contains("--define requires a non-empty symbol name"),
+            "{msg}"
+        );
+
+        let msg = usage_msg(&["--format=--json", "."]);
+        assert!(
+            msg.contains("--format requires a value"),
+            "flag-swallowed usage, got: {msg}"
+        );
+        assert!(
+            !msg.contains("unknown --format"),
+            "must not take the unknown-format path: {msg}"
+        );
+    }
+
+    /// A value beginning with a single `-` (not `--`) stays accepted.
+    #[test]
+    fn parse_check_args_value_flags_accept_single_dash_value() {
+        let opts = parse_check_args(&["--typedb-dir".into(), "-cache".into(), ".".into()]).unwrap();
+        assert_eq!(opts.typedb_dir, Some(PathBuf::from("-cache")));
+
+        let opts =
+            parse_check_args(&["--plugins-dir".into(), "-plugins".into(), ".".into()]).unwrap();
+        assert_eq!(opts.plugins_dirs, vec![PathBuf::from("-plugins")]);
+
+        let opts = parse_check_args(&[
+            "--plugin-files-search-path".into(),
+            "-src".into(),
+            ".".into(),
+        ])
+        .unwrap();
+        assert_eq!(opts.plugin_files_search_paths, vec![PathBuf::from("-src")]);
+
+        let opts = parse_check_args(&["--define".into(), "-DDEV".into(), ".".into()]).unwrap();
+        assert_eq!(opts.extra_defines, vec!["-DDEV".to_string()]);
+    }
+
+    /// Flag as the final argument still gives the existing "requires an
+    /// argument" error (not a swallow).
+    #[test]
+    fn parse_check_args_value_flags_require_argument_when_final() {
+        for (args, needle) in [
+            (
+                &["--typedb-dir"][..],
+                "--typedb-dir requires a directory argument",
+            ),
+            (
+                &["--plugins-dir"][..],
+                "--plugins-dir requires a directory argument",
+            ),
+            (
+                &["--plugin-files-search-path"][..],
+                "--plugin-files-search-path requires a directory argument",
+            ),
+            (
+                &["--define"][..],
+                "--define requires a symbol name argument",
+            ),
+            (&["--format"][..], "--format requires a value"),
+            (&["--unused"][..], "--unused requires a value"),
+            (&["--errors"][..], "--errors requires a value"),
+        ] {
+            let msg = usage_msg(args);
+            assert!(msg.contains(needle), "{args:?} → {msg}");
+        }
+    }
+
+    /// Shared take-arg helper covers `--unused` / `--errors` too (same bug
+    /// class as the five required flags).
+    #[test]
+    fn parse_check_args_unused_and_errors_reject_following_flag() {
+        let msg = usage_msg(&["--unused", "--watch", "."]);
+        assert!(msg.contains("--unused requires a value"), "{msg}");
+        assert!(
+            !msg.contains("unknown --unused"),
+            "must not take the unknown-value path: {msg}"
+        );
+
+        let msg = usage_msg(&["--errors", "--watch", "."]);
+        assert!(msg.contains("--errors requires a value"), "{msg}");
+        assert!(
+            !msg.contains("unknown --errors"),
+            "must not take the unknown-value path: {msg}"
+        );
+    }
+
+    /// `-D` is the short form of `--define` and takes a following token.
+    #[test]
+    fn parse_check_args_define_short_form_rejects_following_flag() {
+        let msg = usage_msg(&["-D", "--no-typedb", "."]);
+        assert!(
+            msg.contains("--define requires a symbol name argument")
+                || msg.contains("-D requires a symbol name argument"),
+            "{msg}"
+        );
     }
 }
