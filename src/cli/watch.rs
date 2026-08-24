@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::config_watch::{self, ConfigReloadAction};
 use crate::tui::{
     DiagItem, RunStatus, Severity, Snapshot, SourceEvent, TuiDataSource, WatchHealth,
 };
@@ -61,12 +62,22 @@ impl WatchDataSource {
         options: CheckOptions,
         checker: Arc<dyn Fn(&CheckOptions) -> Result<CheckReport, CliError> + Send + Sync>,
     ) -> Result<Self, CliError> {
+        Self::with_checker_and_home(options, checker, user_config_home())
+    }
+
+    /// Like [`Self::with_checker`] but watches `home` for the user-global
+    /// config file (tests inject a temp HOME without mutating the process).
+    pub fn with_checker_and_home(
+        options: CheckOptions,
+        checker: Arc<dyn Fn(&CheckOptions) -> Result<CheckReport, CliError> + Send + Sync>,
+        home: Option<PathBuf>,
+    ) -> Result<Self, CliError> {
         let root = resolve_root_label(&options.path)?;
         // Single initial trigger: dirty starts true (no separate first_poll).
         let dirty = Arc::new(AtomicBool::new(true));
         let dirty_flag = Arc::clone(&dirty);
 
-        let (watch_health, debouncer) = match start_watcher(&root, Arc::clone(&dirty_flag)) {
+        let (watch_health, debouncer) = match start_watcher(&root, home, Arc::clone(&dirty_flag)) {
             Ok(d) => (WatchHealth::Active, Some(d)),
             Err(err) => {
                 tracing::warn!("file watch unavailable ({err}); use `r` to recheck");
@@ -211,8 +222,13 @@ fn resolve_root_label(path: &Path) -> Result<PathBuf, CliError> {
         .map_err(|e| CliError::Check(format!("failed to resolve {}: {e}", root.display())))
 }
 
+fn user_config_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
 fn start_watcher(
     root: &Path,
+    home: Option<PathBuf>,
     dirty: Arc<AtomicBool>,
 ) -> Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>, String> {
     let root = root.to_path_buf();
@@ -221,7 +237,7 @@ fn start_watcher(
         move |res: Result<Vec<DebouncedEvent>, notify::Error>| match res {
             Ok(events) => {
                 for ev in events {
-                    if is_interesting_path(&ev.path) {
+                    if should_recheck_path(&ev.path) {
                         dirty.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -238,7 +254,38 @@ fn start_watcher(
         .watcher()
         .watch(&root, RecursiveMode::Recursive)
         .map_err(|e| e.to_string())?;
+
+    // User-global config lives outside the plugin root. Watch the nearest
+    // existing ancestor so create/replace/atomic-rename is visible.
+    if let Some(watch_root) = config_watch::user_config_watch_root(home.as_deref()) {
+        let mode = if watch_root.ends_with("openplanet-lsp") {
+            RecursiveMode::NonRecursive
+        } else {
+            RecursiveMode::Recursive
+        };
+        if let Err(err) = debouncer.watcher().watch(&watch_root, mode) {
+            tracing::warn!(
+                "user config watch unavailable at {}: {err}",
+                watch_root.display()
+            );
+        }
+    }
     Ok(debouncer)
+}
+
+/// Paths that should trigger a re-check. Invalid config TOML is *not*
+/// interesting: keep the last-good check results on screen.
+fn should_recheck_path(path: &Path) -> bool {
+    if config_watch::is_config_path(path) {
+        return match config_watch::config_reload_action(path) {
+            ConfigReloadAction::Reload => true,
+            ConfigReloadAction::KeepLastGood { reason } => {
+                tracing::warn!("keeping last-good config ({reason})");
+                false
+            }
+        };
+    }
+    is_interesting_path(path)
 }
 
 /// Paths that should trigger a re-check.
@@ -249,6 +296,9 @@ pub fn is_interesting_path(path: &Path) -> bool {
         if s == ".git" || s == "target" || s == "node_modules" || s == ".hg" || s == ".svn" {
             return false;
         }
+    }
+    if config_watch::is_config_path(path) {
+        return true;
     }
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         if name == "info.toml" {
@@ -418,6 +468,18 @@ mod tests {
         assert!(!is_interesting_path(Path::new(".git/config")));
         assert!(!is_interesting_path(Path::new("target/debug/x")));
         assert!(!is_interesting_path(Path::new("src/Main.as~")));
+        // Workspace + user-global config files must retrigger a check.
+        assert!(is_interesting_path(Path::new(".openplanet-lsp.toml")));
+        assert!(is_interesting_path(Path::new(
+            "/plugin/.openplanet-lsp.toml"
+        )));
+        assert!(is_interesting_path(Path::new(
+            "/home/dev/.config/openplanet-lsp/config.toml"
+        )));
+        assert!(
+            !is_interesting_path(Path::new("/home/dev/.config/other/config.toml")),
+            "unrelated config.toml must not retrigger"
+        );
     }
 
     #[test]
@@ -552,5 +614,132 @@ mod tests {
             "expected one startup + one coalesced follow-up, got {started}"
         );
         assert_eq!(*phase.lock().unwrap(), 2);
+    }
+
+    fn temp_plugin(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "openplanet-lsp-watch-cfg-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("info.toml"), "[meta]\n").unwrap();
+        std::fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+        root
+    }
+
+    fn options_for(root: PathBuf) -> CheckOptions {
+        CheckOptions {
+            path: root,
+            no_typedb: true,
+            watch: true,
+            ..showcase_options()
+        }
+    }
+
+    fn drain_until_checks(src: &mut WatchDataSource, n: u64, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let _ = src.try_recv();
+            if src.checks_started >= n {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[test]
+    fn workspace_config_write_retriggers_check() {
+        let root = temp_plugin("ws");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = Arc::clone(&calls);
+        let checker: Arc<dyn Fn(&CheckOptions) -> Result<CheckReport, CliError> + Send + Sync> =
+            Arc::new(move |opts| {
+                calls2.fetch_add(1, AtomOrd::SeqCst);
+                run_check(opts)
+            });
+        let mut src = WatchDataSource::with_checker(options_for(root.clone()), checker).unwrap();
+        assert!(
+            drain_until_checks(&mut src, 1, Duration::from_secs(10)),
+            "startup check"
+        );
+
+        std::fs::write(
+            root.join(".openplanet-lsp.toml"),
+            "honor_gitignore = false\n",
+        )
+        .unwrap();
+        assert!(
+            drain_until_checks(&mut src, 2, Duration::from_secs(5)),
+            "workspace config create must retrigger; started={}",
+            src.checks_started
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn user_config_write_retriggers_check() {
+        let root = temp_plugin("user");
+        let home = root.parent().unwrap().join(format!(
+            "openplanet-lsp-watch-home-{}-{}",
+            "user",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".config/openplanet-lsp")).unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = Arc::clone(&calls);
+        let checker: Arc<dyn Fn(&CheckOptions) -> Result<CheckReport, CliError> + Send + Sync> =
+            Arc::new(move |opts| {
+                calls2.fetch_add(1, AtomOrd::SeqCst);
+                run_check(opts)
+            });
+        let mut src = WatchDataSource::with_checker_and_home(
+            options_for(root.clone()),
+            checker,
+            Some(home.clone()),
+        )
+        .unwrap();
+        assert!(
+            drain_until_checks(&mut src, 1, Duration::from_secs(10)),
+            "startup check"
+        );
+
+        std::fs::write(
+            home.join(".config/openplanet-lsp/config.toml"),
+            "game_target = \"TURBO\"\n",
+        )
+        .unwrap();
+        assert!(
+            drain_until_checks(&mut src, 2, Duration::from_secs(5)),
+            "user config create must retrigger; started={}",
+            src.checks_started
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn invalid_config_toml_does_not_retrigger() {
+        let root = temp_plugin("invalid");
+        let checker: Arc<dyn Fn(&CheckOptions) -> Result<CheckReport, CliError> + Send + Sync> =
+            Arc::new(run_check);
+        let mut src = WatchDataSource::with_checker(options_for(root.clone()), checker).unwrap();
+        assert!(drain_until_checks(&mut src, 1, Duration::from_secs(10)));
+
+        std::fs::write(root.join(".openplanet-lsp.toml"), "honor_gitignore = {\n").unwrap();
+        thread::sleep(Duration::from_millis(600));
+        for _ in 0..20 {
+            let _ = src.try_recv();
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            src.checks_started, 1,
+            "invalid workspace TOML must keep last-good (no re-check)"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

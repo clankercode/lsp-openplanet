@@ -27,39 +27,46 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::config::LspConfig;
+use crate::config_watch::{self, ConfigReloadAction};
 use crate::typecheck::GlobalScope;
 use crate::typedb::TypeIndex;
 use crate::update;
 
+#[derive(Clone)]
 pub struct Backend {
     client: Client,
-    config: tokio::sync::RwLock<LspConfig>,
-    type_index: tokio::sync::RwLock<Option<Arc<TypeIndex>>>,
+    config: Arc<tokio::sync::RwLock<LspConfig>>,
+    type_index: Arc<tokio::sync::RwLock<Option<Arc<TypeIndex>>>>,
     /// Open document contents: URI → source text
-    documents: DashMap<Url, String>,
+    documents: Arc<DashMap<Url, String>>,
     /// Cached analysis snapshot: rebuilt on every document lifecycle event
     /// (`did_open` / `did_change` / `did_close`). Requests between rebuilds
     /// read the same consistent view (GH #39). Single-workspace view over
     /// the sharded state below (spec: multi-root phase 2).
-    snapshot: tokio::sync::RwLock<Arc<AnalysisSnapshot>>,
-    workspace_root: tokio::sync::RwLock<Option<PathBuf>>,
+    snapshot: Arc<tokio::sync::RwLock<Arc<AnalysisSnapshot>>>,
+    workspace_root: Arc<tokio::sync::RwLock<Option<PathBuf>>>,
     /// Effective plugin roots, set once at `initialize` (t2 hybrid):
     /// `config.plugin_roots` (init-option override) when non-empty, else
     /// `discover_plugin_roots` over the workspace folders (root_uri
     /// fallback), else the opened folder itself.
-    plugin_roots: tokio::sync::RwLock<Vec<PathBuf>>,
+    plugin_roots: Arc<tokio::sync::RwLock<Vec<PathBuf>>>,
     /// Sharded state (multi-root spec): one isolated workspace per effective
     /// plugin root — own config, own snapshot, own diagnostics. The legacy
     /// `snapshot` / `workspace_root` / `config` fields stay as the N=1 view;
     /// feature handlers route through `workspace_for` per request URI.
-    workspaces: tokio::sync::RwLock<Vec<PluginWorkspace>>,
+    workspaces: Arc<tokio::sync::RwLock<Vec<PluginWorkspace>>>,
     /// Workspace folder paths as of the last initialize/folder-change event
     /// (t9): input for re-walking plugin roots on watched-file events.
-    folder_paths: tokio::sync::RwLock<Vec<PathBuf>>,
+    folder_paths: Arc<tokio::sync::RwLock<Vec<PathBuf>>>,
     /// Cached initialization options (t9): re-sharding after watched-file
     /// events must re-apply the same layers (plugin_roots override, parent
     /// config base, extra plugins dirs).
-    init_options: tokio::sync::RwLock<Option<serde_json::Value>>,
+    init_options: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
+    /// Keep the user-global config notify watcher alive. Shared so the
+    /// background reload task and the LanguageServer value see one watcher.
+    config_watch: Arc<
+        tokio::sync::Mutex<Option<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>,
+    >,
 }
 
 /// One isolated plugin workspace (multi-root spec: "one server, N isolated
@@ -98,6 +105,79 @@ impl Backend {
             .collect()
     }
 
+    /// Notify-watch `$HOME/.config/openplanet-lsp/` (or `home` in tests)
+    /// so the user-global file reloads without a client file-watcher.
+    /// `extra_dirs` are plugin roots / opened folders (non-recursive) so
+    /// `.openplanet-lsp.toml` is seen even when the client does not watch it.
+    pub fn start_user_config_file_watch(&self, home: Option<PathBuf>) {
+        self.start_config_file_watch(home, &[]);
+    }
+
+    fn start_config_file_watch(&self, home: Option<PathBuf>, extra_dirs: &[PathBuf]) {
+        let this = self.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        match config_watch::watch_config_files(home.as_deref(), extra_dirs, move || {
+            let _ = tx.send(());
+        }) {
+            Ok(debouncer) => {
+                // Best-effort replace; a second call (tests) drops the old watch.
+                if let Ok(mut slot) = self.config_watch.try_lock() {
+                    *slot = Some(debouncer);
+                } else {
+                    tokio::spawn({
+                        let watch = Arc::clone(&self.config_watch);
+                        async move {
+                            *watch.lock().await = Some(debouncer);
+                        }
+                    });
+                }
+            }
+            Err(err) => {
+                tracing::warn!("user config watch unavailable ({err})");
+                return;
+            }
+        }
+        tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                this.reload_config_from_disk().await;
+            }
+        });
+    }
+
+    /// Re-run the config ladder and rebuild every shard. Used when a
+    /// config file changes (workspace `.openplanet-lsp.toml` or the
+    /// user-global file). Invalid TOML is rejected by the caller so last-good
+    /// stays in place.
+    pub async fn reload_config_from_disk(&self) {
+        let root_path = self.workspace_root.read().await.clone();
+        let init_options = self.init_options.read().await.clone();
+        self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true, true)
+            .await;
+        self.republish_open_document_diagnostics().await;
+    }
+
+    /// After a config reload, republish diagnostics for every open buffer
+    /// so squiggles match the new defines / discovery / target.
+    async fn republish_open_document_diagnostics(&self) {
+        let docs: Vec<(Url, String)> = self
+            .documents
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        for (uri, text) in docs {
+            if let Some(root) = self.workspace_root_for(&uri).await {
+                let snapshot = self.snapshot_for(&uri).await;
+                let config = self.config_for(&uri).await;
+                self.publish_sharded_diagnostics(&uri, &text, &snapshot, &config, &root)
+                    .await;
+            } else if self.workspaces.read().await.is_empty() {
+                let snapshot = self.snapshot.read().await.clone();
+                self.publish_legacy_diagnostics(&uri, &text, &snapshot)
+                    .await;
+            }
+        }
+    }
+
     /// t9: rebuild the shard set from the current folder list. Reuses
     /// config+snapshot Arcs for roots whose (config-relevant) inputs are
     /// unchanged so unrelated shards keep pointer identity.
@@ -106,6 +186,7 @@ impl Backend {
         root_path: Option<&std::path::Path>,
         init_options: Option<&serde_json::Value>,
         publish_diagnostics: bool,
+        force_reload: bool,
     ) {
         let folder_paths = self.folder_paths.read().await.clone();
         let override_roots = self.init_options.read().await.as_ref().and_then(|o| {
@@ -146,7 +227,10 @@ impl Backend {
             }
             // Reuse the existing shard when the config-relevant inputs are
             // unchanged (same root + same rendered config) — keeps Arc
-            // identity for untouched siblings on re-shard.
+            // identity for untouched siblings on re-shard. Config-file
+            // reloads force a rebuild so last-good is replaced even when
+            // a previously-ignored field (shortcuts, honor_gitignore)
+            // is the only change.
             let existing = self
                 .workspaces
                 .read()
@@ -154,10 +238,12 @@ impl Backend {
                 .iter()
                 .find(|w| w.root == *root)
                 .cloned();
-            if let Some(prev) = &existing {
-                if configs_equivalent(&prev.config, &config) {
-                    shards.push(prev.clone());
-                    continue;
+            if !force_reload {
+                if let Some(prev) = &existing {
+                    if configs_equivalent(&prev.config, &config) {
+                        shards.push(prev.clone());
+                        continue;
+                    }
                 }
             }
             let load = crate::workspace::load::DependencySearch::with_defaults()
@@ -234,18 +320,18 @@ impl Backend {
     pub fn new(client: Client) -> Self {
         Self {
             client,
-            config: tokio::sync::RwLock::new(LspConfig::load(None, None)),
-            type_index: tokio::sync::RwLock::new(None),
-            documents: DashMap::new(),
-            snapshot: tokio::sync::RwLock::new(Arc::new(AnalysisSnapshot::from_files(
-                &[],
-                &LspConfig::default(),
+            config: Arc::new(tokio::sync::RwLock::new(LspConfig::load(None, None))),
+            type_index: Arc::new(tokio::sync::RwLock::new(None)),
+            documents: Arc::new(DashMap::new()),
+            snapshot: Arc::new(tokio::sync::RwLock::new(Arc::new(
+                AnalysisSnapshot::from_files(&[], &LspConfig::default()),
             ))),
-            workspace_root: tokio::sync::RwLock::new(None),
-            plugin_roots: tokio::sync::RwLock::new(Vec::new()),
-            workspaces: tokio::sync::RwLock::new(Vec::new()),
-            folder_paths: tokio::sync::RwLock::new(Vec::new()),
-            init_options: tokio::sync::RwLock::new(None),
+            workspace_root: Arc::new(tokio::sync::RwLock::new(None)),
+            plugin_roots: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            workspaces: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            folder_paths: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            init_options: Arc::new(tokio::sync::RwLock::new(None)),
+            config_watch: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -740,8 +826,18 @@ fn open_into_files(
         .collect()
 }
 
+fn is_config_watch_event(path: Option<&std::path::Path>, uri_path: &str) -> bool {
+    if path.is_some_and(config_watch::is_config_path) {
+        return true;
+    }
+    uri_path.ends_with("/.openplanet-lsp.toml")
+        || uri_path.ends_with("/.config/openplanet-lsp/config.toml")
+        || uri_path == "/.openplanet-lsp.toml"
+}
+
 /// Config fields that participate in shard reuse (t9): everything that
-/// changes what gets loaded/parsed. `defines` and the path fields.
+/// changes what gets loaded/parsed *or* what features read off the cached
+/// shard config (shortcuts, unused-callback exemptions).
 fn configs_equivalent(a: &LspConfig, b: &LspConfig) -> bool {
     a.defines == b.defines
         && a.game_target == b.game_target
@@ -750,6 +846,11 @@ fn configs_equivalent(a: &LspConfig, b: &LspConfig) -> bool {
         && a.ignore_paths == b.ignore_paths
         && a.extra_plugins_dirs == b.extra_plugins_dirs
         && a.openplanet_dir == b.openplanet_dir
+        && a.honor_gitignore == b.honor_gitignore
+        && a.shortcut_namespaces == b.shortcut_namespaces
+        && a.shortcut_disable_default_namespaces == b.shortcut_disable_default_namespaces
+        && a.shortcut_match_enums == b.shortcut_match_enums
+        && a.unused_callbacks == b.unused_callbacks
 }
 
 #[tower_lsp::async_trait]
@@ -841,6 +942,7 @@ impl LanguageServer for Backend {
             root_path.as_deref(),
             params.initialization_options.as_ref(),
             true,
+            false,
         )
         .await;
 
@@ -929,6 +1031,10 @@ impl LanguageServer for Backend {
     async fn initialized(&self, _: InitializedParams) {
         tracing::info!("Openplanet LSP initialized");
         self.spawn_update_check();
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut extra = self.plugin_roots.read().await.clone();
+        extra.extend(self.folder_paths.read().await.iter().cloned());
+        self.start_config_file_watch(home, &extra);
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -1010,9 +1116,36 @@ impl LanguageServer for Backend {
     }
 
     /// t9: manifest/file watcher events. `**/info.toml` events re-shard
-    /// (roots appear/disappear); other file events rebuild the owning
-    /// shard (disk contents changed under us).
+    /// (roots appear/disappear); config-file events reload the config
+    /// ladder; other file events rebuild the owning shard (disk contents
+    /// changed under us).
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let mut config_reload = false;
+        let mut config_invalid_only = false;
+        for event in &params.changes {
+            let file_path = event.uri.to_file_path().ok();
+            if !is_config_watch_event(file_path.as_deref(), event.uri.path()) {
+                continue;
+            }
+            match file_path
+                .as_deref()
+                .map(config_watch::config_reload_action)
+                .unwrap_or(ConfigReloadAction::Reload)
+            {
+                ConfigReloadAction::Reload => config_reload = true,
+                ConfigReloadAction::KeepLastGood { reason } => {
+                    tracing::warn!("keeping last-good config ({reason})");
+                    config_invalid_only = true;
+                }
+            }
+        }
+        if config_reload {
+            self.reload_config_from_disk().await;
+            return;
+        }
+        if config_invalid_only {
+            return;
+        }
         let needs_reshard = params.changes.iter().any(|event| {
             let path = event.uri.path();
             path.ends_with("/info.toml") || path == "/info.toml"
@@ -1020,7 +1153,7 @@ impl LanguageServer for Backend {
         if needs_reshard {
             let root_path = self.workspace_root.read().await.clone();
             let init_options = self.init_options.read().await.clone();
-            self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true)
+            self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true, false)
                 .await;
             return;
         }
@@ -1060,7 +1193,7 @@ impl LanguageServer for Backend {
         }
         let root_path = self.workspace_root.read().await.clone();
         let init_options = self.init_options.read().await.clone();
-        self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true)
+        self.reshard_from_folders(root_path.as_deref(), init_options.as_ref(), true, false)
             .await;
     }
 
