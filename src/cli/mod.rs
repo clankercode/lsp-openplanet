@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
-use crate::config::{LspConfig, UnusedLevel, UserPrefs};
+use crate::config::{ErrorGroup, LspConfig, UnusedLevel, UserPrefs};
 use crate::server::diagnostics;
 use crate::typedb::{TypeDbMeta, TypeIndex};
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
@@ -76,6 +76,13 @@ OPTIONS:
                         wins over user. The flag wins over both.
                         `--no-unused` is `--unused ignore`.
     --no-unused         Same as `--unused ignore`
+    --errors MODE       Group errors in human check output: last | first | off
+                        (aliases: end → last, start/begin → first,
+                        none/false/interleaved → off). Default last:
+                        warnings/info/hints first, then errors. JSON is
+                        never regrouped. Also `errors = \"last\"|\"first\"|\"off\"`
+                        in .openplanet-lsp.toml or the user config;
+                        workspace wins over user. The flag wins over both.
     --plugins-dir DIR   Directory to search for plugin dependencies
                         (may be specified multiple times)
     --plugin-files-search-path DIR
@@ -162,6 +169,10 @@ pub struct CheckOptions {
     /// → config ladder (`unused` in workspace then user config, default
     /// warn). An explicit flag wins over both.
     pub unused_flag: Option<UnusedLevel>,
+    /// `--errors last|first|off`. `None` = flag absent → config ladder
+    /// (`errors` in workspace then user config, default last). An explicit
+    /// flag wins over both. Human formats only; JSON stays analysis order.
+    pub errors_flag: Option<ErrorGroup>,
 }
 
 impl CheckOptions {
@@ -185,6 +196,12 @@ impl CheckOptions {
         let workspace_root = project::find_workspace_root(&self.path);
         let prefs = UserPrefs::load(workspace_root.as_deref());
         self.resolve_warnings_as_errors(&prefs)
+    }
+
+    /// Effective error-grouping for human `check` output: CLI flag >
+    /// workspace / user `errors` key > default last.
+    pub fn resolve_errors(&self, config: &LspConfig) -> ErrorGroup {
+        self.errors_flag.unwrap_or(config.errors)
     }
 }
 
@@ -249,9 +266,12 @@ pub struct CheckReport {
     /// GH #59: stamps of the loaded DB. `None` when no DB was loaded
     /// (`--no-typedb`, or nothing resolved).
     pub type_db: Option<TypeDbVersions>,
+    /// Grouping applied to human (plain/pretty) output only. JSON keeps
+    /// `diagnostics` in analysis order regardless of this field.
+    pub errors: ErrorGroup,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CliDiagnostic {
     pub path: PathBuf,
     /// GH #57: the define combos this diagnostic fired in (each combo is a
@@ -315,6 +335,19 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 })?);
                 i += 2;
             }
+            "--errors" => {
+                let Some(value) = args.get(i + 1) else {
+                    return Err(CliError::Usage(
+                        "--errors requires a value (last, first, or off)".to_string(),
+                    ));
+                };
+                options.errors_flag = Some(ErrorGroup::parse(value).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "unknown --errors value '{value}' (expected last, first, or off)"
+                    ))
+                })?);
+                i += 2;
+            }
             "--watch" => {
                 options.watch = true;
                 i += 1;
@@ -360,6 +393,20 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 options.unused_flag = Some(UnusedLevel::parse(value).ok_or_else(|| {
                     CliError::Usage(format!(
                         "unknown --unused value '{value}' (expected ignore, warn, or error)"
+                    ))
+                })?);
+                i += 1;
+            }
+            _ if arg.starts_with("--errors=") => {
+                let value = arg.trim_start_matches("--errors=");
+                if value.is_empty() {
+                    return Err(CliError::Usage(
+                        "--errors requires a value (last, first, or off)".to_string(),
+                    ));
+                }
+                options.errors_flag = Some(ErrorGroup::parse(value).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "unknown --errors value '{value}' (expected last, first, or off)"
                     ))
                 })?);
                 i += 1;
@@ -499,6 +546,9 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     if let Some(level) = options.unused_flag {
         config.unused = level;
     }
+    if let Some(group) = options.errors_flag {
+        config.errors = group;
+    }
     apply_typedb_dir(&mut config, options.typedb_dir.as_deref());
 
     let manifest_path = root.join("info.toml");
@@ -593,6 +643,7 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         diagnostics: cli_diagnostics,
         type_database_loaded: type_index.is_some(),
         type_db,
+        errors: config.errors,
     })
 }
 
@@ -728,16 +779,72 @@ pub fn format_check_report_for(report: &CheckReport, format: CheckFormat) -> Str
 /// inviting reports whenever the game's compile errors/warnings differ from
 /// this output (GH #45 follow-up).
 pub fn format_check_report_with(report: &CheckReport, color: bool, format: CheckFormat) -> String {
-    // GH #57: JSON is a data surface — no color, no human trailer.
+    // GH #57: JSON is a data surface — no color, no human trailer,
+    // and no error regrouping (analysis order is the contract).
     if format == CheckFormat::Json {
         return format_json(report);
     }
+    let grouped = report_for_human_format(report);
     let body = if format.use_pretty(color) {
-        pretty::format_pretty(report, color)
+        pretty::format_pretty(&grouped, color)
     } else {
-        format_plain(report, color)
+        format_plain(&grouped, color)
     };
     format!("{body}{}\n", mismatch_ask(color))
+}
+
+fn is_error_diagnostic(item: &CliDiagnostic) -> bool {
+    // Missing severity is treated as an error (same as format_plain).
+    matches!(
+        item.diagnostic.severity,
+        Some(DiagnosticSeverity::ERROR) | None
+    )
+}
+
+/// Clone + regroup for human formats. Relative order inside each bucket
+/// is the original analysis order.
+fn group_diagnostics(diagnostics: &[CliDiagnostic], group: ErrorGroup) -> Vec<CliDiagnostic> {
+    match group {
+        ErrorGroup::Off => diagnostics.to_vec(),
+        ErrorGroup::Last => {
+            let mut out: Vec<_> = diagnostics
+                .iter()
+                .filter(|d| !is_error_diagnostic(d))
+                .cloned()
+                .collect();
+            out.extend(
+                diagnostics
+                    .iter()
+                    .filter(|d| is_error_diagnostic(d))
+                    .cloned(),
+            );
+            out
+        }
+        ErrorGroup::First => {
+            let mut out: Vec<_> = diagnostics
+                .iter()
+                .filter(|d| is_error_diagnostic(d))
+                .cloned()
+                .collect();
+            out.extend(
+                diagnostics
+                    .iter()
+                    .filter(|d| !is_error_diagnostic(d))
+                    .cloned(),
+            );
+            out
+        }
+    }
+}
+
+fn report_for_human_format(report: &CheckReport) -> CheckReport {
+    CheckReport {
+        root: report.root.clone(),
+        diagnostics: group_diagnostics(&report.diagnostics, report.errors),
+        type_database_loaded: report.type_database_loaded,
+        type_db: report.type_db.clone(),
+        errors: report.errors,
+    }
 }
 
 /// Issue tracker, shared with the top-level help/version surfaces (main.rs).
@@ -1145,6 +1252,7 @@ mod tests {
             diagnostics,
             type_database_loaded: false,
             type_db: None,
+            errors: ErrorGroup::Off,
         }
     }
 
@@ -1258,5 +1366,177 @@ mod tests {
             out.ends_with(&format!("{ISSUE_URL}\n")),
             "clean output must end with the issue URL + one newline: {out:?}"
         );
+    }
+
+    fn mixed_severity_report(group: ErrorGroup) -> CheckReport {
+        use tower_lsp::lsp_types::Diagnostic;
+        let unknown: DiagnosticSeverity = serde_json::from_value(serde_json::json!(99)).unwrap();
+        let item = |sev: Option<DiagnosticSeverity>, msg: &str| CliDiagnostic {
+            path: PathBuf::from("/tmp/plugin/src/Main.as"),
+            combos: Vec::new(),
+            diagnostic: Diagnostic {
+                severity: sev,
+                message: msg.to_string(),
+                ..Default::default()
+            },
+        };
+        CheckReport {
+            root: PathBuf::from("/tmp/plugin"),
+            diagnostics: vec![
+                item(Some(DiagnosticSeverity::ERROR), "msg-error-a"),
+                item(Some(DiagnosticSeverity::WARNING), "msg-warn-a"),
+                item(Some(DiagnosticSeverity::INFORMATION), "msg-info-a"),
+                item(Some(DiagnosticSeverity::HINT), "msg-hint-a"),
+                item(None, "msg-missing-a"),
+                item(Some(unknown), "msg-unknown-a"),
+                item(Some(DiagnosticSeverity::ERROR), "msg-error-b"),
+                item(Some(DiagnosticSeverity::WARNING), "msg-warn-b"),
+            ],
+            type_database_loaded: false,
+            type_db: None,
+            errors: group,
+        }
+    }
+
+    const MIXED_MSGS: &[&str] = &[
+        "msg-error-a",
+        "msg-warn-a",
+        "msg-info-a",
+        "msg-hint-a",
+        "msg-missing-a",
+        "msg-unknown-a",
+        "msg-error-b",
+        "msg-warn-b",
+    ];
+
+    fn message_order(out: &str) -> Vec<&'static str> {
+        let mut hits: Vec<(usize, &'static str)> = MIXED_MSGS
+            .iter()
+            .filter_map(|msg| out.find(msg).map(|i| (i, *msg)))
+            .collect();
+        hits.sort_by_key(|(i, _)| *i);
+        hits.into_iter().map(|(_, m)| m).collect()
+    }
+
+    fn last_idx(out: &str, needle: &str) -> usize {
+        out.rfind(needle).expect(needle)
+    }
+
+    /// Human formats regroup by `report.errors`; JSON keeps analysis order.
+    /// Variants: last / first / off × plain / pretty / json, plus trailer
+    /// still last.
+    #[test]
+    fn human_check_output_groups_errors_last_first_off_variants() {
+        let analysis = [
+            "msg-error-a",
+            "msg-warn-a",
+            "msg-info-a",
+            "msg-hint-a",
+            "msg-missing-a",
+            "msg-unknown-a",
+            "msg-error-b",
+            "msg-warn-b",
+        ];
+        let last = [
+            "msg-warn-a",
+            "msg-info-a",
+            "msg-hint-a",
+            "msg-unknown-a",
+            "msg-warn-b",
+            "msg-error-a",
+            "msg-missing-a",
+            "msg-error-b",
+        ];
+        let first = [
+            "msg-error-a",
+            "msg-missing-a",
+            "msg-error-b",
+            "msg-warn-a",
+            "msg-info-a",
+            "msg-hint-a",
+            "msg-unknown-a",
+            "msg-warn-b",
+        ];
+
+        for (group, want) in [
+            (ErrorGroup::Last, last.as_slice()),
+            (ErrorGroup::First, first.as_slice()),
+            (ErrorGroup::Off, analysis.as_slice()),
+        ] {
+            let report = mixed_severity_report(group);
+            for fmt in [CheckFormat::Plain, CheckFormat::Pretty] {
+                let out = format_check_report_with(&report, false, fmt);
+                assert_eq!(message_order(&out), want, "{group:?} {fmt:?} order: {out}");
+                let last_msg = last_idx(&out, want[want.len() - 1]);
+                assert!(
+                    last_idx(&out, "8 diagnostics") > last_msg,
+                    "{group:?} {fmt:?} summary after diags: {out}"
+                );
+                assert!(
+                    out.ends_with(&format!("{ISSUE_URL}\n")),
+                    "{group:?} {fmt:?} trailer last: {out:?}"
+                );
+            }
+
+            // JSON is a machine contract: analysis order even when grouping
+            // is last/first.
+            let json = format_check_report_with(&report, false, CheckFormat::Json);
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let got: Vec<&str> = parsed["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["message"].as_str().unwrap())
+                .collect();
+            assert_eq!(got, analysis, "json must stay analysis order for {group:?}");
+        }
+    }
+
+    #[test]
+    fn parse_check_args_errors_flag() {
+        let opts = parse_check_args(&[]).unwrap();
+        assert_eq!(opts.errors_flag, None);
+
+        for (arg, want) in [
+            ("--errors=last", ErrorGroup::Last),
+            ("--errors=end", ErrorGroup::Last),
+            ("--errors=first", ErrorGroup::First),
+            ("--errors=start", ErrorGroup::First),
+            ("--errors=begin", ErrorGroup::First),
+            ("--errors=off", ErrorGroup::Off),
+            ("--errors=none", ErrorGroup::Off),
+            ("--errors=false", ErrorGroup::Off),
+            ("--errors=interleaved", ErrorGroup::Off),
+        ] {
+            let opts = parse_check_args(&[arg.into()]).unwrap();
+            assert_eq!(opts.errors_flag, Some(want), "{arg}");
+        }
+
+        let opts = parse_check_args(&["--errors".into(), "first".into(), ".".into()]).unwrap();
+        assert_eq!(opts.errors_flag, Some(ErrorGroup::First));
+        assert_eq!(opts.path, PathBuf::from("."));
+
+        assert!(parse_check_args(&["--errors".into()]).is_err());
+        assert!(parse_check_args(&["--errors=banana".into()]).is_err());
+        assert!(parse_check_args(&["--errors=".into()]).is_err());
+    }
+
+    #[test]
+    fn resolve_errors_flag_beats_config() {
+        let mut cfg = LspConfig::default();
+        assert_eq!(cfg.errors, ErrorGroup::Last);
+
+        let opts = CheckOptions::default();
+        assert_eq!(opts.resolve_errors(&cfg), ErrorGroup::Last);
+
+        cfg.errors = ErrorGroup::First;
+        assert_eq!(opts.resolve_errors(&cfg), ErrorGroup::First);
+
+        let opts = parse_check_args(&["--errors=off".into()]).unwrap();
+        assert_eq!(opts.resolve_errors(&cfg), ErrorGroup::Off);
+
+        cfg.errors = ErrorGroup::Off;
+        let opts = parse_check_args(&["--errors".into(), "first".into()]).unwrap();
+        assert_eq!(opts.resolve_errors(&cfg), ErrorGroup::First);
     }
 }

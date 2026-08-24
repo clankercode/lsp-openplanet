@@ -134,6 +134,14 @@ default_mode = "tui"   # or "lsp"
 # workspace .openplanet-lsp.toml wins over the user config.
 # unused = "warn"
 
+# Human `check` output groups diagnostics by severity. Default "last":
+# warnings / info / hints first, then errors (so a flood of warnings does
+# not bury the two errors you care about). "first" puts errors first;
+# "off" keeps analysis order. JSON is never regrouped.
+# CLI `--errors last|first|off` wins over this; workspace
+# .openplanet-lsp.toml wins over the user config.
+# errors = "last"
+
 # Any `--define` CLI flag collapses the matrix back to a single-combo run.
 ```
 
@@ -271,6 +279,7 @@ Useful options (see `--help` for the full list):
 |------|---------|
 | `--watch` | Live TUI; re-check on file changes |
 | `--format plain\|pretty\|auto` | One-shot output style (ignored with `--watch`) |
+| `--errors last\|first\|off` | Group errors after / before / interleaved with other diagnostics (default last; ignored for JSON) |
 | `--typedb-dir <DIR>` | Load Openplanet type database from DIR |
 | `--no-typedb` | Skip type DB (parse-only / limited checks) |
 | `--plugins-dir <DIR>` | Extra Openplanet plugins dir for dependency exports |

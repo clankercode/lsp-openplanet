@@ -505,6 +505,7 @@ mod tests {
             extra_defines: Vec::new(),
             no_gitignore: false,
             unused_flag: None,
+            errors_flag: None,
         }
     }
 

@@ -2154,3 +2154,177 @@ fn check_help_mentions_unused_flag() {
         "help must document unused flags: {stdout}"
     );
 }
+
+/// Plugin whose analysis order is warning, error, warning — so last / first /
+/// off are distinguishable.
+fn mixed_severity_plugin(name: &str) -> std::path::PathBuf {
+    let root = make_temp_plugin(name);
+    fs::write(root.join("src/Alpha.as"), "void AlphaDead() {}\n").unwrap();
+    fs::write(
+        root.join("src/Beta.as"),
+        "void Main() {\n    MissingType@ bad;\n}\n",
+    )
+    .unwrap();
+    fs::write(root.join("src/Gamma.as"), "void GammaDead() {}\n").unwrap();
+    root
+}
+
+const MIXED_WARN_A: &str = "`AlphaDead`";
+const MIXED_ERR: &str = "`MissingType`";
+const MIXED_WARN_B: &str = "`GammaDead`";
+
+fn mixed_marker_order(stdout: &str) -> Vec<&'static str> {
+    let mut hits: Vec<(usize, &'static str)> = [MIXED_WARN_A, MIXED_ERR, MIXED_WARN_B]
+        .into_iter()
+        .filter_map(|m| stdout.find(m).map(|i| (i, m)))
+        .collect();
+    hits.sort_by_key(|(i, _)| *i);
+    hits.into_iter().map(|(_, m)| m).collect()
+}
+
+fn json_marker_order(stdout: &str) -> Vec<String> {
+    let parsed: serde_json::Value = serde_json::from_str(stdout).unwrap();
+    parsed["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["message"].as_str())
+        .filter_map(|msg| {
+            [MIXED_WARN_A, MIXED_ERR, MIXED_WARN_B]
+                .into_iter()
+                .find(|m| msg.contains(m))
+                .map(|m| m.to_string())
+        })
+        .collect()
+}
+
+/// Default human output (plain + pretty) prints errors after warnings.
+/// `--errors first` / `off` flip or preserve analysis order. JSON never
+/// regroups. Config is honored; the flag wins. Trailer stays last.
+#[test]
+fn check_command_groups_errors_last_first_off_plain_pretty_json() {
+    let root = mixed_severity_plugin("errors-group");
+    let analysis = [MIXED_WARN_A, MIXED_ERR, MIXED_WARN_B];
+    let last = [MIXED_WARN_A, MIXED_WARN_B, MIXED_ERR];
+    let first = [MIXED_ERR, MIXED_WARN_A, MIXED_WARN_B];
+
+    for format in ["plain", "pretty"] {
+        let (code, stdout) = check_plugin_status(&root, &["--format", format]);
+        assert_eq!(code, Some(1), "default {format} exit: {stdout}");
+        assert_eq!(
+            mixed_marker_order(&stdout),
+            last,
+            "default {format} is errors-last: {stdout}"
+        );
+        assert!(
+            stdout.contains(ISSUE_ASK_TRAILER),
+            "default {format} trailer: {stdout}"
+        );
+        assert!(
+            stdout.trim_end().ends_with(ISSUE_ASK_TRAILER),
+            "default {format} trailer is last: {stdout}"
+        );
+
+        let (code, stdout) = check_plugin_status(&root, &["--format", format, "--errors", "first"]);
+        assert_eq!(code, Some(1), "{format} --errors first: {stdout}");
+        assert_eq!(
+            mixed_marker_order(&stdout),
+            first,
+            "{format} --errors first: {stdout}"
+        );
+
+        let (code, stdout) = check_plugin_status(&root, &["--format", format, "--errors=off"]);
+        assert_eq!(code, Some(1), "{format} --errors=off: {stdout}");
+        assert_eq!(
+            mixed_marker_order(&stdout),
+            analysis,
+            "{format} --errors=off keeps analysis order: {stdout}"
+        );
+        assert!(
+            stdout.trim_end().ends_with(ISSUE_ASK_TRAILER),
+            "{format} off trailer last: {stdout}"
+        );
+    }
+
+    let (_, json) = check_plugin_status(&root, &["--format", "json"]);
+    assert_eq!(
+        json_marker_order(&json),
+        analysis,
+        "default json stays analysis order: {json}"
+    );
+    let (_, json) = check_plugin_status(&root, &["--format=json", "--errors=first"]);
+    assert_eq!(
+        json_marker_order(&json),
+        analysis,
+        "json ignores --errors first: {json}"
+    );
+    let (_, json) = check_plugin_status(&root, &["--format=json", "--errors=last"]);
+    assert_eq!(
+        json_marker_order(&json),
+        analysis,
+        "json ignores --errors last: {json}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Workspace `errors = "first"` is honored; `--errors last` / `off` win.
+#[test]
+fn check_command_errors_config_and_flag_precedence() {
+    let root = mixed_severity_plugin("errors-config");
+    fs::write(root.join(".openplanet-lsp.toml"), "errors = \"first\"\n").unwrap();
+
+    let (_, stdout) = check_plugin_status(&root, &["--format", "plain"]);
+    assert_eq!(
+        mixed_marker_order(&stdout),
+        [MIXED_ERR, MIXED_WARN_A, MIXED_WARN_B],
+        "workspace errors=first: {stdout}"
+    );
+
+    let (_, stdout) = check_plugin_status(&root, &["--format", "plain", "--errors", "last"]);
+    assert_eq!(
+        mixed_marker_order(&stdout),
+        [MIXED_WARN_A, MIXED_WARN_B, MIXED_ERR],
+        "flag last beats config first: {stdout}"
+    );
+
+    let (_, stdout) = check_plugin_status(&root, &["--format", "plain", "--errors=off"]);
+    assert_eq!(
+        mixed_marker_order(&stdout),
+        [MIXED_WARN_A, MIXED_ERR, MIXED_WARN_B],
+        "flag off beats config first: {stdout}"
+    );
+
+    fs::write(root.join(".openplanet-lsp.toml"), "errors = \"off\"\n").unwrap();
+    let (_, stdout) = check_plugin_status(&root, &["--format", "plain"]);
+    assert_eq!(
+        mixed_marker_order(&stdout),
+        [MIXED_WARN_A, MIXED_ERR, MIXED_WARN_B],
+        "workspace errors=off: {stdout}"
+    );
+
+    fs::write(root.join(".openplanet-lsp.toml"), "errors = \"end\"\n").unwrap();
+    let (_, stdout) = check_plugin_status(&root, &["--format", "pretty"]);
+    assert_eq!(
+        mixed_marker_order(&stdout),
+        [MIXED_WARN_A, MIXED_WARN_B, MIXED_ERR],
+        "workspace errors=end alias is last: {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn check_help_mentions_errors_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--help")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "check --help: {stdout}");
+    assert!(
+        stdout.contains("--errors") && stdout.contains("last") && stdout.contains("first"),
+        "help must document --errors last|first|off: {stdout}"
+    );
+}

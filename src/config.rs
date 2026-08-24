@@ -82,6 +82,11 @@ pub struct LspConfig {
     /// Workspace `.openplanet-lsp.toml` wins over the user global; CLI
     /// `--unused` / `--no-unused` wins over both.
     pub unused: UnusedLevel,
+    /// How one-shot `check` groups diagnostics for human formats.
+    /// Default last (non-errors, then errors). JSON is never regrouped.
+    /// Workspace `.openplanet-lsp.toml` wins over the user global; CLI
+    /// `--errors` wins over both.
+    pub errors: ErrorGroup,
 }
 
 impl Default for LspConfig {
@@ -111,6 +116,7 @@ impl Default for LspConfig {
             define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
             unused_callbacks: Vec::new(),
             unused: UnusedLevel::Warn,
+            errors: ErrorGroup::Last,
         }
     }
 }
@@ -190,6 +196,40 @@ impl UnusedLevel {
             Self::Ignore => "ignore",
             Self::Warn => "warn",
             Self::Error => "error",
+        }
+    }
+}
+
+/// How `check` groups diagnostics for human (plain/pretty) output.
+///
+/// Default is [`ErrorGroup::Last`]: warnings/info/hints (and unknown)
+/// keep their relative order, then errors (missing severity counts as
+/// error). `first` puts errors first. `off` keeps analysis order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ErrorGroup {
+    #[default]
+    Last,
+    First,
+    Off,
+}
+
+impl ErrorGroup {
+    /// Parse a config / CLI token. Aliases: end → last; start/begin → first;
+    /// none/false/interleaved → off.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "last" | "end" => Some(Self::Last),
+            "first" | "start" | "begin" => Some(Self::First),
+            "off" | "none" | "false" | "interleaved" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Last => "last",
+            Self::First => "first",
+            Self::Off => "off",
         }
     }
 }
@@ -402,6 +442,7 @@ impl LspConfig {
             define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
             unused_callbacks: Vec::new(),
             unused: UnusedLevel::Warn,
+            errors: ErrorGroup::Last,
         };
 
         // Layer 1: Auto-detect
@@ -433,6 +474,11 @@ impl LspConfig {
         // Same workspace-over-user precedence as unused_callbacks: a
         // per-plugin silence/error pin must beat the machine default.
         config.unused = Self::resolve_unused(
+            Self::user_config_path().as_deref(),
+            parent.filter(|p| Some(*p) != workspace_root),
+            workspace_root,
+        );
+        config.errors = Self::resolve_errors(
             Self::user_config_path().as_deref(),
             parent.filter(|p| Some(*p) != workspace_root),
             workspace_root,
@@ -648,6 +694,30 @@ impl LspConfig {
         parse_unused_toml(table.get("unused")?)
     }
 
+    fn resolve_errors(
+        user: Option<&Path>,
+        parent: Option<&Path>,
+        root: Option<&Path>,
+    ) -> ErrorGroup {
+        let ladder = [
+            user.map(Path::to_path_buf),
+            parent.map(|p| p.join(".openplanet-lsp.toml")),
+            root.map(|r| r.join(".openplanet-lsp.toml")),
+        ];
+        ladder
+            .iter()
+            .flatten()
+            .filter_map(|p| Self::errors_in_file(p))
+            .next_back()
+            .unwrap_or(ErrorGroup::Last)
+    }
+
+    fn errors_in_file(path: &Path) -> Option<ErrorGroup> {
+        let contents = std::fs::read_to_string(path).ok()?;
+        let table: toml::Table = toml::from_str(&contents).ok()?;
+        parse_errors_toml(table.get("errors")?)
+    }
+
     /// Read `unused_callbacks` out of one TOML file, leniently: `None`
     /// when the file is missing, unparseable, or the key is absent or not
     /// an array. Non-string entries are dropped rather than rejecting the
@@ -788,6 +858,9 @@ impl LspConfig {
         if let Some(level) = opts.get("unused").and_then(parse_unused_json) {
             self.unused = level;
         }
+        if let Some(group) = opts.get("errors").and_then(parse_errors_json) {
+            self.errors = group;
+        }
         if let Some(roots) = opts.get("plugin_roots").and_then(|v| v.as_array()) {
             let parsed: Vec<PathBuf> = roots
                 .iter()
@@ -818,6 +891,24 @@ fn parse_unused_json(value: &serde_json::Value) -> Option<UnusedLevel> {
         Some(false) => Some(UnusedLevel::Ignore),
         Some(true) => Some(UnusedLevel::Warn),
         None => None,
+    }
+}
+
+fn parse_errors_toml(value: &toml::Value) -> Option<ErrorGroup> {
+    match value {
+        toml::Value::String(s) => ErrorGroup::parse(s),
+        toml::Value::Boolean(false) => Some(ErrorGroup::Off),
+        _ => None,
+    }
+}
+
+fn parse_errors_json(value: &serde_json::Value) -> Option<ErrorGroup> {
+    if let Some(s) = value.as_str() {
+        return ErrorGroup::parse(s);
+    }
+    match value.as_bool() {
+        Some(false) => Some(ErrorGroup::Off),
+        _ => None,
     }
 }
 
@@ -918,6 +1009,154 @@ mod tests {
         let opts = serde_json::json!({ "unused": "error" });
         let cfg = LspConfig::load(Some(&tmp), Some(&opts));
         assert_eq!(cfg.unused, UnusedLevel::Error);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn error_group_parse_accepts_canonical_and_alias_variants() {
+        for (input, want) in [
+            ("last", ErrorGroup::Last),
+            ("LAST", ErrorGroup::Last),
+            ("end", ErrorGroup::Last),
+            ("first", ErrorGroup::First),
+            ("start", ErrorGroup::First),
+            ("begin", ErrorGroup::First),
+            ("off", ErrorGroup::Off),
+            ("none", ErrorGroup::Off),
+            ("false", ErrorGroup::Off),
+            ("interleaved", ErrorGroup::Off),
+        ] {
+            assert_eq!(ErrorGroup::parse(input), Some(want), "parse {input:?}");
+        }
+        assert!(ErrorGroup::parse("banana").is_none());
+        assert!(ErrorGroup::parse("").is_none());
+    }
+
+    #[test]
+    fn errors_defaults_to_last() {
+        assert_eq!(LspConfig::default().errors, ErrorGroup::Last);
+        assert_eq!(
+            LspConfig::resolve_errors(None, None, None),
+            ErrorGroup::Last
+        );
+    }
+
+    #[test]
+    fn errors_workspace_overrides_user_and_accepts_aliases() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-errors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let user = tmp.join("user.toml");
+        std::fs::write(&user, "errors = \"first\"\n").unwrap();
+
+        let ws_last = tmp.join("ws-last");
+        std::fs::create_dir_all(&ws_last).unwrap();
+        std::fs::write(ws_last.join(".openplanet-lsp.toml"), "errors = \"last\"\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, Some(&ws_last)),
+            ErrorGroup::Last,
+            "workspace last must beat user first"
+        );
+
+        let ws_end = tmp.join("ws-end");
+        std::fs::create_dir_all(&ws_end).unwrap();
+        std::fs::write(ws_end.join(".openplanet-lsp.toml"), "errors = \"end\"\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, Some(&ws_end)),
+            ErrorGroup::Last,
+            "end is last"
+        );
+
+        let ws_start = tmp.join("ws-start");
+        std::fs::create_dir_all(&ws_start).unwrap();
+        std::fs::write(
+            ws_start.join(".openplanet-lsp.toml"),
+            "errors = \"start\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, Some(&ws_start)),
+            ErrorGroup::First,
+            "start is first"
+        );
+
+        let ws_begin = tmp.join("ws-begin");
+        std::fs::create_dir_all(&ws_begin).unwrap();
+        std::fs::write(
+            ws_begin.join(".openplanet-lsp.toml"),
+            "errors = \"begin\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, Some(&ws_begin)),
+            ErrorGroup::First,
+            "begin is first"
+        );
+
+        let ws_off = tmp.join("ws-off");
+        std::fs::create_dir_all(&ws_off).unwrap();
+        std::fs::write(ws_off.join(".openplanet-lsp.toml"), "errors = \"off\"\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, Some(&ws_off)),
+            ErrorGroup::Off
+        );
+
+        let ws_bool = tmp.join("ws-bool");
+        std::fs::create_dir_all(&ws_bool).unwrap();
+        std::fs::write(ws_bool.join(".openplanet-lsp.toml"), "errors = false\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, Some(&ws_bool)),
+            ErrorGroup::Off,
+            "errors = false is off"
+        );
+
+        let ws_none = tmp.join("ws-none");
+        std::fs::create_dir_all(&ws_none).unwrap();
+        std::fs::write(ws_none.join(".openplanet-lsp.toml"), "errors = \"none\"\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, Some(&ws_none)),
+            ErrorGroup::Off
+        );
+
+        let ws_interleaved = tmp.join("ws-interleaved");
+        std::fs::create_dir_all(&ws_interleaved).unwrap();
+        std::fs::write(
+            ws_interleaved.join(".openplanet-lsp.toml"),
+            "errors = \"interleaved\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, Some(&ws_interleaved)),
+            ErrorGroup::Off
+        );
+
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, None),
+            ErrorGroup::First,
+            "user-global errors = first when workspace does not set it"
+        );
+
+        let ws_bad = tmp.join("ws-bad");
+        std::fs::create_dir_all(&ws_bad).unwrap();
+        std::fs::write(ws_bad.join(".openplanet-lsp.toml"), "errors = \"banana\"\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_errors(Some(&user), None, Some(&ws_bad)),
+            ErrorGroup::First,
+            "invalid workspace value is ignored; user first remains"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn errors_init_options_override_config_file() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-errors-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join(".openplanet-lsp.toml"), "errors = \"off\"\n").unwrap();
+        let opts = serde_json::json!({ "errors": "first" });
+        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        assert_eq!(cfg.errors, ErrorGroup::First);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

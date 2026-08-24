@@ -14,6 +14,12 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **`errors` config + `--errors last|first|off`** — human `check` output
+  (plain and pretty) groups diagnostics so a flood of warnings does not bury
+  errors. Default `last`: warnings/info/hints first, then errors. `first`
+  puts errors first; `off` keeps analysis order. JSON is never regrouped.
+  Workspace `.openplanet-lsp.toml` wins over the user config; the flag wins
+  over both.
 - **`unused` config + `--unused` / `--no-unused`** — unused functions, vars,
   parameters, and class members can be `ignore`, `warn` (default), or `error`.
   `unused = "ignore"` (or `false`) in `.openplanet-lsp.toml` / the user config

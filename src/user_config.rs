@@ -325,6 +325,14 @@ pub const SETTINGS: &[SettingSpec] = &[
         help: "Hard cap on matrix cross-product size (default 16)",
         kind: SettingKind::Usize { default: 16 },
     },
+    SettingSpec {
+        key: "errors",
+        help: "Group check errors: last (default), first, or off",
+        kind: SettingKind::Enum {
+            choices: &["last", "first", "off"],
+            default: "last",
+        },
+    },
 ];
 
 pub fn format_string_list(values: &[String]) -> String {
@@ -660,6 +668,7 @@ mod tests {
             "define_matrix_max_combinations",
             "unused",
             "unused_callbacks",
+            "errors",
         ] {
             assert!(
                 keys.contains(&expected),
