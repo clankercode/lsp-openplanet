@@ -810,7 +810,13 @@ impl LanguageServer for Backend {
             match TypeIndex::load(core, game) {
                 Ok(index) => {
                     *self.type_index.write().await = Some(Arc::new(index));
-                    tracing::info!("Type database loaded successfully");
+                    // GH #59: name the build, not just the success — a
+                    // "confidently wrong" diagnostic is traceable to a DB
+                    // version only if the log says which one loaded.
+                    tracing::info!(
+                        "Type database loaded successfully; {}",
+                        crate::cli::TypeDbVersions::probe(core, game).summary_line()
+                    );
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load type database: {}", e);

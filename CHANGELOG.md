@@ -13,6 +13,20 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Added
+- **Type-DB freshness is a visible, managed pipeline** (GH #59) — every
+  `check` run now states which Openplanet type database it judged the code
+  against (`type db: op=1.29.5 (next, Public, 1234ad9e)  game op=…  mp=…`),
+  the JSON report carries the same stamps as an additive `typedb` object,
+  and the language server logs the line at init. New
+  `openplanet-lsp typedb status|diff|refresh` inspects the resolved DBs,
+  reports symbol-level drift between two DB directories, and harvests both
+  files out of a local install — dry-run by default, `--yes` to write,
+  `--into` always explicit, and never over the network. `just typedb-status`
+  / `typedb-diff` / `typedb-refresh` / `typedb-refresh-apply` /
+  `typedb-guard` wrap the maintainer flow, and a named CI step guards the
+  shipped fixture DBs against a corrupt or truncated harvest.
+
 ### Changed
 - **`.as` discovery honors `.gitignore` (GH #60)** — files excluded by
   `.gitignore` rules at or below the plugin root (plus a root-local
@@ -44,6 +58,18 @@ GitHub Release body to match this section (gh release edit).
   per-file diagnostics path asked for the whole workspace's findings and
   filtered, an O(files²) join. It now asks per file: `check` on the
   tm-editor-plus-plus fixture (≈300 files) drops from ~5.0s to ~0.6s.
+- **Namespace-shortcut completions no longer shuffle between runs** — the
+  `UI::`/`Math::` shortcut items all share one `sortText`, so the order the
+  server builds them in is what the editor displays, and it was inheriting
+  `HashMap` iteration order: the same file could offer the same completions
+  in a different order on each request. Function and enum shortcuts are now
+  emitted in sorted qualified-name order.
+- **Loading the same type DB twice yields the same index** — 66 inline
+  member-enum type names collide within a Nadeo module (15 distinct
+  anonymous enums are all `Control::UnnamedEnum`) and were resolved by
+  `HashMap` iteration order, so two loads of identical bytes could produce
+  different enum registrations. Registration now walks modules and types in
+  sorted name order.
 - **Workspace function return types are real types, not `<error>`** —
   free-function symbol extraction left `return_type` empty, so hovering
   a call to a workspace function (e.g. `ts_log(...)` declared in another

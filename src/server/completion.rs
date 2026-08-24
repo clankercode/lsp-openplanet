@@ -386,7 +386,9 @@ fn add_shortcut_completions(
     let mut seen = std::collections::HashSet::new();
 
     for ns in namespaces {
-        for (qname, overloads) in index.namespace_functions(ns) {
+        let mut functions: Vec<_> = index.namespace_functions(ns).collect();
+        functions.sort_by_key(|(qname, _)| *qname);
+        for (qname, overloads) in functions {
             let Some(short) = qname.strip_prefix(&format!("{}::", ns)) else {
                 continue;
             };
@@ -418,7 +420,9 @@ fn add_shortcut_completions(
         }
 
         if match_enums {
-            for (qname, info) in index.namespace_enums(ns) {
+            let mut enums: Vec<_> = index.namespace_enums(ns).collect();
+            enums.sort_by_key(|(qname, _)| *qname);
+            for (qname, info) in enums {
                 let Some(short) = qname.strip_prefix(&format!("{}::", ns)) else {
                     continue;
                 };
@@ -652,13 +656,18 @@ mod tests {
                 "functions": [
                     {"ns": "UI", "name": "Begin", "returntypedecl": "bool", "args": []},
                     {"ns": "UI", "name": "BeginDisabled", "returntypedecl": "void", "args": []},
+                    {"ns": "UI", "name": "Alpha", "returntypedecl": "void", "args": []},
+                    {"ns": "UI", "name": "Close", "returntypedecl": "void", "args": []},
+                    {"ns": "UI", "name": "Zebra", "returntypedecl": "void", "args": []},
                     {"ns": "Math", "name": "Abs", "returntypedecl": "float", "args": []},
                     {"ns": "UX", "name": "DrawGrid", "returntypedecl": "void", "args": []},
                     {"ns": "MathX", "name": "Lerp", "returntypedecl": "float", "args": []}
                 ],
                 "enums": [
                     {"ns": "UI", "name": "WindowFlags", "values": {"NoTitleBar": {"v": 1}}},
-                    {"ns": "UI", "name": "Cond", "values": {"Always": {"v": 2}}}
+                    {"ns": "UI", "name": "Cond", "values": {"Always": {"v": 2}}},
+                    {"ns": "UI", "name": "Apple", "values": {"One": {"v": 3}}},
+                    {"ns": "UI", "name": "Zed", "values": {"Two": {"v": 4}}}
                 ]
             }))
             .expect("fake core db");
@@ -708,6 +717,40 @@ mod tests {
             "case-insensitive prefix: {:?}",
             labels
         );
+    }
+
+    /// Namespace shortcut items share one sortText, so their construction
+    /// order itself is observable LSP output and must not inherit HashMap
+    /// iteration order.
+    #[test]
+    fn shortcut_completion_order_is_stable_across_two_indexes() {
+        let labels_for = |index: &crate::typedb::TypeIndex| {
+            complete_with_shortcuts("void f() {  }", "{ ", index, &["UI"], true)
+                .into_iter()
+                .filter(|item| {
+                    matches!(
+                        item.kind,
+                        Some(CompletionItemKind::FUNCTION | CompletionItemKind::ENUM)
+                    ) && item.sort_text.as_deref() == Some(SHORTCUT_SORT_TEXT)
+                })
+                .map(|item| item.label)
+                .collect::<Vec<_>>()
+        };
+        let first = labels_for(&index_with_ui());
+        let second = labels_for(&index_with_ui());
+        let expected = vec![
+            "UI::Alpha",
+            "UI::Begin",
+            "UI::BeginDisabled",
+            "UI::Close",
+            "UI::Zebra",
+            "UI::Apple",
+            "UI::Cond",
+            "UI::WindowFlags",
+            "UI::Zed",
+        ];
+        assert_eq!(first, expected);
+        assert_eq!(second, expected);
     }
 
     #[test]

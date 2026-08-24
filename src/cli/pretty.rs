@@ -337,6 +337,7 @@ mod tests {
                 "unknown type `Missing`",
             )],
             type_database_loaded: false,
+            type_db: None,
         };
 
         let out = format_check_report_with(&report, false, CheckFormat::Plain);
@@ -371,6 +372,7 @@ mod tests {
                 "unknown type `Missing`",
             )],
             type_database_loaded: false,
+            type_db: None,
         };
 
         // color=false, format=pretty → pretty layout, no ANSI
@@ -421,6 +423,7 @@ mod tests {
                 "demo",
             )],
             type_database_loaded: true,
+            type_db: None,
         };
 
         let plainish = format_check_report_with(&report, false, CheckFormat::Auto);
@@ -449,6 +452,7 @@ mod tests {
             root: root.clone(),
             diagnostics: vec![],
             type_database_loaded: true,
+            type_db: None,
         };
         let out = format_check_report_with(&report, false, CheckFormat::Pretty);
         assert!(

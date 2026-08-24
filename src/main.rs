@@ -24,6 +24,7 @@ USAGE:
     openplanet-lsp [FLAGS]
     openplanet-lsp check [OPTIONS] [PATH]
     openplanet-lsp tui [PATH]
+    openplanet-lsp typedb <status|diff|refresh> [OPTIONS]
     openplanet-lsp update [OPTIONS]
     openplanet-lsp lsp
     openplanet-lsp --lsp
@@ -38,6 +39,9 @@ COMMANDS:
                      Run `openplanet-lsp check --help` for options
     tui              Launch the live watch TUI (alias for `check --watch`)
                      PATH defaults to the current directory
+    typedb           Inspect / refresh the Openplanet type databases
+                     (status, diff, refresh — offline, local install only)
+                     Run `openplanet-lsp typedb --help` for options
     update           Check for / apply self-updates
                      Run `openplanet-lsp update --help` for options
     lsp              Same as --lsp (language server on stdio)
@@ -127,6 +131,7 @@ fn handle_early_args(args: &[String]) -> Option<i32> {
             Some(run_lsp_marker())
         }
         Some("check") => Some(run_check_command(&args[1..])),
+        Some("typedb") => Some(cli::typedb_cmd::run_typedb_command(&args[1..])),
         Some("update") => Some(run_update_command(&args[1..])),
         Some(arg) if arg.starts_with('-') => {
             eprintln!("unknown option: {arg}");
@@ -219,6 +224,14 @@ fn run_check_command(args: &[String]) -> i32 {
         Ok(report) => {
             if !report.type_database_loaded && !options.no_typedb {
                 eprintln!("warning: type database not loaded; pass --typedb-dir or --no-typedb");
+            }
+            // GH #59: state which DB build judged this code. Suppressed for
+            // --format json, where the report carries a `typedb` object
+            // instead (the JSON surface stays the machine contract).
+            if let Some(versions) = &report.type_db {
+                if options.format != cli::CheckFormat::Json {
+                    eprintln!("{}", versions.summary_line());
+                }
             }
             print!("{}", cli::format_check_report_for(&report, options.format));
             let has_errors = report.diagnostics.iter().any(|item| {
