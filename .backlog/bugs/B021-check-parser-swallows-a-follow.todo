@@ -75,3 +75,15 @@ Concrete silent-wrong case for the two non-path flags:
 `check --define --format json` defines a symbol literally named `--format`
 and then treats `json` as the path - same shape as the --plugins-dir silent
 failure, and it changes which #if branches get compiled.
+
+
+## Coordinator decisions (2026-08-24, GH #62)
+
+1. Path flags (`--typedb-dir`, `--plugins-dir`, `--plugin-files-search-path`): reject a *separated* value that starts with `--` as usage (exit 2). Keep `--flag=--weird` accepted (a path beginning with `--` is legal if unusual).
+2. `--define`: reject option-like values in BOTH space and `=` forms. A define named `--x` is not a valid AngelScript identifier; `--define=--x` is not an escape hatch.
+3. `--format`: reject option-like values in BOTH forms. Emit the usage/flag-swallowed error, not "unknown format '--json'".
+4. Required coverage is the five flags in the issue. If a shared take-arg helper is extracted, apply the same separated-`--` guard to every check flag that takes a following token (`--unused`, `--errors` included) — that is the same bug class, not a new feature.
+
+## Lane plan
+
+Parallel with GH #63 / B022. This lane owns `src/cli/mod.rs` and `tests/cli_check_tests.rs`. Do **not** edit typedb loaders or typecheck (those belong to #63).
