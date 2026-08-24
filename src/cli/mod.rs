@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
-use crate::config::{LspConfig, UserPrefs};
+use crate::config::{LspConfig, UnusedLevel, UserPrefs};
 use crate::server::diagnostics;
 use crate::typedb::{TypeDbMeta, TypeIndex};
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
@@ -68,6 +68,14 @@ OPTIONS:
                         .openplanet-lsp.toml) when gitignored files are still
                         compile-critical, e.g. generated sources. The flag
                         wins over both config levels.
+    --unused MODE       Unused functions/vars/etc: ignore | warn | error
+                        (aliases: off/false → ignore, on/true → warn,
+                        err → error). Default warn. Also
+                        `unused = \"ignore\"|\"warn\"|\"error\"` in
+                        .openplanet-lsp.toml or the user config; workspace
+                        wins over user. The flag wins over both.
+                        `--no-unused` is `--unused ignore`.
+    --no-unused         Same as `--unused ignore`
     --plugins-dir DIR   Directory to search for plugin dependencies
                         (may be specified multiple times)
     --plugin-files-search-path DIR
@@ -150,6 +158,10 @@ pub struct CheckOptions {
     /// excludes. Wins over `honor_gitignore` at both config levels. There is
     /// no positive flag: honoring is already the default.
     pub no_gitignore: bool,
+    /// `--unused ignore|warn|error` / `--no-unused`. `None` = flag absent
+    /// → config ladder (`unused` in workspace then user config, default
+    /// warn). An explicit flag wins over both.
+    pub unused_flag: Option<UnusedLevel>,
 }
 
 impl CheckOptions {
@@ -286,6 +298,23 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 options.no_gitignore = true;
                 i += 1;
             }
+            "--no-unused" => {
+                options.unused_flag = Some(UnusedLevel::Ignore);
+                i += 1;
+            }
+            "--unused" => {
+                let Some(value) = args.get(i + 1) else {
+                    return Err(CliError::Usage(
+                        "--unused requires a value (ignore, warn, or error)".to_string(),
+                    ));
+                };
+                options.unused_flag = Some(UnusedLevel::parse(value).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "unknown --unused value '{value}' (expected ignore, warn, or error)"
+                    ))
+                })?);
+                i += 2;
+            }
             "--watch" => {
                 options.watch = true;
                 i += 1;
@@ -319,6 +348,20 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                         )))
                     }
                 });
+                i += 1;
+            }
+            _ if arg.starts_with("--unused=") => {
+                let value = arg.trim_start_matches("--unused=");
+                if value.is_empty() {
+                    return Err(CliError::Usage(
+                        "--unused requires a value (ignore, warn, or error)".to_string(),
+                    ));
+                }
+                options.unused_flag = Some(UnusedLevel::parse(value).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "unknown --unused value '{value}' (expected ignore, warn, or error)"
+                    ))
+                })?);
                 i += 1;
             }
             _ if arg.starts_with("--define=") => {
@@ -453,6 +496,9 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         .canonicalize()
         .map_err(|e| CliError::Check(format!("failed to resolve {}: {e}", root.display())))?;
     let mut config = LspConfig::load(Some(&root), None);
+    if let Some(level) = options.unused_flag {
+        config.unused = level;
+    }
     apply_typedb_dir(&mut config, options.typedb_dir.as_deref());
 
     let manifest_path = root.join("info.toml");
@@ -608,7 +654,9 @@ fn collect_pass_diagnostics(
     // Unused-declaration warnings (workspace view; own-manifest export
     // files are exempt public API). ONE collect pass for the whole
     // workspace — a per-file collect here would be O(files²) check runs.
-    let unused_usage = crate::analysis::unused::WorkspaceUsage::collect(snapshot, type_index);
+    // `unused = ignore` skips the pass entirely (it is the noisy one).
+    let unused_usage = (config.unused != crate::config::UnusedLevel::Ignore)
+        .then(|| crate::analysis::unused::WorkspaceUsage::collect(snapshot, type_index));
 
     for item in &load.files {
         if !item.report_diagnostics {
@@ -641,13 +689,16 @@ fn collect_pass_diagnostics(
                 diagnostic,
             });
         }
-        if let Some(file_id) = snapshot.file_id_of_path(&item.path) {
+        if let (Some(file_id), Some(usage)) =
+            (snapshot.file_id_of_path(&item.path), unused_usage.as_ref())
+        {
             for diagnostic in diagnostics::unused_declaration_diagnostics(
                 analysis.source.as_str(),
-                &unused_usage,
+                usage,
                 snapshot,
                 file_id,
                 snapshot.export_paths(),
+                config.unused,
             ) {
                 cli_diagnostics.push(CliDiagnostic {
                     path: item.path.clone(),
@@ -985,6 +1036,38 @@ mod tests {
 
         // Invalid value is still a usage error.
         assert!(parse_check_args(&["--warnings-as-errors=banana".into(), ".".into()]).is_err());
+    }
+
+    #[test]
+    fn parse_check_args_unused_flag() {
+        let opts = parse_check_args(&[]).unwrap();
+        assert_eq!(opts.unused_flag, None);
+
+        let opts = parse_check_args(&["--no-unused".into()]).unwrap();
+        assert_eq!(opts.unused_flag, Some(UnusedLevel::Ignore));
+
+        for (arg, want) in [
+            ("--unused=ignore", UnusedLevel::Ignore),
+            ("--unused=warn", UnusedLevel::Warn),
+            ("--unused=error", UnusedLevel::Error),
+            ("--unused=off", UnusedLevel::Ignore),
+            ("--unused=err", UnusedLevel::Error),
+        ] {
+            let opts = parse_check_args(&[arg.into()]).unwrap();
+            assert_eq!(opts.unused_flag, Some(want), "{arg}");
+        }
+
+        let opts = parse_check_args(&["--unused".into(), "error".into(), ".".into()]).unwrap();
+        assert_eq!(opts.unused_flag, Some(UnusedLevel::Error));
+        assert_eq!(opts.path, PathBuf::from("."));
+
+        let opts = parse_check_args(&["--watch".into(), "--no-unused".into()]).unwrap();
+        assert!(opts.watch);
+        assert_eq!(opts.unused_flag, Some(UnusedLevel::Ignore));
+
+        assert!(parse_check_args(&["--unused".into()]).is_err());
+        assert!(parse_check_args(&["--unused=banana".into()]).is_err());
+        assert!(parse_check_args(&["--unused=".into()]).is_err());
     }
 
     /// GH #60: `--no-gitignore` is tracked on CheckOptions, absent by default,

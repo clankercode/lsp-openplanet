@@ -293,6 +293,14 @@ pub const SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::StringList,
     },
     SettingSpec {
+        key: "unused",
+        help: "Unused functions/vars/etc: ignore, warn (default), or error",
+        kind: SettingKind::Enum {
+            choices: &["ignore", "warn", "error"],
+            default: "warn",
+        },
+    },
+    SettingSpec {
         key: "unused_callbacks",
         help: "Extra names treated as runtime-invoked callbacks",
         kind: SettingKind::StringList,
@@ -650,6 +658,7 @@ mod tests {
             "define_groups",
             "define_combinations",
             "define_matrix_max_combinations",
+            "unused",
             "unused_callbacks",
         ] {
             assert!(

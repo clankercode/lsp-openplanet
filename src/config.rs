@@ -78,6 +78,10 @@ pub struct LspConfig {
     /// list. Resolved by [`LspConfig::resolve_unused_callbacks`] — empty
     /// when no config file sets the key.
     pub unused_callbacks: Vec<String>,
+    /// How unused-declaration findings are reported. Default warn.
+    /// Workspace `.openplanet-lsp.toml` wins over the user global; CLI
+    /// `--unused` / `--no-unused` wins over both.
+    pub unused: UnusedLevel,
 }
 
 impl Default for LspConfig {
@@ -106,6 +110,7 @@ impl Default for LspConfig {
             define_combinations: None,
             define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
             unused_callbacks: Vec::new(),
+            unused: UnusedLevel::Warn,
         }
     }
 }
@@ -153,6 +158,40 @@ struct ConfigFile {
     define_combinations: Option<Vec<Vec<String>>>,
     /// GH #57: matrix size cap (default 16); exceeding it is a hard error.
     define_matrix_max_combinations: Option<usize>,
+}
+
+/// How unused-declaration findings are reported.
+///
+/// Default is [`UnusedLevel::Warn`] (today's behavior). `ignore` drops the
+/// pass entirely (it is noisy on large plugins). `error` emits ERROR
+/// diagnostics so `check` fails without `--warnings-as-errors`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnusedLevel {
+    Ignore,
+    #[default]
+    Warn,
+    Error,
+}
+
+impl UnusedLevel {
+    /// Parse a config / CLI token. Aliases: off/false/none/disable → ignore;
+    /// on/true/warning → warn; err/errors → error.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ignore" | "off" | "false" | "none" | "disable" | "disabled" => Some(Self::Ignore),
+            "warn" | "warning" | "on" | "true" => Some(Self::Warn),
+            "error" | "err" | "errors" => Some(Self::Error),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignore",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// How bare TTY launches behave when no subcommand is given.
@@ -362,6 +401,7 @@ impl LspConfig {
             define_combinations: None,
             define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
             unused_callbacks: Vec::new(),
+            unused: UnusedLevel::Warn,
         };
 
         // Layer 1: Auto-detect
@@ -386,6 +426,13 @@ impl LspConfig {
         // instead (workspace overrides user-global), which is what a
         // per-project exemption list has to do.
         config.unused_callbacks = Self::resolve_unused_callbacks(
+            Self::user_config_path().as_deref(),
+            parent.filter(|p| Some(*p) != workspace_root),
+            workspace_root,
+        );
+        // Same workspace-over-user precedence as unused_callbacks: a
+        // per-plugin silence/error pin must beat the machine default.
+        config.unused = Self::resolve_unused(
             Self::user_config_path().as_deref(),
             parent.filter(|p| Some(*p) != workspace_root),
             workspace_root,
@@ -577,6 +624,30 @@ impl LspConfig {
             .unwrap_or_default()
     }
 
+    fn resolve_unused(
+        user: Option<&Path>,
+        parent: Option<&Path>,
+        root: Option<&Path>,
+    ) -> UnusedLevel {
+        let ladder = [
+            user.map(Path::to_path_buf),
+            parent.map(|p| p.join(".openplanet-lsp.toml")),
+            root.map(|r| r.join(".openplanet-lsp.toml")),
+        ];
+        ladder
+            .iter()
+            .flatten()
+            .filter_map(|p| Self::unused_in_file(p))
+            .next_back()
+            .unwrap_or(UnusedLevel::Warn)
+    }
+
+    fn unused_in_file(path: &Path) -> Option<UnusedLevel> {
+        let contents = std::fs::read_to_string(path).ok()?;
+        let table: toml::Table = toml::from_str(&contents).ok()?;
+        parse_unused_toml(table.get("unused")?)
+    }
+
     /// Read `unused_callbacks` out of one TOML file, leniently: `None`
     /// when the file is missing, unparseable, or the key is absent or not
     /// an array. Non-string entries are dropped rather than rejecting the
@@ -714,6 +785,9 @@ impl LspConfig {
         if let Some(match_enums) = opts.get("shortcut_match_enums").and_then(|v| v.as_bool()) {
             self.shortcut_match_enums = match_enums;
         }
+        if let Some(level) = opts.get("unused").and_then(parse_unused_json) {
+            self.unused = level;
+        }
         if let Some(roots) = opts.get("plugin_roots").and_then(|v| v.as_array()) {
             let parsed: Vec<PathBuf> = roots
                 .iter()
@@ -724,6 +798,26 @@ impl LspConfig {
                 self.plugin_roots = parsed;
             }
         }
+    }
+}
+
+fn parse_unused_toml(value: &toml::Value) -> Option<UnusedLevel> {
+    match value {
+        toml::Value::String(s) => UnusedLevel::parse(s),
+        toml::Value::Boolean(false) => Some(UnusedLevel::Ignore),
+        toml::Value::Boolean(true) => Some(UnusedLevel::Warn),
+        _ => None,
+    }
+}
+
+fn parse_unused_json(value: &serde_json::Value) -> Option<UnusedLevel> {
+    if let Some(s) = value.as_str() {
+        return UnusedLevel::parse(s);
+    }
+    match value.as_bool() {
+        Some(false) => Some(UnusedLevel::Ignore),
+        Some(true) => Some(UnusedLevel::Warn),
+        None => None,
     }
 }
 
@@ -742,6 +836,90 @@ fn dependency_define_suffix(dep: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unused_level_parse_accepts_canonical_and_alias_variants() {
+        for (input, want) in [
+            ("ignore", UnusedLevel::Ignore),
+            ("IGNORE", UnusedLevel::Ignore),
+            ("off", UnusedLevel::Ignore),
+            ("false", UnusedLevel::Ignore),
+            ("none", UnusedLevel::Ignore),
+            ("disable", UnusedLevel::Ignore),
+            ("disabled", UnusedLevel::Ignore),
+            ("warn", UnusedLevel::Warn),
+            ("warning", UnusedLevel::Warn),
+            ("on", UnusedLevel::Warn),
+            ("true", UnusedLevel::Warn),
+            ("error", UnusedLevel::Error),
+            ("err", UnusedLevel::Error),
+            ("errors", UnusedLevel::Error),
+        ] {
+            assert_eq!(UnusedLevel::parse(input), Some(want), "parse {input:?}");
+        }
+        assert!(UnusedLevel::parse("banana").is_none());
+        assert!(UnusedLevel::parse("").is_none());
+    }
+
+    #[test]
+    fn unused_defaults_to_warn() {
+        assert_eq!(LspConfig::default().unused, UnusedLevel::Warn);
+        assert_eq!(
+            LspConfig::resolve_unused(None, None, None),
+            UnusedLevel::Warn
+        );
+    }
+
+    #[test]
+    fn unused_workspace_overrides_user_and_accepts_bool() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-unused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let user = tmp.join("user.toml");
+        std::fs::write(&user, "unused = \"error\"\n").unwrap();
+
+        let ws_ignore = tmp.join("ws-ignore");
+        std::fs::create_dir_all(&ws_ignore).unwrap();
+        std::fs::write(
+            ws_ignore.join(".openplanet-lsp.toml"),
+            "unused = \"ignore\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LspConfig::resolve_unused(Some(&user), None, Some(&ws_ignore)),
+            UnusedLevel::Ignore,
+            "workspace ignore must beat user error"
+        );
+
+        let ws_bool = tmp.join("ws-bool");
+        std::fs::create_dir_all(&ws_bool).unwrap();
+        std::fs::write(ws_bool.join(".openplanet-lsp.toml"), "unused = false\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_unused(Some(&user), None, Some(&ws_bool)),
+            UnusedLevel::Ignore,
+            "unused = false is ignore"
+        );
+
+        assert_eq!(
+            LspConfig::resolve_unused(Some(&user), None, None),
+            UnusedLevel::Error,
+            "user-global unused = error when workspace does not set it"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn unused_init_options_override_config_file() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-unused-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join(".openplanet-lsp.toml"), "unused = \"ignore\"\n").unwrap();
+        let opts = serde_json::json!({ "unused": "error" });
+        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        assert_eq!(cfg.unused, UnusedLevel::Error);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn test_default_defines() {

@@ -2038,3 +2038,119 @@ fn check_command_unused_reports_the_omitted_caller_with_no_gitignore() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+fn unused_kinds_plugin(name: &str) -> std::path::PathBuf {
+    let root = make_temp_plugin(name);
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+void DeadFn() {}
+int deadVar = 1;
+class DeadClass {
+    void DeadMethod() {}
+}
+void Main() {
+    int deadLocal = 0;
+}
+"#,
+    )
+    .unwrap();
+    root
+}
+
+fn check_plugin_status(root: &std::path::Path, extra_args: &[&str]) -> (Option<i32>, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"));
+    cmd.env("NO_COLOR", "1").arg("check").arg("--no-typedb");
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    let output = cmd.arg(root).output().unwrap();
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+    )
+}
+
+fn unused_mentions(stdout: &str) -> bool {
+    stdout.contains("`DeadFn`")
+        || stdout.contains("`deadVar`")
+        || stdout.contains("`DeadClass`")
+        || stdout.contains("`DeadMethod`")
+        || stdout.contains("`deadLocal`")
+}
+
+/// Default unused level is warn: findings print as warnings and do not fail
+/// the run. `--unused ignore` / `--no-unused` drop every kind. `--unused
+/// error` promotes them to errors (exit 1 without -Werror).
+#[test]
+fn check_command_unused_flag_ignore_warn_error_variants() {
+    let root = unused_kinds_plugin("unused-levels");
+
+    let (code, stdout) = check_plugin_status(&root, &[]);
+    assert_eq!(code, Some(0), "warnings-only is exit 0: {stdout}");
+    assert!(
+        unused_mentions(&stdout),
+        "default warn must report: {stdout}"
+    );
+    assert!(
+        stdout.contains("warning:"),
+        "default unused must be warnings: {stdout}"
+    );
+
+    for flag in ["--no-unused", "--unused=ignore", "--unused=off"] {
+        let (code, stdout) = check_plugin_status(&root, &[flag]);
+        assert_eq!(code, Some(0), "{flag} exit: {stdout}");
+        assert!(
+            !unused_mentions(&stdout),
+            "{flag} must silence unused function/var/class/local: {stdout}"
+        );
+    }
+
+    let (code, stdout) = check_plugin_status(&root, &["--unused=error"]);
+    assert_eq!(code, Some(1), "unused=error must fail check: {stdout}");
+    assert!(unused_mentions(&stdout), "error still reports: {stdout}");
+    assert!(
+        stdout.contains("error:") && stdout.contains("`DeadFn`"),
+        "unused=error must emit error severity: {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Workspace `unused = "ignore"` silences the pass; `--unused error` still
+/// wins over that pin.
+#[test]
+fn check_command_unused_config_and_flag_precedence() {
+    let root = unused_kinds_plugin("unused-config");
+    fs::write(root.join(".openplanet-lsp.toml"), "unused = \"ignore\"\n").unwrap();
+
+    let (_, stdout) = check_plugin_status(&root, &[]);
+    assert!(
+        !unused_mentions(&stdout),
+        "workspace unused=ignore must silence: {stdout}"
+    );
+
+    let (code, stdout) = check_plugin_status(&root, &["--unused", "error"]);
+    assert_eq!(code, Some(1), "flag must beat config: {stdout}");
+    assert!(
+        unused_mentions(&stdout),
+        "flag error still reports: {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn check_help_mentions_unused_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--help")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "check --help: {stdout}");
+    assert!(
+        stdout.contains("--unused") && stdout.contains("--no-unused"),
+        "help must document unused flags: {stdout}"
+    );
+}

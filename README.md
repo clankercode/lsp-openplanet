@@ -126,7 +126,14 @@ default_mode = "tui"   # or "lsp"
 # it never drops the built-ins. Workspace .openplanet-lsp.toml wins over
 # the user config; lists don't merge, the winning file's list is the list.
 # unused_callbacks = ["OnCounterUpdate", "OnThing*"]
-#
+
+# Unused functions / vars / parameters / class members. Default "warn".
+# "ignore" turns the pass off (it is noisy on large plugins). "error"
+# emits ERROR diagnostics so `check` fails without --warnings-as-errors.
+# CLI `--unused ignore|warn|error` and `--no-unused` win over this;
+# workspace .openplanet-lsp.toml wins over the user config.
+# unused = "warn"
+
 # Any `--define` CLI flag collapses the matrix back to a single-combo run.
 ```
 

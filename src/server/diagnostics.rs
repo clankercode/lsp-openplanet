@@ -2,7 +2,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::analysis::unused::UnusedDeclaration;
 use crate::analysis::DocumentAnalysis;
-use crate::config::LspConfig;
+use crate::config::{LspConfig, UnusedLevel};
 use crate::symbols::SymbolTable;
 use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticSeverity};
 use crate::typedb::TypeIndex;
@@ -153,28 +153,45 @@ fn compute_toml_diagnostics(source: &str, diagnostics: &mut Vec<Diagnostic>) {
 /// runs a check pass over every workspace file — do it once per report,
 /// not once per file, or an N-file workspace pays N² passes).
 /// `export_paths` are the plugin's own info.toml export files (public
-/// API — exempt). WARN severity, on the declaration span.
+/// API — exempt). Severity follows [`UnusedLevel`]; [`UnusedLevel::Ignore`]
+/// emits nothing.
 pub fn unused_declaration_diagnostics(
     source: &str,
     usage: &crate::analysis::unused::WorkspaceUsage,
     snapshot: &crate::analysis_snapshot::AnalysisSnapshot,
     file_id: usize,
     export_paths: &std::collections::HashSet<std::path::PathBuf>,
+    unused: UnusedLevel,
 ) -> Vec<Diagnostic> {
+    let Some(severity) = unused_severity(unused) else {
+        return Vec::new();
+    };
     crate::analysis::unused::unused_declarations_for_file(snapshot, usage, export_paths, file_id)
         .iter()
-        .map(|u| unused_to_diagnostic(source, u))
+        .map(|u| unused_to_diagnostic(source, u, severity))
         .collect()
 }
 
-fn unused_to_diagnostic(source: &str, unused: &UnusedDeclaration) -> Diagnostic {
+fn unused_severity(level: UnusedLevel) -> Option<DiagnosticSeverity> {
+    match level {
+        UnusedLevel::Ignore => None,
+        UnusedLevel::Warn => Some(DiagnosticSeverity::WARNING),
+        UnusedLevel::Error => Some(DiagnosticSeverity::ERROR),
+    }
+}
+
+fn unused_to_diagnostic(
+    source: &str,
+    unused: &UnusedDeclaration,
+    severity: DiagnosticSeverity,
+) -> Diagnostic {
     let article = match unused.kind.chars().next() {
         Some(c) if "aeiou".contains(c) => "an",
         _ => "a",
     };
     Diagnostic {
         range: span_to_range(source, unused.span),
-        severity: Some(DiagnosticSeverity::WARNING),
+        severity: Some(severity),
         message: format!(
             "{} {} `{}` is never used (suppress with a leading `_` or a trailing `// lsp: ignore unused` comment)",
             article, unused.kind, unused.simple_name
@@ -258,5 +275,44 @@ mod tests {
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("MissingDep")));
+    }
+
+    #[test]
+    fn unused_severity_follows_level() {
+        assert_eq!(unused_severity(UnusedLevel::Ignore), None);
+        assert_eq!(
+            unused_severity(UnusedLevel::Warn),
+            Some(DiagnosticSeverity::WARNING)
+        );
+        assert_eq!(
+            unused_severity(UnusedLevel::Error),
+            Some(DiagnosticSeverity::ERROR)
+        );
+    }
+
+    #[test]
+    fn unused_to_diagnostic_kinds_use_requested_severity() {
+        for kind in ["function", "variable", "class", "parameter"] {
+            for sev in [DiagnosticSeverity::WARNING, DiagnosticSeverity::ERROR] {
+                let unused = UnusedDeclaration {
+                    qualified_name: "Foo".into(),
+                    simple_name: "Foo".into(),
+                    kind,
+                    span: crate::lexer::Span::new(5, 8),
+                    file_id: 0,
+                };
+                let diag = unused_to_diagnostic("void Foo() {}", &unused, sev);
+                assert_eq!(diag.severity, Some(sev), "{kind} {sev:?}");
+                assert!(
+                    diag.message.contains("Foo"),
+                    "message should name the symbol: {}",
+                    diag.message
+                );
+                assert_eq!(
+                    diag.code,
+                    Some(NumberOrString::String("unused-declaration".into()))
+                );
+            }
+        }
     }
 }

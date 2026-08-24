@@ -620,16 +620,21 @@ impl Backend {
         };
         // Unused-declaration warnings (workspace view: sibling usage
         // suppresses; own-manifest export files are exempt public API).
-        if let Some(file_id) = snapshot.file_id_of(uri) {
-            let usage =
-                crate::analysis::unused::WorkspaceUsage::collect(snapshot, type_index.as_deref());
-            diags.extend(diagnostics::unused_declaration_diagnostics(
-                text,
-                &usage,
-                snapshot,
-                file_id,
-                snapshot.export_paths(),
-            ));
+        if config.unused != crate::config::UnusedLevel::Ignore {
+            if let Some(file_id) = snapshot.file_id_of(uri) {
+                let usage = crate::analysis::unused::WorkspaceUsage::collect(
+                    snapshot,
+                    type_index.as_deref(),
+                );
+                diags.extend(diagnostics::unused_declaration_diagnostics(
+                    text,
+                    &usage,
+                    snapshot,
+                    file_id,
+                    snapshot.export_paths(),
+                    config.unused,
+                ));
+            }
         }
         if uri.path().ends_with("info.toml") {
             diags.extend(diagnostics::missing_required_dependency_diagnostics(
@@ -746,16 +751,21 @@ impl Backend {
             }
         };
         // Unused-declaration warnings — workspace view (same as sharded).
-        if let Some(file_id) = snapshot.file_id_of(uri) {
-            let usage =
-                crate::analysis::unused::WorkspaceUsage::collect(&snapshot, type_index.as_deref());
-            diags.extend(diagnostics::unused_declaration_diagnostics(
-                text,
-                &usage,
-                &snapshot,
-                file_id,
-                snapshot.export_paths(),
-            ));
+        if config.unused != crate::config::UnusedLevel::Ignore {
+            if let Some(file_id) = snapshot.file_id_of(uri) {
+                let usage = crate::analysis::unused::WorkspaceUsage::collect(
+                    &snapshot,
+                    type_index.as_deref(),
+                );
+                diags.extend(diagnostics::unused_declaration_diagnostics(
+                    text,
+                    &usage,
+                    &snapshot,
+                    file_id,
+                    snapshot.export_paths(),
+                    config.unused,
+                ));
+            }
         }
         if uri.path().ends_with("info.toml") {
             diags.extend(diagnostics::missing_required_dependency_diagnostics(
@@ -851,6 +861,7 @@ fn configs_equivalent(a: &LspConfig, b: &LspConfig) -> bool {
         && a.shortcut_disable_default_namespaces == b.shortcut_disable_default_namespaces
         && a.shortcut_match_enums == b.shortcut_match_enums
         && a.unused_callbacks == b.unused_callbacks
+        && a.unused == b.unused
 }
 
 #[tower_lsp::async_trait]
