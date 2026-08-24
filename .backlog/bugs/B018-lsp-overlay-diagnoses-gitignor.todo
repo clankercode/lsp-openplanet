@@ -1,16 +1,14 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-23T15:57:51Z"
 depends_on: []
 estimate_hours: 3
 id: B018
 priority: medium
+started_at: null
 status: pending
-tags:
-    - server
-    - gitignore
-    - followup
-    - gh-60-followup
+tags: []
 title: LSP overlay diagnoses gitignored files (routes by path prefix, not snapshot membership)
 updated_at: "2026-08-23T15:57:51Z"
 ---
@@ -71,3 +69,5 @@ over-suppression); didSave and didChange both behave the same.
 ## Provenance
 tests/gitignore_server_tests.rs (added by B015) pins the discovery half of this
 on the server path; the overlay half is what remains.
+
+RESOLVED by B020 / GH #61, merged as c4bc77f (2026-08-24). Implemented via this task's own recommended resolution 1: a usage-only buffer publishes an EMPTY diagnostic set from both publishers (publish_sharded_diagnostics and publish_legacy_diagnostics) across didOpen/didChange/didSave, so the editor agrees with check. Both remainders landed in the same branch rather than as a further follow-up: the INFO log naming the file and the escape hatches, and a named test (omitted_buffer_using_sibling_declarations_is_not_diagnosed) pinning the motivating FP - a gitignored file using a sibling class, member and function - whose second half is the non-vacuity control asserting a CHECKED file still reports the undefined symbol. Work item 3 (compute_diagnostics single-file mode) audited and found moot: that function is now reachable only via compute_manifest_diagnostics and two integration tests; no live .as route goes through it.
