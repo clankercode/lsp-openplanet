@@ -2117,6 +2117,36 @@ fn check_command_unused_flag_ignore_warn_error_variants() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// GH #62: `check --typedb-dir --no-typedb <path>` must be a usage error
+/// (exit 2), not a load failure for `--no-typedb/OpenplanetCore.json`.
+#[test]
+fn check_command_typedb_dir_swallowing_following_flag_is_usage_error() {
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tm-counter");
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--typedb-dir")
+        .arg("--no-typedb")
+        .arg(&fixture)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "swallowed --no-typedb must be usage (exit 2); stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("--typedb-dir requires a directory argument"),
+        "expected the flag-swallowed usage message; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stderr.contains("OpenplanetCore.json"),
+        "must not attempt to load --no-typedb/OpenplanetCore.json; stderr={stderr:?}"
+    );
+}
+
 /// Workspace `unused = "ignore"` silences the pass; `--unused error` still
 /// wins over that pin.
 #[test]
