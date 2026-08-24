@@ -1,13 +1,14 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-24T13:24:53Z"
 depends_on: []
 estimate_hours: 4
 id: B022
 priority: high
+started_at: null
 status: pending
-tags:
-    - gh-63
+tags: []
 title: 'False error: No matching symbol UI::InputTextCallback (funcdef ctor)'
 updated_at: "2026-08-24T13:24:53Z"
 ---
@@ -55,3 +56,8 @@ Same as Openplanet: `UI::InputTextCallback(NameFilterCallback)` type-checks as t
 ## Lane plan
 
 Parallel with GH #62 / B021. This lane owns `src/typedb/core_format.rs`, `src/typedb/index.rs`, `src/typecheck/**`, lib tests, and optional `tests/fixtures/issue-repros/63-*`. Do **not** edit `src/cli/mod.rs` or `tests/cli_check_tests.rs` (those belong to #62).
+
+
+## Lane plan (coordinator, 2026-08-24)
+
+Parallel with GH #62 / B021 — disjoint files. See decisions above. Do not touch `src/cli/mod.rs` or `tests/cli_check_tests.rs`.
