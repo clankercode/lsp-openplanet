@@ -11,6 +11,8 @@ pub struct CoreDatabase {
     pub classes: Vec<CoreClass>,
     #[serde(default)]
     pub enums: Vec<CoreEnum>,
+    #[serde(default)]
+    pub funcdefs: Vec<CoreFuncdef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +109,24 @@ pub struct CoreProp {
     pub desc: Option<String>,
 }
 
+/// A Core `funcdefs[]` entry. Same `ns` / `name` / `returntypedecl` /
+/// `args` / `decl` shape as [`CoreFunction`]; AngelScript uses the name
+/// as a constructor that wraps a compatible function (`UI::InputTextCallback(fn)`).
+#[derive(Debug, Deserialize)]
+pub struct CoreFuncdef {
+    #[serde(default)]
+    pub ns: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub returntypedecl: String,
+    #[serde(default)]
+    pub args: Vec<CoreArg>,
+    #[serde(default)]
+    pub desc: Option<String>,
+    #[serde(default)]
+    pub decl: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CoreEnum {
     #[serde(default)]
@@ -182,5 +202,31 @@ mod tests {
             .iter()
             .find(|f| f.ns.as_deref() == Some("UI") && f.name == "Begin");
         assert!(ui_begin.is_some(), "expected UI::Begin function");
+    }
+
+    #[test]
+    fn test_core_funcdefs_deserialized() {
+        let path = core_json_path();
+        if !path.exists() {
+            panic!("OpenplanetCore.json not found at {:?}", path);
+        }
+        let db = CoreDatabase::load_from_file(&path).unwrap();
+        assert_eq!(db.funcdefs.len(), 12, "expected 12 Core funcdefs");
+        assert!(
+            db.funcdefs
+                .iter()
+                .any(|f| f.ns.as_deref() == Some("UI") && f.name == "InputTextCallback"),
+            "expected UI::InputTextCallback"
+        );
+        assert!(
+            db.funcdefs.iter().any(|f| f.name == "CoroutineFunc"),
+            "expected un-namespaced CoroutineFunc"
+        );
+        assert!(
+            db.funcdefs
+                .iter()
+                .any(|f| f.ns.as_deref() == Some("Dev") && f.name == "ProcIntercept"),
+            "expected Dev::ProcIntercept"
+        );
     }
 }
