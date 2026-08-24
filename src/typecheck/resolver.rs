@@ -133,6 +133,13 @@ impl<'a> TypeResolver<'a> {
             };
         }
 
+        // Funcdefs are types, but the constructed / annotated form is
+        // `TypeRepr::Funcdef`, not `Named` — a handle `T@` is then
+        // handle-compatible with the ctor result (GH #63).
+        if self.scope.lookup_funcdef(&qualified).is_some() {
+            return TypeRepr::Funcdef(qualified);
+        }
+
         // AngelScript builtin funcdef / synthetic helper types that the
         // core database references but does not formally declare as
         // classes. Treat them as known types so user code referencing
@@ -161,6 +168,9 @@ impl<'a> TypeResolver<'a> {
         for depth in (1..=self.namespace_stack.len()).rev() {
             let ns = self.namespace_stack[..depth].join("::");
             let candidate = format!("{}::{}", ns, qualified);
+            if self.scope.lookup_funcdef(&candidate).is_some() {
+                return TypeRepr::Funcdef(candidate);
+            }
             if self.scope.resolves(&candidate) {
                 return TypeRepr::Named(candidate);
             }
@@ -172,9 +182,15 @@ impl<'a> TypeResolver<'a> {
         // `Game::CGameCtnEditorFree` in the typedb) get rescued.
         if !qualified.contains("::") {
             if let Some(resolved) = self.scope.resolve_unqualified(&qualified) {
+                if self.scope.lookup_funcdef(&resolved).is_some() {
+                    return TypeRepr::Funcdef(resolved);
+                }
                 return TypeRepr::Named(resolved);
             }
         } else if let Some(resolved) = self.scope.resolve_qualified_suffix(&qualified) {
+            if self.scope.lookup_funcdef(&resolved).is_some() {
+                return TypeRepr::Funcdef(resolved);
+            }
             return TypeRepr::Named(resolved);
         }
 

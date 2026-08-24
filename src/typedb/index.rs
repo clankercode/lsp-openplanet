@@ -12,10 +12,12 @@ pub struct TypeIndex {
     functions: HashMap<String, Vec<FunctionInfo>>,
     /// Enums keyed by qualified name
     enums: HashMap<String, EnumInfo>,
+    /// Core funcdefs keyed by qualified name (e.g. "UI::InputTextCallback")
+    funcdefs: HashMap<String, FuncdefInfo>,
     /// Short-name → list of fully qualified names that end with `::<short>`
     /// (or exactly match `<short>`). Built lazily by `ensure_short_index`.
-    /// Covers types and enums — functions are keyed differently and this
-    /// map is only consulted when resolving a referenced *type* name.
+    /// Covers types, enums, and funcdefs — functions are keyed differently
+    /// and this map is only consulted when resolving a referenced *type* name.
     short_type_index: HashMap<String, Vec<String>>,
 }
 
@@ -88,6 +90,18 @@ pub struct EnumInfo {
     pub source: TypeSource,
 }
 
+/// A Core `funcdef` — a named function-pointer type that can be constructed
+/// from a compatible function (`UI::InputTextCallback(fn)`).
+#[derive(Debug, Clone)]
+pub struct FuncdefInfo {
+    pub name: String,
+    pub namespace: Option<String>,
+    pub return_type: String,
+    pub params: Vec<ParamInfo>,
+    pub doc: Option<String>,
+    pub source: TypeSource,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TypeSource {
     Core,
@@ -117,8 +131,9 @@ pub struct TypeDbMeta {
 /// `functions`/`classes`/`enums`/`funcdefs`/`props`; the Nadeo dump
 /// populates `ns_modules` plus `classes` (summed across every module).
 ///
-/// `funcdefs`/`props` are not part of [`TypeIndex`] — counting them here is
-/// how the pipeline notices drift in entries the checker never loads.
+/// `props` are not part of [`TypeIndex`] — counting them here is how the
+/// pipeline notices drift in entries the checker never loads. `funcdefs`
+/// are indexed for lookup (GH #63); the count still flags harvest drift.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TypeDbCounts {
     pub functions: usize,
@@ -181,6 +196,7 @@ impl Default for TypeIndex {
             types: HashMap::new(),
             functions: HashMap::new(),
             enums: HashMap::new(),
+            funcdefs: HashMap::new(),
             short_type_index: HashMap::new(),
         }
     }
@@ -209,6 +225,7 @@ impl TypeIndex {
             .types
             .keys()
             .chain(self.enums.keys())
+            .chain(self.funcdefs.keys())
             .cloned()
             .collect();
         names.sort();
@@ -356,6 +373,30 @@ impl TypeIndex {
                     name: en.name.clone(),
                     namespace: en.ns.clone(),
                     values,
+                    source: TypeSource::Core,
+                },
+            );
+        }
+
+        for fd in &db.funcdefs {
+            let qname = Self::qualify(&fd.ns, &fd.name);
+            self.funcdefs.insert(
+                qname,
+                FuncdefInfo {
+                    name: fd.name.clone(),
+                    namespace: fd.ns.clone(),
+                    return_type: fd.returntypedecl.clone(),
+                    params: fd
+                        .args
+                        .iter()
+                        .map(|a| ParamInfo {
+                            name: a.name.clone(),
+                            type_name: a.typedecl.clone(),
+                            default: a.default.clone(),
+                            is_out: a.typeflags & 0b10 != 0,
+                        })
+                        .collect(),
+                    doc: fd.desc.clone(),
                     source: TypeSource::Core,
                 },
             );
@@ -514,6 +555,12 @@ impl TypeIndex {
         self.enums.get(qualified_name)
     }
 
+    /// Look up a Core funcdef by qualified name (`UI::InputTextCallback`,
+    /// `CoroutineFunc`).
+    pub fn lookup_funcdef(&self, qualified_name: &str) -> Option<&FuncdefInfo> {
+        self.funcdefs.get(qualified_name)
+    }
+
     /// Iterate all known enums by qualified name.
     pub fn enums_iter(&self) -> impl Iterator<Item = (&String, &EnumInfo)> {
         self.enums.iter()
@@ -570,6 +617,13 @@ impl TypeIndex {
                 }
             }
         }
+        for qname in self.funcdefs.keys() {
+            if let Some(name) = qname.strip_prefix(&prefix) {
+                if !name.contains("::") {
+                    seen.insert(name.to_string());
+                }
+            }
+        }
         let mut members: Vec<_> = seen.into_iter().collect();
         members.sort();
         members
@@ -592,6 +646,11 @@ impl TypeIndex {
         }
         for en in self.enums.values() {
             if let Some(ns) = &en.namespace {
+                nss.insert(ns.clone());
+            }
+        }
+        for fd in self.funcdefs.values() {
+            if let Some(ns) = &fd.namespace {
                 nss.insert(ns.clone());
             }
         }
@@ -833,8 +892,9 @@ impl DbDiff {
 /// Two limitations the caller should know about, because both mean a real
 /// change can go unreported:
 ///
-/// * Core's top-level `funcdefs`/`props` are not part of [`TypeIndex`] and so
-///   are not diffed here — [`TypeDbCounts`] tracks their counts instead.
+/// * Core's top-level `funcdefs` are loaded into [`TypeIndex`] for lookup
+///   (GH #63) but are not a [`DbSymbolKind`], so they are not diffed here.
+///   `props` remain count-only via [`TypeDbCounts`].
 /// * Anonymous engine enums that collide on one qualified key (15 distinct
 ///   enums are all `Control::UnnamedEnum`) are only represented by whichever
 ///   one `add_nadeo` registered, so a change to any of the others is
@@ -1092,6 +1152,34 @@ mod tests {
         let index = TypeIndex::load(&cp, &np).unwrap();
         let ui_members = index.namespace_members("UI");
         assert!(!ui_members.is_empty(), "expected UI namespace members");
+        assert!(
+            ui_members.iter().any(|m| m == "InputTextCallback"),
+            "expected UI::InputTextCallback among namespace members, got {:?}",
+            ui_members
+        );
+    }
+
+    #[test]
+    fn core_funcdefs_are_indexed() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+        let input = index
+            .lookup_funcdef("UI::InputTextCallback")
+            .expect("UI::InputTextCallback");
+        assert_eq!(input.name, "InputTextCallback");
+        assert_eq!(input.namespace.as_deref(), Some("UI"));
+        assert_eq!(input.return_type, "void");
+        assert_eq!(input.params.len(), 1);
+        assert!(
+            input.params[0].type_name.contains("InputTextCallbackData"),
+            "callback data param, got {:?}",
+            input.params[0].type_name
+        );
+
+        assert!(index.lookup_funcdef("CoroutineFunc").is_some());
+        assert!(index.lookup_funcdef("Dev::ProcIntercept").is_some());
+        assert!(index.lookup_funcdef("UI::NodTreeMemberCallback").is_some());
+        assert!(index.lookup_funcdef("less_nonconst").is_some());
+        assert!(index.lookup_funcdef("UI::DefinitelyNotAFuncdef").is_none());
     }
 
     #[test]

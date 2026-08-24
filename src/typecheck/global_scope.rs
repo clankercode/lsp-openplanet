@@ -39,6 +39,17 @@ pub struct OverloadSig {
     pub return_type: String,
 }
 
+/// A funcdef type (workspace or Core typedb) looked up by qualified name.
+/// Empty `param_types` + empty `return_type` means the signature is unknown
+/// (workspace extractor currently stores neither); callers then accept any
+/// single function argument.
+#[derive(Debug, Clone)]
+pub struct FuncdefSig {
+    pub qualified: String,
+    pub return_type: String,
+    pub param_types: Vec<String>,
+}
+
 impl<'a> GlobalScope<'a> {
     pub fn new(workspace: &'a SymbolTable, external: Option<&'a TypeIndex>) -> Self {
         Self {
@@ -200,8 +211,43 @@ impl<'a> GlobalScope<'a> {
             if ext.lookup_type(qualified).is_some() {
                 return true;
             }
+            if ext.lookup_funcdef(qualified).is_some() {
+                return true;
+            }
         }
         false
+    }
+
+    /// Look up a funcdef (workspace declaration or Core typedb) by
+    /// qualified name. `None` when the name is not a funcdef.
+    pub fn lookup_funcdef(&self, qualified: &str) -> Option<FuncdefSig> {
+        for s in self.lookup_workspace(qualified) {
+            if let SymbolKind::Funcdef {
+                return_type,
+                params,
+            } = &s.kind
+            {
+                // Typedefs reuse `SymbolKind::Funcdef` with the alias
+                // target in `return_type` and no params. Real extracted
+                // funcdefs either carry a parameter list or (today) have
+                // both fields empty.
+                if !return_type.is_empty() && params.is_empty() {
+                    continue;
+                }
+                return Some(FuncdefSig {
+                    qualified: s.name.clone(),
+                    return_type: return_type.clone(),
+                    param_types: params.iter().map(|(_, ty)| ty.clone()).collect(),
+                });
+            }
+        }
+        let ext = self.external?;
+        let info = ext.lookup_funcdef(qualified)?;
+        Some(FuncdefSig {
+            qualified: qualified.to_string(),
+            return_type: info.return_type.clone(),
+            param_types: info.params.iter().map(|p| p.type_name.clone()).collect(),
+        })
     }
 
     /// True if the qualified name refers to a free function.
@@ -1663,14 +1709,57 @@ mod tests {
             fid,
             vec![make_symbol(
                 "Callback",
+                // Matches the extractor: workspace funcdefs store neither
+                // return type nor params today.
                 SymbolKind::Funcdef {
-                    return_type: "void".into(),
+                    return_type: String::new(),
                     params: vec![],
                 },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
         assert!(scope.has_type("Callback"));
+        assert!(scope.lookup_funcdef("Callback").is_some());
+    }
+
+    #[test]
+    fn workspace_typedef_is_type_but_not_funcdef() {
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![make_symbol(
+                "MyInt",
+                SymbolKind::Funcdef {
+                    return_type: "int".into(),
+                    params: vec![],
+                },
+            )],
+        );
+        let scope = GlobalScope::new(&ws, None);
+        assert!(scope.has_type("MyInt"));
+        assert!(scope.lookup_funcdef("MyInt").is_none());
+    }
+
+    #[test]
+    fn typedb_funcdef_counts_as_type() {
+        use crate::typedb::index::TypeIndex;
+
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+        assert!(scope.has_type("UI::InputTextCallback"));
+        let fd = scope
+            .lookup_funcdef("UI::InputTextCallback")
+            .expect("typedb funcdef");
+        assert_eq!(fd.param_types.len(), 1);
+        assert!(scope.lookup_funcdef("CoroutineFunc").is_some());
+        assert!(scope.lookup_funcdef("Dev::ProcIntercept").is_some());
+        assert!(scope.lookup_funcdef("UI::DefinitelyNotAFuncdef").is_none());
     }
 
     #[test]

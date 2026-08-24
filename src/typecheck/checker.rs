@@ -11,7 +11,7 @@
 
 use super::builtins;
 use super::call_site::{self, ArgBind};
-use super::global_scope::{GlobalScope, OverloadSig};
+use super::global_scope::{FuncdefSig, GlobalScope, OverloadSig};
 use super::repr::{PrimitiveType, TypeRepr};
 use super::resolver::TypeResolver;
 use crate::lexer::token::TokenKind;
@@ -2371,6 +2371,199 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// If `qualified` names a funcdef, type-check `Ns::Name(fn)` /
+    /// `Name(fn)` as a constructor and return `TypeRepr::Funcdef`.
+    fn try_funcdef_ctor(
+        &mut self,
+        qualified: &str,
+        args: &[CallArg],
+        span: Span,
+    ) -> Option<TypeRepr> {
+        if self.scope.lookup_funcdef(qualified).is_none() {
+            return None;
+        }
+        let arg_refs: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
+        Some(self.check_funcdef_construct(qualified, &arg_refs, span))
+    }
+
+    fn funcdef_name_of(&self, ty: &TypeRepr) -> Option<String> {
+        match ty {
+            TypeRepr::Funcdef(n) => Some(n.clone()),
+            TypeRepr::Named(n) if self.scope.lookup_funcdef(n).is_some() => Some(n.clone()),
+            TypeRepr::Handle(inner) | TypeRepr::Const(inner) => self.funcdef_name_of(inner),
+            _ => None,
+        }
+    }
+
+    /// `Funcdef(qual)` / `Name(fn)` constructor: one compatible function
+    /// argument, result is the funcdef type (handle-compatible with `@`).
+    fn check_funcdef_construct(&mut self, qualified: &str, args: &[&Expr], span: Span) -> TypeRepr {
+        let Some(fd) = self.scope.lookup_funcdef(qualified) else {
+            return TypeRepr::Error(String::new());
+        };
+        self.record_use(qualified);
+        if args.len() != 1 {
+            self.diagnostics.push(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::ArgCountMismatch {
+                    function_name: qualified.to_string(),
+                    expected_min: 1,
+                    expected_max: 1,
+                    got: args.len(),
+                },
+            });
+            for a in args {
+                let _ = self.expr_type(a);
+            }
+            return TypeRepr::Funcdef(qualified.to_string());
+        }
+        let arg_ty = self.expr_type(args[0]);
+        if !fd.return_type.is_empty() || !fd.param_types.is_empty() {
+            self.check_funcdef_ctor_arg(&fd, args[0], &arg_ty);
+        }
+        TypeRepr::Funcdef(qualified.to_string())
+    }
+
+    fn check_funcdef_ctor_arg(&mut self, fd: &FuncdefSig, arg: &Expr, arg_ty: &TypeRepr) {
+        if self.arg_binds_to_funcdef(fd, arg, arg_ty) {
+            return;
+        }
+        let sigs = self.lookup_arg_function_sigs(arg, arg_ty);
+        let clearly_not_fn = self.is_clearly_not_a_function(arg_ty) && sigs.is_empty();
+        if clearly_not_fn || !sigs.is_empty() {
+            self.diagnostics.push(TypeDiagnostic {
+                span: arg.span,
+                kind: TypeDiagnosticKind::ArgTypeMismatch {
+                    function_name: fd.qualified.clone(),
+                    param_index: 0,
+                    expected: render_funcdef_sig(fd),
+                    got: render_func_or_type(&sigs, arg_ty),
+                },
+            });
+        }
+    }
+
+    fn arg_binds_to_funcdef(&self, fd: &FuncdefSig, arg: &Expr, arg_ty: &TypeRepr) -> bool {
+        let peeled = Self::peel_const_handle(arg_ty);
+        match peeled {
+            TypeRepr::Funcdef(n) | TypeRepr::Named(n) => {
+                if self.named_types_equivalent(n, &fd.qualified)
+                    || self.scope.lookup_funcdef(n).is_some_and(|other| {
+                        other.qualified == fd.qualified
+                            || self.named_types_equivalent(&other.qualified, &fd.qualified)
+                    })
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        self.lookup_arg_function_sigs(arg, arg_ty)
+            .iter()
+            .any(|sig| self.func_matches_funcdef(sig, fd))
+    }
+
+    fn lookup_arg_function_sigs(&self, arg: &Expr, arg_ty: &TypeRepr) -> Vec<OverloadSig> {
+        let mut out = Vec::new();
+        match &arg.kind {
+            ExprKind::Ident(ident) => {
+                let name = ident.text(self.source);
+                if let Some(cls) = self.current_class() {
+                    out.extend(
+                        self.scope
+                            .lookup_method_overloads_with_inheritance(&cls.name, name),
+                    );
+                }
+                out.extend(self.scope.lookup_function_overloads(name));
+                for depth in (1..=self.namespace_stack.len()).rev() {
+                    let ns = self.namespace_stack[..depth].join("::");
+                    out.extend(
+                        self.scope
+                            .lookup_function_overloads(&format!("{ns}::{name}")),
+                    );
+                }
+            }
+            ExprKind::NamespaceAccess { path } => {
+                let qual = path.to_string(self.source);
+                out.extend(self.scope.lookup_function_overloads(&qual));
+            }
+            _ => {}
+        }
+        if let TypeRepr::Funcdef(n) = Self::peel_const_handle(arg_ty) {
+            if out.is_empty() {
+                out.extend(self.scope.lookup_function_overloads(n));
+            }
+        }
+        out
+    }
+
+    fn func_matches_funcdef(&self, sig: &OverloadSig, fd: &FuncdefSig) -> bool {
+        if sig.param_types.len() != fd.param_types.len() {
+            return false;
+        }
+        if !self.funcdef_types_compatible(
+            &TypeRepr::parse_type_string(&sig.return_type),
+            &TypeRepr::parse_type_string(&fd.return_type),
+        ) {
+            return false;
+        }
+        sig.param_types
+            .iter()
+            .zip(&fd.param_types)
+            .all(|(got, expected)| {
+                self.funcdef_types_compatible(
+                    &TypeRepr::parse_type_string(got),
+                    &TypeRepr::parse_type_string(expected),
+                )
+            })
+    }
+
+    fn funcdef_types_compatible(&self, got: &TypeRepr, expected: &TypeRepr) -> bool {
+        let got = Self::peel_const_handle(got);
+        let expected = Self::peel_const_handle(expected);
+        match (got, expected) {
+            (TypeRepr::Void, TypeRepr::Void) => true,
+            (TypeRepr::Primitive(a), TypeRepr::Primitive(b)) => {
+                a == b || is_convertible(got, expected)
+            }
+            (
+                TypeRepr::Named(a) | TypeRepr::Funcdef(a),
+                TypeRepr::Named(b) | TypeRepr::Funcdef(b),
+            ) => self.named_types_equivalent(a, b) || self.scope.is_external_derived_from(a, b),
+            _ => got == expected,
+        }
+    }
+
+    fn is_clearly_not_a_function(&self, ty: &TypeRepr) -> bool {
+        matches!(
+            Self::peel_const_handle(ty),
+            TypeRepr::Primitive(_)
+                | TypeRepr::Void
+                | TypeRepr::Null
+                | TypeRepr::Array(_)
+                | TypeRepr::Generic { .. }
+        )
+    }
+
+    /// `TypeRepr::Funcdef(q)` is handle-compatible with `Named(q)` /
+    /// `Funcdef(q)` (the `@` form of the same funcdef).
+    fn funcdef_handle_compatible(&self, arg: &TypeRepr, param: &TypeRepr) -> bool {
+        fn type_name(t: &TypeRepr) -> Option<&str> {
+            match t {
+                TypeRepr::Funcdef(n) | TypeRepr::Named(n) => Some(n.as_str()),
+                _ => None,
+            }
+        }
+        match (type_name(arg), type_name(param)) {
+            (Some(a), Some(p)) => {
+                self.named_types_equivalent(a, p)
+                    && (self.scope.lookup_funcdef(a).is_some()
+                        || self.scope.lookup_funcdef(p).is_some())
+            }
+            _ => false,
+        }
+    }
+
     /// Peel `Const` / `Handle` wrappers (either order) down to the value type.
     fn peel_const_handle(ty: &TypeRepr) -> &TypeRepr {
         ty.unwrap_const()
@@ -2517,6 +2710,12 @@ impl<'a> Checker<'a> {
                     // Function-pointer decay: bare functions (`Funcdef`) and
                     // engine funcdefs convert to CoroutineFunc* handles.
                     if Self::funcdef_converts_to_coroutine(arg_core, param_core) {
+                        continue;
+                    }
+                    // GH #63: `UI::InputTextCallback(fn)` yields
+                    // `Funcdef(qual)`, which is handle-compatible with the
+                    // `@` form stored as `Named`/`Funcdef` in typedb params.
+                    if self.funcdef_handle_compatible(arg_core, param_core) {
                         continue;
                     }
 
@@ -2820,6 +3019,9 @@ impl<'a> Checker<'a> {
                             t,
                         );
                     }
+                    if let Some(ty) = self.try_funcdef_ctor(&qualified, args, callee.span) {
+                        return ty;
+                    }
                     if self.scope.has_type(&qualified) {
                         self.record_use(&qualified);
                         self.walk_args(args);
@@ -2842,7 +3044,13 @@ impl<'a> Checker<'a> {
                         t,
                     );
                 }
-                // 5. Maybe it's a type-constructor form that slipped in
+                // 5. Funcdef constructor (`Handler(OnThing)`,
+                //    `CoroutineFunc(fn)`). Must run before the generic
+                //    `has_type` → `Named` path (GH #63).
+                if let Some(ty) = self.try_funcdef_ctor(&name, args, callee.span) {
+                    return ty;
+                }
+                // 6. Maybe it's a type-constructor form that slipped in
                 //    as an Ident — surface the type when possible so
                 //    chained `.member` access off a constructor can
                 //    still resolve. Otherwise just silence.
@@ -3086,6 +3294,9 @@ impl<'a> Checker<'a> {
                     }
                     self.walk_args(args);
                     return t;
+                }
+                if let Some(ty) = self.try_funcdef_ctor(&qual, args, callee.span) {
+                    return ty;
                 }
                 self.walk_args(args);
                 if self.scope.has_type(&qual) {
@@ -3597,6 +3808,10 @@ impl<'a> Checker<'a> {
             }
             ExprKind::TypeConstruct { target_type, args } => {
                 let target = self.resolve_type_expr(target_type);
+                if let Some(qual) = self.funcdef_name_of(&target) {
+                    let arg_refs: Vec<&Expr> = args.iter().collect();
+                    return self.check_funcdef_construct(&qual, &arg_refs, expr.span);
+                }
                 let mut arg_tys = Vec::with_capacity(args.len());
                 for a in args {
                     arg_tys.push(self.expr_type(a));
@@ -4087,6 +4302,26 @@ fn int_nat_family(name: &str) -> Option<u8> {
         "nat2" | "int2" => Some(2),
         "nat3" | "int3" => Some(3),
         _ => None,
+    }
+}
+
+fn render_funcdef_sig(fd: &FuncdefSig) -> String {
+    format!(
+        "{} ({})",
+        if fd.return_type.is_empty() {
+            "?"
+        } else {
+            fd.return_type.as_str()
+        },
+        fd.param_types.join(", ")
+    )
+}
+
+fn render_func_or_type(sigs: &[OverloadSig], arg_ty: &TypeRepr) -> String {
+    if let Some(sig) = sigs.first() {
+        format!("{} ({})", sig.return_type, sig.param_types.join(", "))
+    } else {
+        arg_ty.display()
     }
 }
 
@@ -8193,6 +8428,266 @@ void Main() {
             no_matching_symbols(&diags).len(),
             1,
             "expected exactly one diagnostic for UI::GetIO, got {:?}",
+            diags
+        );
+    }
+
+    // === GH #63: typedb funcdef constructors (B022) ===
+
+    /// `UI::InputTextCallback(fn)` is a Core funcdef constructor. Openplanet
+    /// accepts it; before indexing funcdefs the call path treats `UI` as a
+    /// known API namespace and emits `No matching symbol`.
+    #[test]
+    fn typedb_funcdef_ctor_input_text_callback_is_known() {
+        let diags = check_with_typedb(
+            r#"
+            void NameFilterCallback(UI::InputTextCallbackData@ data) {}
+            void Main() {
+                string str;
+                bool changed;
+                UI::InputText("x", str, changed, 0, UI::InputTextCallback(NameFilterCallback));
+            }
+            "#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "expected UI::InputTextCallback to resolve as a funcdef ctor, got {:?}",
+            diags
+        );
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity() == TypeDiagnosticSeverity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "InputText + InputTextCallback ctor must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Same ctor shape on a different typedb funcdef so the name is not
+    /// hard-coded to InputTextCallback.
+    #[test]
+    fn typedb_funcdef_ctor_nod_tree_member_callback() {
+        let diags = check_with_typedb(
+            r#"
+            void OnMember(CMwNod@ nod, Reflection::MwMemberInfo@ info) {}
+            void Main() {
+                CMwNod@ nod;
+                UI::NodTree(nod, UI::NodTreeMemberCallback(OnMember));
+            }
+            "#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "expected UI::NodTreeMemberCallback to resolve, got {:?}",
+            diags
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "NodTree + NodTreeMemberCallback ctor must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// `Dev::ProcIntercept` — namespaced, `T &in` param (not a handle).
+    #[test]
+    fn typedb_funcdef_ctor_dev_proc_intercept() {
+        let diags = check_with_typedb(
+            r#"
+            bool Hook(CMwStack&in stack) { return false; }
+            void Main() {
+                Dev::InterceptProc("CMwNod", "MwAddRef", Dev::ProcIntercept(Hook));
+            }
+            "#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "expected Dev::ProcIntercept to resolve, got {:?}",
+            diags
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "InterceptProc + ProcIntercept ctor must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Un-namespaced Core funcdef (`CoroutineFunc`) plus the `const T &in`
+    /// sibling (`CoroutineFuncUserdataString`).
+    #[test]
+    fn typedb_funcdef_ctor_unnamespaced_coroutine_family() {
+        let diags = check_with_typedb(
+            r#"
+            void Worker() {}
+            void WorkerStr(const string &in s) {}
+            void Main() {
+                startnew(CoroutineFunc(Worker));
+                startnew(CoroutineFuncUserdataString(WorkerStr), "x");
+            }
+            "#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "expected CoroutineFunc* ctors to resolve, got {:?}",
+            diags
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "startnew + CoroutineFunc* ctors must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Workspace-declared funcdefs keep working via the same ctor path
+    /// (free function and method callback).
+    #[test]
+    fn workspace_funcdef_ctor_still_clean() {
+        let diags = check(
+            r#"
+            funcdef void Handler(int);
+            void OnThing(int a) {}
+            void Main() { Handler@ h = Handler(OnThing); }
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "workspace Handler(OnThing) must stay clean, got {:?}",
+            diags
+        );
+
+        let method = check(
+            r#"
+            funcdef void Handler(int);
+            class Server {
+                Handler@ h;
+                void Wire() { @h = Handler(OnThing); }
+                void OnThing(int a) {}
+            }
+            void Main() { Server s; s.Wire(); }
+            "#,
+        );
+        assert!(
+            method.is_empty(),
+            "workspace method callback must stay clean, got {:?}",
+            method
+        );
+    }
+
+    /// A class method with a matching signature binds the same way a free
+    /// function does.
+    #[test]
+    fn typedb_funcdef_ctor_accepts_method_callback() {
+        let diags = check_with_typedb(
+            r#"
+            class Filter {
+                void OnFilter(UI::InputTextCallbackData@ data) {}
+                void Wire() {
+                    string str;
+                    bool changed;
+                    UI::InputText("x", str, changed, 0, UI::InputTextCallback(OnFilter));
+                }
+            }
+            "#,
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "method callback must not look like a missing symbol, got {:?}",
+            diags
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "method callback must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Wrong callback signature / ctor arity still error.
+    #[test]
+    fn typedb_funcdef_ctor_wrong_signature_and_arity_error() {
+        let diags = check_with_typedb(
+            r#"
+            void Wrong(int x) {}
+            void Ok(UI::InputTextCallbackData@ data) {}
+            void Extra(int a, int b) {}
+            void Main() {
+                UI::InputTextCallback(Wrong);
+                UI::InputTextCallback(Ok, Extra);
+                UI::InputTextCallback();
+            }
+            "#,
+        );
+        let mismatches: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        let arities: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .collect();
+        assert_eq!(
+            mismatches.len(),
+            1,
+            "expected 1 ArgTypeMismatch for Wrong, got {:?}",
+            diags
+        );
+        assert_eq!(
+            arities.len(),
+            2,
+            "expected 2 ArgCountMismatch (2-arg and 0-arg), got {:?}",
+            diags
+        );
+        assert!(
+            no_matching_symbols(&diags).is_empty(),
+            "wrong-sig still names a real funcdef, got {:?}",
+            diags
+        );
+    }
+
+    /// Typedefs are stored as `SymbolKind::Funcdef` in the symbol table
+    /// but are not funcdef constructors — `MyInt(1)` must stay a type
+    /// conversion, not `ArgTypeMismatch`.
+    #[test]
+    fn workspace_typedef_construct_is_not_a_funcdef_ctor() {
+        let diags = check(
+            r#"
+            typedef int MyInt;
+            void Main() { MyInt x = MyInt(42); }
+            "#,
+        );
+        assert!(
+            !diags.iter().any(|d| matches!(
+                d.kind,
+                TypeDiagnosticKind::ArgTypeMismatch { .. }
+                    | TypeDiagnosticKind::ArgCountMismatch { .. }
+                    | TypeDiagnosticKind::UnknownType(_)
+            )),
+            "typedef construction must not be treated as a funcdef ctor, got {:?}",
+            diags
+        );
+    }
+
+    /// Unknown `UI::DefinitelyNotAFuncdef(...)` is still `No matching symbol`.
+    #[test]
+    fn unknown_ui_funcdef_still_no_matching_symbol() {
+        let diags = check_with_typedb(
+            r#"
+            void Cb() {}
+            void Main() { UI::DefinitelyNotAFuncdef(Cb); }
+            "#,
+        );
+        assert_eq!(
+            no_matching_symbols(&diags),
+            vec![("UI::DefinitelyNotAFuncdef".to_string(), None)],
+            "unknown UI member must stay No matching symbol, got {:?}",
             diags
         );
     }
