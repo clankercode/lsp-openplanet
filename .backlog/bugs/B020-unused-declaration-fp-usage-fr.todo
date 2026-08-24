@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-24T03:12:19Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-24T03:12:19Z"
 complexity: medium
 created_at: "2026-08-23T17:52:39Z"
 depends_on: []
+duration_minutes: 0.008402413866666666
 estimate_hours: 3
 id: B020
 priority: critical
 started_at: "2026-08-24T03:12:19Z"
-status: in_progress
+status: done
 tags: []
 title: 'Unused-declaration FP: usage from gitignored/ignore_paths files is invisible'
 updated_at: "2026-08-24T03:12:19Z"
