@@ -19,10 +19,12 @@ GitHub Release body to match this section (gh release edit).
   `unused = "ignore"` (or `false`) in `.openplanet-lsp.toml` / the user config
   turns the noisy pass off; `--unused error` makes them fail `check` without
   `--warnings-as-errors`. Workspace wins over user; the flag wins over both.
-- **`openplanet-lsp config` TUI** — edit `~/.config/openplanet-lsp/config.toml`
-  interactively. Every persisted setting is listed; changing a value writes
-  the file immediately (comments and unknown keys are kept). `--path FILE`
-  selects a different file (tests / alt locations).
+- **`openplanet-lsp config` TUI** — edit workspace `.openplanet-lsp.toml`
+  (next to `info.toml`) interactively. `--global` edits
+  `~/.config/openplanet-lsp/config.toml`; `--path FILE` still wins.
+  Outside a plugin and without `--global`/`--path` is a usage error
+  (exit 2). Every persisted setting is listed; changing a value writes
+  the file immediately (comments and unknown keys are kept).
 - **Config files reload live** — editing `$HOME/.config/openplanet-lsp/config.toml`
   or a workspace `.openplanet-lsp.toml` retriggers `check --watch` and makes a
   running language server re-load the config ladder, rebuild snapshots, and

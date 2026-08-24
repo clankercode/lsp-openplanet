@@ -45,8 +45,8 @@ COMMANDS:
                      Run `openplanet-lsp typedb --help` for options
     update           Check for / apply self-updates
                      Run `openplanet-lsp update --help` for options
-    config           Edit ~/.config/openplanet-lsp/config.toml in a TUI
-                     (writes the file as soon as a setting changes)
+    config           Edit .openplanet-lsp.toml at the plugin root (or
+                     --global for ~/.config/openplanet-lsp/config.toml)
                      Run `openplanet-lsp config --help` for options
     lsp              Same as --lsp (language server on stdio)
     help             Same as --help

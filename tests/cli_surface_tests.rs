@@ -108,12 +108,42 @@ fn config_subcommand_is_recognized() {
         stdout.contains("default_mode") && stdout.contains("warnings_as_errors"),
         "help must list persisted settings: {stdout:?}"
     );
+    assert!(
+        stdout.contains("--global") && stdout.contains(".openplanet-lsp.toml"),
+        "help must describe workspace default and --global: {stdout:?}"
+    );
 
     let unknown = bin().arg("config").output().unwrap();
     let stderr = String::from_utf8_lossy(&unknown.stderr);
     assert!(
         !stderr.contains("unknown command"),
         "`config` must be a recognized subcommand: got {stderr:?}"
+    );
+}
+
+#[test]
+fn config_without_plugin_or_global_is_usage_error() {
+    let tmp =
+        std::env::temp_dir().join(format!("opl-cli-surface-no-plugin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = bin().arg("config").current_dir(&tmp).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "expected usage exit: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cd") && stderr.contains("--global"),
+        "must tell the user to cd into a plugin or pass --global: {stderr:?}"
+    );
+}
+
+#[test]
+fn top_level_help_describes_workspace_config() {
+    let out = bin().arg("--help").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(".openplanet-lsp.toml") && stdout.contains("--global"),
+        "top-level help must mention workspace file and --global: {stdout:?}"
     );
 }
 
