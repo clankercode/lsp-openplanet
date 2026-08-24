@@ -1,0 +1,57 @@
+---
+complexity: medium
+created_at: "2026-08-24T13:24:53Z"
+depends_on: []
+estimate_hours: 4
+id: B022
+priority: high
+status: pending
+tags:
+    - gh-63
+title: 'False error: No matching symbol UI::InputTextCallback (funcdef ctor)'
+updated_at: "2026-08-24T13:24:53Z"
+---
+GitHub issue: https://github.com/clankercode/lsp-openplanet/issues/63 (gh-63)
+
+## Still broken (verified 2026-08-24 on master)
+
+`UI::InputTextCallback` is in `tests/fixtures/typedb/OpenplanetCore.json` (12 Core funcdefs; this one is `ns=UI`). The checker never sees it:
+
+1. `CoreDatabase` in `src/typedb/core_format.rs` does not deserialize `funcdefs` at all (dropped by serde).
+2. `TypeIndex` comment is explicit: "funcdefs/props are not part of TypeIndex — counting them here is how the pipeline notices drift in entries the checker never loads."
+3. `UI::InputTextCallback(NameFilterCallback)` parses as `Call(NamespaceAccess)`, not `TypeConstruct`. The call path (`checker.rs` ~3056) looks up a function, fails, then `free_fn_no_matching_symbol` fires because `UI` is a known API namespace with functions. That is the exact diagnostic in the issue.
+
+Workspace-local `Handler(OnThing)` already works (TypeConstruct of a workspace funcdef). This bug is typedb + namespaced call form.
+
+## Expected
+
+Same as Openplanet: `UI::InputTextCallback(NameFilterCallback)` type-checks as that funcdef (handle-compatible with `InputTextCallback@`). `check` must not emit `No matching symbol 'UI::InputTextCallback'`. Wrong-signature still errors.
+
+## Not
+
+- Do not "fix" E++ by deleting the wrapper.
+- Do not silence `No matching symbol` only — the constructed value must type-check as the funcdef at `UI::InputText` callback sites.
+- Do not invent missing typedb entries; they already exist.
+
+## Design decisions (coordinator, 2026-08-24)
+
+1. Deserialize Core `funcdefs` and index them in `TypeIndex`. That is the missing seam: the name exists in the file and is invisible to the checker.
+2. `Ns::FuncdefName(fn)` — whether parsed as `Call(NamespaceAccess)` or `TypeConstruct` — constructs that funcdef type from a compatible function. Result is `TypeRepr::Funcdef(qualified)` (handle-compatible with `InputTextCallback@`), not `Named`.
+3. The existing `has_type` early-return that yields `Named(qual)` is not enough even after indexing; a funcdef ctor must take the funcdef path.
+4. Workspace-declared funcdefs (`Handler(OnThing)`) must keep working.
+5. A still-unknown `Ns::Name(...)` in a known API namespace still gets `No matching symbol`.
+
+## Test plan (TDD, red first; generalize per CLAUDE.md)
+
+- Namespaced typedb funcdef ctor: `UI::InputTextCallback(cb)` where `cb` is `void(UI::InputTextCallbackData@)` — no `No matching symbol`, accepted as the InputText callback arg.
+- Same pattern with another typedb funcdef (`UI::NodTreeMemberCallback`, `Dev::ProcIntercept`) so we do not hard-code one name.
+- Un-namespaced typedb funcdef ctor if useful (`CoroutineFunc(fn)`).
+- Workspace `funcdef void Handler(int); Handler(OnThing)` still clean.
+- Method callback vs free function.
+- Param variants: `T@`, `const T &in`, non-const, `&out` if a real typedb funcdef has them.
+- Wrong signature / wrong arity still errors.
+- Unknown `UI::DefinitelyNotAFuncdef(...)` still `No matching symbol`.
+
+## Lane plan
+
+Parallel with GH #62 / B021. This lane owns `src/typedb/core_format.rs`, `src/typedb/index.rs`, `src/typecheck/**`, lib tests, and optional `tests/fixtures/issue-repros/63-*`. Do **not** edit `src/cli/mod.rs` or `tests/cli_check_tests.rs` (those belong to #62).

@@ -20,3 +20,4 @@ bugs:
     - file: B019-dependency-id-defined-for-unre.todo
     - file: B020-unused-declaration-fp-usage-fr.todo
     - file: B021-check-parser-swallows-a-follow.todo
+    - file: B022-false-error-no-matching-symbol.todo
