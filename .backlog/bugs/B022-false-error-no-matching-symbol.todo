@@ -1,4 +1,6 @@
 ---
+claimed_at: "2026-08-24T13:25:01Z"
+claimed_by: cli-user
 completed_at: null
 complexity: medium
 created_at: "2026-08-24T13:24:53Z"
@@ -6,11 +8,11 @@ depends_on: []
 estimate_hours: 4
 id: B022
 priority: high
-started_at: null
-status: pending
+started_at: "2026-08-24T13:25:01Z"
+status: in_progress
 tags: []
 title: 'False error: No matching symbol UI::InputTextCallback (funcdef ctor)'
-updated_at: "2026-08-24T13:24:53Z"
+updated_at: "2026-08-24T13:25:01Z"
 ---
 GitHub issue: https://github.com/clankercode/lsp-openplanet/issues/63 (gh-63)
 
