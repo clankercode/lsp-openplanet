@@ -467,6 +467,24 @@ impl Backend {
 
     /// Diagnostics for a document owned by a shard: file diagnostics from the
     /// shard snapshot, manifest diagnostics on the shard's own info.toml.
+    /// The "we are deliberately publishing nothing" note (B018, alongside
+    /// GH #61). An author whose gitignored file silently stopped showing
+    /// errors has no way to discover why, and that is a worse surprise than
+    /// the squiggles GH #60 set out to remove — so name the file and the way
+    /// out. INFO rather than DEBUG for the same reason: it has to be findable
+    /// without turning on debug logging.
+    fn log_usage_only_suppression(uri: &Url) {
+        tracing::info!(
+            uri = %uri,
+            "publishing no diagnostics: this file is omitted from the checked set \
+             (excluded by .gitignore, or filtered out by source_paths / ignore_paths), \
+             so the editor matches what `check` reports. It still counts as usage for \
+             unused-declaration warnings. To diagnose it, set honor_gitignore = false in \
+             .openplanet-lsp.toml, or take its directory out of ignore_paths / add it to \
+             source_paths."
+        );
+    }
+
     async fn publish_sharded_diagnostics(
         &self,
         uri: &Url,
@@ -482,6 +500,7 @@ impl Backend {
         let symbols_for_check =
             snapshot.table_for_own_file(crate::analysis_snapshot::FileRef::Uri(uri));
         let mut diags = if snapshot.is_usage_only_uri(uri) {
+            Self::log_usage_only_suppression(uri);
             Vec::new()
         } else {
             match snapshot.analysis_of(uri) {
@@ -605,6 +624,7 @@ impl Backend {
         let config = self.config.read().await;
         let type_index = self.type_index.read().await;
         let mut diags = if snapshot.is_usage_only_uri(uri) {
+            Self::log_usage_only_suppression(uri);
             Vec::new()
         } else {
             match snapshot.analysis_of(uri) {
@@ -1949,6 +1969,98 @@ mod tests {
         assert!(
             !diagnostics.diagnostics.is_empty(),
             "the legacy one-file fallback stays active for a genuine untitled buffer"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// B018's motivating case, as its own named test: a gitignored file whose
+    /// SIBLINGS declare the symbols it uses.
+    ///
+    /// This is the false positive that made B018 worth a task. The old
+    /// fallback pooled symbols from the opened buffer ALONE, so every name
+    /// declared in `src/` came back unknown — `check` and the editor
+    /// disagreed about what was being compiled, and the squiggles landed on
+    /// the one file the author had open. Routing on snapshot membership
+    /// (B018 resolution 1) is what fixes it.
+    ///
+    /// The second half is the non-vacuity control: the same harness, on a
+    /// file that is NOT omitted, must still report an unknown name. Without
+    /// it, an empty diagnostic set proves nothing about this test.
+    #[tokio::test(flavor = "current_thread")]
+    async fn omitted_buffer_using_sibling_declarations_is_not_diagnosed() {
+        let root = temp_tree("usage-only-sibling-decls");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("generated")).unwrap();
+        write_info_toml(&root);
+        fs::write(root.join(".gitignore"), "generated/\n").unwrap();
+        fs::write(
+            root.join("src/Types.as"),
+            "class Config {\n    int value;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/Api.as"),
+            "void Register(Config@ c) {}\nvoid Main() { Config c; Register(c); }\n",
+        )
+        .unwrap();
+        let omitted_path = root.join("generated/Gen.as");
+        // Uses a sibling class, a sibling member and a sibling function —
+        // all invisible to a one-file symbol pool.
+        let uses_siblings =
+            "void GenCaller() {\n    Config c;\n    c.value = 1;\n    Register(c);\n}\n";
+        fs::write(&omitted_path, uses_siblings).unwrap();
+
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+        let omitted_uri = Url::from_file_path(&omitted_path).unwrap();
+
+        let diagnostics = capture_diagnostics_for(
+            &mut socket,
+            &omitted_uri,
+            backend.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: omitted_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: uses_siblings.into(),
+                },
+            }),
+        )
+        .await;
+        assert_eq!(
+            diagnostics.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "a gitignored buffer using sibling declarations must not be diagnosed"
+        );
+
+        // Non-vacuity: the same harness DOES report an unknown name on a
+        // file that is part of the checked set.
+        let probe_path = root.join("src/Probe.as");
+        let probe_uri = Url::from_file_path(&probe_path).unwrap();
+        let unknown_name = "void Probe() { NoSuchSiblingFunction(); }\n";
+        fs::write(&probe_path, unknown_name).unwrap();
+        let diagnostics = capture_diagnostics_for(
+            &mut socket,
+            &probe_uri,
+            backend.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: probe_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: unknown_name.into(),
+                },
+            }),
+        )
+        .await;
+        assert!(
+            diagnostics
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("NoSuchSiblingFunction")),
+            "control: a checked file must still report an unknown name; got {:?}",
+            diagnostics.diagnostics
         );
 
         let _ = fs::remove_dir_all(&root);

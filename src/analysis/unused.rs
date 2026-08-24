@@ -4,7 +4,11 @@
 //! Two phases, mirroring the checker's resolution ladder:
 //!
 //! 1. **Collect** — run `Checker::with_usage_recording` over every file in
-//!    the snapshot against the pooled workspace symbols. The checker
+//!    the snapshot against the pooled workspace symbols, plus the
+//!    own-module files the checked set OMITTED (gitignored, or filtered
+//!    out by `source_paths`/`ignore_paths`), which the game compiles and
+//!    which therefore count as usage even though they declare nothing we
+//!    can see (GH #61 — see [`usage_from_omitted_files`]). The checker
 //!    records the workspace-qualified name of everything that *resolved*
 //!    (ident reads, calls, member access on typed receivers, implicit-`this`
 //!    member use, type-position references, `import ... from` aliases).
@@ -1028,18 +1032,28 @@ mod omitted_own_module_usage {
     /// Omitted files declare nothing we can see, so their own
     /// declarations are never reported — the GH #60 goal (no squiggles in
     /// a file the author believes is excluded) must survive.
+    ///
+    /// An empty report alone would be a weak guard: it also holds when
+    /// omitted files are ignored entirely, and it would not catch
+    /// declarations pooled under file_ids past the end of `files()`, which
+    /// the join never visits. Since "their declarations never reach the
+    /// pool" is the invariant the whole design rests on, assert the pooled
+    /// table directly rather than inferring it from an absence.
     #[test]
     fn declarations_inside_an_omitted_file_are_never_reported() {
-        assert_eq!(
-            report(
-                &[("src/Main.as", "void Main() {}\n")],
-                &[(
-                    "generated/Gen.as",
-                    "void GenDead() {}\nclass GenClass { int f; }\n"
-                )],
-            ),
-            Vec::<String>::new()
-        );
+        let files = [("src/Main.as", "void Main() {}\n")];
+        let omitted = [(
+            "generated/Gen.as",
+            "void GenDead() {}\nclass GenClass { int f; }\n",
+        )];
+        assert_eq!(report(&files, &omitted), Vec::<String>::new());
+        let snap = snap_with_usage_only(&files, &omitted);
+        for name in ["GenDead", "GenClass", "GenClass::f"] {
+            assert!(
+                snap.symbols().lookup(name).is_empty(),
+                "`{name}` must not reach the pooled table"
+            );
+        }
     }
 
     /// A gitignored WHOLE-TREE COPY (`.worktrees/`, scratch probes) is the

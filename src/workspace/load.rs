@@ -352,9 +352,21 @@ fn push_usage_only(
         }
         Err(err) => {
             unreadable.push(path.to_path_buf());
-            tracing::debug!(
-                path = %path.display(),
-                "omitted own-module file is unreadable; declaration warnings fail closed: {err}"
+            // WARN, not debug: this is a state where output is deliberately
+            // withheld. We cannot know what an unreadable file references, so
+            // the declaration-level unused pass fails closed for the whole
+            // plugin — and from the outside that is indistinguishable from
+            // the feature dying. Name the file AND the consequence.
+            // The path is in the sentence rather than a structured field: the
+            // sentence is what a plugin author reads, and repeating it as a
+            // `path=` field only made the rendered line say it twice.
+            tracing::warn!(
+                "could not read {}: {err}. Declaration-level `never used` warnings are \
+                 suppressed for this plugin, because an unreadable file may contain the \
+                 only use of any declaration. Fix the file's permissions, remove it, or \
+                 set honor_gitignore = false to check it directly. Local and parameter \
+                 warnings are unaffected.",
+                path.display()
             );
         }
     }
