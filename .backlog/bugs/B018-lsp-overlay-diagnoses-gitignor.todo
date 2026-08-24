@@ -1,4 +1,6 @@
 ---
+claimed_at: "2026-08-24T03:12:19Z"
+claimed_by: cli-user
 completed_at: null
 complexity: medium
 created_at: "2026-08-23T15:57:51Z"
@@ -6,11 +8,11 @@ depends_on: []
 estimate_hours: 3
 id: B018
 priority: medium
-started_at: null
-status: pending
+started_at: "2026-08-24T03:12:19Z"
+status: in_progress
 tags: []
 title: LSP overlay diagnoses gitignored files (routes by path prefix, not snapshot membership)
-updated_at: "2026-08-23T15:57:51Z"
+updated_at: "2026-08-24T03:12:19Z"
 ---
 Found by the B015 lane (GH #60) and independently by its codex reviewer,
 2026-08-24. Deliberately scoped OUT of B015, which covers discovery only
