@@ -862,6 +862,7 @@ fn configs_equivalent(a: &LspConfig, b: &LspConfig) -> bool {
         && a.shortcut_match_enums == b.shortcut_match_enums
         && a.unused_callbacks == b.unused_callbacks
         && a.unused == b.unused
+        && a.errors == b.errors
 }
 
 #[tower_lsp::async_trait]

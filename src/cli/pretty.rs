@@ -338,6 +338,7 @@ mod tests {
             )],
             type_database_loaded: false,
             type_db: None,
+            errors: crate::config::ErrorGroup::Off,
         };
 
         let out = format_check_report_with(&report, false, CheckFormat::Plain);
@@ -373,6 +374,7 @@ mod tests {
             )],
             type_database_loaded: false,
             type_db: None,
+            errors: crate::config::ErrorGroup::Off,
         };
 
         // color=false, format=pretty → pretty layout, no ANSI
@@ -424,6 +426,7 @@ mod tests {
             )],
             type_database_loaded: true,
             type_db: None,
+            errors: crate::config::ErrorGroup::Off,
         };
 
         let plainish = format_check_report_with(&report, false, CheckFormat::Auto);
@@ -453,6 +456,7 @@ mod tests {
             diagnostics: vec![],
             type_database_loaded: true,
             type_db: None,
+            errors: crate::config::ErrorGroup::Off,
         };
         let out = format_check_report_with(&report, false, CheckFormat::Pretty);
         assert!(
