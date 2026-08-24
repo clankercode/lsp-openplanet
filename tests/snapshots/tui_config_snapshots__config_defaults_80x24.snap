@@ -1,0 +1,28 @@
+---
+source: tests/tui_config_snapshots.rs
+expression: terminal.backend()
+---
+"┌ openplanet-lsp config ───────────────────────────────────────────────────────┐"
+"│ /tmp/openplanet-lsp-config-snapshot.toml                                     │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+"┌ settings ────────────────────────────────────────────────────────────────────┐"
+"│▸ default_mode                          tui (default)                         │"
+"│  game_target                           TMNEXT (default)                      │"
+"│  warnings_as_errors                    false (default)                       │"
+"│  honor_gitignore                       true (default)                        │"
+"│  shortcut_disable_default_namespaces   false (default)                       │"
+"│  shortcut_match_enums                  false (default)                       │"
+"│  openplanet_dir                        (unset)                               │"
+"│  plugins_dir                           (unset)                               │"
+"│  defines                               (unset)                               │"
+"│  source_paths                          (unset)                               │"
+"│  ignore_paths                          (unset)                               │"
+"│  shortcut_namespaces                   (unset)                               │"
+"│  unused_callbacks                      (unset)                               │"
+"│  define_matrix                         (unset)                               │"
+"│  define_groups                         (unset)                               │"
+"└──────────────────────────────────────────────────────────────────────────────┘"
+"┌──────────────────────────────────────────────────────────────────────────────┐"
+"│ Bare TTY launch: tui (watch) or lsp                                          │"
+"│ ↑/k ↓/j  enter/space edit  ←/→ cycle  d unset  q quit                        │"
+"└──────────────────────────────────────────────────────────────────────────────┘"

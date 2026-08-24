@@ -14,10 +14,11 @@ use crate::workspace::load::{load_plugin_workspace, DependencySearch};
 use crate::workspace::manifest::Manifest;
 use crate::workspace::project;
 
+/// GH #59: `typedb status|diff|refresh` — the type-DB freshness pipeline.
+pub mod config_cmd;
 /// GH #57: define-matrix combo expansion, dedup, and labeling.
 pub mod matrix;
 mod pretty;
-/// GH #59: `typedb status|diff|refresh` — the type-DB freshness pipeline.
 pub mod typedb_cmd;
 pub mod watch;
 

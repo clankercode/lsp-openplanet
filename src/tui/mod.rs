@@ -6,6 +6,7 @@
 //! File watching and typechecking are out of scope here.
 
 mod app;
+pub mod config;
 mod mock;
 mod types;
 mod ui;

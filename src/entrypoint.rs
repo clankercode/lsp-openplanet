@@ -60,6 +60,7 @@ No Openplanet plugin found (no info.toml at or above the current directory).
   • or: openplanet-lsp tui [path/to/plugin]
   • or: openplanet-lsp check --watch /path/to/plugin
   • or: openplanet-lsp check /path/to/plugin
+  • edit user config: openplanet-lsp config
   • force language server: openplanet-lsp --lsp   (or: openplanet-lsp lsp)
 
 Config: ~/.config/openplanet-lsp/config.toml

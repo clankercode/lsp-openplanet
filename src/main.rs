@@ -26,6 +26,7 @@ USAGE:
     openplanet-lsp tui [PATH]
     openplanet-lsp typedb <status|diff|refresh> [OPTIONS]
     openplanet-lsp update [OPTIONS]
+    openplanet-lsp config [OPTIONS]
     openplanet-lsp lsp
     openplanet-lsp --lsp
 
@@ -44,6 +45,9 @@ COMMANDS:
                      Run `openplanet-lsp typedb --help` for options
     update           Check for / apply self-updates
                      Run `openplanet-lsp update --help` for options
+    config           Edit ~/.config/openplanet-lsp/config.toml in a TUI
+                     (writes the file as soon as a setting changes)
+                     Run `openplanet-lsp config --help` for options
     lsp              Same as --lsp (language server on stdio)
     help             Same as --help
 
@@ -133,6 +137,7 @@ fn handle_early_args(args: &[String]) -> Option<i32> {
         Some("check") => Some(run_check_command(&args[1..])),
         Some("typedb") => Some(cli::typedb_cmd::run_typedb_command(&args[1..])),
         Some("update") => Some(run_update_command(&args[1..])),
+        Some("config") => Some(cli::config_cmd::run_config_command(&args[1..])),
         Some(arg) if arg.starts_with('-') => {
             eprintln!("unknown option: {arg}");
             eprintln!("Run `openplanet-lsp --help` for usage.");

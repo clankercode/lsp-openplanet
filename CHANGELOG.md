@@ -14,6 +14,10 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **`openplanet-lsp config` TUI** — edit `~/.config/openplanet-lsp/config.toml`
+  interactively. Every persisted setting is listed; changing a value writes
+  the file immediately (comments and unknown keys are kept). `--path FILE`
+  selects a different file (tests / alt locations).
 - **Config files reload live** — editing `$HOME/.config/openplanet-lsp/config.toml`
   or a workspace `.openplanet-lsp.toml` retriggers `check --watch` and makes a
   running language server re-load the config ladder, rebuild snapshots, and

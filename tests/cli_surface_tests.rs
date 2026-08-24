@@ -67,6 +67,10 @@ fn help_output_includes_repo_url_and_issue_ask() {
         "--help must print the usage block"
     );
     assert!(
+        stdout.contains("config"),
+        "--help must advertise the config command: got {stdout:?}"
+    );
+    assert!(
         stdout.contains(ISSUE_ASK),
         "--help must point at the issue tracker: got {stdout:?}"
     );
@@ -88,6 +92,28 @@ fn help_subcommand_matches_long_flag() {
         String::from_utf8_lossy(&sub.stdout),
         String::from_utf8_lossy(&long.stdout),
         "`help` and `--help` must print identical output"
+    );
+}
+
+#[test]
+fn config_subcommand_is_recognized() {
+    let out = bin().arg("config").arg("--help").output().unwrap();
+    assert!(out.status.success(), "`config --help` must exit 0: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("openplanet-lsp config"),
+        "help title missing: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("default_mode") && stdout.contains("warnings_as_errors"),
+        "help must list persisted settings: {stdout:?}"
+    );
+
+    let unknown = bin().arg("config").output().unwrap();
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(
+        !stderr.contains("unknown command"),
+        "`config` must be a recognized subcommand: got {stderr:?}"
     );
 }
 
@@ -114,5 +140,9 @@ fn bare_tty_help_includes_repo_url_and_issue_ask() {
     assert!(
         msg.contains(ISSUE_ASK),
         "bare-launch help must point at the issue tracker: got {msg:?}"
+    );
+    assert!(
+        msg.contains("openplanet-lsp config"),
+        "bare-launch help should mention the config TUI: got {msg:?}"
     );
 }

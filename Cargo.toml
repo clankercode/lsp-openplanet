@@ -39,6 +39,7 @@ notify-debouncer-mini = "0.4"
 crossterm = "0.29"
 ratatui = "0.30"
 ignore = "0.4"
+toml_edit = "0.25.13"
 
 [dev-dependencies]
 insta = { version = "1", features = ["glob"] }

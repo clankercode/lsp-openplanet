@@ -35,6 +35,7 @@ openplanet-lsp --help
 | Editor / non-TTY stdio (no args) | Language server |
 | TTY, inside a plugin (`info.toml`) | Watch TUI (default) |
 | `openplanet-lsp --lsp` or `lsp` | Force language server |
+| `openplanet-lsp config` | TUI editor for `~/.config/openplanet-lsp/config.toml` |
 | TTY, no plugin nearby | Short help (exit 2) |
 
 Config (`~/.config/openplanet-lsp/config.toml` or workspace `.openplanet-lsp.toml`):

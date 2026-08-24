@@ -14,4 +14,5 @@ pub mod tui;
 pub mod typecheck;
 pub mod typedb;
 pub mod update;
+pub mod user_config;
 pub mod workspace;
