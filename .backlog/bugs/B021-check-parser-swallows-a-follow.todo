@@ -1,15 +1,14 @@
 ---
+completed_at: null
 complexity: low
 created_at: "2026-08-24T03:05:56Z"
 depends_on: []
 estimate_hours: 2
 id: B021
 priority: high
+started_at: null
 status: pending
-tags:
-    - cli
-    - argparse
-    - followup
+tags: []
 title: check parser swallows a following flag as an option value (5 flags, some silently)
 updated_at: "2026-08-24T03:05:56Z"
 ---
@@ -59,3 +58,5 @@ Variants: `--flag=--weird` still accepted for each; a legitimate value beginning
 ## Not
 
 The `typedb` subcommands are already fixed (#59). This is `check` only, plus whatever the watch/TUI path shares with it through the same parser.
+
+GitHub issue: https://github.com/clankercode/lsp-openplanet/issues/62 (gh-62). Found by the B014 lane while fixing the same class in the typedb subcommands; the typedb side (take_dir_arg) is the reference implementation. Confirmed pre-existing on master by the coordinator: 5 unguarded args.get(i + 1) sites in parse_check_args.
