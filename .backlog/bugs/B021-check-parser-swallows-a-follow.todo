@@ -60,3 +60,18 @@ Variants: `--flag=--weird` still accepted for each; a legitimate value beginning
 The `typedb` subcommands are already fixed (#59). This is `check` only, plus whatever the watch/TUI path shares with it through the same parser.
 
 GitHub issue: https://github.com/clankercode/lsp-openplanet/issues/62 (gh-62). Found by the B014 lane while fixing the same class in the typedb subcommands; the typedb side (take_dir_arg) is the reference implementation. Confirmed pre-existing on master by the coordinator: 5 unguarded args.get(i + 1) sites in parse_check_args.
+
+## Refinement from the B014 lane (2026-08-24)
+
+Scope note per flag when porting take_dir_arg: the `=`-form escape hatch
+(`--flag=--weird`) earns its keep for PATH flags, where a path beginning with
+`--` is legal if unusual. It is much weaker for `--define`: a define named
+`--x` is nonsense, so consider rejecting an option-like define outright rather
+than allowing `--define=--x`. Same question for `--format`, whose value set is
+closed (an unknown format is already an error), so the guard there is about
+producing the RIGHT error rather than accepting anything.
+
+Concrete silent-wrong case for the two non-path flags:
+`check --define --format json` defines a symbol literally named `--format`
+and then treats `json` as the path - same shape as the --plugins-dir silent
+failure, and it changes which #if branches get compiled.
