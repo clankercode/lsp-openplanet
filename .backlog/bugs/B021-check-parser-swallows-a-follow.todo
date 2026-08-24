@@ -1,0 +1,61 @@
+---
+complexity: low
+created_at: "2026-08-24T03:05:56Z"
+depends_on: []
+estimate_hours: 2
+id: B021
+priority: high
+status: pending
+tags:
+    - cli
+    - argparse
+    - followup
+title: check parser swallows a following flag as an option value (5 flags, some silently)
+updated_at: "2026-08-24T03:05:56Z"
+---
+*Filed by agent:coordinator [working in lsp-openplanet] on behalf of @XertroV.*
+
+## Summary
+
+`parse_check_args` takes the next argv token as an option's value unconditionally, so a following **flag** is swallowed as if it were a path or value. The flag is then never seen, and the run proceeds with junk — sometimes silently.
+
+Found while fixing the same bug class in the `typedb` subcommands (#59), which is now guarded there. This is the `check` parser, a different code path, and it is **pre-existing on master** (verified: `master:src/cli/mod.rs` has the same unguarded `args.get(i + 1)`).
+
+## Affected flags
+
+Five unguarded sites in `parse_check_args` (`src/cli/mod.rs`): `--typedb-dir`, `--plugins-dir`, `--plugin-files-search-path`, `--define`, `--format`.
+
+## Repro — the visible one
+
+```
+$ openplanet-lsp check --typedb-dir --no-typedb tests/fixtures/tm-counter
+failed to load type database: Failed to read --no-typedb/OpenplanetCore.json: No such file or directory
+```
+
+`--no-typedb` became a directory name, and was never applied as a flag.
+
+## Repro — the dangerous ones
+
+`--plugins-dir` and `--plugin-files-search-path` swallow the following flag and then fail **silently**: the run continues with a nonexistent search path, so dependency resolution quietly finds nothing. A user gets a clean-looking run that checked less than they asked for — the same failure shape as `typedb refresh --into --yes` performing a dry run when the user asked to write (fixed in #59).
+
+`--define` and `--format` swallow a following flag as a define name / format name; `--format` at least rejects an unknown value, `--define` accepts anything.
+
+## Fix
+
+Treat a **separated** option-like value as a usage error (exit 2), exactly as the `typedb` subcommands now do: reject a value starting with `--`, while still allowing `--flag=--weird-value`, since an explicit `=` means the user meant it literally. The `typedb` side is a working reference implementation (`take_dir_arg`).
+
+## Test plan (TDD, red first)
+
+One red test per flag — five, because each has a different failure mode and a shared helper would hide that:
+
+- `--typedb-dir --no-typedb <path>` → usage error, exit 2 (today: confusing load failure, exit 1)
+- `--plugins-dir --no-typedb <path>` → usage error (today: silent junk search path)
+- `--plugin-files-search-path --watch <path>` → usage error (today: silent)
+- `--define --no-typedb <path>` → usage error (today: a define literally named `--no-typedb`)
+- `--format --json <path>` → usage error (today: unknown-format error, which masks the real cause)
+
+Variants: `--flag=--weird` still accepted for each; a legitimate value beginning with a single `-` (a relative path is unlikely, but pin the chosen behaviour); the flag as the final argument still gives the existing "requires an argument" error; and a mutation check — flipping the guard to `---` must make every new test fail.
+
+## Not
+
+The `typedb` subcommands are already fixed (#59). This is `check` only, plus whatever the watch/TUI path shares with it through the same parser.
