@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Directory never treated as plugin source, whatever the ignore rules say.
@@ -67,9 +68,24 @@ impl Default for DiscoveryOptions {
 pub struct Discovery {
     /// Sorted `.as` files to check.
     pub files: Vec<PathBuf>,
-    /// `.as` files the gitignore filter removed. Always 0 when
+    /// Sorted `.as` files the gitignore filter removed. Always empty when
     /// `honor_gitignore` is off — nothing is filtered on that path.
-    pub gitignore_excluded: usize,
+    ///
+    /// The PATHS (not just the count) are load-bearing since GH #61: the
+    /// game compiles these files, so the unused-declaration pass reads
+    /// them for usage recording. They come free — the count already
+    /// required the unfiltered walk, and taking the set difference costs
+    /// no extra `read_dir`.
+    pub gitignore_excluded_files: Vec<PathBuf>,
+}
+
+impl Discovery {
+    /// How many `.as` files the gitignore filter removed — the number the
+    /// GH #58 namespace-authority fence gates on. Derived from
+    /// [`Self::gitignore_excluded_files`] so the two can never drift.
+    pub fn gitignore_excluded(&self) -> usize {
+        self.gitignore_excluded_files.len()
+    }
 }
 
 /// Discover all .as source files under the workspace root, with gitignore
@@ -110,17 +126,25 @@ pub fn discover(root: &Path, options: DiscoveryOptions) -> Discovery {
         discover_recursive(root, &mut files);
     }
     files.sort();
-    let gitignore_excluded = if options.honor_gitignore {
+    let gitignore_excluded_files = if options.honor_gitignore {
         let mut unfiltered = Vec::new();
         walk_as_files(root, false, &mut unfiltered);
-        unfiltered.len().saturating_sub(files.len())
+        unfiltered.sort();
+        // Applying git ignore sources can only REMOVE entries, so the kept
+        // set is a subset of the unfiltered walk and this difference has
+        // exactly the length the old `unfiltered - kept` subtraction gave.
+        let kept: HashSet<&PathBuf> = files.iter().collect();
+        unfiltered
+            .into_iter()
+            .filter(|path| !kept.contains(path))
+            .collect()
     } else {
-        0
+        Vec::new()
     };
-    log_excluded_count(root, gitignore_excluded, files.len());
+    log_excluded_count(root, gitignore_excluded_files.len(), files.len());
     Discovery {
         files,
-        gitignore_excluded,
+        gitignore_excluded_files,
     }
 }
 
@@ -400,7 +424,8 @@ mod tests {
         let discovery = discover(&root, DiscoveryOptions::default());
         assert_eq!(discovery.files.len(), 1, "{:?}", discovery.files);
         assert_eq!(
-            discovery.gitignore_excluded, 2,
+            discovery.gitignore_excluded(),
+            2,
             "both generated .as files count, the .md does not"
         );
     }
@@ -421,7 +446,7 @@ mod tests {
             },
         );
         assert_eq!(discovery.files.len(), 2);
-        assert_eq!(discovery.gitignore_excluded, 0);
+        assert_eq!(discovery.gitignore_excluded(), 0);
     }
 
     /// The overwhelmingly common tree: honoring is on (the default) but no
@@ -436,7 +461,7 @@ mod tests {
 
         let discovery = discover(&root, DiscoveryOptions::default());
         assert_eq!(discovery.files.len(), 2);
-        assert_eq!(discovery.gitignore_excluded, 0);
+        assert_eq!(discovery.gitignore_excluded(), 0);
     }
 
     /// No `.gitignore` at all — the baseline walk and the honoring walk see
@@ -447,7 +472,7 @@ mod tests {
         write(&root, "src/Main.as", "void Main() {}\n");
 
         assert_eq!(
-            discover(&root, DiscoveryOptions::default()).gitignore_excluded,
+            discover(&root, DiscoveryOptions::default()).gitignore_excluded(),
             0
         );
     }
@@ -481,15 +506,15 @@ mod tests {
             },
         );
         assert_eq!(
-            honoring.files.len() + honoring.gitignore_excluded,
+            honoring.files.len() + honoring.gitignore_excluded(),
             unfiltered.files.len(),
             "kept {:?} + excluded {} must account for every unfiltered file {:?}",
             honoring.files,
-            honoring.gitignore_excluded,
+            honoring.gitignore_excluded(),
             unfiltered.files
         );
         assert!(
-            honoring.gitignore_excluded > 0,
+            !honoring.gitignore_excluded_files.is_empty(),
             "this tree really does exclude files: {:?}",
             honoring.files
         );

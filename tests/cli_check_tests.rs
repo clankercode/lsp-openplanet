@@ -1886,3 +1886,155 @@ fn check_command_namespaced_symbol_armed_when_gitignore_excludes_nothing() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+/// GH #61 helper: a plugin whose ONLY caller of `UsedOnlyByOmitted` lives in
+/// `omitted/`, a dir the checked set drops. `gitignore` and `config` are
+/// written verbatim when non-empty (`.gitignore` / `.openplanet-lsp.toml`),
+/// so the same tree exercises the gitignore route and the `ignore_paths` /
+/// `source_paths` routes. `extra_omitted` is appended to the omitted file.
+fn omitted_caller_plugin(
+    name: &str,
+    gitignore: &str,
+    config: &str,
+    extra_omitted: &str,
+) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("openplanet-lsp-{}-{}", name, std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("omitted")).unwrap();
+    fs::write(
+        root.join("info.toml"),
+        "[meta]\nname = \"OmittedCaller\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    if !gitignore.is_empty() {
+        fs::write(root.join(".gitignore"), gitignore).unwrap();
+    }
+    if !config.is_empty() {
+        fs::write(root.join(".openplanet-lsp.toml"), config).unwrap();
+    }
+    fs::write(
+        root.join("src/Main.as"),
+        "void UsedOnlyByOmitted() {}\nvoid Main() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("omitted/Gen.as"),
+        format!("void GenCaller() {{ UsedOnlyByOmitted(); }}\n{extra_omitted}"),
+    )
+    .unwrap();
+    root
+}
+
+/// GH #61 repro 1 (gitignore route, no config needed since GH #60). The game
+/// compiles `omitted/Gen.as`, so `UsedOnlyByOmitted` is used and the
+/// "never used" warning is a false positive.
+#[test]
+fn check_command_unused_silent_when_the_only_caller_is_gitignored() {
+    let root = omitted_caller_plugin("unused-gitignored-caller", "omitted/\n", "", "");
+    let stdout = check_plugin(&root, &[]);
+    assert!(
+        !stdout.contains("UsedOnlyByOmitted"),
+        "a gitignored caller still counts as usage; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// GH #61 repro 2 (`ignore_paths` route) — proof the defect PREDATES GH #60:
+/// no gitignore anywhere, and the same false positive appears.
+#[test]
+fn check_command_unused_silent_when_the_only_caller_is_in_ignore_paths() {
+    let root = omitted_caller_plugin(
+        "unused-ignorepaths-caller",
+        "",
+        "ignore_paths = [\"omitted\"]\n",
+        "",
+    );
+    let stdout = check_plugin(&root, &[]);
+    assert!(
+        !stdout.contains("UsedOnlyByOmitted"),
+        "an ignore_paths caller still counts as usage; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Variant: the `source_paths` allowlist route.
+#[test]
+fn check_command_unused_silent_when_the_only_caller_is_outside_source_paths() {
+    let root = omitted_caller_plugin(
+        "unused-sourcepaths-caller",
+        "",
+        "source_paths = [\"src\"]\n",
+        "",
+    );
+    let stdout = check_plugin(&root, &[]);
+    assert!(
+        !stdout.contains("UsedOnlyByOmitted"),
+        "a caller outside source_paths still counts as usage; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// NON-VACUITY: the pass must still warn when the omitted files really do
+/// not use the declaration. Without this the fix could be "stop warning
+/// whenever anything was omitted" — refuted alternative 2 on GH #61.
+#[test]
+fn check_command_unused_still_warns_when_omitted_files_do_not_use_it() {
+    let root = omitted_caller_plugin("unused-still-warns", "omitted/\n", "", "");
+    fs::write(
+        root.join("src/Main.as"),
+        "void NobodyCallsThis() {}\nvoid UsedOnlyByOmitted() {}\nvoid Main() {}\n",
+    )
+    .unwrap();
+    let stdout = check_plugin(&root, &[]);
+    assert!(
+        stdout.contains("`NobodyCallsThis` is never used"),
+        "a genuinely unused declaration must still warn; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("UsedOnlyByOmitted"),
+        "the omitted caller's usage must still be credited; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// GUARD: the GH #60 goal must survive — a file the author believes is
+/// excluded gets NO squiggles of its own, not even from the errors and dead
+/// declarations it contains.
+#[test]
+fn check_command_reports_no_diagnostics_inside_an_omitted_file() {
+    let root = omitted_caller_plugin(
+        "unused-omitted-silent",
+        "omitted/\n",
+        "",
+        "void GenDead() {}\nvoid GenBroken() { int x = \"not an int\"; }\n",
+    );
+    let stdout = check_plugin(&root, &[]);
+    assert!(
+        !stdout.contains("Gen.as"),
+        "an omitted file must produce no diagnostics of its own; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("GenDead") && !stdout.contains("GenCaller"),
+        "an omitted file's declarations must never be reported; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// `--no-gitignore` is unchanged: the file is CHECKED, so `GenCaller` is a
+/// real declaration nothing calls and is reported — exactly what the GH #61
+/// repro observed on that flag.
+#[test]
+fn check_command_unused_reports_the_omitted_caller_with_no_gitignore() {
+    let root = omitted_caller_plugin("unused-no-gitignore", "omitted/\n", "", "");
+    let stdout = check_plugin(&root, &["--no-gitignore"]);
+    assert!(
+        stdout.contains("`GenCaller` is never used"),
+        "with honoring off the discovered file is checked; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("UsedOnlyByOmitted"),
+        "the call is visible either way; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}

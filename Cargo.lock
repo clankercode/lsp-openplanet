@@ -1419,6 +1419,7 @@ version = "0.5.0"
 dependencies = [
  "crossterm",
  "dashmap 6.2.1",
+ "futures-util",
  "ignore",
  "insta",
  "notify",
@@ -1428,6 +1429,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml",
+ "tower",
  "tower-lsp",
  "tracing",
  "tracing-subscriber",

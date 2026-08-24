@@ -64,6 +64,27 @@ pub struct AnalysisSnapshot {
     /// Cached own-module view (see `own_module_symbols`). Built eagerly
     /// in `from_load` when strict exports exist.
     own_module_symbols: Option<SymbolTable>,
+    /// GH #61: own-module `.as` files the checked set omitted (gitignored,
+    /// or filtered by `source_paths`/`ignore_paths`), as raw
+    /// `(path, source)` — the game compiles them, so the
+    /// unused-declaration pass records usage from them. Deliberately NOT
+    /// parsed here and NOT in `files`: they must contribute no
+    /// declarations and no diagnostics, and only the unused pass needs
+    /// them, so it pays the parse (`WorkspaceUsage::collect`) rather than
+    /// every snapshot rebuild.
+    usage_only_sources: Vec<(PathBuf, String)>,
+    /// Omitted paths that discovery found but the best-effort read could not
+    /// open. They still need usage-only identity so an LSP URI never falls
+    /// through to arbitrary-unsaved-buffer diagnostics.
+    usage_only_unreadable_paths: Vec<PathBuf>,
+    /// True when every omitted source above was readable. This controls
+    /// only declaration-level unused warnings; locals/parameters remain
+    /// sound because their usage is function-local.
+    usage_only_sources_complete: bool,
+    /// The `#if` define set these files were parsed with, so the
+    /// usage-only sources above can be parsed on demand with the same
+    /// masking the checked files got.
+    defines: HashSet<String>,
     /// GH #56: `unused_callbacks` from the config ladder — extra names
     /// the unused-declaration pass treats as runtime-invoked callbacks.
     /// Carried here for the same reason as `export_paths`: it is a
@@ -126,6 +147,10 @@ impl AnalysisSnapshot {
             export_paths: load.export_paths.clone(),
             strict_export_paths: load.strict_export_paths.clone(),
             own_module_symbols,
+            usage_only_sources: load.usage_only_sources.clone(),
+            usage_only_unreadable_paths: load.usage_only_unreadable_paths.clone(),
+            usage_only_sources_complete: load.usage_only_sources_complete,
+            defines: config.defines.clone(),
             unused_callbacks: config.unused_callbacks.clone(),
         }
     }
@@ -146,6 +171,40 @@ impl AnalysisSnapshot {
                 .collect(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
+            usage_only_sources: Vec::new(),
+            usage_only_sources_complete: true,
+            usage_only_unreadable_paths: Vec::new(),
+            export_paths: HashSet::new(),
+            strict_export_paths: HashSet::new(),
+        };
+        Self::from_load(&load, config)
+    }
+
+    /// Like [`Self::from_files`], but with own-module sources that were
+    /// OMITTED from the checked set (GH #61) — gitignored, or filtered out
+    /// by `source_paths`/`ignore_paths`. They contribute usage only: no
+    /// pooled declarations, no diagnostics, no file_id. The in-memory
+    /// surface for the disk behaviour `load_plugin_workspace` builds.
+    pub fn from_files_with_usage_only(
+        files: &[(PathBuf, String)],
+        usage_only: &[(PathBuf, String)],
+        config: &LspConfig,
+    ) -> Self {
+        let load = PluginWorkspaceLoad {
+            root: PathBuf::new(),
+            files: files
+                .iter()
+                .map(|(p, s)| WorkspaceSourceFile {
+                    path: p.clone(),
+                    source: s.clone(),
+                    report_diagnostics: true,
+                })
+                .collect(),
+            missing_required_dependencies: Vec::new(),
+            dependency_closure_complete: false,
+            usage_only_sources: usage_only.to_vec(),
+            usage_only_sources_complete: true,
+            usage_only_unreadable_paths: Vec::new(),
             export_paths: HashSet::new(),
             strict_export_paths: HashSet::new(),
         };
@@ -167,6 +226,9 @@ impl AnalysisSnapshot {
                 .collect(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
+            usage_only_sources: Vec::new(),
+            usage_only_sources_complete: true,
+            usage_only_unreadable_paths: Vec::new(),
             export_paths: Default::default(),
             strict_export_paths: Default::default(),
         };
@@ -193,6 +255,48 @@ impl AnalysisSnapshot {
     /// GH #56: extra callback-name patterns from the config ladder.
     pub fn unused_callbacks(&self) -> &[String] {
         &self.unused_callbacks
+    }
+
+    /// GH #61: own-module sources omitted from the checked set, for usage
+    /// recording only (see the field docs). Not parsed — the caller parses
+    /// with [`Self::defines`].
+    pub fn usage_only_sources(&self) -> &[(PathBuf, String)] {
+        &self.usage_only_sources
+    }
+
+    /// Whether `uri` identifies an omitted own-module source. Readable and
+    /// unreadable omissions both count: neither may gain diagnostics, a
+    /// file ID, or pooled declarations merely because the editor opens it.
+    /// Exact paths cover raced/nonexistent files; canonical equality covers
+    /// symlink aliases while both paths remain resolvable.
+    pub fn is_usage_only_uri(&self, uri: &Url) -> bool {
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        self.is_usage_only_path(&path)
+    }
+
+    /// Path form of [`Self::is_usage_only_uri`], shared by callers that have
+    /// already decoded a file URI.
+    pub fn is_usage_only_path(&self, path: &std::path::Path) -> bool {
+        self.usage_only_sources
+            .iter()
+            .any(|(omitted, _)| paths_equal(omitted, path))
+            || self
+                .usage_only_unreadable_paths
+                .iter()
+                .any(|omitted| paths_equal(omitted, path))
+    }
+
+    /// Whether every omitted own-module source was readable when the
+    /// workspace load was built.
+    pub fn usage_only_sources_complete(&self) -> bool {
+        self.usage_only_sources_complete
+    }
+
+    /// The `#if` define set this snapshot's files were parsed with.
+    pub fn defines(&self) -> &HashSet<String> {
+        &self.defines
     }
 
     /// Files in the snapshot, in file_id order.
@@ -335,6 +439,16 @@ fn canonical_file_path(uri: &Url) -> Option<PathBuf> {
     uri.to_file_path().ok()?.canonicalize().ok()
 }
 
+fn paths_equal(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// One file's checked view: the parse it was checked against plus the
 /// checker's span→type recording (GH #42). Diagnostics are exposed via
 /// [`CheckedFile::take_diagnostics`] so hover-style consumers can ignore
@@ -412,6 +526,63 @@ mod tests {
         assert_eq!(map[&0].1.masked_source(), "int x;");
         let uri = map[&0].0.clone();
         assert!(snap.analysis_of(&uri).is_some());
+    }
+
+    #[test]
+    fn usage_only_uri_includes_unreadable_omitted_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "ols-snap-usage-only-unreadable-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let unreadable = dir.join("raced-away.as");
+        let load = crate::workspace::load::PluginWorkspaceLoad {
+            root: dir.clone(),
+            files: Vec::new(),
+            missing_required_dependencies: Vec::new(),
+            dependency_closure_complete: false,
+            usage_only_sources: Vec::new(),
+            usage_only_sources_complete: false,
+            usage_only_unreadable_paths: vec![unreadable.clone()],
+            export_paths: Default::default(),
+            strict_export_paths: Default::default(),
+        };
+        let snapshot = AnalysisSnapshot::from_load(&load, &LspConfig::default());
+        let uri = Url::from_file_path(&unreadable).unwrap();
+        assert!(snapshot.is_usage_only_uri(&uri));
+        assert!(!snapshot.is_usage_only_uri(&Url::from_file_path(dir.join("new.as")).unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn usage_only_uri_accepts_a_symlink_alias() {
+        let dir =
+            std::env::temp_dir().join(format!("ols-snap-usage-only-alias-{}", std::process::id()));
+        let real_dir = dir.join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let real_path = real_dir.join("generated.as");
+        std::fs::write(&real_path, "void Generated() {}\n").unwrap();
+        let alias_dir = dir.join("alias");
+        std::os::unix::fs::symlink(&real_dir, &alias_dir).unwrap();
+        let load = crate::workspace::load::PluginWorkspaceLoad {
+            root: real_dir,
+            files: Vec::new(),
+            missing_required_dependencies: Vec::new(),
+            dependency_closure_complete: false,
+            usage_only_sources: vec![(
+                real_path.canonicalize().unwrap(),
+                "void Generated() {}\n".into(),
+            )],
+            usage_only_sources_complete: true,
+            usage_only_unreadable_paths: Vec::new(),
+            export_paths: Default::default(),
+            strict_export_paths: Default::default(),
+        };
+        let snapshot = AnalysisSnapshot::from_load(&load, &LspConfig::default());
+        let alias_uri = Url::from_file_path(alias_dir.join("generated.as")).unwrap();
+        assert!(snapshot.is_usage_only_uri(&alias_uri));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

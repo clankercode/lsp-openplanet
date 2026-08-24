@@ -4,7 +4,11 @@
 //! Two phases, mirroring the checker's resolution ladder:
 //!
 //! 1. **Collect** — run `Checker::with_usage_recording` over every file in
-//!    the snapshot against the pooled workspace symbols. The checker
+//!    the snapshot against the pooled workspace symbols, plus the
+//!    own-module files the checked set OMITTED (gitignored, or filtered
+//!    out by `source_paths`/`ignore_paths`), which the game compiles and
+//!    which therefore count as usage even though they declare nothing we
+//!    can see (GH #61 — see [`usage_from_omitted_files`]). The checker
 //!    records the workspace-qualified name of everything that *resolved*
 //!    (ident reads, calls, member access on typed receivers, implicit-`this`
 //!    member use, type-position references, `import ... from` aliases).
@@ -125,6 +129,27 @@ impl WorkspaceUsage {
             used.extend(checker.take_used_names());
             local_decls.push(checker.take_local_decls());
         }
+        // GH #61: own-module files the checked set OMITTED — gitignored
+        // (GH #60), or filtered out by `source_paths` / `ignore_paths`.
+        // The game compiles them, so the visible file set is not the whole
+        // compile set and a declaration whose only callers live there was
+        // being reported "never used".
+        //
+        // They contribute usage and nothing else:
+        //
+        // * no reported declarations — the join walks `snapshot.files()`
+        //   and `snapshot.symbols()`, and these files are in neither, so
+        //   nothing of theirs can be warned about and no file_id shifts;
+        // * no local/parameter records — `local_decls` is indexed by
+        //   file_id, and a local's usage is bounded by its own function
+        //   body anyway, so no other file can affect it (B011 scope note);
+        // * no effect on the GH #58 namespace authority, which the loader
+        //   already gave up for exactly this omission.
+        //
+        // Parsed here rather than in the snapshot so only this pass pays
+        // for them, with the snapshot's own define set so `#if` masking
+        // matches what the checked files got.
+        used.extend(usage_from_omitted_files(snapshot, external));
         let locals = locals::LocalsInputs::new(snapshot, external, local_decls);
         Self { used, locals }
     }
@@ -155,6 +180,79 @@ impl WorkspaceUsage {
     pub fn used_names(&self) -> &HashSet<String> {
         &self.used
     }
+}
+
+/// Usage recorded from the own-module files the checked set omitted
+/// (GH #61) — see the call site in [`WorkspaceUsage::collect`].
+///
+/// The pass runs against a borrowed overlay: the pooled workspace table plus
+/// a small supplemental table containing the NON-COLLIDING declarations of
+/// these files. The supplement lives only for this function and the join
+/// never sees it — pooling omitted declarations for real is refuted
+/// alternative 1 on GH #61. Keeping the tables separate is also important
+/// for scale: cost is proportional to omitted inputs, never a clone of the
+/// full visible symbol table.
+///
+/// Their own declarations are needed to RESOLVE their bodies: a generated
+/// subclass calling an inherited member (`class Derived : Base` …
+/// `Hook()`) records nothing at all unless `Derived` resolves, and that
+/// silent miss leaves the very false positive this change is fixing.
+///
+/// Which is why the COLLISION filter is load-bearing, not tidiness. A
+/// gitignored dir in the real fleet is predominantly a whole-tree COPY,
+/// and a duplicate declaration makes the copy's own calls ambiguous:
+/// measured here, `Dead()` inside a stale copy of `Main.as` records
+/// nothing once both `Dead`s are in the table, so the masking that keeps
+/// the copy from manufacturing warnings is lost. Skipping any declaration
+/// the pooled table already has means a pure copy adds nothing at all and
+/// resolves against the originals, while a genuinely new declaration
+/// (that generated subclass) still gets added.
+fn usage_from_omitted_files(
+    snapshot: &AnalysisSnapshot,
+    external: Option<&crate::typedb::TypeIndex>,
+) -> HashSet<String> {
+    let mut used = HashSet::new();
+    let sources = snapshot.usage_only_sources();
+    if sources.is_empty() {
+        return used;
+    }
+    let parsed: Vec<(&Path, crate::analysis::DocumentAnalysis)> = sources
+        .iter()
+        .map(|(path, source)| {
+            (
+                path.as_path(),
+                crate::analysis::DocumentAnalysis::analyze(source, snapshot.defines()),
+            )
+        })
+        .collect();
+    let pooled = snapshot.symbols();
+    let mut supplemental = crate::symbols::SymbolTable::new();
+    let first_supplemental_id = snapshot.files().len();
+    for (offset, (_, analysis)) in parsed.iter().enumerate() {
+        let file_id = first_supplemental_id + offset;
+        let symbols: Vec<_> = crate::symbols::SymbolTable::extract_symbols(
+            file_id,
+            analysis.masked_source(),
+            &analysis.file,
+        )
+        .into_iter()
+        .filter(|sym| pooled.lookup(&sym.name).is_empty())
+        .collect();
+        supplemental.set_file_symbols(file_id, symbols);
+    }
+    let scope = GlobalScope::with_supplemental(pooled, &supplemental, external);
+    for (path, analysis) in &parsed {
+        let mut checker = Checker::new(analysis.masked_source(), &scope).with_usage_recording();
+        checker.check_file(&analysis.file);
+        let names = checker.take_used_names();
+        tracing::trace!(
+            path = %path.display(),
+            recorded = names.len(),
+            "recorded usage from an omitted own-module file"
+        );
+        used.extend(names);
+    }
+    used
 }
 
 /// One unused-declaration finding, in symbol-table shape.
@@ -223,31 +321,38 @@ fn unused_declarations_filtered(
     only: Option<usize>,
 ) -> Vec<UnusedDeclaration> {
     let mut out = Vec::new();
-    let symbols = snapshot.symbols();
     // GH #56: the project's extra callback patterns, shared by both
     // consumers — the declaration gate below and the parameter gate in
     // `locals`.
     let extra = snapshot.unused_callbacks();
     let exempt = |name: &str| is_exempt_callback(name, extra);
 
-    for (file_id, file) in snapshot.files().iter().enumerate() {
-        if only.is_some_and(|want| want != file_id) {
-            continue;
-        }
-        // Dependency export files contribute symbols and usage but are not
-        // this plugin's code — never warn on them (report_diagnostics
-        // already gates the diagnostics pipeline; same gate here).
-        if !file.report_diagnostics {
-            continue;
-        }
-        // The plugin's own export files are public API.
-        if export_paths.contains(&file.path) {
-            continue;
-        }
-        let source = file.analysis.masked_source();
-        for sym in symbols.file_symbols(file_id) {
-            if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
-                out.push(unused);
+    // An unreadable omitted source may contain a use of any file-level or
+    // class-member declaration, so those warnings fail closed. This is not
+    // the broad "any omission disarms the rule" alternative: readable
+    // omissions keep the declaration pass fully active, and locals/params
+    // below remain sound because their usage is bounded by their function.
+    if snapshot.usage_only_sources_complete() {
+        let symbols = snapshot.symbols();
+        for (file_id, file) in snapshot.files().iter().enumerate() {
+            if only.is_some_and(|want| want != file_id) {
+                continue;
+            }
+            // Dependency export files contribute symbols and usage but are not
+            // this plugin's code — never warn on them (report_diagnostics
+            // already gates the diagnostics pipeline; same gate here).
+            if !file.report_diagnostics {
+                continue;
+            }
+            // The plugin's own export files are public API.
+            if export_paths.contains(&file.path) {
+                continue;
+            }
+            let source = file.analysis.masked_source();
+            for sym in symbols.file_symbols(file_id) {
+                if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
+                    out.push(unused);
+                }
             }
         }
     }
@@ -426,6 +531,26 @@ pub(crate) mod test_support {
             ..LspConfig::default()
         };
         AnalysisSnapshot::from_files(&inputs, &config)
+    }
+
+    /// In-memory snapshot with own-module sources the checked set OMITTED
+    /// (GH #61): `files` are checked and reported, `usage_only` stands for
+    /// the gitignored / `source_paths`-or-`ignore_paths`-filtered files the
+    /// game still compiles — they contribute usage and nothing else.
+    pub fn snap_with_usage_only(
+        files: &[(&str, &str)],
+        usage_only: &[(&str, &str)],
+    ) -> AnalysisSnapshot {
+        let inputs = |v: &[(&str, &str)]| -> Vec<(PathBuf, String)> {
+            v.iter()
+                .map(|(p, s)| (PathBuf::from(p), s.to_string()))
+                .collect()
+        };
+        AnalysisSnapshot::from_files_with_usage_only(
+            &inputs(files),
+            &inputs(usage_only),
+            &LspConfig::default(),
+        )
     }
 
     /// Sorted qualified names of an unused report.
@@ -737,6 +862,315 @@ mod tests {
             !names(&report).contains(&"DepOnly".to_string()),
             "dep export decls must never warn: {:?}",
             names(&report)
+        );
+    }
+}
+
+/// GH #61: usage from own-module files the checked set OMITTED.
+///
+/// Gitignore honoring (GH #60) and `source_paths`/`ignore_paths` both drop
+/// files the GAME still compiles, so a declaration whose only callers live
+/// there was reported "never used". These files contribute usage only —
+/// never declarations, never diagnostics — which is why every case below
+/// asserts on the CHECKED file's report.
+#[cfg(test)]
+mod omitted_own_module_usage {
+    use super::test_support::{names, snap_with_usage_only};
+    use super::*;
+    use std::collections::HashSet as StdHashSet;
+
+    /// Names reported for a checked set plus an omitted (usage-only) set.
+    fn report(files: &[(&str, &str)], usage_only: &[(&str, &str)]) -> Vec<String> {
+        let snap = snap_with_usage_only(files, usage_only);
+        names(&unused_declarations(&snap, None, &StdHashSet::new()))
+    }
+
+    /// The GH #61 repro: `generated/` is gitignored, and its only caller of
+    /// `UsedOnlyByGenerated` is invisible to the usage join.
+    #[test]
+    fn a_call_from_an_omitted_file_counts_as_usage() {
+        assert_eq!(
+            report(
+                &[(
+                    "src/Main.as",
+                    "void UsedOnlyByGenerated() {}\nvoid Main() {}\n"
+                )],
+                &[(
+                    "generated/Gen.as",
+                    "void GenCaller() { UsedOnlyByGenerated(); }\n"
+                )],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Variant: a global variable READ (not a call).
+    #[test]
+    fn a_global_read_from_an_omitted_file_counts_as_usage() {
+        assert_eq!(
+            report(
+                &[("src/Main.as", "int g_Val = 1;\nvoid Main() {}\n")],
+                &[(
+                    "generated/Gen.as",
+                    "void GenCaller() { print(\"\" + g_Val); }\n"
+                )],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Variant: a TYPE-POSITION reference, no call and no member access.
+    #[test]
+    fn a_type_position_reference_from_an_omitted_file_counts_as_usage() {
+        assert_eq!(
+            report(
+                &[("src/Main.as", "class Helper {}\nvoid Main() {}\n")],
+                &[("generated/Gen.as", "void GenCaller() { Helper h; }\n")],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Variant: MEMBER ACCESS on a typed receiver reaches class members —
+    /// the population that motivated the class-member half of the pass.
+    #[test]
+    fn member_access_from_an_omitted_file_counts_as_usage() {
+        assert_eq!(
+            report(
+                &[(
+                    "src/Main.as",
+                    "class C {\n    int f;\n    void M() {}\n}\nvoid Main() {}\n"
+                )],
+                &[(
+                    "generated/Gen.as",
+                    "void GenCaller() { C c; c.f = 1; c.M(); }\n"
+                )],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Variant: an ENUM VALUE. The unused value stays reported — the fix
+    /// must credit exactly what the omitted file touches.
+    #[test]
+    fn enum_value_usage_from_an_omitted_file_is_credited_per_value() {
+        assert_eq!(
+            report(
+                &[("src/Main.as", "enum E { A, B }\nvoid Main() {}\n")],
+                &[("generated/Gen.as", "void GenCaller() { E e = E::A; }\n")],
+            ),
+            vec!["E::B"]
+        );
+    }
+
+    /// Variant: a NAMESPACED declaration, reached by its qualified name.
+    #[test]
+    fn namespaced_usage_from_an_omitted_file_counts_as_usage() {
+        assert_eq!(
+            report(
+                &[(
+                    "src/Main.as",
+                    "namespace N {\n    void F() {}\n}\nvoid Main() {}\n"
+                )],
+                &[("generated/Gen.as", "void GenCaller() { N::F(); }\n")],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Variant: an `import ... from` ALIAS declaration, whose only caller
+    /// is omitted. Aliases are reportable declarations of their own
+    /// (`import_alias_usage_counts`), so they need the same credit.
+    #[test]
+    fn import_alias_used_only_by_an_omitted_file_is_not_reported() {
+        assert_eq!(
+            report(
+                &[(
+                    "src/Main.as",
+                    "import void ExtFn() from \"Other\";\nvoid Main() {}\n"
+                )],
+                &[("generated/Gen.as", "void GenCaller() { ExtFn(); }\n")],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Variant: a CLASS METHOD called through implicit `this` in a subclass
+    /// declared in the omitted file — usage that only resolves because the
+    /// omitted file is checked against the pooled table.
+    #[test]
+    fn subclass_in_an_omitted_file_uses_the_base_member() {
+        assert_eq!(
+            report(
+                &[(
+                    "src/Main.as",
+                    "class Base {\n    void Hook() {}\n}\nvoid Main() {}\n"
+                )],
+                &[(
+                    "generated/Gen.as",
+                    "class Derived : Base {\n    void Go() { Hook(); }\n}\n"
+                )],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// NON-VACUITY: the pass must still warn. A genuinely unused
+    /// declaration with omitted files present is the case that proves the
+    /// fix did not simply disarm the rule (refuted alternative 2).
+    #[test]
+    fn a_genuinely_unused_declaration_still_warns_with_omitted_files_present() {
+        assert_eq!(
+            report(
+                &[("src/Main.as", "void Dead() {}\nvoid Main() {}\n")],
+                &[("generated/Gen.as", "void GenCaller() { print(\"hi\"); }\n")],
+            ),
+            vec!["Dead"]
+        );
+    }
+
+    /// Omitted files declare nothing we can see, so their own
+    /// declarations are never reported — the GH #60 goal (no squiggles in
+    /// a file the author believes is excluded) must survive.
+    ///
+    /// An empty report alone would be a weak guard: it also holds when
+    /// omitted files are ignored entirely, and it would not catch
+    /// declarations pooled under file_ids past the end of `files()`, which
+    /// the join never visits. Since "their declarations never reach the
+    /// pool" is the invariant the whole design rests on, assert the pooled
+    /// table directly rather than inferring it from an absence.
+    #[test]
+    fn declarations_inside_an_omitted_file_are_never_reported() {
+        let files = [("src/Main.as", "void Main() {}\n")];
+        let omitted = [(
+            "generated/Gen.as",
+            "void GenDead() {}\nclass GenClass { int f; }\n",
+        )];
+        assert_eq!(report(&files, &omitted), Vec::<String>::new());
+        let snap = snap_with_usage_only(&files, &omitted);
+        for name in ["GenDead", "GenClass", "GenClass::f"] {
+            assert!(
+                snap.symbols().lookup(name).is_empty(),
+                "`{name}` must not reach the pooled table"
+            );
+        }
+    }
+
+    /// A gitignored WHOLE-TREE COPY (`.worktrees/`, scratch probes) is the
+    /// common shape in the real fleet. A stale copy that still calls a
+    /// now-dead function MASKS the warning. Accepted, and asserted so the
+    /// direction is deliberate: a missed warning is acceptable, a bogus one
+    /// is not.
+    #[test]
+    fn a_stale_omitted_copy_masks_a_real_unused_warning() {
+        assert_eq!(
+            report(
+                &[("src/Main.as", "void Dead() {}\nvoid Main() {}\n")],
+                &[(
+                    ".worktrees/copy/src/Main.as",
+                    "void Dead() {}\nvoid Main() { Dead(); }\n"
+                )],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// The copy above must not DOUBLE-report either: its duplicate
+    /// declarations never reach the pooled table, which is what refuted
+    /// alternative 1 (parse omitted files fully) got wrong.
+    #[test]
+    fn an_omitted_copy_never_double_reports_its_duplicate_declarations() {
+        let out = report(
+            &[("src/Main.as", "void Dead() {}\nvoid Main() {}\n")],
+            &[(
+                ".worktrees/copy/src/Main.as",
+                "void Dead() {}\nvoid Main() {}\n",
+            )],
+        );
+        assert_eq!(
+            out,
+            vec!["Dead"],
+            "exactly one finding, from the checked tree"
+        );
+    }
+
+    /// Both halves of the collision filter at once, on the shape that
+    /// actually occurs: a whole-tree copy that has GAINED a subclass.
+    /// The copy's duplicate declarations must stay out of the supplemental
+    /// table (or its own calls go ambiguous and stop masking), while the
+    /// new `Derived` must go in (or `Hook()` never resolves).
+    #[test]
+    fn an_omitted_copy_that_added_a_subclass_credits_only_the_new_usage() {
+        let checked = "class Base {\n    void Hook() {}\n}\nvoid Dead() {}\nvoid Main() {}\n";
+        let out = report(
+            &[("src/Main.as", checked)],
+            &[(
+                ".worktrees/copy/src/Main.as",
+                &format!("{checked}class Derived : Base {{\n    void Go() {{ Hook(); }}\n}}\n"),
+            )],
+        );
+        assert_eq!(
+            out,
+            vec!["Dead"],
+            "the copy credits the inherited call and nothing else"
+        );
+    }
+
+    /// A supplemental class is distinct by exact qualified name even when
+    /// its bare tail collides with a pooled class. Filtering on a broad
+    /// reference lookup would drop `Generated::Base` and lose its inherited
+    /// member usage; only exact qualified collisions are duplicates.
+    #[test]
+    fn partial_class_name_collision_keeps_supplemental_member_resolution() {
+        assert_eq!(
+            report(
+                &[(
+                    "src/Main.as",
+                    "namespace Live { class Base { void Hook() {} } }\nvoid Main() {}\n"
+                )],
+                &[(
+                    "generated/Gen.as",
+                    "namespace Generated {\n\
+                         class Base : Live::Base { void Go() { Hook(); } }\n\
+                     }\n"
+                )],
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// No omitted files at all: the overwhelmingly common tree must be
+    /// bit-for-bit unchanged.
+    #[test]
+    fn an_empty_omitted_set_changes_nothing() {
+        assert_eq!(
+            report(&[("src/Main.as", "void Dead() {}\nvoid Main() {}\n")], &[]),
+            vec!["Dead"]
+        );
+    }
+
+    /// Locals and parameters are out of scope (B011 scope note): a local's
+    /// usage is bounded by its own function body, so no omitted file can
+    /// affect it — and an omitted mention must NOT silence it.
+    #[test]
+    fn omitted_files_do_not_credit_locals_or_parameters() {
+        let out = report(
+            &[(
+                "src/Main.as",
+                "void Helper(int p) {\n    int dead = 1;\n    print(\"x\");\n}\nvoid Main() { Helper(1); }\n",
+            )],
+            &[(
+                "generated/Gen.as",
+                "void GenCaller() { int dead = 2; int p = 3; print(\"\" + dead + p); }\n",
+            )],
+        );
+        assert!(
+            out.contains(&"Helper::dead".to_string()),
+            "a local must stay reported: {out:?}"
+        );
+        assert!(
+            out.contains(&"Helper::p".to_string()),
+            "a parameter must stay reported: {out:?}"
         );
     }
 }

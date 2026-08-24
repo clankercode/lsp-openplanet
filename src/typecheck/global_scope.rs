@@ -15,6 +15,10 @@ use crate::typedb::TypeIndex;
 /// workspace-defined (user code) + external (Openplanet core + Nadeo).
 pub struct GlobalScope<'a> {
     workspace: &'a SymbolTable,
+    /// Optional declarations used only while checking omitted own-module
+    /// sources for usage. They participate in positive name resolution but
+    /// never in closure/namespace-authority queries.
+    supplemental: Option<&'a SymbolTable>,
     external: Option<&'a TypeIndex>,
 }
 
@@ -39,8 +43,54 @@ impl<'a> GlobalScope<'a> {
     pub fn new(workspace: &'a SymbolTable, external: Option<&'a TypeIndex>) -> Self {
         Self {
             workspace,
+            supplemental: None,
             external,
         }
+    }
+
+    /// Build the usage-only resolution view: authoritative pooled symbols
+    /// plus a small table containing only non-colliding declarations from
+    /// omitted sources. Borrowing both avoids cloning the full pooled table;
+    /// the supplemental table remains outside every snapshot surface.
+    pub fn with_supplemental(
+        workspace: &'a SymbolTable,
+        supplemental: &'a SymbolTable,
+        external: Option<&'a TypeIndex>,
+    ) -> Self {
+        Self {
+            workspace,
+            supplemental: Some(supplemental),
+            external,
+        }
+    }
+
+    /// Exact workspace lookup across the pooled table and the optional
+    /// usage-only supplement. Namespace-authority methods deliberately do
+    /// not use this surface.
+    pub fn lookup_workspace(&self, name: &str) -> Vec<&Symbol> {
+        let mut symbols = self.workspace.lookup(name);
+        if let Some(supplemental) = self.supplemental {
+            symbols.extend(supplemental.lookup(name));
+        }
+        symbols
+    }
+
+    /// Qualified-tail lookup across both positive-resolution tables.
+    pub fn lookup_workspace_tail(&self, tail: &str) -> Vec<&Symbol> {
+        let mut symbols = self.workspace.lookup_tail(tail);
+        if let Some(supplemental) = self.supplemental {
+            symbols.extend(supplemental.lookup_tail(tail));
+        }
+        symbols
+    }
+
+    /// Member-prefix lookup across both positive-resolution tables.
+    pub fn lookup_workspace_members(&self, owner: &str) -> Vec<&Symbol> {
+        let mut symbols = self.workspace.lookup_members(owner);
+        if let Some(supplemental) = self.supplemental {
+            symbols.extend(supplemental.lookup_members(owner));
+        }
+        symbols
     }
 
     /// The external type-database half of the merged view, when one was
@@ -64,7 +114,18 @@ impl<'a> GlobalScope<'a> {
     /// (`SymbolTable::lookup_reference`). One ladder, shared by every
     /// feature instead of per-file copies (GH #41).
     pub fn lookup_reference(&self, name: &str) -> Vec<&Symbol> {
-        self.workspace.lookup_reference(name)
+        let exact = self.lookup_workspace(name);
+        if !exact.is_empty() {
+            return exact;
+        }
+        if let Some((_, bare)) = name.rsplit_once("::") {
+            let bare_hits = self.lookup_workspace(bare);
+            if !bare_hits.is_empty() {
+                return bare_hits;
+            }
+            return self.lookup_workspace_tail(bare);
+        }
+        Vec::new()
     }
 
     /// True when the workspace half is the plugin's COMPLETE module
@@ -129,8 +190,7 @@ impl<'a> GlobalScope<'a> {
             )
         };
         if self
-            .workspace
-            .lookup(qualified)
+            .lookup_workspace(qualified)
             .iter()
             .any(|s| is_type_kind(s))
         {
@@ -147,8 +207,7 @@ impl<'a> GlobalScope<'a> {
     /// True if the qualified name refers to a free function.
     pub fn has_function(&self, qualified: &str) -> bool {
         let workspace_hit = self
-            .workspace
-            .lookup(qualified)
+            .lookup_workspace(qualified)
             .iter()
             .any(|s| matches!(s.kind, SymbolKind::Function { .. }));
         if workspace_hit {
@@ -165,8 +224,7 @@ impl<'a> GlobalScope<'a> {
     /// True if the qualified name refers to an enum.
     pub fn has_enum(&self, qualified: &str) -> bool {
         let workspace_hit = self
-            .workspace
-            .lookup(qualified)
+            .lookup_workspace(qualified)
             .iter()
             .any(|s| matches!(s.kind, SymbolKind::Enum { .. }));
         if workspace_hit {
@@ -221,7 +279,7 @@ impl<'a> GlobalScope<'a> {
         // Workspace fallback: scan for any type-kind symbol whose qualified
         // tail matches. This covers user plugin types that are defined in
         // a sibling file under a namespace but referenced bare.
-        for s in self.workspace.lookup_tail(short) {
+        for s in self.lookup_workspace_tail(short) {
             if !matches!(
                 s.kind,
                 SymbolKind::Class { .. }
@@ -259,7 +317,7 @@ impl<'a> GlobalScope<'a> {
             }
         }
 
-        for s in self.workspace.lookup_tail(short) {
+        for s in self.lookup_workspace_tail(short) {
             if !matches!(
                 s.kind,
                 SymbolKind::Class { .. }
@@ -298,8 +356,8 @@ impl<'a> GlobalScope<'a> {
         }
         // Exact workspace hit as a Variable or EnumValue (both at top level
         // and as a qualified tail).
-        let mut candidates: Vec<&crate::symbols::scope::Symbol> = self.workspace.lookup(name);
-        candidates.extend(self.workspace.lookup_tail(name));
+        let mut candidates: Vec<&crate::symbols::scope::Symbol> = self.lookup_workspace(name);
+        candidates.extend(self.lookup_workspace_tail(name));
         for s in candidates {
             if self.tail_prefix_is_class_member(&s.name, &format!("::{}", name)) {
                 // `ClassName::field` is a class member, not a global — a
@@ -351,7 +409,7 @@ impl<'a> GlobalScope<'a> {
                 acc.push_str("::");
             }
             acc.push_str(seg);
-            if self.workspace.lookup(&acc).iter().any(|s| {
+            if self.lookup_workspace(&acc).iter().any(|s| {
                 matches!(
                     s.kind,
                     SymbolKind::Class { .. } | SymbolKind::Interface { .. }
@@ -377,8 +435,8 @@ impl<'a> GlobalScope<'a> {
                     | SymbolKind::Funcdef { .. }
             )
         };
-        self.workspace.lookup(name).iter().any(is_type)
-            || self.workspace.lookup_tail(name).iter().any(is_type)
+        self.lookup_workspace(name).iter().any(is_type)
+            || self.lookup_workspace_tail(name).iter().any(is_type)
     }
 
     /// Look up a member's type on a fully qualified type name, walking
@@ -676,7 +734,7 @@ impl<'a> GlobalScope<'a> {
     /// return `None` here — use `lookup_external_function_arity_ranges` for
     /// the "no overload accepts this arity" check.
     pub fn lookup_function_signature(&self, qualified: &str) -> Option<(usize, usize)> {
-        if let Some(s) = lookup_workspace_function_property(&self.workspace, qualified) {
+        if let Some(s) = self.lookup_workspace_function_property(qualified) {
             return match &s.kind {
                 SymbolKind::Function {
                     params, min_args, ..
@@ -882,10 +940,11 @@ impl<'a> GlobalScope<'a> {
     /// zero matches *or* two-plus matches (the overloaded case — callers
     /// conservatively suppress type checking when overloads exist).
     pub fn lookup_function_params(&self, qualified: &str) -> Option<Vec<(String, String)>> {
-        lookup_workspace_function_property(&self.workspace, qualified).map(|s| match &s.kind {
-            SymbolKind::Function { params, .. } => params.clone(),
-            _ => unreachable!(),
-        })
+        self.lookup_workspace_function_property(qualified)
+            .map(|s| match &s.kind {
+                SymbolKind::Function { params, .. } => params.clone(),
+                _ => unreachable!(),
+            })
     }
 
     /// Look up a unique workspace free function's parameter type text list
@@ -903,7 +962,7 @@ impl<'a> GlobalScope<'a> {
         let mut out = Vec::new();
         let alt_names = workspace_function_property_candidates(qualified);
         for name in &alt_names {
-            for s in self.workspace.lookup(name) {
+            for s in self.lookup_workspace(name) {
                 if let SymbolKind::Function {
                     return_type,
                     params,
@@ -970,7 +1029,7 @@ impl<'a> GlobalScope<'a> {
     /// the workspace symbol table — external (typedb) types use their
     /// own parent walker via `ext_lookup_member`.
     pub fn workspace_class_parents(&self, class_name: &str) -> Vec<String> {
-        for s in self.workspace.lookup(class_name) {
+        for s in self.lookup_workspace(class_name) {
             if let SymbolKind::Class { parents, .. } = &s.kind {
                 return parents.clone();
             }
@@ -982,8 +1041,7 @@ impl<'a> GlobalScope<'a> {
     /// whether a qualified `Class::Method` callee should pull inherited
     /// overloads into its arity/overload set — GH #34).
     pub fn is_workspace_class(&self, class_name: &str) -> bool {
-        self.workspace
-            .lookup(class_name)
+        self.lookup_workspace(class_name)
             .iter()
             .any(|s| s.name == class_name && matches!(s.kind, SymbolKind::Class { .. }))
     }
@@ -1035,7 +1093,7 @@ impl<'a> GlobalScope<'a> {
                 continue;
             }
             let qualified = format!("{}::{}", name, member);
-            out.extend(self.workspace.lookup(&qualified));
+            out.extend(self.lookup_workspace(&qualified));
             for parent in self.workspace_class_parents(&name) {
                 queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &name));
             }
@@ -1062,7 +1120,7 @@ impl<'a> GlobalScope<'a> {
     pub fn workspace_class_member_pairs(&self, class_name: &str) -> Vec<(String, TypeRepr)> {
         let prefix = format!("{}::", class_name);
         let mut out = Vec::new();
-        for s in self.workspace.lookup_members(class_name) {
+        for s in self.lookup_workspace_members(class_name) {
             let member_name = s.name.strip_prefix(&prefix).unwrap_or(&s.name);
             match &s.kind {
                 crate::symbols::scope::SymbolKind::Variable { type_name } => {
@@ -1093,7 +1151,7 @@ impl<'a> GlobalScope<'a> {
     ) -> Vec<(String, Vec<(String, String)>, usize, Option<String>)> {
         let qualified = format!("{}::{}", class_name, method);
         let mut out = Vec::new();
-        for s in self.workspace.lookup(&qualified) {
+        for s in self.lookup_workspace(&qualified) {
             if let crate::symbols::scope::SymbolKind::Function {
                 return_type,
                 params,
@@ -1127,9 +1185,9 @@ impl<'a> GlobalScope<'a> {
             let qualified = format!("{}::{}", name, member);
             let qualified_getter = format!("{}::{}", name, getter);
             let qualified_setter = format!("{}::{}", name, setter);
-            let mut candidates = self.workspace.lookup(&qualified);
-            candidates.extend(self.workspace.lookup(&qualified_getter));
-            candidates.extend(self.workspace.lookup(&qualified_setter));
+            let mut candidates = self.lookup_workspace(&qualified);
+            candidates.extend(self.lookup_workspace(&qualified_getter));
+            candidates.extend(self.lookup_workspace(&qualified_setter));
             for s in candidates {
                 match &s.kind {
                     SymbolKind::Variable { type_name } => {
@@ -1170,12 +1228,12 @@ impl<'a> GlobalScope<'a> {
         if !name.contains("::") {
             if let Some((ns, _)) = context_class_name.rsplit_once("::") {
                 let candidate = format!("{}::{}", ns, name);
-                if !self.workspace.lookup(&candidate).is_empty() {
+                if !self.lookup_workspace(&candidate).is_empty() {
                     return candidate;
                 }
             }
         }
-        if !self.workspace.lookup(name).is_empty() {
+        if !self.lookup_workspace(name).is_empty() {
             return name.to_string();
         }
         self.resolve_qualified_suffix(name)
@@ -1197,8 +1255,8 @@ impl<'a> GlobalScope<'a> {
     /// through to other Ident rules).
     pub fn lookup_global_value_type(&self, qualified: &str) -> Option<TypeRepr> {
         let tail = format!("::{}", qualified);
-        let mut candidates: Vec<&crate::symbols::scope::Symbol> = self.workspace.lookup(qualified);
-        candidates.extend(self.workspace.lookup_tail(qualified));
+        let mut candidates: Vec<&crate::symbols::scope::Symbol> = self.lookup_workspace(qualified);
+        candidates.extend(self.lookup_workspace_tail(qualified));
         for s in candidates {
             if self.tail_prefix_is_class_member(&s.name, &tail) {
                 // `ClassName::field` is not a global value — bare-name tail
@@ -1244,7 +1302,7 @@ impl<'a> GlobalScope<'a> {
         // type string — parse it (e.g. `void` → Primitive(Void)) instead
         // of silencing with Error, which surfaced as `(local) <error>`
         // hover on workspace function calls.
-        if let Some(s) = lookup_workspace_function_property(&self.workspace, qualified) {
+        if let Some(s) = self.lookup_workspace_function_property(qualified) {
             return match &s.kind {
                 SymbolKind::Function { return_type, .. } => {
                     Some(TypeRepr::parse_type_string(return_type))
@@ -1253,6 +1311,23 @@ impl<'a> GlobalScope<'a> {
             };
         }
         None
+    }
+
+    fn lookup_workspace_function_property(&self, qualified: &str) -> Option<&Symbol> {
+        let candidates = workspace_function_property_candidates(qualified);
+        let mut found = None;
+        for name in &candidates {
+            for symbol in self.lookup_workspace(name) {
+                if !matches!(symbol.kind, SymbolKind::Function { .. }) {
+                    continue;
+                }
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(symbol);
+            }
+        }
+        found
     }
 }
 
@@ -1270,26 +1345,6 @@ fn qualified_virtual_name(name: &str, prefix: &str) -> String {
     } else {
         format!("{}{}", prefix, name)
     }
-}
-
-fn lookup_workspace_function_property<'a>(
-    workspace: &'a SymbolTable,
-    qualified: &str,
-) -> Option<&'a crate::symbols::scope::Symbol> {
-    let candidates = workspace_function_property_candidates(qualified);
-    let mut found = None;
-    for name in &candidates {
-        for s in workspace.lookup(name) {
-            if !matches!(s.kind, SymbolKind::Function { .. }) {
-                continue;
-            }
-            if found.is_some() {
-                return None;
-            }
-            found = Some(s);
-        }
-    }
-    found
 }
 
 #[cfg(test)]
@@ -1378,6 +1433,34 @@ mod tests {
         assert!(scope.has_function("doThing"));
         assert!(!scope.has_type("doThing"));
         assert!(scope.resolves("doThing"));
+    }
+
+    #[test]
+    fn supplemental_symbols_resolve_without_gaining_namespace_authority() {
+        let workspace = SymbolTable::new();
+        let mut supplemental = SymbolTable::new();
+        let fid = supplemental.allocate_file_id();
+        supplemental.set_file_symbols(
+            fid,
+            vec![
+                make_symbol("Generated", SymbolKind::Namespace),
+                make_symbol(
+                    "Generated::UseOnly",
+                    SymbolKind::Function {
+                        return_type: "void".into(),
+                        params: vec![],
+                        min_args: 0,
+                        imported: false,
+                    },
+                ),
+            ],
+        );
+        let scope = GlobalScope::with_supplemental(&workspace, &supplemental, None);
+
+        assert!(scope.has_function("Generated::UseOnly"));
+        assert!(!scope.workspace_closure_complete());
+        assert!(!scope.workspace_namespace_declared("Generated"));
+        assert!(!scope.workspace_declares_any("Generated::UseOnly"));
     }
 
     #[test]

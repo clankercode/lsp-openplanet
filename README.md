@@ -52,7 +52,8 @@ default_mode = "tui"   # or "lsp"
 # specific set; repos often keep non-compiled scripts (asset packs, fixtures,
 # experiments) alongside src/. source_paths is an ALLOWLIST (wins if set);
 # ignore_paths is a BLOCKLIST (used only when source_paths is absent); with
-# neither, every .as under the root is checked (safe default).
+# neither, every .as under the root is checked (safe default). Omitted files
+# are still read for one narrow purpose -- see honor_gitignore below.
 # source_paths = ["src"]
 # ignore_paths = ["OtherPacks", "vendor"]
 
@@ -71,6 +72,11 @@ default_mode = "tui"   # or "lsp"
 # .openplanet-lsp.toml wins over the user config; the flag wins over both.
 # Orthogonal to the two lists above: the checked set is
 # discovered - gitignored - ignore_paths (or intersected with source_paths).
+# Whichever way a file is omitted, it is still read for ONE purpose: the
+# unused-declaration pass records what it REFERENCES, so a function whose only
+# caller lives in a gitignored (or filtered-out) file is not reported "never
+# used". The game compiles those files, so that warning would be wrong. Their
+# own declarations stay invisible and they never get diagnostics of their own.
 # honor_gitignore = true
 
 # Namespace-shortcut completions (old vscode-openplanet-angelscript QoL):
