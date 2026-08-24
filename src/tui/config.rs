@@ -1,4 +1,4 @@
-//! Interactive editor for the user-global config file.
+//! Interactive editor for a workspace or user-global config file.
 
 use std::io;
 use std::path::PathBuf;
@@ -113,7 +113,7 @@ impl ConfigApp {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(Line::from(Span::styled(
-                " openplanet-lsp config ",
+                header_title(self.file.path()),
                 Style::default().add_modifier(Modifier::BOLD),
             )));
         f.render_widget(
@@ -315,6 +315,16 @@ impl ConfigApp {
     }
 }
 
+fn header_title(path: &std::path::Path) -> &'static str {
+    if crate::config_watch::is_workspace_config_path(path) {
+        " openplanet-lsp config · workspace "
+    } else if crate::config_watch::is_user_config_path(path) {
+        " openplanet-lsp config · global "
+    } else {
+        " openplanet-lsp config "
+    }
+}
+
 /// `[]` is distinct from unset for these keys (`LspConfig` treats `Some([])`
 /// differently from a missing key).
 fn persist_empty_array(key: &str) -> bool {
@@ -442,6 +452,57 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
         format!("{:?}", terminal.backend())
+    }
+
+    #[test]
+    fn header_labels_workspace_and_global_paths() {
+        let dir = std::env::temp_dir().join(format!("opl-config-tui-{}-scope", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ws = dir.join(".openplanet-lsp.toml");
+        let mut app = ConfigApp::new(UserConfigFile::load(&ws).unwrap());
+        let out = frame_size(&mut app, 80, 24);
+        assert!(
+            out.contains("workspace"),
+            "workspace file should be labeled in the header:\n{out}"
+        );
+        assert!(
+            !out.contains("global"),
+            "workspace file must not also say global:\n{out}"
+        );
+
+        let global = dir.join(".config/openplanet-lsp/config.toml");
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        let mut app = ConfigApp::new(UserConfigFile::load(&global).unwrap());
+        let out = frame_size(&mut app, 80, 24);
+        assert!(
+            out.contains("global"),
+            "user-global file should be labeled in the header:\n{out}"
+        );
+        assert!(
+            !out.contains("workspace"),
+            "global file must not also say workspace:\n{out}"
+        );
+    }
+
+    #[test]
+    fn header_custom_path_has_no_scope_label() {
+        let dir =
+            std::env::temp_dir().join(format!("opl-config-tui-{}-custom", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("alt.toml");
+        let mut app = ConfigApp::new(UserConfigFile::load(&path).unwrap());
+        let out = frame_size(&mut app, 80, 24);
+        assert!(
+            out.contains("openplanet-lsp config"),
+            "title missing:\n{out}"
+        );
+        assert!(
+            !out.contains("workspace") && !out.contains("global"),
+            "--path custom file should not claim workspace/global:\n{out}"
+        );
     }
 
     #[test]

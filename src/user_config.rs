@@ -1,4 +1,4 @@
-//! User-global config file (`~/.config/openplanet-lsp/config.toml`).
+//! User-global and workspace config files (`config.toml` / `.openplanet-lsp.toml`).
 //!
 //! Load / mutate / save the document the `config` TUI edits. Writes are
 //! atomic (temp + rename) and preserve comments / unknown keys.
@@ -16,6 +16,12 @@ pub fn user_config_path() -> Option<PathBuf> {
             .join("openplanet-lsp")
             .join("config.toml")
     })
+}
+
+/// `<plugin-root>/.openplanet-lsp.toml` — workspace file next to `info.toml`.
+pub fn workspace_config_path(root: impl AsRef<Path>) -> PathBuf {
+    root.as_ref()
+        .join(crate::config_watch::WORKSPACE_CONFIG_FILE)
 }
 
 /// In-memory view of the user config TOML document.
@@ -697,6 +703,18 @@ mod tests {
             "[A, B] | [C]"
         );
         assert!(parse_nested_list("not-brackets").is_err());
+    }
+
+    #[test]
+    fn workspace_config_path_is_dotfile_under_root() {
+        assert_eq!(
+            workspace_config_path(Path::new("/plugin")),
+            PathBuf::from("/plugin/.openplanet-lsp.toml")
+        );
+        assert_eq!(
+            workspace_config_path(Path::new("rel/root")),
+            PathBuf::from("rel/root/.openplanet-lsp.toml")
+        );
     }
 
     #[test]
