@@ -2,6 +2,7 @@ pub mod analysis;
 pub mod analysis_snapshot;
 pub mod cli;
 pub mod config;
+pub mod config_watch;
 pub mod entrypoint;
 pub mod lexer;
 pub mod parser;

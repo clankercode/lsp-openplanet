@@ -14,6 +14,11 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **Config files reload live** — editing `$HOME/.config/openplanet-lsp/config.toml`
+  or a workspace `.openplanet-lsp.toml` retriggers `check --watch` and makes a
+  running language server re-load the config ladder, rebuild snapshots, and
+  republish diagnostics. Invalid TOML is ignored (last-good settings stay,
+  with a warning) instead of crashing the session.
 - **Type-DB freshness is a visible, managed pipeline** (GH #59) — every
   `check` run now states which Openplanet type database it judged the code
   against (`type db: op=1.29.5 (next, Public, 1234ad9e)  game op=…  mp=…`),
