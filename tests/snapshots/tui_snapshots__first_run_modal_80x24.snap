@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: terminal.backend()
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"      ┌ First run — bare-TTY default ────────────────────────────────────┐      "
+"      │                                                                  │      "
+"      │Running openplanet-lsp in a plugin directory on a terminal        │      "
+"      │starts the watch TUI — not the language server.                   │      "
+"      │                                                                  │      "
+"      │Editors that pipe stdio still get the language server.            │      "
+"      │                                                                  │      "
+"      │What should a bare launch do?                                     │      "
+"      │  [t] TUI (default) — watch TUI                                   │      "
+"      │  [l] LSP — language server on stdio                              │      "
+"      │                                                                  │      "
+"      │  Enter = TUI   Esc = keep TUI, don't ask again                   │      "
+"      │  Ctrl-C = quit, ask again next launch                            │      "
+"      │                                                                  │      "
+"      │Change later: openplanet-lsp config (default_mode)                │      "
+"      └──────────────────────────────────────────────────────────────────┘      "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "

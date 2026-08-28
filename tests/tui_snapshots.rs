@@ -52,3 +52,13 @@ fn snapshot_relaxed_80x24() {
     let terminal = draw_app(&mut app);
     insta::assert_snapshot!("relaxed_80x24", terminal.backend());
 }
+
+/// #19: the one-time first-run modal shown before the watch TUI on a
+/// bare TTY with no explicit `default_mode` preference.
+#[test]
+fn snapshot_first_run_modal_80x24() {
+    let backend = TestBackend::new(WIDTH, HEIGHT);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    openplanet_lsp::tui::first_run::render_once(&mut terminal).expect("render");
+    insta::assert_snapshot!("first_run_modal_80x24", terminal.backend());
+}
