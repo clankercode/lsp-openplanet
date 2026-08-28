@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{self, CheckOptions};
 use crate::config::{DefaultMode, UserPrefs};
+use crate::tui::first_run::{self, Choice as FirstRunChoice};
 use crate::workspace::project;
 
 /// Result of deciding what bare / default invocation should do.
@@ -82,6 +83,39 @@ pub fn run_watch_path(path: PathBuf) -> i32 {
             2
         }
     }
+}
+
+/// Bare-TTY watch launch with the one-time first-run modal (#19).
+///
+/// Shows the modal only when no explicit preference exists (see
+/// `first_run::needed`); persists the answer to the user-global config.
+/// Returns `None` when the user switched to LSP — the caller falls
+/// through to the language server for this launch.
+pub fn run_bare_watch(path: PathBuf) -> Option<i32> {
+    let user_cfg = crate::user_config::user_config_path();
+    let workspace_cfg = crate::user_config::workspace_config_path(&path);
+    if first_run::needed(user_cfg.as_deref(), Some(&workspace_cfg)) {
+        match first_run::run_real() {
+            Ok(choice) => {
+                if choice == FirstRunChoice::Aborted {
+                    return Some(130);
+                }
+                match user_cfg.as_deref() {
+                    None => eprintln!("warning: cannot save first-run choice: $HOME is not set"),
+                    Some(cfg) => {
+                        if let Err(err) = first_run::record(choice, Some(cfg)) {
+                            eprintln!("warning: could not save first-run choice: {err}");
+                        }
+                    }
+                }
+                if choice == FirstRunChoice::SwitchLsp {
+                    return None;
+                }
+            }
+            Err(err) => eprintln!("warning: first-run prompt failed: {err}"),
+        }
+    }
+    Some(run_watch_path(path))
 }
 
 #[cfg(test)]

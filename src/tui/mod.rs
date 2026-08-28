@@ -7,6 +7,7 @@
 
 mod app;
 pub mod config;
+pub mod first_run;
 mod mock;
 mod types;
 mod ui;

@@ -346,7 +346,7 @@ fn bare_launch_exit() -> Option<i32> {
     let prefs = openplanet_lsp::config::UserPrefs::load(Some(&cwd));
     match entrypoint::decide_bare_launch(entrypoint::stdin_is_tty(), &cwd, &prefs) {
         entrypoint::LaunchAction::Lsp => None,
-        entrypoint::LaunchAction::WatchTui { path } => Some(entrypoint::run_watch_path(path)),
+        entrypoint::LaunchAction::WatchTui { path } => entrypoint::run_bare_watch(path),
         entrypoint::LaunchAction::HelpNoPlugin => {
             eprint!("{}", entrypoint::no_plugin_help_message());
             Some(2)
