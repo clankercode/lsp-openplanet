@@ -1234,6 +1234,108 @@ fn check_command_issue_repro_37d_variable_shadow_warns() {
     assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
 }
 
+/// todo-cover-cases-next.txt (2026-08-25, tm-dips-plus-plus): a second
+/// local of the same name in the SAME function scope is a game error
+/// (`'cp0' is already declared`). The failed redeclaration must leave the
+/// first binding's type in scope, so a later member access is checked
+/// against that first type (cascade). Inner-block shadowing stays the
+/// GH #37d warning, not this error.
+///
+#[test]
+fn check_command_issue_repro_dup_local_same_scope_diagnoses() {
+    let (ok, stdout, _) = run_issue_repro("dup-local-same-scope");
+    let already: Vec<&str> = [
+        "Main.as:20",
+        "Main.as:26",
+        "Main.as:31",
+        "Main.as:36",
+        "Main.as:41",
+        "Main.as:46",
+        "Main.as:51",
+        "Main.as:55",
+        "Main.as:59",
+        "Main.as:63",
+        "Main.as:67",
+        "Main.as:71",
+        "Main.as:75",
+        "Main.as:80",
+    ]
+    .into_iter()
+    .collect();
+    for line in &already {
+        let hit = stdout
+            .lines()
+            .any(|l| l.contains(line) && l.contains("already declared") && l.contains("error"));
+        assert!(
+            hit,
+            "expected `already declared` error on {line}; stdout={stdout:?}"
+        );
+    }
+    let cascade = stdout.lines().any(|l| {
+        l.contains("Main.as:21")
+            && (l.contains("index") && (l.contains("CpSpec") || l.contains("member")))
+    });
+    assert!(
+        cascade,
+        "failed redecl must keep first type: cp0.index vs CpSpec; stdout={stdout:?}"
+    );
+    let shadow_as_redecl = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:86") && l.contains("already declared"));
+    assert!(
+        !shadow_as_redecl,
+        "inner-block shadow must not be `already declared`; stdout={stdout:?}"
+    );
+    let shadow_warn = stdout
+        .lines()
+        .any(|l| l.contains("Main.as:86") && l.contains("hides another variable"));
+    assert!(
+        shadow_warn,
+        "inner-block shadow must stay the GH #37d warning; stdout={stdout:?}"
+    );
+    assert!(!ok, "redecl errors must fail the check; stdout={stdout:?}");
+}
+
+/// todo-cover-cases-next.txt (2026-08-24, tm-tournament-station): `out` /
+/// `in` / `inout` are reserved as identifiers. Game wording:
+/// `Instead found reserved keyword 'out'`. A generic parse error that does
+/// not name the reserved keyword is not enough — the diagnostic must say
+/// the name is reserved so the first signal is not a reload cycle.
+///
+#[test]
+fn check_command_issue_repro_reserved_keyword_local_diagnoses() {
+    let (_, stdout, _) = run_issue_repro("reserved-keyword-local");
+    for (line, word) in [
+        ("Main.as:6", "out"),
+        ("Main.as:11", "in"),
+        ("Main.as:16", "inout"),
+        ("Main.as:21", "out"),
+        ("Main.as:25", "out"),
+        ("Main.as:29", "out"),
+        ("Main.as:30", "in"),
+        ("Main.as:31", "inout"),
+    ] {
+        let hit = stdout.lines().any(|l| {
+            l.contains(line)
+                && l.contains("error")
+                && l.to_ascii_lowercase().contains("reserved keyword")
+                && l.contains(word)
+        });
+        assert!(
+            hit,
+            "expected reserved-keyword error naming `{word}` on {line}; stdout={stdout:?}"
+        );
+    }
+    let legal_flagged = stdout.lines().any(|l| {
+        (l.contains("Main.as:35") || l.contains("Main.as:36") || l.contains("Main.as:37"))
+            && l.contains("reserved keyword")
+    });
+    assert!(
+        !legal_flagged,
+        "in/out/inout as parameter modifiers must stay legal; stdout={stdout:?}"
+    );
+}
+
 /// #37e: exact duplicate function → ERR (overloads stay silent).
 #[test]
 fn check_command_issue_repro_37e_duplicate_function_errors() {
@@ -1470,6 +1572,102 @@ fn check_command_issue_repro_58d_engine_namespace_fence_without_typedb() {
         flagged,
         "expected an error for Local::Nope with no typedb loaded; stdout={stdout:?}"
     );
+}
+
+/// todo-cover-cases-next.txt (2026-08-25): `Stats::Current()` from inside
+/// `namespace Tests` must diagnose. This was the TDD-breaking miss; it is
+/// already fixed (GH #58). `Tests` itself is an engine namespace and stays
+/// fenced — that is a different rule.
+#[test]
+fn check_command_stats_unknown_from_inside_tests_diagnoses() {
+    let root = make_temp_plugin("stats-from-tests");
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+namespace Stats {
+    int Existing() { return 1; }
+}
+namespace Tests {
+    class Context {}
+    void Probe(Tests::Context@ ctx) {
+        auto @x = Stats::ThisFunctionDoesNotExistAtAll();
+        int y = TotallyUndefinedGlobalFunction(3);
+        Stats::Existing();
+    }
+}
+void Main() {}
+"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--unused")
+        .arg("ignore")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No matching symbol 'Stats::ThisFunctionDoesNotExistAtAll'"),
+        "Stats:: miss from inside Tests must diagnose; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("undefined identifier `TotallyUndefinedGlobalFunction`"),
+        "unqualified miss must still diagnose; stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Stats::Existing"),
+        "declared Stats::Existing must stay silent; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// todo-cover-cases-next.txt (2026-08-23): `check` on a plugin whose tree
+/// contains a nested plugin root (its own info.toml — research fixtures,
+/// .scratch copies) must not report that nested plugin's diagnostics.
+/// `ignore_paths` / `.gitignore` can hide them today; the desired default
+/// is to stop descending at a nested info.toml.
+#[test]
+fn check_command_skips_nested_plugin_roots() {
+    let root = make_temp_plugin("nested-parent");
+    fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+    fs::create_dir_all(root.join(".scratch/research/nested/src")).unwrap();
+    fs::write(
+        root.join(".scratch/research/nested/info.toml"),
+        "[meta]\nname = \"Nested Research\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".scratch/research/nested/src/Main.as"),
+        "void Broken() { MissingType@ x; }\nvoid Main() {}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--unused")
+        .arg("ignore")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("MissingType"),
+        "nested plugin diagnostics must not leak into the parent check; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("0 diagnostics"),
+        "parent-only tree must be clean; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 /// GH #58 trigger (c): the namespace is declared only in a RESOLVED

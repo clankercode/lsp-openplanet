@@ -4,6 +4,13 @@ use std::path::{Path, PathBuf};
 /// Directory never treated as plugin source, whatever the ignore rules say.
 const GIT_DIR: &str = ".git";
 
+/// A directory under the plugin root that is itself a plugin (has its
+/// own `info.toml`). Discovery must not pull those `.as` files into
+/// this module — the game compiles each plugin separately.
+fn is_nested_plugin_dir(path: &Path) -> bool {
+    path.join("info.toml").is_file()
+}
+
 /// Default for `honor_gitignore` (GH #60). Enabled: other language tooling
 /// (rust-analyzer, gopls, tsc) honors gitignore, and a file the author
 /// believes is excluded should not produce squiggles. The single source of
@@ -160,6 +167,12 @@ fn discover_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
             continue;
         }
         if path.is_dir() {
+            // A descendant info.toml is a different plugin (research
+            // fixtures, nested copies). The game does not compile those
+            // sources into this module.
+            if is_nested_plugin_dir(&path) {
+                continue;
+            }
             discover_recursive(&path, files);
         } else if path.extension().is_some_and(|ext| ext == "as") {
             files.push(path);
@@ -204,7 +217,17 @@ fn walk_as_files(root: &Path, apply_git_ignores: bool, files: &mut Vec<PathBuf>)
         .ignore(false)
         .hidden(false)
         .follow_links(true)
-        .filter_entry(|entry| entry.file_name() != GIT_DIR)
+        .filter_entry(|entry| {
+            if entry.file_name() == GIT_DIR {
+                return false;
+            }
+            // Skip nested plugin roots (their own info.toml). Depth 0 is
+            // this plugin; only descendants are other plugins.
+            if entry.depth() > 0 && is_nested_plugin_dir(entry.path()) {
+                return false;
+            }
+            true
+        })
         .build();
     for entry in walker.flatten() {
         // The walker already resolved the file type (following links, since
@@ -342,6 +365,33 @@ mod tests {
                 "src/deep/Nested.as".to_string(),
             ]
         );
+    }
+
+    /// A descendant directory with its own `info.toml` is a different
+    /// plugin. Both walks must skip it so nested research fixtures do
+    /// not leak into the parent check.
+    #[test]
+    fn nested_plugin_root_is_not_discovered_on_either_walk() {
+        let root = temp_tree("nested-plugin");
+        write(&root, "src/Main.as", "void Main() {}\n");
+        write(
+            &root,
+            ".scratch/research/nested/info.toml",
+            "[meta]\nname = \"Nested\"\nversion = \"0.1.0\"\n",
+        );
+        write(
+            &root,
+            ".scratch/research/nested/src/Main.as",
+            "void Broken() { MissingType@ x; }\n",
+        );
+
+        for honor_gitignore in [true, false] {
+            assert_eq!(
+                discovered(&root, DiscoveryOptions { honor_gitignore }),
+                vec!["src/Main.as".to_string()],
+                "honor_gitignore = {honor_gitignore}"
+            );
+        }
     }
 
     /// `.git` internals are not plugin source on either walk.

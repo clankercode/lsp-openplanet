@@ -26,6 +26,11 @@ pub enum ParseErrorKind {
     },
     UnexpectedToken(TokenKind),
     UnexpectedEof,
+    /// `in` / `out` / `inout` used as an identifier. Game wording
+    /// (todo-cover-cases 2026-08-24): `Instead found reserved keyword 'out'`.
+    ReservedKeyword {
+        word: &'static str,
+    },
     Custom(String),
 }
 
@@ -51,6 +56,9 @@ impl std::fmt::Display for ParseError {
                 write!(f, "unexpected token {:?}", kind)
             }
             ParseErrorKind::UnexpectedEof => write!(f, "unexpected end of file"),
+            ParseErrorKind::ReservedKeyword { word } => {
+                write!(f, "Instead found reserved keyword '{word}'")
+            }
             ParseErrorKind::Custom(msg) => write!(f, "{}", msg),
         }
     }

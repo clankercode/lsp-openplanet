@@ -121,6 +121,14 @@ pub enum TypeDiagnosticKind {
     VariableShadow {
         name: String,
     },
+    /// Game parity (todo-cover-cases 2026-08-25): a second local of the
+    /// same name in the SAME function frame. Distinct from
+    /// [`Self::VariableShadow`] (inner block). Game wording:
+    /// `'cp0' is already declared`. The first binding stays in scope so
+    /// later member access uses the original type.
+    AlreadyDeclared {
+        name: String,
+    },
     /// Game parity (GH #37): statement(s) after a terminating statement
     /// (return/break/continue, or an if-else where both branches terminate)
     /// inside the same block. The game warns `Unreachable code` once per
@@ -321,6 +329,9 @@ impl TypeDiagnostic {
                 "Variable '{}' hides another variable of same name in outer scope",
                 name
             ),
+            TypeDiagnosticKind::AlreadyDeclared { name } => {
+                format!("'{name}' is already declared")
+            }
             TypeDiagnosticKind::UnreachableCode => "Unreachable code".to_string(),
             TypeDiagnosticKind::NoImplicitConversion { from, to } => {
                 format!("Can't implicitly convert from '{from}' to '{to}'")
@@ -1066,12 +1077,25 @@ impl<'a> Checker<'a> {
     }
 
     fn define_local(&mut self, name: String, ty: TypeRepr, span: Span) {
+        // Same-frame redecl (todo-cover-cases 2026-08-25): game
+        // `'name' is already declared`. Do not replace the first
+        // binding — later member access must keep the original type.
+        if self
+            .frames
+            .last()
+            .is_some_and(|f| f.locals.iter().any(|l| l.name == name))
+        {
+            self.diagnostics.push(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::AlreadyDeclared { name },
+            });
+            return;
+        }
         // GH #37: local-vs-local shadowing inside the SAME function —
         // warn when an enclosing frame of this function already holds the
         // name (params live in the outermost function frame, so a local
-        // shadowing a param warns too). Same-frame redefinition is a
-        // different (error-class) problem and is left alone here; class
-        // members and globals never participate.
+        // shadowing a param warns too). Class members and globals never
+        // participate.
         let start = self.function_frame_start();
         if self.frames.len() > start + 1
             && self.frames[start..self.frames.len() - 1]
@@ -8939,6 +8963,131 @@ class C {
         let src = "void f() { if (true) { int x = 1; x++; } else { int x = 2; x++; } }";
         let diags = check(src);
         assert!(shadows(&diags).is_empty(), "got {:?}", diags);
+    }
+
+    /// Same-scope redecl (todo-cover-cases 2026-08-25): game
+    /// `'name' is already declared`. Distinct from GH #37d shadowing
+    /// (inner block). Open — the checker is silent today.
+    fn already_declared(diags: &[TypeDiagnostic]) -> Vec<String> {
+        diags
+            .iter()
+            .filter(|d| d.message().contains("already declared"))
+            .map(|d| d.message())
+            .collect()
+    }
+
+    #[test]
+    fn duplicate_local_same_type_errors() {
+        let diags = check("void f() { int a = 1; int a = 2; }");
+        let hits = already_declared(&diags);
+        assert_eq!(hits.len(), 1, "got {diags:?}");
+        assert!(hits[0].contains("'a'"), "game names the binding: {hits:?}");
+    }
+
+    #[test]
+    fn duplicate_local_different_type_errors() {
+        let diags = check("void f() { int b = 1; string b = \"x\"; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_typed_then_auto_errors() {
+        let diags = check("void f() { int c = 1; auto c = 2; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_auto_then_typed_errors() {
+        let diags = check("void f() { auto d = 1; int d = 2; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_const_then_mut_errors() {
+        let diags = check("void f() { const int e = 1; int e = 2; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_handle_then_value_errors() {
+        let diags = check("class T {} void f() { T@ f = T(); T f; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_param_then_local_errors() {
+        let diags = check("void f(int g) { int g = 2; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_ref_in_param_then_local_errors() {
+        let diags = check("void f(int &in h) { int h = 2; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_ref_out_param_then_local_errors() {
+        let diags = check("void f(int &out i) { int i = 2; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_handle_in_param_then_local_errors() {
+        let diags = check("class T {} void f(T@ &in j) { T@ j; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_multi_declarator_errors() {
+        let diags = check("void f() { int k = 1, k = 2; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_handle_out_param_then_local_errors() {
+        let diags = check("class T {} void f(T@ &out p) { T@ p; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    #[test]
+    fn duplicate_local_const_handle_then_handle_errors() {
+        let diags = check("class T {} void f() { const T@ q = T(); T@ q; }");
+        assert_eq!(already_declared(&diags).len(), 1, "got {diags:?}");
+    }
+
+    /// Motivating cascade: after `auto @cp0 = Zone()` fails as a redecl,
+    /// `cp0` keeps `CpSpec@` (no `index`).
+    #[test]
+    fn duplicate_local_keeps_first_type_for_member_access() {
+        let src = r#"
+class CpSpec { int dummy; }
+class Zone { int index; }
+void f() {
+    CpSpec@ cp0 = CpSpec();
+    auto @cp0 = Zone();
+    int n = cp0.index;
+}
+"#;
+        let diags = check(src);
+        assert_eq!(
+            already_declared(&diags).len(),
+            1,
+            "redecl must error, got {diags:?}"
+        );
+        let member_miss = diags.iter().any(|d| {
+            matches!(
+                &d.kind,
+                TypeDiagnosticKind::UndefinedMember {
+                    object_type,
+                    member
+                } if object_type.contains("CpSpec") && member == "index"
+            )
+        });
+        assert!(
+            member_miss,
+            "cp0.index must resolve against the first type CpSpec; got {diags:?}"
+        );
     }
 
     /// Game probe 2026-08-17: statement after `return` → WARN once at the

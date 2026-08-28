@@ -161,6 +161,14 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::Ident) {
             let tok = self.advance();
             Ok(Ident { span: tok.span })
+        } else if let Some(word) = reserved_param_keyword(self.peek()) {
+            // Consume so recovery does not re-report the same token.
+            let span = self.current_span();
+            self.advance();
+            Err(ParseError {
+                span,
+                kind: ParseErrorKind::ReservedKeyword { word },
+            })
         } else {
             let err = ParseError {
                 span: self.current_span(),
@@ -2972,12 +2980,27 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // After the type, we should see an identifier for it to be a var decl
-        self.peek_ahead(i) == TokenKind::Ident
+        // After the type, we should see an identifier — or a reserved
+        // parameter-direction keyword used as a name (`string out;`), so
+        // the var-decl path can emit ReservedKeyword instead of treating
+        // the statement as a broken expression.
+        let after = self.peek_ahead(i);
+        after == TokenKind::Ident || reserved_param_keyword(after).is_some()
     }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// `in` / `out` / `inout` are parameter-direction keywords and cannot be
+/// identifiers (game: `Instead found reserved keyword 'out'`).
+fn reserved_param_keyword(kind: TokenKind) -> Option<&'static str> {
+    match kind {
+        TokenKind::KwIn => Some("in"),
+        TokenKind::KwOut => Some("out"),
+        TokenKind::KwInout => Some("inout"),
+        _ => None,
+    }
+}
 
 /// Check if a TokenKind is a primitive type keyword.
 fn is_primitive_keyword(kind: TokenKind) -> bool {
@@ -3058,6 +3081,81 @@ mod tests {
             matches!(&file.items[0], Item::Class(c) if c.is_shared),
             "expected shared class item, got {:?}",
             file.items
+        );
+    }
+
+    /// todo-cover-cases-next.txt (2026-08-24): `out` / `in` / `inout` as
+    /// identifiers must be diagnosed as reserved keywords (game:
+    /// `Instead found reserved keyword 'out'`). A generic
+    /// `expected LParen, found KwOut` is not enough.
+    fn has_reserved_keyword(errors: &[ParseError], word: &str) -> bool {
+        errors.iter().any(|e| {
+            let msg = e.to_string().to_ascii_lowercase();
+            msg.contains("reserved keyword") && msg.contains(word)
+        })
+    }
+
+    #[test]
+    fn reserved_keyword_out_as_local_is_error() {
+        let (_file, errors) = parse_file("void f() { string out; }");
+        assert!(
+            has_reserved_keyword(&errors, "out"),
+            "string out must name reserved keyword 'out', got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn reserved_keyword_in_as_local_is_error() {
+        let (_file, errors) = parse_file("void f() { int in; }");
+        assert!(
+            has_reserved_keyword(&errors, "in"),
+            "int in must name reserved keyword 'in', got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn reserved_keyword_inout_as_local_is_error() {
+        let (_file, errors) = parse_file("void f() { float inout; }");
+        assert!(
+            has_reserved_keyword(&errors, "inout"),
+            "float inout must name reserved keyword 'inout', got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn reserved_keyword_out_as_auto_local_is_error() {
+        let (_file, errors) = parse_file("void f() { auto out = \"x\"; }");
+        assert!(
+            has_reserved_keyword(&errors, "out"),
+            "auto out must name reserved keyword 'out', got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn reserved_keyword_out_as_handle_local_is_error() {
+        let (_file, errors) = parse_file("void f() { dictionary@ out; }");
+        assert!(
+            has_reserved_keyword(&errors, "out"),
+            "dictionary@ out must name reserved keyword 'out', got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn reserved_keyword_out_as_field_is_error() {
+        let (_file, errors) = parse_file("class C { string out; }");
+        assert!(
+            has_reserved_keyword(&errors, "out"),
+            "field named out must name reserved keyword 'out', got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn reserved_keyword_as_param_modifier_stays_legal() {
+        let (_file, errors) =
+            parse_file("void f(const string &in s, int &out n, float &inout x) {}");
+        assert!(
+            errors.is_empty(),
+            "in/out/inout as modifiers must parse cleanly, got {errors:?}"
         );
     }
 

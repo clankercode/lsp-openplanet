@@ -72,6 +72,8 @@ Record the game verdict in the fixture's gate-test doc comment.
 | `55-getonly-prop-assign` | todo-cover-cases (kinematic-ao) | `The property has no set accessor` ×2 on `iso4.tx` (Tools.as 242:16, 2026-08-22) | fixed — active |
 | `56-readonly-handle-rebind` | todo-cover-cases (kinematic-ao) | `Reference is read-only` on `ty =` value-assign (Scene.as 258:28, 2026-08-22) | fixed — active |
 | `53-define-flag` | #53 | `--define DEV` activates `#if DEV` branch (staged-compile parity) | fixed — active |
+| `dup-local-same-scope` | todo-cover-cases 2026-08-25 | `'cp0' is already declared` + cascade member type | fixed — active |
+| `reserved-keyword-local` | todo-cover-cases 2026-08-24 | `Instead found reserved keyword 'out'` (`in`/`inout` too) | fixed — active |
 
 GH #37 batch (game verdicts from the 2026-08-17 live probe):
 

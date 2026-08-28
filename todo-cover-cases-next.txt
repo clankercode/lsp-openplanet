@@ -286,3 +286,97 @@ Workaround / fix:
 The LSP today does not flag this. `openplanet-lsp check` on the same tree
 reported only the pre-existing fixture warnings and said nothing about the
 declaration, so the first signal was a full stage-and-reload cycle.
+
+## 2026-08-25, tm-dips-plus-plus
+
+### Case 1: duplicate local declaration shadowing an earlier one in the same scope
+Plugin source:
+    // both declarations are in the SAME function scope
+    Minigames::CpSpec@ cp0 = Minigames::CpSpec();     // first declaration
+    s.checkpoints.InsertLast(cp0);
+    // ... later, same scope ...
+    auto @cp0 = rt.FirstZoneAt(pos, Minigames::ZoneRole::Checkpoint);   // redeclaration
+    if (cp0 is null || cp0.index != 0) throw("cp0");
+
+Compiler reports (game-side):
+    Minigames/Runtime_Test.as (177, 15) :  ERR : 'cp0' is already declared
+    Minigames/Runtime_Test.as (178, 31) :  ERR : 'index' is not a member of 'Minigames::CpSpec'
+    Minigames/Runtime_Test.as (179, 15) :  ERR : 'cp1' is already declared
+    Minigames/Runtime_Test.as (180, 31) :  ERR : 'index' is not a member of 'Minigames::CpSpec'
+
+Workaround / fix:
+    Rename the second binding (cpZ0 / cpZ1). Note the member errors are a
+    CASCADE of the redeclaration, not independent: because `auto @cp0 = ...`
+    fails, cp0 keeps its first type (CpSpec@, which has no `index`) instead of
+    becoming Zone@ (which does, Runtime.as:397). So fixing the redeclaration
+    fixes all four.
+
+The LSP today does not flag this. `openplanet-lsp check` on the same tree
+reported 369 diagnostics and not one of them was this; the file had never been
+through the game-side compiler, so a full stage-and-reload was the first signal.
+Worth covering both halves: the redeclaration itself, and the fact that a failed
+redeclaration leaves the original type in scope (so member-access diagnostics
+downstream should resolve against the FIRST declaration's type).
+
+## 2026-08-25, tm-dips-plus-plus
+
+### Case 1: Undefined namespace-qualified function call is not flagged
+Plugin source:
+    namespace Tests {
+        [Test]
+        void Probe(Tests::Context@ ctx) {
+            auto @x = Stats::ThisFunctionDoesNotExistAtAll();   // NOT flagged
+            int y = TotallyUndefinedGlobalFunction(3);          // correctly flagged
+        }
+    }
+
+Compiler reports (game-side):
+    (expected) a "no matching symbol" / undefined function error for the Stats:: call
+
+openplanet-lsp reports:
+    src/LspProbe_Test.as:6:17: error: undefined identifier `TotallyUndefinedGlobalFunction`
+    (nothing at all for the `Stats::ThisFunctionDoesNotExistAtAll()` call on line 4)
+
+Workaround / fix:
+    None available statically; the missing symbol only surfaces at game-side compile.
+
+Impact: this makes red-before-green TDD impossible to observe locally when the new
+interface being introduced lives inside a namespace -- the failing test compiles clean
+under `openplanet-lsp check` and only fails once the plugin is loaded in-game. Undefined
+identifiers at global scope ARE caught, so the gap is specifically namespace resolution.
+
+The LSP today does not flag this.
+
+### Case 2: undefined namespace-qualified function call is not flagged
+Plugin source:
+    namespace Tests {
+        void Probe() {
+            Stats::ThisFunctionDoesNotExistAtAll();   // NOT flagged
+            TotallyUndefinedGlobalFunction(3);        // correctly flagged
+        }
+    }
+
+Compiler reports (game-side):
+    PlayerStats/Stats_Test.as (258, 26) :  ERR : No matching symbol 'Stats::Current'
+    PlayerStats/Stats_Test.as (271, 13) :  ERR : No matching symbol 'allThree'
+    ...18 such errors in one file, none of which openplanet-lsp reported.
+
+Workaround / fix:
+    None available statically today -- a full stage-and-reload was the only way
+    to see them.
+
+The LSP today does not flag this. Unqualified undefined identifiers ARE caught
+("undefined identifier"), but any call qualified with a namespace (`Foo::Bar()`)
+is silently accepted even when the namespace exists and the member does not.
+
+Impact is larger than it looks: it also suppresses the whole CASCADE. Nine of
+the 18 errors above were `auto` locals whose initialisers were the undefined
+calls -- with the initialiser unflagged, every later use of those locals was
+unflagged too. So a test file calling a function that does not exist can be
+100% green under `openplanet-lsp check`.
+
+This breaks TDD in this workspace specifically: you cannot observe a local RED
+for a not-yet-written namespaced function, which is the single most common
+red-before-green shape. Confirmed 2026-08-25 in tm-dips-plus-plus while writing
+Stats::Current() test-first -- the LSP was green on a suite calling it before it
+existed; the game-side compiler produced 18 errors.
