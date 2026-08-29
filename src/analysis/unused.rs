@@ -737,7 +737,8 @@ mod tests {
     fn configured_callback_exempts_the_function_and_its_params() {
         // The issue's own case: MLHook dispatches `OnCounterUpdate` by
         // name reflection, so nothing in the plugin calls it.
-        let src = "void OnCounterUpdate(const string &in name, int val) {}\nvoid Main() {}\n";
+        let src =
+            "void OnCounterUpdate(const string &in name, int val) { print(\"x\"); }\nvoid Main() {}\n";
         assert_eq!(
             report_with_callbacks(src, &[]),
             vec!["OnCounterUpdate"],
@@ -769,7 +770,11 @@ mod tests {
 
     #[test]
     fn non_matching_callback_patterns_still_warn() {
-        let src = "void OnCounterUpdate(int a) {}\nvoid Main() {}\n";
+        // `ConfiguredSentinel` is the effectiveness control: it MUST be
+        // exempted by the list this test configures. Without it the whole
+        // loop passes even if the configured list is ignored outright,
+        // because every case only asserts that something is still warned.
+        let src = "void OnCounterUpdate(int a) {}\nvoid ConfiguredSentinel(int value) {}\nvoid Main() {}\n";
         for pattern in [
             "OnCounter",       // literal prefix is not a wildcard
             "Update",          // literal suffix is not a wildcard
@@ -779,9 +784,10 @@ mod tests {
             "oncounterupdate", // case-sensitive
         ] {
             assert_eq!(
-                report_with_callbacks(src, &[pattern]),
+                report_with_callbacks(src, &[pattern, "ConfiguredSentinel"]),
                 vec!["OnCounterUpdate"],
-                "pattern {pattern:?} must NOT exempt OnCounterUpdate"
+                "pattern {pattern:?} must NOT exempt OnCounterUpdate, \
+                 while the configured sentinel must be exempt"
             );
         }
     }
@@ -817,7 +823,32 @@ mod tests {
     #[test]
     fn an_empty_callback_list_is_a_no_op() {
         let src = "void Dead(int a) {}\nvoid Main() {}\n";
-        assert_eq!(report_with_callbacks(src, &[]), vec!["Dead"]);
+        // Asserting `["Dead"]` alone would pass whether or not the empty
+        // list was consulted. Pin it to a genuinely UNCONFIGURED run, and
+        // keep the literal as a positive control that the analysis ran at
+        // all and applied no exemption.
+        let unconfigured = names(&unused_declarations(
+            &snap_of(&[("a.as", src)]),
+            None,
+            &StdHashSet::new(),
+        ));
+        let empty_config = report_with_callbacks(src, &[]);
+        assert_eq!(empty_config, unconfigured, "an empty list must be a no-op");
+        assert_eq!(
+            empty_config,
+            vec!["Dead"],
+            "positive control: analysis ran and no configured exemption was applied"
+        );
+        // Effectiveness control. The two assertions above are satisfied by a
+        // build that ignores `unused_callbacks` outright, because an empty
+        // list and an absent one are the same input. This one is not: it
+        // proves the configured path is live in this very test, so "no-op"
+        // means "because the list is empty", not "because it is unread".
+        assert_eq!(
+            report_with_callbacks(src, &["Dead"]),
+            Vec::<String>::new(),
+            "effectiveness control: a NON-empty list on the same source must exempt"
+        );
     }
 
     #[test]
@@ -825,21 +856,23 @@ mod tests {
         // Decision 5: the patterns match free functions at file top level
         // — the same population the built-in list applies to. MLHook
         // dispatches free functions.
-        let src = "class C {\n    int keep;\n    void OnCounterUpdate(int a) {}\n}\nvoid Main() { C c; c.keep = 1; }\n";
-        let report = report_with_callbacks(src, &["OnCounterUpdate", "*"]);
-        assert!(
-            report.contains(&"C::OnCounterUpdate".to_string()),
-            "class methods stay in scope: {report:?}"
+        let src = "class C {\n    int keep;\n    void OnCounterUpdate(int a) {}\n}\nvoid ConfiguredSentinel(int value) {}\nvoid Main() { C c; c.keep = 1; }\n";
+        let report = report_with_callbacks(src, &["OnCounterUpdate", "*", "ConfiguredSentinel"]);
+        assert_eq!(
+            report,
+            vec!["C::OnCounterUpdate"],
+            "class method must warn while the configured free-function sentinel is exempt"
         );
     }
 
     #[test]
     fn configured_callbacks_do_not_exempt_namespaced_functions() {
-        let src = "namespace N {\n    void OnCounterUpdate(int a) {}\n}\nvoid Main() {}\n";
-        let report = report_with_callbacks(src, &["OnCounterUpdate", "*"]);
-        assert!(
-            report.contains(&"N::OnCounterUpdate".to_string()),
-            "namespaced functions stay in scope: {report:?}"
+        let src = "namespace N {\n    void OnCounterUpdate(int a) {}\n}\nvoid ConfiguredSentinel(int value) {}\nvoid Main() {}\n";
+        let report = report_with_callbacks(src, &["OnCounterUpdate", "*", "ConfiguredSentinel"]);
+        assert_eq!(
+            report,
+            vec!["N::OnCounterUpdate"],
+            "namespaced function must warn while the configured free-function sentinel is exempt"
         );
     }
 

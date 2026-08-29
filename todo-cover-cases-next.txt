@@ -380,3 +380,20 @@ for a not-yet-written namespaced function, which is the single most common
 red-before-green shape. Confirmed 2026-08-25 in tm-dips-plus-plus while writing
 Stats::Current() test-first -- the LSP was green on a suite calling it before it
 existed; the game-side compiler produced 18 errors.
+
+## 2026-08-30, tm-editor-plus-plus
+
+### Case: string += int is illegal game-side
+Plugin source:
+    string s = "";
+    int n = 5;
+    s += n;
+
+Compiler reports (game-side):
+    MacroblockTerrain.as (468, 17) :  ERR : Illegal operation on 'string'
+
+Workaround / fix:
+    s += tostring(n); (or s += "" + n). String opAddAssign only accepts string;
+    concat via opAdd(string, int) inside an expression is fine.
+
+The LSP today does not flag this.

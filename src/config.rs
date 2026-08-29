@@ -1980,6 +1980,17 @@ fn dependency_define_suffix(dep: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Private protocol between [`unused_callbacks_load_wiring_end_to_end`]
+    /// and its child test. Set only on the spawned `Command`, never with
+    /// `set_var`, so no sibling test can observe them (B032).
+    const UNUSED_CALLBACKS_LOAD_CHILD: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_CHILD";
+    const UNUSED_CALLBACKS_LOAD_ROOT: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_ROOT";
+    const UNUSED_CALLBACKS_LOAD_TOKEN: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_TOKEN";
+    /// Written into each scenario's fixture by the parent with a fresh token,
+    /// then read back by the child: proves the invocation is this harness's,
+    /// not a stale export.
+    const LOAD_HANDSHAKE_FILE: &str = ".b051-load-wiring-handshake";
+
     #[test]
     fn unused_level_parse_accepts_canonical_and_alias_variants() {
         for (input, want) in [
@@ -2826,6 +2837,8 @@ shortcut_match_enums = true
     /// GH #56: `unused_callbacks` precedence. Tested through the pure
     /// resolver rather than `load_with_parent` so the "user global" leg
     /// is a temp file — mutating $HOME in-process races the tests above.
+    /// The public `load` / `load_with_parent` wiring is covered separately
+    /// by [`unused_callbacks_load_wiring_end_to_end`], in a subprocess.
     #[test]
     fn unused_callbacks_workspace_overrides_user_global() {
         let tmp = std::env::temp_dir().join(format!("oplsp-uc-{}", std::process::id()));
@@ -2899,6 +2912,277 @@ shortcut_match_enums = true
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Public-seam coverage for the complete config-loading ladder: the
+    /// resolver tests above call `from_layers`, which cannot reach the leg
+    /// that turns `$HOME` into the user-global path. Each case runs in a
+    /// SUBPROCESS with a fake `HOME`, so the ladder is exercised end to end
+    /// without an in-process `set_var` racing a sibling test (B032).
+    ///
+    /// The child prints `[SCENARIO OK: <name>; TOKEN: <token>]` and the parent
+    /// requires the fresh token: `libtest --exact` exits 0 when the filter
+    /// matches NOTHING, so a renamed child, stale invocation, or unpropagated
+    /// env var would otherwise show green while asserting nothing at all.
+    #[test]
+    fn unused_callbacks_load_wiring_end_to_end() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-uc-load-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Scenario outcomes are collected rather than asserted in the loop, so
+        // a red scenario still reaches the cleanup below instead of leaving its
+        // fixture behind in a shared /tmp.
+        let mut failures: Vec<String> = Vec::new();
+        // Derived, not hardcoded: a module rename cannot silently turn this
+        // into a filter that matches no test. libtest names omit the crate
+        // segment that `module_path!` starts with, hence the split.
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_crate, rest)| rest);
+        let child_filter = format!("{module}::unused_callbacks_load_wiring_child");
+        // Each `RandomState` is independently and unpredictably keyed; hashing
+        // an empty input with two of them gives this parent a fresh 128-bit
+        // token without adding a test-only dependency to the crate.
+        let run_token = {
+            use std::hash::{BuildHasher, Hasher};
+
+            let first = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            let second = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            format!("{first:016x}{second:016x}")
+        };
+
+        // Reproduce the developer invocations that this subprocess protocol
+        // must make inert: `--include-ignored` with either the old exported
+        // variables and scenario-only fixture, or a fresh env token paired
+        // with a stale fixture token. Neither may reach the success marker.
+        for (stale_name, fixture_token) in [
+            ("scenario-only", None),
+            ("mismatched-token", Some("stale-token")),
+        ] {
+            let stale_case = tmp.join(stale_name);
+            let stale_home_config = stale_case.join("home/.config/openplanet-lsp");
+            std::fs::create_dir_all(&stale_home_config).unwrap();
+            std::fs::write(
+                stale_home_config.join("config.toml"),
+                "unused_callbacks = [\"FromUser\"]\n",
+            )
+            .unwrap();
+            let stale_handshake = fixture_token.map_or_else(
+                || "user-only".to_string(),
+                |token| format!("user-only\n{token}\n"),
+            );
+            std::fs::write(stale_case.join(LOAD_HANDSHAKE_FILE), stale_handshake).unwrap();
+            let mut stale_command = std::process::Command::new(std::env::current_exe().unwrap());
+            stale_command
+                .arg("--exact")
+                .arg(&child_filter)
+                .arg("--include-ignored")
+                .arg("--nocapture")
+                .arg("--test-threads=1")
+                .env("HOME", stale_case.join("home"))
+                .env_remove("USERPROFILE")
+                .env(UNUSED_CALLBACKS_LOAD_CHILD, "user-only")
+                .env(UNUSED_CALLBACKS_LOAD_ROOT, &stale_case);
+            if fixture_token.is_some() {
+                stale_command.env(UNUSED_CALLBACKS_LOAD_TOKEN, &run_token);
+            } else {
+                stale_command.env_remove(UNUSED_CALLBACKS_LOAD_TOKEN);
+            }
+            let stale_output = stale_command.output().unwrap();
+            let stale_stdout = String::from_utf8_lossy(&stale_output.stdout);
+            let stale_stderr = String::from_utf8_lossy(&stale_output.stderr);
+            if !stale_output.status.success() {
+                failures.push(format!(
+                    "stale-handshake control {stale_name} failed to exit cleanly:\n\
+                     stdout:\n{stale_stdout}\nstderr:\n{stale_stderr}"
+                ));
+            } else if stale_stdout.contains("[SCENARIO OK:") {
+                failures.push(format!(
+                    "stale-handshake control {stale_name} reached the child assertions:\n\
+                     stdout:\n{stale_stdout}\nstderr:\n{stale_stderr}"
+                ));
+            }
+        }
+
+        for scenario in ["user-only", "workspace", "parent-root", "malformed"] {
+            let case = tmp.join(scenario);
+            let home_config = case.join("home/.config/openplanet-lsp");
+            std::fs::create_dir_all(&home_config).unwrap();
+            std::fs::write(
+                home_config.join("config.toml"),
+                "unused_callbacks = [\"FromUser\"]\n",
+            )
+            .unwrap();
+
+            match scenario {
+                "workspace" => {
+                    std::fs::create_dir_all(case.join("workspace")).unwrap();
+                    std::fs::write(
+                        case.join("workspace/.openplanet-lsp.toml"),
+                        "unused_callbacks = [\"FromWorkspace\"]\n",
+                    )
+                    .unwrap();
+                }
+                "parent-root" => {
+                    for (dir, callback) in [("parent", "FromParent"), ("root", "FromRoot")] {
+                        std::fs::create_dir_all(case.join(dir)).unwrap();
+                        std::fs::write(
+                            case.join(dir).join(".openplanet-lsp.toml"),
+                            format!("unused_callbacks = [\"{callback}\"]\n"),
+                        )
+                        .unwrap();
+                    }
+                    std::fs::create_dir_all(case.join("root-without-key")).unwrap();
+                }
+                "malformed" => {
+                    std::fs::create_dir_all(case.join("workspace")).unwrap();
+                    std::fs::write(
+                        case.join("workspace/.openplanet-lsp.toml"),
+                        "ignore_paths = [\"generated/**\"]\nunused_callbacks = 7\n",
+                    )
+                    .unwrap();
+                }
+                "user-only" => {}
+                _ => unreachable!(),
+            }
+            // Handshake: the child refuses to assert unless this file, written
+            // moments ago by this parent, names both the scenario and this
+            // parent's fresh token.
+            std::fs::write(
+                case.join(LOAD_HANDSHAKE_FILE),
+                format!("{scenario}\n{run_token}\n"),
+            )
+            .unwrap();
+
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(&child_filter)
+                // The child is `#[ignore]`d so an ordinary run cannot execute
+                // it. This deliberate invocation opts it back in; a developer
+                // can also do so with `--include-ignored`, hence the token.
+                .arg("--include-ignored")
+                // libtest captures stdout by default and prints it only for a
+                // FAILING test, so the success marker needs `--nocapture`.
+                .arg("--nocapture")
+                // One test runs; keep the child from claiming a thread per
+                // core on a machine shared with other builds.
+                .arg("--test-threads=1")
+                .env("HOME", case.join("home"))
+                .env_remove("USERPROFILE")
+                .env(UNUSED_CALLBACKS_LOAD_CHILD, scenario)
+                .env(UNUSED_CALLBACKS_LOAD_ROOT, &case)
+                .env(UNUSED_CALLBACKS_LOAD_TOKEN, &run_token)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Delimited on BOTH sides, so one scenario name can never satisfy
+            // another's marker by being a prefix of it — and so the check does
+            // not depend on where libtest puts the text. Under `--nocapture`
+            // it lands inline on the progress line, not on one of its own.
+            let ran = stdout.contains(&format!("[SCENARIO OK: {scenario}; TOKEN: {run_token}]"));
+            if !output.status.success() {
+                failures.push(format!(
+                    "scenario {scenario} failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                ));
+            } else if !ran {
+                failures.push(format!(
+                    "scenario {scenario} exited 0 without running its assertions \
+                     (filter {child_filter:?} matched no test, or the env did not \
+                     propagate):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                ));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    }
+
+    /// The child half of [`unused_callbacks_load_wiring_end_to_end`].
+    ///
+    /// `#[ignore]` is the load-bearing guard, not a convenience: without it an
+    /// ordinary `cargo test` runs this in the SHARED lib-test process, and a
+    /// developer who happens to export both protocol variables gets an
+    /// unlocked `$HOME` read racing every sibling test — precisely the
+    /// process-global env race B032 fixed. Ignored, it cannot run at all
+    /// unless something opts it in, which the parent above or a developer's
+    /// explicit `--include-ignored` run can do.
+    ///
+    /// The env protocol and the on-disk handshake remain as belt and braces
+    /// for the one case `#[ignore]` leaves open: a developer running
+    /// `--include-ignored` who ALSO has both variables exported.
+    #[test]
+    #[ignore = "child of unused_callbacks_load_wiring_end_to_end; that test spawns it"]
+    fn unused_callbacks_load_wiring_child() {
+        let (Ok(scenario), Some(root), Ok(token)) = (
+            std::env::var(UNUSED_CALLBACKS_LOAD_CHILD),
+            std::env::var_os(UNUSED_CALLBACKS_LOAD_ROOT),
+            std::env::var(UNUSED_CALLBACKS_LOAD_TOKEN),
+        ) else {
+            return;
+        };
+        let case = PathBuf::from(root);
+        // Require the scenario and the parent's fresh, unpredictable token;
+        // stale scenario-only fixtures and exported variables cannot opt in.
+        let expected_handshake = format!("{scenario}\n{token}\n");
+        if std::fs::read_to_string(case.join(LOAD_HANDSHAKE_FILE)).ok() != Some(expected_handshake)
+        {
+            return;
+        }
+
+        match scenario.as_str() {
+            "user-only" => {
+                assert_eq!(
+                    LspConfig::load(None, None).unused_callbacks,
+                    vec!["FromUser"],
+                    "the user-global file must reach the public `load` seam"
+                );
+            }
+            "workspace" => {
+                assert_eq!(
+                    LspConfig::load(Some(&case.join("workspace")), None).unused_callbacks,
+                    vec!["FromWorkspace"],
+                    "workspace must override user global (B017)"
+                );
+            }
+            "parent-root" => {
+                let parent = case.join("parent");
+                assert_eq!(
+                    LspConfig::load_with_parent(
+                        Some(&case.join("root-without-key")),
+                        Some(&parent),
+                        None,
+                    )
+                    .unused_callbacks,
+                    vec!["FromParent"],
+                    "parent must override user when the root omits the key"
+                );
+                assert_eq!(
+                    LspConfig::load_with_parent(Some(&case.join("root")), Some(&parent), None)
+                        .unused_callbacks,
+                    vec!["FromRoot"],
+                    "root must override parent"
+                );
+            }
+            "malformed" => {
+                let config = LspConfig::load(Some(&case.join("workspace")), None);
+                assert_eq!(
+                    config.unused_callbacks,
+                    vec!["FromUser"],
+                    "malformed workspace value must fall through to user"
+                );
+                assert_eq!(
+                    config.ignore_paths,
+                    Some(vec![PathBuf::from("generated/**")]),
+                    "malformed unused_callbacks must not discard a sibling key"
+                );
+            }
+            other => panic!("unknown child scenario: {other}"),
+        }
+        println!("[SCENARIO OK: {scenario}; TOKEN: {token}]");
     }
 
     /// Malformed values are ignored, never panic, and never poison the
@@ -3583,10 +3867,12 @@ shortcut_match_enums = true
     }
 
     // NOTE: the user-global layer ($HOME/.config/openplanet-lsp/config.toml)
-    // is deliberately NOT unit-tested here — mutating $HOME in-process races
-    // with `test_game_json_derivation_uses_variant_folder` above (lib tests
-    // share one process). It's covered end-to-end by the subprocess tests in
-    // tests/cli_check_tests.rs, which own their environment.
+    // is never exercised by mutating $HOME IN-PROCESS — that races
+    // `test_game_json_derivation_uses_variant_folder` above (lib tests share
+    // one process). It is covered end-to-end by the subprocess tests in
+    // tests/cli_check_tests.rs, which own their environment, and by
+    // `unused_callbacks_load_wiring_end_to_end` above, which spawns this
+    // same test binary with a fake HOME rather than editing its own.
 
     // ---------------------------------------------------------------------
     // B017: ONE ladder — init options > CLI flag > per-root workspace config
