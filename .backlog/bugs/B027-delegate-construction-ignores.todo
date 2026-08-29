@@ -1,0 +1,56 @@
+---
+complexity: medium
+created_at: "2026-08-29T06:24:14Z"
+depends_on: []
+estimate_hours: 2
+id: B027
+priority: medium
+status: pending
+tags:
+    - typecheck
+    - funcdef
+    - false-negative
+title: 'Delegate construction ignores &out/&inout parameter passing modes (game: Can''t create delegate)'
+updated_at: "2026-08-29T06:24:14Z"
+---
+## Broken (game-verified 2026-08-29, OP 1.29.5 / OpenplanetNext, master @ bc49389)
+
+Delegate construction from a function/method with mismatched `&out` parameter passing modes is silently accepted. The game requires exact parameter modes (`Can't create delegate` on mismatch), both directions:
+
+```angelscript
+funcdef void FDI(int);
+funcdef void FDO(int &out);
+class C {
+    void IntOut(int &out x) { x = 1; }
+    void Plain(int x) {}
+    void T() {
+        startnew(FDI(IntOut));  // game ERR: Can't create delegate — LSP silent
+        startnew(FDO(Plain));   // game ERR: Can't create delegate — LSP silent
+    }
+}
+```
+
+Pre-existing leniency for free functions, surfaced and game-verified during the B025 PIRFL review round (reviewer issue: `func_matches_funcdef`/`funcdef_types_compatible` rely on `parse_type_string`, which strips `&in/&out/&inout` as calling-convention decoration; `OverloadSig.param_out` is computed for typedb sigs but never consulted, and workspace sigs never populate it).
+
+## Root cause
+
+`extract_params` (`src/symbols/table.rs:25`) stores `type_expr.span` text and **drops `ast::Param.modifier`** — so workspace `SymbolKind::Function`/`SymbolKind::Funcdef` params carry no `&out/&in/&inout` information, `OverloadSig.param_out` is all-false for workspace sigs, and `FuncdefSig.param_types` has no modifier text. The check site is `func_matches_funcdef` (`src/typecheck/checker.rs`).
+
+## Expected
+
+Mirror the game: `startnew(FDI(IntOut))` / `startnew(FDO(Plain))` (and the free-function / engine-method equivalents) must emit `ArgTypeMismatch`. Exact-mode equality both directions; return types and arity already match strictly.
+
+## Not
+
+- Do not require mode equality for `&in` without a game probe (unverified; `&in` decoration may or may not block delegate construction — probe first).
+- Plain-compatible signatures (both sides modeless) must keep binding — B025's acceptance suite depends on it.
+
+## Test plan (TDD, red first)
+
+- Unit test `funcdef_ctor_rejects_out_param_modifier_mismatch` (already in src/typecheck/checker.rs, marked `#[ignore]` for this bug) — unignore and make it pass.
+- Both polarities (method→plain funcdef, plain method→`&out` funcdef); generalize: free functions, engine-typed methods with `&out` params (typedb `param_out` already carries the flag — check the typedb side binds/rejects correctly too).
+- Fixture lines in `b025-this-method-funcdef-ctor` or a sibling fixture, game-verified.
+
+## Fix sketch
+
+Carry the modifier through the symbol table: `extract_params` appends the modifier to the stored type text (e.g. `int &out`) or a parallel `Vec<ParamModifier>`; then `func_matches_funcdef` compares mode flags from `sig.param_out` / parsed funcdef param text. Watch string-comparison consumers of param type text (hover, signature help, unused analysis) before changing the stored form.
