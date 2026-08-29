@@ -953,10 +953,20 @@ impl UserPrefs {
     /// `.openplanet-lsp.toml` — project config wins. The CLI flag, where
     /// there is one, still beats both.
     pub fn load(workspace_root: Option<&Path>) -> Self {
-        let (prefs, issues) =
-            Self::from_layers_with_issues(LspConfig::user_config_path().as_deref(), workspace_root);
+        let (prefs, issues) = Self::load_with_issues(workspace_root);
         let _ = write_config_issues(&mut std::io::stderr().lock(), &issues);
         prefs
+    }
+
+    /// Load the CLI preferences without choosing how to report config issues.
+    /// Callers that also load [`LspConfig`] use this to avoid reporting the
+    /// shared config-reader issues twice.
+    pub(crate) fn load_silent(workspace_root: Option<&Path>) -> Self {
+        Self::load_with_issues(workspace_root).0
+    }
+
+    fn load_with_issues(workspace_root: Option<&Path>) -> (Self, Vec<ConfigIssue>) {
+        Self::from_layers_with_issues(LspConfig::user_config_path().as_deref(), workspace_root)
     }
 
     /// Pure variant of [`Self::load`]: `user` is the user-global config
