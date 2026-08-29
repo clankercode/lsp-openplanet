@@ -1665,6 +1665,144 @@ mod tests {
     // Serialize tests that touch process-global env vars.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Entry points that consult a process-global env var somewhere below
+    /// them, so a test calling one races any test that sets that var.
+    ///
+    /// - `detect_install_method_from_path` → `detect_js_pm` reads
+    ///   `OPENPLANET_LSP_PACKAGE_MANAGER` (and `pnpm_global_root` reads
+    ///   `HOME` / `USERPROFILE`).
+    /// - `save_status` / `load_status` → `config_dir` reads
+    ///   `OPENPLANET_LSP_CONFIG_DIR`, `XDG_CONFIG_HOME`, `APPDATA`, `HOME`,
+    ///   `USERPROFILE`.
+    /// - `current_version` / `format_status` / `should_auto_check` read
+    ///   `OPENPLANET_LSP_VERSION` and `OPENPLANET_LSP_LATEST_VERSION`.
+    /// - `apply_standalone` reads `OPENPLANET_LSP_RELEASE_ARCHIVE`.
+    const ENV_DEPENDENT_ENTRY_POINTS: &[&str] = &[
+        "detect_install_method_from_path",
+        "save_status(",
+        "load_status(",
+        "current_version(",
+        "format_status(",
+        "format_status_with(",
+        "should_auto_check(",
+        "apply_standalone(",
+    ];
+
+    /// Take the env lock for a test that reads or writes a process-global env
+    /// var.
+    ///
+    /// B032: cargo runs `--lib` tests as parallel THREADS in one process, so
+    /// `set_var` in one test is visible to every other. Poisoning is ignored
+    /// on purpose — one failing test must not cascade into a wall of
+    /// `PoisonError`s that hides the real assertion.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Split this module's source into (name, body) per `#[test]` fn.
+    fn test_fns() -> Vec<(String, String)> {
+        let src = include_str!("update.rs");
+        let module = src
+            .split_once("mod tests {")
+            .expect("test module present")
+            .1;
+        let mut out = Vec::new();
+        let mut chunks = module.split("#[test]");
+        chunks.next();
+        for chunk in chunks {
+            let Some((sig, rest)) = chunk.split_once('(') else {
+                continue;
+            };
+            let name = sig
+                .rsplit_once("fn ")
+                .map(|(_, n)| n.trim().to_string())
+                .unwrap_or_default();
+            out.push((name, rest.to_string()));
+        }
+        out
+    }
+
+    /// B032 regression guard. The mutex above only helps if the READERS take
+    /// it — the original flake was `detect_npm_local_layout` (no lock) seeing
+    /// the `pnpm` override that `package_manager_env_override` (lock held)
+    /// had set microseconds earlier. Every test that touches the shared env,
+    /// by writing it or by calling something that reads it, must hold the
+    /// guard.
+    #[test]
+    fn every_env_touching_test_takes_the_env_guard() {
+        let mut unguarded: Vec<String> = Vec::new();
+        for (name, body) in test_fns() {
+            // This test itself only inspects source text.
+            if name == "every_env_touching_test_takes_the_env_guard" {
+                continue;
+            }
+            let writes = body.contains("set_var(") || body.contains("remove_var(");
+            let reads = ENV_DEPENDENT_ENTRY_POINTS
+                .iter()
+                .any(|entry| body.contains(entry));
+            if (writes || reads) && !body.contains("env_guard()") {
+                unguarded.push(name);
+            }
+        }
+        assert!(
+            unguarded.is_empty(),
+            "these tests touch process-global env without `let _guard = env_guard();`, \
+             so they race the tests that set it: {unguarded:?}"
+        );
+    }
+
+    /// B032, the hazard itself: an override set by one test must not be
+    /// visible to a detection running concurrently in another. Reproduces the
+    /// original failure deterministically — drop `env_guard()` from either
+    /// side and this fails within a few iterations.
+    #[test]
+    fn package_manager_override_does_not_leak_into_concurrent_detection() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!(
+            "oplsp-b032-{}-{}",
+            std::process::id(),
+            now_epoch_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let bin_dir = dir.join("node_modules/openplanet-lsp-linux-x64/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let exe = bin_dir.join("openplanet-lsp");
+        fs::write(&exe, b"x").unwrap();
+        // No lockfile and no override: detection must land on plain npm.
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_stop = Arc::clone(&stop);
+        // Writer: exactly what `package_manager_env_override` does.
+        let writer = std::thread::spawn(move || {
+            while !writer_stop.load(Ordering::Relaxed) {
+                let _guard = env_guard();
+                std::env::set_var("OPENPLANET_LSP_PACKAGE_MANAGER", "pnpm");
+                std::env::remove_var("OPENPLANET_LSP_PACKAGE_MANAGER");
+            }
+        });
+
+        let mut seen_wrong = None;
+        for _ in 0..2_000 {
+            let _guard = env_guard();
+            if let InstallMethod::NodeLocal { pm, .. } = detect_install_method_from_path(&exe) {
+                if pm != JsPackageManager::Npm {
+                    seen_wrong = Some(pm);
+                    break;
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            seen_wrong, None,
+            "a concurrent OPENPLANET_LSP_PACKAGE_MANAGER override leaked into detection"
+        );
+    }
+
     #[test]
     fn version_compare_basic() {
         assert_eq!(
@@ -1696,6 +1834,7 @@ mod tests {
 
     #[test]
     fn detect_npm_global_linux_layout() {
+        let _guard = env_guard();
         let path = PathBuf::from(
             "/home/user/.nvm/versions/node/v20.0.0/lib/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
         );
@@ -1709,6 +1848,7 @@ mod tests {
 
     #[test]
     fn detect_npm_local_layout() {
+        let _guard = env_guard();
         let path = PathBuf::from(
             "/work/my-plugin/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
         );
@@ -1725,12 +1865,14 @@ mod tests {
 
     #[test]
     fn detect_cargo_bin() {
+        let _guard = env_guard();
         let path = PathBuf::from("/home/user/.cargo/bin/openplanet-lsp");
         assert_eq!(detect_install_method_from_path(&path), InstallMethod::Cargo);
     }
 
     #[test]
     fn detect_development_target() {
+        let _guard = env_guard();
         let path = PathBuf::from("/home/user/src/lsp-openplanet/target/release/openplanet-lsp");
         assert_eq!(
             detect_install_method_from_path(&path),
@@ -1740,6 +1882,7 @@ mod tests {
 
     #[test]
     fn detect_standalone() {
+        let _guard = env_guard();
         let path = PathBuf::from("/opt/openplanet-lsp/openplanet-lsp");
         match detect_install_method_from_path(&path) {
             InstallMethod::Standalone { exe_path } => {
@@ -1810,6 +1953,7 @@ mod tests {
 
     #[test]
     fn detect_pnpm_bun_yarn_global_paths() {
+        let _guard = env_guard();
         let pnpm = PathBuf::from(
             "/home/u/.local/share/pnpm/global/5/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
         );
@@ -1848,7 +1992,7 @@ mod tests {
 
     #[test]
     fn detect_local_pm_from_lockfile() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_guard();
         std::env::remove_var("OPENPLANET_LSP_PACKAGE_MANAGER");
         let dir = std::env::temp_dir().join(format!(
             "oplsp-pm-{}-{}",
@@ -1894,7 +2038,7 @@ mod tests {
 
     #[test]
     fn package_manager_env_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_guard();
         std::env::set_var("OPENPLANET_LSP_PACKAGE_MANAGER", "pnpm");
         let path =
             PathBuf::from("/work/app/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp");
@@ -1910,7 +2054,7 @@ mod tests {
 
     #[test]
     fn status_roundtrip_in_temp_config_dir() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_guard();
         let dir = std::env::temp_dir().join(format!(
             "openplanet-lsp-update-test-{}-{}",
             std::process::id(),
@@ -1945,7 +2089,7 @@ mod tests {
 
     #[test]
     fn should_auto_check_on_version_skew() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_guard();
         std::env::remove_var("OPENPLANET_LSP_VERSION");
         let last = UpdateStatus {
             checked_at: now_epoch_secs(),
@@ -1971,7 +2115,7 @@ mod tests {
 
     #[test]
     fn should_auto_check_respects_interval() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_guard();
         std::env::remove_var("OPENPLANET_LSP_VERSION");
         let fresh = UpdateStatus {
             checked_at: now_epoch_secs(),
@@ -2005,6 +2149,7 @@ mod tests {
 
     #[test]
     fn format_status_pending_restart() {
+        let _guard = env_guard();
         let status = UpdateStatus {
             checked_at: 0,
             checked_at_rfc3339: "1970-01-01T00:00:00Z".into(),
@@ -2033,6 +2178,7 @@ mod tests {
 
     #[test]
     fn detect_npm_nested_optional_dep() {
+        let _guard = env_guard();
         let path = PathBuf::from(
             "/work/app/node_modules/openplanet-lsp/node_modules/openplanet-lsp-linux-x64/bin/openplanet-lsp",
         );
@@ -2049,6 +2195,7 @@ mod tests {
 
     #[test]
     fn detect_npm_global_windows_roaming() {
+        let _guard = env_guard();
         let path = PathBuf::from(
             r"C:\Users\me\AppData\Roaming\npm\node_modules\openplanet-lsp-win32-x64\bin\openplanet-lsp.exe",
         );
@@ -2062,6 +2209,7 @@ mod tests {
 
     #[test]
     fn detect_npm_global_windows_program_files_nodejs() {
+        let _guard = env_guard();
         let path = PathBuf::from(
             r"C:\Program Files\nodejs\node_modules\openplanet-lsp-win32-x64\bin\openplanet-lsp.exe",
         );
@@ -2075,7 +2223,7 @@ mod tests {
 
     #[test]
     fn env_overrides_version_and_latest() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_guard();
         std::env::set_var("OPENPLANET_LSP_VERSION", "0.1.0");
         std::env::set_var("OPENPLANET_LSP_LATEST_VERSION", "9.9.9");
         std::env::set_var("OPENPLANET_LSP_UPDATE_PACKAGE", "./old.tgz ./new.tgz");
@@ -2104,6 +2252,7 @@ mod tests {
 
     #[test]
     fn format_status_mentions_update() {
+        let _guard = env_guard();
         let status = UpdateStatus {
             checked_at: 0,
             checked_at_rfc3339: "1970-01-01T00:00:00Z".into(),
@@ -2143,6 +2292,7 @@ mod tests {
 
     #[test]
     fn format_status_up_to_date_shows_install_type() {
+        let _guard = env_guard();
         let status = UpdateStatus {
             checked_at: 0,
             checked_at_rfc3339: "1970-01-01T00:00:00Z".into(),
@@ -2165,6 +2315,7 @@ mod tests {
 
     #[test]
     fn standalone_apply_from_local_archive_replaces_binary() {
+        let _guard = env_guard();
         let dir = std::env::temp_dir().join(format!(
             "openplanet-lsp-standalone-test-{}",
             std::process::id()
