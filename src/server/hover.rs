@@ -453,27 +453,39 @@ fn receiver_type<'c>(
     checked: &'c CheckedFile<'_>,
     last: usize,
 ) -> Option<&'c TypeRepr> {
-    if tokens[last].kind == TokenKind::RParen {
-        if let Some(open) = matching_open(tokens, last) {
-            // `f(...)` and `cast<T>(...)` are postfix forms, not groups —
-            // their recorded span does cover the closing paren.
-            let postfix = open
-                .checked_sub(1)
-                .map(|p| tokens[p].kind)
-                .is_some_and(|k| {
-                    matches!(
-                        k,
-                        TokenKind::Ident | TokenKind::RParen | TokenKind::RBracket | TokenKind::Gt
-                    )
-                });
-            if !postfix {
-                if open + 1 >= last {
-                    return None;
-                }
-                return checked
-                    .type_at_span_range(tokens[open + 1].span.start, tokens[last - 1].span.end);
-            }
+    let mut last = last;
+    while tokens[last].kind == TokenKind::RParen {
+        let Some(open) = matching_open(tokens, last) else {
+            break;
+        };
+        // `f(...)` and `cast<T>(...)` are postfix forms, not groups — their
+        // recorded span does cover the closing paren, so leave them to the
+        // containment query below.
+        let postfix = open
+            .checked_sub(1)
+            .map(|p| tokens[p].kind)
+            .is_some_and(|k| {
+                matches!(
+                    k,
+                    TokenKind::Ident | TokenKind::RParen | TokenKind::RBracket | TokenKind::Gt
+                )
+            });
+        if postfix {
+            break;
         }
+        if open + 1 >= last {
+            return None;
+        }
+        // `((x))`: the parser keeps only the innermost expression's span, so
+        // a group whose entire contents are another group has to be peeled
+        // again rather than queried (it would name a range nothing recorded).
+        if tokens[last - 1].kind == TokenKind::RParen
+            && matching_open(tokens, last - 1) == Some(open + 1)
+        {
+            last -= 1;
+            continue;
+        }
+        return checked.type_at_span_range(tokens[open + 1].span.start, tokens[last - 1].span.end);
     }
     checked.type_at_offset(tokens[last].span.end.checked_sub(1)?)
 }
@@ -1293,6 +1305,53 @@ mod tests {
         assert!(md.contains("Greets the user."), "{:?}", md);
     }
 
+    /// An `import ... from` alias that duplicates a real definition must not
+    /// inflate the overload count.
+    ///
+    /// The review pass proposed dropping every alias whenever a definition
+    /// exists. Rejected: in AngelScript an imported function with a DIFFERENT
+    /// signature is a genuine additional overload, so that filter would hide
+    /// real ones. The case that actually matters — an alias repeating the
+    /// definition it stands for — collapses through the signature dedupe
+    /// `overload_block` already applies, which is what this pins.
+    #[test]
+    fn workspace_import_alias_does_not_duplicate_its_definition() {
+        let sig = |imported: bool| Symbol {
+            name: "Foo".to_string(),
+            kind: SymbolKind::Function {
+                return_type: "void".to_string(),
+                params: vec![("a".to_string(), "int".to_string())],
+                min_args: 1,
+                imported,
+            },
+            span: crate::lexer::Span::new(0, 1),
+            file_id: 0,
+            doc: None,
+        };
+        let (def, alias) = (sig(false), sig(true));
+        let md = format_workspace_symbols(&[&def, &alias]).expect("formatted");
+        assert!(md.contains("void Foo(int a)"), "{:?}", md);
+        assert!(
+            !md.contains("overload"),
+            "an alias of the same signature was counted twice: {:?}",
+            md
+        );
+
+        // A genuinely different imported signature IS a second overload.
+        let other = Symbol {
+            kind: SymbolKind::Function {
+                return_type: "void".to_string(),
+                params: vec![("b".to_string(), "float".to_string())],
+                min_args: 1,
+                imported: true,
+            },
+            ..sig(true)
+        };
+        let md = format_workspace_symbols(&[&def, &other]).expect("formatted");
+        assert!(md.contains("2 overloads"), "{:?}", md);
+        assert!(md.contains("float b"), "{:?}", md);
+    }
+
     /// Non-callable workspace symbols render their doc too.
     #[test]
     fn workspace_variable_doc_renders_below_the_declaration() {
@@ -1642,6 +1701,37 @@ mod tests {
         let md = hover_checked(src, "Run", 3);
         assert!(md.contains("Inner::Run(int a)"), "{:?}", md);
         assert!(!md.contains("bool wrong"), "picked the decoy: {:?}", md);
+    }
+
+    #[test]
+    fn hover_member_method_through_nested_parenthesised_receivers() {
+        // `((x))` and deeper: the parser records only the innermost
+        // expression's span, so each redundant group has to be peeled.
+        for receiver in ["(x)", "((x))", "(((x)))"] {
+            let src = format!(
+                "class Inner {{\n  void Run(int a) {{}}\n}}\nvoid main() {{ Inner@ x; {}.Run(1); }}",
+                receiver
+            );
+            let md = hover_checked(&src, "Run", 2);
+            assert!(
+                md.contains("Inner::Run(int a)"),
+                "receiver {:?}: {:?}",
+                receiver,
+                md
+            );
+        }
+    }
+
+    #[test]
+    fn hover_member_method_through_a_nested_group_around_a_call() {
+        // Peeling must stop at a postfix form inside the groups.
+        let src = concat!(
+            "class Inner {\n  void Run(int a) {}\n}\n",
+            "Inner@ g(int q) { return null; }\n",
+            "void main() { ((g(1))).Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 2);
+        assert!(md.contains("Inner::Run(int a)"), "{:?}", md);
     }
 
     #[test]
