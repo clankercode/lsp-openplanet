@@ -1387,8 +1387,12 @@ impl LspConfig {
                 name: name.to_string(),
                 active: self.defines.contains(name),
                 // No recorded origin means no derivation layer produced it,
-                // so the user's own `defines` array is the only thing that
-                // could have.
+                // so the user asked for it. That holds as an invariant, not
+                // as a shrug: the only places that insert into `defines`
+                // without an origin are `check --define` and the
+                // `define_matrix` / `define_combinations` combo axes in
+                // `cli/mod.rs`, both of which ARE the user. Pinned by
+                // `resolved_defines_reports_an_untagged_late_insert_as_user`.
                 origin: self
                     .define_origins
                     .get(name)
@@ -5696,6 +5700,92 @@ shortcut_match_enums = true
             );
         }
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Openplanet's id → macro mapping collides: `my-plugin` and `my.plugin`
+    /// both give `DEPENDENCY_MY_PLUGIN`. If ONE of the colliding ids resolves,
+    /// the macro IS defined, so the origin must say `dependency` — reporting
+    /// `dependency-missing` for a define that is live would tell the user a
+    /// live `#if` branch is dead.
+    ///
+    /// Both declaration orders are checked: the answer must not depend on
+    /// which id `info.toml` happens to list first.
+    #[test]
+    fn resolved_defines_lets_a_resolving_dependency_win_a_macro_collision() {
+        // Same two ids in the same order; only WHICH of them is installed
+        // changes, so the resolved one is declared first in one case and
+        // second in the other.
+        let first = "ZzzB050-collide";
+        let second = "ZzzB050.collide";
+        for installed in [first, second] {
+            let (root, plugins) = b019_plugin(
+                "b050-collide",
+                &format!("optional_dependencies = [\"{first}\", \"{second}\"]\n"),
+            );
+            b019_install(&plugins, installed);
+            let cfg = LspConfig::load(Some(&root), None);
+            assert!(
+                cfg.defines.contains("DEPENDENCY_ZZZB050_COLLIDE"),
+                "one colliding id resolved, so the macro is defined: {:?}",
+                cfg.defines
+            );
+            assert_resolved(
+                &cfg.resolved_defines(),
+                "DEPENDENCY_ZZZB050_COLLIDE",
+                DefineOrigin::Dependency,
+                true,
+                true,
+            );
+            let _ = std::fs::remove_dir_all(root.parent().unwrap());
+        }
+    }
+
+    /// Neither colliding id resolving leaves the macro undefined and reported
+    /// as missing — the counterpart of the case above.
+    #[test]
+    fn resolved_defines_reports_a_wholly_unresolved_collision_as_missing() {
+        let (root, _plugins) = b019_plugin(
+            "b050-collide-none",
+            "optional_dependencies = [\"ZzzB050-gone99\", \"ZzzB050.gone99\"]\n",
+        );
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(!cfg.defines.contains("DEPENDENCY_ZZZB050_GONE99"));
+        assert_resolved(
+            &cfg.resolved_defines(),
+            "DEPENDENCY_ZZZB050_GONE99",
+            DefineOrigin::DependencyMissing,
+            false,
+            false,
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// The `User` fallback is an INVARIANT, not a shrug: the only paths that
+    /// put a name into `defines` without tagging it are user-driven ones —
+    /// `check --define` (`cli/mod.rs`) and the `define_matrix` /
+    /// `define_combinations` combo axes, both of which the user asked for.
+    /// This pins the behaviour those callers rely on.
+    #[test]
+    fn resolved_defines_reports_an_untagged_late_insert_as_user() {
+        let (mut cfg, tmp) = b050_pinned_config("late-insert");
+        // Exactly what `run_check` does for a `--define` flag.
+        cfg.defines.insert("FROM_CLI".to_string());
+        assert_resolved(
+            &cfg.resolved_defines(),
+            "FROM_CLI",
+            DefineOrigin::User,
+            true,
+            false,
+        );
+        // And it must not disturb what the ladder already tagged.
+        assert_resolved(
+            &cfg.resolved_defines(),
+            "TMNEXT",
+            DefineOrigin::Target,
+            true,
+            true,
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The platform-family table is readable by clients, so the VS Code
