@@ -1692,6 +1692,33 @@ mod tests {
                 "`{value}` is reachable only through an anonymous enum"
             );
         }
+
+        // Cross-check the Python generator against this index: the probe the
+        // GAME was run against must be this exact set, not merely a set of
+        // the same size. A drift between the two would silently probe the
+        // wrong names.
+        assert_eq!(
+            narrowed,
+            b044_probe_fixture_names(),
+            "the B044 probe fixture no longer lists the narrowed set — \
+             regenerate it with scripts/gen_b044_probe.py"
+        );
+    }
+
+    /// The identifiers `tests/fixtures/issue-repros/b044-anon-enum-value-names`
+    /// probes, read back out of the generated fixture, sorted.
+    fn b044_probe_fixture_names() -> Vec<String> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/issue-repros/b044-anon-enum-value-names/Main.as");
+        let source = std::fs::read_to_string(&path).expect("the probe fixture must exist");
+        let mut names: Vec<String> = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("print(\"\" + "))
+            .filter_map(|rest| rest.split(')').next())
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names
     }
 
     /// B044 fence: a value name that ALSO appears in a NAMED enum keeps
