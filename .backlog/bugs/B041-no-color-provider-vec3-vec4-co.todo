@@ -1,0 +1,104 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:07:25Z"
+depends_on: []
+estimate_hours: 1
+id: B041
+priority: medium
+status: pending
+tags:
+    - lsp
+    - ux
+    - color
+title: 'No color provider: vec3/vec4 colors and $-escape color codes get no swatch or picker'
+updated_at: "2026-08-29T15:07:25Z"
+---
+Found by a coordinator feature-gap review, 2026-08-30. Enhancement.
+
+## Gap
+The server declares no `color_provider`, so `textDocument/documentColor` and
+`textDocument/colorPresentation` are unimplemented. Openplanet plugin code is
+saturated with colors in two distinct forms:
+
+1. **Numeric colors** — `vec3(1, 0, 0)` and `vec4(r, g, b, a)` passed to
+   UI/Draw calls. `vec3`/`vec4` are already first-class in the type checker
+   (they appear across src/typecheck/), so the types are known.
+2. **Openplanet color escape codes in strings** — the `$xxx` form (e.g.
+   `"\\$f00red text"`), used throughout UI strings and log output. These are
+   invisible in the editor today; you have to know the hex by heart.
+
+Neither gets a swatch, and there is no picker.
+
+## Why this one is worth building
+It is the most domain-specific win available. Every other gap on the list is
+"catch up to what other language servers do"; this one is a feature no generic
+AngelScript tooling will ever have, because the `$xxx` escape is Openplanet's
+own and the vec3/vec4-as-color convention is this ecosystem's. It is also
+cheap: the analysis surface (typed expressions, string literals with spans)
+already exists.
+
+## Work
+- Advertise `color_provider` and implement `textDocument/documentColor`:
+  - `vec3(...)`/`vec4(...)` constructor calls with literal numeric arguments.
+    Report in 0..1 space, which is what the game uses.
+  - `$xxx` escapes inside string literals (3 hex digits, Openplanet form).
+    Confirm the exact grammar from Openplanet docs before implementing —
+    check whether `$xxxxxx`, named codes, or `$z`/`$o`/`$g`-style control
+    codes exist, and handle only true colors.
+- Implement `textDocument/colorPresentation` so the picker writes back in the
+  SAME form it read: a `$f00` stays a `$f00`, a `vec3` stays a `vec3` and does
+  not become a `vec4`. Round-tripping the user's chosen representation is the
+  whole usability point.
+- Decide precision for the numeric form: a picker returning 0.5019607 for
+  `128/255` is worse than useless in source. Recommend rounding to 3-4
+  significant figures and preserving the literal style already in the file
+  (int-looking `1` vs `1.0` vs `1.0f`).
+
+## Design decision (coordinator, 2026-08-30)
+Only literal-argument constructors get a swatch. `vec3(x, y, z)` with variable
+arguments must NOT be reported — a swatch that cannot be edited is noise, and
+guessing a runtime value is wrong. Same for computed string concatenation: only
+`$xxx` inside a literal is reported.
+
+Do not report `vec3` used as a POSITION or direction. There is no way to
+distinguish that from a color at the type level, so scope the swatch to vec3/
+vec4 in ARGUMENT position of a call whose parameter is known to be a color, if
+the typedb makes that determinable; otherwise report all literal vec3/vec4 and
+accept the false positives, but say which choice was made and why. Prefer the
+narrower rule if the information is available.
+
+## Test plan (TDD, red first)
+Pure-function tests over the color extraction, no server needed.
+
+Red:
+- `document_color_finds_vec3_literal`: `vec3(1, 0, 0)` -> one color, red,
+  range covering the constructor call.
+- `document_color_finds_dollar_escape_in_string`: `"\\$f00hi"` -> one color,
+  red, range covering exactly the `$f00`, not the whole string.
+- `color_presentation_round_trips_form`: editing a `$f00` yields a `$`-form
+  presentation; editing a `vec3` yields a `vec3` presentation.
+
+Variants (per CLAUDE.md, generalize):
+- `vec3` and `vec4` both handled; alpha preserved on vec4 round-trip
+- literal styles `1`, `1.0`, `1.0f`, `1.f`, `.5` all parse; the presentation
+  preserves the style already used in that call
+- out-of-range values (`vec3(2, -1, 0)`) -> clamped for DISPLAY, and the write
+  back does not silently clamp the user's source
+- non-literal args (`vec3(x, 0, 0)`) -> NO color reported
+- nested calls (`vec3(f(1), 0, 0)`) -> no color
+- multiple colors on one line -> all reported with correct, non-overlapping
+  ranges
+- `$xxx` variants: lowercase, uppercase, mixed hex; an invalid `$zzz` -> not
+  reported; `$$` escape (if it means a literal dollar) -> not reported
+- several `$xxx` in one string -> each gets its own range
+- `$xxx` at the very start and very end of a string literal
+- multi-byte characters before a `$xxx` in the same string -> range is correct
+  in UTF-16 code units (LSP ranges are UTF-16; getting this wrong shifts the
+  swatch, and this repo already has display-width handling in the TUI to
+  contrast with)
+- a string containing `$xxx` inside a COMMENT -> decide and test (recommend
+  reported, comments are where example strings live)
+
+## Related
+Extension needs no change — VS Code renders color decorators natively once the
+server advertises the capability.

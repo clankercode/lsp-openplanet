@@ -39,3 +39,4 @@ bugs:
     - file: B038-quick-fixes-for-rename-and-con.todo
     - file: B039-openplanet-regeneratetypedb-is.todo
     - file: B040-manifest-validate-is-dead-code.todo
+    - file: B041-no-color-provider-vec3-vec4-co.todo
