@@ -13,7 +13,8 @@
 // their declaring context must not change that.
 //
 // The same probe reports THREE errors, one per line of `BareEnumValueNames`
-// at the bottom; see the note there. Everything else must stay silent.
+// at the bottom; the LSP now agrees (B044) and reports one per NAME, so eight.
+// Everything else must stay silent.
 
 void Read(CControlBase@ ctrl, CControlEntry@ entry, CGameCtnChallenge@ map) {
     int h = ctrl.AlignHorizontal;             // read into an int
@@ -54,31 +55,28 @@ void Main() {
     BareEnumValueNames();
 }
 
-// KNOWN FALSE NEGATIVE, deliberately left as-is by B016.
-//
-// The VALUE names of those enums, used bare. The game REJECTS all of them —
-// RemoteBuild probe 2026-08-30, OP 1.29.5, one error per line because
+// B044: bare value names of those anonymous enums. The game REJECTS all of
+// them — RemoteBuild probe 2026-08-30, OP 1.29.5, one error per line because
 // AngelScript stops at the first bad symbol in an expression:
 //     (83,16) ERR : No matching symbol 'HyperTnL'
 //     (84,16) ERR : No matching symbol 'RenderPlaneReflect'
 //     (85,16) ERR : No matching symbol 'MinimalReadOnly'
 // An unnamed enum's values are not global constants; they are reachable only
-// as integers through the declaring member.
+// as integers through the declaring member, which is what everything above
+// this line exercises.
 //
-// The LSP stays silent on all nine. That is a PRE-EXISTING false negative,
-// not one B016 introduced: `GlobalScope::has_global_ident` scans external
-// enum values as a last resort, and before B016 whichever anonymous enum won
-// its module's collision already had its values accepted there — `HyperTnL`,
-// `SlideNoControl`, `NotTimed`, `RenderPlaneReflect` and
-// `Download_WaitingSources` all resolved on 91a296c. B016 makes the set
-// uniform (all 132 enums instead of an arbitrary 14) rather than arbitrary,
-// because the ticket forbids tightening any rule. Narrowing the scan to
-// named enums would match the game exactly and is worth its own ticket —
-// it is a behaviour change with its own FP risk, and it belongs there, not
-// riding on a data-loss fix.
+// The LSP agrees since B044 narrowed `GlobalScope::has_global_ident`'s
+// external enum-value scan to enums a source can NAME. It checks every
+// identifier rather than stopping at the first, so it reports all EIGHT
+// names, not three. Same verdict, finer granularity.
 //
-// When that ticket lands, these three lines start erroring and the gate test
-// must be updated to expect them.
+// Both classes are here on purpose. `HyperTnL`, `SlideNoControl`,
+// `NotTimed`, `RenderPlaneReflect` and `Download_WaitingSources` belong to
+// enums that won their module's key collision before B016 and were accepted
+// long before it existed; `MinimalReadOnly`, `TimeHhMmSsMil` and `Text_Icon`
+// belong to enums B016 recovered. One call site governs both.
+//
+// The exhaustive list — all 261 such names — is `b044-anon-enum-value-names`.
 void BareEnumValueNames() {
     print("" + HyperTnL + SlideNoControl + NotTimed);
     print("" + RenderPlaneReflect + Download_WaitingSources);
