@@ -86,3 +86,25 @@ tm-dips-plus-plus 1, tm-archivist 2, tm-counter 4, tm-dashboard 4). Warning
 deltas are permitted but every delta must be explained in the commit message.
 
 Independent lane — no file overlap with B017/B019/B029.
+
+## Gate result (coordinator parent review, 2026-08-30)
+
+VERIFIED INDEPENDENTLY, not taken from the lane's report:
+
+- Full suite on fix/b016-anon-member-enums: 1407 passed / 0 failed across 17
+  test binaries (1185 lib), re-run by the coordinator.
+- All FIVE FP fixtures byte-identical between a master build and the branch
+  build. Not just equal counts — the full check output diffed clean.
+
+Real counts at this base (the ones written into this ticket earlier were
+STALE and have been corrected):
+
+  tm-editor-plus-plus   14 / 1485      (ticket said 2 / 1428)
+  tm-dips-plus-plus      5 /  276      (ticket said 1 /  258)
+  tm-archivist           2 /   35      (ticket said 2 /   28)
+  tm-counter             4 /    2      (matched)
+  tm-dashboard           4 /    4      (ticket said 4 /    5)
+
+The lane caught this by building from a genuinely archived 91a296c tree rather
+than trusting the ticket, and re-measured everything against it. That is the
+standard for any future define-set or resolution-surface change here.
