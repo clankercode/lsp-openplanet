@@ -3831,3 +3831,58 @@ fn check_command_plugins_dir_flag_is_visible_to_the_dependency_define_probe() {
     );
     let _ = fs::remove_dir_all(base);
 }
+
+/// B033: a declaration whose type begins with `const` is anchored at the
+/// `const`, not at the named type inside it.
+///
+/// The parser used to give a `const T@` type expression a span starting at
+/// `T`, so every declaration whose type has that shape reported a column a few
+/// characters into itself — `2:11` instead of `2:5` on
+/// `    const Json::Value@ GetLocalStats(){` in the tm-archivist fixture. The
+/// span fix that made hover stop losing the `const` also moved this column,
+/// and it is user-visible, so it is pinned here on an exact `line:col` rather
+/// than a fuzzy contains.
+///
+/// Four spaces then `const `, so the qualified type always starts at column
+/// 11 and the declaration at column 5. `const Doc` and `Doc@` are controls:
+/// neither shape was affected, and both must still report column 5.
+#[test]
+fn check_command_const_handle_declaration_is_anchored_at_the_const_keyword() {
+    let root = make_temp_plugin("const-handle-column");
+    fs::write(
+        root.join("src/Main.as"),
+        concat!(
+            "class Doc {}\n",
+            "namespace N {\n",
+            "    const Doc@ Handle() { return null; }\n",
+            "    const Doc@[] HandleArray() { return {}; }\n",
+            "    const Doc Value() { Doc d; return d; }\n",
+            "    Doc@ Plain() { return null; }\n",
+            "}\n",
+            "void Main() {}\n",
+        ),
+    )
+    .unwrap();
+    let stdout = check_plugin(&root, &[]);
+    for (line, name) in [
+        (3, "Handle"),
+        (4, "HandleArray"),
+        (5, "Value"),
+        (6, "Plain"),
+    ] {
+        let expected = format!("src/Main.as:{line}:5: warning: a function `{name}`");
+        assert!(
+            stdout.contains(&expected),
+            "expected {expected:?} (column 5 = the first token of the declaration); stdout={stdout:?}"
+        );
+    }
+    // The pre-fix columns for the two `const T@` shapes, spelled out so the
+    // regression is unmistakable if the span is ever moved back.
+    for line in [3, 4] {
+        assert!(
+            !stdout.contains(&format!("src/Main.as:{line}:11: warning: a function")),
+            "a `const Doc@` declaration re-anchored at the named type; stdout={stdout:?}"
+        );
+    }
+    let _ = fs::remove_dir_all(root);
+}
