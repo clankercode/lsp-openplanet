@@ -436,7 +436,8 @@ enum values. A doc-only DB refresh therefore reports zero drift.
 **Nothing in this command family touches the network.** There is no upstream
 DB download endpoint; DBs are only ever read from a local install. `refresh`
 writes nothing without `--yes`, requires an explicit `--into` (no implicit
-write path), only ever writes the two known filenames, and never deletes.
+write path), writes the two DB JSON filenames plus `Openplanet.h` only when
+that co-located header exists, and never deletes.
 
 #### Maintainer flow (repo fixture DBs)
 
@@ -445,15 +446,16 @@ The repo ships fixture DBs under `tests/fixtures/typedb` for tests and
 
 ```bash
 just typedb-refresh         # dry run: shows the symbol diff, writes nothing
-just typedb-refresh-apply   # writes the two files
+just typedb-refresh-apply   # writes the two DB JSON files, plus Openplanet.h when present
 just test                   # includes the fixture shape guard
 ```
 
 `just typedb-diff` is the parity check on its own, and `just typedb-guard`
 runs the anti-drift guard (also a named CI step): version stamps must look
-like versions, entry counts must clear floors, and both files must survive a
-full load. That catches the dangerous case — a well-formed but *empty* DB
-that parses, loads, and silently disables every type-aware diagnostic.
+like versions, entry counts must clear floors, and both DB JSON files must
+survive a full load (with `Openplanet.h` included when present). That catches
+the dangerous case — a well-formed but *empty* DB that parses, loads, and
+silently disables every type-aware diagnostic.
 
 Per-game-version DB selection (keeping several game builds' DBs side by side)
 is deliberately not implemented: `game_target` already selects the install

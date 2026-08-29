@@ -93,6 +93,8 @@ def block_decl_kind(prefix: str) -> str | None:
     prefix = prefix.strip()
     if ";" in prefix:
         return None
+    if prefix.startswith("template") and ">" in prefix:
+        prefix = prefix.rsplit(">", 1)[1].strip()
     for keyword in ("struct", "class", "union"):
         if prefix == keyword or (prefix.startswith(keyword) and prefix[len(keyword) :].startswith((" ", "\t"))):
             return "aggregate"
@@ -108,25 +110,38 @@ def enum_value(text: str) -> tuple[str, int] | None:
     value = value.rstrip(",").strip()
     if not IDENTIFIER.fullmatch(name) or not INTEGER.fullmatch(value):
         return None
-    return name, int(value)
+    parsed = int(value)
+    if not -(2**63) <= parsed <= 2**63 - 1:
+        return None
+    return name, parsed
 
 
-def enum_values_after_open(after_open: str, lines: object) -> list[tuple[str, int]]:
+def enum_values_after_open(after_open: str, lines: object) -> tuple[list[tuple[str, int]], str]:
     if "}" in after_open:
-        return [
-            value
-            for entry in after_open.split("}", 1)[0].split(",")
-            if (value := enum_value(entry.strip())) is not None
-        ]
+        body, suffix = after_open.split("}", 1)
+        return (
+            [
+                value
+                for entry in body.split(",")
+                if (value := enum_value(entry.strip())) is not None
+            ],
+            suffix,
+        )
     values: list[tuple[str, int]] = []
     for inner in lines:
         inner = inner.strip()
-        if inner.startswith("}"):
-            break
+        if "}" in inner:
+            body, suffix = inner.split("}", 1)
+            values.extend(
+                value
+                for entry in body.split(",")
+                if (value := enum_value(entry.strip())) is not None
+            )
+            return values, suffix
         value = enum_value(inner)
         if value is not None:
             values.append(value)
-    return values
+    return values, ""
 
 
 def header_module_enums(text: str) -> list[tuple[str, list[tuple[str, int]]]]:
@@ -144,20 +159,22 @@ def header_module_enums(text: str) -> list[tuple[str, list[tuple[str, int]]]]:
             name = pending_enum
             pending_enum = None
             if trimmed.startswith("{"):
-                values = enum_values_after_open(trimmed, lines)
+                values, suffix = enum_values_after_open(trimmed, lines)
                 if aggregate_depth == 0 and "::" not in name:
                     parsed.append((name, values))
-                continue
+                line = suffix
+                trimmed = line.strip()
         declaration = enum_decl(trimmed)
         if declaration is not None:
             name, has_open_brace = declaration
             if not has_open_brace:
                 pending_enum = name
                 continue
-            values = enum_values_after_open(trimmed.split("{", 1)[1], lines)
+            values, suffix = enum_values_after_open(trimmed.split("{", 1)[1], lines)
             if aggregate_depth == 0 and "::" not in name:
                 parsed.append((name, values))
-            continue
+            line = suffix
+            trimmed = line.strip()
 
         first_open = True
         prefix = line.split("{", 1)[0]

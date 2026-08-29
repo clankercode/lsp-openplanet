@@ -99,10 +99,16 @@ impl HeaderDatabase {
 
             if let Some(name) = pending_enum.take() {
                 if trimmed.starts_with('{') {
-                    let values = read_enum_after_open(trimmed, &mut lines);
+                    let (values, suffix) = read_enum_after_open(trimmed, &mut lines);
                     if aggregate_depth == 0 && !name.contains("::") {
                         module_enums.push(HeaderEnum { name, values });
                     }
+                    track_blocks(
+                        &suffix,
+                        &mut open_blocks,
+                        &mut aggregate_depth,
+                        &mut pending_block,
+                    );
                     continue;
                 }
             }
@@ -115,7 +121,7 @@ impl HeaderDatabase {
                 // The body is consumed either way; only its ownership of the
                 // values differs.
                 let after_open = trimmed.split_once('{').map(|(_, after)| after).unwrap();
-                let values = read_enum_after_open(after_open, &mut lines);
+                let (values, suffix) = read_enum_after_open(after_open, &mut lines);
                 // Qualified (`Class::EName`) means the header is telling us
                 // this enum belongs to something else, and the dump is the
                 // authority on those. Inside a struct, likewise.
@@ -125,6 +131,12 @@ impl HeaderDatabase {
                         values,
                     });
                 }
+                track_blocks(
+                    &suffix,
+                    &mut open_blocks,
+                    &mut aggregate_depth,
+                    &mut pending_block,
+                );
                 continue;
             }
 
@@ -216,6 +228,10 @@ fn block_decl_kind(prefix: &str) -> Option<BlockKind> {
     if prefix.contains(';') {
         return None;
     }
+    let prefix = prefix
+        .strip_prefix("template")
+        .and_then(|template| template.rsplit_once('>').map(|(_, after)| after.trim()))
+        .unwrap_or(prefix);
     for keyword in ["struct", "class", "union"] {
         if prefix == keyword
             || prefix
@@ -282,18 +298,19 @@ fn strip_comments(line: &str, in_block_comment: &mut bool) -> String {
 /// enum.
 fn read_enum_body<'a>(
     lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
-) -> Vec<(String, i64)> {
+) -> (Vec<(String, i64)>, String) {
     let mut values = Vec::new();
     for line in lines.by_ref() {
         let trimmed = line.trim();
-        if trimmed.starts_with('}') {
-            break;
+        if let Some((body, suffix)) = trimmed.split_once('}') {
+            values.extend(body.split(',').filter_map(|entry| enum_value(entry.trim())));
+            return (values, suffix.to_string());
         }
         if let Some(entry) = enum_value(trimmed) {
             values.push(entry);
         }
     }
-    values
+    (values, String::new())
 }
 
 /// Parse values after an enum's opening brace. The generated header normally
@@ -302,12 +319,14 @@ fn read_enum_body<'a>(
 fn read_enum_after_open<'a>(
     after_open: &str,
     lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
-) -> Vec<(String, i64)> {
+) -> (Vec<(String, i64)>, String) {
     match after_open.split_once('}') {
-        Some((body, _)) => body
-            .split(',')
-            .filter_map(|entry| enum_value(entry.trim()))
-            .collect(),
+        Some((body, suffix)) => (
+            body.split(',')
+                .filter_map(|entry| enum_value(entry.trim()))
+                .collect(),
+            suffix.to_string(),
+        ),
         None => read_enum_body(lines),
     }
 }
@@ -463,11 +482,46 @@ mod tests {
     }
 
     #[test]
+    fn accepts_i64_limits_and_rejects_overflowing_enum_values() {
+        let db = HeaderDatabase::parse(
+            "enum class ELimits {\n  Max = 9223372036854775807,\n  Min = -9223372036854775808,\n  TooHigh = 9223372036854775808,\n  TooLow = -9223372036854775809,\n};\n",
+        );
+        assert_eq!(
+            db.module_enums[0].values,
+            vec![("Max".to_string(), i64::MAX), ("Min".to_string(), i64::MIN),]
+        );
+    }
+
+    #[test]
+    fn enum_close_suffixes_still_close_the_enclosing_aggregate() {
+        for header in [
+            "struct S { enum class E { A = 0, }; };\nenum class EOuter { B = 1, };\n",
+            "struct S {\n  enum class E { A = 0, }; };\nenum class EOuter { B = 1, };\n",
+            "struct S {\n  enum class E {\n    A = 0,\n  }; };\nenum class EOuter { B = 1, };\n",
+        ] {
+            let db = HeaderDatabase::parse(header);
+            assert_eq!(names(&db), vec!["EOuter"], "{header}");
+        }
+    }
+
+    #[test]
+    fn a_template_prefixed_aggregate_does_not_leak_its_enum() {
+        let db = HeaderDatabase::parse(
+            "template <class T> struct S {\n  enum class EInner { A = 0, };\n};\nenum class EOuter { B = 1, };\n",
+        );
+        assert_eq!(names(&db), vec!["EOuter"]);
+    }
+
+    #[test]
     fn python_probe_parser_matches_the_rust_header_grammar() {
         let samples = [
             "namespace Enums {\nenum class EValid {\n  Zero = 0,\n  Negative = -2,\n  Plus = +3,\n  Hex = 0x4,\n  Suffix = 5u,\n}; // enum close suffix\n}\n",
             "/* { a block-comment brace } */\nstruct CThing\n{\n  enum class EInside {\n    A = 0,\n  };\n  class Nested { union { enum class EDeeper { B = 1, }; }; };\n};\nenum class EAfter\n{\n  A = 7, // } a line-comment brace\n}; trailing\n",
             "namespace Enums\n{\nunion { enum class EAnonymous { A = 0, }; };\nstruct Empty {};\nenum class EOnly {\n  Fine = 9,\n  Fraction = 1.5,\n};\n}\n",
+            "struct S { enum class ESameLine { A = 0, }; };\nenum class EAfterSameLine { B = 1, };\n",
+            "struct S {\n  enum class EInline { A = 0, }; };\nenum class EAfterInline { B = 1, };\n",
+            "struct S {\n  enum class EMultiline {\n    A = 0,\n  }; };\ntemplate <class T> struct Template {\n  enum class ETemplate { A = 0, };\n};\nenum class EAfterTemplate { B = 1, };\n",
+            "enum class ELimits {\n  Max = 9223372036854775807,\n  Min = -9223372036854775808,\n  TooHigh = 9223372036854775808,\n  TooLow = -9223372036854775809,\n};\n",
         ];
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         for sample in samples {
