@@ -7,7 +7,9 @@ pub mod formatter;
 pub mod highlights;
 pub mod hover;
 pub mod inlay_hints;
+pub mod lexical_scope;
 pub mod navigation;
+pub mod rename;
 pub mod scope_query;
 pub mod semantic_tokens;
 pub mod signature;
@@ -31,6 +33,18 @@ use crate::config_watch::{self, ConfigReloadAction};
 use crate::typecheck::GlobalScope;
 use crate::typedb::TypeIndex;
 use crate::update;
+
+/// Turn a rename [`Refusal`](rename::Refusal) into the JSON-RPC error the
+/// client shows the user. `prepareRename` answering with an error is the
+/// spec'd way to say "this position is not renameable", and VS Code
+/// surfaces the message in the rename box.
+fn refusal_error(refusal: rename::Refusal) -> tower_lsp::jsonrpc::Error {
+    tower_lsp::jsonrpc::Error {
+        code: tower_lsp::jsonrpc::ErrorCode::InvalidRequest,
+        message: refusal.reason.into(),
+        data: None,
+    }
+}
 
 #[derive(Clone)]
 pub struct Backend {
@@ -1182,7 +1196,13 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec!["(".into(), ",".into()]),
                     ..Default::default()
                 }),
-                rename_provider: Some(OneOf::Left(true)),
+                // B049: `OneOf::Left(true)` cannot advertise prepare
+                // support, so F2 went straight to the destructive path
+                // with no chance to tell the client "not renameable here".
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                })),
                 code_action_provider: Some(code_actions::code_action_provider()),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
@@ -1476,11 +1496,20 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
-        let files = snapshot.uri_map();
+        // Own files only, for the same reason rename uses them: a
+        // dependency plugin is a SEPARATE module, so a symbol there that
+        // merely shares a spelling is a different symbol, and reporting
+        // its occurrences as references to this one is the very
+        // false-positive class B049 exists to remove.
+        let files = snapshot.own_uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
-        let refs = navigation::find_references(
-            &analysis,
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        let refs = rename::find_references(
+            analysis,
+            uri,
             pos,
+            &scope,
             &workspace_files,
             params.context.include_declaration,
         );
@@ -1587,14 +1616,46 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
-        let files = snapshot.uri_map();
+        // Own files only: a WorkspaceEdit naming a dependency plugin's
+        // export file would have the editor rewrite someone else's source.
+        let files = snapshot.own_uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
-        Ok(navigation::rename(
-            &analysis,
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        rename::rename(
+            analysis,
+            uri,
             pos,
             &params.new_name,
+            &scope,
             &workspace_files,
-        ))
+        )
+        .map(Some)
+        .map_err(refusal_error)
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = &params.text_document.uri;
+        let pos = params.position;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let snapshot = self.snapshot_for(uri).await;
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
+        // Own files only: a WorkspaceEdit naming a dependency plugin's
+        // export file would have the editor rewrite someone else's source.
+        let files = snapshot.own_uri_map();
+        let workspace_files = navigation::WorkspaceFiles { files: &files };
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        rename::prepare_rename(analysis, uri, pos, &scope, &workspace_files)
+            .map(|range| Some(PrepareRenameResponse::Range(range)))
+            .map_err(refusal_error)
     }
 
     async fn semantic_tokens_full(

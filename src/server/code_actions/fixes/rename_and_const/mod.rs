@@ -16,7 +16,11 @@
 
 pub mod const_receiver;
 pub mod duplicate_function;
-pub mod scope;
+// B049: the scope model this ticket built was promoted to
+// `crate::server::lexical_scope` so `textDocument/rename` and
+// `textDocument/references` could stop being scope-blind. Re-exported
+// under the old name so the three families read unchanged.
+pub use crate::server::lexical_scope as scope;
 pub mod shadowed_variable;
 
 #[cfg(test)]
