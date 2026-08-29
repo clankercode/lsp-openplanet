@@ -1,0 +1,135 @@
+---
+complexity: medium
+created_at: "2026-08-29T14:05:50Z"
+depends_on:
+    - B017
+    - B019
+estimate_hours: 1
+id: B034
+priority: medium
+status: pending
+tags:
+    - vscode-ext
+    - defines
+    - ux
+    - enhancement
+title: 'VS Code: no UI to add/remove/toggle defines — only raw JSON settings editing'
+updated_at: "2026-08-29T14:05:50Z"
+---
+Requested 2026-08-30 by Max. Extension repo: ../lsp-openplanet-ext/
+(package `packages/vscode-ext`). Enhancement, not a regression.
+
+## Gap
+The only way to manage preprocessor defines today is to hand-edit the
+`openplanetLsp.defines` array in settings JSON. Verified on master:
+`packages/vscode-ext/package.json` contributes exactly ONE command
+(`openplanetLsp.restart` / "Restart Server"). There is no command-palette
+surface for defines at all.
+
+The setting itself (`contributes.configuration.properties`):
+
+    "openplanetLsp.defines": { "type": "array", "items": {"type":"string"}, "default": [] }
+
+with the documented semantics: entries are ADDED to the defines derived from
+the game target, the signature level and `info.toml` `[script].defines`; an
+entry prefixed `-` or `!` turns a define OFF (e.g. `-LOGS`). Read in
+`packages/vscode-ext/src/extension.ts:24` and forwarded to the server as
+`defines` in `packages/vscode-ext/src/settings.ts:130`.
+
+So the array is really a tri-state edit list over a derived base set — exactly
+the kind of thing raw JSON is worst at, because the user cannot see the base
+set they are editing against.
+
+## Ask
+An easy way to add / remove / change / disable defines from the VS Code UI,
+via the command palette.
+
+## Design decision (coordinator, 2026-08-30)
+
+Ship a **QuickPick toggle list** as the primary surface, plus thin
+add/remove commands. Rationale: the value of this feature is seeing the
+RESOLVED define set (derived + manifest + overrides) in one list with its
+current state, which a plain input box cannot give.
+
+Commands to contribute:
+- `openplanetLsp.defines.manage` — "Openplanet: Manage Defines". Opens a
+  multi-select QuickPick listing the resolved define set. Each row shows the
+  define name, its state (on/off) and its ORIGIN (target / signature level /
+  info.toml / user setting), origin shown as QuickPick `description` and
+  greyed. Toggling a row writes the minimal `-NAME` / `NAME` entry into
+  `openplanetLsp.defines`; a row returned to its derived state has its
+  override REMOVED rather than a redundant entry added.
+- `openplanetLsp.defines.add` — "Openplanet: Add Define". Input box, validates
+  the name, appends to the array.
+- `openplanetLsp.defines.remove` — "Openplanet: Remove Define". QuickPick over
+  the user's OWN override entries only, removes the selected ones.
+- `openplanetLsp.defines.clearOverrides` — "Openplanet: Clear Define
+  Overrides". Empties the array back to the derived set, with a confirm.
+
+Scope target: workspace settings by default, with a scope prompt (Workspace /
+User) when a workspace is open — a define override is almost always
+project-specific, so Workspace is the right default.
+
+## Open dependency — resolved-define introspection
+
+The extension cannot render origins or the resolved set without asking the
+server for it. Check whether such a request already exists before adding one:
+grep the server for an existing custom LSP request exposing config/defines
+(the `openplanet-lsp` CLI already has `typedb status`-style introspection, so
+there may be a config equivalent). If none exists, add a custom request
+(suggested: `openplanet-lsp/resolvedDefines`) returning, per define,
+`{ name, active, origin }`, and version it.
+
+If that server-side request turns out to be nontrivial, ship the add/remove/
+clear commands FIRST against the raw array (they need no server support at
+all) and file the origin-annotated manage view as a follow-up — do not block
+the whole feature on introspection.
+
+## Interaction with B017 / B019 / B024
+- B024 already made config layers ACCUMULATE `defines` into
+  `LspConfig::define_overrides`, applied after target derivation and the
+  manifest, honouring `-NAME` / `!NAME` removes. The manage view must reflect
+  that ordering, not re-derive its own.
+- B019 stops defining `DEPENDENCY_<ID>` for UNRESOLVED dependencies. Those
+  should still be listed in the manage view (greyed, origin "dependency —
+  not installed") and be toggleable ON, since that is the documented way to
+  check the branch a user with the dep would compile. Coordinate with B019's
+  decision that `define_matrix` can toggle such a define explicitly.
+- B017 changes config precedence; the "origin" label must name the winning
+  layer under the FINAL ladder, not the current inverted one. So land this
+  after B017/B019 to avoid encoding the old precedence into the UI.
+
+## Test plan (TDD, red first)
+Tests live in the extension repo (`vitest.config.ts` at its root; existing
+tests cover `settings.ts`). Keep the define-edit logic in a PURE module
+(e.g. `src/defines.ts`) so it is testable without the vscode API — mirror how
+`settings.ts` is already structured and tested.
+
+Red (pure logic, no vscode):
+- `toggle_off_adds_minus_entry`: define derived-on, toggled off -> array gains
+  `-NAME`.
+- `toggle_back_on_removes_override`: same define toggled on again -> array
+  returns to its ORIGINAL contents (no redundant `NAME` entry left behind).
+- `toggle_on_for_derived_off_adds_bare_entry`: define not in the derived set,
+  toggled on -> array gains `NAME`.
+
+Variants (per CLAUDE.md, generalize):
+- both negation prefixes `-NAME` and `!NAME` round-trip identically
+- a define already present as BOTH `NAME` and `-NAME` in the array
+  (contradictory user input) -> deterministic resolution, and the UI shows the
+  effective state
+- duplicate entries collapse rather than accumulate
+- name validation: empty, whitespace-only, leading digit, lowercase, dots,
+  spaces, symbols, very long name; reject or normalise consistently with what
+  the server accepts (see `dependency_define_suffix` in src/config.rs and the
+  B019 lane's findings on ID -> define conversion)
+- case handling: `dev` vs `DEV` — decide whether the UI upcases, and lock it
+- clearing overrides when the array is already empty -> no-op, no error
+- workspace vs user scope: writing to one does not clobber the other
+- no workspace open -> scope prompt is skipped, writes to User
+- server restart / config push is triggered exactly once per edit batch, not
+  per toggled row
+
+## Related
+Server side: src/config.rs (define ladder, `define_overrides`, `apply_manifest`).
+Backlog: B017 (precedence), B019 (DEPENDENCY_ defines), B024 (define accumulation).
