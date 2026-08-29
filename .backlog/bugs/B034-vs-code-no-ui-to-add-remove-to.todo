@@ -4,7 +4,7 @@ created_at: "2026-08-29T14:05:50Z"
 depends_on:
     - B017
     - B019
-estimate_hours: 1
+estimate_hours: 5
 id: B034
 priority: medium
 status: pending

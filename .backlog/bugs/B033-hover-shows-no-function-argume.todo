@@ -2,7 +2,7 @@
 complexity: medium
 created_at: "2026-08-29T14:04:54Z"
 depends_on: []
-estimate_hours: 1
+estimate_hours: 3
 id: B033
 priority: high
 status: pending
