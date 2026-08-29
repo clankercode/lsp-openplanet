@@ -43,3 +43,4 @@ bugs:
     - file: B042-vs-code-no-snippets-for-openpl.todo
     - file: B043-vs-code-one-command-total-and.todo
     - file: B044-bare-unnamed-enum-value-names.todo
+    - file: B045-no-gate-stops-a-test-depending.todo
