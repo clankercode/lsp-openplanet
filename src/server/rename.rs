@@ -1,15 +1,51 @@
 //! Scope-aware `textDocument/rename`, `textDocument/prepareRename` and
 //! `textDocument/references` (B049).
 //!
-//! **RED PLACEHOLDER** — the bodies below still delegate to the
-//! scope-blind token scan this ticket exists to replace. The tests are
-//! written against the final API so they fail on behaviour, not on a
-//! compile error.
+//! Before this module, both rename and find-references were the same
+//! workspace-wide **textual** token scan: every `Ident` token in every open
+//! file whose text matched the cursor's bare name was rewritten (or
+//! reported). Renaming a local `x` therefore also rewrote the outer binding
+//! it shadowed, every unrelated local/parameter/global named `x`, every
+//! `obj.x`, both sides of `A::x`, and every named-argument label `x:` — in
+//! every open file. On a loop counter that silently corrupts a plugin.
+//!
+//! ## One strategy per symbol class
+//!
+//! A local's scope is lexical; a field's is its class plus every `obj.field`
+//! access; a free function's is the workspace. There is no single occurrence
+//! rule, so [`classify`] decides which of three applies:
+//!
+//! | class | strategy |
+//! |---|---|
+//! | local variable, `for`-init, block/case local | [`Target::Local`] — the lexical range `[declarator, innermost_scope_end)`, single file |
+//! | function parameter | [`Target::Local`] — the parameter name plus its function body, single file |
+//! | free function, global variable | [`Target::Workspace`] with [`Shape::Value`] — every file, never adjacent to `::`, never after `.` |
+//! | class, interface, enum, funcdef/typedef | [`Target::Workspace`] with [`Shape::Type`] — as above, but `Name::` **is** the symbol so a left-hand qualifier is rewritten |
+//! | class field, method, `obj.member` | refused — needs the type of every receiver |
+//! | namespaced name, either side of `::` | refused — needs qualifier resolution |
+//! | enum value | refused — visible both bare and as `E::V` |
+//! | named-argument label | refused — names one of the *callee's* parameters |
+//! | anything not declared in the open workspace | refused |
+//!
+//! Refusal is the deliberate default: a refused rename is a papercut, a
+//! wrong one corrupts a plugin. Every refusal carries a message, which
+//! `prepareRename` hands the client before the user types a new name.
+//!
+//! [`find_references`] shares the classification but is read-only, so for
+//! the refused classes it degrades to a *filtered* scan
+//! ([`Target::Approximate`]) rather than to nothing — still a large
+//! improvement on the old scan, and it cannot corrupt anything.
+
+use std::collections::HashMap;
 
 use tower_lsp::lsp_types::*;
 
 use crate::analysis::DocumentAnalysis;
-use crate::server::navigation::{self, WorkspaceFiles};
+use crate::lexer::{Span, Token, TokenKind};
+use crate::server::diagnostics::span_to_range;
+use crate::server::lexical_scope::{self as lexical, Binding};
+use crate::server::navigation::{ident_index_at, WorkspaceFiles};
+use crate::symbols::scope::SymbolKind;
 use crate::typecheck::GlobalScope;
 
 /// Why a rename was declined. The message reaches the user: VS Code shows
@@ -28,41 +64,791 @@ impl Refusal {
     }
 }
 
+/// How a workspace symbol may appear next to `::`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// Functions and globals: a bare name, never a qualifier and never a
+    /// member, so every `::`-adjacent occurrence is a different symbol.
+    Value,
+    /// Classes, interfaces, enums and funcdefs: `Name::` **is** this
+    /// symbol, so a left-hand qualifier is rewritten; a right-hand one
+    /// (`Other::Name`) is still someone else's member.
+    Type,
+}
+
+/// Which occurrences a read-only reference scan should keep for a class
+/// rename cannot handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApproxKind {
+    /// A class member: keep `.name` accesses and declarations, drop bare
+    /// locals and globals that merely share the spelling.
+    Member,
+    /// A namespaced name or enum value: keep bare and `::`-adjacent
+    /// occurrences, drop `.name` accesses and argument labels.
+    Qualified,
+}
+
+/// The binding the cursor names, and therefore the occurrence rule.
+#[derive(Debug, Clone)]
+enum Target {
+    /// A local declarator or a function parameter: lexical, single file.
+    Local { name: String, binding: Binding },
+    /// A symbol the table registers at workspace top level.
+    Workspace { name: String, shape: Shape },
+    /// Not renameable. `find_references` still answers, approximately.
+    Approximate {
+        name: String,
+        kind: ApproxKind,
+        reason: &'static str,
+    },
+}
+
+impl Target {
+    fn name(&self) -> &str {
+        match self {
+            Target::Local { name, .. }
+            | Target::Workspace { name, .. }
+            | Target::Approximate { name, .. } => name,
+        }
+    }
+}
+
+/// `textDocument/prepareRename`: the range the client should put in its
+/// rename box, or the reason this position cannot be renamed.
+///
+/// Everything [`rename`] can refuse for a reason that does not depend on
+/// the new name is refused here too, so the user learns "not here" before
+/// typing.
 pub fn prepare_rename(
     analysis: &DocumentAnalysis,
     position: Position,
-    _scope: &GlobalScope<'_>,
-    _files: &WorkspaceFiles,
+    scope: &GlobalScope<'_>,
+    files: &WorkspaceFiles,
 ) -> Result<Range, Refusal> {
-    let (start, end, _) = navigation::ident_span_at(analysis, position)
-        .ok_or_else(|| Refusal::new("not an identifier"))?;
-    Ok(crate::server::diagnostics::span_to_range(
-        analysis.masked_source(),
-        crate::lexer::Span { start, end },
-    ))
+    let (span, target) = classify(analysis, position, scope, files)
+        .ok_or_else(|| Refusal::new("there is no identifier at this position"))?;
+    match &target {
+        Target::Approximate { reason, .. } => return Err(Refusal::new(*reason)),
+        Target::Local { name, binding } => {
+            local_occurrences(analysis, name, *binding)?;
+            if binding.is_parameter {
+                named_argument_label_exists(analysis, name, files)?;
+            }
+        }
+        Target::Workspace { name, shape } => {
+            workspace_occurrences(analysis, name, *shape, files)?;
+        }
+    }
+    Ok(span_to_range(analysis.masked_source(), span))
 }
 
+/// `textDocument/rename`: a workspace edit renaming exactly the
+/// occurrences that bind to the symbol under `position`.
 pub fn rename(
     analysis: &DocumentAnalysis,
-    _uri: &Url,
+    uri: &Url,
     position: Position,
     new_name: &str,
-    _scope: &GlobalScope<'_>,
+    scope: &GlobalScope<'_>,
     files: &WorkspaceFiles,
 ) -> Result<WorkspaceEdit, Refusal> {
-    navigation::rename(analysis, position, new_name, files)
-        .ok_or_else(|| Refusal::new("no matches"))
+    let (_, target) = classify(analysis, position, scope, files)
+        .ok_or_else(|| Refusal::new("there is no identifier at this position"))?;
+    if !lexical::is_plain_identifier(new_name) {
+        return Err(Refusal::new(format!(
+            "`{new_name}` is not a valid AngelScript identifier"
+        )));
+    }
+    if new_name == target.name() {
+        return Err(Refusal::new("the new name is the same as the old one"));
+    }
+
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    match &target {
+        Target::Approximate { reason, .. } => return Err(Refusal::new(*reason)),
+        Target::Local { name, binding } => {
+            if binding.is_parameter {
+                named_argument_label_exists(analysis, name, files)?;
+            }
+            let spans = local_occurrences(analysis, name, *binding)?;
+            local_new_name_conflict(analysis, scope, *binding, new_name)?;
+            changes.insert(uri.clone(), edits_for(analysis, &spans, new_name));
+        }
+        Target::Workspace { name, shape } => {
+            let found = workspace_occurrences(analysis, name, *shape, files)?;
+            workspace_new_name_conflict(scope, &found, new_name)?;
+            for (file_uri, file_analysis, spans) in &found {
+                changes.insert(file_uri.clone(), edits_for(file_analysis, spans, new_name));
+            }
+        }
+    }
+    Ok(WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    })
 }
 
+/// `textDocument/references`: the read-only twin of [`rename`], sharing its
+/// classification.
+///
+/// For the classes [`rename`] refuses this falls back to a filtered scan
+/// (see [`ApproxKind`]) rather than to nothing — reporting a superset is
+/// acceptable for a read-only feature in a way that rewriting one is not.
+/// `include_declaration` is honoured on the precise paths, where the
+/// declaration is known.
 pub fn find_references(
     analysis: &DocumentAnalysis,
-    _uri: &Url,
+    uri: &Url,
     position: Position,
-    _scope: &GlobalScope<'_>,
+    scope: &GlobalScope<'_>,
     files: &WorkspaceFiles,
     include_declaration: bool,
 ) -> Vec<Location> {
-    navigation::find_references(analysis, position, files, include_declaration)
+    let Some((_, target)) = classify(analysis, position, scope, files) else {
+        return Vec::new();
+    };
+    match &target {
+        Target::Local { name, binding } => match local_occurrences(analysis, name, *binding) {
+            Ok(spans) => locations_for(
+                analysis,
+                uri,
+                spans
+                    .into_iter()
+                    .filter(|span| include_declaration || span.start != binding.start),
+            ),
+            // The precise set refused (a lambda in scope, a same-scope
+            // redeclaration). Reporting the filtered scan beats reporting
+            // nothing, and nothing is rewritten.
+            Err(_) => approximate_locations(name, ApproxKind::Qualified, files),
+        },
+        Target::Workspace { name, shape } => {
+            match workspace_occurrences(analysis, name, *shape, files) {
+                Ok(found) => {
+                    let declarations = declaration_starts(scope, name);
+                    found
+                        .iter()
+                        .flat_map(|(file_uri, file_analysis, spans)| {
+                            locations_for(
+                                file_analysis,
+                                file_uri,
+                                spans.iter().copied().filter(|span| {
+                                    include_declaration || !declarations.contains(&span.start)
+                                }),
+                            )
+                        })
+                        .collect()
+                }
+                Err(_) => approximate_locations(name, ApproxKind::Qualified, files),
+            }
+        }
+        Target::Approximate { name, kind, .. } => approximate_locations(name, *kind, files),
+    }
+}
+
+// -------------------------------------------------------------------
+// Classification
+// -------------------------------------------------------------------
+
+/// The identifier span under `position` and what it names, or `None` when
+/// the cursor is not on an identifier at all.
+fn classify(
+    analysis: &DocumentAnalysis,
+    position: Position,
+    scope: &GlobalScope<'_>,
+    files: &WorkspaceFiles,
+) -> Option<(Span, Target)> {
+    let (idx, span, _) = ident_index_at(analysis, position)?;
+    let tokens = &analysis.tokens;
+    let source = analysis.masked_source();
+    let name = span.text(source).to_string();
+
+    let approximate = |kind, reason| {
+        Some((
+            span,
+            Target::Approximate {
+                name: name.clone(),
+                kind,
+                reason,
+            },
+        ))
+    };
+
+    // Syntactic position first: these say what the name is regardless of
+    // what the symbol table knows about the spelling.
+    if idx > 0 && tokens[idx - 1].kind == TokenKind::Dot {
+        return approximate(
+            ApproxKind::Member,
+            "this is a class member; renaming one needs the type of every receiver, \
+             which this server cannot resolve",
+        );
+    }
+    if idx > 0 && tokens[idx - 1].kind == TokenKind::ColonColon {
+        return approximate(
+            ApproxKind::Qualified,
+            "this is a qualified name; renaming the right-hand side of `::` needs \
+             qualifier resolution this server does not do",
+        );
+    }
+    if lexical::is_named_argument_label(tokens, idx) {
+        return approximate(
+            ApproxKind::Qualified,
+            "this is a named-argument label; it names one of the callee's parameters, \
+             not a binding here",
+        );
+    }
+
+    // A local or parameter shadows anything above it, so it is checked
+    // before the workspace. Innermost (largest declarator offset) wins.
+    let binding = lexical::bindings_named(&analysis.file, tokens, source, &name)
+        .into_iter()
+        .filter(|binding| binding.start <= span.start && span.start < binding.scope_end)
+        .max_by_key(|binding| binding.start);
+    if let Some(binding) = binding {
+        return Some((span, Target::Local { name, binding }));
+    }
+
+    let candidates = scope.lookup_workspace(&name);
+    if candidates.is_empty() {
+        // Say *why* when the spelling is visibly owned by something.
+        if declares_class_member(scope, &name) {
+            return approximate(
+                ApproxKind::Member,
+                "this is a class member; renaming one needs the type of every receiver, \
+                 which this server cannot resolve",
+            );
+        }
+        if declares_enum_value(scope, &name) {
+            return approximate(
+                ApproxKind::Qualified,
+                "this is an enum value; it is visible both bare and as `Enum::Value`, \
+                 which this server cannot tell apart from an unrelated name",
+            );
+        }
+        if declares_namespaced(scope, &name) {
+            return approximate(
+                ApproxKind::Qualified,
+                "this is a namespaced name; renaming one needs qualifier resolution \
+                 this server does not do",
+            );
+        }
+        return approximate(
+            ApproxKind::Qualified,
+            "no declaration for this name in the open workspace",
+        );
+    }
+
+    // Every candidate must be a real definition of the same class, living
+    // in a file this request can edit.
+    let mut shape = None;
+    for symbol in &candidates {
+        if files.get(symbol.file_id).is_none() {
+            return approximate(
+                ApproxKind::Qualified,
+                "this symbol is declared outside the open workspace",
+            );
+        }
+        let candidate = match &symbol.kind {
+            SymbolKind::Function { imported: true, .. } => {
+                return approximate(
+                    ApproxKind::Qualified,
+                    "this name is an `import ... from` alias for a function defined \
+                     in another plugin",
+                )
+            }
+            SymbolKind::Function { .. } | SymbolKind::Variable { .. } => Shape::Value,
+            SymbolKind::Class { .. }
+            | SymbolKind::Interface { .. }
+            | SymbolKind::Enum { .. }
+            | SymbolKind::Funcdef { .. } => Shape::Type,
+            SymbolKind::EnumValue { .. } => {
+                return approximate(
+                    ApproxKind::Qualified,
+                    "this is an enum value; it is visible both bare and as `Enum::Value`, \
+                     which this server cannot tell apart from an unrelated name",
+                )
+            }
+            SymbolKind::Namespace => {
+                return approximate(
+                    ApproxKind::Qualified,
+                    "renaming a namespace would have to rewrite every qualifier that \
+                     names it, which this server cannot resolve",
+                )
+            }
+        };
+        if shape.get_or_insert(candidate) != &candidate {
+            // A class and a function sharing one spelling: a bare use may
+            // be either.
+            return approximate(
+                ApproxKind::Qualified,
+                "this name is declared as more than one kind of symbol",
+            );
+        }
+    }
+    let shape = shape?;
+
+    // A bare use inside a class or namespace that owns this spelling
+    // resolves *there*, not to the top-level symbol, and telling the two
+    // apart needs the resolution we do not have.
+    if declares_class_member(scope, &name) {
+        return approximate(
+            ApproxKind::Member,
+            "a class in this workspace declares a member with the same name, so a bare \
+             use inside that class may be the member",
+        );
+    }
+    if declares_enum_value(scope, &name) || declares_namespaced(scope, &name) {
+        return approximate(
+            ApproxKind::Qualified,
+            "an enum value or namespaced declaration in this workspace shares this name, \
+             so a bare use may resolve there",
+        );
+    }
+    Some((span, Target::Workspace { name, shape }))
+}
+
+// -------------------------------------------------------------------
+// Occurrence sets
+// -------------------------------------------------------------------
+
+/// Spans of every reference to a local or parameter, declarator included.
+///
+/// Refuses rather than guess when the range contains something the scope
+/// model cannot see through.
+fn local_occurrences(
+    analysis: &DocumentAnalysis,
+    name: &str,
+    binding: Binding,
+) -> Result<Vec<Span>, Refusal> {
+    let source = analysis.masked_source();
+    let tokens = &analysis.tokens;
+
+    // A lambda opens its own frame, and neither its parameters nor its
+    // locals are reachable from the AST walk (they live inside an
+    // expression), so an identifier inside one may not be ours.
+    if tokens.iter().any(|token| {
+        token.kind == TokenKind::KwFunction
+            && token.span.start > binding.start
+            && token.span.end <= binding.scope_end
+    }) {
+        return Err(Refusal::new(
+            "an anonymous function in this scope may declare its own binding with this \
+             name, which this server cannot see",
+        ));
+    }
+
+    let mut excluded = Vec::new();
+    for redeclaration in lexical::redeclarations_in_range(
+        &analysis.file,
+        source,
+        name,
+        binding.start,
+        binding.scope_end,
+    ) {
+        let Some(end) = lexical::innermost_scope_end(&analysis.file, tokens, redeclaration) else {
+            return Err(Refusal::new(
+                "a redeclaration of this name has no resolvable scope",
+            ));
+        };
+        if end >= binding.scope_end {
+            return Err(Refusal::new(
+                "this name is declared twice in the same scope, so its uses may bind to \
+                 either declaration",
+            ));
+        }
+        // The nested declaration's initialiser is evaluated before its own
+        // name is bound, so references there still resolve to us.
+        if let Some(init) = lexical::own_initializer_span(&analysis.file, redeclaration) {
+            excluded.push((redeclaration, init.start));
+            excluded.push((init.end, end));
+        } else {
+            excluded.push((redeclaration, end));
+        }
+    }
+
+    // `int x = x + 1;` initialises from the OUTER binding. Rewriting that
+    // read would change which variable it names, and leaving it alone
+    // would leave a dangling reference, so neither answer is safe.
+    if let Some(init) = lexical::own_initializer_span(&analysis.file, binding.start) {
+        if tokens.iter().any(|token| {
+            token.kind == TokenKind::Ident
+                && token.span.start >= init.start
+                && token.span.end <= init.end
+                && token.span.text(source) == name
+        }) {
+            return Err(Refusal::new(
+                "this declaration's own initialiser reads a different binding with the \
+                 same name",
+            ));
+        }
+    }
+
+    let spans = lexical::local_occurrences(
+        tokens,
+        source,
+        name,
+        binding.start,
+        binding.scope_end,
+        &excluded,
+    );
+    // Rewriting uses without rewriting the declaration would be worse than
+    // refusing. The declarator is always the first span in range.
+    if spans.first().map(|span| span.start) != Some(binding.start) {
+        return Err(Refusal::new(
+            "the declaration of this name could not be located in its own scope",
+        ));
+    }
+    Ok(spans)
+}
+
+/// Per-file occurrence spans of a workspace symbol, over every open file.
+#[allow(clippy::type_complexity)]
+fn workspace_occurrences<'a>(
+    analysis: &'a DocumentAnalysis,
+    name: &str,
+    shape: Shape,
+    files: &WorkspaceFiles<'a>,
+) -> Result<Vec<(Url, &'a DocumentAnalysis, Vec<Span>)>, Refusal> {
+    let mut out = Vec::new();
+    for (uri, file_analysis) in files.files.values() {
+        let spans = occurrences_in_file(file_analysis, name, shape)?;
+        if !spans.is_empty() {
+            out.push((uri.clone(), *file_analysis, spans));
+        }
+    }
+    if out.is_empty() {
+        // The snapshot did not include the requesting document (an
+        // unsaved buffer the analysis was built for on the fly).
+        let _ = analysis;
+        return Err(Refusal::new("no references to this symbol were found"));
+    }
+    Ok(out)
+}
+
+/// Occurrences of a workspace symbol within one file.
+fn occurrences_in_file(
+    analysis: &DocumentAnalysis,
+    name: &str,
+    shape: Shape,
+) -> Result<Vec<Span>, Refusal> {
+    let source = analysis.masked_source();
+    let tokens = &analysis.tokens;
+
+    // Locals and parameters spelled the same shadow us wholesale.
+    let mut shadowed: Vec<(u32, u32)> = Vec::new();
+    for binding in lexical::bindings_named(&analysis.file, tokens, source, name) {
+        if let Some(init) = lexical::own_initializer_span(&analysis.file, binding.start) {
+            if tokens.iter().any(|token| {
+                token.kind == TokenKind::Ident
+                    && token.span.start >= init.start
+                    && token.span.end <= init.end
+                    && token.span.text(source) == name
+            }) {
+                // `int g = g + 1;` reads US inside a range we are about to
+                // skip wholesale, so skipping it would strand a reference.
+                return Err(Refusal::new(
+                    "a local declaration shadowing this symbol initialises itself from it, \
+                     so the two cannot be separated",
+                ));
+            }
+        }
+        shadowed.push((binding.start, binding.scope_end));
+    }
+
+    let lambdas = lambda_body_regions(tokens);
+    let mut spans = Vec::new();
+    for (idx, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::Ident || token.span.text(source) != name {
+            continue;
+        }
+        if idx > 0 && tokens[idx - 1].kind == TokenKind::Dot {
+            continue;
+        }
+        let follows_colons = idx > 0 && tokens[idx - 1].kind == TokenKind::ColonColon;
+        let precedes_colons = matches!(
+            tokens.get(idx + 1).map(|next| next.kind),
+            Some(TokenKind::ColonColon)
+        );
+        match shape {
+            // `A::name` and `name::A` are both someone else's symbol.
+            Shape::Value if follows_colons || precedes_colons => continue,
+            // `Name::` IS this type; `Other::Name` is not.
+            Shape::Type if follows_colons => continue,
+            _ => {}
+        }
+        if lexical::is_named_argument_label(tokens, idx) {
+            continue;
+        }
+        if shadowed
+            .iter()
+            .any(|(start, end)| token.span.start >= *start && token.span.start < *end)
+        {
+            continue;
+        }
+        if lambdas
+            .iter()
+            .any(|(start, end)| token.span.start >= *start && token.span.start < *end)
+        {
+            // A lambda's own parameters and locals are invisible to the
+            // AST walk, so this may be a binding of its own.
+            return Err(Refusal::new(
+                "this name appears inside an anonymous function, which may declare its \
+                 own binding with the same name",
+            ));
+        }
+        spans.push(token.span);
+    }
+    Ok(spans)
+}
+
+/// Byte ranges of every anonymous-function body (`function(…) { … }`).
+///
+/// The AST walk does not descend into expressions, so a lambda's own
+/// parameters and locals are invisible to [`lexical::bindings_named`].
+/// Callers treat these regions as opaque.
+fn lambda_body_regions(tokens: &[Token]) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for (idx, token) in tokens.iter().enumerate() {
+        if token.kind != TokenKind::KwFunction {
+            continue;
+        }
+        // `funcdef void CB();` has no body; a lambda's `{` is the first
+        // brace before any `;`.
+        let Some(open) = tokens[idx + 1..]
+            .iter()
+            .position(|next| matches!(next.kind, TokenKind::LBrace | TokenKind::Semi))
+            .map(|offset| idx + 1 + offset)
+            .filter(|open| tokens[*open].kind == TokenKind::LBrace)
+        else {
+            continue;
+        };
+        let mut depth = 0usize;
+        for next in &tokens[open..] {
+            match next.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    // A truncated source can close more braces than it
+                    // opened; `checked_sub` keeps a request handler from
+                    // panicking on one.
+                    let Some(remaining) = depth.checked_sub(1) else {
+                        break;
+                    };
+                    depth = remaining;
+                    if depth == 0 {
+                        out.push((tokens[open].span.start, next.span.end));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+// -------------------------------------------------------------------
+// New-name collision checks — refuse, never shadow
+// -------------------------------------------------------------------
+
+fn local_new_name_conflict(
+    analysis: &DocumentAnalysis,
+    scope: &GlobalScope<'_>,
+    binding: Binding,
+    new_name: &str,
+) -> Result<(), Refusal> {
+    if scope.has_global_ident(new_name) {
+        return Err(Refusal::new(format!(
+            "`{new_name}` is already declared in this workspace or by the engine API"
+        )));
+    }
+    let source = analysis.masked_source();
+    let taken = analysis.tokens.iter().any(|token| {
+        token.kind == TokenKind::Ident
+            && token.span.start >= binding.start
+            && token.span.end <= binding.scope_end
+            && token.span.text(source) == new_name
+    });
+    if taken {
+        return Err(Refusal::new(format!(
+            "`{new_name}` is already used in this scope; renaming would capture it"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::type_complexity)]
+fn workspace_new_name_conflict(
+    scope: &GlobalScope<'_>,
+    found: &[(Url, &DocumentAnalysis, Vec<Span>)],
+    new_name: &str,
+) -> Result<(), Refusal> {
+    if scope.has_global_ident(new_name) || declares_class_member(scope, new_name) {
+        return Err(Refusal::new(format!(
+            "`{new_name}` is already declared in this workspace or by the engine API"
+        )));
+    }
+    for (_, analysis, spans) in found {
+        let source = analysis.masked_source();
+        for binding in lexical::bindings_named(&analysis.file, &analysis.tokens, source, new_name) {
+            if spans
+                .iter()
+                .any(|span| span.start >= binding.start && span.start < binding.scope_end)
+            {
+                return Err(Refusal::new(format!(
+                    "a local named `{new_name}` is in scope at one of these references; \
+                     renaming would capture it"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------
+// Symbol-table queries
+// -------------------------------------------------------------------
+
+/// Owner and kind of every workspace symbol registered as `Owner::name`.
+fn qualified_owners<'a>(scope: &'a GlobalScope<'_>, name: &str) -> Vec<(String, &'a SymbolKind)> {
+    let suffix = format!("::{name}");
+    scope
+        .workspace()
+        .all_symbols()
+        .filter(|symbol| symbol.name.ends_with(&suffix))
+        .map(|symbol| {
+            (
+                symbol.name[..symbol.name.len() - suffix.len()].to_string(),
+                &symbol.kind,
+            )
+        })
+        .collect()
+}
+
+/// True when some workspace class or interface declares a member spelled
+/// `name` — then a bare use inside that class is the member, not a global.
+fn declares_class_member(scope: &GlobalScope<'_>, name: &str) -> bool {
+    qualified_owners(scope, name).iter().any(|(owner, kind)| {
+        !matches!(kind, SymbolKind::EnumValue { .. }) && scope.is_workspace_class(owner)
+    })
+}
+
+fn declares_enum_value(scope: &GlobalScope<'_>, name: &str) -> bool {
+    qualified_owners(scope, name)
+        .iter()
+        .any(|(_, kind)| matches!(kind, SymbolKind::EnumValue { .. }))
+}
+
+fn declares_namespaced(scope: &GlobalScope<'_>, name: &str) -> bool {
+    qualified_owners(scope, name)
+        .iter()
+        .any(|(owner, _)| scope.workspace_namespace_declared(owner))
+}
+
+/// Declarator offsets of a workspace symbol, for `include_declaration`.
+fn declaration_starts(scope: &GlobalScope<'_>, name: &str) -> Vec<u32> {
+    scope
+        .lookup_workspace(name)
+        .iter()
+        .map(|symbol| symbol.span.start)
+        .collect()
+}
+
+// -------------------------------------------------------------------
+// Read-only fallback
+// -------------------------------------------------------------------
+
+/// Filtered token scan for the classes [`rename`] refuses.
+///
+/// Deliberately approximate — it can over-report — but it never reports the
+/// occurrences that are certainly a different symbol, which is what made
+/// the old scan useless.
+fn approximate_locations(name: &str, kind: ApproxKind, files: &WorkspaceFiles) -> Vec<Location> {
+    let mut out = Vec::new();
+    for (uri, analysis) in files.files.values() {
+        let source = analysis.masked_source();
+        let tokens = &analysis.tokens;
+        let spans = tokens.iter().enumerate().filter_map(|(idx, token)| {
+            if token.kind != TokenKind::Ident || token.span.text(source) != name {
+                return None;
+            }
+            if lexical::is_named_argument_label(tokens, idx) {
+                return None;
+            }
+            let after_dot = idx > 0 && tokens[idx - 1].kind == TokenKind::Dot;
+            match kind {
+                // A member is reached through `.`, or declared/used bare
+                // inside its own class — which we cannot pin down, so bare
+                // uses are kept.
+                ApproxKind::Member => Some(token.span),
+                // A qualified name is never a `.member`.
+                ApproxKind::Qualified if after_dot => None,
+                ApproxKind::Qualified => Some(token.span),
+            }
+        });
+        out.extend(locations_for(analysis, uri, spans));
+    }
+    out
+}
+
+// -------------------------------------------------------------------
+// Range plumbing
+// -------------------------------------------------------------------
+
+fn edits_for(analysis: &DocumentAnalysis, spans: &[Span], new_name: &str) -> Vec<TextEdit> {
+    let source = analysis.masked_source();
+    spans
+        .iter()
+        .map(|span| TextEdit {
+            range: span_to_range(source, *span),
+            new_text: new_name.to_string(),
+        })
+        .collect()
+}
+
+fn locations_for(
+    analysis: &DocumentAnalysis,
+    uri: &Url,
+    spans: impl IntoIterator<Item = Span>,
+) -> Vec<Location> {
+    let source = analysis.masked_source();
+    spans
+        .into_iter()
+        .map(|span| Location {
+            uri: uri.clone(),
+            range: span_to_range(source, span),
+        })
+        .collect()
+}
+
+/// Refuse a parameter rename when any open file uses this spelling as a
+/// named-argument label.
+///
+/// `f(p: 1)` *is* a reference to the parameter `p`, so the label would have
+/// to move with the rename — but matching a label to its callee needs
+/// overload resolution this server does not do, and rewriting the wrong
+/// call's label is silent corruption.
+fn named_argument_label_exists(
+    _analysis: &DocumentAnalysis,
+    name: &str,
+    files: &WorkspaceFiles,
+) -> Result<(), Refusal> {
+    for (_, analysis) in files.files.values() {
+        let source = analysis.masked_source();
+        let tokens = &analysis.tokens;
+        for (idx, token) in tokens.iter().enumerate() {
+            if token.kind == TokenKind::Ident
+                && token.span.text(source) == name
+                && lexical::is_named_argument_label(tokens, idx)
+            {
+                return Err(Refusal::new(
+                    "a call passes this parameter by name (`f(name: …)`); the label would \
+                     have to be renamed too, and matching labels to callees needs overload \
+                     resolution this server does not do",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -200,7 +986,10 @@ mod tests {
                         .find(|(index, _)| tw.uri_of(*index) == location.uri)
                         .map(|(index, _)| index)
                         .expect("reference in an unknown file");
-                    (index, position_to_offset(sources[index].1, location.range.start))
+                    (
+                        index,
+                        position_to_offset(sources[index].1, location.range.start),
+                    )
                 })
                 .collect();
             out.sort_unstable();
@@ -345,7 +1134,8 @@ mod tests {
 
     #[test]
     fn a_local_shadowing_a_field_renames_only_itself() {
-        let src = "class C {\n    int x;\n    void f() { int x = 1; x++; }\n    void g() { x = 2; }\n}\n";
+        let src =
+            "class C {\n    int x;\n    void f() { int x = 1; x++; }\n    void g() { x = 2; }\n}\n";
         assert_eq!(
             renamed(src, "x = 1", "y").unwrap(),
             "class C {\n    int x;\n    void f() { int y = 1; y++; }\n    void g() { x = 2; }\n}\n"
@@ -495,7 +1285,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(changed.len(), 2, "{changed:?}");
-        assert_eq!(changed[0].1, "void Assist() {}\nvoid Main() { Assist(); }\n");
+        assert_eq!(
+            changed[0].1,
+            "void Assist() {}\nvoid Main() { Assist(); }\n"
+        );
         assert_eq!(changed[1].1, "void Other() { Assist(); }\n");
     }
 
@@ -510,7 +1303,8 @@ mod tests {
 
     #[test]
     fn a_free_function_rename_leaves_a_shadowing_local_alone() {
-        let src = "void Helper() {}\nvoid f() { int Helper = 1; Helper++; }\nvoid g() { Helper(); }\n";
+        let src =
+            "void Helper() {}\nvoid f() { int Helper = 1; Helper++; }\nvoid g() { Helper(); }\n";
         assert_eq!(
             renamed(src, "Helper() {}", "Assist").unwrap(),
             "void Assist() {}\nvoid f() { int Helper = 1; Helper++; }\nvoid g() { Assist(); }\n"
@@ -794,6 +1588,111 @@ mod tests {
             );
         }
         assert_eq!(found.len(), 3, "{found:?}");
+    }
+
+    // ---------------------------------------------------------------
+    // Further symbol classes and scope shapes.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn a_try_catch_local_stays_in_its_block() {
+        let src =
+            "void f() { try { int x = 1; x++; } catch { int y = 2; } }\nvoid g() { int x = 3; }\n";
+        assert_eq!(
+            renamed(src, "x = 1", "z").unwrap(),
+            "void f() { try { int z = 1; z++; } catch { int y = 2; } }\nvoid g() { int x = 3; }\n"
+        );
+    }
+
+    #[test]
+    fn a_do_while_body_local_stays_in_the_body() {
+        let src = "void f() { do { int x = 1; x++; } while (false); }\nvoid g() { int x = 2; }\n";
+        assert_eq!(
+            renamed(src, "x = 1", "y").unwrap(),
+            "void f() { do { int y = 1; y++; } while (false); }\nvoid g() { int x = 2; }\n"
+        );
+    }
+
+    #[test]
+    fn a_local_inside_a_namespaced_function_is_still_just_a_local() {
+        let src = "namespace Ns {\n    void f() { int x = 1; x++; }\n}\nvoid g() { int x = 2; }\n";
+        assert_eq!(
+            renamed(src, "x = 1", "y").unwrap(),
+            "namespace Ns {\n    void f() { int y = 1; y++; }\n}\nvoid g() { int x = 2; }\n"
+        );
+    }
+
+    #[test]
+    fn a_local_declared_inside_a_lambda_is_refused() {
+        // Lambda bodies live inside expressions, which the AST walk does
+        // not enter, so this binding is invisible to the scope model.
+        let src = "void f() { auto g = function() { int q = 1; q++; }; }\n";
+        assert!(!refused(src, "q = 1", "r").is_empty());
+    }
+
+    #[test]
+    fn a_global_referenced_inside_a_lambda_is_refused() {
+        // The lambda may declare its own `counter`, and we cannot see it.
+        let src = "int counter = 0;\nvoid f() { auto g = function() { counter++; }; }\n";
+        assert!(!refused(src, "counter = 0", "tally").is_empty());
+    }
+
+    #[test]
+    fn an_interface_method_is_refused() {
+        let src = "interface I { void Go(); }\nclass C : I { void Go() {} }\n";
+        assert!(!refused(src, "Go();", "Run").is_empty());
+    }
+
+    #[test]
+    fn a_funcdef_renames_like_a_type() {
+        let src = "funcdef void Cb();\nvoid f(Cb@ handler) {}\n";
+        assert_eq!(
+            renamed(src, "Cb();", "Handler").unwrap(),
+            "funcdef void Handler();\nvoid f(Handler@ handler) {}\n"
+        );
+    }
+
+    #[test]
+    fn a_workspace_rename_leaves_strings_and_comments_alone() {
+        let src = "int counter = 0;\n// counter\nvoid f() { string s = \"counter\"; counter++; }\n";
+        assert_eq!(
+            renamed(src, "counter = 0", "tally").unwrap(),
+            "int tally = 0;\n// counter\nvoid f() { string s = \"counter\"; tally++; }\n"
+        );
+    }
+
+    #[test]
+    fn a_global_rename_refuses_when_a_class_declares_that_member() {
+        let src = "int counter = 0;\nclass C { int counter; void f() { counter++; } }\n";
+        assert!(!refused(src, "counter = 0", "tally").is_empty());
+    }
+
+    #[test]
+    fn a_workspace_rename_refuses_when_a_local_would_capture_the_new_name() {
+        // `Assist` is a local at the call site: renaming `Helper` to it
+        // would silently rebind that call.
+        let src = "void Helper() {}\nvoid f() { int Assist = 1; Helper(); Assist++; }\n";
+        assert!(!refused(src, "Helper() {}", "Assist").is_empty());
+    }
+
+    #[test]
+    fn renaming_to_the_same_name_is_refused() {
+        let src = "void f() { int x = 1; x++; }\n";
+        assert!(!refused(src, "x = 1", "x").is_empty());
+    }
+
+    #[test]
+    fn references_to_a_field_keep_member_accesses_and_drop_labels() {
+        // Rename refuses here, but the read-only scan still filters: the
+        // named-argument label is one of `g`'s parameters, not this field.
+        let src = "class C { int w; }\nvoid g(int w) {}\nvoid f(C@ c) { c.w = 1; g(w: 2); }\n";
+        let found = ref_offsets(&[("a", src)], 0, "w = 1", 0, true);
+        let label = src.find("w: 2").unwrap();
+        assert!(!found.contains(&(0, label)), "label reported: {found:?}");
+        assert!(
+            found.contains(&(0, src.find("c.w").unwrap() + 2)),
+            "member access missing: {found:?}"
+        );
     }
 
     #[test]

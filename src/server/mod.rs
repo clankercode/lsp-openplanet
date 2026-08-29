@@ -34,6 +34,18 @@ use crate::typecheck::GlobalScope;
 use crate::typedb::TypeIndex;
 use crate::update;
 
+/// Turn a rename [`Refusal`](rename::Refusal) into the JSON-RPC error the
+/// client shows the user. `prepareRename` answering with an error is the
+/// spec'd way to say "this position is not renameable", and VS Code
+/// surfaces the message in the rename box.
+fn refusal_error(refusal: rename::Refusal) -> tower_lsp::jsonrpc::Error {
+    tower_lsp::jsonrpc::Error {
+        code: tower_lsp::jsonrpc::ErrorCode::InvalidRequest,
+        message: refusal.reason.into(),
+        data: None,
+    }
+}
+
 #[derive(Clone)]
 pub struct Backend {
     client: Client,
@@ -1184,7 +1196,13 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec!["(".into(), ",".into()]),
                     ..Default::default()
                 }),
-                rename_provider: Some(OneOf::Left(true)),
+                // B049: `OneOf::Left(true)` cannot advertise prepare
+                // support, so F2 went straight to the destructive path
+                // with no chance to tell the client "not renameable here".
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                })),
                 code_action_provider: Some(code_actions::code_action_provider()),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
@@ -1480,9 +1498,13 @@ impl LanguageServer for Backend {
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
-        let refs = navigation::find_references(
-            &analysis,
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        let refs = rename::find_references(
+            analysis,
+            uri,
             pos,
+            &scope,
             &workspace_files,
             params.context.include_declaration,
         );
@@ -1591,12 +1613,40 @@ impl LanguageServer for Backend {
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         let files = snapshot.uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
-        Ok(navigation::rename(
-            &analysis,
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        rename::rename(
+            analysis,
+            uri,
             pos,
             &params.new_name,
+            &scope,
             &workspace_files,
-        ))
+        )
+        .map(Some)
+        .map_err(refusal_error)
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = &params.text_document.uri;
+        let pos = params.position;
+        let source = match self.documents.get(uri) {
+            Some(doc) => doc.value().clone(),
+            None => return Ok(None),
+        };
+        let snapshot = self.snapshot_for(uri).await;
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
+        let files = snapshot.uri_map();
+        let workspace_files = navigation::WorkspaceFiles { files: &files };
+        let type_index = self.type_index.read().await;
+        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        rename::prepare_rename(analysis, pos, &scope, &workspace_files)
+            .map(|range| Some(PrepareRenameResponse::Range(range)))
+            .map_err(refusal_error)
     }
 
     async fn semantic_tokens_full(

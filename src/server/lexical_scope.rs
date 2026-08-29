@@ -272,7 +272,7 @@ pub fn local_occurrences(
 /// (`c ? x : y`) and a switch label (`case x:`) both put an identifier
 /// before a `:` too, and skipping either would leave a reference to a
 /// variable that no longer exists.
-fn is_named_argument_label(tokens: &[Token], idx: usize) -> bool {
+pub fn is_named_argument_label(tokens: &[Token], idx: usize) -> bool {
     let follows_colon = tokens
         .get(idx + 1)
         .is_some_and(|tok| tok.kind == TokenKind::Colon);
@@ -323,7 +323,12 @@ pub struct Binding {
 /// parameter is invisible to this. Callers must refuse when a lambda
 /// appears inside the range they are about to rewrite; see the
 /// `KwFunction` guard in `rename`.
-pub fn bindings_named(file: &SourceFile, tokens: &[Token], source: &str, name: &str) -> Vec<Binding> {
+pub fn bindings_named(
+    file: &SourceFile,
+    tokens: &[Token],
+    source: &str,
+    name: &str,
+) -> Vec<Binding> {
     let mut raw = Vec::new();
     for item in &file.items {
         collect_redecls_in_item(item, source, name, &mut raw);

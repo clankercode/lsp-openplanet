@@ -1,10 +1,15 @@
-//! Goto-definition and find-references for the LSP.
+//! Goto-definition for the LSP, and the position → symbol-name lookup its
+//! neighbours share.
 //!
-//! Both features share a position → symbol-name lookup that walks the token
-//! stream at the cursor, reconstructing any `Ns::Name` prefix. Definitions
-//! are resolved against the checker's resolution surface ([`GlobalScope`])
-//! built from the open documents, and references are located via a pragmatic
-//! token-scan (no AST-aware shadowing).
+//! [`ident_index_at`] walks the token stream at the cursor, reconstructing
+//! any `Ns::Name` prefix, and definitions are resolved against the
+//! checker's resolution surface ([`GlobalScope`]) built from the open
+//! documents.
+//!
+//! Rename and find-references used to live here as a workspace-wide token
+//! scan with no scope analysis. B049 moved both to
+//! [`crate::server::rename`], which classifies the symbol under the cursor
+//! and picks an occurrence rule per class instead.
 //!
 //! Since GH #40 every entry point consumes a [`DocumentAnalysis`] — the
 //! per-file view (masked source + AST) — instead of re-lexing/parsing raw
@@ -15,7 +20,7 @@ use std::collections::HashMap;
 use tower_lsp::lsp_types::*;
 
 use crate::analysis::DocumentAnalysis;
-use crate::lexer::{self, TokenKind};
+use crate::lexer::TokenKind;
 use crate::server::diagnostics::{position_to_offset, span_to_range};
 use crate::symbols::scope::Symbol;
 use crate::typecheck::GlobalScope;
@@ -114,7 +119,7 @@ pub fn ident_token_index_at(analysis: &DocumentAnalysis, position: Position) -> 
 
 /// [`ident_span_at`] plus the token index — the fallback needs the token's
 /// neighbours (`this.` prefix, call `(`) to classify the use site.
-fn ident_index_at(
+pub fn ident_index_at(
     analysis: &DocumentAnalysis,
     position: Position,
 ) -> Option<(usize, crate::lexer::Span, String)> {
@@ -307,87 +312,6 @@ pub fn prefer_definition<'s>(candidates: &[&'s Symbol]) -> Option<&'s Symbol> {
         .find(|s| !s.is_import_alias())
         .copied()
         .or_else(|| candidates.first().copied())
-}
-
-/// Build a workspace rename edit replacing every textual reference to the
-/// identifier under `position` with `new_name`.
-///
-/// Uses the same token-scan strategy as [`find_references`] — every `Ident`
-/// token in the open workspace whose text matches the cursor's bare name is
-/// rewritten. Returns `None` if the cursor is not on an identifier or if no
-/// matches were found.
-pub fn rename(
-    analysis: &DocumentAnalysis,
-    position: Position,
-    new_name: &str,
-    files: &WorkspaceFiles,
-) -> Option<WorkspaceEdit> {
-    let qual = name_at_position(analysis, position)?;
-    let bare = qual.rsplit("::").next().unwrap_or(&qual).to_string();
-    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-    for (_fid, (uri, analysis)) in files.files.iter() {
-        let src = analysis.masked_source();
-        let tokens = lexer::tokenize_filtered(src);
-        let mut edits = Vec::new();
-        for tok in &tokens {
-            if tok.kind != TokenKind::Ident {
-                continue;
-            }
-            if tok.span.text(src) == bare {
-                edits.push(TextEdit {
-                    range: span_to_range(src, tok.span),
-                    new_text: new_name.to_string(),
-                });
-            }
-        }
-        if !edits.is_empty() {
-            changes.insert(uri.clone(), edits);
-        }
-    }
-    if changes.is_empty() {
-        return None;
-    }
-    Some(WorkspaceEdit {
-        changes: Some(changes),
-        document_changes: None,
-        change_annotations: None,
-    })
-}
-
-/// Find all references to the symbol at `position` across the workspace.
-///
-/// Pragmatic implementation: once the bare identifier is known, every file
-/// in `files` is tokenized and every `Ident` whose text equals the bare name
-/// is reported. `include_declaration` is accepted for API compatibility but
-/// not acted on — clients can dedupe against the declaration site if they
-/// care.
-pub fn find_references(
-    analysis: &DocumentAnalysis,
-    position: Position,
-    files: &WorkspaceFiles,
-    _include_declaration: bool,
-) -> Vec<Location> {
-    let Some(qual) = name_at_position(analysis, position) else {
-        return Vec::new();
-    };
-    let bare = qual.rsplit("::").next().unwrap_or(&qual);
-    let mut results = Vec::new();
-    for (_fid, (uri, analysis)) in files.files.iter() {
-        let src = analysis.masked_source();
-        let tokens = lexer::tokenize_filtered(src);
-        for tok in &tokens {
-            if tok.kind != TokenKind::Ident {
-                continue;
-            }
-            if tok.span.text(src) == bare {
-                results.push(Location {
-                    uri: uri.clone(),
-                    range: span_to_range(src, tok.span),
-                });
-            }
-        }
-    }
-    results
 }
 
 #[cfg(test)]
@@ -629,30 +553,5 @@ mod tests {
             loc.is_none() || loc.unwrap().range.start.line == 1,
             "receiver call must not resolve to A::Func (line 0)"
         );
-    }
-
-    #[test]
-    fn find_references_scans_open_documents() {
-        let src = "int counter = 0;\nvoid main() { counter += 1; }\n";
-        let tw = build_single_file_workspace("file:///t/a.as", src);
-        let analysis = tw.analysis();
-        let files = tw.uri_map();
-        let ws_files = WorkspaceFiles { files: &files };
-        let refs = find_references(analysis, pos(1, 15), &ws_files, true);
-        assert_eq!(refs.len(), 2);
-    }
-
-    #[test]
-    fn rename_rewrites_matching_identifiers() {
-        let src = "int counter = 0;\nvoid main() { counter += 1; }\n";
-        let tw = build_single_file_workspace("file:///t/a.as", src);
-        let analysis = tw.analysis();
-        let files = tw.uri_map();
-        let ws_files = WorkspaceFiles { files: &files };
-        let edit = rename(analysis, pos(1, 15), "tally", &ws_files).unwrap();
-        let changes = edit.changes.unwrap();
-        let edits = changes.get(&tw.uri()).unwrap();
-        assert_eq!(edits.len(), 2);
-        assert!(edits.iter().all(|e| e.new_text == "tally"));
     }
 }
