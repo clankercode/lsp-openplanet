@@ -1,0 +1,104 @@
+---
+complexity: medium
+created_at: "2026-08-29T19:22:43Z"
+depends_on: []
+estimate_hours: 1
+id: B049
+priority: high
+status: pending
+tags:
+    - lsp
+    - rename
+    - correctness
+title: 'textDocument/rename is a scope-blind textual match: renames unrelated identifiers'
+updated_at: "2026-08-29T19:22:43Z"
+---
+Found by the B038 lane, 2026-08-30, while implementing the shadowed-variable
+quick fix. Pre-existing; user-facing.
+
+## Defect
+`navigation::rename` (src/server/navigation.rs, ~:319) is a workspace-wide
+TEXTUAL token match. Its own doc comment states it plainly:
+
+    Uses the same token-scan strategy as `find_references` -- every `Ident`
+    token in the open workspace whose text matches the cursor's bare name is
+    rewritten.
+
+There is no scope analysis, no declaration binding, and no member/qualifier
+filtering. So invoking Rename Symbol on a local variable `x` rewrites:
+- the outer binding `x` it shadows
+- every unrelated local named `x` in every other function
+- every unrelated global or parameter named `x`
+- every member access `obj.x`
+- both sides of `A::x`
+- named-argument labels `f(x: 1)`
+
+...in EVERY open file. Renaming a loop counter `i` in a real plugin is
+catastrophic.
+
+`rename_provider` is advertised as a live capability
+(`OneOf::Left(true)` in the ServerCapabilities block), so VS Code offers
+Rename Symbol (F2) and users will reasonably trust it.
+
+## Why B038 did not fix it
+B038's brief said to reuse `navigation::rename` for the shadowed-variable quick
+fix. The lane refused, correctly: reusing it would have renamed the outer
+binding, which is precisely what that fix must NOT do. It built a scope model
+instead — `src/server/code_actions/fixes/rename_and_const/scope.rs` — and left
+the live handler alone, because changing a live request handler was out of its
+lane.
+
+**The scope model to promote already exists and is tested.** From B038:
+- occurrence set is `[declarator, innermost_scope_end)`, where the scope is the
+  NARROWER of an AST statement scope and a token brace region — braces alone
+  get `for`-init wrong (too wide), statements alone miss lambda bodies
+- minus member names after `.`, both sides of `::`, named-argument labels, the
+  declarator's own initialiser, and each nested redeclaration's range excluding
+  its initialiser
+- refuses outright on nested lambdas, same-scope redeclaration, and names that
+  are also globals
+
+## Work
+- Promote that scope model into `navigation` (or a shared module) and make
+  `textDocument/rename` use it.
+- Decide what rename does for each symbol CLASS, since the scope model above is
+  built for locals: parameters, class fields, methods, free functions,
+  namespaced names, enum values, globals. A local's scope is lexical; a field's
+  is the class plus every `obj.field` access; a free function's is the
+  workspace. **Do not ship one strategy for all of them.**
+- Where the correct rename cannot be determined, `textDocument/prepareRename`
+  should REFUSE rather than let the user rename destructively. A refused
+  rename is a papercut; a wrong one silently corrupts a plugin.
+- Consider whether `find_references` has the same defect (the doc comment says
+  rename uses "the same token-scan strategy"), and fix both or say why not.
+
+## Test plan (TDD, red first)
+Red: renaming a local `x` that shadows an outer `x` must not touch the outer
+binding, and must not touch `obj.x`, `A::x`, a named-argument label `x:`, or a
+same-named local in another function. Every one of those fails today.
+
+Variants (per CLAUDE.md, generalize):
+- each symbol class: local, parameter, field, method, free function,
+  namespaced function, enum value, global
+- a local shadowing a parameter, a field, and a global
+- rename inside a `for` init, a loop body, an unbraced `if` body, a `switch`
+  case, and a lambda
+- the new name colliding with something in scope -> refuse, do not shadow
+- multi-file: a workspace symbol renames across files; a local does not leave
+  its file
+- a name appearing in a string literal or comment -> untouched
+- multi-byte UTF-8 and CRLF sources -> ranges stay correct (LSP ranges are
+  UTF-16)
+- truncated / unbalanced source -> no panic (B038's fixture set covers five
+  such shapes and can be reused)
+- `prepareRename` refuses on a cursor that is not a renameable symbol
+
+## Gate
+FP fixtures byte-identical — rename is a request handler and adds no
+diagnostics. Compare two binaries on the same machine at the same time.
+`just test-hermetic` green.
+
+## Related
+B038 (merged) — built and tested the scope model this should promote, and
+documented why it could not use the existing handler. B035 (the code-action
+seam). B047 (the two code-action producer paths).

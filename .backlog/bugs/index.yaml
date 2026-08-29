@@ -47,3 +47,4 @@ bugs:
     - file: B046-module-level-engine-enums-are.todo
     - file: B047-code-actions-have-two-producer.todo
     - file: B048-quick-fix-for-the-withrunconte.todo
+    - file: B049-textdocument-rename-is-a-scope.todo
