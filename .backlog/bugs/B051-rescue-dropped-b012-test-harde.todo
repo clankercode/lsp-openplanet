@@ -105,3 +105,30 @@ tests spawn the test binary — confirm they stay hermetic and honour the
 B012 (the task this reviewed; already marked done), B017 (config precedence +
 the sibling-key discard), B032 (test env-var race), B040 (the vacuous-green
 lesson that made this worth rescuing rather than deleting).
+
+## Coordinator verification of the rescue's value, 2026-08-30 (post-merge)
+
+The claim 'these tests are effective' was verified by mutation on both trees,
+not by inspection. Mutation: `is_exempt_callback` ignores the configured list
+entirely (`let _ = extra; is_openplanet_callback(name)`), applied identically
+to pre-rescue master `868523d` and to the merged tree, each in a throwaway
+`git archive` copy.
+
+| tree | tests failing under the mutation |
+|---|---|
+| pre-rescue master 868523d | 4 |
+| post-rescue (merged) | 8 |
+
+The four that flipped from VACUOUSLY PASSING to catching the bug:
+
+- `an_empty_callback_list_is_a_no_op`
+- `non_matching_callback_patterns_still_warn`
+- `configured_callbacks_do_not_exempt_class_methods`
+- `configured_callbacks_do_not_exempt_namespaced_functions`
+
+Each of those four passed on master while the configured-callback path was
+completely disabled. That is the defect the rescued commits exist to fix, and
+it is now measured rather than argued. The lane reported three; it is four.
+
+Branch `review/b012-retrospective` can be deleted — it is fully contained in
+the merge.
