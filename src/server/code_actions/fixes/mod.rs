@@ -10,9 +10,15 @@
 
 use super::fix::FixFamily;
 
+pub mod rename_and_const;
 pub mod string_by_value;
 
 /// The registry. Order here decides the order fixes are offered in when two
 /// families claim the same diagnostic; it does not affect which fixes the
 /// fix-all batcher keeps (see [`super::fix_all::select_non_overlapping`]).
-pub const FAMILIES: &[FixFamily] = &[string_by_value::FAMILY];
+pub const FAMILIES: &[FixFamily] = &[
+    string_by_value::FAMILY,
+    rename_and_const::shadowed_variable::FAMILY,
+    rename_and_const::duplicate_function::FAMILY,
+    rename_and_const::const_receiver::FAMILY,
+];
