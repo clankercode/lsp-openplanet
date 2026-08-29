@@ -198,13 +198,22 @@ pub fn materialize_descriptor(
     candidate: &FixDescriptorCandidate,
     families: &[FixFamily],
 ) -> FixCandidate {
+    // Callers pair descriptors with the registry that produced them, so a
+    // miss is a programming error — loud in development, but an editor-
+    // facing daemon must not die of it mid-session.
     let family = families
         .iter()
-        .find(|family| family.name == candidate.family)
-        .expect("a descriptor can only come from a registered family");
-    let edit = (family.materialize)(&candidate.type_diagnostic, ctx, &candidate.descriptor.title);
+        .find(|family| family.name == candidate.family);
+    debug_assert!(
+        family.is_some(),
+        "descriptor from unregistered family `{}`",
+        candidate.family
+    );
+    let edit = family.map_or_else(WorkspaceEdit::default, |family| {
+        (family.materialize)(&candidate.type_diagnostic, ctx, &candidate.descriptor.title)
+    });
     FixCandidate {
-        family: family.name,
+        family: candidate.family,
         diagnostic: candidate.diagnostic.clone(),
         fix: Fix {
             title: candidate.descriptor.title.clone(),

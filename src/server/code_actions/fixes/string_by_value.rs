@@ -58,7 +58,13 @@ fn title(diag: &TypeDiagnostic) -> Option<String> {
     })
 }
 
-fn describe(diag: &TypeDiagnostic, _ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
+fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
+    // `materialize` is total, so describing a fix whose type span cannot be
+    // recovered would be a panic in the server rather than a missing menu
+    // entry. Establish the invariant here, where failing is free.
+    if param_type_span(&ctx.analysis.tokens, diag.span).is_none() {
+        return Vec::new();
+    }
     title(diag)
         .map(|title| FixDescriptor {
             title,
@@ -77,8 +83,16 @@ fn materialize(
 ) -> tower_lsp::lsp_types::WorkspaceEdit {
     #[cfg(test)]
     MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
-    let type_span = param_type_span(&ctx.analysis.tokens, diag.span)
-        .expect("string-by-value descriptors always have a materializable type span");
+    // `describe` guarantees this resolves. If a future change breaks that,
+    // fail loudly in development but hand the editor an empty edit rather
+    // than taking the language server down mid-session.
+    let Some(type_span) = param_type_span(&ctx.analysis.tokens, diag.span) else {
+        debug_assert!(
+            false,
+            "described a string-by-value fix with no recoverable type span"
+        );
+        return tower_lsp::lsp_types::WorkspaceEdit::default();
+    };
     let mut changes = std::collections::HashMap::new();
     changes.insert(
         ctx.uri.clone(),
@@ -153,6 +167,40 @@ mod tests {
             files: crate::server::code_actions::fix::WorkspaceFileResolver::empty(),
         };
         collect_fixes(&ctx).len()
+    }
+
+    /// A family must never describe a fix it cannot materialize: the seam
+    /// declares `materialize` total, so an unmaterializable descriptor is a
+    /// panic in the language server, not a missing menu entry.
+    #[test]
+    fn describe_offers_nothing_when_the_type_span_cannot_be_recovered() {
+        let (analysis, workspace, uri) = ctx_for("void f(string s) {}");
+        let ctx = FixContext {
+            uri: &uri,
+            analysis: &analysis,
+            workspace: &workspace,
+            type_index: None,
+            files: crate::server::code_actions::fix::WorkspaceFileResolver::empty(),
+        };
+        // A diagnostic anchored where no token starts — the shape
+        // `param_type_span` refuses to guess at.
+        let orphan = TypeDiagnostic {
+            span: Span {
+                start: 9_999,
+                end: 10_000,
+            },
+            kind: TypeDiagnosticKind::StringByValueParam {
+                param_name: "s".to_string(),
+            },
+        };
+        assert!(
+            param_type_span(&analysis.tokens, orphan.span).is_none(),
+            "test premise: this span must be unrecoverable"
+        );
+        assert!(
+            describe(&orphan, &ctx).is_empty(),
+            "describe must not offer a fix materialize would panic on"
+        );
     }
 
     #[test]
