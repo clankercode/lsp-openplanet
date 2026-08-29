@@ -107,3 +107,36 @@ treat `defines` as already resolved — the remaining inversion is
 `openplanet_dir`, `plugins_dir`, `game_target`, `source_paths`,
 `ignore_paths`, `shortcut_*` and the matrix keys. The whole-file-discard
 defect is untouched by B024.
+
+## Decision (coordinator, 2026-08-29) — precedence
+
+Adopt the ladder the ticket recommends, both ladders obey it:
+
+  init options > CLI flag > per-root workspace config > parent config > user global > auto-detect
+
+Rationale: matches every other language tool and the README framing; project
+config must be overridable locally. UserPrefs::load already has this shape
+(workspace wins) — LspConfig::apply_config_file is the one that inverts.
+
+Implementation shape: apply layers lowest-precedence-FIRST with unconditional
+overwrite (user global, then parent, then per-root, then CLI, then init opts),
+OR keep current order and switch apply_config_file to first-wins. Prefer the
+former (apply in ascending precedence) — it reads correctly and keeps
+apply_config_file a dumb overwrite.
+
+Fold the per-key resolvers added for unused_callbacks (B012) and honor_gitignore
+(B015) back onto the shared path once correct.
+
+## Decision (coordinator) — lenient parsing
+
+Parse into a per-key-tolerant shape so ONE bad key cannot discard the file.
+Recommended: deserialize to toml::Table, then per-field try_into with the bad
+key recorded as a ConfigIssue { file, key, expected, found }. Surface issues
+through the existing diagnostic/warn path (stderr warn at minimum, LSP
+window/showMessage if there is already such a channel). Malformed TOML (not
+parseable at all) stays a whole-file skip, but must warn naming the file.
+
+## Sequencing (coordinator)
+
+B017 and B019 both edit src/config.rs and are run SERIAL in one worktree,
+B017 first (it rewrites the ladder that B019's define gating sits in).
