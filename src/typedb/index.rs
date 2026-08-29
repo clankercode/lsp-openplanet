@@ -567,6 +567,16 @@ impl TypeIndex {
         self.enums.get(qualified_name)
     }
 
+    /// The inline enum declared *by* `member` of engine class `class_qname`
+    /// (B016). The Nadeo dump gives such an enum no name of its own, so it
+    /// is keyed by its declaring context (`Module::Class::Member`) and is
+    /// deliberately absent from the short-name index — the values are
+    /// reachable in-game only through the member, never by writing the
+    /// enum's name.
+    pub fn lookup_member_enum(&self, class_qname: &str, member: &str) -> Option<&EnumInfo> {
+        self.lookup_enum(&format!("{}::{}", class_qname, member))
+    }
+
     /// Look up a Core funcdef by qualified name (`UI::InputTextCallback`,
     /// `CoroutineFunc`).
     pub fn lookup_funcdef(&self, qualified_name: &str) -> Option<&FuncdefInfo> {
@@ -2313,5 +2323,357 @@ mod shape_guard_tests {
         let missing = std::env::temp_dir().join("openplanet-lsp-no-such-db.json");
         let problems = check_typedb_shape(&missing, &fixture_game()).unwrap_err();
         assert!(!problems.is_empty(), "{problems:?}");
+    }
+}
+
+/// B016 — inline/anonymous member enums must be keyed by their declaring
+/// context, not collapsed onto `<Module>::UnnamedEnum`.
+///
+/// The Nadeo dump gives an inline member enum no name of its own: the member
+/// carries `"t": "UnnamedEnum"` plus an `e` block of values. Keying by that
+/// type name put every anonymous enum in a module on one key, and
+/// `or_insert` dropped all but the first — 132 anonymous enums in the shipped
+/// fixture collapsed to 14 (one per module), with `Control` losing 14 of 15.
+#[cfg(test)]
+mod anon_member_enum_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const CORE_MIN: &str = r#"{"op":"1.0.0","functions":[],"classes":[],"enums":[]}"#;
+
+    fn fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb")
+    }
+
+    fn load_fixture() -> TypeIndex {
+        let dir = fixture_dir();
+        TypeIndex::load(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+        )
+        .unwrap()
+    }
+
+    /// Build an index over a synthetic Nadeo dump (Core stays empty).
+    fn nadeo_index(tag: &str, nadeo: &str) -> TypeIndex {
+        let dir = std::env::temp_dir().join(format!(
+            "openplanet-lsp-anon-enum-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let core_path = dir.join("OpenplanetCore.json");
+        let nadeo_path = dir.join("OpenplanetNext.json");
+        std::fs::write(&core_path, CORE_MIN).unwrap();
+        std::fs::write(&nadeo_path, nadeo).unwrap();
+        TypeIndex::load(&core_path, &nadeo_path).unwrap()
+    }
+
+    /// Every anonymous member enum in the shipped fixture, read straight
+    /// from the JSON: `(Module::Class::Member, values)`.
+    fn expected_from_fixture() -> Vec<(String, Vec<(String, i64)>)> {
+        let db = NadeoDatabase::load_from_file(&fixture_dir().join("OpenplanetNext.json")).unwrap();
+        let mut out = Vec::new();
+        let mut modules: Vec<&String> = db.ns.keys().collect();
+        modules.sort();
+        for ns_name in modules {
+            let types = &db.ns[ns_name];
+            let mut type_names: Vec<&String> = types.keys().collect();
+            type_names.sort();
+            for type_name in type_names {
+                for member in &types[type_name].m {
+                    if member.kind() != NadeoMemberKind::Enum {
+                        continue;
+                    }
+                    if member.type_name() != Some("UnnamedEnum") {
+                        continue;
+                    }
+                    let values = member_inline_enum_values(member.e.as_ref()).unwrap();
+                    out.push((format!("{}::{}::{}", ns_name, type_name, member.n), values));
+                }
+            }
+        }
+        out
+    }
+
+    /// The headline data loss: 132 anonymous member enums in the fixture,
+    /// each independently queryable under its declaring context. Before
+    /// B016 only 14 survived (one per module).
+    #[test]
+    fn every_anonymous_member_enum_is_independently_queryable() {
+        let index = load_fixture();
+        let expected = expected_from_fixture();
+        assert_eq!(
+            expected.len(),
+            132,
+            "fixture shape guard: the shipped Next dump declares 132 anonymous \
+             member enums — update this count deliberately on a DB refresh"
+        );
+        for (key, values) in &expected {
+            let found = index.lookup_enum(key).unwrap_or_else(|| {
+                panic!("anonymous member enum `{key}` is missing from the index")
+            });
+            assert_eq!(&found.values, values, "values of `{key}`");
+        }
+    }
+
+    /// The 66 colliding inline member-enum type names are gone: no enum key
+    /// is a bare `<Module>::UnnamedEnum` any more.
+    #[test]
+    fn no_module_level_unnamed_enum_key_survives() {
+        let index = load_fixture();
+        let leftovers: Vec<&String> = index
+            .enums_iter()
+            .map(|(qname, _)| qname)
+            .filter(|qname| qname.ends_with("::UnnamedEnum"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "anonymous enums must not be keyed by the placeholder type name: {leftovers:?}"
+        );
+        assert!(index.lookup_enum("Control::UnnamedEnum").is_none());
+    }
+
+    /// The worst collision group: `Control` had 15 distinct anonymous enums
+    /// on one key, so 14 were dropped. All 15 must now resolve, each with
+    /// its own values.
+    #[test]
+    fn control_modules_fifteen_anonymous_enums_all_resolve() {
+        let index = load_fixture();
+        let control: Vec<String> = expected_from_fixture()
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k.starts_with("Control::"))
+            .collect();
+        assert_eq!(control.len(), 15, "{control:?}");
+        for key in &control {
+            assert!(
+                index.lookup_enum(key).is_some(),
+                "`{key}` must resolve independently"
+            );
+        }
+        assert_eq!(
+            index
+                .lookup_enum("Control::CControlColorChooser::StyleType")
+                .map(|e| e.values.clone()),
+            Some(vec![
+                ("HueSlider".to_string(), 0),
+                ("SLSquare".to_string(), 1),
+                ("MinimalReadOnly".to_string(), 2),
+            ])
+        );
+    }
+
+    /// Variant — two previously-collided enums that share value *names*
+    /// (`None`) stay distinct and separately queryable.
+    #[test]
+    fn collided_enums_sharing_value_names_stay_distinct() {
+        let index = load_fixture();
+        for (a, b, shared) in [
+            (
+                "Control::CControlBase::AlignHorizontal",
+                "Control::CControlBase::AlignVertical",
+                "None",
+            ),
+            (
+                "Hms::CHmsViewport::TextureRender",
+                "Hms::CHmsViewportPerfDbg::VisionSkip",
+                "All",
+            ),
+        ] {
+            let ea = index.lookup_enum(a).unwrap_or_else(|| panic!("{a}"));
+            let eb = index.lookup_enum(b).unwrap_or_else(|| panic!("{b}"));
+            assert!(
+                ea.values.iter().any(|(n, _)| n == shared),
+                "{a} lacks {shared}"
+            );
+            assert!(
+                eb.values.iter().any(|(n, _)| n == shared),
+                "{b} lacks {shared}"
+            );
+            assert_ne!(ea.values, eb.values, "{a} and {b} must stay distinct");
+        }
+    }
+
+    /// Variant — two anonymous enums with *identical* values on different
+    /// classes are still two entries, because the key carries the class.
+    #[test]
+    fn identical_anonymous_enums_on_different_classes_are_both_kept() {
+        let index = load_fixture();
+        for (a, b) in [
+            (
+                "Control::CControlBase::AlignHorizontal",
+                "Control::CControlLayout::AlignHorizontal",
+            ),
+            (
+                "Control::CControlButton::DisplayType",
+                "Control::CControlEnum::DisplayType",
+            ),
+            (
+                "Game::CGameCtnChallenge::Kind",
+                "Game::CGameCtnChallengeInfo::Kind",
+            ),
+        ] {
+            let ea = index.lookup_enum(a).unwrap_or_else(|| panic!("{a}"));
+            let eb = index.lookup_enum(b).unwrap_or_else(|| panic!("{b}"));
+            assert_eq!(
+                ea.values, eb.values,
+                "{a} / {b} should carry the same values"
+            );
+        }
+    }
+
+    /// Variant — a module with exactly ONE anonymous member enum never
+    /// collided, but its key must still be contextual (no regression to
+    /// `Audio::UnnamedEnum`).
+    #[test]
+    fn single_anonymous_enum_module_is_also_keyed_by_context() {
+        let index = load_fixture();
+        let audio: Vec<String> = expected_from_fixture()
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k.starts_with("Audio::"))
+            .collect();
+        assert_eq!(audio, vec!["Audio::CAudioPort::SettingQuality".to_string()]);
+        assert!(index
+            .lookup_enum("Audio::CAudioPort::SettingQuality")
+            .is_some());
+        assert!(index.lookup_enum("Audio::UnnamedEnum").is_none());
+    }
+
+    /// The member → enum link is queryable directly, which is what
+    /// completion/hover need (the values are reachable in-game only through
+    /// the member).
+    #[test]
+    fn member_enum_is_reachable_from_its_declaring_member() {
+        let index = load_fixture();
+        let en = index
+            .lookup_member_enum("Control::CControlEntry", "Type")
+            .expect("Control::CControlEntry::Type");
+        assert!(en.values.iter().any(|(n, _)| n == "TimeHhMmSsMil"));
+        assert!(index
+            .lookup_member_enum("Control::CControlEntry", "Nope")
+            .is_none());
+    }
+
+    /// Fallback — an anonymous enum whose declaring member cannot be named
+    /// (empty member name) gets a stable synthesized key derived from its
+    /// declaration ordinal, and two loads agree.
+    #[test]
+    fn unidentifiable_member_falls_back_to_a_stable_synthesized_key() {
+        let nadeo = r#"{"op":"1.0.0","ns":{"X":{"C":{"i":"1","m":[
+            {"n":"","i":0,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["A","B"]}},
+            {"n":"","i":1,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["C"]}}
+        ]}}}}"#;
+        let first = nadeo_index("fallback-a", nadeo);
+        let second = nadeo_index("fallback-b", nadeo);
+        let keys = |ix: &TypeIndex| {
+            let mut k: Vec<String> = ix.enums_iter().map(|(q, _)| q.clone()).collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&first), keys(&second), "fallback keys must be stable");
+        assert_eq!(keys(&first).len(), 2, "{:?}", keys(&first));
+        assert!(
+            keys(&first).iter().all(|k| k.starts_with("X::C::")),
+            "{:?}",
+            keys(&first)
+        );
+        let values: Vec<Vec<(String, i64)>> = keys(&first)
+            .iter()
+            .map(|k| first.lookup_enum(k).unwrap().values.clone())
+            .collect();
+        assert!(values.iter().any(|v| v.len() == 2) && values.iter().any(|v| v.len() == 1));
+    }
+
+    /// Fallback — two anonymous enums declared under the SAME member name on
+    /// one class must not overwrite each other either.
+    #[test]
+    fn duplicate_member_names_on_one_class_do_not_collide() {
+        let nadeo = r#"{"op":"1.0.0","ns":{"X":{"C":{"i":"1","m":[
+            {"n":"Mode","i":0,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["A","B"]}},
+            {"n":"Mode","i":1,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["C"]}}
+        ]}}}}"#;
+        let index = nadeo_index("dup-member", nadeo);
+        let keys: Vec<&String> = index.enums_iter().map(|(q, _)| q).collect();
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert_eq!(
+            index.lookup_enum("X::C::Mode").map(|e| e.values.len()),
+            Some(2),
+            "the first declaration keeps the plain key"
+        );
+    }
+
+    /// Fallback — an anonymous member whose name matches a nested enum on
+    /// the same class must not displace the nested enum.
+    #[test]
+    fn anonymous_member_does_not_displace_a_nested_enum_of_the_same_name() {
+        let nadeo = r#"{"op":"1.0.0","ns":{"X":{"C":{"i":"1",
+            "e":[{"n":"Mode","v":["Nested0","Nested1"]}],
+            "m":[{"n":"Mode","i":0,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["Anon"]}}]
+        }}}}"#;
+        let index = nadeo_index("nested-clash", nadeo);
+        assert_eq!(
+            index.lookup_enum("X::C::Mode").map(|e| e
+                .values
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>()),
+            Some(vec!["Nested0".to_string(), "Nested1".to_string()]),
+            "the *named* nested enum owns the plain key"
+        );
+        assert_eq!(
+            index.enums_iter().count(),
+            2,
+            "the anonymous one is still registered"
+        );
+    }
+
+    /// The name-resolution surface must not move: an anonymous enum has no
+    /// name in the game, so its synthesized key must stay out of the
+    /// short-name index that resolves unqualified user-written type names.
+    #[test]
+    fn synthesized_keys_stay_out_of_the_short_name_index() {
+        let index = load_fixture();
+        for short in [
+            "AlignHorizontal",
+            "SettingQuality",
+            "StyleType",
+            "UnnamedEnum",
+        ] {
+            assert!(
+                index.find_by_short_name(short).is_empty(),
+                "`{short}` must not become resolvable as a type name: {:?}",
+                index.find_by_short_name(short)
+            );
+        }
+        // `Type` is the one pre-existing short name an unfiltered index
+        // would have hijacked (`Control::CControlEntry::Type` sorts before
+        // `Json::Type`).
+        assert_eq!(
+            index.find_by_short_name("Type").first().map(String::as_str),
+            Some("Json::Type"),
+        );
+        assert!(!index.all_short_names().iter().any(|n| n == "UnnamedEnum"));
+    }
+
+    /// Determinism, restated for the new keys: identical bytes in ⇒
+    /// identical anonymous-enum keys and values out.
+    #[test]
+    fn anonymous_enum_keys_are_identical_across_two_loads() {
+        let facts = |index: &TypeIndex| {
+            let mut all: Vec<String> = index
+                .enums_iter()
+                .flat_map(|(qname, info)| {
+                    info.values
+                        .iter()
+                        .map(move |(name, v)| format!("{qname}::{name} = {v}"))
+                })
+                .collect();
+            all.sort();
+            all
+        };
+        assert_eq!(facts(&load_fixture()), facts(&load_fixture()));
     }
 }
