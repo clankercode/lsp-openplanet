@@ -49,6 +49,20 @@ default_mode = "tui"   # or "lsp"
 # support another game.
 # game_target = "TMNEXT"
 
+# Signature level whose SIG_* defines are live. Openplanet defines a
+# signature macro when the current level is equal or BELOW that macro's level,
+# so the levels are cumulative, not exclusive:
+#   official  -> SIG_OFFICIAL
+#   regular   -> SIG_OFFICIAL, SIG_REGULAR
+#   school    -> SIG_OFFICIAL, SIG_REGULAR, SIG_SCHOOL
+#   developer -> all four                                (default)
+# Set it to check the plugin the way it compiles once signed — `#if
+# SIG_DEVELOPER` blocks go dead below developer. Aliases: dev, reg, and the
+# SIG_* token itself; an unknown value warns and keeps developer (falling back
+# permissive, since masking code out is what invents undefined-identifier
+# errors). CLI `--signature MODE` wins over this.
+# signature_mode = "developer"
+
 # Extra preprocessor defines. ADDED to what game_target derives (TMNEXT,
 # WINDOWS, MANIA64, SIG_*, ...) and to info.toml [script].defines — listing
 # DEV here no longer drops TMNEXT and does not blank out the always-on flags.
@@ -155,6 +169,8 @@ default_mode = "tui"   # or "lsp"
 # errors = "last"
 
 # Any `--define` CLI flag collapses the matrix back to a single-combo run.
+# `check --game-target NAME` and `check --signature MODE` override the two
+# selectors above for one run (both wins over these files).
 ```
 
 Point your editor’s AngelScript / Openplanet language client at the binary

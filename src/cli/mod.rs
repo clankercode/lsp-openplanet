@@ -7,11 +7,10 @@ use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
-use crate::config::{ErrorGroup, LspConfig, UnusedLevel, UserPrefs};
+use crate::config::{ErrorGroup, LspConfig, SignatureMode, UnusedLevel, UserPrefs};
 use crate::server::diagnostics;
 use crate::typedb::{TypeDbMeta, TypeIndex};
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
-use crate::workspace::manifest::Manifest;
 use crate::workspace::project;
 
 /// GH #59: `typedb status|diff|refresh` — the type-DB freshness pipeline.
@@ -53,6 +52,20 @@ OPTIONS:
                         a config `true`.
                         Default exit code: 0 = clean or warnings-only,
                         1 = any error, 2 = usage failure
+    --game-target NAME  Which game's platform defines are live for this run:
+                        TMNEXT (default) | MP4 | MP40 | MP41 | TURBO | MP3 |
+                        UNITED | UNITED_FOREVER | NATIONS_FOREVER. Case
+                        -insensitive. Also picks the typedb variant and the
+                        Openplanet install folder. Same key as
+                        `game_target` in .openplanet-lsp.toml; the flag wins.
+    --signature MODE    Signature level whose SIG_* defines are live:
+                        developer (default) | school | regular | official.
+                        Levels are cumulative — official defines
+                        SIG_OFFICIAL, developer defines all four — so this
+                        checks the plugin the way it compiles once signed.
+                        Aliases: dev, reg, and the SIG_* token itself. Same
+                        key as `signature_mode` in .openplanet-lsp.toml;
+                        the flag wins.
     --define NAME       Add a preprocessor define on top of info.toml /
                         config (short form -D; repeatable). Use to check
                         branches the staged build enables but the source
@@ -169,6 +182,15 @@ pub struct CheckOptions {
     /// → config ladder (`unused` in workspace then user config, default
     /// warn). An explicit flag wins over both.
     pub unused_flag: Option<UnusedLevel>,
+    /// GH #64: `--game-target TMNEXT|MP4|…` for one run. `None` = flag
+    /// absent → config ladder (`game_target`). Stored normalized to the
+    /// upper-case token the config file uses, and fed to `LspConfig::load`
+    /// as an init option so the define set AND the GH #45 variant-folder
+    /// re-probe (typedb / game JSON) both follow it.
+    pub game_target_flag: Option<String>,
+    /// GH #64: `--signature developer|school|regular|official` for one run.
+    /// `None` = flag absent → config ladder (`signature_mode`).
+    pub signature_mode_flag: Option<SignatureMode>,
     /// `--errors last|first|off`. `None` = flag absent → config ladder
     /// (`errors` in workspace then user config, default last). An explicit
     /// flag wins over both. Human formats only; JSON stays analysis order.
@@ -382,6 +404,41 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 })?);
                 i += used;
             }
+            _ if arg == "--game-target" || arg.starts_with("--game-target=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--game-target",
+                    "--game-target requires a value (TMNEXT, MP4, TURBO, …)",
+                    false,
+                )?;
+                let normalized = value.trim().to_ascii_uppercase();
+                if !LspConfig::GAME_TARGETS.contains(&normalized.as_str()) {
+                    return Err(CliError::Usage(format!(
+                        "unknown --game-target value '{value}' (expected {})",
+                        LspConfig::GAME_TARGETS.join(", ")
+                    )));
+                }
+                options.game_target_flag = Some(normalized);
+                i += used;
+            }
+            _ if arg == "--signature" || arg.starts_with("--signature=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--signature",
+                    "--signature requires a value (developer, school, regular, or official)",
+                    false,
+                )?;
+                options.signature_mode_flag =
+                    Some(SignatureMode::parse(value).ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "unknown --signature value '{value}' (expected {})",
+                            SignatureMode::CHOICES.join(", ")
+                        ))
+                    })?);
+                i += used;
+            }
             "--watch" => {
                 options.watch = true;
                 i += 1;
@@ -508,12 +565,37 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
     }
 }
 
+/// `initializationOptions`-shaped overrides for the run's selector flags
+/// (GH #64). `None` when neither flag was given, so the config ladder is
+/// untouched.
+fn check_init_options(options: &CheckOptions) -> Option<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    if let Some(target) = &options.game_target_flag {
+        map.insert(
+            "game_target".into(),
+            serde_json::Value::from(target.clone()),
+        );
+    }
+    if let Some(mode) = options.signature_mode_flag {
+        map.insert(
+            "signature_mode".into(),
+            serde_json::Value::from(mode.as_str()),
+        );
+    }
+    (!map.is_empty()).then_some(serde_json::Value::Object(map))
+}
+
 pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     let root = resolve_workspace_root(&options.path)?;
     let root = root
         .canonicalize()
         .map_err(|e| CliError::Check(format!("failed to resolve {}: {e}", root.display())))?;
-    let mut config = LspConfig::load(Some(&root), None);
+    // GH #64: the two selector flags ride the init-options layer — the same
+    // top-of-ladder path an editor uses — so `load` re-derives the define set
+    // AND re-probes the variant folder (typedb / game JSON follow the target,
+    // GH #45). Mutating `config.game_target` after the fact would do neither.
+    let init_options = check_init_options(options);
+    let mut config = LspConfig::load(Some(&root), init_options.as_ref());
     if let Some(level) = options.unused_flag {
         config.unused = level;
     }
@@ -522,12 +604,11 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     }
     apply_typedb_dir(&mut config, options.typedb_dir.as_deref());
 
-    let manifest_path = root.join("info.toml");
-    if manifest_path.exists() {
-        if let Ok(manifest) = Manifest::load(&manifest_path) {
-            config.apply_manifest(&manifest);
-        }
-    }
+    // B026: the manifest is NOT re-applied here. `LspConfig::load` already
+    // applied it for this same root (Layer 4) and then ran the user's
+    // `defines` overrides (Layer 5) — re-applying it re-inserted every
+    // manifest/dependency define AFTER a `-NAME` removal had dropped it, so
+    // `check` and the LSP server disagreed. One seam owns the ladder.
 
     // GH #57: any --define flag collapses the define matrix — single-combo
     // behavior (the base set plus the CLI defines), exactly like pre-matrix
@@ -1675,6 +1756,84 @@ mod tests {
         ] {
             let msg = usage_msg(args);
             assert!(msg.contains(needle), "{args:?} → {msg}");
+        }
+    }
+
+    /// GH #64: `--game-target` / `--signature` select the define set for one
+    /// run. Values are case-insensitive; the target normalizes to the
+    /// upper-case token the config file uses.
+    #[test]
+    fn parse_check_args_game_target_and_signature() {
+        let opts = parse_check_args(&["--game-target".into(), "MP4".into(), ".".into()]).unwrap();
+        assert_eq!(opts.game_target_flag.as_deref(), Some("MP4"));
+
+        let opts = parse_check_args(&["--game-target=turbo".into(), ".".into()]).unwrap();
+        assert_eq!(
+            opts.game_target_flag.as_deref(),
+            Some("TURBO"),
+            "target must normalize to the config-file token"
+        );
+
+        let opts = parse_check_args(&["--signature".into(), "regular".into(), ".".into()]).unwrap();
+        assert_eq!(opts.signature_mode_flag, Some(SignatureMode::Regular));
+
+        let opts = parse_check_args(&["--signature=DEV".into(), ".".into()]).unwrap();
+        assert_eq!(opts.signature_mode_flag, Some(SignatureMode::Developer));
+
+        let opts = parse_check_args(&[".".to_string()]).unwrap();
+        assert_eq!(opts.game_target_flag, None);
+        assert_eq!(opts.signature_mode_flag, None);
+    }
+
+    /// Unknown values are a usage error naming the accepted set — a typo'd
+    /// flag must not silently analyze the wrong define set.
+    #[test]
+    fn parse_check_args_rejects_unknown_target_and_signature() {
+        let msg = usage_msg(&["--game-target", "BANANA", "."]);
+        assert!(msg.contains("unknown --game-target value"), "{msg}");
+        assert!(
+            msg.contains("TMNEXT"),
+            "error must list valid targets: {msg}"
+        );
+
+        let msg = usage_msg(&["--signature", "banana", "."]);
+        assert!(msg.contains("unknown --signature value"), "{msg}");
+        assert!(
+            msg.contains("developer"),
+            "error must list valid modes: {msg}"
+        );
+    }
+
+    /// GH #62 guard: neither flag may swallow a following option, and both
+    /// report the "requires a value" error when final.
+    #[test]
+    fn parse_check_args_game_target_and_signature_reject_following_flag() {
+        for (args, needle) in [
+            (
+                &["--game-target", "--watch", "."][..],
+                "--game-target requires a value",
+            ),
+            (
+                &["--signature", "--watch", "."][..],
+                "--signature requires a value",
+            ),
+            (&["--game-target"][..], "--game-target requires a value"),
+            (&["--signature"][..], "--signature requires a value"),
+            (
+                &["--game-target=--watch", "."][..],
+                "--game-target requires a value",
+            ),
+            (
+                &["--signature=--watch", "."][..],
+                "--signature requires a value",
+            ),
+        ] {
+            let msg = usage_msg(args);
+            assert!(msg.contains(needle), "{args:?} → {msg}");
+            assert!(
+                !msg.contains("unknown --"),
+                "must not take the unknown-value path: {msg}"
+            );
         }
     }
 

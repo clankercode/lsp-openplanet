@@ -238,18 +238,18 @@ pub const SETTINGS: &[SettingSpec] = &[
         key: "game_target",
         help: "Platform defines / typedb variant (TMNEXT, MP4, TURBO, …)",
         kind: SettingKind::Enum {
-            choices: &[
-                "TMNEXT",
-                "MP4",
-                "MP40",
-                "MP41",
-                "TURBO",
-                "UNITED",
-                "UNITED_FOREVER",
-                "MP3",
-                "NATIONS_FOREVER",
-            ],
+            // The server's own list — one source of truth for the CLI's
+            // `--game-target` validation, this TUI, and the define tables.
+            choices: crate::config::LspConfig::GAME_TARGETS,
             default: "TMNEXT",
+        },
+    },
+    SettingSpec {
+        key: "signature_mode",
+        help: "Signature level whose SIG_* defines are live (cumulative)",
+        kind: SettingKind::Enum {
+            choices: crate::config::SignatureMode::CHOICES,
+            default: "developer",
         },
     },
     SettingSpec {

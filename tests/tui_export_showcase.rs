@@ -47,6 +47,8 @@ fn showcase_snapshot() -> Snapshot {
         format: openplanet_lsp::cli::CheckFormat::Plain,
         watch: false,
         warnings_as_errors_flag: None,
+        game_target_flag: None,
+        signature_mode_flag: None,
         extra_defines: Vec::new(),
         no_gitignore: false,
         unused_flag: None,
