@@ -80,8 +80,10 @@ enum Shape {
 /// rename cannot handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApproxKind {
-    /// A class member: keep `.name` accesses and declarations, drop bare
-    /// locals and globals that merely share the spelling.
+    /// A class member: keep `.name` accesses and the bare uses inside a
+    /// class that could be implicit-`this`, but drop anything sitting in
+    /// the scope of a local or parameter of the same name — that is
+    /// certainly not the member.
     Member,
     /// A namespaced name or enum value: keep bare and `::`-adjacent
     /// occurrences, drop `.name` accesses and argument labels.
@@ -178,8 +180,11 @@ pub fn rename(
         Target::Workspace { name, shape } => {
             let found = workspace_occurrences(analysis, uri, name, *shape, files)?;
             workspace_new_name_conflict(scope, &found, new_name)?;
-            for (file_uri, file_analysis, spans) in &found {
-                changes.insert(file_uri.clone(), edits_for(file_analysis, spans, new_name));
+            for file in &found {
+                changes.insert(
+                    file.uri.clone(),
+                    edits_for(file.analysis, &file.spans, new_name),
+                );
             }
         }
     }
@@ -225,21 +230,23 @@ pub fn find_references(
         },
         Target::Workspace { name, shape } => {
             match workspace_occurrences(analysis, uri, name, *shape, files) {
-                Ok(found) => {
-                    let declarations = declaration_starts(scope, name);
-                    found
-                        .iter()
-                        .flat_map(|(file_uri, file_analysis, spans)| {
-                            locations_for(
-                                file_analysis,
-                                file_uri,
-                                spans.iter().copied().filter(|span| {
+                Ok(found) => found
+                    .iter()
+                    .flat_map(|file| {
+                        let declarations = declaration_spans(scope, name, file);
+                        locations_for(
+                            file.analysis,
+                            &file.uri,
+                            file.spans
+                                .iter()
+                                .copied()
+                                .filter(|span| {
                                     include_declaration || !declarations.contains(&span.start)
-                                }),
-                            )
-                        })
-                        .collect()
-                }
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect(),
                 Err(_) => approximate_locations(name, ApproxKind::Qualified, files),
             }
         }
@@ -502,6 +509,16 @@ fn local_occurrences(
     Ok(spans)
 }
 
+/// One file's share of a workspace symbol's occurrences.
+struct FileOccurrences<'a> {
+    /// `None` for a requesting document the snapshot does not hold, whose
+    /// symbols are therefore not in the pool either.
+    file_id: Option<usize>,
+    uri: Url,
+    analysis: &'a DocumentAnalysis,
+    spans: Vec<Span>,
+}
+
 /// Per-file occurrence spans of a workspace symbol, over every open file.
 ///
 /// The requesting document is covered even when the snapshot does not hold
@@ -509,29 +526,38 @@ fn local_occurrences(
 /// the snapshot has not caught up with, and renaming every *other* file
 /// while silently skipping the one under the cursor would leave the edited
 /// buffer calling a name that no longer exists.
-#[allow(clippy::type_complexity)]
 fn workspace_occurrences<'a>(
     analysis: &'a DocumentAnalysis,
     uri: &Url,
     name: &str,
     shape: Shape,
     files: &WorkspaceFiles<'a>,
-) -> Result<Vec<(Url, &'a DocumentAnalysis, Vec<Span>)>, Refusal> {
+) -> Result<Vec<FileOccurrences<'a>>, Refusal> {
     let mut out = Vec::new();
     let mut saw_requesting_document = false;
-    for (file_uri, file_analysis) in files.files.values() {
+    for (file_id, (file_uri, file_analysis)) in files.files.iter() {
         if file_uri == uri {
             saw_requesting_document = true;
         }
         let spans = occurrences_in_file(file_analysis, name, shape)?;
         if !spans.is_empty() {
-            out.push((file_uri.clone(), *file_analysis, spans));
+            out.push(FileOccurrences {
+                file_id: Some(*file_id),
+                uri: file_uri.clone(),
+                analysis: file_analysis,
+                spans,
+            });
         }
     }
     if !saw_requesting_document {
         let spans = occurrences_in_file(analysis, name, shape)?;
         if !spans.is_empty() {
-            out.push((uri.clone(), analysis, spans));
+            out.push(FileOccurrences {
+                file_id: None,
+                uri: uri.clone(),
+                analysis,
+                spans,
+            });
         }
     }
     if out.is_empty() {
@@ -691,10 +717,9 @@ fn local_new_name_conflict(
     Ok(())
 }
 
-#[allow(clippy::type_complexity)]
 fn workspace_new_name_conflict(
     scope: &GlobalScope<'_>,
-    found: &[(Url, &DocumentAnalysis, Vec<Span>)],
+    found: &[FileOccurrences<'_>],
     new_name: &str,
 ) -> Result<(), Refusal> {
     if scope.has_global_ident(new_name) || declares_class_member(scope, new_name) {
@@ -702,10 +727,12 @@ fn workspace_new_name_conflict(
             "`{new_name}` is already declared in this workspace or by the engine API"
         )));
     }
-    for (_, analysis, spans) in found {
+    for file in found {
+        let analysis = file.analysis;
         let source = analysis.masked_source();
         for binding in lexical::bindings_named(&analysis.file, &analysis.tokens, source, new_name) {
-            if spans
+            if file
+                .spans
                 .iter()
                 .any(|span| span.start >= binding.start && span.start < binding.scope_end)
             {
@@ -767,12 +794,29 @@ fn declares_namespaced(scope: &GlobalScope<'_>, name: &str) -> bool {
         .any(|(owner, _)| scope.workspace_namespace_declared(owner))
 }
 
-/// Declarator offsets of a workspace symbol, for `include_declaration`.
-fn declaration_starts(scope: &GlobalScope<'_>, name: &str) -> Vec<u32> {
+/// Occurrence offsets in `file` that are declarations rather than uses,
+/// for `include_declaration: false`.
+///
+/// A `Symbol`'s span covers the WHOLE declaration — a function's body
+/// included — so it cannot be compared against an identifier offset
+/// directly. The declaring identifier is the first occurrence inside each
+/// symbol's span (`void Helper() { Helper(); }` declares at the first and
+/// recurses at the second).
+fn declaration_spans(scope: &GlobalScope<'_>, name: &str, file: &FileOccurrences<'_>) -> Vec<u32> {
+    let Some(file_id) = file.file_id else {
+        return Vec::new();
+    };
     scope
         .lookup_workspace(name)
         .iter()
-        .map(|symbol| symbol.span.start)
+        .filter(|symbol| symbol.file_id == file_id)
+        .filter_map(|symbol| {
+            file.spans
+                .iter()
+                .filter(|span| span.start >= symbol.span.start && span.end <= symbol.span.end)
+                .map(|span| span.start)
+                .min()
+        })
         .collect()
 }
 
@@ -790,24 +834,41 @@ fn approximate_locations(name: &str, kind: ApproxKind, files: &WorkspaceFiles) -
     for (uri, analysis) in files.files.values() {
         let source = analysis.masked_source();
         let tokens = &analysis.tokens;
-        let spans = tokens.iter().enumerate().filter_map(|(idx, token)| {
-            if token.kind != TokenKind::Ident || token.span.text(source) != name {
-                return None;
-            }
-            if lexical::is_named_argument_label(tokens, idx) {
-                return None;
-            }
-            let after_dot = idx > 0 && tokens[idx - 1].kind == TokenKind::Dot;
-            match kind {
-                // A member is reached through `.`, or declared/used bare
-                // inside its own class — which we cannot pin down, so bare
-                // uses are kept.
-                ApproxKind::Member => Some(token.span),
-                // A qualified name is never a `.member`.
-                ApproxKind::Qualified if after_dot => None,
-                ApproxKind::Qualified => Some(token.span),
-            }
-        });
+        // A local or parameter of the same name is definitely not the
+        // symbol under the cursor, whichever approximate class this is.
+        let shadowed: Vec<(u32, u32)> =
+            lexical::bindings_named(&analysis.file, tokens, source, name)
+                .into_iter()
+                .map(|binding| (binding.start, binding.scope_end))
+                .collect();
+        let spans: Vec<Span> = tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, token)| {
+                if token.kind != TokenKind::Ident || token.span.text(source) != name {
+                    return None;
+                }
+                if lexical::is_named_argument_label(tokens, idx) {
+                    return None;
+                }
+                let after_dot = idx > 0 && tokens[idx - 1].kind == TokenKind::Dot;
+                if !after_dot
+                    && shadowed
+                        .iter()
+                        .any(|(start, end)| token.span.start >= *start && token.span.start < *end)
+                {
+                    return None;
+                }
+                match kind {
+                    // A member is reached through `.`, or used bare inside
+                    // its own class, which we cannot pin down further.
+                    ApproxKind::Member => Some(token.span),
+                    // A qualified name is never a `.member`.
+                    ApproxKind::Qualified if after_dot => None,
+                    ApproxKind::Qualified => Some(token.span),
+                }
+            })
+            .collect();
         out.extend(locations_for(analysis, uri, spans));
     }
     out
@@ -1804,6 +1865,46 @@ mod tests {
         assert!(
             changes.contains_key(&tw.uri_of(0)),
             "the declaring file must be edited too"
+        );
+    }
+
+    #[test]
+    fn references_can_exclude_a_workspace_symbols_declaration() {
+        // A `Symbol`'s span covers the whole declaration, body included,
+        // so the declaring identifier has to be found inside it — a
+        // recursive call is a use, not the declaration.
+        let sources: &[(&str, &str)] = &[
+            ("a", "void Helper() { Helper(); }\n"),
+            ("b", "void Other() { Helper(); }\n"),
+        ];
+        let with_decl = ref_offsets(sources, 0, "Helper() {", 0, true);
+        let without = ref_offsets(sources, 0, "Helper() {", 0, false);
+        assert_eq!(with_decl.len(), 3, "{with_decl:?}");
+        assert_eq!(without.len(), 2, "{without:?}");
+        let declaration = (0, sources[0].1.find("Helper").unwrap());
+        assert!(with_decl.contains(&declaration), "{with_decl:?}");
+        assert!(!without.contains(&declaration), "{without:?}");
+        // The recursive call inside the body is a use, not the declaration.
+        assert!(
+            without.contains(&(0, sources[0].1.rfind("Helper").unwrap())),
+            "{without:?}"
+        );
+    }
+
+    #[test]
+    fn approximate_references_drop_a_same_named_local() {
+        // Rename refuses on a field, but the read-only scan must still not
+        // report an unrelated local that merely shares the spelling.
+        let src = "class C { int w; }\nvoid f(C@ c) { c.w = 1; }\nvoid g() { int w = 2; w++; }\n";
+        let found = ref_offsets(&[("a", src)], 0, "w;", 0, true);
+        let local_decl = src.find("w = 2").unwrap();
+        assert!(
+            !found.contains(&(0, local_decl)),
+            "local reported: {found:?}"
+        );
+        assert!(
+            found.contains(&(0, src.find("c.w").unwrap() + 2)),
+            "member access missing: {found:?}"
         );
     }
 
