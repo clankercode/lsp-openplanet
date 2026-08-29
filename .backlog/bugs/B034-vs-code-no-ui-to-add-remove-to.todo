@@ -1,20 +1,21 @@
 ---
 claimed_at: "2026-08-29T18:54:47Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T20:15:33Z"
 complexity: medium
 created_at: "2026-08-29T14:05:50Z"
 depends_on:
     - B017
     - B019
+duration_minutes: 80.76988560058334
 estimate_hours: 5
 id: B034
 priority: medium
 started_at: "2026-08-29T18:54:47Z"
-status: in_progress
+status: done
 tags: []
 title: 'VS Code: no UI to add/remove/toggle defines — only raw JSON settings editing'
-updated_at: "2026-08-29T18:54:47Z"
+updated_at: "2026-08-29T20:15:33Z"
 ---
 Requested 2026-08-30 by Max. Extension repo: ../lsp-openplanet-ext/
 (package `packages/vscode-ext`). Enhancement, not a regression.
