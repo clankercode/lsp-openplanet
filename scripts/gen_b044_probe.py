@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -48,6 +49,140 @@ ANON_TYPE_NAMES = {None, "", "UnnamedEnum"}
 
 HEADER_FILE = TYPEDB / "Openplanet.h"
 
+IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+INTEGER = re.compile(r"^[+-]?\d+$")
+
+
+def strip_comments(line: str, in_block_comment: list[bool]) -> str:
+    """Match the Rust parser's comment removal before brace tracking."""
+    out = ""
+    rest = line
+    while True:
+        if in_block_comment[0]:
+            end = rest.find("*/")
+            if end < 0:
+                return out
+            in_block_comment[0] = False
+            rest = rest[end + 2 :]
+            continue
+        block = rest.find("/*")
+        line_comment = rest.find("//")
+        if line_comment >= 0 and (block < 0 or line_comment < block):
+            return out + rest[:line_comment]
+        if block >= 0:
+            out += rest[:block]
+            in_block_comment[0] = True
+            rest = rest[block + 2 :]
+            continue
+        return out + rest
+
+
+def enum_decl(line: str) -> tuple[str, bool] | None:
+    if not line.startswith("enum class "):
+        return None
+    rest = line[len("enum class ") :]
+    if "{" in rest:
+        name = rest.split("{", 1)[0].strip()
+        return (name, True) if name else None
+    if ";" not in rest and rest.strip():
+        return rest.strip(), False
+    return None
+
+
+def block_decl_kind(prefix: str) -> str | None:
+    prefix = prefix.strip()
+    if ";" in prefix:
+        return None
+    for keyword in ("struct", "class", "union"):
+        if prefix == keyword or (prefix.startswith(keyword) and prefix[len(keyword) :].startswith((" ", "\t"))):
+            return "aggregate"
+    if prefix == "namespace" or (prefix.startswith("namespace") and prefix[len("namespace") :].startswith((" ", "\t"))):
+        return "namespace"
+    return None
+
+
+def enum_value(text: str) -> tuple[str, int] | None:
+    if "=" not in text:
+        return None
+    name, value = (part.strip() for part in text.split("=", 1))
+    value = value.rstrip(",").strip()
+    if not IDENTIFIER.fullmatch(name) or not INTEGER.fullmatch(value):
+        return None
+    return name, int(value)
+
+
+def enum_values_after_open(after_open: str, lines: object) -> list[tuple[str, int]]:
+    if "}" in after_open:
+        return [
+            value
+            for entry in after_open.split("}", 1)[0].split(",")
+            if (value := enum_value(entry.strip())) is not None
+        ]
+    values: list[tuple[str, int]] = []
+    for inner in lines:
+        inner = inner.strip()
+        if inner.startswith("}"):
+            break
+        value = enum_value(inner)
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def header_module_enums(text: str) -> list[tuple[str, list[tuple[str, int]]]]:
+    """Rust-parity parser for module-level header enums, used by B044."""
+    parsed: list[tuple[str, list[tuple[str, int]]]] = []
+    in_block_comment = [False]
+    lines = iter(strip_comments(line, in_block_comment) for line in text.splitlines())
+    aggregate_depth = 0
+    blocks: list[str] = []
+    pending_block: str | None = None
+    pending_enum: str | None = None
+    for line in lines:
+        trimmed = line.strip()
+        if pending_enum is not None:
+            name = pending_enum
+            pending_enum = None
+            if trimmed.startswith("{"):
+                values = enum_values_after_open(trimmed, lines)
+                if aggregate_depth == 0 and "::" not in name:
+                    parsed.append((name, values))
+                continue
+        declaration = enum_decl(trimmed)
+        if declaration is not None:
+            name, has_open_brace = declaration
+            if not has_open_brace:
+                pending_enum = name
+                continue
+            values = enum_values_after_open(trimmed.split("{", 1)[1], lines)
+            if aggregate_depth == 0 and "::" not in name:
+                parsed.append((name, values))
+            continue
+
+        first_open = True
+        prefix = line.split("{", 1)[0]
+        declared_kind = block_decl_kind(prefix)
+        if "{" not in line:
+            if declared_kind is not None:
+                pending_block = declared_kind
+            elif trimmed:
+                pending_block = None
+        for char in line:
+            if char == "{":
+                if first_open:
+                    first_open = False
+                    kind = declared_kind or pending_block or "other"
+                    pending_block = None
+                else:
+                    kind = "other"
+                if kind == "aggregate":
+                    aggregate_depth += 1
+                blocks.append(kind)
+            elif char == "}" and blocks:
+                if blocks.pop() == "aggregate":
+                    aggregate_depth = max(0, aggregate_depth - 1)
+    return parsed
+
 
 def header_module_enum_values(text: str) -> set[str]:
     """Value names of every MODULE-LEVEL enum in `Openplanet.h` (B046).
@@ -56,35 +191,7 @@ def header_module_enum_values(text: str) -> set[str]:
     whose name is unqualified. Struct-nested and qualified declarations are
     skipped — the dump is the authority for those.
     """
-    values: set[str] = set()
-    struct_depth = 0
-    blocks: list[str] = []
-    lines = iter(text.splitlines())
-    for line in lines:
-        trimmed = line.strip()
-        if trimmed.startswith("enum class ") and trimmed.endswith("{"):
-            name = trimmed[len("enum class "):-1].strip()
-            body: set[str] = set()
-            for inner in lines:
-                inner = inner.strip()
-                if inner.startswith("}"):
-                    break
-                head, sep, _ = inner.partition("=")
-                head = head.strip()
-                if sep and head.isidentifier():
-                    body.add(head)
-            if struct_depth == 0 and "::" not in name:
-                values |= body
-            continue
-        if trimmed.startswith("struct ") and trimmed.endswith("{"):
-            blocks.append("struct")
-            struct_depth += 1
-        elif trimmed.startswith("namespace ") and trimmed.endswith("{"):
-            blocks.append("namespace")
-        elif trimmed.startswith("}") and blocks:
-            if blocks.pop() == "struct":
-                struct_depth = max(0, struct_depth - 1)
-    return values
+    return {name for _, enum_values in header_module_enums(text) for name, _ in enum_values}
 
 
 def anonymous_enum_values(nadeo: dict) -> tuple[dict[str, list[str]], set[str], int]:
@@ -174,7 +281,16 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="print the names only")
     parser.add_argument("--check", action="store_true", help="fail if the fixture is stale")
     parser.add_argument("--batch", nargs=2, type=int, metavar=("START", "COUNT"))
+    parser.add_argument(
+        "--parse-header",
+        action="store_true",
+        help="read header text on stdin and emit Rust-parity enum data as JSON",
+    )
     args = parser.parse_args()
+
+    if args.parse_header:
+        print(json.dumps(header_module_enums(sys.stdin.read())))
+        return 0
 
     core = json.loads((TYPEDB / "OpenplanetCore.json").read_text())
     nadeo = json.loads((TYPEDB / "OpenplanetNext.json").read_text())

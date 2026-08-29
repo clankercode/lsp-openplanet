@@ -264,13 +264,22 @@ impl TypeIndex {
     /// all of them already point at a directory holding both JSONs.
     pub fn load(core_path: &Path, nadeo_path: &Path) -> Result<Self, String> {
         let header_path = nadeo_path.parent().map(|d| d.join(HEADER_FILENAME));
-        let header_path = header_path.filter(|p| p.is_file());
-        Self::load_with_header(core_path, nadeo_path, header_path.as_deref())
+        let header = header_path
+            .filter(|p| p.is_file())
+            .and_then(|path| HeaderDatabase::load_from_file(&path).ok());
+        let mut index = Self::load_with_header(core_path, nadeo_path, None)?;
+        if let Some(header) = header {
+            index.add_header(&header);
+            index.build_short_type_index();
+        }
+        Ok(index)
     }
 
     /// [`Self::load`] with the header named explicitly. `None` skips it.
     ///
-    /// A header that fails to READ is an error the caller sees; a header
+    /// A header that fails to READ is an error the caller sees; normal
+    /// [`Self::load`] treats its co-located optional header as best-effort.
+    /// A header
     /// that parses to nothing is not, because the parser degrades to an
     /// empty result rather than guessing (see [`HeaderDatabase::parse`]).
     pub fn load_with_header(
@@ -706,15 +715,25 @@ impl TypeIndex {
     /// bare-value scan behind `source_enums_iter` — which is what makes the
     /// 55 false-positive value names resolve.
     fn add_header(&mut self, db: &HeaderDatabase) {
-        let indexed_enum_names: std::collections::HashSet<String> = self
-            .enums
-            .iter()
-            .filter(|(_, info)| !info.anonymous)
-            .map(|(key, _)| key.rsplit("::").next().unwrap_or(key.as_str()).to_string())
+        // This is exactly the source type-name universe: `build_short_type_index`
+        // combines types, non-synthetic enums, and funcdefs. Functions are
+        // intentionally absent because their names are never resolved through
+        // a type-name bucket (see that method's field documentation).
+        let indexed_source_type_names: std::collections::HashSet<String> = self
+            .types
+            .keys()
+            .chain(
+                self.enums
+                    .iter()
+                    .filter(|(_, info)| !info.anonymous)
+                    .map(|(key, _)| key),
+            )
+            .chain(self.funcdefs.keys())
+            .map(|key| key.rsplit("::").next().unwrap_or(key.as_str()).to_string())
             .collect();
 
         for header_enum in &db.module_enums {
-            if indexed_enum_names.contains(&header_enum.name) {
+            if indexed_source_type_names.contains(&header_enum.name) {
                 continue;
             }
             let mut values = header_enum.values.clone();
@@ -3112,13 +3131,13 @@ mod module_level_enum_tests {
         .unwrap()
     }
 
-    /// A private directory to assemble a DB pair in. Matches the idiom the
-    /// rest of this file uses; the pid keeps concurrent test binaries apart.
+    /// A private ignored directory to assemble a DB pair in. Keeping it below
+    /// the repository makes these tests independent of a home or `/tmp`.
+    /// The pid keeps concurrent test binaries apart.
     fn scratch_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-typedb-b046-{tag}-{}",
-            std::process::id()
-        ));
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("test-typedb-b046-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -3444,16 +3463,10 @@ mod module_level_enum_tests {
         assert_eq!(index.find_by_short_name("EFresh"), ["EFresh"]);
     }
 
-    /// The skip rule compares against ENUM names only, so a module-level
-    /// enum sharing a short name with a TYPE is still added. That is
-    /// deliberate: the enum genuinely exists and the game accepts it, so
-    /// `find_by_short_name` returning both is the honest answer. It does not
-    /// arise in the shipped data — `the_header_disturbs_no_existing_short_name_bucket`
-    /// proves no bucket moves — and if a future dump ever creates such a
-    /// clash that test fails loudly rather than the resolution silently
-    /// shifting. Pinned here so the behaviour is a decision, not an accident.
+    /// Header entries are optional supplements, so they may not displace a
+    /// source-visible type that already owns the short-name resolution bucket.
     #[test]
-    fn a_header_enum_sharing_a_short_name_with_a_type_is_still_added() {
+    fn a_header_enum_sharing_a_short_name_with_a_type_is_not_added() {
         let core = r#"{"op":"1.0.0","functions":[],"classes":[],"enums":[]}"#;
         let nadeo = r#"{"op":"1.0.0","ns":{"Game":{"CThing":{"i":"1"}}}}"#;
         let dir = scratch_dir("type-name-clash");
@@ -3475,14 +3488,11 @@ mod module_level_enum_tests {
         });
         index.build_short_type_index();
 
-        assert!(
-            index.lookup_source_enum("CThing").is_some(),
-            "a type of the same name must not suppress a real enum"
-        );
+        assert!(index.lookup_source_enum("CThing").is_none());
         assert_eq!(
             index.find_by_short_name("CThing"),
-            ["CThing", "Game::CThing"],
-            "both are reported, and the order is deterministic"
+            ["Game::CThing"],
+            "the existing source-visible bucket must stay unchanged"
         );
     }
 

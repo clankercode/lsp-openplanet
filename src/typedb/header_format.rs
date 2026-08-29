@@ -80,26 +80,46 @@ impl HeaderDatabase {
     /// enums, which degrades to today's behaviour rather than to an error.
     pub fn parse(text: &str) -> Self {
         let mut module_enums = Vec::new();
-        // Depth of `struct` bodies we are inside. A declaration is at
-        // namespace level exactly when this is zero; namespace blocks
-        // themselves do not count, since their contents are what we want.
-        let mut struct_depth = 0usize;
-        // Brace depth of each open block, innermost last, so a closing brace
-        // knows whether it ended a struct.
+        // Namespace blocks themselves do not count: their contents are what
+        // we want. Every other block stays on the stack so its closing brace
+        // cannot accidentally close an enclosing aggregate.
+        let mut aggregate_depth = 0usize;
         let mut open_blocks: Vec<BlockKind> = Vec::new();
+        let mut pending_block = None;
+        let mut pending_enum: Option<String> = None;
 
-        let mut lines = text.lines().peekable();
+        let mut in_block_comment = false;
+        let cleaned_lines: Vec<String> = text
+            .lines()
+            .map(|line| strip_comments(line, &mut in_block_comment))
+            .collect();
+        let mut lines = cleaned_lines.iter().map(String::as_str).peekable();
         while let Some(line) = lines.next() {
             let trimmed = line.trim();
 
-            if let Some(name) = enum_decl_name(trimmed) {
+            if let Some(name) = pending_enum.take() {
+                if trimmed.starts_with('{') {
+                    let values = read_enum_after_open(trimmed, &mut lines);
+                    if aggregate_depth == 0 && !name.contains("::") {
+                        module_enums.push(HeaderEnum { name, values });
+                    }
+                    continue;
+                }
+            }
+
+            if let Some((name, has_open_brace)) = enum_decl(trimmed) {
+                if !has_open_brace {
+                    pending_enum = Some(name.to_string());
+                    continue;
+                }
                 // The body is consumed either way; only its ownership of the
                 // values differs.
-                let values = read_enum_body(&mut lines);
+                let after_open = trimmed.split_once('{').map(|(_, after)| after).unwrap();
+                let values = read_enum_after_open(after_open, &mut lines);
                 // Qualified (`Class::EName`) means the header is telling us
                 // this enum belongs to something else, and the dump is the
                 // authority on those. Inside a struct, likewise.
-                if struct_depth == 0 && !name.contains("::") {
+                if aggregate_depth == 0 && !name.contains("::") {
                     module_enums.push(HeaderEnum {
                         name: name.to_string(),
                         values,
@@ -108,20 +128,12 @@ impl HeaderDatabase {
                 continue;
             }
 
-            if is_struct_open(trimmed) {
-                open_blocks.push(BlockKind::Struct);
-                struct_depth += 1;
-                continue;
-            }
-            if is_namespace_open(trimmed) {
-                open_blocks.push(BlockKind::Namespace);
-                continue;
-            }
-            if trimmed.starts_with('}') {
-                if let Some(BlockKind::Struct) = open_blocks.pop() {
-                    struct_depth = struct_depth.saturating_sub(1);
-                }
-            }
+            track_blocks(
+                trimmed,
+                &mut open_blocks,
+                &mut aggregate_depth,
+                &mut pending_block,
+            );
         }
 
         HeaderDatabase { module_enums }
@@ -131,28 +143,137 @@ impl HeaderDatabase {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum BlockKind {
     Namespace,
-    Struct,
+    Aggregate,
+    Other,
 }
 
-/// `enum class EName {` / `enum class Class::EName {` -> the declared name.
-fn enum_decl_name(trimmed: &str) -> Option<&str> {
+/// `enum class EName {` / `enum class Class::EName {` -> `(name, opens)`.
+///
+/// A declaration whose brace is on the following line is also useful in the
+/// generated header. Forward declarations (`enum class EName;`) are not.
+fn enum_decl(trimmed: &str) -> Option<(&str, bool)> {
     let rest = trimmed.strip_prefix("enum class ")?;
-    let name = rest.strip_suffix('{')?.trim();
+    let (name, opens) = match rest.split_once('{') {
+        Some((name, _)) => (name.trim(), true),
+        None if !rest.contains(';') => (rest.trim(), false),
+        None => return None,
+    };
     if name.is_empty() {
         return None;
     }
-    Some(name)
+    Some((name, opens))
 }
 
-/// `struct CMwNod {` / `struct CMwEngine : public CMwNod {`. A forward
-/// declaration (`struct X;`) opens no block.
-fn is_struct_open(trimmed: &str) -> bool {
-    trimmed.starts_with("struct ") && trimmed.ends_with('{')
+/// Record braces while remembering the block kind of the first opening brace
+/// on a declaration line. This intentionally understands only the regular
+/// machine-generated aggregate/namespace forms, not C++ in general.
+fn track_blocks(
+    line: &str,
+    open_blocks: &mut Vec<BlockKind>,
+    aggregate_depth: &mut usize,
+    pending_block: &mut Option<BlockKind>,
+) {
+    let mut first_open = true;
+    let prefix = line.split_once('{').map_or(line, |(before, _)| before);
+    let declared_kind = block_decl_kind(prefix);
+    if !line.contains('{') {
+        if declared_kind.is_some() {
+            *pending_block = declared_kind;
+        } else if !line.is_empty() {
+            *pending_block = None;
+        }
+    }
+
+    for ch in line.chars() {
+        match ch {
+            '{' => {
+                let kind = if first_open {
+                    first_open = false;
+                    declared_kind.or_else(|| pending_block.take())
+                } else {
+                    None
+                }
+                .unwrap_or(BlockKind::Other);
+                if kind == BlockKind::Aggregate {
+                    *aggregate_depth += 1;
+                }
+                open_blocks.push(kind);
+            }
+            '}' => {
+                if let Some(BlockKind::Aggregate) = open_blocks.pop() {
+                    *aggregate_depth = aggregate_depth.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
-/// `namespace Game {`.
-fn is_namespace_open(trimmed: &str) -> bool {
-    trimmed.starts_with("namespace ") && trimmed.ends_with('{')
+/// A generated aggregate or namespace declaration, with or without the
+/// opening brace on this line. A semicolon is a forward declaration.
+fn block_decl_kind(prefix: &str) -> Option<BlockKind> {
+    let prefix = prefix.trim();
+    if prefix.contains(';') {
+        return None;
+    }
+    for keyword in ["struct", "class", "union"] {
+        if prefix == keyword
+            || prefix
+                .strip_prefix(keyword)
+                .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+        {
+            return Some(BlockKind::Aggregate);
+        }
+    }
+    if prefix == "namespace"
+        || prefix
+            .strip_prefix("namespace")
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    {
+        return Some(BlockKind::Namespace);
+    }
+    None
+}
+
+/// Remove line and block comments before brace tracking. The header grammar
+/// does not need string-literal handling, but comments commonly contain
+/// illustrative braces and must never alter scope.
+fn strip_comments(line: &str, in_block_comment: &mut bool) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    loop {
+        if *in_block_comment {
+            match rest.find("*/") {
+                Some(end) => {
+                    *in_block_comment = false;
+                    rest = &rest[end + 2..];
+                }
+                None => return out,
+            }
+        } else {
+            let block = rest.find("/*");
+            let line_comment = rest.find("//");
+            match (block, line_comment) {
+                (_, Some(line_end)) if block.map_or(true, |block_start| line_end < block_start) => {
+                    out.push_str(&rest[..line_end]);
+                    return out;
+                }
+                (Some(block_start), _) => {
+                    out.push_str(&rest[..block_start]);
+                    *in_block_comment = true;
+                    rest = &rest[block_start + 2..];
+                }
+                (None, None) => {
+                    out.push_str(rest);
+                    return out;
+                }
+                (None, Some(line_end)) => {
+                    out.push_str(&rest[..line_end]);
+                    return out;
+                }
+            }
+        }
+    }
 }
 
 /// Consume an enum body up to and including its closing brace, collecting
@@ -173,6 +294,22 @@ fn read_enum_body<'a>(
         }
     }
     values
+}
+
+/// Parse values after an enum's opening brace. The generated header normally
+/// puts members on later lines, but recognising a one-line body prevents its
+/// closing brace from consuming the surrounding aggregate's scope.
+fn read_enum_after_open<'a>(
+    after_open: &str,
+    lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Vec<(String, i64)> {
+    match after_open.split_once('}') {
+        Some((body, _)) => body
+            .split(',')
+            .filter_map(|entry| enum_value(entry.trim()))
+            .collect(),
+        None => read_enum_body(lines),
+    }
 }
 
 /// `Menu = 2,` -> `("Menu", 2)`. Trailing `// comment` is tolerated.
@@ -207,7 +344,9 @@ fn is_identifier(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
 
     fn fixture_header() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/Openplanet.h")
@@ -306,6 +445,67 @@ mod tests {
         let db = HeaderDatabase::parse("enum class ENextLine\n{\n  A = 1,\n};\n");
         assert_eq!(names(&db), vec!["ENextLine"]);
         assert_eq!(db.module_enums[0].values, vec![("A".to_string(), 1)]);
+    }
+
+    #[test]
+    fn accepts_only_decimal_integer_enum_values() {
+        let db = HeaderDatabase::parse(
+            "enum class EValues {\n  Decimal = 1,\n  Negative = -2,\n  Plus = +3,\n  Hex = 0x4,\n  Suffix = 5u,\n  Fraction = 6.5,\n};\n",
+        );
+        assert_eq!(
+            db.module_enums[0].values,
+            vec![
+                ("Decimal".to_string(), 1),
+                ("Negative".to_string(), -2),
+                ("Plus".to_string(), 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn python_probe_parser_matches_the_rust_header_grammar() {
+        let samples = [
+            "namespace Enums {\nenum class EValid {\n  Zero = 0,\n  Negative = -2,\n  Plus = +3,\n  Hex = 0x4,\n  Suffix = 5u,\n}; // enum close suffix\n}\n",
+            "/* { a block-comment brace } */\nstruct CThing\n{\n  enum class EInside {\n    A = 0,\n  };\n  class Nested { union { enum class EDeeper { B = 1, }; }; };\n};\nenum class EAfter\n{\n  A = 7, // } a line-comment brace\n}; trailing\n",
+            "namespace Enums\n{\nunion { enum class EAnonymous { A = 0, }; };\nstruct Empty {};\nenum class EOnly {\n  Fine = 9,\n  Fraction = 1.5,\n};\n}\n",
+        ];
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for sample in samples {
+            let rust = HeaderDatabase::parse(sample);
+            let mut child = Command::new("python3")
+                .arg(repo.join("scripts/gen_b044_probe.py"))
+                .arg("--parse-header")
+                .current_dir(&repo)
+                .env_clear()
+                .env(
+                    "PATH",
+                    std::env::var("PATH").expect("PATH is required for python3"),
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("python3 must be available for header-parser parity");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(sample.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "python parser failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let python: Vec<(String, Vec<(String, i64)>)> =
+                serde_json::from_slice(&output.stdout).unwrap();
+            let rust: Vec<(String, Vec<(String, i64)>)> = rust
+                .module_enums
+                .into_iter()
+                .map(|header_enum| (header_enum.name, header_enum.values))
+                .collect();
+            assert_eq!(python, rust, "header parser disagreement for {sample:?}");
+        }
     }
 
     #[test]
