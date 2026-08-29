@@ -103,3 +103,30 @@ diagnostics. Compare two binaries on the same machine at the same time.
 B038 (merged) — built and tested the scope model this should promote, and
 documented why it could not use the existing handler. B035 (the code-action
 seam). B047 (the two code-action producer paths).
+
+## Coordinator pre-dispatch findings, 2026-08-30
+
+**`find_references` has the SAME defect — confirmed, not just suspected.**
+`src/server/navigation.rs:364` is byte-for-byte the same strategy as `rename`:
+tokenize every open file, keep every `Ident` whose text equals the bare name,
+emit a Location. No scope, no binding, no member/qualifier filter. Fix both.
+It is the read-only twin of the same bug: Find All References shows garbage,
+and it is what a user checks BEFORE trusting a rename.
+
+**`prepareRename` is not implemented at all.** There is no `prepare_rename`
+function in `navigation.rs` (only `rename` at :319 and `find_references` at
+:364), and `src/server/mod.rs:1132` advertises
+`rename_provider: Some(OneOf::Left(true))` — the plain-bool form, which does
+NOT advertise prepare support. So the client never gets a chance to be told
+'this is not renameable'; F2 goes straight to the destructive path. The
+ticket's 'prepareRename should REFUSE' therefore means ADDING the handler and
+switching that field to `OneOf::Right(RenameOptions { prepare_provider:
+Some(true), .. })`.
+
+**Lane-sequencing consequence:** that one-line change puts B049 in the
+ServerCapabilities block of `src/server/mod.rs`, which B040 is currently
+rewriting (~900 lines) and which B039 and B041 also need. B049 is dispatched
+anyway because the substance of its work is `navigation.rs` plus a promoted
+scope module, which nobody else touches; the capability edit is last and
+minimal, and B049 rebases onto post-B040 master before its final gates.
+B039 / B041 / B049 must not hold that block concurrently.
