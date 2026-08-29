@@ -93,6 +93,10 @@ pub struct ParamInfo {
     pub is_out: bool,
     /// `&inout` reference parameter (typedb `typeflags` bits 1|2) (B027).
     pub is_inout: bool,
+    /// `typeflags` bit 3 (value 4): the parameter is const-qualified. Kept so
+    /// the no-`decl` rendering path (the Nadeo half, and any Core entry that
+    /// omits `decl`) can still show `const T &in` rather than `T &in` (B033).
+    pub is_const: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +122,8 @@ pub struct FuncdefInfo {
     pub namespace: Option<String>,
     pub return_type: String,
     pub params: Vec<ParamInfo>,
+    /// Declaration text as stored by the database — see [`FunctionInfo::decl`].
+    pub decl: Option<String>,
     pub doc: Option<String>,
     pub source: TypeSource,
 }
@@ -318,6 +324,7 @@ impl TypeIndex {
                         is_in: a.typeflags & 0b1 != 0,
                         is_out: a.typeflags & 0b10 != 0,
                         is_inout: a.typeflags & 0b11 == 0b11,
+                        is_const: a.typeflags & 0b100 != 0,
                     })
                     .collect(),
                 decl: func.decl.clone(),
@@ -349,6 +356,7 @@ impl TypeIndex {
                                 is_in: a.typeflags & 0b1 != 0,
                                 is_out: a.typeflags & 0b10 != 0,
                                 is_inout: a.typeflags & 0b11 == 0b11,
+                                is_const: a.typeflags & 0b100 != 0,
                             })
                             .collect(),
                         is_const: m.is_const,
@@ -401,7 +409,11 @@ impl TypeIndex {
         for en in &db.enums {
             let qname = Self::qualify(&en.ns, &en.name);
             let mut values: Vec<_> = en.values.iter().map(|(k, v)| (k.clone(), v.v)).collect();
-            values.sort_by_key(|(_, v)| *v);
+            // By value, then by name: the Core dump stores members in a
+            // HashMap, so aliases sharing a value (`UI::Plot::Marker` has
+            // both `Auto = -1` and `None = -1`) would otherwise come back in
+            // a different order on every load (B033).
+            values.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
             self.enums.insert(
                 qname,
                 EnumInfo {
@@ -432,8 +444,10 @@ impl TypeIndex {
                             is_in: a.typeflags & 0b1 != 0,
                             is_out: a.typeflags & 0b10 != 0,
                             is_inout: a.typeflags & 0b11 == 0b11,
+                            is_const: a.typeflags & 0b100 != 0,
                         })
                         .collect(),
+                    decl: fd.decl.clone(),
                     doc: fd.desc.clone(),
                     source: TypeSource::Core,
                 },
@@ -493,6 +507,9 @@ impl TypeIndex {
                                         is_in: false,
                                         is_out: false,
                                         is_inout: false,
+                                        // The Nadeo dump carries `const` in
+                                        // the signature text, not in flags.
+                                        is_const: false,
                                     })
                                     .collect(),
                                 is_const: false,

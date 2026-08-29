@@ -424,28 +424,84 @@ fn receiver_type_name(
     offset: u32,
 ) -> Option<String> {
     let tokens = &analysis.tokens;
-    let recv = tokens.get(tok_idx.checked_sub(2)?)?;
-    if recv.kind == TokenKind::KwThis {
+    let last = tok_idx.checked_sub(2)?;
+    if tokens.get(last)?.kind == TokenKind::KwThis {
         let cls = class_name_at(analysis, offset);
         return (!cls.is_empty()).then_some(cls);
     }
-    if recv.kind != TokenKind::Ident {
-        return None;
-    }
     let checked = checked?;
-    // Walk back over an `a.b.c` chain so the recorded span of the whole
-    // receiver expression is found, then fall back to the last link alone.
-    let mut start = tok_idx - 2;
-    while start >= 2
-        && tokens[start - 1].kind == TokenKind::Dot
-        && matches!(tokens[start - 2].kind, TokenKind::Ident | TokenKind::KwThis)
-    {
-        start -= 2;
-    }
+    let (start, end) = receiver_span(tokens, last)?;
     let ty = checked
-        .type_at_span_range(tokens[start].span.start, recv.span.end)
-        .or_else(|| checked.type_at_span_range(recv.span.start, recv.span.end))?;
+        .type_at_span_range(tokens[start].span.start, tokens[end].span.end)
+        .or_else(|| {
+            let one = &tokens[end];
+            checked.type_at_span_range(one.span.start, one.span.end)
+        })?;
     base_type_name(ty)
+}
+
+/// Token range of the receiver expression whose last token is `last`.
+///
+/// Walks left over `a.b.c` chains, `Ns::name` paths, call argument lists and
+/// index brackets, so `c.GetChild().Run`, `items[0].Run` and `(c).Run` all
+/// reach the span the checker recorded for the whole receiver instead of
+/// stopping at a closing bracket. A bare parenthesised receiver unwraps to
+/// its contents, because the parser gives such an expression the span of the
+/// expression INSIDE the parens.
+fn receiver_span(tokens: &[crate::lexer::Token], last: usize) -> Option<(usize, usize)> {
+    let mut end = last;
+    let mut i = last;
+    loop {
+        match tokens[i].kind {
+            TokenKind::RParen | TokenKind::RBracket => {
+                let open = matching_open(tokens, i)?;
+                match open.checked_sub(1).map(|p| tokens[p].kind) {
+                    // A call or index applies to the element on its left.
+                    Some(TokenKind::Ident | TokenKind::RParen | TokenKind::RBracket) => {
+                        i = open - 1;
+                    }
+                    // A bare parenthesised expression: step inside it.
+                    _ => {
+                        if tokens[i].kind != TokenKind::RParen || open + 1 >= i {
+                            return None;
+                        }
+                        end = i - 1;
+                        i = end;
+                    }
+                }
+            }
+            TokenKind::Ident | TokenKind::KwThis => {
+                if i >= 2 && matches!(tokens[i - 1].kind, TokenKind::Dot | TokenKind::ColonColon) {
+                    i -= 2;
+                } else {
+                    return Some((i, end));
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Index of the bracket opening the one that closes at `close`.
+fn matching_open(tokens: &[crate::lexer::Token], close: usize) -> Option<usize> {
+    let (open_kind, close_kind) = match tokens[close].kind {
+        TokenKind::RParen => (TokenKind::LParen, TokenKind::RParen),
+        TokenKind::RBracket => (TokenKind::LBracket, TokenKind::RBracket),
+        _ => return None,
+    };
+    let mut depth = 0usize;
+    let mut i = close;
+    loop {
+        if tokens[i].kind == close_kind {
+            depth += 1;
+        } else if tokens[i].kind == open_kind {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i = i.checked_sub(1)?;
+    }
 }
 
 /// Strip handle / const / array wrappers down to the named type a member
@@ -558,9 +614,13 @@ fn typedb_params(params: &[ParamInfo]) -> Vec<HoverParam> {
         .iter()
         .map(|p| {
             let mut ty = p.type_name.trim().to_string();
-            // Core `typedecl` text carries no `&` decoration — the
-            // `typeflags` bits are authoritative there; Nadeo signature text
-            // already carries it, so only add what is missing.
+            // Core `typedecl` text carries neither `const` nor the `&`
+            // decoration — the `typeflags` bits are authoritative there;
+            // Nadeo signature text already carries both, so only add what is
+            // missing.
+            if p.is_const && !ty.contains("const") {
+                ty.insert_str(0, "const ");
+            }
             if !ty.contains('&') {
                 if p.is_inout {
                     ty.push_str(" &inout");
@@ -726,6 +786,17 @@ fn lookup_external(qualified: &str, index: &TypeIndex) -> Option<String> {
         if let Some(md) = overload_block(sigs) {
             return Some(md);
         }
+    }
+
+    if let Some(fd) = index.lookup_funcdef(qualified) {
+        // Funcdefs are types, not callables, so they never overload — but
+        // they do have a signature, and the workspace path already showed
+        // one (B033).
+        let sig = external_signature(fd.decl.as_deref(), &fd.return_type, qualified, &fd.params);
+        return Some(with_doc(
+            fence(&format!("funcdef {}", sig)),
+            fd.doc.as_ref(),
+        ));
     }
 
     if let Some(en) = index.lookup_source_enum(qualified) {
@@ -1529,6 +1600,132 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hover_member_method_through_a_call_receiver() {
+        // `c.Child().Run(1)`: the receiver ends in `)`, so the token walk has
+        // to step back over the whole call to find the recorded span.
+        let src = concat!(
+            "class Inner {\n  void Run(int a) {}\n}\n",
+            "class C {\n  Inner@ Child() { return null; }\n}\n",
+            "void main() { C c; c.Child().Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 2);
+        assert!(md.contains("int a"), "call receiver: {:?}", md);
+    }
+
+    #[test]
+    fn hover_member_method_through_an_index_receiver() {
+        let src = concat!(
+            "class Inner {\n  void Run(int a) {}\n}\n",
+            "void main() { array<Inner@> items; items[0].Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 2);
+        assert!(md.contains("int a"), "index receiver: {:?}", md);
+    }
+
+    #[test]
+    fn hover_member_method_through_a_parenthesised_receiver() {
+        let src = concat!(
+            "class Inner {\n  void Run(int a) {}\n}\n",
+            "void main() { Inner@ i; (i).Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 2);
+        assert!(md.contains("int a"), "parenthesised receiver: {:?}", md);
+    }
+
+    #[test]
+    fn hover_member_method_binds_to_the_receiver_not_a_same_named_method() {
+        // Two unrelated classes declare `Run`; the receiver decides which
+        // signature hover shows.
+        let src = concat!(
+            "class Decoy {\n  void Run(bool wrong) {}\n}\n",
+            "class Inner {\n  void Run(int a) {}\n}\n",
+            "class C {\n  Inner@ Child() { return null; }\n}\n",
+            "void main() { C c; c.Child().Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 3);
+        assert!(md.contains("Inner::Run(int a)"), "{:?}", md);
+        assert!(!md.contains("bool wrong"), "picked the decoy: {:?}", md);
+    }
+
+    #[test]
+    fn hover_member_walk_does_not_panic_on_unbalanced_source() {
+        // Truncated/garbage input must not index out of bounds or underflow.
+        for src in [
+            ").Run(1);",
+            "]  .Run(1);",
+            "void f() { ).Run(1); }",
+            "void f() { a[.Run(1); }",
+            "void f() { (.Run(1); }",
+        ] {
+            let tw = TestWorkspace::one_file("hover.as", src);
+            let scope = tw.scope();
+            let pos = pos_of(src, "Run", 1);
+            let _ = hover(tw.analysis(), None, pos, &scope);
+        }
+    }
+
+    // --- external funcdefs ---
+
+    #[test]
+    fn hover_external_funcdef_shows_signature() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "funcdefs": [{"ns": "UI", "name": "InputTextCallback",
+                          "returntypedecl": "int",
+                          "decl": "int InputTextCallback(UI::InputTextCallbackData@ data)",
+                          "args": [{"name": "data", "typedecl": "UI::InputTextCallbackData@",
+                                    "typeflags": 0}],
+                          "desc": "Called while text is edited."}]
+        }));
+        let src = "void main() { UI::InputTextCallback@ cb; }";
+        let md = hover_external_md(src, "InputTextCallback", 1, &idx);
+        assert!(md.contains("funcdef"), "{:?}", md);
+        assert!(md.contains("UI::InputTextCallback("), "{:?}", md);
+        assert!(md.contains("data"), "params missing: {:?}", md);
+        assert!(md.contains("Called while text is edited."), "{:?}", md);
+    }
+
+    // --- typedb signatures with no `decl` text ---
+
+    #[test]
+    fn hover_external_no_decl_still_renders_const() {
+        // The Nadeo half stores no `decl`, and a Core entry may omit it:
+        // the reconstruction path must still show `const`.
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "functions": [
+                {"ns": "T", "name": "Take", "returntypedecl": "void",
+                 "args": [
+                    {"name": "a", "typedecl": "string", "typeflags": 5},
+                    {"name": "b", "typedecl": "C@", "typeflags": 4},
+                    {"name": "c", "typedecl": "int", "typeflags": 0}
+                 ]}
+            ]
+        }));
+        let src = "void main() { T::Take(); }";
+        let md = hover_external_md(src, "Take", 1, &idx);
+        assert!(md.contains("const string &in a"), "{:?}", md);
+        assert!(md.contains("const C@ b"), "{:?}", md);
+        assert!(md.contains("int c"), "{:?}", md);
+        assert!(!md.contains("const const"), "doubled const: {:?}", md);
+    }
+
+    #[test]
+    fn hover_external_no_decl_does_not_double_an_existing_const() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "functions": [
+                {"ns": "T", "name": "Take", "returntypedecl": "void",
+                 "args": [{"name": "a", "typedecl": "const string&in", "typeflags": 5}]}
+            ]
+        }));
+        let src = "void main() { T::Take(); }";
+        let md = hover_external_md(src, "Take", 1, &idx);
+        assert!(md.contains("const string&in a"), "{:?}", md);
+        assert!(!md.contains("const const"), "{:?}", md);
+    }
+
     // --- enum consistency across the two paths ---
 
     #[test]
@@ -1544,6 +1741,34 @@ mod tests {
             md.contains("B = 2"),
             "workspace enum has no values: {:?}",
             md
+        );
+    }
+
+    #[test]
+    fn hover_external_enum_alias_order_is_deterministic() {
+        // Two members sharing a value came out of a HashMap, so sorting by
+        // value alone left their order to chance.
+        let src = "void main() { Marker m; }";
+        let json = serde_json::json!({
+            "op": "1.0",
+            "enums": [{"name": "Marker", "values": {
+                "Auto": {"v": -1}, "None": {"v": -1}, "Circle": {"v": 0}
+            }}]
+        });
+        let first = hover_external_md(src, "Marker", 1, &typedb(json.clone()));
+        for _ in 0..8 {
+            assert_eq!(
+                first,
+                hover_external_md(src, "Marker", 1, &typedb(json.clone()))
+            );
+        }
+        let auto = first.find("Auto = -1").expect("Auto");
+        let none = first.find("None = -1").expect("None");
+        let circle = first.find("Circle = 0").expect("Circle");
+        assert!(
+            auto < none && none < circle,
+            "not (value, name) ordered: {:?}",
+            first
         );
     }
 
