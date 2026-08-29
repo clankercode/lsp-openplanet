@@ -1,15 +1,14 @@
 ---
+completed_at: null
 complexity: high
 created_at: "2026-08-23T15:50:55Z"
 depends_on: []
 estimate_hours: 4
 id: B016
 priority: medium
+started_at: null
 status: pending
-tags:
-    - typedb
-    - followup
-    - gh-59-followup
+tags: []
 title: Anonymous member enums collide to Module::UnnamedEnum (Nadeo DB data loss)
 updated_at: "2026-08-23T15:50:55Z"
 ---
@@ -64,3 +63,24 @@ values are referenced from a fixture plugin; determinism guard still green.
 Discovered by the B014 lane's own plan-mandated test
 (`diff_repo_fixture_against_itself_is_empty` reporting `(0, 0, 8)`), which is
 exactly the tripwire GH #59 was asked to build.
+
+## Decision (coordinator, 2026-08-29) — key scheme
+
+Key inline/anonymous member enums by their declaring context rather than
+<Module>::UnnamedEnum. Preferred key: <Module>::<Class>::<Field> when the
+enum is a member's inline type; fall back to a stable synthesized suffix if
+the declaring member cannot be identified. The key MUST be deterministic
+(sorted-order registration is already in place) and stable across loads of
+identical bytes — the existing
+loading_the_same_db_twice_yields_identical_enums guard stays green.
+
+Checker acceptance: values of such an enum are reachable in-game through the
+member's type, so the checker should accept them wherever the member's type is
+in play. Do not tighten any rule as part of this task — the goal is to stop
+DROPPING enums, not to start rejecting more code.
+
+Gate: FP fixture ERROR counts must be unchanged (tm-editor-plus-plus 2,
+tm-dips-plus-plus 1, tm-archivist 2, tm-counter 4, tm-dashboard 4). Warning
+deltas are permitted but every delta must be explained in the commit message.
+
+Independent lane — no file overlap with B017/B019/B029.
