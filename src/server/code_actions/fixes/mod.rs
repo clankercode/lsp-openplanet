@@ -10,9 +10,17 @@
 
 use super::fix::FixFamily;
 
+pub mod conversion;
 pub mod string_by_value;
 
 /// The registry. Order here decides the order fixes are offered in when two
 /// families claim the same diagnostic; it does not affect which fixes the
 /// fix-all batcher keeps (see [`super::fix_all::select_non_overlapping`]).
-pub const FAMILIES: &[FixFamily] = &[string_by_value::FAMILY];
+pub const FAMILIES: &[FixFamily] = &[
+    string_by_value::FAMILY,
+    conversion::float_truncation::FAMILY,
+    conversion::sign_change::FAMILY,
+    conversion::signed_unsigned::FAMILY,
+    conversion::unreachable_code::FAMILY,
+    conversion::missing_return::FAMILY,
+];
