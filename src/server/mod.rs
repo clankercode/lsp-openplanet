@@ -335,6 +335,70 @@ impl Backend {
         }
     }
 
+    /// Resolve the manifest URI and source a client is currently editing.
+    ///
+    /// A plugin may be opened through a symlink farm, so the URI visible to
+    /// the client need not equal `root/info.toml`. Prefer that URI and its
+    /// buffer over the canonical disk path; otherwise diagnostics disappear
+    /// from the document the user can actually fix.
+    fn manifest_diagnostic_target(&self, root: &std::path::Path) -> Option<(Url, Option<String>)> {
+        let manifest_path = root.join("info.toml");
+        let manifest_uri = Url::from_file_path(&manifest_path).ok()?;
+        let canon = manifest_path.canonicalize().ok();
+        let open_manifest_uri = self.documents.iter().find_map(|entry| {
+            let doc_uri = entry.key();
+            if *doc_uri == manifest_uri {
+                return Some(doc_uri.clone());
+            }
+            let doc_path = doc_uri.to_file_path().ok()?.canonicalize().ok()?;
+            (Some(&doc_path) == canon.as_ref()).then(|| doc_uri.clone())
+        });
+        let publish_uri = open_manifest_uri.unwrap_or(manifest_uri);
+        let source = self
+            .documents
+            .get(&publish_uri)
+            .map(|document| document.value().clone())
+            .or_else(|| std::fs::read_to_string(&manifest_path).ok());
+        Some((publish_uri, source))
+    }
+
+    /// Publish the info.toml diagnostic set for one live shard. Kept as the
+    /// single refresh operation for close/watch/config lifecycle paths.
+    async fn publish_manifest_diagnostics_for_root(&self, root: &std::path::Path) {
+        let live = self
+            .workspaces
+            .read()
+            .await
+            .iter()
+            .find(|workspace| workspace.root == root)
+            .map(|workspace| (workspace.config.clone(), workspace.snapshot.clone()));
+        let Some((config, snapshot)) = live else {
+            return;
+        };
+        let Some((manifest_uri, source)) = self.manifest_diagnostic_target(root) else {
+            return;
+        };
+        let search =
+            crate::workspace::load::DependencySearch::with_defaults().finalize_with_config(&config);
+        let workspace = crate::workspace::manifest::ManifestWorkspace {
+            root,
+            plugin_files_search_paths: &search.plugin_files_search_paths,
+        };
+        let diagnostics = source
+            .as_deref()
+            .map(|source| {
+                diagnostics::compute_manifest_diagnostics_in_workspace(
+                    source,
+                    &workspace,
+                    snapshot.missing_required_dependencies(),
+                )
+            })
+            .unwrap_or_default();
+        self.client
+            .publish_diagnostics(manifest_uri, diagnostics, None)
+            .await;
+    }
+
     /// Publish the info.toml diagnostic set for every live shard, so a newly
     /// added root gets its manifest squiggles without anything being opened.
     ///
@@ -342,39 +406,15 @@ impl Backend {
     /// suppresses client messages until the `initialize` response is out, so
     /// the reshard that runs during `initialize` publishes into the void.
     async fn publish_manifest_diagnostics_for_all_roots(&self) {
-        let live: Vec<(PathBuf, LspConfig, Arc<AnalysisSnapshot>)> = self
+        let roots: Vec<PathBuf> = self
             .workspaces
             .read()
             .await
             .iter()
-            .map(|w| (w.root.clone(), w.config.clone(), w.snapshot.clone()))
+            .map(|workspace| workspace.root.clone())
             .collect();
-        for (root, config, snapshot) in live {
-            let manifest_path = root.join("info.toml");
-            let Ok(manifest_uri) = Url::from_file_path(&manifest_path) else {
-                continue;
-            };
-            // Prefer the open buffer: an unsaved edit is what the user is
-            // looking at, and the manifest rules must judge that text.
-            let source = self
-                .documents
-                .get(&manifest_uri)
-                .map(|document| document.value().clone())
-                .or_else(|| std::fs::read_to_string(&manifest_path).ok());
-            let diagnostics = source
-                .as_deref()
-                .map(|source| {
-                    diagnostics::compute_manifest_diagnostics(
-                        &manifest_uri,
-                        source,
-                        &config,
-                        snapshot.missing_required_dependencies(),
-                    )
-                })
-                .unwrap_or_default();
-            self.client
-                .publish_diagnostics(manifest_uri, diagnostics, None)
-                .await;
+        for root in roots {
+            self.publish_manifest_diagnostics_for_root(&root).await;
         }
     }
 }
@@ -682,6 +722,23 @@ impl Backend {
         config: &LspConfig,
         root: &std::path::Path,
     ) {
+        if uri.path().ends_with("info.toml") {
+            let search = crate::workspace::load::DependencySearch::with_defaults()
+                .finalize_with_config(config);
+            let workspace = crate::workspace::manifest::ManifestWorkspace {
+                root,
+                plugin_files_search_paths: &search.plugin_files_search_paths,
+            };
+            let diagnostics = diagnostics::compute_manifest_diagnostics_in_workspace(
+                text,
+                &workspace,
+                snapshot.missing_required_dependencies(),
+            );
+            self.client
+                .publish_diagnostics(uri.clone(), diagnostics, None)
+                .await;
+            return;
+        }
         let type_index = self.type_index.read().await;
         // Own-module symbol view: strict export files' decls are
         // consumer-only (game parity 2026-08-23) — hide them from name
@@ -751,52 +808,25 @@ impl Backend {
                 ));
             }
         }
-        if uri.path().ends_with("info.toml") {
-            diags.extend(diagnostics::missing_required_dependency_diagnostics(
-                snapshot.missing_required_dependencies(),
-            ));
-        }
         drop(type_index);
         self.client
             .publish_diagnostics(uri.clone(), diags, None)
             .await;
-        if uri.path().ends_with("info.toml") {
-            return;
-        }
         // Non-manifest files also refresh the owning workspace's manifest
         // diagnostics (same shape as the legacy path).
-        let manifest_uri = Url::from_file_path(root.join("info.toml")).ok();
-        if let Some(manifest_uri) = manifest_uri {
-            let manifest_path = root.join("info.toml");
-            // The client may have the manifest open through a symlink-alias
-            // URI (dips++-all layout) — the canonical `manifest_uri` lookup
-            // misses then. Prefer whichever URI the client actually opened
-            // so diagnostics land on the visible document (and the open
-            // buffer's content is used, not the disk copy).
-            let open_manifest_uri = {
-                let canon = manifest_path.canonicalize().ok();
-                self.documents.iter().find_map(|entry| {
-                    let doc_uri = entry.key();
-                    if *doc_uri == manifest_uri {
-                        return Some(doc_uri.clone());
-                    }
-                    let doc_path = doc_uri.to_file_path().ok()?.canonicalize().ok()?;
-                    (Some(&doc_path) == canon.as_ref()).then(|| doc_uri.clone())
-                })
+        if let Some((publish_uri, manifest_source)) = self.manifest_diagnostic_target(root) {
+            let search = crate::workspace::load::DependencySearch::with_defaults()
+                .finalize_with_config(config);
+            let workspace = crate::workspace::manifest::ManifestWorkspace {
+                root,
+                plugin_files_search_paths: &search.plugin_files_search_paths,
             };
-            let publish_uri = open_manifest_uri.unwrap_or_else(|| manifest_uri.clone());
-            let manifest_source = self
-                .documents
-                .get(&publish_uri)
-                .map(|document| document.value().clone())
-                .or_else(|| std::fs::read_to_string(manifest_path).ok());
             let diagnostics = manifest_source
                 .as_deref()
                 .map(|source| {
-                    diagnostics::compute_manifest_diagnostics(
-                        &publish_uri,
+                    diagnostics::compute_manifest_diagnostics_in_workspace(
                         source,
-                        config,
+                        &workspace,
                         snapshot.missing_required_dependencies(),
                     )
                 })
@@ -1215,6 +1245,7 @@ impl LanguageServer for Backend {
         // see the on-disk contents again. Only the owning shard (if any).
         if let Some(root) = self.workspace_root_for(&params.text_document.uri).await {
             self.rebuild_workspace(&root).await;
+            self.publish_manifest_diagnostics_for_root(&root).await;
             return;
         }
         if !self.workspaces.read().await.is_empty() {
@@ -1330,6 +1361,7 @@ impl LanguageServer for Backend {
             if let Some(root) = self.workspace_root_for(&event.uri).await {
                 if rebuilt.insert(root.clone()) {
                     self.rebuild_workspace(&root).await;
+                    self.publish_manifest_diagnostics_for_root(&root).await;
                 }
             }
         }
@@ -2719,6 +2751,195 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Closing a manifest discards its buffer overlay. The client must then
+    /// receive the on-disk diagnostic set, or diagnostics from an unsaved
+    /// edit stay stale until another unrelated workspace event happens.
+    #[tokio::test(flavor = "current_thread")]
+    async fn closing_manifest_republishes_the_on_disk_diagnostics() {
+        let valid = "[meta]\nversion = \"1.0\"\n";
+        let invalid = "[meta]\nname = \"Counter\"\n";
+
+        for (label, disk, buffer, expects_error) in [
+            ("discard-invalid-buffer", valid, invalid, false),
+            ("discard-valid-buffer", invalid, valid, true),
+        ] {
+            let root = manifest_tree(&format!("manifest-close-{label}"), disk);
+            let uri = manifest_uri_of(&root);
+            let (mut service, mut socket) = LspService::new(Backend::new);
+            initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+            let backend = service.inner();
+
+            let buffered = capture_diagnostics_for(
+                &mut socket,
+                &uri,
+                backend.did_open(open_params(&uri, buffer)),
+            )
+            .await;
+            assert_eq!(
+                buffered
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("[meta].version")),
+                !expects_error,
+                "{label}: the open buffer must be the initial source of truth"
+            );
+
+            let after_close = capture_diagnostics_for(
+                &mut socket,
+                &uri,
+                backend.did_close(DidCloseTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                }),
+            )
+            .await;
+            assert_eq!(
+                after_close
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("[meta].version")),
+                expects_error,
+                "{label}: closing must restore the on-disk manifest diagnostics"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Export-file changes commonly arrive through the watched-file channel
+    /// (renames outside the editor, generators, VCS operations). Rebuilding
+    /// the shard alone is not enough: the manifest URI needs a new published
+    /// set for both the missing and restored transitions.
+    #[tokio::test(flavor = "current_thread")]
+    async fn watched_export_changes_republish_manifest_diagnostics() {
+        let source = "[meta]\nversion = \"1.0\"\n\n[script]\nexports = [\"Ex.as\"]\n";
+        let root = manifest_tree("manifest-watched-export", source);
+        let uri = manifest_uri_of(&root);
+        let export = root.join("src/Ex.as");
+        fs::write(&export, "void Exported() {}\n").unwrap();
+        let export_uri = Url::from_file_path(&export).unwrap();
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+
+        let clean = capture_diagnostics_for(
+            &mut socket,
+            &uri,
+            backend.did_open(open_params(&uri, source)),
+        )
+        .await;
+        assert_eq!(
+            clean.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "control: export exists"
+        );
+
+        fs::remove_file(&export).unwrap();
+        let missing = capture_diagnostics_for(
+            &mut socket,
+            &uri,
+            backend.did_change_watched_files(DidChangeWatchedFilesParams {
+                changes: vec![FileEvent::new(export_uri.clone(), FileChangeType::DELETED)],
+            }),
+        )
+        .await;
+        assert!(
+            missing
+                .diagnostics
+                .iter()
+                .any(|d| d.message == "Export file not found: Ex.as"),
+            "a watched deletion must refresh manifest diagnostics: {:?}",
+            missing.diagnostics
+        );
+
+        fs::write(&export, "void Exported() {}\n").unwrap();
+        let restored = capture_diagnostics_for(
+            &mut socket,
+            &uri,
+            backend.did_change_watched_files(DidChangeWatchedFilesParams {
+                changes: vec![FileEvent::new(export_uri, FileChangeType::CREATED)],
+            }),
+        )
+        .await;
+        assert_eq!(
+            restored.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "a watched creation must clear the export diagnostic"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A manifest opened through a symlink URI is the document the editor can
+    /// display. A manifest watcher refresh must keep using that URI and its
+    /// unsaved buffer, not publish the on-disk result to the canonical path.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_watch_republishes_the_open_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let valid = "[meta]\nversion = \"1.0\"\n";
+        let alias_buffer = "[meta]\nversion = \"1.0\"\n\n[script]\nexports = [\"Ex.as\"]\n";
+        let root = manifest_tree("manifest-watch-alias", valid);
+        fs::write(root.join("src/Ex.as"), "void Exported() {}\n").unwrap();
+        let aliases = temp_tree("manifest-watch-alias-dir");
+        let alias_path = aliases.join("info.toml");
+        symlink(root.join("info.toml"), &alias_path).unwrap();
+        let alias_uri = Url::from_file_path(&alias_path).unwrap();
+        let manifest_uri = manifest_uri_of(&root);
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+
+        let buffered = capture_diagnostics_for(
+            &mut socket,
+            &alias_uri,
+            backend.did_open(open_params(&alias_uri, alias_buffer)),
+        )
+        .await;
+        assert_eq!(
+            buffered.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "the real workspace's src/Ex.as must resolve for an alias buffer: {:?}",
+            buffered.diagnostics
+        );
+
+        let source_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
+        let after_source_open = capture_diagnostics_for(
+            &mut socket,
+            &alias_uri,
+            backend.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: source_uri,
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: "void Main() {}\n".into(),
+                },
+            }),
+        )
+        .await;
+        assert_eq!(
+            after_source_open.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "a source edit must retain the real-root export resolution for the alias manifest: {:?}",
+            after_source_open.diagnostics
+        );
+
+        let refreshed = capture_diagnostics_for(
+            &mut socket,
+            &alias_uri,
+            backend.did_change_watched_files(DidChangeWatchedFilesParams {
+                changes: vec![FileEvent::new(manifest_uri, FileChangeType::CHANGED)],
+            }),
+        )
+        .await;
+        assert_eq!(
+            refreshed.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "manifest watch must keep the visible alias URI while resolving exports from the real root: {:?}",
+            refreshed.diagnostics
+        );
+        let _ = fs::remove_dir_all(&aliases);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// A manifest the TOML parser rejects is the loudest failure there is —
     /// the plugin cannot load at all. It must be published, not skipped.
     #[tokio::test(flavor = "current_thread")]
@@ -2757,6 +2978,10 @@ mod tests {
                 source,
             );
             let published = manifest_diagnostics_on_open(&root, source).await;
+            assert!(
+                !published.is_empty(),
+                "{label}: malformed or invalid TOML must publish a parse or validation diagnostic"
+            );
             assert_ranges_within(source, &published);
             let _ = fs::remove_dir_all(&root);
         }

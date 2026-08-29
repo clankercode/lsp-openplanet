@@ -75,6 +75,21 @@ pub fn compute_manifest_diagnostics(
     diagnostics
 }
 
+/// Manifest diagnostics for a known workspace root. The URI a client opened
+/// may be a symlink alias, so it is publication identity only; export paths
+/// must resolve with the actual shard root and loader search paths.
+pub fn compute_manifest_diagnostics_in_workspace(
+    source: &str,
+    workspace: &ManifestWorkspace<'_>,
+    missing_required_dependencies: &[String],
+) -> Vec<Diagnostic> {
+    let mut diagnostics = manifest_rule_diagnostics(source, Some(workspace));
+    diagnostics.extend(missing_required_dependency_diagnostics(
+        missing_required_dependencies,
+    ));
+    diagnostics
+}
+
 /// Diagnostics from an existing [`DocumentAnalysis`] (shared pipeline).
 pub fn compute_diagnostics_from_analysis(
     uri: &Url,
