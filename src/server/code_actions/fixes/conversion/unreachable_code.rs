@@ -51,14 +51,20 @@ fn title(count: usize) -> String {
 fn deletion_span(source: &str, tail: &[Stmt]) -> Span {
     let first = tail[0].span.start as usize;
     let last = tail[tail.len() - 1].span.end as usize;
-    let line_start = source[..first.min(source.len())]
-        .rfind('\n')
-        .map_or(0, |nl| nl + 1);
+    // `get`, never a bare `source[..first]`: `materialize` must not panic on
+    // ANY offset, and slicing panics on one that is not a char boundary.
+    // Falling back to the statements' own bounds still produces a correct
+    // deletion, just without the line trim.
+    let exact = Span::new(first as u32, last as u32);
+    let Some(before) = source.get(..first) else {
+        return exact;
+    };
+    let line_start = before.rfind('\n').map_or(0, |nl| nl + 1);
     let own_line = source
         .get(line_start..first)
         .is_some_and(|indent| indent.trim().is_empty());
     if !own_line {
-        return Span::new(first as u32, last as u32);
+        return exact;
     }
     let bytes = source.as_bytes();
     let mut end = last;
@@ -130,6 +136,22 @@ mod tests {
     fn dead_tail_after_return_is_deleted() {
         assert_eq!(
             fixed("void f() {\n    return;\n    int x = 1;\n}"),
+            "void f() {\n    return;\n}"
+        );
+    }
+
+    #[test]
+    fn non_ascii_source_is_handled_without_panicking() {
+        // Offsets are BYTES, so multi-byte text around the dead run puts the
+        // line-start scan on a non-char-boundary path. Deletion must still
+        // land exactly, and must never panic.
+        assert_eq!(
+            fixed("void f() {\n    Log(\"caf\u{e9} \u{2014} \u{65e5}\u{672c}\u{8a9e}\");\n    return;\n    int x = 1;\n}"),
+            "void f() {\n    Log(\"caf\u{e9} \u{2014} \u{65e5}\u{672c}\u{8a9e}\");\n    return;\n}"
+        );
+        // Multi-byte text INSIDE the dead run, too.
+        assert_eq!(
+            fixed("void f() {\n    return;\n    Log(\"\u{2713} \u{fc}ber\");\n}"),
             "void f() {\n    return;\n}"
         );
     }

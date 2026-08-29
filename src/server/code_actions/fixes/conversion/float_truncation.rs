@@ -61,11 +61,13 @@ fn cast_title(keyword: &str) -> String {
 
 /// The integral literal this float literal truncates to, as source text.
 ///
-/// `None` whenever the rewrite would not be a faithful truncation: a
-/// non-literal initializer, a non-finite value, or one that does not survive
-/// the trip through `i64` (`int n = 1e30;`). Refusing beats emitting a
-/// literal whose value differs from the one the game would store.
-fn truncated_literal(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<String> {
+/// `None` whenever the rewrite would not be a faithful truncation the target
+/// can actually hold: a non-literal initializer, a non-finite value, or a
+/// value outside `keyword`'s range. `int n = 3e10;` truncates faithfully to
+/// 30000000000, but that is not an `int` — offering it would trade one
+/// compile complaint for another, so it is withheld and only the cast is
+/// offered. The same literal IS offered for an `int64`.
+fn truncated_literal(diag: &TypeDiagnostic, ctx: &FixContext<'_>, keyword: &str) -> Option<String> {
     if !matches!(
         diag.kind,
         TypeDiagnosticKind::FloatTruncation { literal: true }
@@ -77,13 +79,32 @@ fn truncated_literal(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<Stri
         return None;
     };
     let truncated = value.trunc();
-    // `i64::MAX as f64` rounds up to 2^63, the first out-of-range value,
-    // so the upper comparison must be exclusive. The lower bound is exactly
-    // representable and remains valid.
-    if !truncated.is_finite() || truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
+    if !truncated.is_finite() {
         return None;
     }
-    Some((truncated as i64).to_string())
+    let (min, max) = integer_range(keyword)?;
+    // `as` saturates rather than wrapping, and both saturation points sit
+    // far outside every range below — so a value the target cannot hold is
+    // rejected here instead of being silently clamped to a different one.
+    // (That is also what keeps 2^63 out: `i64::MAX as f64` rounds *up* to
+    // it, so an `f64` bound would have admitted it.)
+    let as_int = truncated as i128;
+    (as_int >= min && as_int <= max).then(|| as_int.to_string())
+}
+
+/// The inclusive value range of an integer keyword.
+fn integer_range(keyword: &str) -> Option<(i128, i128)> {
+    Some(match keyword {
+        "int8" => (i8::MIN as i128, i8::MAX as i128),
+        "int16" => (i16::MIN as i128, i16::MAX as i128),
+        "int" | "int32" => (i32::MIN as i128, i32::MAX as i128),
+        "int64" => (i64::MIN as i128, i64::MAX as i128),
+        "uint8" => (0, u8::MAX as i128),
+        "uint16" => (0, u16::MAX as i128),
+        "uint" | "uint32" => (0, u32::MAX as i128),
+        "uint64" => (0, u64::MAX as i128),
+        _ => return None,
+    })
 }
 
 fn literal_title(original: &str, replacement: &str) -> String {
@@ -105,7 +126,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
         is_preferred: true,
         auto_applicable: true,
     }];
-    if let Some(replacement) = truncated_literal(diag, ctx) {
+    if let Some(replacement) = truncated_literal(diag, ctx, target.keyword) {
         out.push(FixDescriptor {
             title: literal_title(target.init_text, &replacement),
             kind: CodeActionKind::QUICKFIX,
@@ -125,7 +146,7 @@ fn materialize(diag: &TypeDiagnostic, ctx: &FixContext<'_>, selected: &str) -> W
     let new_text = if selected == cast_title(target.keyword) {
         format!("{}({})", target.keyword, target.init_text)
     } else {
-        match truncated_literal(diag, ctx) {
+        match truncated_literal(diag, ctx, target.keyword) {
             Some(replacement) => replacement,
             None => {
                 debug_assert!(false, "unknown float-truncation title `{selected}`");
@@ -365,6 +386,52 @@ mod tests {
             ),
             "void f() { int n = 1000; }"
         );
+    }
+
+    #[test]
+    fn a_literal_that_does_not_fit_the_declared_type_withholds_the_rewrite() {
+        // The truncation is faithful but unusable: 3e10 is not an `int`, so
+        // `int n = 30000000000;` would just trade one compile complaint for
+        // another. The same value IS offered for a type that can hold it.
+        assert_eq!(
+            fix_titles("void f() { int n = 3e10; }"),
+            vec!["Cast the initializer to `int`".to_string()]
+        );
+        assert_eq!(
+            apply(
+                "void f() { int64 n = 3e10; }",
+                FAMILY_NAME,
+                "Change the literal"
+            ),
+            "void f() { int64 n = 30000000000; }"
+        );
+    }
+
+    #[test]
+    fn the_range_guard_is_applied_per_declared_width() {
+        for (keyword, value, fits) in [
+            ("int8", "127.5", true),
+            ("int8", "128.5", false),
+            ("uint8", "255.5", true),
+            ("uint8", "256.5", false),
+            ("int16", "32767.5", true),
+            ("int16", "32768.5", false),
+            ("uint16", "65535.5", true),
+            ("uint16", "65536.5", false),
+            ("int", "2147483647.5", true),
+            ("int", "2147483648.5", false),
+            ("uint", "4294967295.5", true),
+            ("uint", "4294967296.5", false),
+        ] {
+            let source = format!("void f() {{ {keyword} n = {value}; }}");
+            // Always the cast; the literal rewrite only when it fits.
+            let expected = if fits { 2 } else { 1 };
+            assert_eq!(
+                count(&source, FAMILY_NAME),
+                expected,
+                "unexpected action count for `{keyword} n = {value};`"
+            );
+        }
     }
 
     #[test]
