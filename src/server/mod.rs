@@ -67,6 +67,10 @@ pub struct Backend {
     config_watch: Arc<
         tokio::sync::Mutex<Option<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>,
     >,
+    /// B017: config-file problems already shown to the user, so a re-shard
+    /// (every watched-file event) does not repeat the same `showMessage`.
+    /// Rendered issue text, not a struct — one line per distinct problem.
+    reported_config_issues: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// One isolated plugin workspace (multi-root spec: "one server, N isolated
@@ -215,6 +219,7 @@ impl Backend {
         for root in &effective_roots {
             let mut config =
                 LspConfig::load_with_parent(Some(root), parent_config_base, init_options);
+            self.report_config_issues(&config).await;
             if n_roots > 1 {
                 if let Some(parent) = &root_path {
                     let canon = parent
@@ -332,6 +337,36 @@ impl Backend {
             folder_paths: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             init_options: Arc::new(tokio::sync::RwLock::new(None)),
             config_watch: Arc::new(tokio::sync::Mutex::new(None)),
+            reported_config_issues: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+        }
+    }
+
+    /// B017: surface unusable config keys once each. A mistyped key used to
+    /// discard its whole file silently; now the key is skipped and the user
+    /// is told which file, which key, and what was expected. Warnings also go
+    /// to stderr from the config loader — this is the in-editor channel.
+    async fn report_config_issues(&self, config: &LspConfig) {
+        if config.config_issues.is_empty() {
+            return;
+        }
+        let mut seen = self.reported_config_issues.lock().await;
+        let fresh: Vec<String> = config
+            .config_issues
+            .iter()
+            .map(|issue| issue.to_string())
+            .filter(|line| seen.insert(line.clone()))
+            .collect();
+        drop(seen);
+        for line in fresh {
+            tracing::warn!("config: {line}");
+            self.client
+                .show_message(
+                    MessageType::WARNING,
+                    format!("openplanet-lsp config: {line}"),
+                )
+                .await;
         }
     }
 
