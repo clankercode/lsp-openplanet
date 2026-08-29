@@ -13,6 +13,7 @@ use crate::config::{
 use crate::server::diagnostics;
 use crate::typedb::{TypeDbMeta, TypeIndex};
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
+use crate::workspace::manifest::ManifestWorkspace;
 use crate::workspace::project;
 
 /// GH #59: `typedb status|diff|refresh` — the type-DB freshness pipeline.
@@ -818,6 +819,7 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
             &combo_config,
             type_index.as_ref(),
             &manifest_path,
+            &search.plugin_files_search_paths,
             &mut cli_diagnostics,
         );
         if matrix_run {
@@ -849,6 +851,7 @@ fn collect_pass_diagnostics(
     config: &LspConfig,
     type_index: Option<&TypeIndex>,
     manifest_path: &Path,
+    plugin_files_search_paths: &[PathBuf],
     cli_diagnostics: &mut Vec<CliDiagnostic>,
 ) {
     if !snapshot.missing_required_dependencies().is_empty() {
@@ -863,36 +866,24 @@ fn collect_pass_diagnostics(
         }
     }
 
+    // B040: info.toml rules (missing `version`, `exports` pointing at files
+    // that are not there, deprecated keys) reach `check` through the same
+    // seam the LSP publishes from — the manifest decides whether the plugin
+    // loads at all, so an Error here fails the run.
     if manifest_path.exists() {
         if let Ok(source) = std::fs::read_to_string(manifest_path) {
-            if let Ok(uri) = Url::from_file_path(manifest_path) {
-                // The manifest is not an .as file — parse on the fly with an
-                // owned symbol pool.
-                let manifest_analysis =
-                    crate::analysis::DocumentAnalysis::analyze(&source, &config.defines);
-                let mut manifest_symbols = crate::symbols::SymbolTable::new();
-                let mf_fid = manifest_symbols.allocate_file_id();
-                let mf_syms = crate::symbols::SymbolTable::extract_symbols(
-                    mf_fid,
-                    manifest_analysis.masked_source(),
-                    &manifest_analysis.file,
-                );
-                manifest_symbols.set_file_symbols(mf_fid, mf_syms);
-                for mut diagnostic in diagnostics::compute_diagnostics_from_analysis(
-                    &uri,
-                    &manifest_analysis,
-                    config,
-                    type_index,
-                    &manifest_symbols,
-                ) {
-                    diagnostic.range =
-                        diagnostics::range_to_utf8_columns(&source, diagnostic.range);
-                    cli_diagnostics.push(CliDiagnostic {
-                        path: manifest_path.to_path_buf(),
-                        combos: Vec::new(),
-                        diagnostic,
-                    });
-                }
+            let workspace = ManifestWorkspace {
+                root: &load.root,
+                plugin_files_search_paths,
+            };
+            for mut diagnostic in diagnostics::manifest_rule_diagnostics(&source, Some(&workspace))
+            {
+                diagnostic.range = diagnostics::range_to_utf8_columns(&source, diagnostic.range);
+                cli_diagnostics.push(CliDiagnostic {
+                    path: manifest_path.to_path_buf(),
+                    combos: Vec::new(),
+                    diagnostic,
+                });
             }
         }
     }

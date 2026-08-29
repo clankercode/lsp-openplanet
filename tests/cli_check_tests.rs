@@ -3910,3 +3910,163 @@ fn check_command_const_handle_declaration_is_anchored_at_the_const_keyword() {
     }
     let _ = fs::remove_dir_all(root);
 }
+
+// ---------------------------------------------------------------------
+// B040: info.toml rules reach `check`, and Error severity fails the run.
+//
+// The manifest decides whether the plugin loads at all, so `check` — which
+// CI and `just check-showcase` run — must see the same findings the editor
+// does, and a manifest that cannot load must not report success.
+// ---------------------------------------------------------------------
+
+/// A plugin whose `info.toml` is exactly `manifest`, plus one trivial source.
+fn plugin_with_manifest(name: &str, manifest: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "openplanet-lsp-manifest-{}-{}",
+        name,
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("info.toml"), manifest).unwrap();
+    fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+    root
+}
+
+fn run_check(root: &std::path::Path, home: &std::path::Path) -> (i32, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(root)
+        .env("HOME", home)
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn check_reports_manifest_errors_and_exits_non_zero() {
+    for (name, manifest, needle) in [
+        ("no-version", "[meta]\nname = \"T\"\n", "[meta].version"),
+        (
+            "missing-export",
+            "[meta]\nversion = \"1\"\n\n[script]\nexports = [\"Gone.as\"]\n",
+            "Export file not found: Gone.as",
+        ),
+        (
+            "missing-shared-export",
+            "[meta]\nversion = \"1\"\n\n[script]\nshared_exports = [\"Gone.as\"]\n",
+            "Shared export file not found: Gone.as",
+        ),
+        (
+            "malformed",
+            "[meta]\nversion = = \"1\"\n",
+            "TOML parse error",
+        ),
+    ] {
+        let root = plugin_with_manifest(name, manifest);
+        let home = isolated_home(&format!("manifest-{name}"));
+        let (code, stdout) = run_check(&root, &home);
+        assert!(
+            stdout.contains(needle),
+            "{name}: expected {needle:?} in check output; got {stdout}"
+        );
+        assert!(
+            stdout.contains("info.toml"),
+            "{name}: the finding must be attributed to info.toml; got {stdout}"
+        );
+        assert_eq!(
+            code, 1,
+            "{name}: a manifest error must fail the run; got {stdout}"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&home);
+    }
+}
+
+/// A deprecated field is a warning: worth saying, not worth failing over.
+#[test]
+fn check_reports_manifest_warnings_without_failing() {
+    let root = plugin_with_manifest(
+        "warn-only",
+        "[meta]\nname = \"T\"\nversion = \"1\"\nperms = \"full\"\n",
+    );
+    let home = isolated_home("manifest-warn-only");
+    let (code, stdout) = run_check(&root, &home);
+    assert!(
+        stdout.contains("'perms' is deprecated"),
+        "expected the deprecation warning; got {stdout}"
+    );
+    assert_eq!(
+        code, 0,
+        "a warning alone must not fail the run; got {stdout}"
+    );
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// False-positive guard: exports that resolve through the loader's `src/`
+/// search path — where most plugins keep their sources — are not reported.
+#[test]
+fn check_does_not_report_exports_that_resolve_under_src() {
+    let root = plugin_with_manifest(
+        "exports-under-src",
+        "[meta]\nname = \"T\"\nversion = \"1\"\n\n[script]\nexports = [\"Ex/Fns.as\"]\nshared_exports = [\"Ex/Shared.as\"]\n",
+    );
+    fs::create_dir_all(root.join("src/Ex")).unwrap();
+    fs::write(root.join("src/Ex/Fns.as"), "void F() {}\n").unwrap();
+    fs::write(root.join("src/Ex/Shared.as"), "void S() {}\n").unwrap();
+    let home = isolated_home("manifest-exports-under-src");
+
+    let (code, stdout) = run_check(&root, &home);
+    assert!(
+        !stdout.contains("Export file not found"),
+        "exports under src/ must resolve; got {stdout}"
+    );
+    assert_eq!(code, 0, "{stdout}");
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// `--plugin-files-search-path` moves where exports are looked for, and the
+/// manifest rules must follow it — otherwise `check` contradicts the loader
+/// it just ran.
+#[test]
+fn check_manifest_export_rules_follow_the_search_path_flag() {
+    let root = plugin_with_manifest(
+        "exports-custom-search",
+        "[meta]\nname = \"T\"\nversion = \"1\"\n\n[script]\nexports = [\"Fns.as\"]\n",
+    );
+    fs::create_dir_all(root.join("code")).unwrap();
+    fs::write(root.join("code/Fns.as"), "void F() {}\n").unwrap();
+    let home = isolated_home("manifest-exports-custom-search");
+
+    // Default search paths (`src/`) do not find it.
+    let (code, stdout) = run_check(&root, &home);
+    assert!(
+        stdout.contains("Export file not found: Fns.as"),
+        "control: not found under the default search path; got {stdout}"
+    );
+    assert_eq!(code, 1, "{stdout}");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugin-files-search-path")
+        .arg("code")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Export file not found"),
+        "the flag must move the export lookup too; got {stdout}"
+    );
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&home);
+}

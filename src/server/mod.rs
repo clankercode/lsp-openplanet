@@ -331,35 +331,50 @@ impl Backend {
         *self.workspaces.write().await = shards;
 
         if publish_diagnostics {
-            // Publish manifest diagnostics for every live shard so newly
-            // added roots get their info.toml squiggles immediately.
-            let live: Vec<(PathBuf, LspConfig, Arc<AnalysisSnapshot>)> = self
-                .workspaces
-                .read()
-                .await
-                .iter()
-                .map(|w| (w.root.clone(), w.config.clone(), w.snapshot.clone()))
-                .collect();
-            for (root, config, snapshot) in live {
-                let manifest_uri = Url::from_file_path(root.join("info.toml")).ok();
-                if let Some(manifest_uri) = manifest_uri {
-                    let source = std::fs::read_to_string(root.join("info.toml")).ok();
-                    let diagnostics = source
-                        .as_deref()
-                        .map(|s| {
-                            diagnostics::compute_manifest_diagnostics(
-                                &manifest_uri,
-                                s,
-                                &config,
-                                snapshot.missing_required_dependencies(),
-                            )
-                        })
-                        .unwrap_or_default();
-                    self.client
-                        .publish_diagnostics(manifest_uri, diagnostics, None)
-                        .await;
-                }
-            }
+            self.publish_manifest_diagnostics_for_all_roots().await;
+        }
+    }
+
+    /// Publish the info.toml diagnostic set for every live shard, so a newly
+    /// added root gets its manifest squiggles without anything being opened.
+    ///
+    /// Called from `reshard_from_folders` AND from `initialized`: tower-lsp
+    /// suppresses client messages until the `initialize` response is out, so
+    /// the reshard that runs during `initialize` publishes into the void.
+    async fn publish_manifest_diagnostics_for_all_roots(&self) {
+        let live: Vec<(PathBuf, LspConfig, Arc<AnalysisSnapshot>)> = self
+            .workspaces
+            .read()
+            .await
+            .iter()
+            .map(|w| (w.root.clone(), w.config.clone(), w.snapshot.clone()))
+            .collect();
+        for (root, config, snapshot) in live {
+            let manifest_path = root.join("info.toml");
+            let Ok(manifest_uri) = Url::from_file_path(&manifest_path) else {
+                continue;
+            };
+            // Prefer the open buffer: an unsaved edit is what the user is
+            // looking at, and the manifest rules must judge that text.
+            let source = self
+                .documents
+                .get(&manifest_uri)
+                .map(|document| document.value().clone())
+                .or_else(|| std::fs::read_to_string(&manifest_path).ok());
+            let diagnostics = source
+                .as_deref()
+                .map(|source| {
+                    diagnostics::compute_manifest_diagnostics(
+                        &manifest_uri,
+                        source,
+                        &config,
+                        snapshot.missing_required_dependencies(),
+                    )
+                })
+                .unwrap_or_default();
+            self.client
+                .publish_diagnostics(manifest_uri, diagnostics, None)
+                .await;
         }
     }
 }
@@ -1169,6 +1184,10 @@ impl LanguageServer for Backend {
         let mut extra = self.plugin_roots.read().await.clone();
         extra.extend(self.folder_paths.read().await.iter().cloned());
         self.start_config_file_watch(home, &extra);
+        // B040: the reshard during `initialize` published while tower-lsp was
+        // still suppressing client messages, so the manifest set never
+        // reached the editor. Now is the first moment it can.
+        self.publish_manifest_diagnostics_for_all_roots().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -2445,6 +2464,536 @@ mod tests {
             diagnostics.diagnostics
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---------------------------------------------------------------
+    // B040: info.toml diagnostics reach the editor.
+    //
+    // `Manifest::validate` was fully implemented and called by nobody, so a
+    // manifest that stops the plugin loading in-game produced no editor
+    // signal. These pin the publish path end to end: the diagnostics go to
+    // the info.toml URI (never to a `.as` file — they are unfixable from
+    // there), they carry a usable range, and they CLEAR when fixed.
+    // ---------------------------------------------------------------
+
+    /// A plugin root with the given manifest and one source file.
+    fn manifest_tree(name: &str, info_toml: &str) -> PathBuf {
+        let root = temp_tree(name);
+        fs::write(root.join("info.toml"), info_toml).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+        root
+    }
+
+    fn manifest_uri_of(root: &Path) -> Url {
+        Url::from_file_path(root.join("info.toml")).unwrap()
+    }
+
+    fn open_params(uri: &Url, text: &str) -> DidOpenTextDocumentParams {
+        DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "toml".into(),
+                version: 1,
+                text: text.into(),
+            },
+        }
+    }
+
+    fn change_params(uri: &Url, version: i32, text: &str) -> DidChangeTextDocumentParams {
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.into(),
+            }],
+        }
+    }
+
+    /// Open `info.toml` in a fresh session and return what the server
+    /// published against it.
+    async fn manifest_diagnostics_on_open(root: &Path, info_toml: &str) -> Vec<Diagnostic> {
+        let uri = manifest_uri_of(root);
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(
+            &mut service,
+            init_params(root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
+        let backend = service.inner();
+        capture_diagnostics_for(
+            &mut socket,
+            &uri,
+            backend.did_open(open_params(&uri, info_toml)),
+        )
+        .await
+        .diagnostics
+    }
+
+    /// The text a diagnostic's range selects, so range assertions read as
+    /// "it points at this", not as line/column arithmetic.
+    fn selected(source: &str, range: Range) -> String {
+        let start = diagnostics::position_to_offset(source, range.start);
+        let end = diagnostics::position_to_offset(source, range.end);
+        source[start..end].to_string()
+    }
+
+    /// Every published range must address real text in the document — an
+    /// out-of-bounds range is dropped or mis-rendered by clients.
+    fn assert_ranges_within(source: &str, published: &[Diagnostic]) {
+        let lines: Vec<&str> = source.split('\n').collect();
+        for diagnostic in published {
+            for (label, pos) in [
+                ("start", diagnostic.range.start),
+                ("end", diagnostic.range.end),
+            ] {
+                let line = lines
+                    .get(pos.line as usize)
+                    .unwrap_or_else(|| panic!("{label} line {} past end of document", pos.line));
+                assert!(
+                    pos.character as usize <= line.encode_utf16().count(),
+                    "{label} column {} past end of line {:?}",
+                    pos.character,
+                    line
+                );
+            }
+            assert!(
+                (
+                    diagnostic.range.start.line,
+                    diagnostic.range.start.character
+                ) <= (diagnostic.range.end.line, diagnostic.range.end.character),
+                "inverted range {:?}",
+                diagnostic.range
+            );
+        }
+    }
+
+    const NO_VERSION: &str = "# Counter\n[meta]\nname = \"Counter\"\n";
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_diagnostics_are_published_for_info_toml() {
+        let root = manifest_tree("manifest-no-version", NO_VERSION);
+        let published = manifest_diagnostics_on_open(&root, NO_VERSION).await;
+
+        let version = published
+            .iter()
+            .find(|d| d.message.contains("version"))
+            .unwrap_or_else(|| panic!("missing `version` must be reported; got {published:?}"));
+        assert_eq!(version.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(
+            version.source.as_deref(),
+            Some(diagnostics::DIAGNOSTIC_SOURCE)
+        );
+        // The key is absent, so the anchor is the containing table's header.
+        assert_eq!(selected(NO_VERSION, version.range), "meta");
+        assert_ranges_within(NO_VERSION, &published);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_export_missing_file_is_reported() {
+        let source = "[meta]\nversion = \"1.0\"\n\n[script]\nexports = [\"Gone.as\"]\n";
+        let root = manifest_tree("manifest-missing-export", source);
+        let published = manifest_diagnostics_on_open(&root, source).await;
+
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert_eq!(published[0].message, "Export file not found: Gone.as");
+        assert_eq!(published[0].severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(selected(source, published[0].range), "\"Gone.as\"");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_shared_export_missing_file_is_reported() {
+        let source = "[meta]\nversion = \"1.0\"\n\n[script]\nshared_exports = [\"Gone.as\"]\n";
+        let root = manifest_tree("manifest-missing-shared-export", source);
+        let published = manifest_diagnostics_on_open(&root, source).await;
+
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert_eq!(
+            published[0].message,
+            "Shared export file not found: Gone.as"
+        );
+        assert_eq!(published[0].severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(selected(source, published[0].range), "\"Gone.as\"");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An export that IS on disk — including through the loader's `src/`
+    /// search path, which is where most plugins keep their sources — must
+    /// not be reported. This is the false-positive guard for the rule above.
+    #[tokio::test(flavor = "current_thread")]
+    async fn present_exports_publish_nothing() {
+        let source = "[meta]\nversion = \"1.0\"\n\n[script]\nexports = [\"Ex/Fns.as\"]\nshared_exports = [\"Shared.as\"]\n";
+        let root = manifest_tree("manifest-exports-present", source);
+        // `Ex/Fns.as` under `src/`, `Shared.as` at the root: both resolve.
+        fs::create_dir_all(root.join("src/Ex")).unwrap();
+        fs::write(root.join("src/Ex/Fns.as"), "void F() {}\n").unwrap();
+        fs::write(root.join("Shared.as"), "void S() {}\n").unwrap();
+
+        let published = manifest_diagnostics_on_open(&root, source).await;
+        assert_eq!(published, Vec::<Diagnostic>::new(), "{published:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deprecated_manifest_field_is_published_as_a_warning() {
+        let source = "[meta]\nversion = \"1.0\"\nperms = \"full\"\n";
+        let root = manifest_tree("manifest-deprecated", source);
+        let published = manifest_diagnostics_on_open(&root, source).await;
+
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert!(published[0].message.contains("deprecated"), "{published:?}");
+        assert_eq!(
+            published[0].severity,
+            Some(DiagnosticSeverity::WARNING),
+            "a deprecated field does not stop the plugin loading"
+        );
+        assert_eq!(selected(source, published[0].range), "perms = \"full\"");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Every rule fires in one publish — the first problem must not shadow
+    /// the rest, or fixing them becomes a guessing game one save at a time.
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_manifest_problem_is_published_together() {
+        let source = "[meta]\nname = \"T\"\nperms = \"full\"\n\n[script]\nexports = [\"A.as\", \"B.as\"]\nshared_exports = [\"S.as\"]\n";
+        let root = manifest_tree("manifest-all-rules", source);
+        let published = manifest_diagnostics_on_open(&root, source).await;
+
+        let messages: Vec<&str> = published.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec![
+                "Missing required field: [meta].version",
+                "Export file not found: A.as",
+                "Export file not found: B.as",
+                "Shared export file not found: S.as",
+                "'perms' is deprecated",
+            ],
+            "{published:?}"
+        );
+        // Each missing entry points at its OWN array element.
+        assert_eq!(selected(source, published[1].range), "\"A.as\"");
+        assert_eq!(selected(source, published[2].range), "\"B.as\"");
+        assert_ranges_within(source, &published);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A stale published set is worse than none: once the manifest is valid
+    /// the server must publish an EMPTY set for it, not simply stop talking.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fixing_the_manifest_republishes_an_empty_set() {
+        let root = manifest_tree("manifest-stale-clear", NO_VERSION);
+        let uri = manifest_uri_of(&root);
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+
+        let broken = capture_diagnostics_for(
+            &mut socket,
+            &uri,
+            backend.did_open(open_params(&uri, NO_VERSION)),
+        )
+        .await;
+        assert!(!broken.diagnostics.is_empty(), "control: starts broken");
+
+        let fixed = "# Counter\n[meta]\nname = \"Counter\"\nversion = \"1.0\"\n";
+        fs::write(root.join("info.toml"), fixed).unwrap();
+        let cleared = capture_diagnostics_for(
+            &mut socket,
+            &uri,
+            backend.did_change(change_params(&uri, 2, fixed)),
+        )
+        .await;
+        assert_eq!(
+            cleared.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "a fixed manifest must clear its squiggles"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A manifest the TOML parser rejects is the loudest failure there is —
+    /// the plugin cannot load at all. It must be published, not skipped.
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_manifest_publishes_a_parse_error() {
+        let source = "[meta]\nname = \"T\"\nversion = = \"1.0\"\n";
+        let root = manifest_tree("manifest-malformed", source);
+        let published = manifest_diagnostics_on_open(&root, source).await;
+
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert_eq!(published[0].severity, Some(DiagnosticSeverity::ERROR));
+        assert!(
+            published[0].message.contains("TOML parse error"),
+            "{published:?}"
+        );
+        assert_ranges_within(source, &published);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Generalise the parse-error case over the ways TOML can be broken:
+    /// none of them may panic, and every one must produce an in-bounds range.
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_manifests_never_panic_and_stay_in_bounds() {
+        for (label, source) in [
+            ("unterminated table", "[meta\nname = \"T\"\n"),
+            ("bare garbage", "this is not toml [[[\n"),
+            (
+                "duplicate key",
+                "[meta]\nversion = \"1\"\nversion = \"2\"\n",
+            ),
+            ("unterminated string", "[meta]\nname = \"T\n"),
+            ("empty file", ""),
+            ("wrong type", "[meta]\nversion = 3\n"),
+        ] {
+            let root = manifest_tree(
+                &format!("manifest-broken-{}", label.replace(' ', "-")),
+                source,
+            );
+            let published = manifest_diagnostics_on_open(&root, source).await;
+            assert_ranges_within(source, &published);
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Editing a `.as` file refreshes its root's manifest diagnostics too —
+    /// the manifest is validated against files on disk, so renaming an
+    /// export away has to show up without opening info.toml.
+    #[tokio::test(flavor = "current_thread")]
+    async fn editing_a_source_file_refreshes_its_root_manifest_diagnostics() {
+        let source = "[meta]\nversion = \"1.0\"\n\n[script]\nexports = [\"Gone.as\"]\n";
+        let root = manifest_tree("manifest-from-source-edit", source);
+        let manifest_uri = manifest_uri_of(&root);
+        let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
+
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+        let published = capture_diagnostics_for(
+            &mut socket,
+            &manifest_uri,
+            backend.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: main_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: "void Main() {}\n".into(),
+                },
+            }),
+        )
+        .await;
+        assert!(
+            published
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("Gone.as")),
+            "manifest diagnostics must follow a source edit; got {:?}",
+            published.diagnostics
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Manifest problems belong to info.toml and nowhere else: attaching
+    /// them to a `.as` file would put them where they cannot be fixed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_diagnostics_never_attach_to_source_files() {
+        let source = "[meta]\n\n[script]\nexports = [\"Gone.as\"]\n";
+        let root = manifest_tree("manifest-not-on-sources", source);
+        let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
+
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+        let published = capture_diagnostics_for(
+            &mut socket,
+            &main_uri,
+            backend.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: main_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: "void Main() {}\n".into(),
+                },
+            }),
+        )
+        .await;
+        assert_eq!(
+            published.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "the source file carries no manifest findings"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// No info.toml at all is not an error — plenty of folders are opened
+    /// that are not plugins.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_workspace_without_a_manifest_publishes_no_manifest_diagnostics() {
+        let root = temp_tree("manifest-absent");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+        let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
+
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+        let published = capture_diagnostics_for(
+            &mut socket,
+            &main_uri,
+            backend.did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: main_uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: "void Main() {}\n".into(),
+                },
+            }),
+        )
+        .await;
+        assert_eq!(published.diagnostics, Vec::<Diagnostic>::new());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Multi-root: each plugin's problems go to ITS OWN info.toml URI.
+    #[tokio::test(flavor = "current_thread")]
+    async fn each_root_publishes_its_own_manifest_diagnostics() {
+        let parent = temp_tree("manifest-multi-root");
+        let a_source = "[meta]\nname = \"A\"\n";
+        let b_source = "[meta]\nversion = \"1\"\n\n[script]\nexports = [\"Gone.as\"]\n";
+        let mut roots = Vec::new();
+        for (name, source) in [("plugin-a", a_source), ("plugin-b", b_source)] {
+            let root = parent.join(name);
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("info.toml"), source).unwrap();
+            fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+            roots.push(root);
+        }
+
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(
+            &mut service,
+            init_params(&parent, Some(vec![parent.clone()])),
+        )
+        .await;
+        let backend = service.inner();
+
+        for (root, source, want) in [
+            (
+                &roots[0],
+                a_source,
+                "Missing required field: [meta].version",
+            ),
+            (&roots[1], b_source, "Export file not found: Gone.as"),
+        ] {
+            let uri = manifest_uri_of(root);
+            let published = capture_diagnostics_for(
+                &mut socket,
+                &uri,
+                backend.did_open(open_params(&uri, source)),
+            )
+            .await;
+            let messages: Vec<&str> = published
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect();
+            assert_eq!(messages, vec![want], "{}", root.display());
+        }
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    /// A dependency that lives inside a `.op` archive has a manifest too,
+    /// and it may well be invalid — but the user cannot open a path inside
+    /// a ZIP, so nothing may be published against one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn op_archive_manifests_are_never_published_against() {
+        let parent = temp_tree("manifest-op-archive");
+        let plugins = parent.join("Plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        // The archived dependency's own manifest is missing `version` and
+        // names an export that is not in the archive.
+        {
+            use std::io::Write;
+            let file = fs::File::create(plugins.join("ArchivedDep.op")).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("info.toml", opts).unwrap();
+            zip.write_all(
+                b"[meta]\nname = \"ArchivedDep\"\n\n[script]\nmodule = \"ArchivedDep\"\nexports = [\"Gone.as\"]\n",
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+
+        let root = parent.join("plugin");
+        fs::create_dir_all(root.join("src")).unwrap();
+        let source = "[meta]\nname = \"Consumer\"\nversion = \"1\"\n\n[script]\ndependencies = [\"ArchivedDep\"]\n";
+        fs::write(root.join("info.toml"), source).unwrap();
+        fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+        fs::write(
+            root.join(".openplanet-lsp.toml"),
+            format!("plugins_dir = \"{}\"\n", plugins.display()),
+        )
+        .unwrap();
+
+        let uri = manifest_uri_of(&root);
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+        let published = capture_diagnostics_for(
+            &mut socket,
+            &uri,
+            backend.did_open(open_params(&uri, source)),
+        )
+        .await;
+
+        // Nothing from the archive's manifest leaked into the consumer's,
+        // and the archive's own path was never a publish target.
+        assert_eq!(
+            published.diagnostics,
+            Vec::<Diagnostic>::new(),
+            "{:?}",
+            published.diagnostics
+        );
+        assert!(
+            !published.uri.path().contains(".op"),
+            "published against {}",
+            published.uri
+        );
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    /// tower-lsp suppresses every client message until the `initialize`
+    /// RESPONSE has gone out, so anything published from inside `initialize`
+    /// is dropped on the floor. The manifest set has to be (re)published
+    /// from `initialized`, or a project whose info.toml is broken shows an
+    /// empty Problems panel until the user happens to open a file.
+    #[tokio::test(flavor = "current_thread")]
+    async fn manifest_diagnostics_are_published_on_initialized_without_opening_a_file() {
+        let root = manifest_tree("manifest-on-initialized", NO_VERSION);
+        let uri = manifest_uri_of(&root);
+        let (mut service, mut socket) = LspService::new(Backend::new);
+        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        let backend = service.inner();
+
+        let published =
+            capture_diagnostics_for(&mut socket, &uri, backend.initialized(InitializedParams {}))
+                .await;
+        assert!(
+            published
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("[meta].version")),
+            "no file was opened, so `initialized` is the only chance to \
+             publish; got {:?}",
+            published.diagnostics
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }
