@@ -940,21 +940,29 @@ impl Backend {
                 let manifest_path = root.join("info.toml");
                 Url::from_file_path(&manifest_path)
                     .ok()
-                    .map(|manifest_uri| (manifest_uri, manifest_path))
+                    .map(|manifest_uri| (manifest_uri, manifest_path, root.clone()))
             });
-            manifest_uri.map(|(manifest_uri, manifest_path)| {
+            manifest_uri.map(|(manifest_uri, manifest_path, root)| {
                 let manifest_source = self
                     .documents
                     .get(&manifest_uri)
                     .map(|document| document.value().clone())
                     .or_else(|| std::fs::read_to_string(manifest_path).ok());
+                // Root-explicit, exactly like the sharded path: the URI is
+                // publication identity only, never the directory `exports`
+                // resolve against.
+                let search = crate::workspace::load::DependencySearch::with_defaults()
+                    .finalize_with_config(&config);
+                let workspace = crate::workspace::manifest::ManifestWorkspace {
+                    root: &root,
+                    plugin_files_search_paths: &search.plugin_files_search_paths,
+                };
                 let diagnostics = manifest_source
                     .as_deref()
                     .map(|source| {
-                        diagnostics::compute_manifest_diagnostics(
-                            &manifest_uri,
+                        diagnostics::compute_manifest_diagnostics_in_workspace(
                             source,
-                            &config,
+                            &workspace,
                             snapshot.missing_required_dependencies(),
                         )
                     })

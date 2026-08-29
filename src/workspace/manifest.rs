@@ -62,17 +62,6 @@ pub struct ManifestDiagnostic {
     pub anchor: ManifestAnchor,
 }
 
-impl ManifestDiagnostic {
-    /// The dotted key path this diagnostic points at, when it points at a
-    /// key at all (a TOML parse error carries a raw span instead).
-    pub fn key_path(&self) -> Option<&str> {
-        match &self.anchor {
-            ManifestAnchor::Key { path, .. } => Some(path),
-            ManifestAnchor::Span(_) => None,
-        }
-    }
-}
-
 /// Where a [`ManifestDiagnostic`] belongs in the info.toml source.
 ///
 /// `validate` works on the deserialized manifest, which serde strips of all
@@ -248,7 +237,9 @@ exports = ["Source/Exports.as"]
         let toml_str = "[meta]\nname = \"Test\"";
         let manifest = Manifest::parse(toml_str).unwrap();
         let diags = manifest.validate(None);
-        assert!(diags.iter().any(|d| d.key_path() == Some("meta.version")));
+        assert!(diags
+            .iter()
+            .any(|d| d.anchor == ManifestAnchor::key("meta.version")));
     }
 
     #[test]

@@ -57,27 +57,13 @@ pub fn missing_required_dependency_diagnostics(dependencies: &[String]) -> Vec<D
         .collect()
 }
 
-/// Manifest diagnostics, including unresolved required plugin dependencies.
-/// Kept together so replacing the LSP diagnostic set never drops TOML errors.
-pub fn compute_manifest_diagnostics(
-    uri: &Url,
-    source: &str,
-    _config: &LspConfig,
-    missing_required_dependencies: &[String],
-) -> Vec<Diagnostic> {
-    // info.toml is TOML, not AngelScript: go straight to the manifest rules
-    // rather than through the source pipeline, which would parse the TOML as
-    // AngelScript and build a symbol table for it before discarding both.
-    let mut diagnostics = manifest_diagnostics_for_uri(uri, source);
-    diagnostics.extend(missing_required_dependency_diagnostics(
-        missing_required_dependencies,
-    ));
-    diagnostics
-}
-
-/// Manifest diagnostics for a known workspace root. The URI a client opened
-/// may be a symlink alias, so it is publication identity only; export paths
-/// must resolve with the actual shard root and loader search paths.
+/// Every diagnostic that belongs on an info.toml: the manifest rules plus
+/// unresolved required plugin dependencies. Kept together so replacing the
+/// published set never drops one kind while refreshing the other.
+///
+/// Takes the workspace root explicitly. The URI a client opened may be a
+/// symlink alias (dips++-all layout), so it is publication identity only —
+/// never the directory `exports` entries resolve against.
 pub fn compute_manifest_diagnostics_in_workspace(
     source: &str,
     workspace: &ManifestWorkspace<'_>,
@@ -421,11 +407,14 @@ mod tests {
 
     #[test]
     fn manifest_diagnostics_preserve_toml_and_missing_dependency_errors() {
-        let uri = Url::parse("file:///tmp/info.toml").unwrap();
-        let diagnostics = compute_manifest_diagnostics(
-            &uri,
+        let search = [std::path::PathBuf::from("src")];
+        let workspace = ManifestWorkspace {
+            root: Path::new("/tmp"),
+            plugin_files_search_paths: &search,
+        };
+        let diagnostics = compute_manifest_diagnostics_in_workspace(
             "[meta]\nname = \"Missing Version\"\n",
-            &LspConfig::default(),
+            &workspace,
             &["MissingDep".to_string()],
         );
         assert!(diagnostics
