@@ -56,3 +56,4 @@ bugs:
     - file: B055-rename-of-a-strict-export-decl.todo
     - file: B056-qualified-engine-names-lsp-acc.todo
     - file: B057-bare-enum-values-lsp-accepts-2.todo
+    - file: B058-withruncontext-quick-fix-can-e.todo

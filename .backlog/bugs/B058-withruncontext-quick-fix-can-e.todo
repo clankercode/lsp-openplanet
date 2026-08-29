@@ -1,0 +1,26 @@
+---
+complexity: medium
+created_at: "2026-08-29T23:39:52Z"
+depends_on: []
+estimate_hours: 1
+id: B058
+priority: high
+status: pending
+tags: []
+title: WithRunContext quick fix can emit a call with no matching overload when userdata is a bool variable
+updated_at: "2026-08-29T23:39:52Z"
+---
+
+# WithRunContext quick fix can emit a call with no matching overload when userdata is a bool variable
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior
