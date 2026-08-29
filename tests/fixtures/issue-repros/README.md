@@ -61,6 +61,8 @@ Record the game verdict in the fixture's gate-test doc comment.
 | `b028-dup-decl-arch-os` | B028 | clean (2026-08-29 probe) — the game compiles one branch per pair; the LSP defaulted to windows/64 must match | fixed — active |
 | `63-inputtext-callback-funcdef` | #63 | clean (2026-08-29 probe, OP 1.29.5) | fixed (8e49f81) — active |
 | `b025-this-method-funcdef-ctor` | B025 | legal half clean; 3 diagnosed lines ERR (`Can't create delegate` ×2, `No matching signatures to 'CoroutineFunc(string)'`; 2026-08-29 probe) | fixed (342a10a) — active |
+| `b027-funcdef-param-modes` | B027 | 7 mismatch lines ERR (`Can't create delegate`; free-fn ones as `Can't implicitly convert from '<function>@const'`), incl. `&in`; exact matches clean (2026-08-29 probe; `int &inout` is itself illegal) | fixed — active |
+| `b023-funcdef-slot-signatures` | B023 | 7 slot-misuse lines ERR (`No matching signatures to '...'`) across UI::InputText[Multiline] / startnew / UI::NodTree / Dev::InterceptProc; matching forms clean (2026-08-29 probe) | fixed — active |
 | `46-mixin-consumer-member` | #46 | clean | fixed (8c13ef5) — active |
 | `44-indexed-handle-assign` | #44 | `not an l-value` (@-into-Json-index only) | fixed (70f3f97) — active |
 | `30-sibling-field-bare-ident` | #30 | `No matching symbol 'nod'` | fixed — active |

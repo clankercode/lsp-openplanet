@@ -257,6 +257,35 @@ impl TypeRepr {
     }
 }
 
+/// Parameter passing mode (B027). Delegate construction requires EXACT
+/// mode equality — game probe (RemoteBuild 2026-08-29, OP 1.29.5):
+/// plain, `&in`, `&out` and object-typed `&inout` are all enforced;
+/// `int &inout` is not even declarable ("Only object types that support
+/// object handles can use &inout").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamMode {
+    Value,
+    In,
+    Out,
+    Inout,
+}
+
+/// Mode from param type text. Workspace param text carries the source
+/// `&in`/`&out`/`&inout` decoration; typedb `typedecl` text does not —
+/// its mode comes from the `typeflags` bits, surfaced as flags on
+/// `typedb::ParamInfo`.
+pub fn param_mode_from_text(text: &str) -> ParamMode {
+    if text.contains("&inout") {
+        ParamMode::Inout
+    } else if text.contains("&out") {
+        ParamMode::Out
+    } else if text.contains("&in") {
+        ParamMode::In
+    } else {
+        ParamMode::Value
+    }
+}
+
 /// True for generic base names that behave as AngelScript arrays when they
 /// appear in typedb member type strings: the script-side `array<T>` plus
 /// the Nadeo engine container generics (`MwFastArray<CControlBase@>` etc.)

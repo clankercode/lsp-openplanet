@@ -454,11 +454,16 @@ impl SymbolTable {
             }
             ast::Item::Funcdef(fd) => {
                 let name = qualify(fd.name.text(source));
+                // B027: carry the full signature (modes included — the
+                // `Reference` type span covers `&out`/`&in`/`&inout`) so
+                // `GlobalScope::lookup_funcdef` can compare delegate args.
+                let (params, _) = extract_params(source, &fd.params);
                 out.push(Symbol {
                     name,
                     kind: SymbolKind::Funcdef {
-                        return_type: String::new(),
-                        params: Vec::new(),
+                        return_type: fd.return_type.span.text(source).to_string(),
+                        params,
+                        is_typedef: false,
                     },
                     span: fd.span,
                     file_id,
@@ -473,9 +478,13 @@ impl SymbolTable {
                     // symbol surface already represents user-defined
                     // type-only aliases with `Funcdef`, so use that category
                     // rather than widening it for one declaration form.
+                    // `is_typedef` keeps it out of callable-signature
+                    // lookups (shape alone can't discriminate now that
+                    // parameterless funcdefs carry signatures).
                     kind: SymbolKind::Funcdef {
                         return_type: td.target_type.span.text(source).to_string(),
                         params: Vec::new(),
+                        is_typedef: true,
                     },
                     span: td.span,
                     file_id,
@@ -647,5 +656,60 @@ mod tests {
         );
         let results = table.lookup("Main");
         assert_eq!(results.len(), 1);
+    }
+
+    /// B027: the symbol table must preserve parameter passing modes.
+    /// Function/method params keep the mode in the stored type text (the
+    /// parser's `Reference` span covers `&out`/`&in`/`&inout`; consumers
+    /// strip the decoration via `TypeRepr::parse_type_string`), and funcdef
+    /// symbols carry their full signature — `lookup_funcdef` previously saw
+    /// only an empty skeleton, which disabled the whole ctor arg check for
+    /// workspace funcdefs.
+    #[test]
+    fn extract_symbols_funcdef_signature_and_param_modes() {
+        let src = "funcdef void FDO(int &out);\n\
+                   class C {\n\
+                   \x20   void MOut(int &out x) {}\n\
+                   \x20   void MIn(const int &in y) {}\n\
+                   \x20   void MPlain(int z) {}\n\
+                   }\n";
+        let tokens = lexer::tokenize_filtered(src);
+        let mut parser = Parser::new(&tokens, src);
+        let file = parser.parse_file();
+        let symbols = SymbolTable::extract_symbols(0, src, &file);
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        let find = |name: &str| -> &Symbol {
+            symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("missing {name} in {names:?}"))
+        };
+        match &find("FDO").kind {
+            SymbolKind::Funcdef {
+                return_type,
+                params,
+                is_typedef: _,
+            } => {
+                assert_eq!(return_type, "void");
+                assert_eq!(params, &[("".to_string(), "int &out".to_string())]);
+            }
+            other => panic!("expected Funcdef, got {other:?}"),
+        }
+        let params_of = |name: &str| match &find(name).kind {
+            SymbolKind::Function { params, .. } => params.clone(),
+            other => panic!("expected Function, got {other:?}"),
+        };
+        assert_eq!(
+            params_of("C::MOut"),
+            vec![("x".to_string(), "int &out".to_string())]
+        );
+        assert_eq!(
+            params_of("C::MIn"),
+            vec![("y".to_string(), "const int &in".to_string())]
+        );
+        assert_eq!(
+            params_of("C::MPlain"),
+            vec![("z".to_string(), "int".to_string())]
+        );
     }
 }

@@ -6,9 +6,10 @@
 //! whether a referenced name is known. It does NOT own either data source —
 //! callers build one on demand by borrowing both.
 
-use super::repr::TypeRepr;
+use super::repr::{param_mode_from_text, ParamMode, TypeRepr};
 use crate::symbols::scope::{Symbol, SymbolKind};
 use crate::symbols::SymbolTable;
+use crate::typedb::index::ParamInfo;
 use crate::typedb::TypeIndex;
 
 /// Read-only merged view of all globally visible symbols:
@@ -35,19 +36,43 @@ pub struct OverloadSig {
     /// Per-parameter `&out` flag (typedb `typeflags` bit 2) aligned with
     /// `param_types`; true params bind only l-value args (GH #47).
     pub param_out: Vec<bool>,
+    /// Per-parameter passing mode (B027), aligned with `param_types`:
+    /// workspace sigs derive it from the stored param text, typedb sigs
+    /// from the `typeflags` bits.
+    pub param_modes: Vec<ParamMode>,
     pub min_args: usize,
     pub return_type: String,
 }
 
 /// A funcdef type (workspace or Core typedb) looked up by qualified name.
 /// Empty `param_types` + empty `return_type` means the signature is unknown
-/// (workspace extractor currently stores neither); callers then accept any
-/// single function argument.
+/// (e.g. a typedef); callers then accept any single function argument.
 #[derive(Debug, Clone)]
 pub struct FuncdefSig {
     pub qualified: String,
     pub return_type: String,
     pub param_types: Vec<String>,
+    /// Per-parameter passing mode (B027), aligned with `param_types`.
+    pub param_modes: Vec<ParamMode>,
+}
+
+/// Passing mode of a typedb parameter. Core `typedecl` text never carries
+/// the `&` decoration (the `typeflags` bits are authoritative there);
+/// Nadeo signature text may, so prefer the text and fall back to flags.
+fn typedb_param_mode(p: &ParamInfo) -> ParamMode {
+    let from_text = param_mode_from_text(&p.type_name);
+    if from_text != ParamMode::Value {
+        return from_text;
+    }
+    if p.is_inout {
+        ParamMode::Inout
+    } else if p.is_out {
+        ParamMode::Out
+    } else if p.is_in {
+        ParamMode::In
+    } else {
+        ParamMode::Value
+    }
 }
 
 impl<'a> GlobalScope<'a> {
@@ -225,19 +250,24 @@ impl<'a> GlobalScope<'a> {
             if let SymbolKind::Funcdef {
                 return_type,
                 params,
+                is_typedef,
             } = &s.kind
             {
-                // Typedefs reuse `SymbolKind::Funcdef` with the alias
-                // target in `return_type` and no params. Real extracted
-                // funcdefs either carry a parameter list or (today) have
-                // both fields empty.
-                if !return_type.is_empty() && params.is_empty() {
+                // Typedefs reuse `SymbolKind::Funcdef` (tagged at
+                // extraction): they are type aliases, not callable
+                // signatures. Real funcdefs — including parameterless
+                // ones — must resolve here.
+                if *is_typedef {
                     continue;
                 }
                 return Some(FuncdefSig {
                     qualified: s.name.clone(),
                     return_type: return_type.clone(),
                     param_types: params.iter().map(|(_, ty)| ty.clone()).collect(),
+                    param_modes: params
+                        .iter()
+                        .map(|(_, ty)| param_mode_from_text(ty))
+                        .collect(),
                 });
             }
         }
@@ -247,6 +277,7 @@ impl<'a> GlobalScope<'a> {
             qualified: qualified.to_string(),
             return_type: info.return_type.clone(),
             param_types: info.params.iter().map(|p| p.type_name.clone()).collect(),
+            param_modes: info.params.iter().map(|p| typedb_param_mode(p)).collect(),
         })
     }
 
@@ -935,6 +966,7 @@ impl<'a> GlobalScope<'a> {
                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                     param_types: m.params.iter().map(|p| p.type_name.clone()).collect(),
                     param_out: m.params.iter().map(|p| p.is_out).collect(),
+                    param_modes: m.params.iter().map(|p| typedb_param_mode(p)).collect(),
                     min_args,
                     return_type: m.return_type.clone(),
                 });
@@ -973,6 +1005,7 @@ impl<'a> GlobalScope<'a> {
                         param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         param_types: f.params.iter().map(|p| p.type_name.clone()).collect(),
                         param_out: f.params.iter().map(|p| p.is_out).collect(),
+                        param_modes: f.params.iter().map(|p| typedb_param_mode(p)).collect(),
                         min_args,
                         return_type: f.return_type.clone(),
                     }
@@ -1019,7 +1052,17 @@ impl<'a> GlobalScope<'a> {
                     out.push(OverloadSig {
                         param_names: params.iter().map(|(name, _)| Some(name.clone())).collect(),
                         param_types: params.iter().map(|(_, ty_text)| ty_text.clone()).collect(),
-                        param_out: params.iter().map(|_| false).collect(),
+                        // B027: workspace param text carries the source
+                        // `&out` decoration (the `Reference` type span
+                        // covers it) — derive the flag from it.
+                        param_out: params
+                            .iter()
+                            .map(|(_, ty_text)| ty_text.contains("&out"))
+                            .collect(),
+                        param_modes: params
+                            .iter()
+                            .map(|(_, ty_text)| param_mode_from_text(ty_text))
+                            .collect(),
                         min_args: *min_args,
                         return_type: return_type.clone(),
                     });
@@ -1709,17 +1752,63 @@ mod tests {
             fid,
             vec![make_symbol(
                 "Callback",
-                // Matches the extractor: workspace funcdefs store neither
-                // return type nor params today.
+                // Synthetic symbol exercising the empty-signature shape
+                // the extractor can produce for a broken parse.
                 SymbolKind::Funcdef {
                     return_type: String::new(),
                     params: vec![],
+                    is_typedef: false,
                 },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
         assert!(scope.has_type("Callback"));
         assert!(scope.lookup_funcdef("Callback").is_some());
+    }
+
+    /// B027: workspace signatures must carry parameter passing modes —
+    /// `param_out` derived from the stored param text, and a funcdef
+    /// signature complete enough to compare against (previously the
+    /// workspace funcdef branch returned an empty skeleton).
+    #[test]
+    fn workspace_sigs_carry_param_passing_modes() {
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![
+                make_symbol(
+                    "Save",
+                    SymbolKind::Function {
+                        return_type: "void".into(),
+                        params: vec![("v".into(), "int &out".into())],
+                        min_args: 1,
+                        imported: false,
+                    },
+                ),
+                make_symbol(
+                    "FDO",
+                    SymbolKind::Funcdef {
+                        return_type: "void".into(),
+                        params: vec![("".into(), "int &out".into())],
+                        is_typedef: false,
+                    },
+                ),
+            ],
+        );
+        let scope = GlobalScope::new(&ws, None);
+        let sigs = scope.lookup_function_overloads("Save");
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].param_types, vec!["int &out"]);
+        assert_eq!(
+            sigs[0].param_out,
+            vec![true],
+            "workspace sigs must derive &out from the stored param text"
+        );
+        let fd = scope.lookup_funcdef("FDO").expect("workspace funcdef");
+        assert_eq!(fd.return_type, "void");
+        assert_eq!(fd.param_types, vec!["int &out"]);
+        assert_eq!(fd.param_modes, vec![ParamMode::Out]);
     }
 
     #[test]
@@ -1733,6 +1822,7 @@ mod tests {
                 SymbolKind::Funcdef {
                     return_type: "int".into(),
                     params: vec![],
+                    is_typedef: true,
                 },
             )],
         );

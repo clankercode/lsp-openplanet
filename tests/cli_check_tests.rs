@@ -1638,6 +1638,113 @@ fn check_command_issue_repro_b028_build_flag_probe_matches_client_profile() {
     let _ = fs::remove_dir_all(home);
 }
 
+/// B027: delegate construction requires EXACT parameter passing modes.
+/// Game ground truth (RemoteBuild probe 2026-08-29, OP 1.29.5): the seven
+/// MISMATCH lines error in-game (`Can't create delegate`, free-fn ones as
+/// `Can't implicitly convert from '<function>@const'`); the exact-match
+/// lines (plain/&in/&out methods and free fns, object-typed &inout) compile
+/// clean. `&in` and `&inout` are enforced exactly like `&out`.
+#[test]
+fn check_command_issue_repro_b027_funcdef_param_modes() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b027-funcdef-param-modes");
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains("error:")).collect();
+    let expected = [
+        // &out method -> plain funcdef / plain method -> &out funcdef
+        "Main.as:37",
+        "Main.as:39",
+        // free functions, both polarities
+        "Main.as:41",
+        "Main.as:42",
+        // &in enforced exactly, both polarities
+        "Main.as:44",
+        "Main.as:45",
+        // object-typed &inout funcdef vs &out method
+        "Main.as:53",
+    ];
+    assert_eq!(
+        errors.len(),
+        expected.len(),
+        "expected exactly {} errors; stdout={stdout:?} stderr={stderr:?}",
+        expected.len()
+    );
+    for line in expected {
+        assert!(
+            errors.iter().any(|e| e.contains(line)),
+            "mode mismatch on {line} must be flagged; stdout={stdout:?}"
+        );
+    }
+    // Exact matches (47/48/50/51/55) must stay silent — covered by the
+    // exact count above, but name them for the failure message.
+    for line in [
+        "Main.as:47",
+        "Main.as:48",
+        "Main.as:50",
+        "Main.as:51",
+        "Main.as:55",
+    ] {
+        assert!(
+            !errors.iter().any(|e| e.contains(line)),
+            "exact mode match on {line} must stay silent; stdout={stdout:?}"
+        );
+    }
+}
+
+/// B023: wrong-signature / non-function args passed directly into typedb
+/// funcdef-typed parameter slots must be rejected (`NoMatchingSignatures`,
+/// like the game's `No matching signatures to '...'`). Game ground truth
+/// (RemoteBuild probe 2026-08-29, OP 1.29.5): the seven REJECT lines error
+/// in-game — UI::InputText / InputTextMultiline callback slots (wrong-sig
+/// fn, string literal, wrong-typed funcdef var), startnew, UI::NodTree and
+/// Dev::InterceptProc — while every matching form (free fn, ctor-wrapped
+/// fn, right-typed var, void() into startnew, matching member callbacks)
+/// compiles clean.
+#[test]
+fn check_command_issue_repro_b023_funcdef_slot_signatures() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b023-funcdef-slot-signatures");
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains("error:")).collect();
+    let expected = [
+        "Main.as:23", // InputText + wrong-sig fn
+        "Main.as:25", // InputText + string literal
+        "Main.as:27", // InputText + wrong-typed funcdef var
+        "Main.as:29", // InputTextMultiline + wrong-sig fn
+        "Main.as:31", // startnew + wrong-sig fn
+        "Main.as:33", // NodTree + wrong-sig fn
+        "Main.as:35", // InterceptProc + wrong-sig fn
+    ];
+    assert_eq!(
+        errors.len(),
+        expected.len(),
+        "expected exactly {} errors; stdout={stdout:?} stderr={stderr:?}",
+        expected.len()
+    );
+    for line in expected {
+        assert!(
+            errors.iter().any(|e| e.contains(line)),
+            "slot misuse on {line} must be flagged; stdout={stdout:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains(line) && e.contains("No matching signatures")),
+            "{line} must be a NoMatchingSignatures diagnostic; stdout={stdout:?}"
+        );
+    }
+    // Legal forms must stay silent (lines 37-43).
+    for line in [
+        "Main.as:37",
+        "Main.as:38",
+        "Main.as:39",
+        "Main.as:41",
+        "Main.as:42",
+        "Main.as:43",
+    ] {
+        assert!(
+            !errors.iter().any(|e| e.contains(line)),
+            "matching callback on {line} must stay silent; stdout={stdout:?}"
+        );
+    }
+}
+
 /// GH #49: AngelScript has no implicit nat3 -> int3 conversion — the game
 /// rejects both the implicit init and the int3(nat3) constructor form.
 /// Ground truth quoted in the issue (tm-editor-plus-plus). Fixed — must flag.

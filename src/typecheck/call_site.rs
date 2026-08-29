@@ -6,6 +6,7 @@
 //! truth** shared with signature help via [`crate::typecheck::global_scope::GlobalScope::callables_free`].
 
 use super::global_scope::OverloadSig;
+use super::repr::ParamMode;
 
 /// Result of binding one call argument to a parameter slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +93,7 @@ mod tests {
             param_names: names.iter().map(|n| Some((*n).to_string())).collect(),
             param_types: names.iter().map(|_| "int".to_string()).collect(),
             param_out: names.iter().map(|_| false).collect(),
+            param_modes: names.iter().map(|_| ParamMode::Value).collect(),
             min_args: min,
             return_type: "void".into(),
         }

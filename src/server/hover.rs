@@ -216,6 +216,7 @@ fn format_workspace_symbol(sym: &crate::symbols::scope::Symbol) -> Option<String
         SymbolKind::Funcdef {
             return_type,
             params,
+            is_typedef: _,
         } => {
             let params_str: Vec<String> = params
                 .iter()
