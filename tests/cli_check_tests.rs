@@ -607,6 +607,8 @@ fn check_command_rejects_unknown_selector_values() {
     for (flag, value, needle) in [
         ("--game-target", "BANANA", "unknown --game-target value"),
         ("--signature", "banana", "unknown --signature value"),
+        ("--os", "banana", "unknown --os value"),
+        ("--arch", "banana", "unknown --arch value"),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
             .arg("check")
@@ -667,6 +669,252 @@ void Main() {}
     assert!(
         stderr.contains("game_target"),
         "expected a warning pointing at game_target; stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+// ── B028: `--os` / `--arch` selectors and build-flag narrowing ──────────
+//
+// The live game (2026-08-29 Wine probe, tests/fixtures/issue-repros/
+// b028-*-probe) defines exactly one OS (WINDOWS + WINDOWS_WINE under Wine)
+// and one arch (MANIA64); SERVER/LOGS/HAS_DEV/DEVELOPER are off on a
+// client. The LSP used to define all of them at once (B028).
+
+/// B028: `--os linux` models a native Linux run — LINUX live, WINDOWS dead —
+/// and beats a workspace `os_target` (same ladder as `--game-target`).
+#[test]
+fn check_command_os_flag_selects_os_defines() {
+    let root = make_temp_plugin("os-flag");
+    let home = isolated_home("os-flag");
+    fs::write(
+        root.join(".openplanet-lsp.toml"),
+        "os_target = \"windows\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if WINDOWS
+MissingType windows_should_be_dead_under_linux;
+#endif
+
+#if !LINUX
+MissingType linux_should_be_live_under_linux;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--os")
+        .arg("linux")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "--os linux must make LINUX live and WINDOWS dead; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// B028: `--arch 32` flips the arch pair — MANIA32 live, MANIA64 dead.
+/// Never both (that is the reported failure mode).
+#[test]
+fn check_command_arch_flag_selects_arch_defines() {
+    let root = make_temp_plugin("arch-flag");
+    let home = isolated_home("arch-flag");
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if MANIA64
+MissingType sixty_four_should_be_dead_on_32;
+#endif
+
+#if !MANIA32
+MissingType thirty_two_should_be_live_on_32;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--arch")
+        .arg("32")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "--arch 32 must make MANIA32 live and MANIA64 dead; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// B028 (2026-08-29 Wine probe ground truth): `--os wine` defines WINDOWS
+/// and WINDOWS_WINE TOGETHER (the game under Wine has both), with LINUX and
+/// MANIA32 dead.
+#[test]
+fn check_command_os_wine_defines_windows_and_wine_together() {
+    let root = make_temp_plugin("os-wine");
+    let home = isolated_home("os-wine");
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if !WINDOWS_WINE
+MissingType wine_should_be_defined;
+#endif
+
+#if !WINDOWS
+MissingType windows_rides_along_with_wine;
+#endif
+
+#if LINUX
+MissingType linux_should_be_dead_under_wine;
+#endif
+
+#if MANIA32
+MissingType thirty_two_should_be_dead_by_default;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--os")
+        .arg("wine")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "--os wine must define WINDOWS + WINDOWS_WINE and nothing else; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// B028: `--os` is the top of the ladder — it beats a workspace
+/// `os_target`, like `--signature` beats `signature_mode` (GH #64).
+#[test]
+fn check_command_os_flag_beats_config_os_target() {
+    let root = make_temp_plugin("os-flag-precedence");
+    let home = isolated_home("os-flag-precedence");
+    fs::write(root.join(".openplanet-lsp.toml"), "os_target = \"wine\"\n").unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if WINDOWS
+MissingType flag_did_not_win;
+#endif
+
+#if !LINUX
+MissingType linux_should_be_live;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--os")
+        .arg("linux")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "--os must beat config os_target; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// B028 decision (a): the build flags default ON (no default churn) and are
+/// narrowed via config (`server = false`, `arch_target`), while `defines`
+/// still gets the last word — `defines = ["SERVER"]` re-enables SERVER in
+/// the narrowed profile. That is the whole narrowing flow end-to-end.
+#[test]
+fn check_command_defines_re_enable_server_under_narrowed_profile() {
+    let root = make_temp_plugin("narrowed-profile-server");
+    let home = isolated_home("narrowed-profile-server");
+    fs::write(
+        root.join(".openplanet-lsp.toml"),
+        "os_target = \"linux\"\narch_target = \"32\"\nserver = false\ndefines = [\"SERVER\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if !SERVER
+MissingType server_should_be_re_enabled_by_defines;
+#endif
+
+#if MANIA64
+MissingType sixty_four_should_be_dead_on_32;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "defines = [\"SERVER\"] must re-enable SERVER under the narrowed \
+         profile; stdout={stdout:?} stderr={stderr:?}"
     );
 
     let _ = fs::remove_dir_all(root);
@@ -1300,6 +1548,94 @@ fn check_command_issue_repro_b025_method_references_at_funcdef_ctors() {
         errors.iter().any(|l| l.contains("Main.as:53")),
         "property reference must be flagged; stdout={stdout:?}"
     );
+}
+
+/// B028 regression: the same function declared in `#if MANIA32` and
+/// `#if MANIA64` (and `#if WINDOWS` / `#if LINUX`) branches. The LSP used to
+/// define both sides of each pair at once, so the second declaration was a
+/// phantom duplicate-declaration error. Game ground truth (RemoteBuild probe
+/// 2026-08-29): CLEAN — the game defines one arch and one OS and compiles a
+/// single branch. The default profile (windows + 64) must match that.
+#[test]
+fn check_command_issue_repro_b028_dup_decl_across_arch_os_is_clean() {
+    let (ok, stdout, stderr) = run_issue_repro_typedb("b028-dup-decl-arch-os");
+    assert!(
+        ok && stdout.contains("0 diagnostics"),
+        "b028-dup-decl-arch-os must be clean under the default profile \
+         (windows + 64); stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+/// B028 probe fixture: one positive/negative trap per OS/arch flag. Game
+/// ground truth (RemoteBuild probe 2026-08-29): CLEAN with WINDOWS,
+/// WINDOWS_WINE and MANIA64 defined and LINUX/MANIA32 undefined — so the
+/// LSP must also be clean when `--os wine` models the live game exactly.
+#[test]
+fn check_command_issue_repro_b028_os_arch_probe_matches_game_with_os_wine() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/issue-repros/b028-os-arch-defines-probe");
+    let typedb = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+    let home = isolated_home("b028-os-arch-probe");
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--typedb-dir")
+        .arg(&typedb)
+        .arg("--os")
+        .arg("wine")
+        .arg(&fixture)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "b028-os-arch-defines-probe must be clean under --os wine (the \
+         measured game set); stdout={stdout:?} stderr={stderr:?}"
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+/// B028 probe fixture for the build-shape flags: SERVER/LOGS/HAS_DEV/
+/// DEVELOPER traps under `#if FLAG`. Game ground truth (RemoteBuild probe
+/// 2026-08-29): CLEAN — none of the four is defined on a normal client.
+/// Per decision (a) the LSP defaults them ON (no default churn), so matching
+/// the game's client profile takes the `defines` removals a real user would
+/// write — which must yield the same clean verdict as the game.
+#[test]
+fn check_command_issue_repro_b028_build_flag_probe_matches_client_profile() {
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/issue-repros/b028-build-flag-probe");
+    let typedb = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+    let home = isolated_home("b028-build-flag-probe");
+    fs::write(
+        home.join(".config/openplanet-lsp/config.toml"),
+        "defines = [\"-SERVER\", \"-LOGS\", \"-HAS_DEV\", \"-DEVELOPER\"]\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--typedb-dir")
+        .arg(&typedb)
+        .arg(&fixture)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "b028-build-flag-probe must match the game's client profile once \
+         the four build flags are narrowed away; stdout={stdout:?} \
+         stderr={stderr:?}"
+    );
+    let _ = fs::remove_dir_all(home);
 }
 
 /// GH #49: AngelScript has no implicit nat3 -> int3 conversion — the game

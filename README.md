@@ -63,9 +63,28 @@ default_mode = "tui"   # or "lsp"
 # errors). CLI `--signature MODE` wins over this.
 # signature_mode = "developer"
 
+# Host OS / game arch whose defines are live. Exactly one OS and one arch
+# are live in a real process, and the defaults model a windows/64 client:
+#   windows -> WINDOWS          (default)
+#   wine    -> WINDOWS, WINDOWS_WINE   (as the game defines under Wine)
+#   linux   -> LINUX
+#   64 -> MANIA64   (default)      32 -> MANIA32
+# CLI `--os OS` / `--arch ARCH` win over this.
+# os_target = "windows"
+# arch_target = "64"
+
+# Build-shape defines (DEVELOPER, HAS_DEV, LOGS, SERVER), all default true
+# so today's analysis set is unchanged; set false (or `--no-server` etc.)
+# to narrow the run toward a real client build, which has none of them.
+# developer_build = true
+# has_dev = true
+# logs = true
+# server = true
+
 # Extra preprocessor defines. ADDED to what game_target derives (TMNEXT,
 # WINDOWS, MANIA64, SIG_*, ...) and to info.toml [script].defines — listing
-# DEV here no longer drops TMNEXT and does not blank out the always-on flags.
+# DEV here no longer drops TMNEXT and does not blank out the target-derived
+# set (game platform, OS/arch, signature level, build flags).
 # Prefix an entry with `-` or `!` to turn a define OFF (`-LOGS`); removals are
 # applied after additions, so a removal wins. Entries ACCUMULATE across layers
 # (parent config, per-root config, user global, initializationOptions), so a

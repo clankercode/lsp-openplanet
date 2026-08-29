@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
-use crate::config::{ErrorGroup, LspConfig, SignatureMode, UnusedLevel, UserPrefs};
+use crate::config::{
+    ArchTarget, ErrorGroup, LspConfig, OsTarget, SignatureMode, UnusedLevel, UserPrefs,
+};
 use crate::server::diagnostics;
 use crate::typedb::{TypeDbMeta, TypeIndex};
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
@@ -66,6 +68,25 @@ OPTIONS:
                         Aliases: dev, reg, and the SIG_* token itself. Same
                         key as `signature_mode` in .openplanet-lsp.toml;
                         the flag wins.
+    --os OS             Host OS whose OS defines are live: windows
+                        (default) | wine | linux. Wine defines BOTH
+                        WINDOWS and WINDOWS_WINE (as the game does under
+                        Wine); linux defines LINUX. Exactly one OS is
+                        live, as in a real process. Same key as `os_target`
+                        in .openplanet-lsp.toml; the flag wins.
+    --arch ARCH         Game architecture whose MANIA* define is live:
+                        64 (default) | 32 — never both. Same key as
+                        `arch_target` in .openplanet-lsp.toml; the flag
+                        wins.
+    --developer-build / --no-developer-build
+    --has-dev / --no-has-dev
+    --logs / --no-logs
+    --server / --no-server
+                        Build-shape defines (DEVELOPER, HAS_DEV, LOGS,
+                        SERVER), all ON by default; the negative spelling
+                        narrows the run toward a real client profile
+                        (a client has none of them). Same keys in
+                        .openplanet-lsp.toml; the flags win.
     --define NAME       Add a preprocessor define on top of info.toml /
                         config (short form -D; repeatable). Use to check
                         branches the staged build enables but the source
@@ -191,6 +212,20 @@ pub struct CheckOptions {
     /// GH #64: `--signature developer|school|regular|official` for one run.
     /// `None` = flag absent → config ladder (`signature_mode`).
     pub signature_mode_flag: Option<SignatureMode>,
+    /// B028: `--os windows|wine|linux` for one run. `None` = flag absent →
+    /// config ladder (`os_target`). Wine defines WINDOWS + WINDOWS_WINE
+    /// together, matching the live game (probe 2026-08-29).
+    pub os_flag: Option<OsTarget>,
+    /// B028: `--arch 64|32` for one run. `None` = flag absent → config
+    /// ladder (`arch_target`).
+    pub arch_flag: Option<ArchTarget>,
+    /// B028: build-shape flag selectors (`--developer-build` /
+    /// `--no-developer-build`, …). `None` = flag absent → config ladder,
+    /// default true (decision (a)).
+    pub developer_build_flag: Option<bool>,
+    pub has_dev_flag: Option<bool>,
+    pub logs_flag: Option<bool>,
+    pub server_flag: Option<bool>,
     /// `--errors last|first|off`. `None` = flag absent → config ladder
     /// (`errors` in workspace then user config, default last). An explicit
     /// flag wins over both. Human formats only; JSON stays analysis order.
@@ -439,6 +474,70 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                     })?);
                 i += used;
             }
+            _ if arg == "--os" || arg.starts_with("--os=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--os",
+                    "--os requires a value (windows, wine, or linux)",
+                    false,
+                )?;
+                options.os_flag = Some(OsTarget::parse(value).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "unknown --os value '{value}' (expected {})",
+                        OsTarget::CHOICES.join(", ")
+                    ))
+                })?);
+                i += used;
+            }
+            _ if arg == "--arch" || arg.starts_with("--arch=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--arch",
+                    "--arch requires a value (64 or 32)",
+                    false,
+                )?;
+                options.arch_flag = Some(ArchTarget::parse(value).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "unknown --arch value '{value}' (expected {})",
+                        ArchTarget::CHOICES.join(", ")
+                    ))
+                })?);
+                i += used;
+            }
+            "--developer-build" => {
+                options.developer_build_flag = Some(true);
+                i += 1;
+            }
+            "--no-developer-build" => {
+                options.developer_build_flag = Some(false);
+                i += 1;
+            }
+            "--has-dev" => {
+                options.has_dev_flag = Some(true);
+                i += 1;
+            }
+            "--no-has-dev" => {
+                options.has_dev_flag = Some(false);
+                i += 1;
+            }
+            "--logs" => {
+                options.logs_flag = Some(true);
+                i += 1;
+            }
+            "--no-logs" => {
+                options.logs_flag = Some(false);
+                i += 1;
+            }
+            "--server" => {
+                options.server_flag = Some(true);
+                i += 1;
+            }
+            "--no-server" => {
+                options.server_flag = Some(false);
+                i += 1;
+            }
             "--watch" => {
                 options.watch = true;
                 i += 1;
@@ -581,6 +680,24 @@ fn check_init_options(options: &CheckOptions) -> Option<serde_json::Value> {
             "signature_mode".into(),
             serde_json::Value::from(mode.as_str()),
         );
+    }
+    if let Some(os) = options.os_flag {
+        map.insert("os_target".into(), serde_json::Value::from(os.as_str()));
+    }
+    if let Some(arch) = options.arch_flag {
+        map.insert("arch_target".into(), serde_json::Value::from(arch.as_str()));
+    }
+    if let Some(v) = options.developer_build_flag {
+        map.insert("developer_build".into(), serde_json::Value::from(v));
+    }
+    if let Some(v) = options.has_dev_flag {
+        map.insert("has_dev".into(), serde_json::Value::from(v));
+    }
+    if let Some(v) = options.logs_flag {
+        map.insert("logs".into(), serde_json::Value::from(v));
+    }
+    if let Some(v) = options.server_flag {
+        map.insert("server".into(), serde_json::Value::from(v));
     }
     (!map.is_empty()).then_some(serde_json::Value::Object(map))
 }
@@ -1804,6 +1921,71 @@ mod tests {
         );
     }
 
+    /// B028: `--os` / `--arch` select the OS/arch define pairs for one run,
+    /// same shape as `--game-target` / `--signature`.
+    #[test]
+    fn parse_check_args_os_and_arch_flags() {
+        let opts = parse_check_args(&["--os".into(), "wine".into(), ".".into()]).unwrap();
+        assert_eq!(opts.os_flag, Some(OsTarget::Wine));
+        assert_eq!(opts.arch_flag, None, "absent flag stays None");
+
+        let opts = parse_check_args(&["--os=linux".into(), ".".into()]).unwrap();
+        assert_eq!(opts.os_flag, Some(OsTarget::Linux));
+
+        let opts = parse_check_args(&["--os".into(), "Windows".into(), ".".into()]).unwrap();
+        assert_eq!(opts.os_flag, Some(OsTarget::Windows), "case-insensitive");
+
+        let opts = parse_check_args(&["--arch".into(), "32".into(), ".".into()]).unwrap();
+        assert_eq!(opts.arch_flag, Some(ArchTarget::Arch32));
+
+        let opts = parse_check_args(&["--arch=64".into(), ".".into()]).unwrap();
+        assert_eq!(opts.arch_flag, Some(ArchTarget::Arch64));
+
+        let opts = parse_check_args(&[".".to_string()]).unwrap();
+        assert_eq!(opts.os_flag, None);
+        assert_eq!(opts.arch_flag, None);
+
+        let msg = usage_msg(&["--os", "banana", "."]);
+        assert!(msg.contains("unknown --os value"), "{msg}");
+        assert!(msg.contains("wine"), "error must list valid targets: {msg}");
+
+        let msg = usage_msg(&["--arch", "banana", "."]);
+        assert!(msg.contains("unknown --arch value"), "{msg}");
+        assert!(msg.contains("64"), "error must list valid arches: {msg}");
+    }
+
+    /// B028: build-shape flag pairs (`--server` / `--no-server`, …). A bare
+    /// positive flag exists so an explicit ON can beat a config `false`.
+    #[test]
+    fn parse_check_args_build_flag_pairs() {
+        let opts = parse_check_args(&["--no-server".into(), "--logs".into(), ".".into()]).unwrap();
+        assert_eq!(opts.server_flag, Some(false));
+        assert_eq!(opts.logs_flag, Some(true));
+
+        let opts = parse_check_args(&[
+            "--server".into(),
+            "--no-logs".into(),
+            "--has-dev".into(),
+            "--no-developer-build".into(),
+            ".".into(),
+        ])
+        .unwrap();
+        assert_eq!(opts.server_flag, Some(true));
+        assert_eq!(opts.logs_flag, Some(false));
+        assert_eq!(opts.has_dev_flag, Some(true));
+        assert_eq!(opts.developer_build_flag, Some(false));
+
+        let opts = parse_check_args(&[".".to_string()]).unwrap();
+        for flag in [
+            opts.server_flag,
+            opts.logs_flag,
+            opts.has_dev_flag,
+            opts.developer_build_flag,
+        ] {
+            assert_eq!(flag, None, "absent build flags stay None");
+        }
+    }
+
     /// GH #62 guard: neither flag may swallow a following option, and both
     /// report the "requires a value" error when final.
     #[test]
@@ -1817,8 +1999,12 @@ mod tests {
                 &["--signature", "--watch", "."][..],
                 "--signature requires a value",
             ),
+            (&["--os", "--watch", "."][..], "--os requires a value"),
+            (&["--arch", "--watch", "."][..], "--arch requires a value"),
             (&["--game-target"][..], "--game-target requires a value"),
             (&["--signature"][..], "--signature requires a value"),
+            (&["--os"][..], "--os requires a value"),
+            (&["--arch"][..], "--arch requires a value"),
             (
                 &["--game-target=--watch", "."][..],
                 "--game-target requires a value",
@@ -1827,6 +2013,8 @@ mod tests {
                 &["--signature=--watch", "."][..],
                 "--signature requires a value",
             ),
+            (&["--os=--watch", "."][..], "--os requires a value"),
+            (&["--arch=--watch", "."][..], "--arch requires a value"),
         ] {
             let msg = usage_msg(args);
             assert!(msg.contains(needle), "{args:?} → {msg}");

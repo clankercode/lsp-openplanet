@@ -1,0 +1,5 @@
+[meta]
+name     = "B028 - duplicate declaration across arch/OS branches"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
