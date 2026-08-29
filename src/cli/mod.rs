@@ -96,6 +96,7 @@ OPTIONS:
                         (define_matrix in .openplanet-lsp.toml) back to a
                         single-combo run.
     --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
+                        (plus Openplanet.h, if present)
     --no-typedb         Run without Openplanet/Nadeo type database files
     --no-gitignore      Check .as files that .gitignore excludes. Discovery
                         honors .gitignore at or below the plugin root by

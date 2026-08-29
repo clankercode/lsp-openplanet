@@ -464,9 +464,11 @@ impl<'a> GlobalScope<'a> {
         // type; a bare value name of one is not a symbol. Game ground truth,
         // RemoteBuild probe, OP 1.29.5, on the exhaustive fixture
         // `tests/fixtures/issue-repros/b044-anon-enum-value-names`:
-        // `No matching symbol 'HyperTnL'` and 257 siblings, 258 of its 261
-        // names. The 3 the game accepts are a separate, documented gap —
-        // see the fixture header and `todo-false-positives.txt`.
+        // `No matching symbol 'HyperTnL'` and 257 siblings — all 258 of its
+        // names, with no residual. The 3 the game accepted (`DoubleJump`,
+        // `Jump`, `TechJump`) were never anonymous-only: they belong to the
+        // module-level enum `ESceneCharVisNotice`, which only `Openplanet.h`
+        // names. B046 taught the loader to read it, and they left this set.
         //
         // This is the whole seam. Two things keep it from over-rejecting:
         //   * a value name that ALSO appears in a named enum is still found
@@ -1643,9 +1645,16 @@ mod tests {
     /// the whole DB rather than over hand-picked names, so a regression
     /// anywhere in the enum index shows up here.
     ///
-    /// 261 is the exact size of that set, and it is the list
+    /// 258 is the exact size of that set, and it is the list
     /// `scripts/gen_b044_probe.py` generates and the game was probed against.
     /// Refreshing the type DB moves it: regenerate the fixture and re-probe.
+    ///
+    /// It was 261 until B046. `ESceneCharVisNotice` is a module-level enum
+    /// no dump member is typed by, so only `Openplanet.h` names it; once the
+    /// loader reads the header, its 3 values that the game accepts
+    /// (`DoubleJump`, `Jump`, `TechJump`) land in the NAMED half and leave
+    /// the narrowed set. The narrowing itself is unchanged — the enum they
+    /// belong to stopped being invisible.
     #[test]
     fn the_narrowing_touches_only_anonymous_only_value_names() {
         use std::collections::HashSet;
@@ -1682,7 +1691,7 @@ mod tests {
         narrowed.sort_unstable();
         assert_eq!(
             narrowed.len(),
-            261,
+            258,
             "the narrowed set changed size — regenerate the B044 probe fixture \
              and re-probe the game"
         );
@@ -1749,6 +1758,100 @@ mod tests {
         assert!(
             scope.has_global_ident("VCenter2"),
             "a value shared with a named enum must keep resolving"
+        );
+    }
+
+    /// B046: a bare value of a MODULE-LEVEL engine enum resolves.
+    ///
+    /// The game accepts these (RemoteBuild probe, OP 1.29.5, 2026-08-30:
+    /// `DoubleJump`, `TechJump`, `BulletHit`, `Land` all compile), and it
+    /// accepts them because every engine namespace is `using namespace`'d —
+    /// there is no namespace to qualify them with. Before B046 the LSP
+    /// rejected all 55 value names these two enums carry alone.
+    #[test]
+    fn bare_value_of_a_module_level_enum_resolves() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for name in ["ESceneCharVisNotice", "ESceneVehicleVisEvent"] {
+            let info = index
+                .lookup_source_enum(name)
+                .unwrap_or_else(|| panic!("fixture guard: {name} must be indexed"));
+            assert!(!info.anonymous, "{name} is spellable, so not anonymous");
+            for (value, _) in &info.values {
+                assert!(
+                    scope.has_global_ident(value),
+                    "`{value}` is a value of the module-level enum {name}"
+                );
+            }
+        }
+    }
+
+    /// B046: the enum NAME is a type the game accepts unqualified, so the
+    /// resolver must take it as one.
+    #[test]
+    fn a_module_level_enum_name_resolves_as_a_type() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for name in ["ESceneCharVisNotice", "ESceneVehicleVisEvent"] {
+            assert!(scope.has_enum(name), "`{name}` must resolve as an enum");
+            assert!(scope.resolves(name), "`{name}` must resolve as a type");
+        }
+    }
+
+    /// B046 fence: no namespace is invented for a module-level enum.
+    ///
+    /// The game rejects `Scene::ESceneCharVisNotice` with `Namespace 'Scene'
+    /// doesn't exist.` and `Enums::ESceneCharVisNotice` likewise, so neither
+    /// spelling may become a key. `has_enum` still answers true for them via
+    /// the generic B007 tail fallback, which is deliberately permissive for
+    /// EVERY enum and predates this ticket; what is pinned here is that the
+    /// INDEX carries no such entry, which is what a namespace-inventing fix
+    /// would have added.
+    #[test]
+    fn no_namespace_is_invented_for_a_module_level_enum() {
+        let index = typedb_fixture_index();
+        for qualified in [
+            "Scene::ESceneCharVisNotice",
+            "Enums::ESceneCharVisNotice",
+            "Scene::ESceneVehicleVisEvent",
+            "Enums::ESceneVehicleVisEvent",
+        ] {
+            assert!(
+                index.lookup_enum(qualified).is_none(),
+                "`{qualified}` is not a name the game accepts"
+            );
+        }
+        assert!(!index.namespace_exists("Enums"));
+    }
+
+    /// B046 fence: a value a module-level enum SHARES with an enum the dump
+    /// already carries keeps resolving, and the dump's enum is untouched.
+    /// Guards against a fix that only works by shadowing.
+    #[test]
+    fn a_value_shared_with_a_dump_enum_still_resolves_after_b046() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // `Turbo` is carried by both module-level enums AND by enums the
+        // dump has. (In-game a bare `Turbo` is actually ambiguous — "Found
+        // multiple matching enum values" — which the LSP does not model.
+        // That is a pre-existing false NEGATIVE, out of scope for B046.)
+        for value in ["Turbo", "WallJump", "FreeWheeling"] {
+            assert!(
+                scope.has_global_ident(value),
+                "`{value}` must keep resolving"
+            );
+        }
+        assert!(
+            index
+                .lookup_source_enum("ESceneCharVisNotice")
+                .is_some_and(|i| i.values.iter().any(|(v, _)| v == "Turbo")),
+            "fixture guard: the module-level enum carries `Turbo`"
         );
     }
 

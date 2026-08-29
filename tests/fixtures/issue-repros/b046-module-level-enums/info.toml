@@ -1,0 +1,7 @@
+[meta]
+name     = "Issue Repro B046 - Module Level Engine Enums"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]

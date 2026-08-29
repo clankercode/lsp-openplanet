@@ -37,7 +37,10 @@ fn tmp_dir(tag: &str) -> PathBuf {
 /// Temp dir holding a copy of both fixture DBs — stands in for an install.
 fn tmp_install(tag: &str) -> PathBuf {
     let dir = tmp_dir(tag);
-    for name in ["OpenplanetCore.json", "OpenplanetNext.json"] {
+    // `Openplanet.h` is part of an install (B046): it is the only source for
+    // the module-level enums the dump cannot express, so a copy that omits it
+    // is not byte-equivalent to the fixture and diffs non-empty.
+    for name in ["OpenplanetCore.json", "OpenplanetNext.json", "Openplanet.h"] {
         fs::copy(fixture_typedb().join(name), dir.join(name)).unwrap();
     }
     dir
@@ -511,7 +514,7 @@ fn typedb_diff_defaults_new_dir_to_auto_detected_install() {
     let home = tmp_dir("diff-home");
     let install = home.join("OpenplanetNext");
     fs::create_dir_all(&install).unwrap();
-    for name in ["OpenplanetCore.json", "OpenplanetNext.json"] {
+    for name in ["OpenplanetCore.json", "OpenplanetNext.json", "Openplanet.h"] {
         fs::copy(fixture_typedb().join(name), install.join(name)).unwrap();
     }
     let mut cmd = bin();
@@ -871,16 +874,16 @@ fn typedb_refresh_yes_copies_then_is_idempotent() {
     );
     assert_eq!(r.code, Some(0), "{}", r.all());
     assert!(
-        r.stdout.contains("wrote 2 files"),
-        "expected a write report: {}",
+        r.stdout.contains("wrote 3 files"),
+        "expected a write report (the pair plus Openplanet.h, B046): {}",
         r.stdout
     );
     assert_eq!(
         db_names(&into),
-        vec!["OpenplanetCore.json", "OpenplanetNext.json"],
-        "exactly the two known filenames, nothing else"
+        vec!["Openplanet.h", "OpenplanetCore.json", "OpenplanetNext.json"],
+        "exactly the three known filenames, nothing else"
     );
-    for name in ["OpenplanetCore.json", "OpenplanetNext.json"] {
+    for name in ["OpenplanetCore.json", "OpenplanetNext.json", "Openplanet.h"] {
         assert_eq!(
             fs::read(install.join(name)).unwrap(),
             fs::read(into.join(name)).unwrap(),
@@ -908,7 +911,7 @@ fn typedb_refresh_yes_copies_then_is_idempotent() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("0 of 2 files differ"),
+        r.stdout.contains("0 of 3 files differ"),
         "an idempotent run must say nothing differs: {}",
         r.stdout
     );
@@ -999,7 +1002,7 @@ fn typedb_refresh_first_harvest_into_empty_dir() {
         "an empty destination should be called out: {}",
         r.stdout
     );
-    assert!(r.stdout.contains("2 of 2 files differ"), "{}", r.stdout);
+    assert!(r.stdout.contains("3 of 3 files differ"), "{}", r.stdout);
     assert!(db_names(&into).is_empty(), "dry run must write nothing");
 }
 
@@ -1119,7 +1122,12 @@ fn typedb_refresh_leaves_unrelated_destination_files_alone() {
     );
     assert_eq!(
         db_names(&into),
-        vec!["OpenplanetCore.json", "OpenplanetNext.json", "README.md"]
+        vec![
+            "Openplanet.h",
+            "OpenplanetCore.json",
+            "OpenplanetNext.json",
+            "README.md"
+        ]
     );
 }
 

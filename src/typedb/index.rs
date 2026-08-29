@@ -2,7 +2,12 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use super::core_format::{CoreClass, CoreDatabase};
+use super::header_format::HeaderDatabase;
 use super::nadeo_format::{NadeoDatabase, NadeoEnumEntry, NadeoMemberKind, NadeoType};
+
+/// The engine header, read from the same directory as the game dump for the
+/// module-level enums the dump cannot express (B046).
+pub const HEADER_FILENAME: &str = "Openplanet.h";
 
 /// Merged type index combining Core API and Nadeo game engine types.
 pub struct TypeIndex {
@@ -132,6 +137,11 @@ pub struct FuncdefInfo {
 pub enum TypeSource {
     Core,
     Nadeo,
+    /// `Openplanet.h` — only ever a module-level enum the dump's shape
+    /// cannot express (B046). Never a type, so the `is_nadeo_type` /
+    /// `nadeo_member_list_trusted` member-completeness rules, which ask
+    /// about types, are unaffected by this variant.
+    Header,
 }
 
 /// Version stamps + top-level shape of a type-DB JSON file (GH #59).
@@ -243,12 +253,49 @@ impl TypeIndex {
         Self::default()
     }
 
+    /// Load the type database from a co-located set of Openplanet files.
+    ///
+    /// `Openplanet.h` is read from the same directory as the game dump, and
+    /// is OPTIONAL: it supplies only the module-level enums the dump's shape
+    /// cannot express (B046), so an install without it loads exactly as it
+    /// did before. Deriving the path here rather than taking a third
+    /// argument keeps every existing caller — `--typedb-dir`, `typedb
+    /// diff`, the server, the tests — reading the header for free, since
+    /// all of them already point at a directory holding both JSONs.
     pub fn load(core_path: &Path, nadeo_path: &Path) -> Result<Self, String> {
+        let header_path = nadeo_path.parent().map(|d| d.join(HEADER_FILENAME));
+        let header = header_path
+            .filter(|p| p.is_file())
+            .and_then(|path| HeaderDatabase::load_from_file(&path).ok());
+        let mut index = Self::load_with_header(core_path, nadeo_path, None)?;
+        if let Some(header) = header {
+            index.add_header(&header);
+            index.build_short_type_index();
+        }
+        Ok(index)
+    }
+
+    /// [`Self::load`] with the header named explicitly. `None` skips it.
+    ///
+    /// A header that fails to READ is an error the caller sees; normal
+    /// [`Self::load`] treats its co-located optional header as best-effort.
+    /// A header
+    /// that parses to nothing is not, because the parser degrades to an
+    /// empty result rather than guessing (see [`HeaderDatabase::parse`]).
+    pub fn load_with_header(
+        core_path: &Path,
+        nadeo_path: &Path,
+        header_path: Option<&Path>,
+    ) -> Result<Self, String> {
         let mut index = Self::new();
         let core = CoreDatabase::load_from_file(core_path)?;
         index.add_core(&core);
         let nadeo = NadeoDatabase::load_from_file(nadeo_path)?;
         index.add_nadeo(&nadeo);
+        if let Some(path) = header_path {
+            let header = HeaderDatabase::load_from_file(path)?;
+            index.add_header(&header);
+        }
         index.build_short_type_index();
         Ok(index)
     }
@@ -628,6 +675,79 @@ impl TypeIndex {
             key = format!("{}#{}", preferred_key, nth);
         }
         self.insert_nadeo_enum(key, values, true);
+    }
+
+    /// Index the module-level enums `Openplanet.h` declares that the dump
+    /// could not express (B046). Must run AFTER [`Self::add_nadeo`], whose
+    /// result decides what is left to add.
+    ///
+    /// # The header is a superset — prefer the dump
+    ///
+    /// 57 of the 59 module-level enums are already indexed, because some
+    /// class member is typed by them and carries the enum inline, which
+    /// [`Self::add_nadeo`] keys `Module::EName`. Re-adding those under a
+    /// bare key would not overwrite anything — it would DUPLICATE them under
+    /// a second key, inflating `enum_count`, putting two FQNs in every
+    /// affected short-name bucket, and so moving the lexicographically-first
+    /// pick that `resolve_unqualified` depends on. So an enum whose name
+    /// already names an indexed enum is skipped, and the dump stays the
+    /// authority for everything it can reach. On OP 1.29.5 that admits
+    /// exactly `ESceneCharVisNotice` and `ESceneVehicleVisEvent`.
+    ///
+    /// Matching on the TAIL rather than the whole key is what makes the
+    /// comparison meaningful: the dump keys these `Module::EName`, and the
+    /// module is precisely the part the header does not know.
+    ///
+    /// # No namespace
+    ///
+    /// These are keyed by their bare name, with `namespace: None`, because
+    /// that is what the game accepts. A live RemoteBuild probe (OP 1.29.5,
+    /// 2026-08-30) takes `ESceneCharVisNotice` as a type and `DoubleJump`
+    /// bare, and rejects both `Scene::ESceneCharVisNotice` and
+    /// `Enums::ESceneCharVisNotice` with `Namespace '…' doesn't exist.`
+    /// Nothing here infers a namespace from a name prefix.
+    ///
+    /// # Spellable, so `anonymous: false`
+    ///
+    /// Unlike B016's synthesized keys, this key is a name the game accepts.
+    /// The entry therefore joins every source-facing surface — the
+    /// short-name index, `namespace_members`, hover, completion, and the
+    /// bare-value scan behind `source_enums_iter` — which is what makes the
+    /// 55 false-positive value names resolve.
+    fn add_header(&mut self, db: &HeaderDatabase) {
+        // This is exactly the source type-name universe: `build_short_type_index`
+        // combines types, non-synthetic enums, and funcdefs. Functions are
+        // intentionally absent because their names are never resolved through
+        // a type-name bucket (see that method's field documentation).
+        let indexed_source_type_names: std::collections::HashSet<String> = self
+            .types
+            .keys()
+            .chain(
+                self.enums
+                    .iter()
+                    .filter(|(_, info)| !info.anonymous)
+                    .map(|(key, _)| key),
+            )
+            .chain(self.funcdefs.keys())
+            .map(|key| key.rsplit("::").next().unwrap_or(key.as_str()).to_string())
+            .collect();
+
+        for header_enum in &db.module_enums {
+            if indexed_source_type_names.contains(&header_enum.name) {
+                continue;
+            }
+            let mut values = header_enum.values.clone();
+            sort_enum_values(&mut values);
+            self.enums
+                .entry(header_enum.name.clone())
+                .or_insert(EnumInfo {
+                    name: header_enum.name.clone(),
+                    namespace: None,
+                    values,
+                    source: TypeSource::Header,
+                    anonymous: false,
+                });
+        }
     }
 
     fn insert_nadeo_enum(
@@ -2976,5 +3096,499 @@ mod anon_member_enum_tests {
             all
         };
         assert_eq!(facts(&load_fixture()), facts(&load_fixture()));
+    }
+}
+
+/// B046 — MODULE-LEVEL engine enums, the enums the dump's shape cannot
+/// express.
+///
+/// The Nadeo dump's `ns` map is namespace -> type name -> type, so the only
+/// enum it carries directly is one nested in a class. It reaches most
+/// module-level enums by accident of shape — a member typed by one carries
+/// the enum inline — but an enum nothing is typed by has no route in at all.
+/// `Openplanet.h` is then the only source. Measured on OP 1.29.5: 59
+/// module-level enums, 57 already reachable, 2 not.
+///
+/// The risk this suite exists to pin is the other direction: the header is a
+/// SUPERSET of the dump, so a loader that took everything would double-index
+/// 57 enums under a second key.
+#[cfg(test)]
+mod module_level_enum_tests {
+    use super::*;
+    use crate::typedb::header_format::{HeaderDatabase, HeaderEnum};
+    use std::path::PathBuf;
+
+    fn fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb")
+    }
+
+    fn load_fixture() -> TypeIndex {
+        let dir = fixture_dir();
+        TypeIndex::load(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+        )
+        .unwrap()
+    }
+
+    /// A private ignored directory to assemble a DB pair in. Keeping it below
+    /// the repository makes these tests independent of a home or `/tmp`.
+    /// The pid keeps concurrent test binaries apart.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("test-typedb-b046-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn load_without_header() -> TypeIndex {
+        let dir = fixture_dir();
+        TypeIndex::load_with_header(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn header_sourced(index: &TypeIndex) -> Vec<String> {
+        let mut keys: Vec<String> = index
+            .enums_iter()
+            .filter(|(_, info)| info.source == TypeSource::Header)
+            .map(|(key, _)| key.clone())
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// The whole point: the two enums the dump cannot express are indexed,
+    /// and NOTHING else is taken from the header.
+    #[test]
+    fn the_header_contributes_exactly_the_enums_the_dump_lacks() {
+        let index = load_fixture();
+        assert_eq!(
+            header_sourced(&index),
+            vec![
+                "ESceneCharVisNotice".to_string(),
+                "ESceneVehicleVisEvent".to_string()
+            ]
+        );
+    }
+
+    /// The header declares 59 module-level enums and the index gains 2, so
+    /// 57 were recognised as already present. Asserted as a delta rather
+    /// than an absolute so it keeps meaning after a type-DB refresh.
+    #[test]
+    fn the_other_fifty_seven_module_level_enums_are_not_double_indexed() {
+        let header = HeaderDatabase::load_from_file(&fixture_dir().join("Openplanet.h")).unwrap();
+        assert_eq!(header.module_enums.len(), 59, "fixture guard");
+        let before = load_without_header();
+        let after = load_fixture();
+        assert_eq!(
+            after.enum_count() - before.enum_count(),
+            2,
+            "the header must add only what the dump could not express"
+        );
+    }
+
+    /// The dump stays the authority for an enum it already carries: the
+    /// header must not shadow `Game::ESpectatorCameraType` with a bare
+    /// `ESpectatorCameraType`, which would put two FQNs in one short-name
+    /// bucket and move the pick `resolve_unqualified` depends on.
+    #[test]
+    fn an_enum_the_dump_already_carries_keeps_its_dump_key_and_gains_no_second_one() {
+        let index = load_fixture();
+        assert!(
+            index
+                .lookup_source_enum("Game::ESpectatorCameraType")
+                .is_some(),
+            "fixture guard: the dump carries this one"
+        );
+        assert!(
+            index.lookup_enum("ESpectatorCameraType").is_none(),
+            "the header must not add a second key for an enum the dump has"
+        );
+        // The dump itself already puts two keys in this bucket (a nested one
+        // and the module-level one). What must not change is the bucket:
+        // adding a bare third key would move the lexicographically-first
+        // pick that `resolve_unqualified` treats as the answer.
+        assert_eq!(
+            index.find_by_short_name("ESpectatorCameraType"),
+            load_without_header().find_by_short_name("ESpectatorCameraType"),
+            "the header must not disturb an existing short-name bucket"
+        );
+    }
+
+    /// The stronger form of the rule above, over the whole index: reading
+    /// the header must leave every pre-existing short-name bucket alone.
+    /// This is what keeps `resolve_unqualified`'s deterministic first pick,
+    /// and with it the false-positive fixture counts, unchanged.
+    #[test]
+    fn the_header_disturbs_no_existing_short_name_bucket() {
+        let before = load_without_header();
+        let after = load_fixture();
+        for short in before.all_short_names() {
+            assert_eq!(
+                before.find_by_short_name(&short),
+                after.find_by_short_name(&short),
+                "short-name bucket `{short}` changed"
+            );
+        }
+        // The only new buckets are the two enums the dump could not express.
+        let added: Vec<String> = after
+            .all_short_names()
+            .into_iter()
+            .filter(|s| before.find_by_short_name(s).is_empty())
+            .collect();
+        assert_eq!(added, ["ESceneCharVisNotice", "ESceneVehicleVisEvent"]);
+    }
+
+    /// A module-level enum is spellable, so unlike B016's synthesized keys
+    /// it belongs on every source-facing surface.
+    #[test]
+    fn a_module_level_enum_is_source_facing() {
+        let index = load_fixture();
+        let info = index
+            .lookup_source_enum("ESceneCharVisNotice")
+            .expect("must be reachable as a source-facing enum");
+        assert!(!info.anonymous);
+        assert_eq!(info.name, "ESceneCharVisNotice");
+        assert_eq!(info.values.len(), 33);
+        assert_eq!(
+            index.find_by_short_name("ESceneCharVisNotice"),
+            ["ESceneCharVisNotice"],
+            "it must join the short-name index"
+        );
+    }
+
+    /// No namespace is invented. The game rejects both `Scene::` (a real
+    /// dump namespace whose name the enum shares a prefix with) and
+    /// `Enums::` (the header's own bucket) with `Namespace '…' doesn't
+    /// exist.`, so the entry carries neither.
+    #[test]
+    fn no_namespace_is_attributed_to_a_module_level_enum() {
+        let index = load_fixture();
+        for name in ["ESceneCharVisNotice", "ESceneVehicleVisEvent"] {
+            let info = index.lookup_source_enum(name).unwrap();
+            assert_eq!(info.namespace, None, "{name} must have no namespace");
+        }
+        assert!(index.lookup_enum("Scene::ESceneCharVisNotice").is_none());
+        assert!(index.lookup_enum("Enums::ESceneCharVisNotice").is_none());
+        assert!(
+            !index.namespaces().iter().any(|n| n == "Enums"),
+            "the header's documentation bucket must not become a namespace"
+        );
+    }
+
+    /// The header carries explicit integers; the dump only has positions.
+    /// Six engine enums are non-contiguous, so this is a real difference.
+    #[test]
+    fn header_enum_values_keep_the_engines_own_integers() {
+        let mut index = TypeIndex::new();
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "EGappy".to_string(),
+                values: vec![("A".to_string(), 2), ("B".to_string(), 11)],
+            }],
+        });
+        let info = index.lookup_source_enum("EGappy").unwrap();
+        assert_eq!(
+            info.values,
+            vec![("A".to_string(), 2), ("B".to_string(), 11)]
+        );
+    }
+
+    /// Values are sorted the same way Core's are, so a header that lists
+    /// aliases in a different order still yields one index.
+    #[test]
+    fn header_enum_values_are_sorted_deterministically() {
+        let mut index = TypeIndex::new();
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "EAliases".to_string(),
+                values: vec![
+                    ("Zebra".to_string(), 1),
+                    ("Second".to_string(), 2),
+                    ("Alpha".to_string(), 1),
+                ],
+            }],
+        });
+        let info = index.lookup_source_enum("EAliases").unwrap();
+        assert_eq!(
+            info.values,
+            vec![
+                ("Alpha".to_string(), 1),
+                ("Zebra".to_string(), 1),
+                ("Second".to_string(), 2),
+            ]
+        );
+    }
+
+    /// `add_header` runs after the dump, so a name the dump owns is never
+    /// overwritten even when the header disagrees about its values.
+    #[test]
+    fn the_dump_wins_a_disagreement_about_values() {
+        let dir = fixture_dir();
+        let mut index = TypeIndex::load_with_header(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+            None,
+        )
+        .unwrap();
+        let before = index
+            .lookup_source_enum("Game::ESpectatorCameraType")
+            .unwrap()
+            .values
+            .clone();
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "ESpectatorCameraType".to_string(),
+                values: vec![("Bogus".to_string(), 99)],
+            }],
+        });
+        assert_eq!(
+            index
+                .lookup_source_enum("Game::ESpectatorCameraType")
+                .unwrap()
+                .values,
+            before
+        );
+        assert!(index.lookup_enum("ESpectatorCameraType").is_none());
+    }
+
+    /// An anonymous key must not be mistaken for a name the dump owns —
+    /// B016's synthesized keys name nothing, so they cannot block a real
+    /// module-level enum of the same tail.
+    #[test]
+    fn an_anonymous_key_does_not_block_a_module_level_enum() {
+        let core = r#"{"op":"1.0.0","functions":[],"classes":[],"enums":[]}"#;
+        let nadeo = r#"{"op":"1.0.0","ns":{"Game":{"CThing":{"i":"1","m":[
+            {"n":"EMystery","i":0,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["A"]}}]}}}}"#;
+        let dir = scratch_dir("anon-key-no-block");
+        std::fs::write(dir.join("OpenplanetCore.json"), core).unwrap();
+        std::fs::write(dir.join("OpenplanetNext.json"), nadeo).unwrap();
+        let mut index = TypeIndex::load_with_header(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+            None,
+        )
+        .unwrap();
+        assert!(index.lookup_enum("Game::CThing::EMystery").is_some());
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "EMystery".to_string(),
+                values: vec![("B".to_string(), 0)],
+            }],
+        });
+        assert!(
+            index.lookup_source_enum("EMystery").is_some(),
+            "an anonymous key names nothing and must not shadow a real enum"
+        );
+    }
+
+    #[test]
+    fn a_header_enum_does_not_change_a_type_short_name_bucket() {
+        let mut index = TypeIndex::new();
+        index.types.insert(
+            "Game::ECollision".to_string(),
+            TypeInfo {
+                name: "ECollision".to_string(),
+                namespace: Some("Game".to_string()),
+                parent: None,
+                methods: Vec::new(),
+                properties: Vec::new(),
+                ctor_conversions: Vec::new(),
+                doc: None,
+                source: TypeSource::Nadeo,
+            },
+        );
+        index.build_short_type_index();
+        let before = index.find_by_short_name("ECollision").to_vec();
+
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "ECollision".to_string(),
+                values: vec![("A".to_string(), 0)],
+            }],
+        });
+        index.build_short_type_index();
+
+        assert!(index.lookup_enum("ECollision").is_none());
+        assert_eq!(index.find_by_short_name("ECollision"), before.as_slice());
+    }
+
+    #[test]
+    fn a_header_enum_does_not_change_a_funcdef_short_name_bucket() {
+        let mut index = TypeIndex::new();
+        index.funcdefs.insert(
+            "UI::ECollision".to_string(),
+            FuncdefInfo {
+                name: "ECollision".to_string(),
+                namespace: Some("UI".to_string()),
+                return_type: "void".to_string(),
+                params: Vec::new(),
+                decl: None,
+                doc: None,
+                source: TypeSource::Core,
+            },
+        );
+        index.build_short_type_index();
+        let before = index.find_by_short_name("ECollision").to_vec();
+
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "ECollision".to_string(),
+                values: vec![("A".to_string(), 0)],
+            }],
+        });
+        index.build_short_type_index();
+
+        assert!(index.lookup_enum("ECollision").is_none());
+        assert_eq!(index.find_by_short_name("ECollision"), before.as_slice());
+    }
+
+    #[test]
+    fn a_header_enum_without_a_type_name_collision_is_inserted() {
+        let mut index = TypeIndex::new();
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "EFresh".to_string(),
+                values: vec![("A".to_string(), 0)],
+            }],
+        });
+        index.build_short_type_index();
+        assert!(index.lookup_source_enum("EFresh").is_some());
+        assert_eq!(index.find_by_short_name("EFresh"), ["EFresh"]);
+    }
+
+    /// Header entries are optional supplements, so they may not displace a
+    /// source-visible type that already owns the short-name resolution bucket.
+    #[test]
+    fn a_header_enum_sharing_a_short_name_with_a_type_is_not_added() {
+        let core = r#"{"op":"1.0.0","functions":[],"classes":[],"enums":[]}"#;
+        let nadeo = r#"{"op":"1.0.0","ns":{"Game":{"CThing":{"i":"1"}}}}"#;
+        let dir = scratch_dir("type-name-clash");
+        std::fs::write(dir.join("OpenplanetCore.json"), core).unwrap();
+        std::fs::write(dir.join("OpenplanetNext.json"), nadeo).unwrap();
+        let mut index = TypeIndex::load_with_header(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+            None,
+        )
+        .unwrap();
+        assert!(index.lookup_type("Game::CThing").is_some(), "fixture guard");
+
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "CThing".to_string(),
+                values: vec![("A".to_string(), 0)],
+            }],
+        });
+        index.build_short_type_index();
+
+        assert!(index.lookup_source_enum("CThing").is_none());
+        assert_eq!(
+            index.find_by_short_name("CThing"),
+            ["Game::CThing"],
+            "the existing source-visible bucket must stay unchanged"
+        );
+    }
+
+    /// A header enum the parser found no values for is still a name the game
+    /// accepts, so it is indexed; it simply contributes no bare values.
+    #[test]
+    fn a_header_enum_with_no_values_is_indexed_but_contributes_none() {
+        let mut index = TypeIndex::new();
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "EEmpty".to_string(),
+                values: vec![],
+            }],
+        });
+        let info = index.lookup_source_enum("EEmpty").expect("indexed");
+        assert!(info.values.is_empty());
+        assert!(!info.anonymous);
+    }
+
+    /// The header is optional: an install without one must load exactly as
+    /// it did before B046, not fail.
+    #[test]
+    fn a_missing_header_is_not_an_error() {
+        let dir = scratch_dir("no-header");
+        let src = fixture_dir();
+        std::fs::copy(
+            src.join("OpenplanetCore.json"),
+            dir.join("OpenplanetCore.json"),
+        )
+        .unwrap();
+        std::fs::copy(
+            src.join("OpenplanetNext.json"),
+            dir.join("OpenplanetNext.json"),
+        )
+        .unwrap();
+        let index = TypeIndex::load(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+        )
+        .expect("a dump without a header must still load");
+        assert!(header_sourced(&index).is_empty());
+        assert_eq!(index.enum_count(), load_without_header().enum_count());
+    }
+
+    #[test]
+    fn an_invalid_utf8_adjacent_header_is_ignored_by_normal_load() {
+        let dir = scratch_dir("invalid-utf8-header");
+        let src = fixture_dir();
+        std::fs::copy(
+            src.join("OpenplanetCore.json"),
+            dir.join("OpenplanetCore.json"),
+        )
+        .unwrap();
+        std::fs::copy(
+            src.join("OpenplanetNext.json"),
+            dir.join("OpenplanetNext.json"),
+        )
+        .unwrap();
+        std::fs::write(dir.join(HEADER_FILENAME), [0xff, 0xfe]).unwrap();
+
+        let index = TypeIndex::load(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+        )
+        .expect("an optional malformed header must not break normal type-db loading");
+        assert!(header_sourced(&index).is_empty());
+    }
+
+    /// `load` finds the header beside the dump, so every existing caller
+    /// that points at a directory gets it without changing its signature.
+    #[test]
+    fn load_picks_up_a_header_sitting_beside_the_dump() {
+        assert_eq!(header_sourced(&load_fixture()).len(), 2);
+        assert!(header_sourced(&load_without_header()).is_empty());
+    }
+
+    #[test]
+    fn loading_the_same_files_twice_yields_identical_module_level_enums() {
+        let a = load_fixture();
+        let b = load_fixture();
+        assert_eq!(header_sourced(&a), header_sourced(&b));
+        for key in header_sourced(&a) {
+            assert_eq!(
+                a.lookup_source_enum(&key).unwrap().values,
+                b.lookup_source_enum(&key).unwrap().values
+            );
+        }
+        assert_eq!(a.enum_count(), b.enum_count());
+    }
+
+    /// `typedb diff` of the fixture against itself must stay empty — a
+    /// header-sourced enum diffs on values and its source-facing bit, both
+    /// of which are stable across loads.
+    #[test]
+    fn diff_of_the_fixture_against_itself_is_empty_with_the_header_loaded() {
+        let diff = diff_indexes(&load_fixture(), &load_fixture());
+        assert!(diff.is_empty(), "{diff:?}");
     }
 }
