@@ -959,6 +959,17 @@ void Main() {}
 #[test]
 fn check_command_applies_manifest_defines_and_dependency_defines() {
     let root = make_temp_plugin("manifest-defines");
+    let home = isolated_home("manifest-defines");
+    let plugins_dir = root.join("plugins");
+    fs::create_dir_all(plugins_dir.join("Editor")).unwrap();
+    // B019 only defines DEPENDENCY_<ID> for installed optional dependencies.
+    // Keep the dependency under this fixture's explicit search root so the
+    // assertion never relies on a developer's Openplanet plugin install.
+    fs::write(
+        plugins_dir.join("Editor/info.toml"),
+        "[meta]\nname = \"Editor\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
     fs::write(
         root.join("info.toml"),
         r#"
@@ -991,7 +1002,10 @@ void Main() {}
     let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
         .arg("check")
         .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(&plugins_dir)
         .arg(&root)
+        .env("HOME", &home)
         .output()
         .unwrap();
 
@@ -1008,6 +1022,7 @@ void Main() {}
     );
 
     let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
 }
 
 #[test]
