@@ -36,7 +36,7 @@ Consequences, all client-visible:
 - Every action's edit must be computed eagerly on every `textDocument/
   codeAction` request, because there is no resolve step to defer it to.
 
-For a codebase like tests/fixtures/tm-editor-plus-plus (1428 warnings) the
+For a codebase like tests/fixtures/tm-editor-plus-plus (1485 warnings) the
 difference between per-squiggle right-clicking and fix-on-save is the
 difference between usable and not.
 
