@@ -1,0 +1,85 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:07:49Z"
+depends_on: []
+estimate_hours: 1
+id: B042
+priority: medium
+status: pending
+tags:
+    - vscode-ext
+    - ux
+    - snippets
+title: 'VS Code: no snippets for Openplanet plugin boilerplate'
+updated_at: "2026-08-29T15:07:49Z"
+---
+Requested via a coordinator feature-gap review, 2026-08-30. Extension repo:
+../lsp-openplanet-ext/ (packages/vscode-ext). Enhancement.
+
+## Gap
+The extension's `contributes` has no `snippets` entry at all — verified on
+master. Every Openplanet plugin starts from the same handful of shapes and the
+user types all of them by hand or copies from another plugin.
+
+## Why this one first among the extension items
+It is pure `contributes.snippets` plus a JSON file. No server work, no TypeScript,
+no new LSP capability, and it pays off on the very first plugin a user writes.
+It is the cheapest real improvement on the whole review list.
+
+## Work
+Add a snippets file for the `angelscript` language covering at least:
+
+**Entry points / callbacks** — take the authoritative list from the Openplanet
+docs rather than memory, and cover the ones plugins actually use:
+- `void Main()`, `void Update(float dt)`, `void Render()`,
+  `void RenderMenu()`, `void RenderInterface()`, `void RenderEarly()`,
+  `void OnDestroyed()`, `void OnDisabled()`, `void OnEnabled()`,
+  `void OnSettingsChanged()`, `void OnKeyPress(bool down, VirtualKey key)`,
+  `void OnMouseButton(bool down, int button, int x, int y)`,
+  `void OnMouseMove(int x, int y)`, `void OnMouseWheel(int x, int y)`
+
+**Settings blocks** — the `[Setting ...]` attribute forms:
+- plain, with `name=`, `description=`, `category=`, `min=`/`max=` for numerics,
+  `color` variant, `drag` variant. One snippet per shape, with tab stops on
+  the values a user always edits.
+
+**Meta / coroutines**
+- `Meta::PluginCoroutine@ ...` / `startnew(...)` shapes
+- a `while (true) { yield(); }` coroutine skeleton
+
+**info.toml scaffold** — a snippet for the manifest is also worth having, but
+info.toml is TOML not AngelScript, so it needs its own language scoping.
+Include it only if it can be scoped without hijacking every TOML file the
+user opens; otherwise file it separately rather than degrading TOML editing.
+
+## Design decision (coordinator, 2026-08-30)
+Snippet prefixes must be namespaced enough not to fight ordinary typing —
+prefer `op` prefixes (`opmain`, `opsetting`, `oprender`) over bare `main` /
+`render`, which would insert on any identifier starting that way. A snippet
+that fires when the user meant to type a variable name is a net negative.
+
+Verify the callback SIGNATURES against the Openplanet docs before writing
+them. A snippet with a wrong parameter list is worse than no snippet: it
+compiles, silently never fires, and the user has no reason to doubt it. Cite
+the docs URL in a comment in the snippets file.
+
+## Test plan
+Snippets are declarative, so the meaningful tests are structural (vitest, the
+extension repo's existing harness):
+- the snippets file is valid JSON and every entry has `prefix`, `body`,
+  `description`
+- every `prefix` is unique across the file
+- every prefix starts with the agreed namespace
+- tab stops are well-formed and sequential (`$1`, `$2`, ..., `$0` present and
+  last) — a malformed tab stop breaks the insert silently
+- `contributes.snippets` in package.json points at a file that exists and
+  declares `"language": "angelscript"`
+- placeholder text contains no smart quotes or non-ASCII that would break in
+  a source file
+
+Manual gate before closing: insert every snippet into a scratch plugin and
+confirm the result compiles under `openplanet-lsp check` with no new
+diagnostics. A snippet that emits code our own checker flags is a bug.
+
+## Related
+B043 (extension commands + status bar). B034 (defines UI).
