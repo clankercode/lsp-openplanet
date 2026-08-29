@@ -99,8 +99,14 @@ impl App {
     }
 
     /// Page step from last-drawn list height and density.
+    ///
+    /// In Relaxed the *selected* item can spill its message onto a third row
+    /// (B029), so one item in the viewport may be taller than `rows_per_item`.
+    /// Budget for that row rather than measuring every item: under-paging by at
+    /// most one item is harmless, paging past the viewport is not.
     pub fn page_step(&self) -> usize {
-        let inner = self.list_inner_h.saturating_sub(2) as usize; // borders
+        let spill = usize::from(self.density == ListDensity::Relaxed);
+        let inner = (self.list_inner_h.saturating_sub(2) as usize).saturating_sub(spill);
         let per = self.density.rows_per_item().max(1);
         let visible = (inner / per).max(1);
         visible.saturating_sub(1).max(1)
@@ -110,6 +116,11 @@ impl App {
         // Density is a list-only concern — the detail box shows the same text
         // either way, so the reader keeps their place in it.
         self.density = self.density.toggle();
+    }
+
+    #[cfg(test)]
+    fn set_list_inner_h_for_test(&mut self, h: u16) {
+        self.list_inner_h = h;
     }
 
     /// First visible detail-box row (0 = top).
@@ -262,7 +273,8 @@ impl App {
         if !wh.is_empty() {
             parts.push(wh);
         }
-        let body = format!(" {} ", parts.join("  ·  "));
+        // `root_label` and a failed run's message are untrusted display text.
+        let body = sanitize_row(&format!(" {} ", parts.join("  ·  ")));
         let block = Block::default()
             .borders(Borders::ALL)
             .title(Line::from(Span::styled(
@@ -356,7 +368,10 @@ impl App {
         let inner_h = area.height.saturating_sub(2);
 
         // The box caps at 8 inner rows; a longer wrapped message scrolls (B029).
-        let total = lines.len() as u16;
+        // Saturate rather than wrap: `Paragraph::scroll` is u16, so a message
+        // with more rows than that is unreachable either way, but a wrapped
+        // count would report (and scroll to) nonsense.
+        let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
         let max_scroll = total.saturating_sub(inner_h);
         self.detail_scroll = self.detail_scroll.min(max_scroll);
         // `inner_h == 0` means the pane got squeezed to nothing on a very short
@@ -575,9 +590,8 @@ fn wrap_display(s: &str, width: usize) -> Vec<String> {
 /// control character.
 ///
 /// A `Line` is one rendered row, so an embedded terminator has to become a real
-/// row split. The remaining controls are dropped rather than kept: ratatui would
-/// pass them through to the terminal, where an ESC from a source string literal
-/// is an escape sequence, not text.
+/// row split. The remaining controls are dropped here rather than left for the
+/// renderer to drop, so the wrapped width matches what is actually painted.
 fn normalize_for_wrap(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -650,7 +664,7 @@ fn wrap_logical_line(s: &str, width: usize) -> Vec<String> {
 }
 
 fn bare_location(d: &DiagItem) -> String {
-    format!("{}:{}:{}", short_path(&d.path), d.line, d.col)
+    sanitize_row(&format!("{}:{}:{}", short_path(&d.path), d.line, d.col))
 }
 
 fn format_location(d: &DiagItem, loc_w: usize) -> String {
@@ -662,6 +676,35 @@ fn format_location(d: &DiagItem, loc_w: usize) -> String {
     let truncated = trim_left_to(&bare_location(d), loc_w);
     let pad = loc_w.saturating_sub(str_w(&truncated));
     format!("{truncated}{}", " ".repeat(pad))
+}
+
+/// One-row display text with every control character removed.
+///
+/// Ratatui drops control characters as it writes into the buffer, which is what
+/// keeps them off the terminal — but dropping *shifts* everything after them a
+/// column left, so a row built from unsanitised text does not land where its
+/// width was computed. Removing them here keeps the layout honest, and keeps the
+/// TUI correct regardless of what the renderer chooses to do. A list row is one
+/// row, so line terminators and tabs collapse to a space.
+fn sanitize_row(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            '\n' | '\r' | '\t' | '\u{85}' | '\u{2028}' | '\u{2029}' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// Same, but one char in, one char out: a diagnostic's column is a char offset
+/// into the source line, so sanitising it must not shift anything. This is the
+/// one that matters visibly — the caret row is built from those offsets, so a
+/// control character the renderer drops from the source row would slide the code
+/// out from under the carets.
+fn sanitize_keep_columns(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Widest "there is more below" hint that fits `inner_w` title columns.
@@ -732,7 +775,7 @@ fn list_item_for(
         ListDensity::Compact => {
             let (eff_loc_w, msg_budget) = compact_field_widths(content_w, loc_w);
             let loc = format_location(d, eff_loc_w);
-            let msg = ellipsize(&d.message, msg_budget);
+            let msg = ellipsize(&sanitize_row(&d.message), msg_budget);
             let row = Line::from(vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
                 Span::styled(loc, loc_style),
@@ -774,7 +817,7 @@ fn list_item_for(
             }
             let head = Line::from(head_spans);
             let mut rows = vec![head];
-            for txt in relaxed_msg_rows(&d.message, content_w, selected) {
+            for txt in relaxed_msg_rows(&sanitize_row(&d.message), content_w, selected) {
                 rows.push(Line::from(Span::styled(
                     format!("{}{txt}", " ".repeat(RELAXED_MSG_INDENT)),
                     msg_style,
@@ -838,7 +881,8 @@ fn format_fragment_rhs(frag: &str, budget: usize) -> Option<String> {
 }
 
 fn code_fragment(d: &DiagItem) -> Option<String> {
-    let src = d.source_line.as_ref()?;
+    // Column-preserving: `start`/`end` below are char offsets into the line.
+    let src = sanitize_keep_columns(d.source_line.as_ref()?);
     let chars: Vec<char> = src.chars().collect();
     if chars.is_empty() {
         return None;
@@ -982,7 +1026,10 @@ fn pretty_detail_lines(d: &DiagItem, inner_w: usize) -> Vec<Line<'static>> {
     let header = if inner_w >= tail_w {
         vec![
             Span::styled(
-                trim_left_to(&d.path.display().to_string(), inner_w - tail_w),
+                trim_left_to(
+                    &sanitize_row(&d.path.display().to_string()),
+                    inner_w - tail_w,
+                ),
                 path_style,
             ),
             Span::raw(loc_tail),
@@ -1000,7 +1047,8 @@ fn pretty_detail_lines(d: &DiagItem, inner_w: usize) -> Vec<Line<'static>> {
         Line::from(""), // blank between header and source (even spacing in the box)
     ];
 
-    if let Some(src) = d.source_line.as_ref() {
+    if let Some(src) = d.source_line.as_deref().map(sanitize_keep_columns) {
+        let src = src.as_str();
         let gutter_w = d.line.to_string().len().max(2);
         let gutter = format!("{:>gutter_w$}", d.line);
         let blank = " ".repeat(gutter_w);
@@ -1909,8 +1957,8 @@ mod tests {
         assert_eq!(wrap_display("a\u{85}b", 40), vec!["a", "b"]);
         assert_eq!(wrap_display("a\u{2028}b", 40), vec!["a", "b"]);
         assert_eq!(wrap_display("a\u{2029}b", 40), vec!["a", "b"]);
-        // Everything else is dropped: ratatui would hand an ESC straight to the
-        // terminal, where it is an escape sequence rather than text.
+        // Everything else is dropped here rather than by the renderer, so the
+        // wrapped width matches the row that actually gets painted.
         assert_eq!(wrap_display("a\u{1b}[31mb", 40), vec!["a[31mb"]);
         assert_eq!(wrap_display("a\u{0}\u{7}\u{b}\u{c}b", 40), vec!["ab"]);
         for row in wrap_display("\u{1b}]0;title\u{7}text", 40) {
@@ -1958,6 +2006,96 @@ mod tests {
             2,
             "a 2-column char needs 2 carets: {:?}",
             rows[3]
+        );
+    }
+
+    #[test]
+    fn no_control_character_ever_reaches_a_span() {
+        // An ESC/OSC sequence smuggled in through a source string literal, a
+        // filename, or a checker message must not reach a Span: the renderer
+        // would drop it and slide the rest of the row out of position.
+        let nasty = "a\u{1b}]0;pwned\u{7}b\u{9b}c\u{0}\td\ne";
+        let mut d = diag(Severity::Error, nasty);
+        d.path = std::path::PathBuf::from(format!("src/{nasty}.as"));
+        d.source_line = Some(format!("    vec4 t = F(\"{nasty}\");"));
+
+        let mut snap = canned_snapshot();
+        snap.root_label = nasty.into();
+        snap.diagnostics = vec![d.clone()];
+        snap.status = RunStatus::Failed {
+            message: nasty.into(),
+        };
+
+        let spans_of = |lines: Vec<Line<'static>>| -> Vec<String> {
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|sp| sp.content.to_string()))
+                .collect()
+        };
+        let mut all: Vec<String> = spans_of(pretty_detail_lines(&d, 60));
+        all.extend(spans_of(pretty_detail_lines(&d, 20)));
+        for density in [ListDensity::Compact, ListDensity::Relaxed] {
+            for selected in [true, false] {
+                // `list_item_for` returns a ListItem, so exercise its inputs
+                // through the same helpers it uses.
+                all.push(ellipsize(&sanitize_row(&d.message), 30));
+                all.extend(relaxed_msg_rows(&sanitize_row(&d.message), 40, selected));
+                all.push(format_location(&d, 24));
+                let _ = density;
+            }
+        }
+        if let Some(frag) = code_fragment(&d) {
+            all.push(frag);
+        }
+        all.push(sanitize_row(&snap.root_label));
+        all.push(sanitize_row(&snap.status.label()));
+
+        for text in &all {
+            assert!(
+                !text.chars().any(char::is_control),
+                "control character reached a span: {text:?}"
+            );
+        }
+        // The visible text still survives sanitisation.
+        assert!(
+            all.iter().any(|t| t.contains('a') && t.contains('b')),
+            "sanitising ate the message: {all:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_keep_columns_preserves_char_offsets() {
+        for s in [
+            "",
+            "plain",
+            "a\u{1b}b\u{0}c",
+            "\u{8a3a}\u{7}x",
+            "e\u{301}\u{1b}",
+        ] {
+            let out = sanitize_keep_columns(s);
+            assert_eq!(
+                out.chars().count(),
+                s.chars().count(),
+                "offset shift on {s:?} -> {out:?}"
+            );
+            assert!(!out.chars().any(char::is_control), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn relaxed_page_step_allows_for_the_spilled_row() {
+        let mut app = App::from_snapshot(canned_snapshot());
+        app.set_list_inner_h_for_test(14); // 12 inner rows
+        let compact = app.page_step();
+        app.toggle_density();
+        let relaxed = app.page_step();
+        // Compact: 12 rows / 1 = 12 visible -> step 11.
+        assert_eq!(compact, 11);
+        // Relaxed: one item may be 3 rows, so budget for it: (12-1)/2 = 5 -> 4.
+        assert_eq!(relaxed, 4);
+        assert!(
+            relaxed * 2 < 12,
+            "a page must never outrun the viewport: {relaxed}"
         );
     }
 
