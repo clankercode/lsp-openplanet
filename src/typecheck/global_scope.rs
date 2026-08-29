@@ -454,18 +454,28 @@ impl<'a> GlobalScope<'a> {
         //
         // B016: deliberately `enums_iter`, NOT `source_enums_iter`. Every
         // other external-enum call site asks "can source NAME this enum?",
-        // where a synthesized anonymous key must answer no. This one asks
-        // the opposite question — "is this bare identifier a value the
-        // engine knows?" — and returning true only silences an
-        // `UndefinedIdentifier`. Filtering here would REMOVE names the
-        // checker accepted before B016: pre-B016 the sorted-first anonymous
-        // enum of each module survived the collision, so `HyperTnL`,
+        // where a synthesized anonymous key must answer no. This one asks a
+        // different question — "is this bare identifier a value the engine
+        // knows?" — and answering true only silences an
+        // `UndefinedIdentifier`.
+        //
+        // KNOWN FALSE NEGATIVE, left as-is on purpose. The game rejects a
+        // bare unnamed-enum value: RemoteBuild probe 2026-08-30, OP 1.29.5,
+        // on `tests/fixtures/issue-repros/b016-anon-member-enums` →
+        // `No matching symbol 'HyperTnL'` (and `RenderPlaneReflect`,
+        // `MinimalReadOnly`). So filtering here would match the game.
+        //
+        // It is not B016's to fix. Pre-B016 the sorted-first anonymous enum
+        // of each module survived the collision, so `HyperTnL`,
         // `SlideNoControl`, `NotTimed`, `RenderPlaneReflect` and
-        // `Download_WaitingSources` all resolved. Measured against a
-        // 91a296c build, filtering turns those into 5 fresh errors, which
-        // is exactly the tightening B016 is required not to introduce.
-        // Covering all 132 instead of an arbitrary 14 can only ever silence
-        // a diagnostic, never add one.
+        // `Download_WaitingSources` already resolved here — measured against
+        // a build of 91a296c, filtering turns those into 5 fresh errors,
+        // which is the tightening B016's ticket explicitly forbids. B016
+        // makes the accepted set uniform (all 132 anonymous enums) instead of
+        // an arbitrary 14, which can only ever silence a diagnostic, never
+        // add one. Narrowing this scan to named enums is a behaviour change
+        // with its own false-positive surface and belongs in its own ticket,
+        // not riding on a data-loss fix.
         if let Some(ext) = self.external {
             for (qname, en) in ext.enums_iter() {
                 let _ = qname;
@@ -1529,11 +1539,14 @@ mod tests {
     }
 
     /// B016 (the other half of the rule above): a bare identifier that names
-    /// a VALUE of an anonymous member enum must stay accepted. Five of these
-    /// resolved before B016 because their enum won its module's collision;
-    /// the other four were casualties of that collision and now resolve too.
-    /// Neither direction may produce a diagnostic — this is the site where
-    /// hiding anonymous enums would *tighten* the checker.
+    /// a VALUE of an anonymous member enum stays accepted.
+    ///
+    /// This pins a KNOWN FALSE NEGATIVE, not correct behaviour — the game
+    /// rejects these names (`No matching symbol`, RemoteBuild probe
+    /// 2026-08-30, OP 1.29.5). It exists because the five names in the first
+    /// group already resolved on 91a296c, so filtering them out would be a
+    /// fresh tightening, which B016 is required not to introduce. Delete this
+    /// test as part of the ticket that narrows the scan to named enums.
     #[test]
     fn anonymous_member_enum_values_are_accepted_as_bare_identifiers() {
         use crate::typedb::index::TypeIndex;

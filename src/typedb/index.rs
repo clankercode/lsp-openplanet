@@ -586,7 +586,7 @@ impl TypeIndex {
     /// it are deterministic, so identical bytes yield identical keys.
     fn register_anon_member_enum(&mut self, preferred_key: String, values: Vec<(String, i64)>) {
         let mut key = preferred_key.clone();
-        let mut nth = 1u32;
+        let mut nth = 1usize;
         while self.enums.contains_key(&key) {
             nth += 1;
             key = format!("{}#{}", preferred_key, nth);
@@ -638,11 +638,28 @@ impl TypeIndex {
     /// The inline enum declared *by* `member` of engine class `class_qname`
     /// (B016). The Nadeo dump gives such an enum no name of its own, so it
     /// is keyed by its declaring context (`Module::Class::Member`) and is
-    /// deliberately absent from the short-name index — the values are
+    /// deliberately absent from every source-facing lookup — the values are
     /// reachable in-game only through the member, never by writing the
     /// enum's name.
+    ///
+    /// Walks the same `#2`, `#3`, … chain [`Self::register_anon_member_enum`]
+    /// assigns, because the plain key can be owned by a *named* nested enum
+    /// of the same name, and only ever returns an anonymous entry — a named
+    /// enum is not "the enum this member declares". When one class declares
+    /// two anonymous enums under the same member name, this returns the
+    /// first; the rest are reachable via [`Self::enums_iter`].
     pub fn lookup_member_enum(&self, class_qname: &str, member: &str) -> Option<&EnumInfo> {
-        self.lookup_enum(&format!("{}::{}", class_qname, member))
+        let base = format!("{}::{}", class_qname, member);
+        let mut key = base.clone();
+        let mut nth = 1usize;
+        loop {
+            let info = self.enums.get(&key)?;
+            if info.anonymous {
+                return Some(info);
+            }
+            nth += 1;
+            key = format!("{}#{}", base, nth);
+        }
     }
 
     /// Look up a Core funcdef by qualified name (`UI::InputTextCallback`,
@@ -2759,12 +2776,25 @@ mod anon_member_enum_tests {
             {"n":"Mode","i":1,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["C"]}}
         ]}}}}"#;
         let index = nadeo_index("dup-member", nadeo);
-        let keys: Vec<&String> = index.enums_iter().map(|(q, _)| q).collect();
-        assert_eq!(keys.len(), 2, "{keys:?}");
+        let mut keys: Vec<&String> = index.enums_iter().map(|(q, _)| q).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["X::C::Mode", "X::C::Mode#2"], "{keys:?}");
         assert_eq!(
             index.lookup_enum("X::C::Mode").map(|e| e.values.len()),
             Some(2),
             "the first declaration keeps the plain key"
+        );
+        assert_eq!(
+            index.lookup_enum("X::C::Mode#2").map(|e| e.values.len()),
+            Some(1),
+            "the second takes the disambiguated key"
+        );
+        assert_eq!(
+            index
+                .lookup_member_enum("X::C", "Mode")
+                .map(|e| e.values.len()),
+            Some(2),
+            "the member lookup returns the first declaration"
         );
     }
 
@@ -2786,10 +2816,19 @@ mod anon_member_enum_tests {
             Some(vec!["Nested0".to_string(), "Nested1".to_string()]),
             "the *named* nested enum owns the plain key"
         );
+        let mut keys: Vec<&String> = index.enums_iter().map(|(q, _)| q).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["X::C::Mode", "X::C::Mode#2"], "{keys:?}");
+        // The member lookup must skip the named squatter and return the
+        // enum the member actually declares.
         assert_eq!(
-            index.enums_iter().count(),
-            2,
-            "the anonymous one is still registered"
+            index.lookup_member_enum("X::C", "Mode").map(|e| e
+                .values
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>()),
+            Some(vec!["Anon".to_string()]),
+            "the member declares the ANONYMOUS enum, not the nested one"
         );
     }
 

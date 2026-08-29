@@ -6,10 +6,14 @@
 //   Control::CControlEntry::Type
 //   Game::CGameCtnChallenge::Kind / CGameCtnChallengeInfo::Kind
 //
-// The game exposes these as plain integers — the enum has no name, so no
-// source can spell it — and every line below compiles in-game. Keying the
-// enums by their declaring context must not make the checker reject any of
-// them: nothing here may produce a diagnostic.
+// GAME GROUND TRUTH (RemoteBuild probe 2026-08-30, OP 1.29.5): every line
+// down to `Main` compiles clean. The game exposes these members as plain
+// integers — the enum has no name, so no source can spell it — and reading,
+// writing, comparing and passing them is all legal. Keying the enums by
+// their declaring context must not change that.
+//
+// The same probe reports THREE errors, one per line of `BareEnumValueNames`
+// at the bottom; see the note there. Everything else must stay silent.
 
 void Read(CControlBase@ ctrl, CControlEntry@ entry, CGameCtnChallenge@ map) {
     int h = ctrl.AlignHorizontal;             // read into an int
@@ -50,15 +54,31 @@ void Main() {
     BareEnumValueNames();
 }
 
-// The VALUE names of those enums, used bare. AngelScript lets a bare enum
-// value stand in for its qualified form, and the checker's last-resort
-// `has_global_ident` scan is what accepts them. Before B016 whichever
-// anonymous enum won its module's collision had its values accepted
-// (HyperTnL, SlideNoControl, NotTimed, RenderPlaneReflect,
-// Download_WaitingSources) while the losers' did not (MinimalReadOnly,
-// TimeHhMmSsMil, Text_Icon) — an arbitrary split. All of them resolve now.
-// Hiding anonymous enums from this scan would turn the first five back into
-// `undefined identifier`, which is the regression this guards.
+// KNOWN FALSE NEGATIVE, deliberately left as-is by B016.
+//
+// The VALUE names of those enums, used bare. The game REJECTS all of them —
+// RemoteBuild probe 2026-08-30, OP 1.29.5, one error per line because
+// AngelScript stops at the first bad symbol in an expression:
+//     (83,16) ERR : No matching symbol 'HyperTnL'
+//     (84,16) ERR : No matching symbol 'RenderPlaneReflect'
+//     (85,16) ERR : No matching symbol 'MinimalReadOnly'
+// An unnamed enum's values are not global constants; they are reachable only
+// as integers through the declaring member.
+//
+// The LSP stays silent on all nine. That is a PRE-EXISTING false negative,
+// not one B016 introduced: `GlobalScope::has_global_ident` scans external
+// enum values as a last resort, and before B016 whichever anonymous enum won
+// its module's collision already had its values accepted there — `HyperTnL`,
+// `SlideNoControl`, `NotTimed`, `RenderPlaneReflect` and
+// `Download_WaitingSources` all resolved on 91a296c. B016 makes the set
+// uniform (all 132 enums instead of an arbitrary 14) rather than arbitrary,
+// because the ticket forbids tightening any rule. Narrowing the scan to
+// named enums would match the game exactly and is worth its own ticket —
+// it is a behaviour change with its own FP risk, and it belongs there, not
+// riding on a data-loss fix.
+//
+// When that ticket lands, these three lines start erroring and the gate test
+// must be updated to expect them.
 void BareEnumValueNames() {
     print("" + HyperTnL + SlideNoControl + NotTimed);
     print("" + RenderPlaneReflect + Download_WaitingSources);

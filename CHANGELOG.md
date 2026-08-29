@@ -89,14 +89,21 @@ GitHub Release body to match this section (gh release edit).
   every one in a module as `<Module>::UnnamedEnum` and kept only the first:
   132 enums in the shipped type DB collapsed to 14, `Control` losing 14 of its
   15. They are now keyed by their declaring context
-  (`<Module>::<Class>::<Member>`), so `typedb diff` sees drift in all of them
-  and their value names resolve. Three names that used to report `undefined
-  identifier` because their enum lost the collision — `MinimalReadOnly`,
-  `TimeHhMmSsMil`, `Text_Icon` — now resolve, along with the rest of the
-  recovered set. Nothing became stricter: those keys are synthesized, name
-  nothing the game accepts in source, and are held out of every source-facing
-  lookup, completion and namespace query, so diagnostics on the five plugin
-  fixtures are byte-identical.
+  (`<Module>::<Class>::<Member>`), so `typedb diff` now sees drift in every
+  one of them instead of 14.
+
+  Nothing became stricter: the new keys are synthesized, name nothing the
+  game accepts in source, and are held out of every source-facing lookup,
+  completion and namespace query, so diagnostics on the five plugin fixtures
+  are byte-identical. The one visible change is that a handful of bare
+  identifiers which used to report `undefined identifier` — `MinimalReadOnly`,
+  `TimeHhMmSsMil`, `Text_Icon` — no longer do. That is a *known false
+  negative* being made uniform rather than fixed: the game rejects a bare
+  unnamed-enum value (`No matching symbol`, RemoteBuild probe 2026-08-30, OP
+  1.29.5), but the equivalent names from the 14 enums that used to win their
+  module's collision were already accepted, so suppressing them all is the
+  only change that does not newly reject working code. Making the checker
+  match the game here is a separate change.
 - **`check` no longer undoes `defines` removals of manifest defines (B026)** —
   `run_check` re-applied `info.toml`'s `[script].defines` and the
   `DEPENDENCY_*` defines AFTER `LspConfig::load` had already applied them and
