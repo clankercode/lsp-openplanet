@@ -3299,6 +3299,54 @@ fn check_command_unused_quiet_levels_are_reported_but_never_fail() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// B031 design call 1: greying out preprocessor-dead `#if` branches is an
+/// LSP-only affordance. `check` must NEVER emit it — a plugin with a few
+/// hundred `#if MP4` lines would drown the CLI output, and HINT severity does
+/// not save us because `check` prints hints. This test is the guard on that
+/// boundary: the config key exists and is honoured by the server, but no
+/// value of it may leak an inactive-region diagnostic into `check`.
+#[test]
+fn check_command_never_reports_inactive_regions() {
+    // NB: the fixture name must not contain the word this test greps
+    // for — the temp dir path is printed in the summary line.
+    let root = make_temp_plugin("dead-branch-cli");
+    fs::write(
+        root.join("src/Main.as"),
+        "#if MP4\nvoid DeadForNext() { MissingTypeInDeadBranch@ x; }\n#endif\nvoid Main() {}\n",
+    )
+    .unwrap();
+
+    // Default (hint), and every explicit level, including via the config file.
+    for pin in [
+        "",
+        "inactive_regions = \"hint\"\n",
+        "inactive_regions = \"info\"\n",
+    ] {
+        if pin.is_empty() {
+            let _ = fs::remove_file(root.join(".openplanet-lsp.toml"));
+        } else {
+            fs::write(root.join(".openplanet-lsp.toml"), pin).unwrap();
+        }
+        let (code, stdout) = check_plugin_status(&root, &[]);
+        assert_eq!(code, Some(0), "pin={pin:?} must stay clean: {stdout}");
+        assert!(
+            !stdout.contains("inactive code"),
+            "pin={pin:?} must not leak an inactive-region diagnostic: {stdout}"
+        );
+        // The dead branch is still dead: its contents must not be analysed.
+        assert!(
+            !stdout.contains("MissingTypeInDeadBranch"),
+            "pin={pin:?} dead branch must stay unanalysed: {stdout}"
+        );
+        assert!(
+            stdout.contains("0 diagnostics"),
+            "pin={pin:?} expected a clean run: {stdout}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// GH #62: `check --typedb-dir --no-typedb <path>` must be a usage error
 /// (exit 2), not a load failure for `--no-typedb/OpenplanetCore.json`.
 #[test]

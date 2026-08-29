@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use crate::lexer::Span;
+
 use super::eval::eval_condition;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -32,6 +34,15 @@ pub struct PreprocessResult {
     pub masked_source: String,
     /// Any errors encountered.
     pub errors: Vec<PreprocError>,
+    /// Byte spans of code the current defines switched off, in source order.
+    ///
+    /// Indexes the ORIGINAL source, not [`Self::masked_source`]. One span per
+    /// contiguous dead body: consecutive dead lines coalesce, the `#if` /
+    /// `#elif` / `#else` / `#endif` lines that delimit the block stay out,
+    /// and a nested block inside an already-dead body is folded into the
+    /// outermost span rather than splitting it. B031: the LSP fades these
+    /// (HINT + `DiagnosticTag::UNNECESSARY`); the CLI ignores them.
+    pub inactive_regions: Vec<Span>,
 }
 
 // ── Directive parsing ─────────────────────────────────────────────────────────
@@ -80,6 +91,14 @@ fn parse_directive(trimmed: &str) -> Option<Directive<'_>> {
 pub fn preprocess(source: &str, defines: &HashSet<String>) -> PreprocessResult {
     let mut masked = source.as_bytes().to_vec();
     let mut errors: Vec<PreprocError> = Vec::new();
+    let mut inactive_regions: Vec<Span> = Vec::new();
+
+    // Open dead region as (start, end) byte offsets, and the stack depth at
+    // which inactivity began. The depth is what separates the directive that
+    // CLOSES this region (same depth — a boundary, kept out of the span) from
+    // one merely nested inside it (deeper — dead too, folded in).
+    let mut region: Option<(usize, usize)> = None;
+    let mut dead_depth: Option<usize> = None;
 
     // Stack entries: (parent_was_active, branch_already_taken)
     // - `parent_was_active`: whether the enclosing block is active (true at
@@ -100,7 +119,25 @@ pub fn preprocess(source: &str, defines: &HashSet<String>) -> PreprocessResult {
         let line_end = line_start + raw_line.len();
         let trimmed = raw_line.trim();
 
-        if let Some(directive) = parse_directive(trimmed) {
+        let parsed = parse_directive(trimmed);
+        // A dead line belongs to the region unless it is this region's own
+        // closing/branching directive.
+        let closes_region = !active
+            && dead_depth == Some(stack.len())
+            && matches!(
+                parsed,
+                Some(Directive::Elif(_) | Directive::Else | Directive::Endif)
+            );
+        if !active && !closes_region {
+            match &mut region {
+                Some((_, end)) => *end = line_end,
+                None => region = Some((line_start, line_end)),
+            }
+        } else {
+            flush_region(source, &mut region, &mut inactive_regions);
+        }
+
+        if let Some(directive) = parsed {
             // Always mask the directive line itself.
             mask_range(&mut masked, line_start, line_end);
 
@@ -159,8 +196,18 @@ pub fn preprocess(source: &str, defines: &HashSet<String>) -> PreprocessResult {
             mask_range(&mut masked, line_start, line_end);
         }
 
+        // Inactivity is anchored to the depth it began at; nesting deeper
+        // inside an already-dead body does not move that anchor.
+        if active {
+            dead_depth = None;
+        } else if dead_depth.is_none() {
+            dead_depth = Some(stack.len());
+        }
+
         line_start = line_end;
     }
+    // An unterminated dead block runs to EOF.
+    flush_region(source, &mut region, &mut inactive_regions);
 
     // Any unclosed #if blocks.
     for _ in 0..stack.len() {
@@ -178,6 +225,7 @@ pub fn preprocess(source: &str, defines: &HashSet<String>) -> PreprocessResult {
     PreprocessResult {
         masked_source,
         errors,
+        inactive_regions,
     }
 }
 
@@ -193,12 +241,168 @@ fn mask_range(masked: &mut Vec<u8>, start: usize, end: usize) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// Close the open dead region, if any, into `out`.
+///
+/// Trims trailing line breaks so the span ends on the last real character
+/// (a span ending at `\n` renders as a fade that bleeds onto the next line),
+/// and drops a region that is empty once trimmed.
+fn flush_region(source: &str, region: &mut Option<(usize, usize)>, out: &mut Vec<Span>) {
+    let Some((start, mut end)) = region.take() else {
+        return;
+    };
+    let bytes = source.as_bytes();
+    while end > start && (bytes[end - 1] == b'\n' || bytes[end - 1] == b'\r') {
+        end -= 1;
+    }
+    if end > start {
+        out.push(Span::new(start as u32, end as u32));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn def(names: &[&str]) -> HashSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The source text each inactive region covers, for readable assertions.
+    fn regions<'a>(src: &'a str, defines: &[&str]) -> Vec<&'a str> {
+        preprocess(src, &def(defines))
+            .inactive_regions
+            .iter()
+            .map(|span| span.text(src))
+            .collect()
+    }
+
+    #[test]
+    fn inactive_region_covers_the_dead_body_not_the_directives() {
+        assert_eq!(
+            regions("#if TMNEXT\nint x = 1;\n#endif\n", &[]),
+            vec!["int x = 1;"],
+            "the #if / #endif lines stay out of the region"
+        );
+        assert!(
+            regions("#if TMNEXT\nint x = 1;\n#endif\n", &["TMNEXT"]).is_empty(),
+            "a live branch has no inactive region"
+        );
+    }
+
+    #[test]
+    fn inactive_region_tracks_which_else_arm_is_dead() {
+        let src = "#if TMNEXT\nint a;\n#else\nint b;\n#endif\n";
+        assert_eq!(regions(src, &["TMNEXT"]), vec!["int b;"], "else arm dead");
+        assert_eq!(regions(src, &[]), vec!["int a;"], "if arm dead");
+    }
+
+    #[test]
+    fn inactive_regions_cover_every_untaken_elif_arm() {
+        let src = "#if A\nint a;\n#elif B\nint b;\n#elif C\nint c;\n#else\nint d;\n#endif\n";
+        assert_eq!(regions(src, &["A"]), vec!["int b;", "int c;", "int d;"]);
+        assert_eq!(regions(src, &["B"]), vec!["int a;", "int c;", "int d;"]);
+        assert_eq!(regions(src, &["C"]), vec!["int a;", "int b;", "int d;"]);
+        // Nothing matches: every arm but the #else is dead.
+        assert_eq!(regions(src, &[]), vec!["int a;", "int b;", "int c;"]);
+        // A taken #elif is never a region, even with a later true arm.
+        assert_eq!(
+            regions(src, &["B", "C"]),
+            vec!["int a;", "int c;", "int d;"]
+        );
+    }
+
+    #[test]
+    fn nested_dead_block_is_one_outermost_region_including_inner_directives() {
+        let src = "#if OUTER\nint a;\n#if INNER\nint b;\n#endif\nint c;\n#endif\n";
+        // Whole outer body is dead: ONE region, and the nested #if/#endif are
+        // inside it (they are dead too) rather than splitting it in three.
+        assert_eq!(
+            regions(src, &["INNER"]),
+            vec!["int a;\n#if INNER\nint b;\n#endif\nint c;"],
+        );
+    }
+
+    #[test]
+    fn nested_dead_block_inside_a_live_block_covers_the_inner_body_only() {
+        let src = "#if OUTER\nint a;\n#if INNER\nint b;\n#endif\nint c;\n#endif\n";
+        assert_eq!(regions(src, &["OUTER"]), vec!["int b;"]);
+    }
+
+    #[test]
+    fn adjacent_dead_blocks_stay_separate_regions() {
+        // Separated by live code.
+        let src = "#if A\nint a;\n#endif\nint live;\n#if B\nint b;\n#endif\n";
+        assert_eq!(regions(src, &[]), vec!["int a;", "int b;"]);
+
+        // Separated only by directives — still two regions: the #endif/#if
+        // between them are live directives and must not be faded.
+        let src = "#if A\nint a;\n#endif\n#if B\nint b;\n#endif\n";
+        assert_eq!(regions(src, &[]), vec!["int a;", "int b;"]);
+    }
+
+    #[test]
+    fn consecutive_dead_lines_coalesce_into_one_region() {
+        let src = "#if A\nint a;\nint b;\n\nint c;\n#endif\n";
+        assert_eq!(regions(src, &[]), vec!["int a;\nint b;\n\nint c;"]);
+    }
+
+    #[test]
+    fn empty_dead_body_emits_no_region() {
+        assert!(regions("#if A\n#endif\n", &[]).is_empty());
+        // Dead #if arm with an empty body; the #else arm is live.
+        assert!(regions("#if A\n#else\nint b;\n#endif\n", &[]).is_empty());
+        // Mirror: the taken arm is empty and the #else arm is dead, so the
+        // #else body IS a region (an empty body must not swallow it).
+        assert_eq!(
+            regions("#if A\n#else\nint b;\n#endif\n", &["A"]),
+            vec!["int b;"]
+        );
+    }
+
+    #[test]
+    fn unterminated_dead_block_runs_to_end_of_file() {
+        let src = "#if A\nint a;\nint b;\n";
+        let result = preprocess(src, &def(&[]));
+        assert!(
+            !result.errors.is_empty(),
+            "missing #endif is still an error"
+        );
+        assert_eq!(
+            result
+                .inactive_regions
+                .iter()
+                .map(|s| s.text(src))
+                .collect::<Vec<_>>(),
+            vec!["int a;\nint b;"],
+        );
+    }
+
+    #[test]
+    fn inactive_regions_index_the_original_source_and_are_fully_masked() {
+        // Multi-byte content and CRLF: spans must stay on char boundaries,
+        // slice out of the ORIGINAL source, and every byte inside must be
+        // masked in masked_source (guards offset drift).
+        let src = "#if A\r\nint \u{00e9}\u{00e9}\u{00e9} = 1; // \u{4e2d}\u{6587}\r\nint b;\r\n#endif\r\nint live;\r\n";
+        let result = preprocess(src, &def(&[]));
+        assert_eq!(result.masked_source.len(), src.len());
+        assert_eq!(result.inactive_regions.len(), 1);
+        for span in &result.inactive_regions {
+            let (start, end) = (span.start as usize, span.end as usize);
+            assert!(
+                src.is_char_boundary(start) && src.is_char_boundary(end),
+                "span {start}..{end} must land on char boundaries"
+            );
+            assert!(
+                src[start..end].contains("\u{4e2d}\u{6587}"),
+                "region must slice the original source, not the mask"
+            );
+            assert!(
+                result.masked_source.as_bytes()[start..end]
+                    .iter()
+                    .all(|b| b.is_ascii_whitespace()),
+                "every byte inside an inactive region must be masked"
+            );
+        }
     }
 
     #[test]

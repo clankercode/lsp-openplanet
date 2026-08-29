@@ -585,18 +585,28 @@ impl Backend {
         // resolution unless we're diagnosing the export file itself.
         let symbols_for_check =
             snapshot.table_for_own_file(crate::analysis_snapshot::FileRef::Uri(uri));
+        // B031: greying out preprocessor-dead branches is an LSP-only
+        // affordance — emitted here beside the shared analysis, never from
+        // `compute_diagnostics_from_analysis` (which `check` also calls).
+        let inactive = |analysis: &crate::analysis::DocumentAnalysis| {
+            diagnostics::inactive_region_diagnostics(text, analysis, config.inactive_regions)
+        };
         let mut diags = if snapshot.is_usage_only_uri(uri) {
             Self::log_usage_only_suppression(uri);
             Vec::new()
         } else {
             match snapshot.analysis_of(uri) {
-                Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
-                    uri,
-                    analysis,
-                    config,
-                    type_index.as_deref(),
-                    &symbols_for_check,
-                ),
+                Some(analysis) => {
+                    let mut d = diagnostics::compute_diagnostics_from_analysis(
+                        uri,
+                        analysis,
+                        config,
+                        type_index.as_deref(),
+                        &symbols_for_check,
+                    );
+                    d.extend(inactive(analysis));
+                    d
+                }
                 None => {
                     let analysis_owned =
                         crate::analysis::DocumentAnalysis::analyze(text, &config.defines);
@@ -608,13 +618,15 @@ impl Backend {
                         &analysis_owned.file,
                     );
                     symbols.set_file_symbols(fid, syms);
-                    diagnostics::compute_diagnostics_from_analysis(
+                    let mut d = diagnostics::compute_diagnostics_from_analysis(
                         uri,
                         &analysis_owned,
                         config,
                         type_index.as_deref(),
                         &symbols,
-                    )
+                    );
+                    d.extend(inactive(&analysis_owned));
+                    d
                 }
             }
         };
@@ -720,13 +732,22 @@ impl Backend {
         } else {
             match snapshot.analysis_of(uri) {
                 // Parsed as part of the snapshot build — reuse the analysis.
-                Some(analysis) => diagnostics::compute_diagnostics_from_analysis(
-                    uri,
-                    analysis,
-                    &config,
-                    type_index.as_deref(),
-                    snapshot.symbols(),
-                ),
+                Some(analysis) => {
+                    let mut d = diagnostics::compute_diagnostics_from_analysis(
+                        uri,
+                        analysis,
+                        &config,
+                        type_index.as_deref(),
+                        snapshot.symbols(),
+                    );
+                    // B031: LSP-only, same as the sharded path above.
+                    d.extend(diagnostics::inactive_region_diagnostics(
+                        text,
+                        analysis,
+                        config.inactive_regions,
+                    ));
+                    d
+                }
                 // Not on disk (e.g. untitled documents) — parse on the fly
                 // with an owned one-file symbol pool.
                 None => {
@@ -740,13 +761,19 @@ impl Backend {
                         &analysis_owned.file,
                     );
                     symbols.set_file_symbols(fid, syms);
-                    diagnostics::compute_diagnostics_from_analysis(
+                    let mut d = diagnostics::compute_diagnostics_from_analysis(
                         uri,
                         &analysis_owned,
                         &config,
                         type_index.as_deref(),
                         &symbols,
-                    )
+                    );
+                    d.extend(diagnostics::inactive_region_diagnostics(
+                        text,
+                        &analysis_owned,
+                        config.inactive_regions,
+                    ));
+                    d
                 }
             }
         };

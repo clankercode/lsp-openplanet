@@ -14,6 +14,23 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **Inactive `#if` branches are greyed out in the editor (`inactive_regions`)**
+  — code the current defines switch off now gets a HINT diagnostic tagged
+  `Unnecessary` over each dead body, so an editor fades it the way it fades
+  `#if 0` in C (VS Code gates this on `editor.showUnused`). Default `hint`;
+  `info` also lists them in the problems panel, `ignore` marks nothing.
+  Configurable via `inactive_regions` in `.openplanet-lsp.toml`, the user
+  config, or `initializationOptions`.
+
+  **LSP-only** — `check` and the TUI never emit these at any level, so a
+  plugin full of `#if MP4` does not drown the CLI output. There is
+  deliberately no warn/error level: a branch that is off for your target is
+  dead by design, not a defect.
+
+  One diagnostic per contiguous dead body: consecutive dead lines coalesce,
+  the `#if` / `#elif` / `#else` / `#endif` lines stay at normal weight, and a
+  nested block inside an already-dead body folds into the outermost span
+  rather than splitting it.
 - **Quiet levels for unused declarations: `unused = "hint" | "info"`** — "never
   used" is advisory, not a defect, so it no longer has to be a warning.
   `info` keeps the findings listed in an editor's problems panel; `hint` drops

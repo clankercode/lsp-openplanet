@@ -2,7 +2,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::analysis::unused::UnusedDeclaration;
 use crate::analysis::DocumentAnalysis;
-use crate::config::{LspConfig, UnusedLevel};
+use crate::config::{InactiveLevel, LspConfig, UnusedLevel};
 use crate::symbols::SymbolTable;
 use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticSeverity};
 use crate::typedb::TypeIndex;
@@ -172,6 +172,52 @@ pub fn unused_declaration_diagnostics(
         .collect()
 }
 
+/// Diagnostics that grey out the `#if` branches the current defines switch
+/// off, one per contiguous dead body (see
+/// [`crate::preprocessor::PreprocessResult::inactive_regions`]).
+///
+/// LSP-ONLY. Never call this from `check` or the TUI: a plugin with a few
+/// hundred `#if MP4` lines would drown the CLI output, and HINT severity does
+/// not save us there because `check` prints hints. The greying is a
+/// live-editor affordance, not a finding.
+///
+/// The fade comes from [`DiagnosticTag::UNNECESSARY`], not the severity —
+/// HINT alone would render as an ordinary (if quiet) squiggle, and VS Code
+/// gates the grey-out on `editor.showUnused`.
+pub fn inactive_region_diagnostics(
+    source: &str,
+    analysis: &crate::analysis::DocumentAnalysis,
+    level: InactiveLevel,
+) -> Vec<Diagnostic> {
+    let Some(severity) = inactive_severity(level) else {
+        return Vec::new();
+    };
+    analysis
+        .preprocess
+        .inactive_regions
+        .iter()
+        .map(|span| Diagnostic {
+            range: span_to_range(source, *span),
+            severity: Some(severity),
+            message: "inactive code: the current preprocessor defines switch this branch off \
+                      (see `defines` / `game_target` / `signature_mode`)"
+                .to_string(),
+            source: Some("openplanet-lsp".to_string()),
+            code: Some(NumberOrString::String("inactive-region".to_string())),
+            tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn inactive_severity(level: InactiveLevel) -> Option<DiagnosticSeverity> {
+    match level {
+        InactiveLevel::Ignore => None,
+        InactiveLevel::Hint => Some(DiagnosticSeverity::HINT),
+        InactiveLevel::Info => Some(DiagnosticSeverity::INFORMATION),
+    }
+}
+
 fn unused_severity(level: UnusedLevel) -> Option<DiagnosticSeverity> {
     match level {
         UnusedLevel::Ignore => None,
@@ -284,6 +330,121 @@ mod tests {
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("MissingDep")));
+    }
+
+    fn dead_analysis(source: &str) -> crate::analysis::DocumentAnalysis {
+        // No defines: every `#if` body below is dead.
+        crate::analysis::DocumentAnalysis::analyze(source, &std::collections::HashSet::new())
+    }
+
+    #[test]
+    fn inactive_region_diagnostics_follow_level() {
+        let src = "#if MP4\nvoid Dead() {}\n#endif\nvoid Main() {}\n";
+        let analysis = dead_analysis(src);
+        for (level, want) in [
+            (InactiveLevel::Ignore, None),
+            (InactiveLevel::Hint, Some(DiagnosticSeverity::HINT)),
+            (InactiveLevel::Info, Some(DiagnosticSeverity::INFORMATION)),
+        ] {
+            let diags = inactive_region_diagnostics(src, &analysis, level);
+            match want {
+                None => assert!(diags.is_empty(), "{level:?} must emit nothing"),
+                Some(sev) => {
+                    assert_eq!(diags.len(), 1, "{level:?}");
+                    assert_eq!(diags[0].severity, Some(sev), "{level:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inactive_region_diagnostics_are_tagged_unnecessary_with_a_stable_code() {
+        let src = "#if MP4\nvoid Dead() {}\n#endif\nvoid Main() {}\n";
+        let analysis = dead_analysis(src);
+        for level in [InactiveLevel::Hint, InactiveLevel::Info] {
+            for diag in inactive_region_diagnostics(src, &analysis, level) {
+                assert_eq!(
+                    diag.tags,
+                    Some(vec![DiagnosticTag::UNNECESSARY]),
+                    "{level:?} must fade the range"
+                );
+                assert_eq!(
+                    diag.code,
+                    Some(NumberOrString::String("inactive-region".into())),
+                    "{level:?}"
+                );
+                assert_eq!(diag.source, Some("openplanet-lsp".to_string()));
+            }
+        }
+    }
+
+    /// The range must cover exactly the dead body — not the directives, and
+    /// not the live code after it.
+    #[test]
+    fn inactive_region_diagnostic_range_covers_the_dead_body_only() {
+        let src = "#if MP4\nvoid Dead() {}\n#endif\nvoid Main() {}\n";
+        let diags = inactive_region_diagnostics(src, &dead_analysis(src), InactiveLevel::Hint);
+        assert_eq!(diags.len(), 1);
+        let range = diags[0].range;
+        assert_eq!(range.start, Position::new(1, 0), "starts at the dead body");
+        assert_eq!(
+            range.end,
+            Position::new(1, "void Dead() {}".len() as u32),
+            "ends at the last real character, not the newline"
+        );
+    }
+
+    /// Generalise over what the dead branch contains: whole declarations,
+    /// statements inside a live function, class members, globals, and a
+    /// block nested in a namespace all fade the same way.
+    #[test]
+    fn inactive_region_diagnostics_generalise_over_what_is_dead() {
+        for (label, src) in [
+            ("whole function", "#if MP4\nvoid Dead() {}\n#endif\n"),
+            (
+                "statements in a live function",
+                "void Main() {\n#if MP4\n    int dead = 1;\n#endif\n}\n",
+            ),
+            (
+                "class member",
+                "class C {\n#if MP4\n    int dead;\n#endif\n}\n",
+            ),
+            ("global", "#if MP4\nint dead = 1;\n#endif\n"),
+            (
+                "inside a namespace",
+                "namespace N {\n#if MP4\n    void Dead() {}\n#endif\n}\n",
+            ),
+            (
+                "else arm",
+                "#if MP4\nvoid A() {}\n#else\nvoid B() {}\n#endif\n",
+            ),
+        ] {
+            let diags = inactive_region_diagnostics(src, &dead_analysis(src), InactiveLevel::Hint);
+            assert_eq!(diags.len(), 1, "{label}: one region");
+            assert_eq!(diags[0].severity, Some(DiagnosticSeverity::HINT), "{label}");
+            assert_eq!(
+                diags[0].tags,
+                Some(vec![DiagnosticTag::UNNECESSARY]),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_source_has_no_inactive_region_diagnostics() {
+        for src in [
+            "void Main() {}\n",
+            "#if MP4\nvoid Dead() {}\n#endif\n", // dead, but see defines below
+        ] {
+            let analysis = crate::analysis::DocumentAnalysis::analyze(
+                src,
+                &["MP4".to_string()].into_iter().collect(),
+            );
+            assert!(
+                inactive_region_diagnostics(src, &analysis, InactiveLevel::Hint).is_empty(),
+                "nothing is switched off: {src:?}"
+            );
+        }
     }
 
     #[test]
