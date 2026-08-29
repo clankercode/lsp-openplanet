@@ -705,7 +705,7 @@ impl TypeIndex {
     /// short-name index, `namespace_members`, hover, completion, and the
     /// bare-value scan behind `source_enums_iter` — which is what makes the
     /// 55 false-positive value names resolve.
-    pub fn add_header(&mut self, db: &HeaderDatabase) {
+    fn add_header(&mut self, db: &HeaderDatabase) {
         let indexed_enum_names: std::collections::HashSet<String> = self
             .enums
             .iter()
