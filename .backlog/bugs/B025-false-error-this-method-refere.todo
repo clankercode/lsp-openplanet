@@ -1,0 +1,73 @@
+---
+complexity: medium
+created_at: "2026-08-29T05:24:01Z"
+depends_on: []
+estimate_hours: 3
+id: B025
+priority: high
+status: pending
+tags:
+    - typecheck
+    - funcdef
+    - false-positive
+title: 'False error: this.Method references at funcdef ctor sites typed as return type (CoroutineFunc(this.M) -> expected void (), got void)'
+updated_at: "2026-08-29T05:24:01Z"
+---
+## Broken (game-verified 2026-08-29, OP 1.29.5 / OpenplanetNext, master @ d771d92)
+
+A class method referenced via `this.Method` (or another object expression) and passed to a typedb funcdef constructor is typed as the method's **return type** instead of a callable reference, so the ctor arg check rejects every such site:
+
+```
+error: argument 1 of `CoroutineFunc`: expected `void ()`, got `void`
+error: argument 1 of `CoroutineFunc`: expected `void ()`, got `bool`   (overload pick: `bool OpenInvFolderMb(CGameCtnEditorFree@, ...)`)
+```
+
+Scale: **53 errors, all one family**, on the real-world `tm-editor-plus-plus` plugin (e.g. `startnew(CoroutineFunc(this.LoadSavedValues))`, `InvObj(fullName, ..., isDirectory ? CoroutineFunc(this.DirCallback) : null)`, `Meta::StartWithRunContext(..., CoroutineFunc(this.Loop))`).
+
+AngelScript semantics: class methods do NOT implicitly decay to funcdefs the way free functions do — the funcdef constructor **is** the required conversion (`CoroutineFunc(this.M)`). So these sites are the idiomatic legal form, not misuse.
+
+Minimal repro + verdicts (game probed via `scripts/issue_repro_game.py`):
+
+| Case | Game (1.29.5) | LSP today |
+|---|---|---|
+| `startnew(CoroutineFunc(this.voidMethod))` | CLEAN | ERR (FP) |
+| `startnew(CoroutineFunc(this.overloaded))` — `void()` + `bool(int)` overloads | CLEAN (binds compatible overload) | ERR, names the wrong overload's return type (FP; the Favorites.as:671 `OpenInvFolderMb` case) |
+| `startnew(CoroutineFunc(bareMethod))` — implicit this | CLEAN | CLEAN (GH #63 test) |
+| `auto @h = CoroutineFunc(this.voidMethod)` | CLEAN | ERR (FP) |
+| `startnew(CoroutineFunc(this.boolMethod))` — `bool()` into `void()` funcdef | ERR: `Can't create delegate` | ERR `got bool` (true positive, keep) |
+| `startnew(CoroutineFuncUserdata(this.voidFn))` — `void()` into `void (ref)` | ERR: `Can't create delegate` | ERR (true positive, keep) |
+| `startnew(CoroutineFuncUserdata(this.voidRefFn))` — `void(ref@)` method | CLEAN (Map_EditProps.as:249 `RevertDeco`) | ERR (FP) |
+
+## Root cause
+
+The funcdef ctor path (`check_funcdef_ctor_arg` → `arg_binds_to_funcdef` → `lookup_arg_function_sigs`, `src/typecheck/checker.rs`) only recognizes callables for `ExprKind::Ident` args (where `lookup_global_value_type` maps `SymbolKind::Function` → `TypeRepr::Funcdef(name)` and class methods are looked up via `lookup_method_overloads_with_inheritance`). A `this.X` member access flows down the member-access typing path instead, which yields the method's return type (`void` / first-overload `bool`); `is_clearly_not_a_function` then fires and emits `ArgTypeMismatch`.
+
+## Expected
+
+A method reference (`this.X`, `obj.X`, bare `X` in class scope) at a funcdef ctor arg (and any funcdef-typed slot, e.g. handle init) must be treated as a callable:
+
+- accept when **any overload** of the method is signature-compatible with the funcdef (game binds the compatible one; return type must match exactly),
+- reject when no overload is compatible — game verdict is `Can't create delegate`; keep the LSP flagging those,
+- return-type strictness stays: `bool()` method into `void()` funcdef stays rejected.
+
+## Not
+
+- Do not accept signature-incompatible methods (bool-into-void, wrong params) — game rejects them.
+- Do not require a unique overload — any compatible overload binds.
+- Do not change bare free-function decay (`startnew(FreeFn)`) or bare implicit-this (`CoroutineFunc(M)`) — both already correct.
+
+## Test plan (TDD, red first; generalize per CLAUDE.md)
+
+- `this.voidMethod` into `CoroutineFunc(...)`: call arg, handle init, ternary arm → clean (red today).
+- Overloaded method (`void()` + `bool(int)`) → clean, must not use the first overload's return type (red today; Favorites.as:671 shape).
+- `void(ref@)` method into `CoroutineFuncUserdata` → clean (red today; Map_EditProps.as:249 shape).
+- `bool()` method into `CoroutineFunc` → still flagged (green today; keep).
+- `void()` method into `CoroutineFuncUserdata` (`void (ref)`) → still flagged (green today; keep).
+- Bare implicit-this method → stays clean (green today; keep).
+- Non-method member (property) into a funcdef slot → still flagged.
+- Fixture `tests/fixtures/issue-repros/<n>-*` (47-style: legal forms clean, incompatible forms diagnosed), game-verified via `scripts/issue_repro_game.py`. Sanity signal: `openplanet-lsp check` on `tests/fixtures/tm-editor-plus-plus` drops from 55 errors to near 0.
+
+## Related
+
+- B022 / GH #63 (funcdef ctor checking, closed): introduced the ctor path this bug extends to method references.
+- B023: the opposite direction — overload-set *parameter* slots silently accept bad callables. Same signature-match helpers should serve both.

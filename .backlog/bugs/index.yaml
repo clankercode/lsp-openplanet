@@ -23,3 +23,4 @@ bugs:
     - file: B022-false-error-no-matching-symbol.todo
     - file: B023-wrong-signature-non-function-c.todo
     - file: B024-config-defines-replaces-the-ga.todo
+    - file: B025-false-error-this-method-refere.todo
