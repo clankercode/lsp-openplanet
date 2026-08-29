@@ -1,19 +1,20 @@
 ---
 claimed_at: "2026-08-29T18:19:20Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T20:13:36Z"
 complexity: medium
 created_at: "2026-08-29T15:05:11Z"
 depends_on:
     - B035
+duration_minutes: 114.26896157526667
 estimate_hours: 4
 id: B036
 priority: high
 started_at: "2026-08-29T18:19:20Z"
-status: in_progress
+status: done
 tags: []
 title: Quick fixes for diagnostics whose replacement text is already computed
-updated_at: "2026-08-29T18:19:20Z"
+updated_at: "2026-08-29T20:13:36Z"
 ---
 Found by a coordinator feature-gap review, 2026-08-30. Depends on B035
 (code-action seam, kinds, resolve, fixAll).
