@@ -64,6 +64,7 @@ impl App {
         if len == 0 {
             self.list_state.select(None);
             self.selected_key = None;
+            self.detail_scroll = 0;
             return;
         }
 
@@ -367,9 +368,9 @@ impl App {
             if str_w(&title) + str_w(&suffix) <= inner_w {
                 title.push_str(&suffix);
             } else {
-                // Too narrow for the range — the key hint still has to survive,
-                // it is the only thing telling the user there is more to read.
-                title = " ↕ J/K ".to_string();
+                // Too narrow for the range — the hint still has to survive, it
+                // is the only thing telling the user there is more to read.
+                title = scroll_hint_title(inner_w);
             }
         }
 
@@ -661,6 +662,19 @@ fn format_location(d: &DiagItem, loc_w: usize) -> String {
     let truncated = trim_left_to(&bare_location(d), loc_w);
     let pad = loc_w.saturating_sub(str_w(&truncated));
     format!("{truncated}{}", " ".repeat(pad))
+}
+
+/// Widest "there is more below" hint that fits `inner_w` title columns.
+///
+/// Tiered rather than truncated: a clipped `J/` teaches the reader nothing, and
+/// on a pane this narrow the hint is the only overflow signal there is.
+fn scroll_hint_title(inner_w: usize) -> String {
+    for hint in [" ↕ J/K ", "↕ J/K", "J/K", "↕"] {
+        if str_w(hint) <= inner_w {
+            return hint.to_string();
+        }
+    }
+    String::new()
 }
 
 /// Placeholder body shown when nothing is selected.
@@ -995,6 +1009,10 @@ fn pretty_detail_lines(d: &DiagItem, inner_w: usize) -> Vec<Line<'static>> {
         let start = d.start_col0().min(src.chars().count());
         let end = d.end_col0().max(start + 1);
         let end = end.min(src.chars().count().max(start + 1));
+        // A range that lands inside a cluster (a lone combining mark, or half a
+        // ZWJ sequence) would otherwise caret the gap next to the glyph rather
+        // than the glyph itself.
+        let (start, end) = snap_to_clusters(src, start, end);
 
         // Source line with the underlined span emphasized. Columns are char
         // offsets (that is what the diagnostic carries), but the caret row is
@@ -1062,6 +1080,26 @@ fn pretty_detail_lines(d: &DiagItem, inner_w: usize) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+/// Widen a char-offset range to whole grapheme clusters.
+///
+/// Diagnostics carry character columns, but a caret has to sit under a rendered
+/// glyph — and one glyph can be several chars (`e` + U+0301, a ZWJ emoji).
+fn snap_to_clusters(src: &str, start: usize, end: usize) -> (usize, usize) {
+    let (mut lo, mut hi) = (start, end);
+    let mut off = 0usize; // char offset of the cluster being examined
+    for g in graphemes(src) {
+        let next = off + g.chars().count();
+        if start > off && start < next {
+            lo = off;
+        }
+        if end > off && end < next {
+            hi = next;
+        }
+        off = next;
+    }
+    (lo, hi.max(lo + 1))
 }
 
 fn severity_style(sev: Severity) -> Style {
@@ -1921,6 +1959,98 @@ mod tests {
             "a 2-column char needs 2 carets: {:?}",
             rows[3]
         );
+    }
+
+    #[test]
+    fn carets_sit_under_whole_grapheme_clusters() {
+        // A range selecting only the combining mark must caret the glyph it
+        // belongs to, not the gap after the base char.
+        let mut d = diag(Severity::Error, "combining-mark-only span");
+        d.source_line = Some("e\u{301}x = 1;".into());
+        d.col = 2; // 1-based char column of U+0301
+        d.end_col = 3;
+        let rows = detail_rows(&d, 200);
+        let caret_col = str_w(&rows[3][..rows[3].find('^').expect("caret")]);
+        let glyph_col = str_w(&rows[2][..rows[2].find('e').expect("glyph")]);
+        assert_eq!(
+            caret_col, glyph_col,
+            "caret must land on the rendered glyph\n  src={:?}\ncaret={:?}",
+            rows[2], rows[3]
+        );
+
+        // Half of a ZWJ sequence: the whole emoji gets caretted.
+        let mut z = diag(Severity::Error, "zwj-internal span");
+        z.source_line = Some("\u{1f469}\u{200d}\u{1f4bb}x".into());
+        z.col = 2; // the ZWJ itself
+        z.end_col = 3;
+        let rows = detail_rows(&z, 200);
+        assert_eq!(
+            str_w(&rows[3][..rows[3].find('^').expect("caret")]),
+            str_w(&rows[2][..rows[2].find('\u{1f469}').expect("glyph")]),
+            "caret must start at the emoji, not inside it: {:?}",
+            rows[3]
+        );
+    }
+
+    #[test]
+    fn snap_to_clusters_widens_only_partial_ranges() {
+        // ASCII is one char per cluster: nothing moves.
+        assert_eq!(snap_to_clusters("abcdef", 2, 4), (2, 4));
+        // "e\u{301}" is one cluster spanning chars 0..2.
+        assert_eq!(snap_to_clusters("e\u{301}x", 1, 2), (0, 2));
+        assert_eq!(snap_to_clusters("e\u{301}x", 0, 2), (0, 2));
+        assert_eq!(snap_to_clusters("e\u{301}x", 2, 3), (2, 3));
+        // Past the end of the line: left alone, but never empty.
+        assert_eq!(snap_to_clusters("ab", 2, 3), (2, 3));
+        // The result always contains the input range.
+        for (lo, hi) in [(0, 1), (1, 2), (0, 3), (2, 3), (1, 3)] {
+            let (a, b) = snap_to_clusters("e\u{301}x", lo, hi);
+            assert!(a <= lo && b >= hi, "({lo},{hi}) -> ({a},{b})");
+            assert!(a < b, "({lo},{hi}) -> empty range ({a},{b})");
+        }
+    }
+
+    #[test]
+    fn scroll_hint_title_degrades_but_never_overflows() {
+        for inner_w in 0..=40usize {
+            let hint = scroll_hint_title(inner_w);
+            assert!(
+                str_w(&hint) <= inner_w,
+                "w={inner_w} hint={hint:?} is {} wide",
+                str_w(&hint)
+            );
+            // Anything that can show a hint at all shows one.
+            if inner_w >= 1 {
+                assert!(!hint.is_empty(), "w={inner_w}: gave up on the hint");
+            }
+            if inner_w >= 3 {
+                assert!(hint.contains("J/K"), "w={inner_w} hint={hint:?}");
+            }
+        }
+        assert_eq!(scroll_hint_title(0), "");
+    }
+
+    #[test]
+    fn detail_scroll_clears_when_the_list_empties() {
+        let mut app = App::from_snapshot(canned_snapshot());
+        app.scroll_detail_down();
+        app.scroll_detail_down();
+        assert_eq!(app.detail_scroll(), 2);
+        app.apply_snapshot(Snapshot::empty("./MyPlugin"));
+        assert_eq!(app.selected(), None);
+        assert_eq!(
+            app.detail_scroll(),
+            0,
+            "an empty refresh must not leave stale scroll state"
+        );
+        // Same for the explicit selection clears.
+        app.apply_snapshot(canned_snapshot());
+        app.scroll_detail_down();
+        app.apply_snapshot(Snapshot::empty("./MyPlugin"));
+        app.select_first();
+        assert_eq!(app.detail_scroll(), 0);
+        app.select_last();
+        assert_eq!(app.detail_scroll(), 0);
     }
 
     #[test]

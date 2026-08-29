@@ -235,3 +235,39 @@ fn very_narrow_detail_title_keeps_the_scroll_hint() {
         );
     }
 }
+
+/// A diagnostic with no source excerpt wraps into more rows for a given width,
+/// so it is the case that can overflow the detail box on a truly tiny terminal.
+/// The hint must still be there, in whatever form fits.
+#[test]
+fn scroll_hint_survives_the_narrowest_scrollable_box() {
+    let mut snap = narrow_snapshot();
+    snap.diagnostics[0].source_line = None;
+    snap.diagnostics.truncate(1);
+
+    for w in 5u16..=20 {
+        let mut app = App::from_snapshot(snap.clone());
+        let backend = TestBackend::new(w, HEIGHT);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let rows = rendered_text(&terminal);
+        // Nothing may spill past the terminal edge.
+        for row in &rows {
+            assert!(
+                row.chars().count() <= w as usize,
+                "row overflows {w}: {row:?}"
+            );
+        }
+        let text = rows.join("\n");
+        assert!(
+            text.contains("J/K") || text.contains('↕'),
+            "no overflow hint at width {w}:\n{text}"
+        );
+        // ...and it must never be a clipped one: half a key name teaches the
+        // reader nothing, so the hint has to degrade to a shorter whole form.
+        assert!(
+            !text.contains("J/") || text.contains("J/K"),
+            "key hint clipped mid-token at width {w}:\n{text}"
+        );
+    }
+}
