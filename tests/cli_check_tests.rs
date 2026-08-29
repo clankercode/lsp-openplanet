@@ -1302,6 +1302,48 @@ fn check_command_issue_repro_b025_method_references_at_funcdef_ctors() {
     );
 }
 
+/// B027: delegate construction requires EXACT parameter passing modes.
+/// Game ground truth (RemoteBuild probe 2026-08-29, OP 1.29.5): the seven
+/// MISMATCH lines error in-game (`Can't create delegate`, free-fn ones as
+/// `Can't implicitly convert from '<function>@const'`); the exact-match
+/// lines (plain/&in/&out methods and free fns, object-typed &inout) compile
+/// clean. `&in` and `&inout` are enforced exactly like `&out`.
+#[test]
+fn check_command_issue_repro_b027_funcdef_param_modes() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b027-funcdef-param-modes");
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains("error:")).collect();
+    let expected = [
+        // &out method -> plain funcdef / plain method -> &out funcdef
+        "Main.as:37", "Main.as:39",
+        // free functions, both polarities
+        "Main.as:41", "Main.as:42",
+        // &in enforced exactly, both polarities
+        "Main.as:44", "Main.as:45",
+        // object-typed &inout funcdef vs &out method
+        "Main.as:53",
+    ];
+    assert_eq!(
+        errors.len(),
+        expected.len(),
+        "expected exactly {} errors; stdout={stdout:?} stderr={stderr:?}",
+        expected.len()
+    );
+    for line in expected {
+        assert!(
+            errors.iter().any(|e| e.contains(line)),
+            "mode mismatch on {line} must be flagged; stdout={stdout:?}"
+        );
+    }
+    // Exact matches (47/48/50/51/55) must stay silent — covered by the
+    // exact count above, but name them for the failure message.
+    for line in ["Main.as:47", "Main.as:48", "Main.as:50", "Main.as:51", "Main.as:55"] {
+        assert!(
+            !errors.iter().any(|e| e.contains(line)),
+            "exact mode match on {line} must stay silent; stdout={stdout:?}"
+        );
+    }
+}
+
 /// GH #49: AngelScript has no implicit nat3 -> int3 conversion — the game
 /// rejects both the implicit init and the int3(nat3) constructor form.
 /// Ground truth quoted in the issue (tm-editor-plus-plus). Fixed — must flag.

@@ -77,9 +77,13 @@ pub struct ParamInfo {
     pub name: Option<String>,
     pub type_name: String,
     pub default: Option<String>,
+    /// `&in` reference parameter (typedb `typeflags` bit 1) (B027).
+    pub is_in: bool,
     /// `&out` reference parameter (typedb `typeflags` bit 2): only an
     /// l-value argument can bind (GH #47).
     pub is_out: bool,
+    /// `&inout` reference parameter (typedb `typeflags` bits 1|2) (B027).
+    pub is_inout: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -284,9 +288,11 @@ impl TypeIndex {
                         name: a.name.clone(),
                         type_name: a.typedecl.clone(),
                         default: a.default.clone(),
-                        // typedb typeflags bit 2 marks `&out` reference params
-                        // (GH #47): only an l-value argument can bind.
+                        // typedb typeflags: bit 1 `&in`, bit 2 `&out`,
+                        // both = `&inout` (B027); bit 4 is const.
+                        is_in: a.typeflags & 0b1 != 0,
                         is_out: a.typeflags & 0b10 != 0,
+                        is_inout: a.typeflags & 0b11 == 0b11,
                     })
                     .collect(),
                 doc: func.desc.clone(),
@@ -314,7 +320,9 @@ impl TypeIndex {
                                 name: a.name.clone(),
                                 type_name: a.typedecl.clone(),
                                 default: a.default.clone(),
+                                is_in: a.typeflags & 0b1 != 0,
                                 is_out: a.typeflags & 0b10 != 0,
+                                is_inout: a.typeflags & 0b11 == 0b11,
                             })
                             .collect(),
                         is_const: m.is_const,
@@ -393,7 +401,9 @@ impl TypeIndex {
                             name: a.name.clone(),
                             type_name: a.typedecl.clone(),
                             default: a.default.clone(),
+                            is_in: a.typeflags & 0b1 != 0,
                             is_out: a.typeflags & 0b10 != 0,
+                            is_inout: a.typeflags & 0b11 == 0b11,
                         })
                         .collect(),
                     doc: fd.desc.clone(),
@@ -457,7 +467,9 @@ impl TypeIndex {
                                         name: Some(name),
                                         type_name: ty,
                                         default: None,
+                                        is_in: false,
                                         is_out: false,
+                                        is_inout: false,
                                     })
                                     .collect(),
                                 is_const: false,

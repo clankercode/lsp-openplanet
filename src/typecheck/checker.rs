@@ -12,7 +12,7 @@
 use super::builtins;
 use super::call_site::{self, ArgBind};
 use super::global_scope::{FuncdefSig, GlobalScope, OverloadSig};
-use super::repr::{PrimitiveType, TypeRepr};
+use super::repr::{param_mode_from_text, ParamMode, PrimitiveType, TypeRepr};
 use super::resolver::TypeResolver;
 use crate::lexer::token::TokenKind;
 use crate::lexer::Span;
@@ -2660,13 +2660,27 @@ impl<'a> Checker<'a> {
                 ) {
                     return false;
                 }
-                // Delegate construction requires exact parameter passing
-                // modes (game ground truth 2026-08-29: a `void(int &out)`
-                // method into `funcdef void(int)` errors `Can't create
-                // delegate`).
-                let got_out = sig.param_out.get(i).copied().unwrap_or(false);
-                let expected_out = expected.contains("&out");
-                got_out == expected_out
+                // Delegate construction requires EXACT parameter passing
+                // modes (game probe 2026-08-29, OP 1.29.5: `Can't create
+                // delegate` on any plain/&in/&out/&inout mismatch). The
+                // signature's `param_modes` is authoritative; fall back to
+                // the param text (then the `&out` flag) for safety.
+                let got_mode = sig
+                    .param_modes
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| match param_mode_from_text(got) {
+                        ParamMode::Value if sig.param_out.get(i).copied().unwrap_or(false) => {
+                            ParamMode::Out
+                        }
+                        mode => mode,
+                    });
+                let expected_mode = fd
+                    .param_modes
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| param_mode_from_text(expected));
+                got_mode == expected_mode
             })
     }
 
@@ -9279,11 +9293,7 @@ void Main() {
     /// `void(int &out)` method does NOT convert to `funcdef void(int)` —
     /// game ground truth (RemoteBuild 2026-08-29, OP 1.29.5): ERR
     /// `Can't create delegate`. Both polarities must flag.
-    /// Open — B027: the symbol table drops `Param.modifier`, so workspace
-    /// sigs carry no mode flags; desired outcome asserted, unignore as part
-    /// of the B027 fix.
     #[test]
-    #[ignore = "B027 open — &out/&inout modes not carried through the symbol table"]
     fn funcdef_ctor_rejects_out_param_modifier_mismatch() {
         let diags = check_with_typedb(
             r#"
@@ -9307,6 +9317,136 @@ void Main() {
             mismatches, 2,
             "both &out-modifier mismatches must be flagged, got {:?}",
             diags
+        );
+    }
+
+    /// B027 generalization (CLAUDE.md): the same exact-mode rule for free
+    /// functions, both polarities; exact matches keep binding.
+    #[test]
+    fn funcdef_ctor_out_mode_mismatch_free_functions() {
+        let diags = check(
+            r#"
+            funcdef void FDI(int);
+            funcdef void FDO(int &out);
+            void FnPlain(int x) {}
+            void FnOut(int &out x) {}
+            void Main() {
+                FDI@ a = FDI(FnOut);
+                FDO@ b = FDO(FnPlain);
+                FDI@ c = FDI(FnPlain);
+                FDO@ d = FDO(FnOut);
+            }
+            "#,
+        );
+        let mismatches = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .count();
+        assert_eq!(
+            mismatches, 2,
+            "free-fn &out mismatches must flag both polarities and nothing else, got {:?}",
+            diags
+        );
+    }
+
+    /// B027: `&in` is enforced exactly like `&out` — game probe
+    /// (RemoteBuild 2026-08-29, OP 1.29.5): `FIn(plain)` and
+    /// `FPlain(fnWithIn)` both error, while exact `&in`↔`&in` binds.
+    #[test]
+    fn funcdef_ctor_enforces_in_mode_exactly() {
+        let diags = check(
+            r#"
+            funcdef void FPlain(int);
+            funcdef void FIn(int &in);
+            void FnPlain(int x) {}
+            void FnIn(int &in x) {}
+            void Main() {
+                FIn@ a = FIn(FnPlain);
+                FPlain@ b = FPlain(FnIn);
+                FIn@ c = FIn(FnIn);
+                FPlain@ d = FPlain(FnPlain);
+            }
+            "#,
+        );
+        let mismatches = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .count();
+        assert_eq!(
+            mismatches, 2,
+            "&in mismatches must flag both polarities, exact &in binds, got {:?}",
+            diags
+        );
+    }
+
+    /// B027: `&inout` is only legal on object types (the game rejects
+    /// `int &inout` at declaration) and is enforced exactly — game probe
+    /// 2026-08-29: `GInout(&inout)` vs `&out`/value methods error,
+    /// `GInout` vs `&inout` method binds.
+    #[test]
+    fn funcdef_ctor_enforces_inout_mode_for_object_types() {
+        let diags = check(
+            r#"
+            class H {}
+            funcdef void GInout(H &inout);
+            class D {
+                void HPlain(H x) {}
+                void HOut(H &out x) {}
+                void HInout(H &inout x) {}
+            }
+            void Main() {
+                D d;
+                GInout@ a = GInout(d.HPlain);
+                GInout@ b = GInout(d.HOut);
+                GInout@ c = GInout(d.HInout);
+            }
+            "#,
+        );
+        let mismatches = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .count();
+        assert_eq!(
+            mismatches, 2,
+            "&inout mismatch vs value/&out methods must flag, exact &inout binds, got {:?}",
+            diags
+        );
+    }
+
+    /// B027: typedb method signatures carry the `&out` mode only as
+    /// `OverloadSig.param_out` (their param text has no mode decoration) —
+    /// the flag must participate in the same exact-mode comparison for
+    /// both sides of the funcdef.
+    #[test]
+    fn func_matches_funcdef_uses_typedb_out_flag() {
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, None);
+        let checker = Checker::new("", &scope);
+        let engine_out_method = OverloadSig {
+            param_names: vec![None],
+            param_types: vec!["float".to_string()],
+            param_out: vec![true],
+            param_modes: vec![ParamMode::Out],
+            min_args: 1,
+            return_type: "void".to_string(),
+        };
+        let fd = |mode: ParamMode| FuncdefSig {
+            qualified: "FD".to_string(),
+            return_type: "void".to_string(),
+            param_types: vec!["float".to_string()],
+            param_modes: vec![mode],
+        };
+        assert!(
+            !checker.func_matches_funcdef(&engine_out_method, &fd(ParamMode::Value)),
+            "&out arg must not bind a value funcdef"
+        );
+        assert!(
+            checker.func_matches_funcdef(&engine_out_method, &fd(ParamMode::Out)),
+            "&out arg must bind an &out funcdef"
+        );
+        assert!(
+            !checker.func_matches_funcdef(&engine_out_method, &fd(ParamMode::In)),
+            "&out arg must not bind an &in funcdef"
         );
     }
 
