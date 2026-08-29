@@ -290,7 +290,7 @@ fn lookup_external(qualified: &str, index: &TypeIndex) -> Option<Hover> {
         return Some(markdown_hover(info));
     }
 
-    if let Some(en) = index.lookup_enum(qualified) {
+    if let Some(en) = index.lookup_source_enum(qualified) {
         let values_str: Vec<String> = en
             .values
             .iter()

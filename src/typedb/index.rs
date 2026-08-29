@@ -96,8 +96,8 @@ pub struct EnumInfo {
     /// it no name of its own, so its qualified key is *synthesized* from the
     /// declaring context (`Module::Class::Member`) rather than read from the
     /// DB. Such a key names nothing the game will accept in source, so it is
-    /// kept out of the short-name index and never participates in resolving
-    /// a user-written type name — see `build_short_type_index`.
+    /// kept out of every source-facing lookup, completion, and namespace
+    /// query — see `lookup_source_enum` and `build_short_type_index`.
     pub anonymous: bool,
 }
 
@@ -627,6 +627,14 @@ impl TypeIndex {
         self.enums.get(qualified_name)
     }
 
+    /// Source-facing enum lookup. Anonymous member enums are keyed by
+    /// declaration context solely for internal data queries; that synthetic
+    /// key is never a type name AngelScript accepts in user source.
+    pub fn lookup_source_enum(&self, qualified_name: &str) -> Option<&EnumInfo> {
+        self.lookup_enum(qualified_name)
+            .filter(|info| !info.anonymous)
+    }
+
     /// The inline enum declared *by* `member` of engine class `class_qname`
     /// (B016). The Nadeo dump gives such an enum no name of its own, so it
     /// is keyed by its declaring context (`Module::Class::Member`) and is
@@ -648,6 +656,11 @@ impl TypeIndex {
         self.enums.iter()
     }
 
+    /// Iterate only enums that have a real, source-writable name.
+    pub fn source_enums_iter(&self) -> impl Iterator<Item = (&String, &EnumInfo)> {
+        self.enums.iter().filter(|(_, info)| !info.anonymous)
+    }
+
     /// Iterate all function overload sets directly under `namespace`
     /// (e.g., `UI` → `UI::Begin` but not `UI::Layout::Foo`). Used by
     /// namespace-shortcut completions.
@@ -663,18 +676,22 @@ impl TypeIndex {
         })
     }
 
-    /// Iterate all enums directly under `namespace` (qualified name → info).
-    /// Used by namespace-shortcut completions when enum matching is enabled.
+    /// Iterate source-visible enums directly under `namespace` (qualified
+    /// name → info). Used by namespace-shortcut completions when enum
+    /// matching is enabled; contextual anonymous enums are intentionally
+    /// excluded.
     pub fn namespace_enums(&self, namespace: &str) -> impl Iterator<Item = (&String, &EnumInfo)> {
         let prefix = format!("{}::", namespace);
-        self.enums.iter().filter(move |(qname, _)| {
-            qname
-                .strip_prefix(&prefix)
-                .is_some_and(|rest| !rest.contains("::"))
+        self.enums.iter().filter(move |(qname, info)| {
+            !info.anonymous
+                && qname
+                    .strip_prefix(&prefix)
+                    .is_some_and(|rest| !rest.contains("::"))
         })
     }
 
-    /// Get all member names for namespace completion (e.g., after "UI::")
+    /// Get source-visible member names for namespace completion (e.g., after
+    /// "UI::").
     pub fn namespace_members(&self, namespace: &str) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let prefix = format!("{}::", namespace);
@@ -692,7 +709,10 @@ impl TypeIndex {
                 }
             }
         }
-        for qname in self.enums.keys() {
+        for (qname, info) in &self.enums {
+            if info.anonymous {
+                continue;
+            }
             if let Some(name) = qname.strip_prefix(&prefix) {
                 if !name.contains("::") {
                     seen.insert(name.to_string());
@@ -711,7 +731,7 @@ impl TypeIndex {
         members
     }
 
-    /// Get all known namespaces
+    /// Get all source-visible namespaces.
     pub fn namespaces(&self) -> Vec<String> {
         let mut nss: std::collections::HashSet<String> = std::collections::HashSet::new();
         for info in self.types.values() {
@@ -726,7 +746,7 @@ impl TypeIndex {
                 }
             }
         }
-        for en in self.enums.values() {
+        for en in self.enums.values().filter(|en| !en.anonymous) {
             if let Some(ns) = &en.namespace {
                 nss.insert(ns.clone());
             }
@@ -1114,10 +1134,16 @@ fn class_facts(info: &TypeInfo) -> BTreeSet<String> {
 }
 
 fn enum_facts(info: &EnumInfo) -> BTreeSet<String> {
-    info.values
+    let mut facts: BTreeSet<String> = info
+        .values
         .iter()
         .map(|(name, value)| format!("value {name} = {value}"))
-        .collect()
+        .collect();
+    facts.insert(format!(
+        "source-facing {}",
+        if info.anonymous { "anonymous" } else { "named" }
+    ));
+    facts
 }
 
 /// One fact per overload, so an added or dropped overload of an existing
@@ -2130,6 +2156,42 @@ mod diff_tests {
         );
     }
 
+    /// The enum's source-facing status changes the checker surface even
+    /// when its key and values do not; the typedb diff must report it.
+    #[test]
+    fn diff_reports_changed_enum_source_facing_status() {
+        let enum_db =
+            r#"{"op":"1.0.0","enums":[{"ns":"UI","name":"Cond","values":{"Always":{"v":0}}}]}"#;
+        let named = core_index("en-source-named", enum_db);
+        let mut anonymous = core_index("en-source-anonymous", enum_db);
+        anonymous.enums.get_mut("UI::Cond").unwrap().anonymous = true;
+
+        for (old, new, removed, added) in [
+            (&anonymous, &named, "anonymous", "named"),
+            (&named, &anonymous, "named", "anonymous"),
+        ] {
+            let diff = diff_indexes(old, new);
+            assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+            assert_eq!(diff.changed[0].kind, DbSymbolKind::Enum);
+            assert!(
+                diff.changed[0]
+                    .details
+                    .iter()
+                    .any(|detail| detail == &format!("- source-facing {removed}")),
+                "{:?}",
+                diff.changed[0].details
+            );
+            assert!(
+                diff.changed[0]
+                    .details
+                    .iter()
+                    .any(|detail| detail == &format!("+ source-facing {added}")),
+                "{:?}",
+                diff.changed[0].details
+            );
+        }
+    }
+
     #[test]
     fn diff_reports_added_enum_member() {
         let old = core_index(
@@ -2757,6 +2819,23 @@ mod anon_member_enum_tests {
             Some("Json::Type"),
         );
         assert!(!index.all_short_names().iter().any(|n| n == "UnnamedEnum"));
+    }
+
+    /// B016: the contextual key's prefix is an internal lookup context, not
+    /// a source namespace that can lend authority to qualified diagnostics.
+    #[test]
+    fn anonymous_member_enum_namespaces_stay_internal() {
+        let index = load_fixture();
+        for namespace in ["Control::CControlEntry", "Audio::CAudioPort"] {
+            assert!(
+                !index.namespace_exists(namespace),
+                "anonymous enum context `{namespace}` must not become a source namespace"
+            );
+        }
+        assert!(
+            index.namespace_exists("Game::CGameCtnBlock"),
+            "named nested enum namespace must stay source-visible"
+        );
     }
 
     /// Determinism, restated for the new keys: identical bytes in ⇒

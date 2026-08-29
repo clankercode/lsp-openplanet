@@ -617,6 +617,45 @@ mod tests {
         );
     }
 
+    /// B016: a contextual anonymous-enum key must not become a namespace
+    /// completion, while a genuinely named nested enum remains available.
+    #[test]
+    fn namespace_completion_hides_anonymous_member_enum_key() {
+        let idx = index_with_anonymous_member_enums();
+
+        let anonymous_src = "void f() { Control::CControlEntry:: }";
+        let anonymous_items = complete(
+            &crate::analysis::DocumentAnalysis::analyze_plain(anonymous_src),
+            None,
+            pos_after(anonymous_src, "CControlEntry::"),
+            Some(&idx),
+            None,
+            &[],
+            false,
+        );
+        assert!(
+            !labels(&anonymous_items).contains(&"Type"),
+            "anonymous enum key leaked into completion: {:?}",
+            labels(&anonymous_items)
+        );
+
+        let named_src = "void f() { Game::CGameCtnBlock:: }";
+        let named_items = complete(
+            &crate::analysis::DocumentAnalysis::analyze_plain(named_src),
+            None,
+            pos_after(named_src, "CGameCtnBlock::"),
+            Some(&idx),
+            None,
+            &[],
+            false,
+        );
+        assert!(
+            labels(&named_items).contains(&"ECardinalDirections"),
+            "named enum must remain in completion: {:?}",
+            labels(&named_items)
+        );
+    }
+
     #[test]
     fn completion_preprocessor_directive() {
         let src = "#";
@@ -673,6 +712,16 @@ mod tests {
             .expect("fake core db");
         idx.add_core(&db);
         idx
+    }
+
+    fn index_with_anonymous_member_enums() -> crate::typedb::TypeIndex {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        crate::typedb::TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
     }
 
     fn complete_with_shortcuts(
@@ -899,6 +948,29 @@ mod tests {
             value_labels.contains(&"UI::WindowFlags::NoTitleBar"),
             "enum value missing when enabled: {:?}",
             value_labels
+        );
+    }
+
+    /// B016: enabling enum shortcuts for a nested contextual key must not
+    /// offer either the synthetic enum name or any of its values.
+    #[test]
+    fn shortcut_completion_hides_anonymous_member_enums_and_values() {
+        let idx = index_with_anonymous_member_enums();
+        let namespace = ["Control::CControlEntry"];
+
+        let enum_items = complete_with_shortcuts("void f() { Typ }", "Typ", &idx, &namespace, true);
+        assert!(
+            !labels(&enum_items).contains(&"Control::CControlEntry::Type"),
+            "anonymous enum leaked into shortcut completion: {:?}",
+            labels(&enum_items)
+        );
+
+        let value_items =
+            complete_with_shortcuts("void f() { TimeHh }", "TimeHh", &idx, &namespace, true);
+        assert!(
+            !labels(&value_items).contains(&"Control::CControlEntry::Type::TimeHhMmSsMil"),
+            "anonymous enum value leaked into shortcut completion: {:?}",
+            labels(&value_items)
         );
     }
 

@@ -308,14 +308,14 @@ impl<'a> GlobalScope<'a> {
             return true;
         }
         if let Some(ext) = self.external {
-            if ext.lookup_enum(qualified).is_some() {
+            if ext.lookup_source_enum(qualified).is_some() {
                 return true;
             }
             // Typedb indexes enums by short name (`ECardinalDirections`), so
             // a qualified lookup (`CGameCtnBlock::ECardinalDirections`) must
             // fall through to the tail segment before giving up (B007).
             if let Some((_, tail)) = qualified.rsplit_once("::") {
-                if ext.lookup_enum(tail).is_some() {
+                if ext.lookup_source_enum(tail).is_some() {
                     return true;
                 }
             }
@@ -452,7 +452,7 @@ impl<'a> GlobalScope<'a> {
         // This is linear in enum count but enums are small and this only
         // runs on identifiers that failed every earlier check.
         if let Some(ext) = self.external {
-            for (qname, en) in ext.enums_iter() {
+            for (qname, en) in ext.source_enums_iter() {
                 let _ = qname;
                 if en.values.iter().any(|(v, _)| v == name) {
                     return true;
@@ -1196,8 +1196,8 @@ impl<'a> GlobalScope<'a> {
     pub fn external_enum_by_short_name(&self, short: &str) -> Option<String> {
         let ext = self.external?;
         ext.find_by_short_name(short)
-            .into_iter()
-            .find(|enum_name| ext.lookup_enum(enum_name).is_some())
+            .iter()
+            .find(|enum_name| ext.lookup_source_enum(enum_name).is_some())
             .cloned()
     }
 
@@ -1464,6 +1464,53 @@ mod tests {
         assert!(!scope.has_function("foo"));
         assert!(!scope.has_enum("E"));
         assert!(!scope.resolves("Foo"));
+    }
+
+    /// B016: contextual keys preserve anonymous member-enum data in the
+    /// type DB, but those synthesized keys never name a source-level type.
+    #[test]
+    fn anonymous_member_enum_keys_stay_internal_to_source_resolution() {
+        use crate::typedb::index::TypeIndex;
+
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let index = TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let anonymous = "Control::CControlEntry::Type";
+        assert!(
+            index
+                .lookup_enum(anonymous)
+                .is_some_and(|info| info.anonymous),
+            "fixture guard: this must remain an internally queryable anonymous enum"
+        );
+        assert!(
+            index.lookup_source_enum(anonymous).is_none(),
+            "the source-facing API must hide synthetic keys"
+        );
+        assert!(
+            !scope.has_enum(anonymous) && !scope.resolves(anonymous),
+            "synthesized keys must not resolve from source"
+        );
+        assert_eq!(
+            scope.canonicalize_type_name(anonymous),
+            anonymous,
+            "an anonymous key must remain unresolved rather than canonicalized"
+        );
+
+        let named = "Game::CGameCtnBlock::ECardinalDirections";
+        assert!(index.lookup_source_enum(named).is_some());
+        assert!(scope.has_enum(named) && scope.resolves(named));
+        assert_eq!(
+            scope.canonicalize_type_name("CGameCtnBlock::ECardinalDirections"),
+            named,
+            "the anonymous filter must not hide named enums"
+        );
     }
 
     #[test]
