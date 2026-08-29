@@ -1,0 +1,941 @@
+//! `textDocument/codeAction` and `codeAction/resolve` handlers.
+//!
+//! Three sources of actions, in the order the client sees them:
+//!
+//! 1. **"Did you mean X?" quick-fixes** driven by `unknown type` and
+//!    `undefined identifier` diagnostics echoed back by the client.
+//!    Candidates come from the workspace symbol table and the external type
+//!    index (short-name map). Similarity is scored with Levenshtein distance
+//!    (≤ 2), plus cheap fallbacks: case-insensitive substring containment and
+//!    common-prefix length ≥ 3.
+//! 2. **"Wrap in try/catch" refactor** — always offered regardless of the
+//!    diagnostic context.
+//! 3. **The fix seam** ([`fix`]) — registered fix families keyed on
+//!    `TypeDiagnosticKind`, plus the batched `source.fixAll.openplanet`
+//!    source action ([`fix_all`]). New fix families plug in at
+//!    [`fixes::FAMILIES`] and touch nothing here.
+//!
+//! Seam actions are returned **without** their edit when the client
+//! advertises `codeAction/resolve` support; the edit is materialised in
+//! [`resolve_code_action`] for the single action the user picked. Producers
+//! are pure, so re-entering them on resolve is cheap and cannot diverge.
+
+pub mod fix;
+pub mod fix_all;
+pub mod fixes;
+#[cfg(test)]
+pub mod test_fixtures;
+
+use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+use tower_lsp::lsp_types::*;
+
+use crate::analysis::DocumentAnalysis;
+use crate::server::diagnostics::{position_to_offset, DIAGNOSTIC_SOURCE};
+use crate::symbols::SymbolTable;
+use crate::typedb::TypeIndex;
+
+pub use fix::SOURCE_FIX_ALL_OPENPLANET;
+use fix::{collect_fixes, kind_selected, FixCandidate, FixContext};
+
+/// Tag stamped into `CodeAction.data` so [`resolve_code_action`] never tries
+/// to interpret another provider's payload.
+const FIX_DATA_TAG: &str = "openplanet.codeAction.fix";
+
+/// Enough to re-derive one seam fix during `codeAction/resolve` without
+/// depending on the order actions happened to be returned in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixRef {
+    tag: String,
+    uri: Url,
+    family: String,
+    diagnostic_range: Range,
+    title: String,
+}
+
+/// The kinds this server can produce, and the promise that it resolves
+/// edits lazily.
+///
+/// `source.fixAll.openplanet` is namespaced deliberately: it lets a user put
+/// exactly our fixes in `editor.codeActionsOnSave` without opting into every
+/// other language server's `source.fixAll`. It is never applied by default —
+/// a checker warning is a suggestion, and silently rewriting a signature on
+/// save is worse than the warning it removes (B035 decision).
+pub fn code_action_provider() -> CodeActionProviderCapability {
+    CodeActionProviderCapability::Simple(true)
+}
+
+/// One `textDocument/codeAction` request, as the handler sees it.
+pub struct CodeActionRequest<'a> {
+    pub uri: &'a Url,
+    pub analysis: &'a DocumentAnalysis,
+    /// The range the client asked about (cursor or selection).
+    pub range: Range,
+    pub context: &'a CodeActionContext,
+    pub workspace: &'a SymbolTable,
+    pub type_index: Option<&'a TypeIndex>,
+    /// The client advertised `codeAction.dataSupport` + `resolveSupport`, so
+    /// seam actions may be returned without their `edit`. Clients that did
+    /// not must get the edit up front or the action would silently do
+    /// nothing when picked.
+    pub lazy_edits: bool,
+}
+
+/// Entry point invoked by the LSP `code_action` handler.
+pub fn code_actions(req: &CodeActionRequest<'_>) -> Vec<CodeActionOrCommand> {
+    let only = req.context.only.as_deref();
+    let mut actions: Vec<CodeAction> = Vec::new();
+
+    actions.extend(quick_fix_did_you_mean(
+        req.uri,
+        &req.context.diagnostics,
+        req.workspace,
+        req.type_index,
+    ));
+    actions.extend(refactor_wrap_in_try_catch(
+        req.uri,
+        &req.analysis.source,
+        req.range,
+    ));
+
+    let ctx = FixContext {
+        uri: req.uri,
+        analysis: req.analysis,
+        workspace: req.workspace,
+        type_index: req.type_index,
+    };
+    let candidates = collect_fixes(&ctx);
+    for candidate in &candidates {
+        // A quick fix is about the squiggle under the cursor; the fix-all
+        // source action below is the document-wide view.
+        if ranges_touch(&candidate.diagnostic.range, &req.range) {
+            actions.push(seam_action(req, candidate));
+        }
+    }
+    // `fixAll` always considers the whole document — a source action is
+    // defined over the file, not the selection.
+    if let Some(action) = fix_all::fix_all_action(req.uri, &candidates) {
+        actions.push(action);
+    }
+
+    actions
+        .into_iter()
+        .filter(|a| a.kind.as_ref().is_none_or(|k| kind_selected(k, only)))
+        .map(CodeActionOrCommand::CodeAction)
+        .collect()
+}
+
+/// `codeAction/resolve`: materialise the edit for one previously offered
+/// seam action. An action we did not produce — or one that already carries
+/// an edit — is returned untouched rather than rejected, because the client
+/// is free to resolve anything it was given.
+pub fn resolve_code_action(
+    mut action: CodeAction,
+    analysis: &DocumentAnalysis,
+    workspace: &SymbolTable,
+    type_index: Option<&TypeIndex>,
+) -> CodeAction {
+    if action.edit.is_some() {
+        return action;
+    }
+    let Some(fix_ref) = parse_fix_ref(&action) else {
+        return action;
+    };
+    let ctx = FixContext {
+        uri: &fix_ref.uri,
+        analysis,
+        workspace,
+        type_index,
+    };
+    if let Some(candidate) = collect_fixes(&ctx).into_iter().find(|c| {
+        c.family == fix_ref.family
+            && c.diagnostic.range == fix_ref.diagnostic_range
+            && c.fix.title == fix_ref.title
+    }) {
+        action.edit = Some(single_file_edit(&fix_ref.uri, candidate.fix.edits));
+    }
+    action
+}
+
+/// Document a `codeAction/resolve` request needs loaded, if any. `None` for
+/// an action that is not ours to resolve.
+pub fn resolve_target_uri(action: &CodeAction) -> Option<Url> {
+    parse_fix_ref(action).map(|r| r.uri)
+}
+
+fn parse_fix_ref(action: &CodeAction) -> Option<FixRef> {
+    let data = action.data.clone()?;
+    let fix_ref: FixRef = serde_json::from_value(data).ok()?;
+    (fix_ref.tag == FIX_DATA_TAG).then_some(fix_ref)
+}
+
+fn seam_action(req: &CodeActionRequest<'_>, candidate: &FixCandidate) -> CodeAction {
+    let edit = single_file_edit(req.uri, candidate.fix.edits.clone());
+    let data = serde_json::to_value(FixRef {
+        tag: FIX_DATA_TAG.to_string(),
+        uri: req.uri.clone(),
+        family: candidate.family.to_string(),
+        diagnostic_range: candidate.diagnostic.range,
+        title: candidate.fix.title.clone(),
+    })
+    .ok();
+    CodeAction {
+        title: candidate.fix.title.clone(),
+        kind: Some(candidate.fix.kind.clone()),
+        diagnostics: Some(vec![client_diagnostic(req, candidate)]),
+        edit: (!req.lazy_edits).then_some(edit),
+        command: None,
+        is_preferred: candidate.fix.is_preferred.then_some(true),
+        disabled: None,
+        data,
+    }
+}
+
+/// Prefer the client's own copy of the diagnostic (it may carry fields we
+/// never sent, and matching by identity is what ties the action to the
+/// squiggle); fall back to the form we published.
+fn client_diagnostic(req: &CodeActionRequest<'_>, candidate: &FixCandidate) -> Diagnostic {
+    req.context
+        .diagnostics
+        .iter()
+        .find(|d| {
+            d.range == candidate.diagnostic.range && d.message == candidate.diagnostic.message
+        })
+        .cloned()
+        .unwrap_or_else(|| candidate.diagnostic.clone())
+}
+
+fn single_file_edit(uri: &Url, edits: Vec<TextEdit>) -> WorkspaceEdit {
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(uri.clone(), edits);
+    WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    }
+}
+
+/// Inclusive intersection: a zero-width cursor sitting at either end of a
+/// diagnostic still counts as "on" it, which is what the lightbulb needs.
+fn ranges_touch(a: &Range, b: &Range) -> bool {
+    a.start <= b.end && b.start <= a.end
+}
+
+/// Is this diagnostic one of ours? A diagnostic published by another server
+/// must never drive our quick fixes, even when the message happens to match.
+/// A missing `source` is treated as ours: some clients drop the field on the
+/// round trip, and refusing would silently disable the feature.
+fn is_our_diagnostic(diag: &Diagnostic) -> bool {
+    diag.source
+        .as_deref()
+        .is_none_or(|s| s == DIAGNOSTIC_SOURCE)
+}
+
+fn quick_fix_did_you_mean(
+    uri: &Url,
+    diagnostics: &[Diagnostic],
+    workspace: &SymbolTable,
+    type_index: Option<&TypeIndex>,
+) -> Vec<CodeAction> {
+    let mut out = Vec::new();
+    for diag in diagnostics {
+        if !is_our_diagnostic(diag) {
+            continue;
+        }
+        if !is_did_you_mean_candidate(&diag.message) {
+            continue;
+        }
+        let Some(needle) = extract_name_from_diagnostic(&diag.message) else {
+            continue;
+        };
+        if needle.is_empty() {
+            continue;
+        }
+        let candidates = find_candidates(needle, workspace, type_index);
+        for (i, (name, _dist)) in candidates.iter().enumerate() {
+            out.push(CodeAction {
+                title: format!("Did you mean '{}'?", name),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(single_file_edit(
+                    uri,
+                    vec![TextEdit {
+                        range: diag.range,
+                        new_text: name.clone(),
+                    }],
+                )),
+                command: None,
+                is_preferred: Some(i == 0),
+                disabled: None,
+                data: None,
+            });
+        }
+    }
+    out
+}
+
+fn refactor_wrap_in_try_catch(uri: &Url, source: &str, range: Range) -> Vec<CodeAction> {
+    let start_off = position_to_offset(source, range.start);
+    let end_off = position_to_offset(source, range.end);
+    let (start_off, end_off) = if start_off <= end_off {
+        (start_off, end_off)
+    } else {
+        (end_off, start_off)
+    };
+    let selected = source.get(start_off..end_off).unwrap_or("");
+    let new_text = format!("try {{\n    {}\n}} catch {{ }}\n", selected);
+
+    vec![CodeAction {
+        title: "Wrap in try/catch".to_string(),
+        kind: Some(CodeActionKind::REFACTOR_REWRITE),
+        diagnostics: None,
+        edit: Some(single_file_edit(uri, vec![TextEdit { range, new_text }])),
+        command: None,
+        is_preferred: None,
+        disabled: None,
+        data: None,
+    }]
+}
+
+fn is_did_you_mean_candidate(message: &str) -> bool {
+    message.starts_with("unknown type `") || message.starts_with("undefined identifier `")
+}
+
+fn extract_name_from_diagnostic(message: &str) -> Option<&str> {
+    let start = message.find('`')? + 1;
+    let rest = &message[start..];
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+/// Bounded Levenshtein distance. Returns a large sentinel for over-long
+/// inputs so the caller naturally skips them.
+fn levenshtein(a: &str, b: &str) -> usize {
+    if a.len() > 30 || b.len() > 30 {
+        return 999;
+    }
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+    for i in 0..m {
+        curr[0] = i + 1;
+        for j in 0..n {
+            let cost = if a_chars[i] == b_chars[j] { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+fn is_similar(needle: &str, candidate: &str) -> Option<usize> {
+    let needle_lower = needle.to_lowercase();
+    let cand_lower = candidate.to_lowercase();
+    let dist = levenshtein(&needle_lower, &cand_lower);
+    if dist <= 2 {
+        return Some(dist);
+    }
+    if needle.len() >= 3 && candidate.len() >= 3 && cand_lower.contains(&needle_lower) {
+        return Some(dist);
+    }
+    if common_prefix_len(&needle_lower, &cand_lower) >= 3 {
+        return Some(dist);
+    }
+    None
+}
+
+fn find_candidates(
+    needle: &str,
+    workspace: &SymbolTable,
+    type_index: Option<&TypeIndex>,
+) -> Vec<(String, usize)> {
+    let mut candidates: Vec<(String, usize)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // Workspace symbols: use the tail segment ("Foo" from "Ns::Foo").
+    for sym in workspace.all_symbols() {
+        let bare = sym.name.rsplit("::").next().unwrap_or(&sym.name);
+        if bare == needle {
+            continue;
+        }
+        if let Some(dist) = is_similar(needle, bare) {
+            if seen.insert(bare.to_string()) {
+                candidates.push((bare.to_string(), dist));
+            }
+        }
+    }
+
+    // External type index short names (types + enums).
+    if let Some(idx) = type_index {
+        for short in idx.all_short_names() {
+            if short == needle {
+                continue;
+            }
+            if let Some(dist) = is_similar(needle, &short) {
+                if seen.insert(short.clone()) {
+                    candidates.push((short, dist));
+                }
+            }
+        }
+    }
+
+    candidates.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    candidates.truncate(3);
+    candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_fixtures::{apply_edits, ctx_for};
+    use super::*;
+    use crate::lexer::Span;
+    use crate::symbols::scope::{Symbol, SymbolKind};
+
+    fn mk_range(l0: u32, c0: u32, l1: u32, c1: u32) -> Range {
+        Range::new(Position::new(l0, c0), Position::new(l1, c1))
+    }
+
+    fn whole_doc(source: &str) -> Range {
+        let lines = source.lines().count().max(1) as u32;
+        mk_range(0, 0, lines, 0)
+    }
+
+    fn mk_diag(range: Range, message: &str) -> Diagnostic {
+        Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            message: message.to_string(),
+            source: Some(DIAGNOSTIC_SOURCE.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn workspace_with_class(name: &str) -> SymbolTable {
+        let mut table = SymbolTable::new();
+        let fid = table.allocate_file_id();
+        let sym = Symbol {
+            name: name.to_string(),
+            kind: SymbolKind::Class {
+                parents: Vec::new(),
+                members: Vec::new(),
+            },
+            span: Span { start: 0, end: 0 },
+            file_id: fid,
+            doc: None,
+        };
+        table.set_file_symbols(fid, vec![sym]);
+        table
+    }
+
+    struct Harness {
+        analysis: DocumentAnalysis,
+        workspace: SymbolTable,
+        uri: Url,
+        source: String,
+    }
+
+    impl Harness {
+        fn new(source: &str) -> Self {
+            let (analysis, workspace, uri) = ctx_for(source);
+            Self {
+                analysis,
+                workspace,
+                uri,
+                source: source.to_string(),
+            }
+        }
+
+        fn with_workspace(source: &str, workspace: SymbolTable) -> Self {
+            let mut h = Self::new(source);
+            h.workspace = workspace;
+            h
+        }
+
+        fn request(&self, ctx: CodeActionContext, range: Range, lazy: bool) -> Vec<CodeAction> {
+            code_actions(&CodeActionRequest {
+                uri: &self.uri,
+                analysis: &self.analysis,
+                range,
+                context: &ctx,
+                workspace: &self.workspace,
+                type_index: None,
+                lazy_edits: lazy,
+            })
+            .into_iter()
+            .map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => ca,
+                CodeActionOrCommand::Command(c) => panic!("unexpected bare Command: {:?}", c),
+            })
+            .collect()
+        }
+
+        /// The common case: whole document, no diagnostics echoed, lazy.
+        fn all(&self) -> Vec<CodeAction> {
+            self.request(CodeActionContext::default(), whole_doc(&self.source), true)
+        }
+
+        fn with_diags(&self, diagnostics: Vec<Diagnostic>) -> Vec<CodeAction> {
+            self.request(
+                CodeActionContext {
+                    diagnostics,
+                    ..Default::default()
+                },
+                whole_doc(&self.source),
+                true,
+            )
+        }
+
+        fn resolve(&self, action: CodeAction) -> CodeAction {
+            resolve_code_action(action, &self.analysis, &self.workspace, None)
+        }
+    }
+
+    fn titles(actions: &[CodeAction]) -> Vec<String> {
+        actions.iter().map(|a| a.title.clone()).collect()
+    }
+
+    fn of_kind<'a>(actions: &'a [CodeAction], kind: &CodeActionKind) -> Vec<&'a CodeAction> {
+        actions
+            .iter()
+            .filter(|a| a.kind.as_ref() == Some(kind))
+            .collect()
+    }
+
+    fn edits_of<'a>(action: &'a CodeAction, uri: &Url) -> &'a [TextEdit] {
+        action
+            .edit
+            .as_ref()
+            .and_then(|e| e.changes.as_ref())
+            .and_then(|c| c.get(uri))
+            .expect("workspace edit for uri")
+    }
+
+    // ── Capability ────────────────────────────────────────────────────────
+
+    #[test]
+    fn capability_advertises_quickfix_and_fixall_kinds() {
+        let CodeActionProviderCapability::Options(opts) = code_action_provider() else {
+            panic!("expected CodeActionOptions, not Simple(bool)");
+        };
+        let kinds = opts
+            .code_action_kinds
+            .expect("code_action_kinds advertised");
+        for want in [
+            CodeActionKind::QUICKFIX,
+            CodeActionKind::REFACTOR_REWRITE,
+            CodeActionKind::SOURCE_FIX_ALL,
+            SOURCE_FIX_ALL_OPENPLANET,
+        ] {
+            assert!(
+                kinds.contains(&want),
+                "missing kind {:?} in {:?}",
+                want,
+                kinds
+            );
+        }
+        assert_eq!(opts.resolve_provider, Some(true));
+    }
+
+    #[test]
+    fn capability_fix_all_kind_is_namespaced_to_openplanet() {
+        assert_eq!(
+            SOURCE_FIX_ALL_OPENPLANET.as_str(),
+            "source.fixAll.openplanet"
+        );
+    }
+
+    // ── Lazy resolve ──────────────────────────────────────────────────────
+
+    #[test]
+    fn code_action_resolve_computes_edit_lazily() {
+        let h = Harness::new("void f(string s) {}");
+        let actions = h.all();
+        let quickfixes = of_kind(&actions, &CodeActionKind::QUICKFIX);
+        assert_eq!(quickfixes.len(), 1, "titles: {:?}", titles(&actions));
+        let offered = quickfixes[0].clone();
+        assert!(
+            offered.edit.is_none(),
+            "seam action must be offered without an edit"
+        );
+        assert!(
+            offered.data.is_some(),
+            "seam action must carry resolve data"
+        );
+
+        let resolved = h.resolve(offered);
+        let edits = edits_of(&resolved, &h.uri);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "const string &in");
+        assert_eq!(
+            apply_edits(&h.source, edits),
+            "void f(const string &in s) {}"
+        );
+    }
+
+    #[test]
+    fn non_resolving_client_gets_the_edit_up_front() {
+        let h = Harness::new("void f(string s) {}");
+        let actions = h.request(
+            CodeActionContext::default(),
+            whole_doc(&h.source),
+            /* lazy_edits */ false,
+        );
+        let quickfixes = of_kind(&actions, &CodeActionKind::QUICKFIX);
+        assert_eq!(quickfixes.len(), 1);
+        assert_eq!(edits_of(quickfixes[0], &h.uri).len(), 1);
+    }
+
+    #[test]
+    fn resolve_on_an_action_with_no_fix_data_returns_it_unchanged() {
+        let h = Harness::new("void f(string s) {}");
+        let plain = CodeAction {
+            title: "Someone else's action".to_string(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            ..Default::default()
+        };
+        let resolved = h.resolve(plain.clone());
+        assert_eq!(resolved, plain);
+    }
+
+    #[test]
+    fn resolve_ignores_data_from_another_provider() {
+        let h = Harness::new("void f(string s) {}");
+        let foreign = CodeAction {
+            title: "Other".to_string(),
+            data: Some(serde_json::json!({ "tag": "some.other.provider", "n": 1 })),
+            ..Default::default()
+        };
+        assert_eq!(h.resolve(foreign.clone()), foreign);
+    }
+
+    #[test]
+    fn resolve_leaves_an_already_resolved_action_alone() {
+        let h = Harness::new("void f(string s) {}");
+        let mut action = of_kind(&h.all(), &CodeActionKind::QUICKFIX)[0].clone();
+        let sentinel = single_file_edit(
+            &h.uri,
+            vec![TextEdit {
+                range: mk_range(0, 0, 0, 0),
+                new_text: "sentinel".into(),
+            }],
+        );
+        action.edit = Some(sentinel.clone());
+        assert_eq!(h.resolve(action).edit, Some(sentinel));
+    }
+
+    #[test]
+    fn resolve_of_a_stale_action_does_not_error() {
+        // The document changed under the action: the referenced diagnostic
+        // no longer exists, so nothing resolves — but no error either.
+        let h_offer = Harness::new("void f(string s) {}");
+        let stale = of_kind(&h_offer.all(), &CodeActionKind::QUICKFIX)[0].clone();
+        let h_now = Harness::new("void f(const string &in s) {}");
+        let resolved = h_now.resolve(stale);
+        assert!(resolved.edit.is_none());
+    }
+
+    #[test]
+    fn resolve_target_uri_reports_the_document_to_load() {
+        let h = Harness::new("void f(string s) {}");
+        let action = of_kind(&h.all(), &CodeActionKind::QUICKFIX)[0].clone();
+        assert_eq!(resolve_target_uri(&action), Some(h.uri.clone()));
+        assert_eq!(resolve_target_uri(&CodeAction::default()), None);
+    }
+
+    // ── fixAll ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fix_all_applies_every_nonoverlapping_fix() {
+        let src = "void f(string a) {}\nvoid g(string b) {}\nvoid h(string c) {}";
+        let h = Harness::new(src);
+        let actions = h.all();
+        let fix_all = of_kind(&actions, &SOURCE_FIX_ALL_OPENPLANET);
+        assert_eq!(fix_all.len(), 1, "titles: {:?}", titles(&actions));
+        let edits = edits_of(fix_all[0], &h.uri);
+        assert_eq!(edits.len(), 3);
+        assert_eq!(
+            apply_edits(src, edits),
+            "void f(const string &in a) {}\nvoid g(const string &in b) {}\nvoid h(const string &in c) {}"
+        );
+    }
+
+    #[test]
+    fn fix_all_absent_when_nothing_is_fixable() {
+        let h = Harness::new("void f(const string &in s) {}");
+        let actions = h.all();
+        assert!(
+            of_kind(&actions, &SOURCE_FIX_ALL_OPENPLANET).is_empty(),
+            "expected NO fixAll action, got {:?}",
+            titles(&actions)
+        );
+    }
+
+    #[test]
+    fn fix_all_handles_two_fixes_on_one_line() {
+        let src = "void f(string a, string b) {}";
+        let h = Harness::new(src);
+        let fix_all = of_kind(&h.all(), &SOURCE_FIX_ALL_OPENPLANET)[0].clone();
+        let edits = edits_of(&fix_all, &h.uri);
+        assert_eq!(edits.len(), 2);
+        assert_eq!(
+            apply_edits(src, edits),
+            "void f(const string &in a, const string &in b) {}"
+        );
+    }
+
+    #[test]
+    fn fix_all_edits_are_ordered_descending() {
+        let src = "void f(string a, string b, string c) {}";
+        let h = Harness::new(src);
+        let fix_all = of_kind(&h.all(), &SOURCE_FIX_ALL_OPENPLANET)[0].clone();
+        let starts: Vec<Position> = edits_of(&fix_all, &h.uri)
+            .iter()
+            .map(|e| e.range.start)
+            .collect();
+        let mut descending = starts.clone();
+        descending.sort_by(|a, b| b.cmp(a));
+        assert_eq!(starts, descending);
+    }
+
+    #[test]
+    fn fix_all_is_not_preferred() {
+        // A source action must not hijack the "auto fix" keybinding.
+        let h = Harness::new("void f(string s) {}");
+        let fix_all = of_kind(&h.all(), &SOURCE_FIX_ALL_OPENPLANET)[0].clone();
+        assert_eq!(fix_all.is_preferred, None);
+    }
+
+    // ── `only` filtering ──────────────────────────────────────────────────
+
+    #[test]
+    fn only_quickfix_excludes_the_refactor_and_the_source_action() {
+        let h = Harness::new("void f(string s) {}");
+        let actions = h.request(
+            CodeActionContext {
+                only: Some(vec![CodeActionKind::QUICKFIX]),
+                ..Default::default()
+            },
+            whole_doc(&h.source),
+            true,
+        );
+        assert!(
+            actions
+                .iter()
+                .all(|a| a.kind == Some(CodeActionKind::QUICKFIX)),
+            "got {:?}",
+            actions.iter().map(|a| a.kind.clone()).collect::<Vec<_>>()
+        );
+        assert!(!actions.is_empty());
+    }
+
+    #[test]
+    fn only_source_fix_all_excludes_per_diagnostic_quickfixes() {
+        let h = Harness::new("void f(string s) {}");
+        let actions = h.request(
+            CodeActionContext {
+                only: Some(vec![CodeActionKind::SOURCE_FIX_ALL]),
+                ..Default::default()
+            },
+            whole_doc(&h.source),
+            true,
+        );
+        assert_eq!(actions.len(), 1, "got {:?}", titles(&actions));
+        assert_eq!(actions[0].kind, Some(SOURCE_FIX_ALL_OPENPLANET));
+    }
+
+    #[test]
+    fn only_namespaced_fix_all_selects_our_source_action() {
+        let h = Harness::new("void f(string s) {}");
+        let actions = h.request(
+            CodeActionContext {
+                only: Some(vec![SOURCE_FIX_ALL_OPENPLANET]),
+                ..Default::default()
+            },
+            whole_doc(&h.source),
+            true,
+        );
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, Some(SOURCE_FIX_ALL_OPENPLANET));
+    }
+
+    #[test]
+    fn only_refactor_returns_just_the_refactor() {
+        let h = Harness::new("void f(string s) {}");
+        let actions = h.request(
+            CodeActionContext {
+                only: Some(vec![CodeActionKind::REFACTOR]),
+                ..Default::default()
+            },
+            whole_doc(&h.source),
+            true,
+        );
+        assert_eq!(titles(&actions), vec!["Wrap in try/catch".to_string()]);
+    }
+
+    // ── Range scoping ─────────────────────────────────────────────────────
+
+    #[test]
+    fn quickfix_is_scoped_to_the_requested_range_but_fixall_is_not() {
+        let src = "void f(string a) {}\nvoid g(string b) {}";
+        let h = Harness::new(src);
+        // Cursor on line 0 only.
+        let actions = h.request(CodeActionContext::default(), mk_range(0, 14, 0, 14), true);
+        let quickfixes = of_kind(&actions, &CodeActionKind::QUICKFIX);
+        assert_eq!(quickfixes.len(), 1, "titles: {:?}", titles(&actions));
+        assert!(quickfixes[0].title.contains('a'));
+        // The source action still covers the whole file.
+        let fix_all = of_kind(&actions, &SOURCE_FIX_ALL_OPENPLANET);
+        assert_eq!(edits_of(fix_all[0], &h.uri).len(), 2);
+    }
+
+    // ── Diagnostic plumbing ───────────────────────────────────────────────
+
+    #[test]
+    fn seam_action_carries_the_diagnostic_it_fixes() {
+        let h = Harness::new("void f(string s) {}");
+        let action = of_kind(&h.all(), &CodeActionKind::QUICKFIX)[0].clone();
+        let diags = action.diagnostics.expect("diagnostics attached");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(diags[0].source.as_deref(), Some(DIAGNOSTIC_SOURCE));
+        assert!(diags[0].message.contains("const string &in"));
+    }
+
+    #[test]
+    fn seam_action_prefers_the_clients_copy_of_the_diagnostic() {
+        let h = Harness::new("void f(string s) {}");
+        let ours = of_kind(&h.all(), &CodeActionKind::QUICKFIX)[0]
+            .diagnostics
+            .clone()
+            .unwrap()[0]
+            .clone();
+        let mut echoed = ours.clone();
+        echoed.code = Some(NumberOrString::String("client-side".into()));
+        let action = of_kind(
+            &h.with_diags(vec![echoed.clone()]),
+            &CodeActionKind::QUICKFIX,
+        )[0]
+        .diagnostics
+        .clone()
+        .unwrap()[0]
+            .clone();
+        assert_eq!(action.code, echoed.code);
+    }
+
+    #[test]
+    fn a_diagnostic_from_another_source_never_drives_a_quick_fix() {
+        let table = workspace_with_class("Foo");
+        let h = Harness::with_workspace("", table);
+        let mut foreign = mk_diag(mk_range(1, 4, 1, 7), "unknown type `Foa`");
+        foreign.source = Some("some-other-server".to_string());
+        let actions = h.with_diags(vec![foreign]);
+        assert!(
+            !actions.iter().any(|a| a.title.contains("Did you mean")),
+            "got {:?}",
+            titles(&actions)
+        );
+        // Sanity: the same diagnostic from us DOES produce the fix.
+        let ours = mk_diag(mk_range(1, 4, 1, 7), "unknown type `Foa`");
+        assert!(h
+            .with_diags(vec![ours])
+            .iter()
+            .any(|a| a.title.contains("Did you mean")));
+    }
+
+    // ── Regression guards for the pre-existing actions ────────────────────
+
+    #[test]
+    fn extract_name_works() {
+        assert_eq!(
+            extract_name_from_diagnostic("unknown type `Foo`"),
+            Some("Foo")
+        );
+        assert_eq!(
+            extract_name_from_diagnostic("undefined identifier `bar`"),
+            Some("bar")
+        );
+        assert_eq!(extract_name_from_diagnostic("no backtick here"), None);
+    }
+
+    #[test]
+    fn levenshtein_basic() {
+        assert_eq!(levenshtein("foo", "foo"), 0);
+        assert_eq!(levenshtein("foo", "fop"), 1);
+        assert_eq!(levenshtein("foo", "bar"), 3);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn is_did_you_mean_candidate_detects_messages() {
+        assert!(is_did_you_mean_candidate("unknown type `Foo`"));
+        assert!(is_did_you_mean_candidate("undefined identifier `bar`"));
+        assert!(!is_did_you_mean_candidate("expected ; after expression"));
+    }
+
+    #[test]
+    fn quickfix_did_you_mean_finds_typo() {
+        let table = workspace_with_class("Foo");
+        let h = Harness::with_workspace("", table);
+        let diag_range = mk_range(1, 4, 1, 7);
+        let actions = h.with_diags(vec![mk_diag(diag_range, "unknown type `Foa`")]);
+
+        let foo_action = actions
+            .iter()
+            .find(|a| a.title.contains("Foo"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a 'Did you mean Foo?' action in {:?}",
+                    titles(&actions)
+                )
+            });
+        assert_eq!(foo_action.kind, Some(CodeActionKind::QUICKFIX));
+        assert_eq!(foo_action.is_preferred, Some(true));
+        let edits = edits_of(foo_action, &h.uri);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "Foo");
+        assert_eq!(edits[0].range, diag_range);
+    }
+
+    #[test]
+    fn quickfix_did_you_mean_ignores_unrelated_diagnostics() {
+        let table = workspace_with_class("Foo");
+        let uri = Url::parse("file:///tmp/a.as").unwrap();
+        let diag = mk_diag(mk_range(0, 0, 0, 3), "some other error");
+        assert!(quick_fix_did_you_mean(&uri, &[diag], &table, None).is_empty());
+    }
+
+    #[test]
+    fn wrap_in_try_catch_always_offered() {
+        let source = "print(x);";
+        let h = Harness::new(source);
+        let actions = h.request(CodeActionContext::default(), mk_range(0, 0, 0, 9), true);
+        let refactors = of_kind(&actions, &CodeActionKind::REFACTOR_REWRITE);
+        assert_eq!(refactors.len(), 1);
+        assert_eq!(refactors[0].title, "Wrap in try/catch");
+        let edits = edits_of(refactors[0], &h.uri);
+        assert_eq!(edits.len(), 1);
+        assert!(edits[0].new_text.contains("try {"));
+        assert!(edits[0].new_text.contains("print(x);"));
+        assert!(edits[0].new_text.contains("} catch { }"));
+    }
+
+    #[test]
+    fn common_prefix_matches_long_prefix() {
+        assert!(is_similar("GetFoo", "GetFooBar").is_some());
+    }
+}

@@ -7,6 +7,11 @@ use crate::symbols::SymbolTable;
 use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticSeverity};
 use crate::typedb::TypeIndex;
 
+/// The `source` field on every diagnostic this server publishes. Code
+/// actions key on it so another server's diagnostics can never drive our
+/// quick fixes.
+pub const DIAGNOSTIC_SOURCE: &str = "openplanet-lsp";
+
 /// Compute diagnostics for a single file.
 ///
 /// If `workspace_symbols` is `Some`, the supplied pooled [`SymbolTable`] is

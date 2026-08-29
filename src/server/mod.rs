@@ -71,6 +71,22 @@ pub struct Backend {
     /// (every watched-file event) does not repeat the same `showMessage`.
     /// Rendered issue text, not a struct — one line per distinct problem.
     reported_config_warnings: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    /// B035: the client advertised `codeAction.dataSupport` +
+    /// `resolveSupport`, so code actions may be offered without their edit
+    /// and materialised in `codeAction/resolve`. A client that did not must
+    /// receive edits up front or its actions would do nothing.
+    code_action_resolve_support: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// B035: may we hand back a code action with no `edit` and wait for
+/// `codeAction/resolve`? Both halves are required — `dataSupport` so our
+/// resolve token survives the round trip, and `resolveSupport` so the client
+/// asks at all. Without them an edit-less action is a dead menu entry.
+fn client_resolves_code_actions(caps: &ClientCapabilities) -> bool {
+    caps.text_document
+        .as_ref()
+        .and_then(|td| td.code_action.as_ref())
+        .is_some_and(|ca| ca.data_support == Some(true) && ca.resolve_support.is_some())
 }
 
 /// One isolated plugin workspace (multi-root spec: "one server, N isolated
@@ -349,6 +365,7 @@ impl Backend {
             reported_config_warnings: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
+            code_action_resolve_support: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -945,6 +962,13 @@ fn configs_equivalent(a: &LspConfig, b: &LspConfig) -> bool {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // B035: only defer code-action edits to `codeAction/resolve` when the
+        // client can actually round-trip `data` and ask for the resolve.
+        self.code_action_resolve_support.store(
+            client_resolves_code_actions(&params.capabilities),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         // Root intake (t2 hybrid mechanism). The opened folder (root_uri) is
         // the base; workspace folders are preferred as discovery input when
         // the client sent them.
@@ -1085,7 +1109,7 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 rename_provider: Some(OneOf::Left(true)),
-                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                code_action_provider: Some(code_actions::code_action_provider()),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
@@ -1616,16 +1640,42 @@ impl LanguageServer for Backend {
         };
         let snapshot = self.snapshot_for(uri).await;
         let type_index_guard = self.type_index.read().await;
-        let type_index = type_index_guard.as_deref();
-        let actions = code_actions::code_actions(
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
+        let actions = code_actions::code_actions(&code_actions::CodeActionRequest {
             uri,
-            &source,
-            params.range,
-            &params.context.diagnostics,
-            snapshot.symbols(),
-            type_index,
-        );
+            analysis,
+            range: params.range,
+            context: &params.context,
+            workspace: snapshot.symbols(),
+            type_index: type_index_guard.as_deref(),
+            lazy_edits: self
+                .code_action_resolve_support
+                .load(std::sync::atomic::Ordering::Relaxed),
+        });
         Ok(Some(actions))
+    }
+
+    /// `codeAction/resolve`: fill in the edit for the one action the user
+    /// picked. Unknown or already-resolved actions come back untouched — the
+    /// client may resolve anything it was handed.
+    async fn code_action_resolve(&self, params: CodeAction) -> Result<CodeAction> {
+        let Some(uri) = code_actions::resolve_target_uri(&params) else {
+            return Ok(params);
+        };
+        let Some(source) = self.documents.get(&uri).map(|d| d.value().clone()) else {
+            return Ok(params);
+        };
+        let snapshot = self.snapshot_for(&uri).await;
+        let type_index_guard = self.type_index.read().await;
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = snapshot.analysis_of(&uri).unwrap_or(&owned);
+        Ok(code_actions::resolve_code_action(
+            params,
+            analysis,
+            snapshot.symbols(),
+            type_index_guard.as_deref(),
+        ))
     }
 
     async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
