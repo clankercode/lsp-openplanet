@@ -1227,14 +1227,22 @@ impl LanguageServer for Backend {
                 }
             }
         }
-        if !config_issues.is_empty() {
-            for issue in config_issues {
-                self.report_config_issue(&issue).await;
-            }
-            return;
+        // Report every unusable config file, THEN still reload if any other
+        // changed config was valid. Suppressing the reload whenever one file
+        // in the batch is broken would let a half-saved user-global config
+        // silently swallow a workspace edit — the one-bad-file-blocks-
+        // everything shape B017 exists to delete, moved from the parser to
+        // the watcher. Guarded by
+        // `invalid_config_in_a_batch_does_not_suppress_a_valid_sibling_reload`.
+        let had_issues = !config_issues.is_empty();
+        for issue in config_issues {
+            self.report_config_issue(&issue).await;
         }
         if config_reload {
             self.reload_config_from_disk().await;
+            return;
+        }
+        if had_issues {
             return;
         }
         let needs_reshard = params.changes.iter().any(|event| {

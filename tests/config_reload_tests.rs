@@ -241,6 +241,63 @@ async fn watched_file_invalid_toml_warns_client_once_and_keeps_last_good() {
     );
 }
 
+/// B017 positive guard for a REJECTED review finding.
+///
+/// A Codex review pass proposed suppressing the reload whenever ANY config in
+/// a watched-file batch was invalid. That moves "one bad file blocks
+/// everything" from the parser up into the watcher: a half-saved user-global
+/// config would silently discard an unrelated, valid workspace edit, while
+/// every B017 unit test stayed green. The batch must do BOTH — warn about the
+/// broken file AND apply the valid one.
+///
+/// Without this test the rejection lives only in review history, and the next
+/// reviewer proposes the same change unopposed.
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_config_in_a_batch_does_not_suppress_a_valid_sibling_reload() {
+    let root = temp_plugin("batch-mixed-validity");
+    let workspace_cfg = root.join(".openplanet-lsp.toml");
+    let broken_cfg = root.join("sub/.openplanet-lsp.toml");
+    fs::create_dir_all(broken_cfg.parent().unwrap()).unwrap();
+    fs::write(&workspace_cfg, "game_target = \"TURBO\"\n").unwrap();
+
+    let (service, mut socket) = LspService::new(Backend::new);
+    let backend = service.inner();
+    backend.initialize(init_params(&root)).await.unwrap();
+    assert_eq!(config_of(backend).await.game_target, "TURBO");
+
+    // One VALID edit and one BROKEN file arrive in the same batch.
+    fs::write(&workspace_cfg, "game_target = \"MP4\"\n").unwrap();
+    fs::write(&broken_cfg, "game_target = [\n").unwrap();
+    backend
+        .did_change_watched_files(DidChangeWatchedFilesParams {
+            changes: vec![
+                FileEvent::new(
+                    Url::from_file_path(&broken_cfg).unwrap(),
+                    FileChangeType::CHANGED,
+                ),
+                FileEvent::new(
+                    Url::from_file_path(&workspace_cfg).unwrap(),
+                    FileChangeType::CHANGED,
+                ),
+            ],
+        })
+        .await;
+
+    let warning = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        next_show_message(&mut socket),
+    )
+    .await
+    .expect("the broken file in the batch must still warn");
+    assert_whole_file_toml_warning(&warning, &broken_cfg);
+
+    assert_eq!(
+        config_of(backend).await.game_target,
+        "MP4",
+        "a broken sibling must NOT swallow the valid edit in the same batch"
+    );
+}
+
 /// The server-owned native notify watcher has the same visible warning and
 /// last-good contract as `workspace/didChangeWatchedFiles`.
 #[tokio::test(flavor = "current_thread")]

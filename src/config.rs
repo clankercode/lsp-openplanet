@@ -387,11 +387,26 @@ struct FileReader<'a> {
     file: &'a Path,
     table: &'a toml::Table,
     issues: &'a mut Vec<ConfigIssue>,
+    /// Every key this reader was asked for, in call order. Feeds the
+    /// CONFIG_KEYS drift guard; see [`ConfigFile::read_recording`].
+    read: &'a mut Vec<&'static str>,
 }
 
-impl FileReader<'_> {
-    fn typed<T: serde::de::DeserializeOwned>(&mut self, key: &str, expected: &str) -> Option<T> {
-        let value = self.table.get(key)?;
+impl<'a> FileReader<'a> {
+    /// Fetch one key's value, recording that this key was read. EVERY
+    /// accessor goes through here — that is what makes the recorded list a
+    /// faithful account of what `from_table` reads, absent keys included.
+    fn lookup(&mut self, key: &'static str) -> Option<&'a toml::Value> {
+        self.read.push(key);
+        self.table.get(key)
+    }
+
+    fn typed<T: serde::de::DeserializeOwned>(
+        &mut self,
+        key: &'static str,
+        expected: &str,
+    ) -> Option<T> {
+        let value = self.lookup(key)?;
         match value.clone().try_into::<T>() {
             Ok(parsed) => Some(parsed),
             Err(_) => {
@@ -402,7 +417,7 @@ impl FileReader<'_> {
         }
     }
 
-    fn string(&mut self, key: &str) -> Option<String> {
+    fn string(&mut self, key: &'static str) -> Option<String> {
         self.typed(key, "a string")
     }
 
@@ -411,11 +426,11 @@ impl FileReader<'_> {
     /// unusable, leaving lower config layers intact.
     fn validated_string<T>(
         &mut self,
-        key: &str,
+        key: &'static str,
         expected: &str,
         parse: fn(&str) -> Option<T>,
     ) -> Option<String> {
-        let value = self.table.get(key)?;
+        let value = self.lookup(key)?;
         let Some(token) = value.as_str() else {
             self.issues
                 .push(ConfigIssue::wrong_type(self.file, key, expected, value));
@@ -433,7 +448,7 @@ impl FileReader<'_> {
     /// compare case-insensitively, and retain the canonical uppercase token.
     fn game_target(&mut self) -> Option<String> {
         const KEY: &str = "game_target";
-        let value = self.table.get(KEY)?;
+        let value = self.lookup("game_target")?;
         let expected = format!("one of {}", LspConfig::GAME_TARGETS.join(", "));
         let Some(token) = value.as_str() else {
             self.issues
@@ -449,26 +464,26 @@ impl FileReader<'_> {
         Some(normalized)
     }
 
-    fn boolean(&mut self, key: &str) -> Option<bool> {
+    fn boolean(&mut self, key: &'static str) -> Option<bool> {
         self.typed(key, "a boolean")
     }
 
-    fn size(&mut self, key: &str) -> Option<usize> {
+    fn size(&mut self, key: &'static str) -> Option<usize> {
         self.typed(key, "a non-negative integer")
     }
 
     /// An ordinary array-of-strings config key. Any unusable entry makes the
     /// whole key unusable, allowing the valid lower-precedence layer to
     /// survive unchanged. An explicit empty array remains a valid value.
-    fn string_list(&mut self, key: &str) -> Option<Vec<String>> {
+    fn string_list(&mut self, key: &'static str) -> Option<Vec<String>> {
         self.typed(key, ARRAY_OF_STRINGS)
     }
 
     /// The deliberately lenient legacy contract for `unused_callbacks`:
     /// retain usable callback names from a mixed array, but treat an
     /// all-unusable array as a bad key so it falls through to a lower layer.
-    fn callback_list(&mut self, key: &str) -> Option<Vec<String>> {
-        let value = self.table.get(key)?;
+    fn callback_list(&mut self, key: &'static str) -> Option<Vec<String>> {
+        let value = self.lookup(key)?;
         let Some(entries) = value.as_array() else {
             self.issues.push(ConfigIssue::wrong_type(
                 self.file,
@@ -496,7 +511,7 @@ impl FileReader<'_> {
         Some(kept)
     }
 
-    fn nested_string_list(&mut self, key: &str) -> Option<Vec<Vec<String>>> {
+    fn nested_string_list(&mut self, key: &'static str) -> Option<Vec<Vec<String>>> {
         self.typed(key, "an array of arrays of strings")
     }
 
@@ -504,11 +519,11 @@ impl FileReader<'_> {
     /// a bool). An unusable value reports `expected` verbatim.
     fn parsed<T>(
         &mut self,
-        key: &str,
+        key: &'static str,
         expected: &str,
         parse: fn(&toml::Value) -> Option<T>,
     ) -> Option<T> {
-        let value = self.table.get(key)?;
+        let value = self.lookup(key)?;
         match parse(value) {
             Some(parsed) => Some(parsed),
             None => {
@@ -527,6 +542,25 @@ impl ConfigFile {
     /// unusable or unknown key. Never fails: unusable keys are skipped and
     /// their siblings in the same file stay effective.
     fn from_table(file: &Path, table: &toml::Table, issues: &mut Vec<ConfigIssue>) -> Self {
+        Self::read_recording(file, table, issues, &mut Vec::new())
+    }
+
+    /// [`Self::from_table`], additionally recording every key the reader was
+    /// asked for into `read`.
+    ///
+    /// Drift guard (B017): dropping `#[derive(Deserialize)]` made it possible
+    /// to add a field here and forget it in [`CONFIG_KEYS`], or vice versa —
+    /// a silent return of the original defect, where the key parses to
+    /// nothing AND the loader warns "unknown key" about a key we define.
+    /// Production goes through `from_table` with a throwaway `Vec` (which
+    /// never allocates), so there is no `cfg(test)` divergence between what
+    /// ships and what the guard inspects.
+    fn read_recording(
+        file: &Path,
+        table: &toml::Table,
+        issues: &mut Vec<ConfigIssue>,
+        read: &mut Vec<&'static str>,
+    ) -> Self {
         for key in table.keys() {
             if !CONFIG_KEYS.contains(&key.as_str()) {
                 issues.push(ConfigIssue::unknown_key(file, key));
@@ -536,6 +570,7 @@ impl ConfigFile {
             file,
             table,
             issues,
+            read,
         };
         Self {
             openplanet_dir: r.string("openplanet_dir"),
@@ -4219,6 +4254,92 @@ shortcut_match_enums = true
             );
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Keys the catalog lists that the LADDER deliberately does not read.
+    /// Everything else in [`CONFIG_KEYS`] must be read by `from_table`.
+    const CATALOG_KEYS_NOT_READ_BY_THE_LADDER: &[&str] = &[
+        // Written by the TUI first-run prompt (src/tui/first_run.rs).
+        "first_run_prompt_done",
+    ];
+
+    /// Drift guard 1 (B017). Dropping `#[derive(Deserialize)]` for a
+    /// hand-rolled `from_table` bought per-key tolerance but created a new
+    /// failure mode the derive made impossible: a field added to
+    /// `ConfigFile` and forgotten in `from_table` and/or [`CONFIG_KEYS`].
+    /// The symptom is the ORIGINAL B017 defect in a new mask — the key
+    /// parses to nothing, the config silently does nothing, and the loader
+    /// warns "unknown key" about a key we ourselves define. Invisible to
+    /// every other test in this file, so it is pinned in both directions.
+    #[test]
+    fn config_key_catalog_and_from_table_read_exactly_the_same_keys() {
+        let table = toml::Table::new();
+        let mut issues = Vec::new();
+        let mut read: Vec<&'static str> = Vec::new();
+        let _ = ConfigFile::read_recording(Path::new("<none>"), &table, &mut issues, &mut read);
+
+        for key in &read {
+            assert!(
+                CONFIG_KEYS.contains(key),
+                "`from_table` reads `{key}` but CONFIG_KEYS omits it — the \
+                 loader would warn 'unknown key' about our own key"
+            );
+        }
+        for key in CONFIG_KEYS {
+            if CATALOG_KEYS_NOT_READ_BY_THE_LADDER.contains(key) {
+                continue;
+            }
+            assert!(
+                read.contains(key),
+                "CONFIG_KEYS lists `{key}` but `from_table` never reads it — \
+                 the key would parse to nothing and silently do nothing"
+            );
+        }
+        let mut sorted = read.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), read.len(), "`from_table` reads a key twice");
+    }
+
+    /// Drift guard 2 (B017): a config file written by our OWN writer must
+    /// read back with zero issues. `first_run_prompt_done` was caught by
+    /// hand; this makes the whole class permanent, so a new `SETTINGS` key
+    /// cannot ship a tool that warns about the file it just wrote.
+    #[test]
+    fn a_config_file_written_by_our_own_writer_produces_no_issues() {
+        use crate::user_config::{SettingKind, UserConfigFile, SETTINGS};
+
+        let dir = std::env::temp_dir().join(format!("oplsp-b017-writer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut file = UserConfigFile::load(&path).unwrap();
+        for spec in SETTINGS {
+            match spec.kind {
+                SettingKind::Bool { default } => file.set_bool(spec.key, !default),
+                SettingKind::Enum { choices, .. } => file.set_string(spec.key, choices[0]),
+                SettingKind::String | SettingKind::Path => file.set_string(spec.key, "some/value"),
+                SettingKind::StringList { .. } => {
+                    file.set_string_list(spec.key, &["Alpha".to_string(), "Beta".to_string()])
+                }
+                SettingKind::NestedStringList => {
+                    file.set_nested_string_list(spec.key, &[vec!["Alpha".to_string()]])
+                }
+                SettingKind::Usize { .. } => file.set_usize(spec.key, 8),
+            }
+        }
+        // Written by the TUI first-run prompt into this same document.
+        file.set_bool("first_run_prompt_done", true);
+        file.save().unwrap();
+
+        let (_cfg, issues) = read_config_file(&path).expect("the writer produced a file");
+        assert!(
+            issues.is_empty(),
+            "openplanet-lsp must not warn about a config file it wrote itself: {issues:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The known-key catalog must cover every key the tool itself writes —
