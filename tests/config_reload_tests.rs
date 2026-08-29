@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use futures_util::StreamExt;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{LanguageServer, LspService};
 
@@ -50,6 +51,22 @@ async fn watched(backend: &Backend, path: &Path, typ: FileChangeType) {
             changes: vec![FileEvent::new(Url::from_file_path(path).unwrap(), typ)],
         })
         .await;
+}
+
+async fn next_show_message(socket: &mut tower_lsp::ClientSocket) -> ShowMessageParams {
+    loop {
+        let request = socket.next().await.expect("client socket remains open");
+        if request.method() != "window/showMessage" {
+            continue;
+        }
+        return serde_json::from_value(
+            request
+                .params()
+                .expect("showMessage carries params")
+                .clone(),
+        )
+        .expect("valid showMessage params");
+    }
 }
 
 async fn config_of(backend: &Backend) -> openplanet_lsp::config::LspConfig {
@@ -163,6 +180,80 @@ async fn workspace_config_invalid_toml_keeps_last_good() {
         resolves(backend, "GeneratedFunc").await,
         "invalid TOML must keep last-good discovery"
     );
+}
+
+/// Client-driven watched-file notifications must surface malformed TOML in
+/// the editor, preserve the cached config, and deduplicate repeated events.
+#[tokio::test(flavor = "current_thread")]
+async fn watched_file_invalid_toml_warns_client_once_and_keeps_last_good() {
+    let root = temp_plugin("ws-invalid-warning");
+    let cfg = root.join(".openplanet-lsp.toml");
+    fs::write(&cfg, "game_target = \"TURBO\"\nhonor_gitignore = false\n").unwrap();
+
+    let (service, mut socket) = LspService::new(Backend::new);
+    let backend = service.inner();
+    backend.initialize(init_params(&root)).await.unwrap();
+
+    fs::write(&cfg, "game_target = [\n").unwrap();
+    watched(backend, &cfg, FileChangeType::CHANGED).await;
+    let warning = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        next_show_message(&mut socket),
+    )
+    .await
+    .expect("invalid watched file must warn the LSP client");
+    assert_eq!(warning.typ, MessageType::WARNING);
+    assert!(warning.message.contains("invalid TOML"), "{warning:?}");
+    assert!(
+        warning.message.contains(".openplanet-lsp.toml"),
+        "{warning:?}"
+    );
+    let after = config_of(backend).await;
+    assert_eq!(after.game_target, "TURBO");
+    assert_eq!(after.honor_gitignore, Some(false));
+
+    watched(backend, &cfg, FileChangeType::CHANGED).await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            next_show_message(&mut socket),
+        )
+        .await
+        .is_err(),
+        "the same invalid TOML warning must be deduplicated"
+    );
+}
+
+/// The server-owned native notify watcher has the same visible warning and
+/// last-good contract as `workspace/didChangeWatchedFiles`.
+#[tokio::test(flavor = "current_thread")]
+async fn native_config_watcher_invalid_toml_warns_client_and_keeps_last_good() {
+    let root = temp_plugin("native-invalid-warning");
+    let cfg = root.join(".openplanet-lsp.toml");
+    fs::write(&cfg, "game_target = \"MP4\"\nsource_paths = [\"src\"]\n").unwrap();
+
+    let (service, mut socket) = LspService::new(Backend::new);
+    let backend = service.inner();
+    backend.initialize(init_params(&root)).await.unwrap();
+    backend.initialized(InitializedParams {}).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    fs::write(&cfg, "source_paths = [\n").unwrap();
+    let warning = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        next_show_message(&mut socket),
+    )
+    .await
+    .expect("native config watcher must warn the LSP client");
+    assert_eq!(warning.typ, MessageType::WARNING);
+    assert!(warning.message.contains("invalid TOML"), "{warning:?}");
+    assert!(
+        warning.message.contains(".openplanet-lsp.toml"),
+        "{warning:?}"
+    );
+    let after = config_of(backend).await;
+    assert_eq!(after.game_target, "MP4");
+    assert_eq!(after.source_paths, Some(vec![PathBuf::from("src")]));
 }
 
 /// Completion shortcuts live on the cached shard config; a reload must

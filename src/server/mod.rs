@@ -70,7 +70,7 @@ pub struct Backend {
     /// B017: config-file problems already shown to the user, so a re-shard
     /// (every watched-file event) does not repeat the same `showMessage`.
     /// Rendered issue text, not a struct — one line per distinct problem.
-    reported_config_issues: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    reported_config_warnings: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// One isolated plugin workspace (multi-root spec: "one server, N isolated
@@ -120,9 +120,13 @@ impl Backend {
     fn start_config_file_watch(&self, home: Option<PathBuf>, extra_dirs: &[PathBuf]) {
         let this = self.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        match config_watch::watch_config_files(home.as_deref(), extra_dirs, move || {
-            let _ = tx.send(());
-        }) {
+        match config_watch::watch_config_files_with_action(
+            home.as_deref(),
+            extra_dirs,
+            move |action| {
+                let _ = tx.send(action);
+            },
+        ) {
             Ok(debouncer) => {
                 // Best-effort replace; a second call (tests) drops the old watch.
                 if let Ok(mut slot) = self.config_watch.try_lock() {
@@ -142,8 +146,13 @@ impl Backend {
             }
         }
         tokio::spawn(async move {
-            while rx.recv().await.is_some() {
-                this.reload_config_from_disk().await;
+            while let Some(action) = rx.recv().await {
+                match action {
+                    ConfigReloadAction::Reload => this.reload_config_from_disk().await,
+                    ConfigReloadAction::KeepLastGood { reason } => {
+                        this.report_config_warning(reason).await;
+                    }
+                }
             }
         });
     }
@@ -337,7 +346,7 @@ impl Backend {
             folder_paths: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             init_options: Arc::new(tokio::sync::RwLock::new(None)),
             config_watch: Arc::new(tokio::sync::Mutex::new(None)),
-            reported_config_issues: Arc::new(tokio::sync::Mutex::new(
+            reported_config_warnings: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
         }
@@ -348,26 +357,28 @@ impl Backend {
     /// is told which file, which key, and what was expected. Warnings also go
     /// to stderr from the config loader — this is the in-editor channel.
     async fn report_config_issues(&self, config: &LspConfig) {
-        if config.config_issues.is_empty() {
+        for issue in &config.config_issues {
+            self.report_config_warning(issue.to_string()).await;
+        }
+    }
+
+    /// Emit one distinct config warning to the editor. The dedup lock guards
+    /// only the set insertion and is always released before the client await.
+    async fn report_config_warning(&self, line: String) {
+        let fresh = {
+            let mut seen = self.reported_config_warnings.lock().await;
+            seen.insert(line.clone())
+        };
+        if !fresh {
             return;
         }
-        let mut seen = self.reported_config_issues.lock().await;
-        let fresh: Vec<String> = config
-            .config_issues
-            .iter()
-            .map(|issue| issue.to_string())
-            .filter(|line| seen.insert(line.clone()))
-            .collect();
-        drop(seen);
-        for line in fresh {
-            tracing::warn!("config: {line}");
-            self.client
-                .show_message(
-                    MessageType::WARNING,
-                    format!("openplanet-lsp config: {line}"),
-                )
-                .await;
-        }
+        tracing::warn!("config: {line}");
+        self.client
+            .show_message(
+                MessageType::WARNING,
+                format!("openplanet-lsp config: {line}"),
+            )
+            .await;
     }
 
     /// Open documents as `(path, source)` pairs for the overlay merge.
@@ -1195,7 +1206,7 @@ impl LanguageServer for Backend {
     /// changed under us).
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         let mut config_reload = false;
-        let mut config_invalid_only = false;
+        let mut config_invalid_reasons = Vec::new();
         for event in &params.changes {
             let file_path = event.uri.to_file_path().ok();
             if !is_config_watch_event(file_path.as_deref(), event.uri.path()) {
@@ -1208,16 +1219,18 @@ impl LanguageServer for Backend {
             {
                 ConfigReloadAction::Reload => config_reload = true,
                 ConfigReloadAction::KeepLastGood { reason } => {
-                    tracing::warn!("keeping last-good config ({reason})");
-                    config_invalid_only = true;
+                    config_invalid_reasons.push(reason);
                 }
             }
         }
-        if config_reload {
-            self.reload_config_from_disk().await;
+        if !config_invalid_reasons.is_empty() {
+            for reason in config_invalid_reasons {
+                self.report_config_warning(reason).await;
+            }
             return;
         }
-        if config_invalid_only {
+        if config_reload {
+            self.reload_config_from_disk().await;
             return;
         }
         let needs_reshard = params.changes.iter().any(|event| {

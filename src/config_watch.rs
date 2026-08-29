@@ -75,31 +75,54 @@ pub fn is_user_config_path(path: &Path) -> bool {
     file == Some("config.toml") && dir == Some("openplanet-lsp") && config == Some(".config")
 }
 
-/// Watch the user-global config parent (create/replace visible) plus any
-/// extra directories (plugin roots / opened folders, non-recursive) and
-/// invoke `on_reload` when a config file should retrigger analysis.
-/// Invalid TOML keeps last-good and only logs a warning.
+/// Back-compatible reload-only watcher. New LSP callers should use
+/// [`watch_config_files_with_action`] so invalid TOML can be surfaced to the
+/// client rather than only logged.
 pub fn watch_config_files(
     home: Option<&Path>,
     extra_dirs: &[PathBuf],
     on_reload: impl Fn() + Send + Sync + 'static,
 ) -> Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>, String> {
+    watch_config_files_with_action(home, extra_dirs, move |action| match action {
+        ConfigReloadAction::Reload => on_reload(),
+        ConfigReloadAction::KeepLastGood { reason } => {
+            tracing::warn!("keeping last-good config ({reason})");
+        }
+    })
+}
+
+/// Watch the user-global config parent (create/replace visible) plus any
+/// extra directories (plugin roots / opened folders, non-recursive) and
+/// invoke `on_action` with the batch result. If any changed config is invalid,
+/// the whole batch keeps last-good and reports each invalid file; otherwise a
+/// valid create/modify/delete produces one reload action.
+pub fn watch_config_files_with_action(
+    home: Option<&Path>,
+    extra_dirs: &[PathBuf],
+    on_action: impl Fn(ConfigReloadAction) + Send + Sync + 'static,
+) -> Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>, String> {
     let mut debouncer = new_debouncer(
         DEBOUNCE,
         move |res: Result<Vec<DebouncedEvent>, notify::Error>| match res {
             Ok(events) => {
+                let mut reload = false;
+                let mut invalid = Vec::new();
                 for ev in events {
                     if !is_config_path(&ev.path) {
                         continue;
                     }
                     match config_reload_action(&ev.path) {
-                        ConfigReloadAction::Reload => {
-                            on_reload();
-                            break;
-                        }
-                        ConfigReloadAction::KeepLastGood { reason } => {
-                            tracing::warn!("keeping last-good config ({reason})");
-                        }
+                        ConfigReloadAction::Reload => reload = true,
+                        action @ ConfigReloadAction::KeepLastGood { .. } => invalid.push(action),
+                    }
+                }
+                if invalid.is_empty() {
+                    if reload {
+                        on_action(ConfigReloadAction::Reload);
+                    }
+                } else {
+                    for action in invalid {
+                        on_action(action);
                     }
                 }
             }

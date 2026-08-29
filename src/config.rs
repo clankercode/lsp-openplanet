@@ -28,8 +28,8 @@ pub struct LspConfig {
     /// narrow via config / CLI to model a real client.
     pub build_flags: BuildFlags,
     pub defines: HashSet<String>,
-    /// Raw `defines` entries from every config layer (parent config, per-root
-    /// config, user global, init options), in the order they were read. They
+    /// Raw `defines` entries from every config layer (user global, parent
+    /// config, per-root config, init options), in the order they were read. They
     /// are ADDITIVE over the target-derived set and are applied last — after
     /// `defines_for_target` and the manifest — by
     /// [`LspConfig::apply_define_overrides`] (B024). An entry prefixed `-` or
@@ -229,6 +229,12 @@ impl ConfigIssue {
         Self::new(file, key, expected, describe_value(value))
     }
 
+    /// A value with the right TOML shape but outside the key's accepted
+    /// vocabulary. Preserve the value itself so the diagnostic is actionable.
+    fn invalid_value(file: &Path, key: &str, expected: &str, value: &str) -> Self {
+        Self::new(file, key, expected, format!("the string {value:?}"))
+    }
+
     /// A key this loader does not read — almost always a typo.
     fn unknown_key(file: &Path, key: &str) -> Self {
         Self::new(file, key, "a known config key", "an unknown key")
@@ -394,6 +400,29 @@ impl FileReader<'_> {
         self.typed(key, "a string")
     }
 
+    /// A string whose accepted vocabulary is known at file-parse time.
+    /// Both wrong TOML shapes and unknown string values make this one key
+    /// unusable, leaving lower config layers intact.
+    fn validated_string<T>(
+        &mut self,
+        key: &str,
+        expected: &str,
+        parse: fn(&str) -> Option<T>,
+    ) -> Option<String> {
+        let value = self.table.get(key)?;
+        let Some(token) = value.as_str() else {
+            self.issues
+                .push(ConfigIssue::wrong_type(self.file, key, expected, value));
+            return None;
+        };
+        if parse(token).is_none() {
+            self.issues
+                .push(ConfigIssue::invalid_value(self.file, key, expected, token));
+            return None;
+        }
+        Some(token.to_string())
+    }
+
     fn boolean(&mut self, key: &str) -> Option<bool> {
         self.typed(key, "a boolean")
     }
@@ -402,12 +431,17 @@ impl FileReader<'_> {
         self.typed(key, "a non-negative integer")
     }
 
-    /// An array of strings, leniently: non-string entries are dropped (and
-    /// reported) rather than losing the whole key — the contract
-    /// `unused_callbacks` already had. An array whose entries are ALL
-    /// unusable drops the key, so a typo can never silently turn
-    /// `source_paths` into "check nothing".
+    /// An ordinary array-of-strings config key. Any unusable entry makes the
+    /// whole key unusable, allowing the valid lower-precedence layer to
+    /// survive unchanged. An explicit empty array remains a valid value.
     fn string_list(&mut self, key: &str) -> Option<Vec<String>> {
+        self.typed(key, ARRAY_OF_STRINGS)
+    }
+
+    /// The deliberately lenient legacy contract for `unused_callbacks`:
+    /// retain usable callback names from a mixed array, but treat an
+    /// all-unusable array as a bad key so it falls through to a lower layer.
+    fn callback_list(&mut self, key: &str) -> Option<Vec<String>> {
         let value = self.table.get(key)?;
         let Some(entries) = value.as_array() else {
             self.issues.push(ConfigIssue::wrong_type(
@@ -481,15 +515,27 @@ impl ConfigFile {
             openplanet_dir: r.string("openplanet_dir"),
             plugins_dir: r.string("plugins_dir"),
             game_target: r.string("game_target"),
-            signature_mode: r.string("signature_mode"),
-            os_target: r.string("os_target"),
-            arch_target: r.string("arch_target"),
+            signature_mode: r.validated_string(
+                "signature_mode",
+                "one of developer, school, regular, official",
+                SignatureMode::parse,
+            ),
+            os_target: r.validated_string(
+                "os_target",
+                "one of windows, wine, linux",
+                OsTarget::parse,
+            ),
+            arch_target: r.validated_string("arch_target", "one of 64, 32", ArchTarget::parse),
             developer_build: r.boolean("developer_build"),
             has_dev: r.boolean("has_dev"),
             logs: r.boolean("logs"),
             server: r.boolean("server"),
             defines: r.string_list("defines"),
-            default_mode: r.string("default_mode"),
+            default_mode: r.validated_string(
+                "default_mode",
+                "one of tui, lsp (aliases: watch, check, server, stdio)",
+                DefaultMode::parse,
+            ),
             source_paths: r.string_list("source_paths"),
             ignore_paths: r.string_list("ignore_paths"),
             honor_gitignore: r.boolean("honor_gitignore"),
@@ -501,7 +547,7 @@ impl ConfigFile {
             define_groups: r.nested_string_list("define_groups"),
             define_combinations: r.nested_string_list("define_combinations"),
             define_matrix_max_combinations: r.size("define_matrix_max_combinations"),
-            unused_callbacks: r.string_list("unused_callbacks"),
+            unused_callbacks: r.callback_list("unused_callbacks"),
             unused: r.parsed(
                 "unused",
                 "one of ignore, hint, info, warn, error (or a boolean)",
@@ -540,6 +586,19 @@ fn read_config_file(path: &Path) -> Option<(ConfigFile, Vec<ConfigIssue>)> {
             Some((ConfigFile::default(), issues))
         }
     }
+}
+
+/// Render config issues consistently on CLI/UserPrefs-only paths. Kept as a
+/// writer seam so tests can prove reporting without redirecting process-wide
+/// stderr or mutating HOME.
+fn write_config_issues(
+    writer: &mut impl std::io::Write,
+    issues: &[ConfigIssue],
+) -> std::io::Result<()> {
+    for issue in issues {
+        writeln!(writer, "warning: config: {issue}")?;
+    }
+    Ok(())
 }
 
 /// How unused-declaration findings are reported.
@@ -894,35 +953,50 @@ impl UserPrefs {
     /// `.openplanet-lsp.toml` — project config wins. The CLI flag, where
     /// there is one, still beats both.
     pub fn load(workspace_root: Option<&Path>) -> Self {
-        Self::from_layers(LspConfig::user_config_path().as_deref(), workspace_root)
+        let (prefs, issues) =
+            Self::from_layers_with_issues(LspConfig::user_config_path().as_deref(), workspace_root);
+        let _ = write_config_issues(&mut std::io::stderr().lock(), &issues);
+        prefs
     }
 
     /// Pure variant of [`Self::load`]: `user` is the user-global config
     /// FILE, `root` the workspace DIRECTORY. Explicit paths so precedence
     /// tests never mutate `$HOME`.
     pub fn from_layers(user: Option<&Path>, root: Option<&Path>) -> Self {
-        let mut prefs = Self::default();
-        if let Some(user) = user {
-            prefs.apply_file(user);
-        }
-        if let Some(root) = root {
-            prefs.apply_workspace_config(root);
-        }
-        prefs
+        Self::from_layers_with_issues(user, root).0
     }
 
-    fn apply_workspace_config(&mut self, root: &Path) {
-        self.apply_file(&root.join(crate::config_watch::WORKSPACE_CONFIG_FILE));
+    /// Pure issue-carrying variant used by tests and callers that need to
+    /// surface config diagnostics through a channel other than stderr.
+    pub fn from_layers_with_issues(
+        user: Option<&Path>,
+        root: Option<&Path>,
+    ) -> (Self, Vec<ConfigIssue>) {
+        let mut prefs = Self::default();
+        let mut issues = Vec::new();
+        if let Some(user) = user {
+            prefs.apply_file(user, &mut issues);
+        }
+        if let Some(root) = root {
+            prefs.apply_workspace_config(root, &mut issues);
+        }
+        (prefs, issues)
+    }
+
+    fn apply_workspace_config(&mut self, root: &Path, issues: &mut Vec<ConfigIssue>) {
+        self.apply_file(
+            &root.join(crate::config_watch::WORKSPACE_CONFIG_FILE),
+            issues,
+        );
     }
 
     /// One layer. Reads through the shared lenient reader (B017), so a
     /// mistyped `game_target` no longer takes `default_mode` down with it.
-    /// Issues are not reported here: [`LspConfig::load_with_parent`] reads
-    /// the same two files and warns about them once.
-    fn apply_file(&mut self, path: &Path) {
-        let Some((cfg, _issues)) = read_config_file(path) else {
+    fn apply_file(&mut self, path: &Path, issues: &mut Vec<ConfigIssue>) {
+        let Some((cfg, mut file_issues)) = read_config_file(path) else {
             return;
         };
+        issues.append(&mut file_issues);
         if let Some(mode) = cfg.default_mode.as_deref().and_then(DefaultMode::parse) {
             self.default_mode = mode;
         }
@@ -1082,9 +1156,10 @@ impl LspConfig {
         out
     }
 
-    /// Build config from layers: auto-detect → parent (opened-folder) config
-    /// → config file → init params. The parent layer only applies when the
-    /// workspace root differs from the per-root path (multi-root t5).
+    /// Build config in ascending precedence: auto-detect → user global →
+    /// parent (opened-folder) config → per-root config → init params. The
+    /// parent layer only applies when it differs from the per-root path
+    /// (multi-root t5).
     pub fn load(workspace_root: Option<&Path>, init_options: Option<&serde_json::Value>) -> Self {
         Self::load_with_parent(workspace_root, None, init_options)
     }
@@ -1107,9 +1182,10 @@ impl LspConfig {
     }
 
     /// Multi-root aware load: `parent` is the opened folder hosting multiple
-    /// plugin roots. Ladder (lowest→highest): auto-detect defaults < parent
-    /// config < per-root config < user config < init options < manifest
-    /// defines. typedb settings stay global (resolved init > user > first
+    /// plugin roots. Ladder (lowest→highest): auto-detect defaults < user
+    /// global < parent config < per-root config < init options. Manifest and
+    /// accumulated config/init define overrides are applied after target
+    /// derivation. typedb settings stay global (resolved init > user > first
     /// root) — per-root: defines, plugins_dir, source_paths, ignore_paths.
     pub fn load_with_parent(
         workspace_root: Option<&Path>,
@@ -1136,9 +1212,7 @@ impl LspConfig {
             parent.filter(|p| Some(*p) != workspace_root),
             workspace_root,
         );
-        for issue in &issues {
-            eprintln!("warning: config: {issue}");
-        }
+        let _ = write_config_issues(&mut std::io::stderr().lock(), &issues);
         config.config_issues = issues;
 
         // Layer 3: Init params (highest priority)
@@ -3795,6 +3869,205 @@ shortcut_match_enums = true
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// A malformed replacement list is an unusable KEY, not a partially
+    /// usable value. Every ordinary string-list key therefore falls through
+    /// to the lower layer as a unit. Empty arrays remain valid, explicit
+    /// values; `defines` is the B024 exception whose valid layers accumulate.
+    #[test]
+    fn strict_string_list_keys_fall_through_as_a_unit_and_accept_empty() {
+        struct Case {
+            key: &'static str,
+            lower: &'static str,
+            mixed: &'static str,
+            all_invalid: &'static str,
+            empty: &'static str,
+            render: fn(&LspConfig) -> String,
+            lower_rendered: &'static str,
+            empty_rendered: &'static str,
+        }
+
+        let cases = [
+            Case {
+                key: "source_paths",
+                lower: "source_paths = [\"lower\"]",
+                mixed: "source_paths = [\"partial\", 7]",
+                all_invalid: "source_paths = [7, true]",
+                empty: "source_paths = []",
+                render: |c| format!("{:?}", c.source_paths),
+                lower_rendered: "Some([\"lower\"])",
+                empty_rendered: "Some([])",
+            },
+            Case {
+                key: "ignore_paths",
+                lower: "ignore_paths = [\"lower\"]",
+                mixed: "ignore_paths = [\"partial\", 7]",
+                all_invalid: "ignore_paths = [7, true]",
+                empty: "ignore_paths = []",
+                render: |c| format!("{:?}", c.ignore_paths),
+                lower_rendered: "Some([\"lower\"])",
+                empty_rendered: "Some([])",
+            },
+            Case {
+                key: "shortcut_namespaces",
+                lower: "shortcut_namespaces = [\"Lower\"]",
+                mixed: "shortcut_namespaces = [\"Partial\", 7]",
+                all_invalid: "shortcut_namespaces = [7, true]",
+                empty: "shortcut_namespaces = []",
+                render: |c| format!("{:?}", c.shortcut_namespaces),
+                lower_rendered: "Some([\"Lower\"])",
+                empty_rendered: "Some([])",
+            },
+            Case {
+                key: "define_matrix",
+                lower: "define_matrix = [\"LOWER\"]",
+                mixed: "define_matrix = [\"PARTIAL\", 7]",
+                all_invalid: "define_matrix = [7, true]",
+                empty: "define_matrix = []",
+                render: |c| format!("{:?}", c.define_matrix),
+                lower_rendered: "[\"LOWER\"]",
+                empty_rendered: "[]",
+            },
+            Case {
+                key: "defines",
+                lower: "defines = [\"LOWER\"]",
+                mixed: "defines = [\"PARTIAL\", 7]",
+                all_invalid: "defines = [7, true]",
+                empty: "defines = []",
+                render: |c| format!("{:?}", c.define_overrides),
+                lower_rendered: "[\"LOWER\"]",
+                // B024: a valid empty higher layer contributes nothing; it
+                // does not erase accumulated lower-layer overrides.
+                empty_rendered: "[\"LOWER\"]",
+            },
+        ];
+
+        for case in cases {
+            let (tmp, user, _parent, root) = b017_layers(case.key);
+            std::fs::write(&user, format!("{}\n", case.lower)).unwrap();
+
+            for (variant, higher) in [("mixed", case.mixed), ("all-invalid", case.all_invalid)] {
+                write_ws(&root, &format!("{higher}\n"));
+                let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+                assert_eq!(
+                    (case.render)(&cfg),
+                    case.lower_rendered,
+                    "{} {variant} must fall through as one bad key",
+                    case.key
+                );
+                assert!(
+                    issues.iter().any(|issue| issue.key == case.key),
+                    "{} {variant} must report its unusable key: {issues:?}",
+                    case.key
+                );
+            }
+
+            write_ws(&root, &format!("{}\n", case.empty));
+            let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+            assert_eq!(
+                (case.render)(&cfg),
+                case.empty_rendered,
+                "{} empty array is a valid explicit value",
+                case.key
+            );
+            assert!(issues.is_empty(), "{} empty array: {issues:?}", case.key);
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+
+    /// String-shaped selector values can still be semantically unusable.
+    /// They are bad keys at their file layer (with attribution), so each
+    /// selector falls through independently and valid siblings still apply.
+    #[test]
+    fn semantic_selector_errors_report_and_fall_through_per_key() {
+        let (tmp, user, _parent, root) = b017_layers("semantic-selectors");
+        std::fs::write(
+            &user,
+            "signature_mode = \"official\"\nos_target = \"linux\"\narch_target = \"32\"\n",
+        )
+        .unwrap();
+
+        let variants = [
+            (
+                "unknown-values",
+                "signature_mode = \"banana-sig\"\nos_target = \"beos\"\narch_target = \"128\"\ngame_target = \"TURBO\"\n",
+                ["banana-sig", "beos", "128"],
+            ),
+            (
+                "wrong-scalars",
+                "signature_mode = 7\nos_target = true\narch_target = [\"32\"]\ngame_target = \"TURBO\"\n",
+                ["integer", "boolean", "array"],
+            ),
+        ];
+
+        for (name, body, found_fragments) in variants {
+            write_ws(&root, body);
+            let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+            assert_eq!(cfg.signature_mode, SignatureMode::Official, "{name}");
+            assert_eq!(cfg.os_target, OsTarget::Linux, "{name}");
+            assert_eq!(cfg.arch_target, ArchTarget::Arch32, "{name}");
+            assert_eq!(
+                cfg.game_target, "TURBO",
+                "{name}: a valid sibling must still apply"
+            );
+
+            for (key, found) in ["signature_mode", "os_target", "arch_target"]
+                .into_iter()
+                .zip(found_fragments)
+            {
+                let issue = issues
+                    .iter()
+                    .find(|issue| issue.key == key)
+                    .unwrap_or_else(|| panic!("{name}: missing issue for {key}: {issues:?}"));
+                assert_eq!(issue.file, root.join(".openplanet-lsp.toml"));
+                assert!(
+                    issue.expected.contains("one of"),
+                    "{name} {key}: expected choices, got {issue:?}"
+                );
+                assert!(
+                    issue.found.contains(found),
+                    "{name} {key}: expected found value/type {found:?}, got {issue:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `unused_callbacks` keeps its pre-B017 legacy tolerance: usable names
+    /// survive a mixed list. An all-unusable higher list is still a bad key
+    /// and falls through; an explicit empty list wins outright.
+    #[test]
+    fn unused_callbacks_mixed_all_invalid_and_empty_keep_legacy_contract() {
+        let (tmp, user, _parent, root) = b017_layers("callbacks-list-contract");
+        std::fs::write(&user, "unused_callbacks = [\"Lower\"]\n").unwrap();
+
+        let variants = [
+            (
+                "mixed",
+                "unused_callbacks = [\"Kept\", 7, true]\n",
+                vec!["Kept".to_string()],
+                true,
+            ),
+            (
+                "all-invalid",
+                "unused_callbacks = [7, true]\n",
+                vec!["Lower".to_string()],
+                true,
+            ),
+            ("empty", "unused_callbacks = []\n", vec![], false),
+        ];
+        for (name, body, expected, has_issue) in variants {
+            write_ws(&root, body);
+            let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+            assert_eq!(cfg.unused_callbacks, expected, "case {name}");
+            assert_eq!(
+                issues.iter().any(|issue| issue.key == "unused_callbacks"),
+                has_issue,
+                "case {name}: {issues:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// The second ladder (`UserPrefs`) obeys the same order, and a bad key
     /// no longer discards its siblings either.
     #[test]
@@ -3822,6 +4095,50 @@ shortcut_match_enums = true
             !prefs.warnings_as_errors,
             "a bad `game_target` must not take `warnings_as_errors` with it"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The bare-TTY/UserPrefs-only loader must diagnose semantic and scalar
+    /// `default_mode` errors itself: there may be no later LspConfig load to
+    /// report them. This pure seam avoids mutating process-global HOME.
+    #[test]
+    fn user_prefs_reports_default_mode_issues_and_keeps_valid_siblings() {
+        let (tmp, user, _parent, root) = b017_layers("user-prefs-issues");
+        std::fs::write(&user, "default_mode = \"lsp\"\nwarnings_as_errors = true\n").unwrap();
+
+        for (name, bad_mode, found) in [
+            ("unknown-value", "default_mode = \"graphical\"", "graphical"),
+            ("wrong-scalar", "default_mode = 7", "integer"),
+        ] {
+            write_ws(&root, &format!("{bad_mode}\nwarnings_as_errors = false\n"));
+            let (prefs, issues) = UserPrefs::from_layers_with_issues(Some(&user), Some(&root));
+            assert_eq!(
+                prefs.default_mode,
+                DefaultMode::Lsp,
+                "{name}: invalid higher key must fall through"
+            );
+            assert!(
+                !prefs.warnings_as_errors,
+                "{name}: valid sibling must still apply"
+            );
+            let issue = issues
+                .iter()
+                .find(|issue| issue.key == "default_mode")
+                .unwrap_or_else(|| panic!("{name}: missing default_mode issue: {issues:?}"));
+            assert_eq!(issue.file, root.join(".openplanet-lsp.toml"));
+            assert!(issue.expected.contains("one of"), "{name}: {issue:?}");
+            assert!(issue.found.contains(found), "{name}: {issue:?}");
+
+            let mut stderr = Vec::new();
+            write_config_issues(&mut stderr, &issues).unwrap();
+            let stderr = String::from_utf8(stderr).unwrap();
+            assert!(stderr.contains("warning: config:"), "{name}: {stderr:?}");
+            assert!(stderr.contains("default_mode"), "{name}: {stderr:?}");
+            assert!(
+                stderr.contains(".openplanet-lsp.toml"),
+                "{name}: {stderr:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
