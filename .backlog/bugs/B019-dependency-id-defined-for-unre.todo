@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-29T13:30:16Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T16:03:50Z"
 complexity: medium
 created_at: "2026-08-23T16:52:13Z"
 depends_on: []
+duration_minutes: 153.57399100036668
 estimate_hours: 3
 id: B019
 priority: high
 started_at: "2026-08-29T13:30:16Z"
-status: in_progress
+status: done
 tags: []
 title: DEPENDENCY_<ID> defined for unresolved optional deps (define-set mismatch with game)
-updated_at: "2026-08-29T13:30:16Z"
+updated_at: "2026-08-29T16:03:50Z"
 ---
 Found by the B013 lane (GH #58) while building the namespace-rule authority
 guard, 2026-08-24. Pre-existing; independent of that rule.
@@ -184,3 +185,39 @@ its numbers.
 Command used:
   ./target/debug/openplanet-lsp check --typedb-dir tests/fixtures/typedb \
       tests/fixtures/<fixture>
+
+## Merged (coordinator, 2026-08-30)
+
+Merged to master as 2f38818. Parent-review gate run independently: 1422
+passed / 0 failed; all five FP fixtures byte-identical to master with full
+check output diffed. History verified unrewritten (9479673 still an ancestor).
+
+Merge conflict in tests/cli_check_tests.rs resolved by keeping BOTH added
+tests — B016's anon-member-enum repro and B019's --plugins-dir probe guard
+were independent additions at the same end-of-file location, base empty.
+cli_check_tests: 97 passed after resolution.
+
+## CAVEAT FOR ALL FUTURE BASELINING (important)
+
+B019 makes fixture output depend on WHICH PLUGINS ARE INSTALLED LOCALLY,
+because the game's define set does too. A dependency that resolves on this
+machine yields a live `#if DEPENDENCY_X` branch; on a machine without it the
+branch is masked and its consumers become unused.
+
+Demonstrated: isolating the plugin install so MLHook stops resolving moves
+tm-dips-plus-plus 283 -> 290 diagnostics, the 7 added all being 'never used'
+warnings for declarations whose only consumers live in the now-masked block.
+Correct behaviour — but it means a fixture baseline is no longer a property of
+the tree alone.
+
+So: B019-adjacent baselining must PIN THE PLUGIN INSTALL, not just the tree.
+Two binaries compared on the same machine at the same time is still a valid
+A/B (that is what the merge gate used); comparing against a number recorded
+elsewhere or earlier is not.
+
+Related hazard found by the Codex review on this branch:
+`check_command_applies_manifest_defines_and_dependency_defines` implicitly
+relied on this machine's installed `Editor` plugin — it asserted a
+DEPENDENCY_EDITOR branch was live, which after B019 only holds if Editor
+resolves. It passed here and would have failed on a clean machine or in CI.
+Fixed on the branch by provisioning the dependency in the fixture.
