@@ -120,6 +120,28 @@ GitHub Release body to match this section (gh release edit).
   enums. `check` output across the false-positive fixture corpus is
   byte-identical.
 
+- **Rename Symbol (F2) no longer rewrites unrelated identifiers (B049)** —
+  `textDocument/rename` was a workspace-wide *textual* token match with no
+  scope analysis, so renaming a local `x` also rewrote the outer binding it
+  shadowed, every unrelated local, parameter and global named `x`, every
+  `obj.x`, both sides of `A::x`, and every named-argument label `f(x: 1)`, in
+  every open file. On a loop counter that silently corrupted a plugin.
+
+  Rename now classifies the symbol under the cursor and uses one occurrence
+  rule per class: a local or parameter is confined to its lexical scope and its
+  own file; a free function, global, class, interface, enum or funcdef is
+  renamed across the workspace but never through a `.` member access, never
+  through a shadowing local, and never in a named-argument label. Class fields,
+  methods, namespaced names and enum values are **refused** rather than guessed
+  at, as is any new name that would be captured or collide.
+
+  `textDocument/prepareRename` is now implemented, so an editor greys out F2
+  and shows the reason instead of offering a rename that cannot be done
+  correctly.
+- **Find All References is scope-aware too (B049)** — it shared the same
+  token scan, so it reported every same-spelled identifier in the workspace.
+  It now uses the same classification as rename, and falls back to a filtered
+  scan (never a raw one) for the classes rename refuses.
 - **A bare value name of an unnamed engine enum is now an error (B044)** — the
   engine dump declares 132 enums inline on a member and gives them no name, so
   nothing in source can spell such an enum and nothing can reach its values by a
