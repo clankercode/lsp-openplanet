@@ -184,69 +184,74 @@ fn source_of<'a>(ctx: &'a FixContext<'a>, uri: &Url) -> Option<&'a str> {
 }
 
 /// `(declaring uri, span of the `)` closing the method's parameter list)`
-/// for the workspace declaration of `object_type::method`, when it exists
-/// and is not already const.
+/// for the unique non-const workspace declaration of
+/// `object_type::method`.
+///
+/// The diagnostic carries no argument types or overload identity. Selecting
+/// the first same-named declaration would therefore change an arbitrary
+/// overload, so ambiguity means no method alternative.
 fn locate_method_const_insertion(
     ctx: &FixContext<'_>,
     object_type: &str,
     method: &str,
 ) -> Option<(Url, Span)> {
+    let mut found = None;
     for (uri, analysis) in workspace_files(ctx) {
         let source = analysis.masked_source();
-        let Some(class) = find_class(&analysis.file, source, object_type) else {
-            continue;
-        };
-        let Some(decl) = class.members.iter().find_map(|member| match member {
-            ClassMember::Method(func) if func.name.text(source) == method => Some(func),
-            _ => None,
-        }) else {
-            continue;
-        };
-        if decl.is_const {
-            return None;
+        for class in matching_classes(&analysis.file, source, object_type) {
+            for decl in class.members.iter().filter_map(|member| match member {
+                ClassMember::Method(func) if func.name.text(source) == method => Some(func),
+                _ => None,
+            }) {
+                if found.is_some() || decl.is_const {
+                    return None;
+                }
+                let close = scope::params_close_paren(&analysis.tokens, decl.name.span.end)?;
+                found = Some((uri.clone(), close));
+            }
         }
-        let close = scope::params_close_paren(&analysis.tokens, decl.name.span.end)?;
-        return Some((uri.clone(), close));
     }
-    None
+    found
 }
 
-/// The class declared in `file` under the fully qualified `wanted` name.
-fn find_class<'a>(file: &'a SourceFile, source: &str, wanted: &str) -> Option<&'a ClassDecl> {
+/// Every class declared in `file` under the fully qualified `wanted` name.
+/// Duplicate class declarations are invalid source, but are still treated
+/// conservatively because a code action must never pick one arbitrarily.
+fn matching_classes<'a>(file: &'a SourceFile, source: &str, wanted: &str) -> Vec<&'a ClassDecl> {
     fn walk<'a>(
         items: &'a [Item],
         source: &str,
-        prefix: Option<&str>,
+        prefix: Option<String>,
         wanted: &str,
-    ) -> Option<&'a ClassDecl> {
+        out: &mut Vec<&'a ClassDecl>,
+    ) {
         for item in items {
             match item {
                 Item::Class(class) => {
                     let simple = class.name.text(source);
-                    let qualified = match prefix {
+                    let qualified = match &prefix {
                         Some(ns) => format!("{ns}::{simple}"),
                         None => simple.to_string(),
                     };
                     if qualified == wanted {
-                        return Some(class);
+                        out.push(class);
                     }
                 }
                 Item::Namespace(ns) => {
                     let simple = ns.name.text(source);
-                    let nested = match prefix {
+                    let nested = match &prefix {
                         Some(outer) => format!("{outer}::{simple}"),
                         None => simple.to_string(),
                     };
-                    if let Some(found) = walk(&ns.items, source, Some(&nested), wanted) {
-                        return Some(found);
-                    }
+                    walk(&ns.items, source, Some(nested), wanted, out);
                 }
                 _ => {}
             }
         }
-        None
     }
-    walk(&file.items, source, None, wanted)
+    let mut out = Vec::new();
+    walk(&file.items, source, None, wanted, &mut out);
+    out
 }
 
 // ── Fix (b): drop const from the receiver ───────────────────────────────────
@@ -261,6 +266,12 @@ fn locate_receiver_const_deletion(
     callee_span: Span,
 ) -> Option<(Span, String)> {
     let analysis = ctx.analysis;
+    // Anonymous-function parameters are not represented by the enclosing
+    // `FunctionDecl`. Until they have their own scope-aware lookup, refusing
+    // this alternative is safer than deleting a same-named outer parameter.
+    if is_in_anonymous_function_body(&analysis.tokens, callee_span.start) {
+        return None;
+    }
     let source = analysis.masked_source();
     let receiver = simple_receiver_name(&analysis.tokens, source, callee_span)?;
     let type_span = receiver_type_expr_span(
@@ -272,6 +283,47 @@ fn locate_receiver_const_deletion(
     )?;
     let deletion = sole_const_qualifier(&analysis.tokens, type_span)?;
     Some((deletion, receiver))
+}
+
+/// Whether `offset` lies within an anonymous `function (...) { ... }` body.
+///
+/// The parser models function declarations but not lambda parameters in the
+/// enclosing-function query used below. This token-level guard deliberately
+/// errs on the conservative side: an unmatched lambda simply yields no
+/// receiver edit rather than risking an edit to an outer binding.
+fn is_in_anonymous_function_body(tokens: &[crate::lexer::Token], offset: u32) -> bool {
+    for (function_idx, function) in tokens.iter().enumerate() {
+        if function.kind != TokenKind::KwFunction || function.span.start >= offset {
+            continue;
+        }
+        let Some(open_idx) = tokens[function_idx + 1..]
+            .iter()
+            .position(|token| token.kind == TokenKind::LBrace)
+            .map(|relative| function_idx + 1 + relative)
+        else {
+            continue;
+        };
+        let mut depth = 0usize;
+        for token in &tokens[open_idx..] {
+            match token.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    let Some(next_depth) = depth.checked_sub(1) else {
+                        break;
+                    };
+                    depth = next_depth;
+                    if depth == 0 {
+                        if tokens[open_idx].span.start < offset && offset < token.span.start {
+                            return true;
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// Receiver name when the callee is exactly `Ident . Ident`.
@@ -708,9 +760,132 @@ mod tests {
         assert!(
             starts
                 .iter()
-                .any(|position| position.character as u32 == param_const),
+                .any(|position| position.character == param_const),
             "no fix edits the parameter: {starts:?}"
         );
+    }
+
+    #[test]
+    fn a_closed_inner_receiver_does_not_steal_the_outer_calls_fix() {
+        let src = "class C { bool M() { return true; } } \
+                   void f(const C &in h) { { const C h = C(); } h.M(); }";
+        assert_eq!(
+            apply_titled(src, RECEIVER_TITLE),
+            "class C { bool M() { return true; } } \
+             void f(C &in h) { { const C h = C(); } h.M(); }"
+        );
+    }
+
+    #[test]
+    fn a_live_inner_receiver_is_preferred_over_the_outer_parameter() {
+        let src = "class C { bool M() { return true; } } \
+                   void f(const C &in h) { { const C h = C(); h.M(); } }";
+        assert_eq!(
+            apply_titled(src, RECEIVER_TITLE),
+            "class C { bool M() { return true; } } \
+             void f(const C &in h) { { C h = C(); h.M(); } }"
+        );
+    }
+
+    #[test]
+    fn a_lambda_parameter_never_edits_the_enclosing_functions_receiver() {
+        let src = "class C { bool M() { return true; } } \
+                   void f(const C &in h) { auto cb = function(const C &in h) { h.M(); }; }";
+        let workspace = Workspace::single(src);
+        let pairs = workspace.pairs();
+        let ctx = context(&workspace, &pairs, 0);
+        let start = src.rfind("h.M").expect("lambda call site") as u32;
+        let diag = TypeDiagnostic {
+            span: Span {
+                start,
+                end: start + 3,
+            },
+            kind: TypeDiagnosticKind::NonConstMethodOnConstReceiver {
+                method: "M".to_string(),
+                object_type: "C".to_string(),
+            },
+        };
+        let described = describe(&diag, &ctx);
+        assert_eq!(
+            described
+                .iter()
+                .map(|descriptor| descriptor.title.as_str())
+                .collect::<Vec<_>>(),
+            vec![METHOD_TITLE]
+        );
+        assert!(
+            !edits_for(&materialize(&diag, &ctx, METHOD_TITLE), workspace.uri(0)).is_empty(),
+            "the safe method alternative remains available"
+        );
+    }
+
+    #[test]
+    fn overloaded_methods_do_not_offer_an_ambiguous_method_edit() {
+        for src in [
+            "class C { bool M(int n) { return true; } bool M() { return true; } } void f(const C &in h) { h.M(); }",
+            "class C { bool M() { return true; } bool M(int n) { return true; } } void f(const C &in h) { h.M(); }",
+        ] {
+            let workspace = Workspace::single(src);
+            let pairs = workspace.pairs();
+            let ctx = context(&workspace, &pairs, 0);
+            let start = src.find("h.M").expect("call site") as u32;
+            let diag = TypeDiagnostic {
+                span: Span {
+                    start,
+                    end: start + 3,
+                },
+                kind: TypeDiagnosticKind::NonConstMethodOnConstReceiver {
+                    method: "M".to_string(),
+                    object_type: "C".to_string(),
+                },
+            };
+            let described = describe(&diag, &ctx);
+            assert_eq!(
+                described
+                    .iter()
+                    .map(|descriptor| descriptor.title.as_str())
+                    .collect::<Vec<_>>(),
+                vec![RECEIVER_TITLE],
+                "must not choose an overload in `{src}`"
+            );
+            assert!(described.iter().all(|descriptor| {
+                !descriptor.is_preferred && !descriptor.auto_applicable
+            }));
+        }
+    }
+
+    #[test]
+    fn a_unique_method_still_offers_both_non_auto_applicable_alternatives() {
+        let workspace = Workspace::single(CALL);
+        let pairs = workspace.pairs();
+        let ctx = context(&workspace, &pairs, 0);
+        let start = CALL.find("h.M").expect("call site") as u32;
+        let diag = TypeDiagnostic {
+            span: Span {
+                start,
+                end: start + 3,
+            },
+            kind: TypeDiagnosticKind::NonConstMethodOnConstReceiver {
+                method: "M".to_string(),
+                object_type: "C".to_string(),
+            },
+        };
+        let described = describe(&diag, &ctx);
+        assert_eq!(described.len(), 2);
+        assert!(described
+            .iter()
+            .all(|descriptor| { !descriptor.is_preferred && !descriptor.auto_applicable }));
+        for descriptor in described {
+            assert!(
+                !edits_for(
+                    &materialize(&diag, &ctx, &descriptor.title),
+                    workspace.uri(0)
+                )
+                .is_empty(),
+                "described title must materialize: {}",
+                descriptor.title
+            );
+        }
     }
 
     #[test]

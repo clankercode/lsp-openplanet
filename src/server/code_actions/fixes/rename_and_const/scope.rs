@@ -224,7 +224,8 @@ fn collect_brace_scopes(tokens: &[Token], offset: u32, out: &mut Vec<Span>) {
 /// itself.
 ///
 /// Skips identifiers that only *look* like the local: a member name after
-/// `.` and a namespace-qualified name after `::` are different symbols.
+/// `.` and a namespace-qualified name on either side of `::` are different
+/// symbols.
 /// `excluded` ranges (a nested redeclaration's own scope) are skipped
 /// wholesale — inside them the name belongs to the deeper binding.
 pub fn local_occurrences(
@@ -244,7 +245,12 @@ pub fn local_occurrences(
         {
             continue;
         }
-        if idx > 0 && matches!(tokens[idx - 1].kind, TokenKind::Dot | TokenKind::ColonColon) {
+        if (idx > 0 && matches!(tokens[idx - 1].kind, TokenKind::Dot | TokenKind::ColonColon))
+            || matches!(
+                tokens.get(idx + 1).map(|token| token.kind),
+                Some(TokenKind::ColonColon)
+            )
+        {
             continue;
         }
         if excluded
@@ -529,6 +535,20 @@ mod tests {
         assert_eq!(
             starts, bare,
             "member and `::`-qualified names must be skipped"
+        );
+    }
+
+    #[test]
+    fn occurrences_skip_a_namespace_segment_before_the_separator() {
+        // A local named `N` must not capture the namespace in `N::Call()`.
+        // Receiver names followed by `.` remain valid local occurrences, so
+        // the guard is deliberately specific to `::`.
+        let src = "N; N::Call(); N.M();";
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        let spans = local_occurrences(&analysis.tokens, src, "N", 0, src.len() as u32, &[]);
+        assert_eq!(
+            spans.iter().map(|span| span.start).collect::<Vec<_>>(),
+            vec![0, src.rfind("N.M").expect("receiver") as u32],
         );
     }
 

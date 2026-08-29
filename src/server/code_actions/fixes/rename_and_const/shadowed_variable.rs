@@ -130,7 +130,16 @@ fn plan(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<RenamePlan> {
             // ours. Not a rename we can get right.
             return None;
         }
-        excluded.push((redecl, end));
+        // The checker evaluates the nested declaration's initializer
+        // before binding the nested name. Exclude its declarator and all
+        // later uses, but leave its initializer available to the parent
+        // rename plan because those references still resolve to us.
+        if let Some(init) = own_initializer_span(&analysis.file, redecl) {
+            excluded.push((redecl, init.start));
+            excluded.push((init.end, end));
+        } else {
+            excluded.push((redecl, end));
+        }
     }
     // `int x = x;` initialises from the OUTER binding — the checker types
     // the initialiser before defining the local. Rewriting it would change
@@ -417,6 +426,40 @@ mod tests {
         assert_eq!(
             applied(src, &middle.fix.edit, workspace.uri(0)),
             "void f() { int x = 1; { int x2 = 2; x2++; { int x = 3; x++; } x2++; } }"
+        );
+    }
+
+    #[test]
+    fn a_nested_redeclarations_initializer_keeps_the_parent_binding() {
+        // The checker evaluates a declaration's initializer before adding
+        // that declaration to its frame. The deepest `x` therefore reads
+        // the middle binding, even though its later uses are its own.
+        let src = "void f() { int x = 0; { int x = 1; { int x = x + 1; x++; } x++; } }";
+        let workspace = Workspace::single(src);
+        let middle = super::super::test_support::fixes_in(&workspace, 0)
+            .into_iter()
+            .filter(|candidate| candidate.family == FAMILY.name)
+            .min_by_key(|candidate| candidate.diagnostic.range.start.character)
+            .expect("a fix on the middle declaration");
+        assert_eq!(
+            applied(src, &middle.fix.edit, workspace.uri(0)),
+            "void f() { int x = 0; { int x2 = 1; { int x = x2 + 1; x++; } x2++; } }"
+        );
+    }
+
+    #[test]
+    fn nested_redeclaration_initializers_all_keep_the_parent_binding() {
+        let src =
+            "void f() { int x = 0; { int x = 1; { int x = x + 1; } { int x = x + 2; } x++; } }";
+        let workspace = Workspace::single(src);
+        let middle = super::super::test_support::fixes_in(&workspace, 0)
+            .into_iter()
+            .filter(|candidate| candidate.family == FAMILY.name)
+            .min_by_key(|candidate| candidate.diagnostic.range.start.character)
+            .expect("a fix on the middle declaration");
+        assert_eq!(
+            applied(src, &middle.fix.edit, workspace.uri(0)),
+            "void f() { int x = 0; { int x2 = 1; { int x = x2 + 1; } { int x = x2 + 2; } x2++; } }"
         );
     }
 
