@@ -368,17 +368,18 @@ impl App {
         let inner_h = area.height.saturating_sub(2);
 
         // The box caps at 8 inner rows; a longer wrapped message scrolls (B029).
-        // Saturate rather than wrap: `Paragraph::scroll` is u16, so a message
-        // with more rows than that is unreachable either way, but a wrapped
-        // count would report (and scroll to) nonsense.
-        let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-        let max_scroll = total.saturating_sub(inner_h);
-        self.detail_scroll = self.detail_scroll.min(max_scroll);
+        // Row counts stay usize so the reported range is exact; only the offset
+        // handed to ratatui is capped, since `Paragraph::scroll` is u16.
+        let total = lines.len();
+        let inner = inner_h as usize;
+        let max_scroll = total.saturating_sub(inner);
+        let scroll = (self.detail_scroll as usize).min(max_scroll);
+        self.detail_scroll = u16::try_from(scroll).unwrap_or(u16::MAX);
         // `inner_h == 0` means the pane got squeezed to nothing on a very short
         // terminal — there is no range to report.
         if max_scroll > 0 && inner_h > 0 {
-            let top = self.detail_scroll + 1;
-            let bot = (self.detail_scroll + inner_h).min(total);
+            let top = scroll + 1;
+            let bot = (scroll + inner).min(total);
             let suffix = format!("· {top}-{bot}/{total} · J/K ");
             if str_w(&title) + str_w(&suffix) <= inner_w {
                 title.push_str(&suffix);
@@ -2096,15 +2097,15 @@ mod tests {
                 assert!(step >= 1, "h={h} {density:?}: a page must move");
                 // Rows a page's worth of items occupies, worst case: every item
                 // at its density height, plus the selected item's extra row in
-                // Relaxed. That must still fit the viewport.
+                // Relaxed. Either that fits the viewport, or the step is the
+                // single-item minimum — on a viewport too short for even one
+                // Relaxed item, moving one beats a dead PgUp/PgDn.
                 let spill = usize::from(density == ListDensity::Relaxed);
                 let rows = step * density.rows_per_item() + spill;
-                if inner >= 3 {
-                    assert!(
-                        rows <= inner,
-                        "h={h} {density:?}: step {step} needs {rows} rows of {inner}"
-                    );
-                }
+                assert!(
+                    rows <= inner || step == 1,
+                    "h={h} {density:?}: step {step} needs {rows} rows of {inner}"
+                );
             }
         }
     }

@@ -343,3 +343,29 @@ fn rendered_frame_never_contains_a_control_character() {
         }
     }
 }
+
+/// Row counts must not be truncated to `u16`: at 65_536+ rows a `as u16` cast
+/// wraps, which used to report a nonsense range and hide the scroll affordance
+/// entirely. Only the offset handed to ratatui is capped.
+#[test]
+fn detail_range_stays_exact_past_the_u16_row_limit() {
+    let rows = 65_540usize;
+    let mut snap = narrow_snapshot();
+    snap.diagnostics.truncate(1);
+    snap.diagnostics[0].source_line = None;
+    snap.diagnostics[0].message = "x\n".repeat(rows);
+
+    let mut app = App::from_snapshot(snap);
+    let backend = TestBackend::new(60, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal.draw(|frame| app.draw(frame)).expect("draw");
+    let text = rendered_text(&terminal).join("\n");
+
+    // header + blank + one row per line (the trailing "\n" yields a final empty).
+    let total = rows + 1 + 2;
+    assert!(
+        text.contains(&format!("/{total}")),
+        "range not reported exactly (expected /{total}):\n{text}"
+    );
+    assert!(text.contains("J/K"), "scroll affordance missing:\n{text}");
+}
