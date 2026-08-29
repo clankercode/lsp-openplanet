@@ -53,3 +53,4 @@ bugs:
     - file: B052-has-enum-tail-fallback-resolve.todo
     - file: B053-bare-enum-value-carried-by-two.todo
     - file: B054-interface-members-are-absent-f.todo
+    - file: B055-rename-of-a-strict-export-decl.todo
