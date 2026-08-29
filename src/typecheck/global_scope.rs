@@ -422,6 +422,11 @@ impl<'a> GlobalScope<'a> {
     /// symbol whose qualified tail matches `::name` — this covers the
     /// common AngelScript case where bare enum-value names (`Red` rather
     /// than `Color::Red`) are sometimes usable without a qualifier.
+    ///
+    /// The external enum-value fallback covers *named* enums only (B044):
+    /// an inline member enum the engine dump leaves unnamed cannot be
+    /// spelled in source, so a bare name that is only one of its values is
+    /// not a symbol — the game answers `No matching symbol`.
     pub fn has_global_ident(&self, name: &str) -> bool {
         if self.has_type(name) || self.has_function(name) || self.has_enum(name) {
             return true;
@@ -452,33 +457,34 @@ impl<'a> GlobalScope<'a> {
         // This is linear in enum count but enums are small and this only
         // runs on identifiers that failed every earlier check.
         //
-        // B016: deliberately `enums_iter`, NOT `source_enums_iter`. Every
-        // other external-enum call site asks "can source NAME this enum?",
-        // where a synthesized anonymous key must answer no. This one asks a
-        // different question — "is this bare identifier a value the engine
-        // knows?" — and answering true only silences an
-        // `UndefinedIdentifier`.
+        // B044: `source_enums_iter`, NOT `enums_iter` — only an enum source
+        // can NAME contributes its values here. An inline member enum the
+        // engine dump leaves unnamed has no name in the game either, so no
+        // source can reach its values except through the declaring member's
+        // type; a bare value name of one is not a symbol. Game ground truth,
+        // RemoteBuild probe, OP 1.29.5, on
+        // `tests/fixtures/issue-repros/b044-anon-enum-value-names`:
+        // `No matching symbol 'HyperTnL'` and 260 siblings.
         //
-        // KNOWN FALSE NEGATIVE, left as-is on purpose. The game rejects a
-        // bare unnamed-enum value: RemoteBuild probe 2026-08-30, OP 1.29.5,
-        // on `tests/fixtures/issue-repros/b016-anon-member-enums` →
-        // `No matching symbol 'HyperTnL'` (and `RenderPlaneReflect`,
-        // `MinimalReadOnly`). So filtering here would match the game.
+        // This is the whole seam. Two things keep it from over-rejecting:
+        //   * a value name that ALSO appears in a named enum is still found
+        //     on that enum (`VCenter2` lives in an anonymous enum *and* in
+        //     `Game::CGameManialinkControl::EAlignVertical`), and
+        //   * every other way a name can be global — type, function, virtual
+        //     property, workspace variable or enum value — was already tried
+        //     above, so a name that merely collides with an anonymous enum
+        //     value keeps resolving through its real declaration.
         //
-        // It is not B016's to fix. Pre-B016 the sorted-first anonymous enum
-        // of each module survived the collision, so `HyperTnL`,
-        // `SlideNoControl`, `NotTimed`, `RenderPlaneReflect` and
-        // `Download_WaitingSources` already resolved here — measured against
-        // a build of 91a296c, filtering turns those into 5 fresh errors,
-        // which is the tightening B016's ticket explicitly forbids. B016
-        // makes the accepted set uniform (all 132 anonymous enums) instead of
-        // an arbitrary 14, which can only ever silence a diagnostic, never
-        // add one. Narrowing this scan to named enums is a behaviour change
-        // with its own false-positive surface and belongs in its own ticket,
-        // not riding on a data-loss fix.
+        // Member access is unaffected: `lookup_member_enum` reaches an
+        // anonymous enum by its declaring context, never through this scan.
+        //
+        // Deliberately deferred by B016, which was forbidden to tighten any
+        // rule: pre-B016 only the 14 anonymous enums that won their module's
+        // key collision had their values accepted here, so filtering would
+        // have turned 5 identifiers into fresh errors on a data-loss fix.
+        // B044 is that tightening, with the game probe behind it.
         if let Some(ext) = self.external {
-            for (qname, en) in ext.enums_iter() {
-                let _ = qname;
+            for (_, en) in ext.source_enums_iter() {
                 if en.values.iter().any(|(v, _)| v == name) {
                     return true;
                 }
@@ -1481,6 +1487,19 @@ mod tests {
         }
     }
 
+    /// The shipped type-DB fixtures, loaded as a `TypeIndex`. Several tests
+    /// assert against real engine enums, where a hand-built stub would not
+    /// prove anything about the data the checker actually sees.
+    fn typedb_fixture_index() -> crate::typedb::index::TypeIndex {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        crate::typedb::index::TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
     #[test]
     fn empty_scope_resolves_nothing() {
         let ws = SymbolTable::new();
@@ -1495,15 +1514,7 @@ mod tests {
     /// type DB, but those synthesized keys never name a source-level type.
     #[test]
     fn anonymous_member_enum_keys_stay_internal_to_source_resolution() {
-        use crate::typedb::index::TypeIndex;
-
-        let fixtures =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
-        let index = TypeIndex::load(
-            &fixtures.join("OpenplanetCore.json"),
-            &fixtures.join("OpenplanetNext.json"),
-        )
-        .unwrap();
+        let index = typedb_fixture_index();
         let ws = SymbolTable::new();
         let scope = GlobalScope::new(&ws, Some(&index));
 
@@ -1538,31 +1549,27 @@ mod tests {
         );
     }
 
-    /// B016 (the other half of the rule above): a bare identifier that names
-    /// a VALUE of an anonymous member enum stays accepted.
+    /// B044 (the other half of the rule above): a bare identifier that names
+    /// only a VALUE of an anonymous member enum is NOT a global identifier.
     ///
-    /// This pins a KNOWN FALSE NEGATIVE, not correct behaviour — the game
-    /// rejects these names (`No matching symbol`, RemoteBuild probe
-    /// 2026-08-30, OP 1.29.5). It exists because the five names in the first
-    /// group already resolved on 91a296c, so filtering them out would be a
-    /// fresh tightening, which B016 is required not to introduce. Delete this
-    /// test as part of the ticket that narrows the scan to named enums.
+    /// The enum has no name in the game, so nothing in source can reach its
+    /// values except through the declaring member's type. Game ground truth,
+    /// RemoteBuild probe, OP 1.29.5: `No matching symbol 'HyperTnL'`.
+    ///
+    /// Both classes of anonymous enum are covered on purpose. `HyperTnL`,
+    /// `SlideNoControl`, `NotTimed`, `RenderPlaneReflect` and
+    /// `Download_WaitingSources` belong to enums that won their module's key
+    /// collision before B016 and were accepted long before it existed (set
+    /// B); `MinimalReadOnly`, `TimeHhMmSsMil` and `Text_Icon` belong to enums
+    /// B016 recovered (set C). One call site governs both, and the game
+    /// rejects both.
     #[test]
-    fn anonymous_member_enum_values_are_accepted_as_bare_identifiers() {
-        use crate::typedb::index::TypeIndex;
-
-        let fixtures =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
-        let index = TypeIndex::load(
-            &fixtures.join("OpenplanetCore.json"),
-            &fixtures.join("OpenplanetNext.json"),
-        )
-        .unwrap();
+    fn bare_anonymous_enum_value_is_not_a_global_identifier() {
+        let index = typedb_fixture_index();
         let ws = SymbolTable::new();
         let scope = GlobalScope::new(&ws, Some(&index));
 
-        // Accepted before B016 — their enum was the sorted-first anonymous
-        // one in its module, so it survived the collision.
+        // Set B — accepted before B016 (their enum survived the collision).
         for name in [
             "HyperTnL",
             "SlideNoControl",
@@ -1571,24 +1578,206 @@ mod tests {
             "Download_WaitingSources",
         ] {
             assert!(
-                scope.has_global_ident(name),
-                "`{name}` resolved before B016 and must keep resolving"
+                !scope.has_global_ident(name),
+                "`{name}` is only an anonymous enum value; the game rejects it"
             );
         }
-        // Dropped before B016 — their enum lost the collision and these
-        // names appear in no other enum, so a 91a296c build reports
-        // `undefined identifier` for all three. Recovering them can only
-        // silence a diagnostic, never add one.
+        // Set C — dropped before B016, recovered by it. The narrowing must
+        // not be scoped to the enums B016 recovered.
         for name in ["MinimalReadOnly", "TimeHhMmSsMil", "Text_Icon"] {
             assert!(
-                scope.has_global_ident(name),
-                "`{name}` belongs to a recovered anonymous enum"
+                !scope.has_global_ident(name),
+                "`{name}` is only an anonymous enum value; the game rejects it"
             );
         }
         assert!(
             !scope.has_global_ident("NoSuchEngineEnumValue"),
             "the scan must still reject genuinely unknown identifiers"
         );
+    }
+
+    /// B044: a value name carried by TWO different anonymous member enums is
+    /// still not a symbol — the narrowing is a property of the enum's
+    /// namelessness, not of how many nameless enums happen to share the name.
+    #[test]
+    fn bare_value_of_two_anonymous_enums_is_still_not_a_global_identifier() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for (name, first, second) in [
+            (
+                "BackFlip",
+                "Scene::CSceneCharVisState::CharPhyState",
+                "Scene::CSceneCharVisState::CharPhyState2",
+            ),
+            (
+                "Campaign",
+                "Game::CGameCtnChallenge::Kind",
+                "Game::CGameCtnChallengeInfo::Kind",
+            ),
+        ] {
+            for key in [first, second] {
+                assert!(
+                    index.lookup_enum(key).is_some_and(
+                        |info| info.anonymous && info.values.iter().any(|(v, _)| v == name)
+                    ),
+                    "fixture guard: `{key}` must stay an anonymous enum carrying `{name}`"
+                );
+            }
+            assert!(
+                !scope.has_global_ident(name),
+                "`{name}` is a value of two anonymous enums and of no named one"
+            );
+        }
+    }
+
+    /// B044 fence: a value name that ALSO appears in a NAMED enum keeps
+    /// resolving. `VCenter2` is a value of the anonymous
+    /// `Control::CControlBase::AlignVertical` and of the named
+    /// `Game::CGameManialinkControl::EAlignVertical`, and a bare reference to
+    /// it is legitimate in-game.
+    #[test]
+    fn bare_value_shared_with_a_named_enum_still_resolves() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let named = "Game::CGameManialinkControl::EAlignVertical";
+        assert!(
+            index
+                .lookup_source_enum(named)
+                .is_some_and(|info| info.values.iter().any(|(v, _)| v == "VCenter2")),
+            "fixture guard: the named enum must still carry `VCenter2`"
+        );
+        assert!(
+            index
+                .enums_iter()
+                .any(|(_, info)| info.anonymous
+                    && info.values.iter().any(|(v, _)| v == "VCenter2")),
+            "fixture guard: `VCenter2` must also be an anonymous enum value"
+        );
+        assert!(
+            scope.has_global_ident("VCenter2"),
+            "a value shared with a named enum must keep resolving"
+        );
+    }
+
+    /// B044 fence: the values of a NAMED nested enum are untouched by the
+    /// narrowing, bare or qualified.
+    #[test]
+    fn named_nested_enum_values_still_resolve_bare() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let named = "Game::CGameCtnBlock::ECardinalDirections";
+        let values: Vec<String> = index
+            .lookup_source_enum(named)
+            .expect("fixture guard: the named nested enum must exist")
+            .values
+            .iter()
+            .map(|(v, _)| v.clone())
+            .collect();
+        assert!(!values.is_empty(), "fixture guard: it must carry values");
+        for value in &values {
+            assert!(
+                scope.has_global_ident(value),
+                "`{value}` is a named enum's value and must keep resolving"
+            );
+        }
+    }
+
+    /// B044 fence: a name that collides with an anonymous enum value but has
+    /// a real declaration of its own keeps resolving through that
+    /// declaration. This is the residual the ticket's 261 upper bound could
+    /// not subtract — the checks that run BEFORE the enum scan (type,
+    /// function, virtual property, workspace variable, workspace enum value)
+    /// are what keep such a name a symbol.
+    #[test]
+    fn anonymous_enum_value_name_declared_elsewhere_still_resolves() {
+        let index = typedb_fixture_index();
+        let colliding = "HyperTnL";
+
+        for kind in [
+            SymbolKind::Variable {
+                type_name: "int".into(),
+            },
+            SymbolKind::Function {
+                return_type: "void".into(),
+                params: Vec::new(),
+                min_args: 0,
+                imported: false,
+            },
+            SymbolKind::EnumValue {
+                enum_name: "MyEnum".into(),
+                value: Some(0),
+            },
+        ] {
+            let mut ws = SymbolTable::new();
+            let fid = ws.allocate_file_id();
+            ws.set_file_symbols(fid, vec![make_symbol(colliding, kind)]);
+            let scope = GlobalScope::new(&ws, Some(&index));
+            assert!(
+                scope.has_global_ident(colliding),
+                "a workspace declaration of `{colliding}` must outrank the narrowing"
+            );
+        }
+
+        // Same shape one level up: a virtual property's `get_` accessor.
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![make_symbol(
+                &format!("get_{colliding}"),
+                SymbolKind::Function {
+                    return_type: "int".into(),
+                    params: Vec::new(),
+                    min_args: 0,
+                    imported: false,
+                },
+            )],
+        );
+        let scope = GlobalScope::new(&ws, Some(&index));
+        assert!(
+            scope.has_global_ident(colliding),
+            "a virtual property named `{colliding}` must outrank the narrowing"
+        );
+    }
+
+    /// B044 fence: an anonymous member enum stays reachable through the
+    /// member that declares it — the path the game does accept. Narrowing
+    /// the bare-name scan must not touch `lookup_member_enum`, the property
+    /// type it is keyed by, or the enum's stored values.
+    #[test]
+    fn member_path_to_an_anonymous_enum_value_still_resolves() {
+        let index = typedb_fixture_index();
+
+        for (class, member, value) in [
+            ("Graphic::CGxLightBall", "AttenuationType", "HyperTnL"),
+            (
+                "Control::CControlColorChooser",
+                "StyleType",
+                "MinimalReadOnly",
+            ),
+            ("Control::CControlEntry", "Type", "TimeHhMmSsMil"),
+        ] {
+            let info = index
+                .lookup_member_enum(class, member)
+                .unwrap_or_else(|| panic!("`{class}::{member}` must still declare its enum"));
+            assert!(info.anonymous, "`{class}::{member}` must stay anonymous");
+            assert!(
+                info.values.iter().any(|(v, _)| v == value),
+                "`{value}` must stay reachable through `{class}::{member}`"
+            );
+            assert!(
+                index
+                    .lookup_type(class)
+                    .is_some_and(|t| t.properties.iter().any(|p| p.name == member)),
+                "`{member}` must stay a property of `{class}`"
+            );
+        }
     }
 
     #[test]
