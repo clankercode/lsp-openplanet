@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: terminal.backend()
+---
+"┌ openplanet-lsp · watch ──────────────────┐"
+"│ ./MyPlugin  ·  2 diagnostics (1 error · 1│"
+"└──────────────────────────────────────────┘"
+"┌ diagnostics · relaxed · 1/2 ─────────────┐"
+"│▸ E ui/Overlay.as:123:26   › MakeTint(t… ‹│"
+"│    no matching signatures to             │"
+"│    'MakeTint(bool)' - candidates are…    │"
+"│  W util/Helpers.as:4:24           › msg ‹│"
+"│    Use 'const string &in msg' to pass a …│"
+"│                                          │"
+"│                                          │"
+"│                                          │"
+"└──────────────────────────────────────────┘"
+"┌ detail · error · 1-8/10 · J/K ───────────┐"
+"│…/MyPlugin/src/ui/Overlay.as:123:26: error│"
+"│                                          │"
+"│  123 │     vec4 tint = MakeTint(true);   │"
+"│      │                          ^^^^     │"
+"│      │ no matching signatures to         │"
+"│      │ 'MakeTint(bool)' - candidates are │"
+"│      │ 'vec4 MakeTint(int, int, int)',   │"
+"│      │ 'vec4 MakeTint(const string &in)' │"
+"└──────────────────────────────────────────┘"
+" j/k move · PgUp/Dn page · g/G top/end · r r"

@@ -5,6 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::types::{DiagItem, ListDensity, RunStatus, Severity, Snapshot, WatchHealth};
 
@@ -275,7 +276,7 @@ impl App {
                 .snapshot
                 .diagnostics
                 .iter()
-                .map(|d| bare_location(d).chars().count())
+                .map(|d| str_w(&bare_location(d)))
                 .max()
                 .unwrap_or(16)
                 .min(loc_cap);
@@ -328,9 +329,10 @@ impl App {
         f.render_stateful_widget(list, area, &mut self.list_state);
     }
 
-    fn draw_detail(&self, f: &mut Frame<'_>, area: Rect) {
+    fn draw_detail(&mut self, f: &mut Frame<'_>, area: Rect) {
         let inner_w = area.width.saturating_sub(2) as usize;
-        let (title, lines): (String, Vec<Line<'_>>) = match self.selected_diag() {
+        let inner_h = area.height.saturating_sub(2);
+        let (mut title, lines): (String, Vec<Line<'static>>) = match self.selected_diag() {
             None => (" detail ".to_string(), empty_detail_lines()),
             Some(d) => (
                 format!(" detail · {} ", d.severity.label()),
@@ -338,9 +340,26 @@ impl App {
             ),
         };
 
+        // The box caps at 8 inner rows; a longer wrapped message scrolls (B029).
+        let total = lines.len() as u16;
+        let max_scroll = total.saturating_sub(inner_h);
+        self.detail_scroll = self.detail_scroll.min(max_scroll);
+        if max_scroll > 0 {
+            let top = self.detail_scroll + 1;
+            let bot = (self.detail_scroll + inner_h).min(total);
+            title.push_str(&format!("· {top}-{bot}/{total} · J/K "));
+        }
+
         let block = Block::default().borders(Borders::ALL).title(title);
-        // No wrap: source + caret lines must stay column-aligned.
-        f.render_widget(Paragraph::new(lines).block(block), area);
+        // No wrap: source + caret lines must stay column-aligned. The message
+        // is soft-wrapped to `inner_w` by `pretty_detail_lines` instead, so the
+        // Paragraph never reflows the aligned rows.
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .scroll((self.detail_scroll, 0)),
+            area,
+        );
     }
 
     fn draw_footer(&self, f: &mut Frame<'_>, area: Rect) {
@@ -432,19 +451,127 @@ fn snap_nearest(snap: &Snapshot, key: &str, prev_idx: Option<usize>) -> Option<u
         .or_else(|| prev_idx.map(|i| i.min(snap.diagnostics.len().saturating_sub(1))))
 }
 
-fn ellipsize(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
+/// Display columns of `s` (wide/CJK chars count as 2).
+fn str_w(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Display columns of `ch` (control chars count as 0).
+fn char_w(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+/// Truncate `s` to `max_w` display columns, marking the cut with `…`.
+/// Returns `s` unchanged when it already fits (no stray marker).
+fn ellipsize(s: &str, max_w: usize) -> String {
+    if max_w == 0 {
         return String::new();
     }
-    let n = s.chars().count();
-    if n <= max_chars {
+    if str_w(s) <= max_w {
         return s.to_string();
     }
-    if max_chars == 1 {
-        return "…".into();
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        // Reserve one column for the `…`.
+        if w + char_w(ch) + 1 > max_w {
+            break;
+        }
+        out.push(ch);
+        w += char_w(ch);
     }
-    let take: String = s.chars().take(max_chars - 1).collect();
-    format!("{take}…")
+    out.push('…');
+    out
+}
+
+/// Keep the *tail* of `s` within `max_w` columns, marking the cut with a
+/// leading `…` (paths read better from the right).
+fn trim_left_to(s: &str, max_w: usize) -> String {
+    if str_w(s) <= max_w {
+        return s.to_string();
+    }
+    if max_w == 0 {
+        return String::new();
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut w = 1usize; // the leading `…`
+    for ch in s.chars().rev() {
+        if w + char_w(ch) > max_w {
+            break;
+        }
+        tail.push(ch);
+        w += char_w(ch);
+    }
+    tail.reverse();
+    let tail: String = tail.into_iter().collect();
+    format!("…{tail}")
+}
+
+/// Append a `…` to `s` (already within `max_w`) to signal more content follows.
+fn with_more_marker(s: &str, max_w: usize) -> String {
+    if max_w == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        if w + char_w(ch) + 1 > max_w {
+            break;
+        }
+        out.push(ch);
+        w += char_w(ch);
+    }
+    out.push('…');
+    out
+}
+
+/// Soft-wrap `s` to `width` display columns.
+///
+/// Greedy word wrap on single spaces; tokens wider than the line are hard-broken
+/// by display width so nothing overflows. Content is never dropped: for a message
+/// of single-space-separated words, `wrap_display(msg, w).join(" ") == msg`.
+fn wrap_display(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+
+    for word in s.split(' ') {
+        let word_w = str_w(word);
+        let sep = usize::from(!cur.is_empty());
+        if cur_w + sep + word_w <= width {
+            if sep == 1 {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+            cur_w += sep + word_w;
+            continue;
+        }
+        // Does not fit here — start a fresh line.
+        if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        if word_w <= width {
+            cur.push_str(word);
+            cur_w = word_w;
+            continue;
+        }
+        // Oversized token: hard-break it by display width.
+        for ch in word.chars() {
+            let cw = char_w(ch);
+            if cur_w + cw > width && !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            cur.push(ch);
+            cur_w += cw;
+        }
+    }
+    out.push(cur);
+    out
 }
 
 fn bare_location(d: &DiagItem) -> String {
@@ -452,22 +579,14 @@ fn bare_location(d: &DiagItem) -> String {
 }
 
 fn format_location(d: &DiagItem, loc_w: usize) -> String {
-    let bare = bare_location(d);
-    let truncated = if bare.chars().count() > loc_w {
-        // Keep the tail (file:line:col) when truncating long paths.
-        let tail: String = bare
-            .chars()
-            .rev()
-            .take(loc_w.saturating_sub(1))
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-        format!("…{tail}")
-    } else {
-        bare
-    };
-    format!("{:<loc_w$}", truncated)
+    if loc_w == 0 {
+        return String::new();
+    }
+    // Keep the tail (file:line:col) when truncating long paths, then pad by
+    // display columns (not chars) so the message column stays put.
+    let truncated = trim_left_to(&bare_location(d), loc_w);
+    let pad = loc_w.saturating_sub(str_w(&truncated));
+    format!("{truncated}{}", " ".repeat(pad))
 }
 
 /// Placeholder body shown when nothing is selected.
@@ -500,7 +619,7 @@ fn detail_box_height(selected: Option<&DiagItem>, inner_w: usize) -> u16 {
 
 fn lhs_width(d: &DiagItem) -> usize {
     // " E " + bare location
-    3 + bare_location(d).chars().count()
+    3 + str_w(&bare_location(d))
 }
 
 fn list_item_for(
@@ -590,20 +709,38 @@ const COMPACT_MSG_MIN: usize = 20;
 const RELAXED_MSG_INDENT: usize = 3;
 
 /// Split a Compact row's content width into `(location, message)` budgets.
+///
+/// The location shrinks first (B029), so a long `path:line:col` can never
+/// squeeze the message down to `abc…`: the message is guaranteed
+/// `min(COMPACT_MSG_MIN, ceil(avail / 2))` columns. The location never grows
+/// beyond what it asked for.
 fn compact_field_widths(content_w: usize, loc_w: usize) -> (usize, usize) {
-    let _ = COMPACT_MSG_MIN;
-    (
-        loc_w,
-        content_w.saturating_sub(COMPACT_CHROME + loc_w).max(4),
-    )
+    let avail = content_w.saturating_sub(COMPACT_CHROME);
+    let loc_cap = avail.saturating_sub(COMPACT_MSG_MIN).max(avail / 2);
+    let loc = loc_w.min(loc_cap);
+    (loc, avail - loc)
 }
 
-/// Message row text for a Relaxed list item (one row, or two when selected
-/// and the message does not fit — B029).
+/// Message row text for a Relaxed list item.
+///
+/// One row normally; the *selected* item spills to a second row when the
+/// message does not fit, so the row the user is reading shows more (B029).
+/// A `…` on the last row means content is still cut — the detail box has it all.
 fn relaxed_msg_rows(msg: &str, content_w: usize, selected: bool) -> Vec<String> {
     let budget = content_w.saturating_sub(RELAXED_MSG_INDENT);
-    let _ = selected;
-    vec![ellipsize(msg, budget.max(4))]
+    if !selected {
+        return vec![ellipsize(msg, budget)];
+    }
+    let wrapped = wrap_display(msg, budget);
+    if wrapped.len() < 2 {
+        return vec![ellipsize(msg, budget)];
+    }
+    let second = if wrapped.len() > 2 {
+        with_more_marker(&wrapped[1], budget)
+    } else {
+        wrapped[1].clone()
+    };
+    vec![wrapped[0].clone(), second]
 }
 
 /// Build `› frag ‹`, truncating `frag` only when it exceeds `budget` chars total.
@@ -762,22 +899,34 @@ fn enrich_call_fragment(chars: &[char], start: usize, end: usize) -> Option<Stri
 
 /// Detail-box body for `d`, laid out for an inner width of `inner_w` columns.
 fn pretty_detail_lines(d: &DiagItem, inner_w: usize) -> Vec<Line<'static>> {
-    let _ = inner_w;
-    let path = d.path.display().to_string();
     let sev = d.severity.label();
     let sev_style = severity_style(d.severity).add_modifier(Modifier::BOLD);
+    let path_style = Style::default()
+        .fg(ratatui::style::Color::Rgb(120, 220, 255))
+        .add_modifier(Modifier::BOLD);
+
+    // Header: keep `:line:col: severity` and trim the path from the left, so a
+    // long absolute path is visibly shortened rather than silently clipped.
+    let loc_tail = format!(":{}:{}: ", d.line, d.col);
+    let tail_w = str_w(&loc_tail) + str_w(sev);
+    let header = if inner_w >= tail_w {
+        vec![
+            Span::styled(
+                trim_left_to(&d.path.display().to_string(), inner_w - tail_w),
+                path_style,
+            ),
+            Span::raw(loc_tail),
+            Span::styled(sev.to_string(), sev_style),
+        ]
+    } else {
+        vec![Span::styled(
+            ellipsize(&format!("{loc_tail}{sev}"), inner_w),
+            sev_style,
+        )]
+    };
 
     let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                path,
-                Style::default()
-                    .fg(ratatui::style::Color::Rgb(120, 220, 255))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(format!(":{}:{}: ", d.line, d.col)),
-            Span::styled(sev.to_string(), sev_style),
-        ]),
+        Line::from(header),
         Line::from(""), // blank between header and source (even spacing in the box)
     ];
 
@@ -830,17 +979,27 @@ fn pretty_detail_lines(d: &DiagItem, inner_w: usize) -> Vec<Line<'static>> {
             ),
         ]));
 
-        lines.push(Line::from(vec![
-            Span::raw(format!("  {blank} ")),
-            Span::styled("│".to_string(), pipe),
-            Span::raw(" "),
-            Span::styled(d.message.clone(), severity_style(d.severity)),
-        ]));
+        // Message: soft-wrapped here (B029) so the Paragraph can stay unwrapped
+        // and the source/caret rows above keep their column alignment. Every
+        // continuation row repeats the gutter prefix, so it lands in the same
+        // column as the first.
+        let prefix = format!("  {blank} ");
+        let msg_w = inner_w.saturating_sub(str_w(&prefix) + 2); // + "│" + " "
+        for chunk in wrap_display(&d.message, msg_w) {
+            lines.push(Line::from(vec![
+                Span::raw(prefix.clone()),
+                Span::styled("│".to_string(), pipe),
+                Span::raw(" "),
+                Span::styled(chunk, severity_style(d.severity)),
+            ]));
+        }
     } else {
-        lines.push(Line::from(Span::styled(
-            format!("  {}", d.message),
-            severity_style(d.severity),
-        )));
+        for chunk in wrap_display(&d.message, inner_w.saturating_sub(2)) {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(chunk, severity_style(d.severity)),
+            ]));
+        }
     }
 
     lines
