@@ -11,6 +11,7 @@
 use super::fix::FixFamily;
 
 pub mod conversion;
+pub mod removed_api;
 pub mod rename_and_const;
 pub mod string_by_value;
 
@@ -27,4 +28,5 @@ pub const FAMILIES: &[FixFamily] = &[
     rename_and_const::shadowed_variable::FAMILY,
     rename_and_const::duplicate_function::FAMILY,
     rename_and_const::const_receiver::FAMILY,
+    removed_api::FAMILY,
 ];

@@ -25,6 +25,7 @@ pub mod fix_all;
 pub mod fixes;
 #[cfg(test)]
 pub mod test_fixtures;
+mod unused_decl;
 
 use std::collections::{HashMap, HashSet};
 
@@ -141,6 +142,7 @@ fn code_actions_with_families(
             req.type_index,
             req.lazy_edits,
         ));
+        actions.extend(unused_decl::quick_fixes(req));
     }
     if kind_selected(&CodeActionKind::REFACTOR_REWRITE, only) {
         actions.extend(refactor_wrap_in_try_catch(
