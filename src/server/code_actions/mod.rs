@@ -64,7 +64,16 @@ struct FixRef {
 /// a checker warning is a suggestion, and silently rewriting a signature on
 /// save is worse than the warning it removes (B035 decision).
 pub fn code_action_provider() -> CodeActionProviderCapability {
-    CodeActionProviderCapability::Simple(true)
+    CodeActionProviderCapability::Options(CodeActionOptions {
+        code_action_kinds: Some(vec![
+            CodeActionKind::QUICKFIX,
+            CodeActionKind::REFACTOR_REWRITE,
+            CodeActionKind::SOURCE_FIX_ALL,
+            SOURCE_FIX_ALL_OPENPLANET,
+        ]),
+        work_done_progress_options: WorkDoneProgressOptions::default(),
+        resolve_provider: Some(true),
+    })
 }
 
 /// One `textDocument/codeAction` request, as the handler sees it.
