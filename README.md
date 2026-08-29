@@ -515,6 +515,44 @@ cargo build --release
 cargo test
 ```
 
+### Hermetic test gate
+
+`DEPENDENCY_<ID>` is defined only when the dependency actually **resolves**, so
+a test can quietly start depending on which plugins exist in the author's
+`~/OpenplanetNext/Plugins` — passing locally and failing for everyone else,
+looking like flakiness rather than a hermeticity bug.
+
+```bash
+just test                     # normal run — what you iterate against
+just test-hermetic            # same suite, HOME/USERPROFILE isolated (also a CI step)
+just test-hermetic-selftest   # proves the gate can actually fail
+```
+
+`just test-hermetic` builds with `cargo test --no-run` and then executes each
+test binary directly with `HOME` and `USERPROFILE` pointed at a fresh empty
+directory (cargo itself cannot run under a fake `HOME` — rustup resolves the
+toolchain through it). That covers both HOME-derived surfaces: the auto-detected
+install dir and `~/.config/openplanet-lsp/config.toml`.
+
+It also **unsets `XDG_CONFIG_HOME`, `APPDATA` and every `OPENPLANET*`
+variable** for the run. Those win over `HOME` — `OPENPLANET_REAL_PLUGINS_DIR`
+is passed straight through as `--plugins-dir` — so exporting one (which is what
+they are for) would otherwise hand a real install back to a run whose `HOME` is
+a sandbox. Tests gated on them take their documented skip path here; use
+`just test` when you want them. Both recipes need `python3`, as the `tui-*`
+recipes already do.
+
+A test that needs a real install is fine, but must say so — provision it inside
+the test's own fixture dir with an explicit `--plugins-dir`, or mark it
+`#[ignore = "<reason>"]`. A test that needs one *by accident* is the bug.
+
+**It does not catch everything.** Absolute paths outside `HOME` (a hardcoded
+`--plugins-dir /opt/...`) are untouched by the isolation, and a test depending
+on a plugin being *absent* is green under the gate and red on a developer box.
+Both limits are kept executable as `uncaught_*` canaries in
+`tests/hermeticity_canary.rs`; the full list is in the header of
+`scripts/test-hermetic.py`.
+
 ## Smoke tests
 
 ```bash
