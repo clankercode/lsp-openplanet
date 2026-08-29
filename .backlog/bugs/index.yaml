@@ -27,3 +27,4 @@ bugs:
     - file: B026-check-re-applies-the-manifest.todo
     - file: B027-delegate-construction-ignores.todo
     - file: B028-os-arch-build-defines-are-all.todo
+    - file: B029-tui-diagnostic-messages-are-cu.todo

@@ -1,0 +1,15 @@
+---
+complexity: medium
+created_at: "2026-08-29T08:52:48Z"
+depends_on: []
+estimate_hours: 2
+id: B029
+priority: high
+status: pending
+tags:
+    - tui
+title: TUI diagnostic messages are cut off at narrow widths with no way to read the full text
+updated_at: "2026-08-29T08:52:48Z"
+---
+
+TUI diagnostic messages are cut off at narrow widths with no way to read the full text
