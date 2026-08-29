@@ -84,6 +84,17 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **TUI diagnostic messages are readable at narrow widths (B029)** — the detail
+  box used to hard-clip long messages at the pane edge with no `…`, so you
+  could not even tell text was missing, and a long `path:line:col` could squeeze
+  a compact list row's message down to `abc…`. The detail box now soft-wraps
+  the message itself (the source line and caret row keep their column alignment,
+  which is why the pane is still unwrapped), grows to fit, and scrolls with
+  **Shift+J / Shift+K** when the message runs past the box — the title shows the
+  visible range. List rows shrink the location before the message, and in
+  relaxed density the selected row spills its message onto a second line. All
+  widths are now measured in display columns, so wide/CJK text no longer
+  overflows.
 - **`check` no longer undoes `defines` removals of manifest defines (B026)** —
   `run_check` re-applied `info.toml`'s `[script].defines` and the
   `DEPENDENCY_*` defines AFTER `LspConfig::load` had already applied them and
