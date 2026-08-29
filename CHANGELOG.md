@@ -140,8 +140,10 @@ GitHub Release body to match this section (gh release edit).
   correctly.
 - **Find All References is scope-aware too (B049)** — it shared the same
   token scan, so it reported every same-spelled identifier in the workspace.
-  It now uses the same classification as rename, and falls back to a filtered
-  scan (never a raw one) for the classes rename refuses.
+  It now uses the same classification and precise occurrence sets as rename.
+  When resolution is indeterminate (members, qualified names, ambiguous named
+  argument labels, lambdas, or an incomplete workspace closure), it returns an
+  empty result rather than presenting an unmarked approximation as exact.
 - **A bare value name of an unnamed engine enum is now an error (B044)** — the
   engine dump declares 132 enums inline on a member and gives them no name, so
   nothing in source can spell such an enum and nothing can reach its values by a

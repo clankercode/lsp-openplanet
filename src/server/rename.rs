@@ -31,10 +31,9 @@
 //! wrong one corrupts a plugin. Every refusal carries a message, which
 //! `prepareRename` hands the client before the user types a new name.
 //!
-//! [`find_references`] shares the classification but is read-only, so for
-//! the refused classes it degrades to a *filtered* scan
-//! ([`Target::Approximate`]) rather than to nothing — still a large
-//! improvement on the old scan, and it cannot corrupt anything.
+//! [`find_references`] shares the classification. LSP locations carry no
+//! approximation marker, so an indeterminate occurrence set is returned as
+//! empty rather than presenting guesses as exact references.
 
 use std::collections::HashMap;
 
@@ -42,7 +41,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::analysis::DocumentAnalysis;
 use crate::lexer::{Span, Token, TokenKind};
-use crate::parser::ast::Item;
+use crate::parser::ast::{ClassMember, Item};
 use crate::server::diagnostics::span_to_range;
 use crate::server::lexical_scope::{self as lexical, Binding};
 use crate::server::navigation::{ident_index_at, WorkspaceFiles};
@@ -77,17 +76,27 @@ enum Shape {
     Type,
 }
 
-/// Which occurrences a read-only reference scan should keep for a class
-/// rename cannot handle.
+/// Exact declaration class represented by a workspace spelling. Only free
+/// function overloads may intentionally share one class; mixing any of these
+/// leaves a bare occurrence unresolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclarationClass {
+    Function,
+    Variable,
+    Class,
+    Interface,
+    Enum,
+    Funcdef,
+    Typedef,
+}
+
+/// Why classification cannot produce a precise occurrence set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApproxKind {
-    /// A class member: keep `.name` accesses and the bare uses inside a
-    /// class that could be implicit-`this`, but drop anything sitting in
-    /// the scope of a local or parameter of the same name — that is
-    /// certainly not the member.
+    /// A class member needs receiver / implicit-`this` resolution.
     Member,
-    /// A namespaced name or enum value: keep bare and `::`-adjacent
-    /// occurrences, drop `.name` accesses and argument labels.
+    /// A namespaced name, enum value, or otherwise unresolved bare spelling
+    /// needs qualifier or declaration resolution.
     Qualified,
 }
 
@@ -98,10 +107,10 @@ enum Target {
     Local { name: String, binding: Binding },
     /// A symbol the table registers at workspace top level.
     Workspace { name: String, shape: Shape },
-    /// Not renameable. `find_references` still answers, approximately.
+    /// Not renameable, and not precise enough for `find_references` either.
     Approximate {
         name: String,
-        kind: ApproxKind,
+        _kind: ApproxKind,
         reason: &'static str,
     },
 }
@@ -129,14 +138,14 @@ pub fn prepare_rename(
     scope: &GlobalScope<'_>,
     files: &WorkspaceFiles,
 ) -> Result<Range, Refusal> {
-    let (span, target) = classify(analysis, position, scope, files)
+    let (span, target) = classify(analysis, uri, position, scope, files)
         .ok_or_else(|| Refusal::new("there is no identifier at this position"))?;
     match &target {
         Target::Approximate { reason, .. } => return Err(Refusal::new(*reason)),
         Target::Local { name, binding } => {
             local_occurrences(analysis, name, *binding)?;
             if binding.is_parameter {
-                named_argument_label_exists(analysis, name, files)?;
+                named_argument_label_exists(analysis, uri, name, files)?;
             }
         }
         Target::Workspace { name, shape } => {
@@ -156,7 +165,7 @@ pub fn rename(
     scope: &GlobalScope<'_>,
     files: &WorkspaceFiles,
 ) -> Result<WorkspaceEdit, Refusal> {
-    let (_, target) = classify(analysis, position, scope, files)
+    let (_, target) = classify(analysis, uri, position, scope, files)
         .ok_or_else(|| Refusal::new("there is no identifier at this position"))?;
     if !lexical::is_plain_identifier(new_name) {
         return Err(Refusal::new(format!(
@@ -172,7 +181,7 @@ pub fn rename(
         Target::Approximate { reason, .. } => return Err(Refusal::new(*reason)),
         Target::Local { name, binding } => {
             if binding.is_parameter {
-                named_argument_label_exists(analysis, name, files)?;
+                named_argument_label_exists(analysis, uri, name, files)?;
             }
             let spans = local_occurrences(analysis, name, *binding)?;
             local_new_name_conflict(analysis, scope, *binding, new_name)?;
@@ -199,11 +208,10 @@ pub fn rename(
 /// `textDocument/references`: the read-only twin of [`rename`], sharing its
 /// classification.
 ///
-/// For the classes [`rename`] refuses this falls back to a filtered scan
-/// (see [`ApproxKind`]) rather than to nothing — reporting a superset is
-/// acceptable for a read-only feature in a way that rewriting one is not.
-/// `include_declaration` is honoured on the precise paths, where the
-/// declaration is known.
+/// LSP's `Location` result has no way to mark a row as approximate. When
+/// classification or occurrence analysis is indeterminate, return an empty
+/// set rather than misleading the client with guesses. `include_declaration`
+/// is honoured on the precise paths, where the declaration is known.
 pub fn find_references(
     analysis: &DocumentAnalysis,
     uri: &Url,
@@ -212,23 +220,27 @@ pub fn find_references(
     files: &WorkspaceFiles,
     include_declaration: bool,
 ) -> Vec<Location> {
-    let Some((_, target)) = classify(analysis, position, scope, files) else {
+    let Some((_, target)) = classify(analysis, uri, position, scope, files) else {
         return Vec::new();
     };
     match &target {
-        Target::Local { name, binding } => match local_occurrences(analysis, name, *binding) {
-            Ok(spans) => locations_for(
-                analysis,
-                uri,
-                spans
-                    .into_iter()
-                    .filter(|span| include_declaration || span.start != binding.start),
-            ),
-            // The precise set refused (a lambda in scope, a same-scope
-            // redeclaration). Reporting the filtered scan beats reporting
-            // nothing, and nothing is rewritten.
-            Err(_) => approximate_locations(name, ApproxKind::Qualified, files),
-        },
+        Target::Local { name, binding } => {
+            if binding.is_parameter
+                && named_argument_label_exists(analysis, uri, name, files).is_err()
+            {
+                return Vec::new();
+            }
+            match local_occurrences(analysis, name, *binding) {
+                Ok(spans) => locations_for(
+                    analysis,
+                    uri,
+                    spans
+                        .into_iter()
+                        .filter(|span| include_declaration || span.start != binding.start),
+                ),
+                Err(_) => Vec::new(),
+            }
+        }
         Target::Workspace { name, shape } => {
             match workspace_occurrences(analysis, uri, name, *shape, files) {
                 Ok(found) => found
@@ -248,10 +260,10 @@ pub fn find_references(
                         )
                     })
                     .collect(),
-                Err(_) => approximate_locations(name, ApproxKind::Qualified, files),
+                Err(_) => Vec::new(),
             }
         }
-        Target::Approximate { name, kind, .. } => approximate_locations(name, *kind, files),
+        Target::Approximate { .. } => Vec::new(),
     }
 }
 
@@ -263,6 +275,7 @@ pub fn find_references(
 /// the cursor is not on an identifier at all.
 fn classify(
     analysis: &DocumentAnalysis,
+    uri: &Url,
     position: Position,
     scope: &GlobalScope<'_>,
     files: &WorkspaceFiles,
@@ -277,7 +290,7 @@ fn classify(
             span,
             Target::Approximate {
                 name: name.clone(),
-                kind,
+                _kind: kind,
                 reason,
             },
         ))
@@ -314,6 +327,20 @@ fn classify(
         .filter(|binding| binding.start <= span.start && span.start < binding.scope_end)
         .max_by_key(|binding| binding.start);
     if let Some(binding) = binding {
+        if binding.is_parameter && !scope.workspace_closure_complete() {
+            return approximate(
+                ApproxKind::Qualified,
+                "the plugin's complete compile surface is not loaded, so named-argument \
+                 labels for this parameter may exist in an omitted source file",
+            );
+        }
+        if workspace_declares_type(scope, &name) || scope.has_type(&name) {
+            return approximate(
+                ApproxKind::Qualified,
+                "a workspace type shares this lexical binding's spelling, so bare type \
+                 references and value references cannot be separated safely",
+            );
+        }
         return Some((span, Target::Local { name, binding }));
     }
 
@@ -347,9 +374,25 @@ fn classify(
         );
     }
 
+    if !scope.workspace_closure_complete() {
+        return approximate(
+            ApproxKind::Qualified,
+            "the plugin's complete compile surface is not loaded; a workspace rename \
+             could miss references in omitted source or dependency files",
+        );
+    }
+    if workspace_syntax_incomplete(analysis, uri, files) {
+        return approximate(
+            ApproxKind::Qualified,
+            "a source file in the workspace has parse errors, so its declarations cannot \
+             be classified precisely enough for a workspace rename",
+        );
+    }
+
     // Every candidate must be a real definition of the same class, living
     // in a file this request can edit.
     let mut shape = None;
+    let mut declaration_class = None;
     for symbol in &candidates {
         if files.get(symbol.file_id).is_none() {
             return approximate(
@@ -357,7 +400,7 @@ fn classify(
                 "this symbol is declared outside the open workspace",
             );
         }
-        let candidate = match &symbol.kind {
+        let (candidate, class) = match &symbol.kind {
             SymbolKind::Function { imported: true, .. } => {
                 return approximate(
                     ApproxKind::Qualified,
@@ -365,11 +408,17 @@ fn classify(
                      in another plugin",
                 )
             }
-            SymbolKind::Function { .. } | SymbolKind::Variable { .. } => Shape::Value,
-            SymbolKind::Class { .. }
-            | SymbolKind::Interface { .. }
-            | SymbolKind::Enum { .. }
-            | SymbolKind::Funcdef { .. } => Shape::Type,
+            SymbolKind::Function { .. } => (Shape::Value, DeclarationClass::Function),
+            SymbolKind::Variable { .. } => (Shape::Value, DeclarationClass::Variable),
+            SymbolKind::Class { .. } => (Shape::Type, DeclarationClass::Class),
+            SymbolKind::Interface { .. } => (Shape::Type, DeclarationClass::Interface),
+            SymbolKind::Enum { .. } => (Shape::Type, DeclarationClass::Enum),
+            SymbolKind::Funcdef {
+                is_typedef: false, ..
+            } => (Shape::Type, DeclarationClass::Funcdef),
+            SymbolKind::Funcdef {
+                is_typedef: true, ..
+            } => (Shape::Type, DeclarationClass::Typedef),
             SymbolKind::EnumValue { .. } => {
                 return approximate(
                     ApproxKind::Qualified,
@@ -393,8 +442,22 @@ fn classify(
                 "this name is declared as more than one kind of symbol",
             );
         }
+        if declaration_class.get_or_insert(class) != &class {
+            return approximate(
+                ApproxKind::Qualified,
+                "this name is declared as more than one kind of symbol",
+            );
+        }
     }
     let shape = shape?;
+
+    if shape == Shape::Type && lexical_binding_exists(analysis, uri, files, &name) {
+        return approximate(
+            ApproxKind::Qualified,
+            "a local or parameter shares this type's spelling, so type references inside \
+             that lexical scope cannot be separated from value references safely",
+        );
+    }
 
     // A bare use inside a class or namespace that owns this spelling
     // resolves *there*, not to the top-level symbol, and telling the two
@@ -597,7 +660,7 @@ fn occurrences_in_file(
         shadowed.push((binding.start, binding.scope_end));
     }
 
-    let lambdas = lambda_body_regions(tokens);
+    let lambdas = lambda_regions(tokens)?;
     let mut spans = Vec::new();
     for (idx, token) in tokens.iter().enumerate() {
         if token.kind != TokenKind::Ident || token.span.text(source) != name {
@@ -643,12 +706,15 @@ fn occurrences_in_file(
     Ok(spans)
 }
 
-/// Byte ranges of every anonymous-function body (`function(…) { … }`).
+/// Byte ranges of every complete anonymous function (`function(…) { … }`).
 ///
 /// The AST walk does not descend into expressions, so a lambda's own
 /// parameters and locals are invisible to [`lexical::bindings_named`].
-/// Callers treat these regions as opaque.
-fn lambda_body_regions(tokens: &[Token]) -> Vec<(u32, u32)> {
+/// Callers treat the signature and body as one opaque region: parameters
+/// live in the signature, while locals and uses live in the body. An
+/// unbalanced lambda has no trustworthy end, so refuse the containing
+/// workspace operation instead of letting the range silently disappear.
+fn lambda_regions(tokens: &[Token]) -> Result<Vec<(u32, u32)>, Refusal> {
     let mut out = Vec::new();
     for (idx, token) in tokens.iter().enumerate() {
         if token.kind != TokenKind::KwFunction {
@@ -662,9 +728,12 @@ fn lambda_body_regions(tokens: &[Token]) -> Vec<(u32, u32)> {
             .map(|offset| idx + 1 + offset)
             .filter(|open| tokens[*open].kind == TokenKind::LBrace)
         else {
-            continue;
+            return Err(Refusal::new(
+                "an anonymous function is incomplete, so its bindings cannot be separated",
+            ));
         };
         let mut depth = 0usize;
+        let mut closed = false;
         for next in &tokens[open..] {
             match next.kind {
                 TokenKind::LBrace => depth += 1,
@@ -677,15 +746,21 @@ fn lambda_body_regions(tokens: &[Token]) -> Vec<(u32, u32)> {
                     };
                     depth = remaining;
                     if depth == 0 {
-                        out.push((tokens[open].span.start, next.span.end));
+                        out.push((token.span.start, next.span.end));
+                        closed = true;
                         break;
                     }
                 }
                 _ => {}
             }
         }
+        if !closed {
+            return Err(Refusal::new(
+                "an anonymous function is incomplete, so its bindings cannot be separated",
+            ));
+        }
     }
-    out
+    Ok(out)
 }
 
 // -------------------------------------------------------------------
@@ -704,6 +779,21 @@ fn local_new_name_conflict(
         )));
     }
     let source = analysis.masked_source();
+    let enclosing_binding =
+        lexical::bindings_named(&analysis.file, &analysis.tokens, source, new_name)
+            .into_iter()
+            .any(|candidate| {
+                candidate.start < binding.start
+                    && binding.start < candidate.scope_end
+                    && candidate.start != binding.start
+            });
+    if enclosing_binding
+        || enclosing_class_declares_member(&analysis.file.items, source, binding.start, new_name)
+    {
+        return Err(Refusal::new(format!(
+            "`{new_name}` is already visible at this declaration; renaming would shadow it"
+        )));
+    }
     let taken = analysis.tokens.iter().any(|token| {
         token.kind == TokenKind::Ident
             && token.span.start >= binding.start
@@ -716,6 +806,29 @@ fn local_new_name_conflict(
         )));
     }
     Ok(())
+}
+
+fn enclosing_class_declares_member(items: &[Item], source: &str, offset: u32, name: &str) -> bool {
+    items.iter().any(|item| match item {
+        Item::Class(class) if class.span.start <= offset && offset < class.span.end => {
+            class.members.iter().any(|member| match member {
+                ClassMember::Field(field) => field
+                    .declarators
+                    .iter()
+                    .any(|decl| decl.name.text(source) == name),
+                ClassMember::Method(method)
+                | ClassMember::Constructor(method)
+                | ClassMember::Destructor(method) => method.name.text(source) == name,
+                ClassMember::Property(property) => property.name.text(source) == name,
+            })
+        }
+        Item::Namespace(namespace)
+            if namespace.span.start <= offset && offset < namespace.span.end =>
+        {
+            enclosing_class_declares_member(&namespace.items, source, offset, name)
+        }
+        _ => false,
+    })
 }
 
 fn workspace_new_name_conflict(
@@ -824,6 +937,55 @@ fn declares_namespaced(scope: &GlobalScope<'_>, name: &str) -> bool {
         .any(|(owner, _)| scope.workspace_namespace_declared(owner))
 }
 
+fn workspace_declares_type(scope: &GlobalScope<'_>, name: &str) -> bool {
+    scope.lookup_workspace(name).iter().any(|symbol| {
+        matches!(
+            symbol.kind,
+            SymbolKind::Class { .. }
+                | SymbolKind::Interface { .. }
+                | SymbolKind::Enum { .. }
+                | SymbolKind::Funcdef { .. }
+        )
+    })
+}
+
+/// Whether the live requesting analysis or any other workspace file carries
+/// a lexical binding named `name`. Scan the request exactly once even when it
+/// is already in the snapshot.
+fn lexical_binding_exists(
+    request_analysis: &DocumentAnalysis,
+    request_uri: &Url,
+    files: &WorkspaceFiles,
+    name: &str,
+) -> bool {
+    let scan = |analysis: &DocumentAnalysis| {
+        !lexical::bindings_named(
+            &analysis.file,
+            &analysis.tokens,
+            analysis.masked_source(),
+            name,
+        )
+        .is_empty()
+    };
+    scan(request_analysis)
+        || files
+            .files
+            .values()
+            .any(|(uri, analysis)| uri != request_uri && scan(analysis))
+}
+
+fn workspace_syntax_incomplete(
+    request_analysis: &DocumentAnalysis,
+    request_uri: &Url,
+    files: &WorkspaceFiles,
+) -> bool {
+    !request_analysis.parse_errors.is_empty()
+        || files
+            .files
+            .values()
+            .any(|(uri, analysis)| uri != request_uri && !analysis.parse_errors.is_empty())
+}
+
 /// Occurrence offsets in `file` that are declarations rather than uses,
 /// for `include_declaration: false`.
 ///
@@ -848,60 +1010,6 @@ fn declaration_spans(scope: &GlobalScope<'_>, name: &str, file: &FileOccurrences
                 .min()
         })
         .collect()
-}
-
-// -------------------------------------------------------------------
-// Read-only fallback
-// -------------------------------------------------------------------
-
-/// Filtered token scan for the classes [`rename`] refuses.
-///
-/// Deliberately approximate — it can over-report — but it never reports the
-/// occurrences that are certainly a different symbol, which is what made
-/// the old scan useless.
-fn approximate_locations(name: &str, kind: ApproxKind, files: &WorkspaceFiles) -> Vec<Location> {
-    let mut out = Vec::new();
-    for (uri, analysis) in files.files.values() {
-        let source = analysis.masked_source();
-        let tokens = &analysis.tokens;
-        // A local or parameter of the same name is definitely not the
-        // symbol under the cursor, whichever approximate class this is.
-        let shadowed: Vec<(u32, u32)> =
-            lexical::bindings_named(&analysis.file, tokens, source, name)
-                .into_iter()
-                .map(|binding| (binding.start, binding.scope_end))
-                .collect();
-        let spans: Vec<Span> = tokens
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, token)| {
-                if token.kind != TokenKind::Ident || token.span.text(source) != name {
-                    return None;
-                }
-                if lexical::is_named_argument_label(tokens, idx) {
-                    return None;
-                }
-                let after_dot = idx > 0 && tokens[idx - 1].kind == TokenKind::Dot;
-                if !after_dot
-                    && shadowed
-                        .iter()
-                        .any(|(start, end)| token.span.start >= *start && token.span.start < *end)
-                {
-                    return None;
-                }
-                match kind {
-                    // A member is reached through `.`, or used bare inside
-                    // its own class, which we cannot pin down further.
-                    ApproxKind::Member => Some(token.span),
-                    // A qualified name is never a `.member`.
-                    ApproxKind::Qualified if after_dot => None,
-                    ApproxKind::Qualified => Some(token.span),
-                }
-            })
-            .collect();
-        out.extend(locations_for(analysis, uri, spans));
-    }
-    out
 }
 
 // -------------------------------------------------------------------
@@ -942,25 +1050,34 @@ fn locations_for(
 /// overload resolution this server does not do, and rewriting the wrong
 /// call's label is silent corruption.
 fn named_argument_label_exists(
-    _analysis: &DocumentAnalysis,
+    request_analysis: &DocumentAnalysis,
+    request_uri: &Url,
     name: &str,
     files: &WorkspaceFiles,
 ) -> Result<(), Refusal> {
-    for (_, analysis) in files.files.values() {
+    fn scan(analysis: &DocumentAnalysis, name: &str) -> bool {
         let source = analysis.masked_source();
         let tokens = &analysis.tokens;
-        for (idx, token) in tokens.iter().enumerate() {
-            if token.kind == TokenKind::Ident
+        tokens.iter().enumerate().any(|(idx, token)| {
+            token.kind == TokenKind::Ident
                 && token.span.text(source) == name
                 && lexical::is_named_argument_label(tokens, idx)
-            {
-                return Err(Refusal::new(
-                    "a call passes this parameter by name (`f(name: …)`); the label would \
-                     have to be renamed too, and matching labels to callees needs overload \
-                     resolution this server does not do",
-                ));
-            }
-        }
+        })
+    }
+
+    // The requesting buffer may not have reached the snapshot yet. Scan its
+    // live analysis first, then every other URI exactly once.
+    if scan(request_analysis, name)
+        || files
+            .files
+            .values()
+            .any(|(uri, analysis)| uri != request_uri && scan(analysis, name))
+    {
+        return Err(Refusal::new(
+            "a call passes this parameter by name (`f(name: …)`); the label would \
+             have to be renamed too, and matching labels to callees needs overload \
+             resolution this server does not do",
+        ));
     }
     Ok(())
 }
@@ -978,8 +1095,24 @@ mod tests {
         sources: &[(&str, &str)],
         body: impl FnOnce(&TestWorkspace, &GlobalScope<'_>, &WorkspaceFiles) -> R,
     ) -> R {
+        with_closure(sources, true, body)
+    }
+
+    /// Inject the one authority bit production snapshots derive from disk
+    /// discovery. `TestWorkspace::files` deliberately defaults to an
+    /// incomplete ad-hoc pool, so rename tests opt into a complete compile
+    /// surface explicitly rather than weakening that production invariant.
+    fn with_closure<R>(
+        sources: &[(&str, &str)],
+        complete: bool,
+        body: impl FnOnce(&TestWorkspace, &GlobalScope<'_>, &WorkspaceFiles) -> R,
+    ) -> R {
         let tw = TestWorkspace::files(sources);
-        let scope = tw.scope();
+        let mut symbols = tw.snapshot.symbols().clone();
+        if complete {
+            symbols.mark_dependency_closure_complete();
+        }
+        let scope = GlobalScope::new(&symbols, None);
         let map = tw.uri_map();
         let files = WorkspaceFiles { files: &map };
         body(&tw, &scope, &files)
@@ -1289,6 +1422,20 @@ mod tests {
     }
 
     #[test]
+    fn a_local_rename_refuses_prior_enclosing_bindings_and_implicit_this_fields() {
+        for (src, new_name) in [
+            ("void f(int outer) { { int x = 1; x++; } }\n", "outer"),
+            ("void f() { int outer = 0; { int x = 1; x++; } }\n", "outer"),
+            (
+                "class C { int field; void f() { int x = 1; x++; } }\n",
+                "field",
+            ),
+        ] {
+            assert!(!refused(src, "x = 1", new_name).is_empty(), "{src:?}");
+        }
+    }
+
+    #[test]
     fn a_rename_refuses_when_the_new_name_is_a_global() {
         let src = "int y = 0;\nvoid f() { int x = 1; x++; }\n";
         assert!(!refused(src, "x = 1", "y").is_empty());
@@ -1404,6 +1551,69 @@ mod tests {
             "void Assist() {}\nvoid Main() { Assist(); }\n"
         );
         assert_eq!(changed[1].1, "void Other() { Assist(); }\n");
+    }
+
+    #[test]
+    fn incomplete_compile_surfaces_refuse_workspace_and_parameter_renames() {
+        // These are the distinct runtime causes collapsed into
+        // `workspace_closure_complete == false` by workspace loading.
+        for cause in [
+            "gitignored source",
+            "source_paths allowlist",
+            "ignore_paths blocklist",
+            "unresolved dependency export",
+        ] {
+            let workspace = "int g = 0;\nvoid f(int p) { g += p; }\n";
+            with_closure(&[(cause, workspace)], false, |tw, scope, files| {
+                for needle in ["g = 0", "p) {"] {
+                    let position = at(workspace, needle, 0);
+                    let prepared =
+                        prepare_rename(tw.analysis_of(0), &tw.uri_of(0), position, scope, files)
+                            .expect_err("prepareRename must share the closure refusal");
+                    let refusal = rename(
+                        tw.analysis_of(0),
+                        &tw.uri_of(0),
+                        position,
+                        "renamed",
+                        scope,
+                        files,
+                    )
+                    .expect_err("incomplete compile surface must refuse");
+                    assert_eq!(prepared.reason, refusal.reason);
+                    assert!(!refusal.reason.is_empty(), "cause={cause} needle={needle}");
+                    assert!(find_references(
+                        tw.analysis_of(0),
+                        &tw.uri_of(0),
+                        position,
+                        scope,
+                        files,
+                        true,
+                    )
+                    .is_empty());
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn incomplete_compile_surfaces_still_allow_healthy_local_only_rename() {
+        let src = "void f() { int x = 1; x++; }\n";
+        let result = with_closure(&[("gitignored-source", src)], false, |tw, scope, files| {
+            rename(
+                tw.analysis_of(0),
+                &tw.uri_of(0),
+                at(src, "x = 1", 0),
+                "y",
+                scope,
+                files,
+            )
+        })
+        .unwrap();
+        let edits = result.changes.unwrap();
+        assert_eq!(
+            apply(src, &edits.values().next().unwrap()),
+            "void f() { int y = 1; y++; }\n"
+        );
     }
 
     #[test]
@@ -1765,6 +1975,22 @@ mod tests {
     }
 
     #[test]
+    fn a_global_sharing_an_unused_lambda_parameter_is_refused() {
+        let src = "int g = 0;\nvoid f() { auto cb = function(int g) {}; g++; }\n";
+        assert!(!refused(src, "g = 0", "total").is_empty());
+    }
+
+    #[test]
+    fn an_unbalanced_lambda_makes_a_workspace_rename_indeterminate() {
+        for src in [
+            "int g = 0;\nvoid f() { auto cb = function(int g) {\n",
+            "int g = 0;\nvoid f() { auto cb = function(int x) { g++;\n",
+        ] {
+            assert!(!refused(src, "g = 0", "total").is_empty(), "{src:?}");
+        }
+    }
+
+    #[test]
     fn an_interface_method_is_refused() {
         let src = "interface I { void Go(); }\nclass C : I { void Go() {} }\n";
         assert!(!refused(src, "Go();", "Run").is_empty());
@@ -1776,6 +2002,57 @@ mod tests {
         assert_eq!(
             renamed(src, "Cb();", "Handler").unwrap(),
             "funcdef void Handler();\nvoid f(Handler@ handler) {}\n"
+        );
+    }
+
+    #[test]
+    fn type_value_spelling_collisions_are_refused_for_locals_and_parameters() {
+        for type_decl in [
+            "class Thing {}",
+            "interface Thing {}",
+            "enum Thing { A }",
+            "funcdef void Thing();",
+            "typedef int Thing;",
+        ] {
+            for function in [
+                "void f() { int Thing = 1; Thing value; Thing++; }",
+                "void f(int Thing) { Thing value; Thing++; }",
+            ] {
+                let src = format!("{type_decl}\n{function}\n");
+                let needle = if function.contains("int Thing =") {
+                    "Thing = 1"
+                } else {
+                    "Thing) {"
+                };
+                assert!(
+                    !refused(&src, needle, "renamed").is_empty(),
+                    "type={type_decl:?} function={function:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_type_rename_refuses_when_a_same_named_value_hides_type_references() {
+        let src = "class Thing {}\nvoid f() { int Thing = 1; Thing@ value; Thing++; }\n";
+        assert!(!refused(src, "Thing {}", "Widget").is_empty());
+    }
+
+    #[test]
+    fn mixed_workspace_declaration_classes_are_refused_but_overloads_remain_supported() {
+        for src in [
+            "void Mix() {}\nint Mix = 0;\nvoid Use() { Mix(); }\n",
+            "class Mix {}\ninterface Mix {}\nvoid Use(Mix@ value) {}\n",
+            "enum Mix { A }\nfuncdef void Mix();\n",
+            "void Mix() {}\nint Mix\nvoid Use() { Mix(); }\n",
+            "class Mix {}\ninterface Mix {\n",
+        ] {
+            assert!(!refused(src, "Mix", "Other").is_empty(), "{src:?}");
+        }
+        let overloads = "void Mix(int x) {}\nvoid Mix(float x) {}\nvoid Use() { Mix(1); }\n";
+        assert_eq!(
+            renamed(overloads, "Mix(int", "Other").unwrap(),
+            "void Other(int x) {}\nvoid Other(float x) {}\nvoid Use() { Other(1); }\n"
         );
     }
 
@@ -1809,17 +2086,12 @@ mod tests {
     }
 
     #[test]
-    fn references_to_a_field_keep_member_accesses_and_drop_labels() {
-        // Rename refuses here, but the read-only scan still filters: the
-        // named-argument label is one of `g`'s parameters, not this field.
+    fn references_to_a_field_are_empty_when_receiver_resolution_is_unavailable() {
+        // A Location cannot say "this might be a reference". Without
+        // receiver resolution the honest result is empty, not a guessed set.
         let src = "class C { int w; }\nvoid g(int w) {}\nvoid f(C@ c) { c.w = 1; g(w: 2); }\n";
         let found = ref_offsets(&[("a", src)], 0, "w = 1", 0, true);
-        let label = src.find("w: 2").unwrap();
-        assert!(!found.contains(&(0, label)), "label reported: {found:?}");
-        assert!(
-            found.contains(&(0, src.find("c.w").unwrap() + 2)),
-            "member access missing: {found:?}"
-        );
+        assert!(found.is_empty(), "indeterminate references: {found:?}");
     }
 
     #[test]
@@ -1871,7 +2143,9 @@ mod tests {
         // has not caught up with a buffer. Renaming every other file but
         // not that one would leave it calling a name that is gone.
         let tw = TestWorkspace::files(&[("a", "void Helper() {}\n")]);
-        let scope = tw.scope();
+        let mut symbols = tw.snapshot.symbols().clone();
+        symbols.mark_dependency_closure_complete();
+        let scope = GlobalScope::new(&symbols, None);
         let map = tw.uri_map();
         let files = WorkspaceFiles { files: &map };
 
@@ -1899,6 +2173,39 @@ mod tests {
     }
 
     #[test]
+    fn an_unsnapshotted_parameter_label_is_not_skipped() {
+        let tw = TestWorkspace::files(&[("snapshot", "void Other() {}\n")]);
+        let mut symbols = tw.snapshot.symbols().clone();
+        symbols.mark_dependency_closure_complete();
+        let scope = GlobalScope::new(&symbols, None);
+        let map = tw.uri_map();
+        let files = WorkspaceFiles { files: &map };
+        let unsaved = "void f(int p) {}\nvoid g() { f(p: 1); }\n";
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(unsaved);
+        let uri = Url::parse("file:///test/unsaved.as").unwrap();
+
+        let refusal = rename(
+            &analysis,
+            &uri,
+            at(unsaved, "p) {}", 0),
+            "value",
+            &scope,
+            &files,
+        )
+        .expect_err("the requesting analysis contains an ambiguous named label");
+        assert!(!refusal.reason.is_empty());
+        assert!(find_references(
+            &analysis,
+            &uri,
+            at(unsaved, "p) {}", 0),
+            &scope,
+            &files,
+            true,
+        )
+        .is_empty());
+    }
+
+    #[test]
     fn a_free_function_rename_refuses_when_an_interface_declares_that_method() {
         // Interfaces are a member surface too: a bare `Go()` inside an
         // implementor is that method, not this function.
@@ -1914,8 +2221,8 @@ mod tests {
         // plugin's own files -- and a symbol DECLARED in a dependency is
         // then not ours to rename at all.
         let tw = TestWorkspace::files_with_flags(&[
-            ("own", "void Main() { Helper(); }\n", true),
-            ("dep", "void Helper() {}\n", false),
+            ("own", "void Main() { SharedThing@ value; }\n", true),
+            ("dep", "shared class SharedThing {}\n", false),
         ]);
         let scope = tw.scope();
         let map = tw.snapshot.own_uri_map();
@@ -1924,12 +2231,12 @@ mod tests {
             "own_uri_map must not carry the dependency file"
         );
         let files = WorkspaceFiles { files: &map };
-        let own = "void Main() { Helper(); }\n";
+        let own = "void Main() { SharedThing@ value; }\n";
         let refusal = rename(
             tw.analysis_of(0),
             &tw.uri_of(0),
-            at(own, "Helper", 0),
-            "Assist",
+            at(own, "SharedThing", 0),
+            "RenamedThing",
             &scope,
             &files,
         )
@@ -1961,19 +2268,29 @@ mod tests {
     }
 
     #[test]
-    fn approximate_references_drop_a_same_named_local() {
-        // Rename refuses on a field, but the read-only scan must still not
-        // report an unrelated local that merely shares the spelling.
+    fn references_are_empty_when_member_resolution_is_indeterminate() {
         let src = "class C { int w; }\nvoid f(C@ c) { c.w = 1; }\nvoid g() { int w = 2; w++; }\n";
         let found = ref_offsets(&[("a", src)], 0, "w;", 0, true);
-        let local_decl = src.find("w = 2").unwrap();
+        assert!(found.is_empty(), "indeterminate references: {found:?}");
+    }
+
+    #[test]
+    fn references_are_empty_when_a_lambda_makes_a_local_set_indeterminate() {
+        let src = "void f() { int x = 1; auto cb = function() { x++; }; x++; }\n";
+        let found = ref_offsets(&[("a", src)], 0, "x = 1", 0, true);
+        assert!(found.is_empty(), "indeterminate references: {found:?}");
+    }
+
+    #[test]
+    fn parameter_references_are_empty_when_named_labels_cannot_be_resolved() {
+        let sources: &[(&str, &str)] = &[
+            ("decls", "void f(int p) {}\nvoid f(int p, int q) {}\n"),
+            ("calls", "void g() { f(p: 1); f(p: 1, q: 2); }\n"),
+        ];
+        let found = ref_offsets(sources, 0, "p) {}", 0, true);
         assert!(
-            !found.contains(&(0, local_decl)),
-            "local reported: {found:?}"
-        );
-        assert!(
-            found.contains(&(0, src.find("c.w").unwrap() + 2)),
-            "member access missing: {found:?}"
+            found.is_empty(),
+            "ambiguous parameter references: {found:?}"
         );
     }
 
