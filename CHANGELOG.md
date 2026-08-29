@@ -84,6 +84,19 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **Engine enums declared inline on a member are no longer dropped (B016)** —
+  the game dump gives such an enum no name of its own, so the loader keyed
+  every one in a module as `<Module>::UnnamedEnum` and kept only the first:
+  132 enums in the shipped type DB collapsed to 14, `Control` losing 14 of its
+  15. They are now keyed by their declaring context
+  (`<Module>::<Class>::<Member>`), so `typedb diff` sees drift in all of them
+  and their value names resolve. Three names that used to report `undefined
+  identifier` because their enum lost the collision — `MinimalReadOnly`,
+  `TimeHhMmSsMil`, `Text_Icon` — now resolve, along with the rest of the
+  recovered set. Nothing became stricter: those keys are synthesized, name
+  nothing the game accepts in source, and are held out of every source-facing
+  lookup, completion and namespace query, so diagnostics on the five plugin
+  fixtures are byte-identical.
 - **`check` no longer undoes `defines` removals of manifest defines (B026)** —
   `run_check` re-applied `info.toml`'s `[script].defines` and the
   `DEPENDENCY_*` defines AFTER `LspConfig::load` had already applied them and

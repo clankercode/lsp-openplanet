@@ -3598,8 +3598,11 @@ fn check_help_mentions_errors_flag() {
 /// must not let the checker start rejecting reads, writes, comparisons
 /// across two formerly-collided enums, or argument passing.
 ///
-/// A fence, not a red/green: the fixture is clean before and after the fix,
-/// and its job is to stay that way.
+/// Red before, green after (measured against a build of 91a296c): the three
+/// bare value names in `BareEnumValueNames` whose enums lost their module's
+/// collision — `MinimalReadOnly`, `TimeHhMmSsMil`, `Text_Icon` — were
+/// `undefined identifier` there. Everything else in the fixture was clean
+/// before too and must stay that way.
 #[test]
 fn check_command_issue_repro_b016_anon_member_enums_is_clean() {
     let (ok, stdout, stderr) = run_issue_repro_typedb("b016-anon-member-enums");

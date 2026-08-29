@@ -2838,6 +2838,31 @@ mod anon_member_enum_tests {
         );
     }
 
+    /// The drift the collapse used to hide. `typedb diff` is the tripwire
+    /// that found B016, and it could only ever see the one anonymous enum
+    /// that won its module's collision. Change a value in one that did NOT
+    /// win, and the diff must now report it — otherwise `typedb refresh`
+    /// could ship a changed engine enum silently.
+    #[test]
+    fn a_change_to_a_formerly_dropped_anonymous_enum_is_reported() {
+        // `AA` sorts before `ZZ`, so pre-B016 both members keyed
+        // `X::UnnamedEnum` and only `AA`'s values reached the index.
+        let db = |zz_second: &str| {
+            format!(
+                r#"{{"op":"1.0.0","ns":{{"X":{{
+                    "AA":{{"i":"1","m":[{{"n":"Mode","i":0,"t":"UnnamedEnum","e":{{"n":"UnnamedEnum","v":["Keep"]}}}}]}},
+                    "ZZ":{{"i":"2","m":[{{"n":"Mode","i":0,"t":"UnnamedEnum","e":{{"n":"UnnamedEnum","v":["Same","{zz_second}"]}}}}]}}
+                }}}}}}"#
+            )
+        };
+        let old = nadeo_index("drift-old", &db("Before"));
+        let new = nadeo_index("drift-new", &db("After"));
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert_eq!(diff.changed[0].name, "X::ZZ::Mode");
+        assert_eq!(diff.changed[0].kind, DbSymbolKind::Enum);
+    }
+
     /// Determinism, restated for the new keys: identical bytes in ⇒
     /// identical anonymous-enum keys and values out.
     #[test]

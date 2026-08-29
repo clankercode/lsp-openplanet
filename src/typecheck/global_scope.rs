@@ -451,8 +451,23 @@ impl<'a> GlobalScope<'a> {
         // External index: scan known enums for a matching bare value name.
         // This is linear in enum count but enums are small and this only
         // runs on identifiers that failed every earlier check.
+        //
+        // B016: deliberately `enums_iter`, NOT `source_enums_iter`. Every
+        // other external-enum call site asks "can source NAME this enum?",
+        // where a synthesized anonymous key must answer no. This one asks
+        // the opposite question — "is this bare identifier a value the
+        // engine knows?" — and returning true only silences an
+        // `UndefinedIdentifier`. Filtering here would REMOVE names the
+        // checker accepted before B016: pre-B016 the sorted-first anonymous
+        // enum of each module survived the collision, so `HyperTnL`,
+        // `SlideNoControl`, `NotTimed`, `RenderPlaneReflect` and
+        // `Download_WaitingSources` all resolved. Measured against a
+        // 91a296c build, filtering turns those into 5 fresh errors, which
+        // is exactly the tightening B016 is required not to introduce.
+        // Covering all 132 instead of an arbitrary 14 can only ever silence
+        // a diagnostic, never add one.
         if let Some(ext) = self.external {
-            for (qname, en) in ext.source_enums_iter() {
+            for (qname, en) in ext.enums_iter() {
                 let _ = qname;
                 if en.values.iter().any(|(v, _)| v == name) {
                     return true;
@@ -1510,6 +1525,56 @@ mod tests {
             scope.canonicalize_type_name("CGameCtnBlock::ECardinalDirections"),
             named,
             "the anonymous filter must not hide named enums"
+        );
+    }
+
+    /// B016 (the other half of the rule above): a bare identifier that names
+    /// a VALUE of an anonymous member enum must stay accepted. Five of these
+    /// resolved before B016 because their enum won its module's collision;
+    /// the other four were casualties of that collision and now resolve too.
+    /// Neither direction may produce a diagnostic — this is the site where
+    /// hiding anonymous enums would *tighten* the checker.
+    #[test]
+    fn anonymous_member_enum_values_are_accepted_as_bare_identifiers() {
+        use crate::typedb::index::TypeIndex;
+
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let index = TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // Accepted before B016 — their enum was the sorted-first anonymous
+        // one in its module, so it survived the collision.
+        for name in [
+            "HyperTnL",
+            "SlideNoControl",
+            "NotTimed",
+            "RenderPlaneReflect",
+            "Download_WaitingSources",
+        ] {
+            assert!(
+                scope.has_global_ident(name),
+                "`{name}` resolved before B016 and must keep resolving"
+            );
+        }
+        // Dropped before B016 — their enum lost the collision and these
+        // names appear in no other enum, so a 91a296c build reports
+        // `undefined identifier` for all three. Recovering them can only
+        // silence a diagnostic, never add one.
+        for name in ["MinimalReadOnly", "TimeHhMmSsMil", "Text_Icon"] {
+            assert!(
+                scope.has_global_ident(name),
+                "`{name}` belongs to a recovered anonymous enum"
+            );
+        }
+        assert!(
+            !scope.has_global_ident("NoSuchEngineEnumValue"),
+            "the scan must still reject genuinely unknown identifiers"
         );
     }
 

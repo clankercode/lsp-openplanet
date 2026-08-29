@@ -47,4 +47,20 @@ void Main() {
     Compare(null, null, null);
     Write(null, null);
     PassAsArgument(null, null);
+    BareEnumValueNames();
+}
+
+// The VALUE names of those enums, used bare. AngelScript lets a bare enum
+// value stand in for its qualified form, and the checker's last-resort
+// `has_global_ident` scan is what accepts them. Before B016 whichever
+// anonymous enum won its module's collision had its values accepted
+// (HyperTnL, SlideNoControl, NotTimed, RenderPlaneReflect,
+// Download_WaitingSources) while the losers' did not (MinimalReadOnly,
+// TimeHhMmSsMil, Text_Icon) — an arbitrary split. All of them resolve now.
+// Hiding anonymous enums from this scan would turn the first five back into
+// `undefined identifier`, which is the regression this guards.
+void BareEnumValueNames() {
+    print("" + HyperTnL + SlideNoControl + NotTimed);
+    print("" + RenderPlaneReflect + Download_WaitingSources);
+    print("" + MinimalReadOnly + TimeHhMmSsMil + Text_Icon);
 }
