@@ -2011,7 +2011,7 @@ mod tests {
     }
 
     #[test]
-    fn no_control_character_ever_reaches_a_span() {
+    fn display_text_is_sanitized_before_it_becomes_a_span() {
         // An ESC/OSC sequence smuggled in through a source string literal, a
         // filename, or a checker message must not reach a Span: the renderer
         // would drop it and slide the rest of the row out of position.
@@ -2027,6 +2027,9 @@ mod tests {
             message: nasty.into(),
         };
 
+        // `pretty_detail_lines` is checked as real Spans; `ListItem` contents
+        // are not publicly readable, so the list rows are exercised through the
+        // same helpers `list_item_for` feeds them to.
         let spans_of = |lines: Vec<Line<'static>>| -> Vec<String> {
             lines
                 .iter()
@@ -2084,7 +2087,7 @@ mod tests {
     }
 
     #[test]
-    fn page_step_never_outruns_the_viewport() {
+    fn page_step_fits_the_viewport_or_moves_one_item() {
         for h in 3u16..=40 {
             let inner = h.saturating_sub(2) as usize;
             for density in [ListDensity::Compact, ListDensity::Relaxed] {
@@ -2250,7 +2253,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_scroll_resets_with_the_selection() {
+    fn detail_scroll_resets_only_with_the_selection() {
         let mut app = App::from_snapshot(canned_snapshot());
         assert_eq!(app.detail_scroll(), 0);
         app.scroll_detail_down();
