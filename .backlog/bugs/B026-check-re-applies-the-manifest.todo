@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-29T05:25:04Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T07:02:27Z"
 complexity: low
 created_at: "2026-08-29T05:24:34Z"
 depends_on: []
+duration_minutes: 97.3907751368
 estimate_hours: 1
 id: B026
 priority: high
 started_at: "2026-08-29T05:25:04Z"
-status: in_progress
+status: done
 tags: []
 title: check re-applies the manifest after config load, undoing `defines` removals (B024 follow-up)
-updated_at: "2026-08-29T05:25:04Z"
+updated_at: "2026-08-29T07:02:27Z"
 ---
 Found 2026-08-29 while planning the signature-mode work. Regression window:
 introduced by B024 (custom defines became additive with `-NAME` removals).
