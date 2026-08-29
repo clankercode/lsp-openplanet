@@ -283,6 +283,69 @@ fn is_named_argument_label(tokens: &[Token], idx: usize) -> bool {
     follows_colon && opens_argument
 }
 
+/// A declarator or parameter found by the binding walk, before its scope
+/// has been resolved.
+#[derive(Debug, Clone, Copy)]
+struct RawBinding {
+    /// Offset of the name token.
+    start: u32,
+    /// For a parameter, the end of the owning function's body — a
+    /// parameter is visible across the whole body, which is not a scope
+    /// [`innermost_scope_end`] can find from the parameter's own offset
+    /// (the parameter list sits outside the body's braces). `None` for a
+    /// local, and for a parameter of a body-less declaration.
+    param_body_end: Option<u32>,
+}
+
+/// A binding named some given name, with the half-open byte range
+/// `[start, scope_end)` its references live in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Binding {
+    /// Offset of the declarator's / parameter's name token.
+    pub start: u32,
+    /// End of the range the binding is visible in.
+    pub scope_end: u32,
+    /// True for a function parameter, false for a local declarator.
+    pub is_parameter: bool,
+}
+
+/// Every local declarator and parameter named `name` in the file, each with
+/// its resolved scope.
+///
+/// A parameter's scope is its owning function's body; a local's is
+/// [`innermost_scope_end`]. Bindings whose scope cannot be resolved — a
+/// parameter of a body-less declaration, a declarator inside no scope at
+/// all — are dropped, because there is nothing a caller can safely do with
+/// them. Sorted by `start`.
+///
+/// **Lambda parameters are not here.** Lambdas are expressions and the AST
+/// walk does not descend into expressions, so a `function(int x) { … }`
+/// parameter is invisible to this. Callers must refuse when a lambda
+/// appears inside the range they are about to rewrite; see the
+/// `KwFunction` guard in `rename`.
+pub fn bindings_named(file: &SourceFile, tokens: &[Token], source: &str, name: &str) -> Vec<Binding> {
+    let mut raw = Vec::new();
+    for item in &file.items {
+        collect_redecls_in_item(item, source, name, &mut raw);
+    }
+    let mut out: Vec<Binding> = raw
+        .into_iter()
+        .filter_map(|binding| {
+            let scope_end = match binding.param_body_end {
+                Some(end) => end,
+                None => innermost_scope_end(file, tokens, binding.start)?,
+            };
+            Some(Binding {
+                start: binding.start,
+                scope_end,
+                is_parameter: binding.param_body_end.is_some(),
+            })
+        })
+        .collect();
+    out.sort_unstable_by_key(|binding| binding.start);
+    out
+}
+
 /// Every declarator/parameter named `name` inside `(after, until)`,
 /// reported as its declarator-name offset. Used to find the *nested*
 /// redeclarations whose scopes must be excluded from a rename.
@@ -293,16 +356,20 @@ pub fn redeclarations_in_range(
     after: u32,
     until: u32,
 ) -> Vec<u32> {
-    let mut out = Vec::new();
+    let mut raw = Vec::new();
     for item in &file.items {
-        collect_redecls_in_item(item, source, name, &mut out);
+        collect_redecls_in_item(item, source, name, &mut raw);
     }
-    out.retain(|start| *start > after && *start < until);
+    let mut out: Vec<u32> = raw
+        .into_iter()
+        .map(|binding| binding.start)
+        .filter(|start| *start > after && *start < until)
+        .collect();
     out.sort_unstable();
     out
 }
 
-fn collect_redecls_in_item(item: &Item, source: &str, name: &str, out: &mut Vec<u32>) {
+fn collect_redecls_in_item(item: &Item, source: &str, name: &str, out: &mut Vec<RawBinding>) {
     match item {
         Item::Function(func) => collect_redecls_in_function(func, source, name, out),
         Item::Class(cls) => {
@@ -344,11 +411,20 @@ fn collect_redecls_in_item(item: &Item, source: &str, name: &str, out: &mut Vec<
     }
 }
 
-fn collect_redecls_in_function(func: &FunctionDecl, source: &str, name: &str, out: &mut Vec<u32>) {
+fn collect_redecls_in_function(
+    func: &FunctionDecl,
+    source: &str,
+    name: &str,
+    out: &mut Vec<RawBinding>,
+) {
+    let body_end = func.body.as_ref().map(|body| body.span.end);
     for param in &func.params {
         if let Some(ident) = &param.name {
             if ident.text(source) == name {
-                out.push(ident.span.start);
+                out.push(RawBinding {
+                    start: ident.span.start,
+                    param_body_end: body_end,
+                });
             }
         }
     }
@@ -357,13 +433,13 @@ fn collect_redecls_in_function(func: &FunctionDecl, source: &str, name: &str, ou
     }
 }
 
-fn collect_redecls_in_stmts(stmts: &[Stmt], source: &str, name: &str, out: &mut Vec<u32>) {
+fn collect_redecls_in_stmts(stmts: &[Stmt], source: &str, name: &str, out: &mut Vec<RawBinding>) {
     for stmt in stmts {
         collect_redecls_in_stmt(stmt, source, name, out);
     }
 }
 
-fn collect_redecls_in_stmt(stmt: &Stmt, source: &str, name: &str, out: &mut Vec<u32>) {
+fn collect_redecls_in_stmt(stmt: &Stmt, source: &str, name: &str, out: &mut Vec<RawBinding>) {
     match &stmt.kind {
         StmtKind::VarDecl(var) => collect_redecls_in_var(var, source, name, out),
         StmtKind::Block(stmts) => collect_redecls_in_stmts(stmts, source, name, out),
@@ -402,10 +478,13 @@ fn collect_redecls_in_stmt(stmt: &Stmt, source: &str, name: &str, out: &mut Vec<
     }
 }
 
-fn collect_redecls_in_var(var: &VarDeclStmt, source: &str, name: &str, out: &mut Vec<u32>) {
+fn collect_redecls_in_var(var: &VarDeclStmt, source: &str, name: &str, out: &mut Vec<RawBinding>) {
     for declarator in &var.declarators {
         if declarator.name.text(source) == name {
-            out.push(declarator.name.span.start);
+            out.push(RawBinding {
+                start: declarator.name.span.start,
+                param_body_end: None,
+            });
         }
     }
 }

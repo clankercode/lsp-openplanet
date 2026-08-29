@@ -9,6 +9,7 @@ pub mod hover;
 pub mod inlay_hints;
 pub mod lexical_scope;
 pub mod navigation;
+pub mod rename;
 pub mod scope_query;
 pub mod semantic_tokens;
 pub mod signature;
