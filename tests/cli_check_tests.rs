@@ -3588,3 +3588,24 @@ fn check_help_mentions_errors_flag() {
         "help must document --errors last|first|off: {stdout}"
     );
 }
+
+/// B016: members typed by an inline enum the engine dump leaves unnamed.
+///
+/// Those enums used to collapse onto one `<Module>::UnnamedEnum` key per
+/// module — `Control` alone lost 14 of 15 — and B016 keys them by their
+/// declaring context instead. The game exposes such a member as a plain
+/// integer (the enum has no name, so no source can spell it), so re-keying
+/// must not let the checker start rejecting reads, writes, comparisons
+/// across two formerly-collided enums, or argument passing.
+///
+/// A fence, not a red/green: the fixture is clean before and after the fix,
+/// and its job is to stay that way.
+#[test]
+fn check_command_issue_repro_b016_anon_member_enums_is_clean() {
+    let (ok, stdout, stderr) = run_issue_repro_typedb("b016-anon-member-enums");
+    assert!(
+        ok && stdout.contains("0 diagnostics"),
+        "engine members typed by an anonymous inline enum must stay silent; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}
