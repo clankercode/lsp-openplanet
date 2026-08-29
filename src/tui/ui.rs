@@ -106,8 +106,9 @@ impl App {
     }
 
     pub fn toggle_density(&mut self) {
+        // Density is a list-only concern — the detail box shows the same text
+        // either way, so the reader keeps their place in it.
         self.density = self.density.toggle();
-        self.detail_scroll = 0;
     }
 
     /// First visible detail-box row (0 = top).
@@ -547,9 +548,9 @@ fn truncate_with_marker(s: &str, max_w: usize) -> String {
 
 /// Soft-wrap `s` to `width` display columns.
 ///
-/// Line feeds are hard breaks (blank lines are preserved) and tabs become a
-/// single space, because a `Line` renders as one row and ratatui drops control
-/// characters — an unsplit `"a\nb"` would draw as `ab` and mis-size the box.
+/// Line terminators are hard breaks (blank lines are preserved), tabs become a
+/// single space and any other control character is dropped — a `Line` renders as
+/// one row, so an unsplit `"a\nb"` would draw as `ab` and mis-size the box.
 /// Within a logical line: greedy word wrap on single spaces, with tokens wider
 /// than the line hard-broken on grapheme-cluster boundaries so nothing overflows.
 ///
@@ -562,13 +563,38 @@ fn wrap_display(s: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];
     }
-    let normalized = s
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .replace('\t', " ");
     let mut out = Vec::new();
-    for logical in normalized.split('\n') {
+    for logical in normalize_for_wrap(s).split('\n') {
         out.extend(wrap_logical_line(logical, width));
+    }
+    out
+}
+
+/// Fold every line terminator to `\n`, tabs to a space, and drop any other
+/// control character.
+///
+/// A `Line` is one rendered row, so an embedded terminator has to become a real
+/// row split. The remaining controls are dropped rather than kept: ratatui would
+/// pass them through to the terminal, where an ESC from a source string literal
+/// is an escape sequence, not text.
+fn normalize_for_wrap(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                // CRLF is one break, not two.
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\n');
+            }
+            // LF, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR.
+            '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => out.push('\n'),
+            '\t' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
     }
     out
 }
@@ -1840,6 +1866,21 @@ mod tests {
     }
 
     #[test]
+    fn wrap_display_strips_other_control_characters() {
+        // NEL / LS / PS are line terminators too.
+        assert_eq!(wrap_display("a\u{85}b", 40), vec!["a", "b"]);
+        assert_eq!(wrap_display("a\u{2028}b", 40), vec!["a", "b"]);
+        assert_eq!(wrap_display("a\u{2029}b", 40), vec!["a", "b"]);
+        // Everything else is dropped: ratatui would hand an ESC straight to the
+        // terminal, where it is an escape sequence rather than text.
+        assert_eq!(wrap_display("a\u{1b}[31mb", 40), vec!["a[31mb"]);
+        assert_eq!(wrap_display("a\u{0}\u{7}\u{b}\u{c}b", 40), vec!["ab"]);
+        for row in wrap_display("\u{1b}]0;title\u{7}text", 40) {
+            assert!(!row.chars().any(char::is_control), "{row:?}");
+        }
+    }
+
+    #[test]
     fn detail_message_with_newlines_becomes_separate_rows() {
         let d = diag(Severity::Error, "line one\nline two\nline three");
         assert_eq!(
@@ -1931,8 +1972,8 @@ mod tests {
         app.toggle_density();
         assert_eq!(
             app.detail_scroll(),
-            0,
-            "density toggle resets detail scroll"
+            1,
+            "density is a list concern; the detail box is unchanged"
         );
     }
 
