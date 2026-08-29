@@ -1985,8 +1985,10 @@ mod tests {
     /// `set_var`, so no sibling test can observe them (B032).
     const UNUSED_CALLBACKS_LOAD_CHILD: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_CHILD";
     const UNUSED_CALLBACKS_LOAD_ROOT: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_ROOT";
-    /// Written into each scenario's fixture by the parent, read back by the
-    /// child: proves the invocation is this harness's, not a stale export.
+    const UNUSED_CALLBACKS_LOAD_TOKEN: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_TOKEN";
+    /// Written into each scenario's fixture by the parent with a fresh token,
+    /// then read back by the child: proves the invocation is this harness's,
+    /// not a stale export.
     const LOAD_HANDSHAKE_FILE: &str = ".b051-load-wiring-handshake";
 
     #[test]
@@ -2918,10 +2920,10 @@ shortcut_match_enums = true
     /// SUBPROCESS with a fake `HOME`, so the ladder is exercised end to end
     /// without an in-process `set_var` racing a sibling test (B032).
     ///
-    /// The child prints `[SCENARIO OK: <name>]` and the parent requires it:
-    /// `libtest --exact` exits 0 when the filter matches NOTHING, so a
-    /// renamed child or an unpropagated env var would otherwise show green
-    /// while asserting nothing at all.
+    /// The child prints `[SCENARIO OK: <name>; TOKEN: <token>]` and the parent
+    /// requires the fresh token: `libtest --exact` exits 0 when the filter
+    /// matches NOTHING, so a renamed child, stale invocation, or unpropagated
+    /// env var would otherwise show green while asserting nothing at all.
     #[test]
     fn unused_callbacks_load_wiring_end_to_end() {
         let tmp = std::env::temp_dir().join(format!("oplsp-uc-load-{}", std::process::id()));
@@ -2937,6 +2939,73 @@ shortcut_match_enums = true
             .split_once("::")
             .map_or(module_path!(), |(_crate, rest)| rest);
         let child_filter = format!("{module}::unused_callbacks_load_wiring_child");
+        // Each `RandomState` is independently and unpredictably keyed; hashing
+        // an empty input with two of them gives this parent a fresh 128-bit
+        // token without adding a test-only dependency to the crate.
+        let run_token = {
+            use std::hash::{BuildHasher, Hasher};
+
+            let first = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            let second = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            format!("{first:016x}{second:016x}")
+        };
+
+        // Reproduce the developer invocations that this subprocess protocol
+        // must make inert: `--include-ignored` with either the old exported
+        // variables and scenario-only fixture, or a fresh env token paired
+        // with a stale fixture token. Neither may reach the success marker.
+        for (stale_name, fixture_token) in [
+            ("scenario-only", None),
+            ("mismatched-token", Some("stale-token")),
+        ] {
+            let stale_case = tmp.join(stale_name);
+            let stale_home_config = stale_case.join("home/.config/openplanet-lsp");
+            std::fs::create_dir_all(&stale_home_config).unwrap();
+            std::fs::write(
+                stale_home_config.join("config.toml"),
+                "unused_callbacks = [\"FromUser\"]\n",
+            )
+            .unwrap();
+            let stale_handshake = fixture_token.map_or_else(
+                || "user-only".to_string(),
+                |token| format!("user-only\n{token}\n"),
+            );
+            std::fs::write(stale_case.join(LOAD_HANDSHAKE_FILE), stale_handshake).unwrap();
+            let mut stale_command = std::process::Command::new(std::env::current_exe().unwrap());
+            stale_command
+                .arg("--exact")
+                .arg(&child_filter)
+                .arg("--include-ignored")
+                .arg("--nocapture")
+                .arg("--test-threads=1")
+                .env("HOME", stale_case.join("home"))
+                .env_remove("USERPROFILE")
+                .env(UNUSED_CALLBACKS_LOAD_CHILD, "user-only")
+                .env(UNUSED_CALLBACKS_LOAD_ROOT, &stale_case);
+            if fixture_token.is_some() {
+                stale_command.env(UNUSED_CALLBACKS_LOAD_TOKEN, &run_token);
+            } else {
+                stale_command.env_remove(UNUSED_CALLBACKS_LOAD_TOKEN);
+            }
+            let stale_output = stale_command.output().unwrap();
+            let stale_stdout = String::from_utf8_lossy(&stale_output.stdout);
+            let stale_stderr = String::from_utf8_lossy(&stale_output.stderr);
+            if !stale_output.status.success() {
+                failures.push(format!(
+                    "stale-handshake control {stale_name} failed to exit cleanly:\n\
+                     stdout:\n{stale_stdout}\nstderr:\n{stale_stderr}"
+                ));
+            } else if stale_stdout.contains("[SCENARIO OK:") {
+                failures.push(format!(
+                    "stale-handshake control {stale_name} reached the child assertions:\n\
+                     stdout:\n{stale_stdout}\nstderr:\n{stale_stderr}"
+                ));
+            }
+        }
 
         for scenario in ["user-only", "workspace", "parent-root", "malformed"] {
             let case = tmp.join(scenario);
@@ -2980,14 +3049,20 @@ shortcut_match_enums = true
                 _ => unreachable!(),
             }
             // Handshake: the child refuses to assert unless this file, written
-            // moments ago by this parent, names the scenario its env claims.
-            std::fs::write(case.join(LOAD_HANDSHAKE_FILE), scenario).unwrap();
+            // moments ago by this parent, names both the scenario and this
+            // parent's fresh token.
+            std::fs::write(
+                case.join(LOAD_HANDSHAKE_FILE),
+                format!("{scenario}\n{run_token}\n"),
+            )
+            .unwrap();
 
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .arg("--exact")
                 .arg(&child_filter)
                 // The child is `#[ignore]`d so an ordinary run cannot execute
-                // it; only this deliberate invocation opts it back in.
+                // it. This deliberate invocation opts it back in; a developer
+                // can also do so with `--include-ignored`, hence the token.
                 .arg("--include-ignored")
                 // libtest captures stdout by default and prints it only for a
                 // FAILING test, so the success marker needs `--nocapture`.
@@ -2999,6 +3074,7 @@ shortcut_match_enums = true
                 .env_remove("USERPROFILE")
                 .env(UNUSED_CALLBACKS_LOAD_CHILD, scenario)
                 .env(UNUSED_CALLBACKS_LOAD_ROOT, &case)
+                .env(UNUSED_CALLBACKS_LOAD_TOKEN, &run_token)
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -3007,7 +3083,7 @@ shortcut_match_enums = true
             // another's marker by being a prefix of it — and so the check does
             // not depend on where libtest puts the text. Under `--nocapture`
             // it lands inline on the progress line, not on one of its own.
-            let ran = stdout.contains(&format!("[SCENARIO OK: {scenario}]"));
+            let ran = stdout.contains(&format!("[SCENARIO OK: {scenario}; TOKEN: {run_token}]"));
             if !output.status.success() {
                 failures.push(format!(
                     "scenario {scenario} failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -3032,7 +3108,8 @@ shortcut_match_enums = true
     /// developer who happens to export both protocol variables gets an
     /// unlocked `$HOME` read racing every sibling test — precisely the
     /// process-global env race B032 fixed. Ignored, it cannot run at all
-    /// unless something opts it in, which only the parent above does.
+    /// unless something opts it in, which the parent above or a developer's
+    /// explicit `--include-ignored` run can do.
     ///
     /// The env protocol and the on-disk handshake remain as belt and braces
     /// for the one case `#[ignore]` leaves open: a developer running
@@ -3040,16 +3117,19 @@ shortcut_match_enums = true
     #[test]
     #[ignore = "child of unused_callbacks_load_wiring_end_to_end; that test spawns it"]
     fn unused_callbacks_load_wiring_child() {
-        let (Ok(scenario), Some(root)) = (
+        let (Ok(scenario), Some(root), Ok(token)) = (
             std::env::var(UNUSED_CALLBACKS_LOAD_CHILD),
             std::env::var_os(UNUSED_CALLBACKS_LOAD_ROOT),
+            std::env::var(UNUSED_CALLBACKS_LOAD_TOKEN),
         ) else {
             return;
         };
         let case = PathBuf::from(root);
-        // A stale or hand-exported environment cannot forge this: only the
-        // parent writes the file, into the fixture it just built.
-        if std::fs::read_to_string(case.join(LOAD_HANDSHAKE_FILE)).ok() != Some(scenario.clone()) {
+        // Require the scenario and the parent's fresh, unpredictable token;
+        // stale scenario-only fixtures and exported variables cannot opt in.
+        let expected_handshake = format!("{scenario}\n{token}\n");
+        if std::fs::read_to_string(case.join(LOAD_HANDSHAKE_FILE)).ok() != Some(expected_handshake)
+        {
             return;
         }
 
@@ -3102,7 +3182,7 @@ shortcut_match_enums = true
             }
             other => panic!("unknown child scenario: {other}"),
         }
-        println!("[SCENARIO OK: {scenario}]");
+        println!("[SCENARIO OK: {scenario}; TOKEN: {token}]");
     }
 
     /// Malformed values are ignored, never panic, and never poison the
