@@ -35,3 +35,4 @@ bugs:
     - file: B034-vs-code-no-ui-to-add-remove-to.todo
     - file: B035-code-actions-advertise-no-kind.todo
     - file: B036-quick-fixes-for-diagnostics-wh.todo
+    - file: B037-quick-fixes-for-conversion-and.todo

@@ -1,0 +1,95 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:05:36Z"
+depends_on:
+    - B035
+estimate_hours: 1
+id: B037
+priority: medium
+status: pending
+tags:
+    - lsp
+    - code-actions
+    - ux
+title: Quick fixes for conversion and structural diagnostics (casts, unreachable, missing return)
+updated_at: "2026-08-29T15:05:36Z"
+---
+Found by a coordinator feature-gap review, 2026-08-30. Depends on B035.
+
+## Gap
+Five diagnostic families are mechanically fixable but offer no edit. Unlike
+B036 these need a little type knowledge, not just a span replacement.
+
+- `FloatTruncation { literal: bool }` (checker.rs) — two message variants:
+  `literal: true` (`int ms = 3.7;`) and `literal: false` (`int g = f;`).
+  Fixes: wrap in an explicit cast `int(x)`, or (literal case) change the
+  literal to an integral one. Offer the cast as preferred; changing a literal
+  silently changes the VALUE and must not be preferred.
+- `SignChange` (`uint u = -1;`) — fix: change the declared type to a signed
+  one, or cast. Neither is preferred; both change meaning.
+- `SignedUnsignedMismatch` (relational compare across signedness) — fix:
+  insert a cast on one side. Offer BOTH sides as separate actions; the correct
+  one depends on intent.
+- `UnreachableCode` — fix: delete the dead tail. Span is already known.
+- `MissingReturn { function_name }` — fix: insert `return <default>;` at the
+  end of the function body, using a return-type default table
+  (`int`->`0`, `float`->`0.0f`? confirm AngelScript literal form,
+  `bool`->`false`, `string`->`""`, handle `T@`->`null`, `void`-> no-op /
+  no action). Non-preferred: a plausible-looking wrong return is worse than a
+  compile error, so this must be clearly labelled and never auto-applied by
+  fixAll.
+
+## Design decision (coordinator, 2026-08-30)
+`MissingReturn` and the literal-rewriting variant of `FloatTruncation` are
+EXCLUDED from `source.fixAll.openplanet`. Both can silently change program
+behaviour rather than merely tidy it. They remain available as explicit
+per-diagnostic quick fixes. `UnreachableCode` deletion is likewise excluded
+from fixAll — deleting code on save is not a tidy-up.
+
+fixAll includes only: the cast insertions (`FloatTruncation` cast variant,
+`SignedUnsignedMismatch`), which are behaviour-preserving relative to what the
+game compiler already does implicitly.
+
+## Test plan (TDD, red first)
+Red, one per family: fixture with the diagnostic -> the expected action(s)
+offered, applied edit yields the expected text.
+
+Variants (per CLAUDE.md, generalize):
+
+`FloatTruncation`:
+- literal and non-literal variants both fixable, with DIFFERENT action sets
+- targets `int`, `uint`, `int8/16/64` and the unsigned widths — all offered
+- targets `float`/`double` -> no diagnostic, no action (regression guard,
+  the checker already special-cases these)
+- initializer is a complex expression -> cast wraps the WHOLE expression, with
+  parens, and the result still parses
+
+`SignChange`:
+- `uint u = -1;` fixable; runtime `int`->`uint` of a variable -> no diagnostic
+  and no action (game behaviour, guard it)
+- all unsigned widths
+
+`SignedUnsignedMismatch`:
+- each of `<`, `<=`, `>`, `>=` produces the fix
+- BOTH cast-left and cast-right actions offered and distinguishable by title
+- `==`/`!=` -> no diagnostic (confirm current behaviour first, then guard it)
+- Error / unknown / non-primitive operands -> no action
+
+`UnreachableCode`:
+- dead tail after `return`, after `break`, after `continue`, after `throw` if
+  supported
+- dead tail spanning multiple statements -> single deletion of the whole run
+- dead tail containing a nested block / closing braces -> deletion leaves the
+  function parseable (assert the result re-parses clean, not just the text)
+
+`MissingReturn`:
+- each primitive return type gets the right default
+- handle return `T@` -> `null`
+- `void` -> no action offered at all
+- a function with SOME return paths -> insertion goes at the missing path, or
+  the action is not offered if the correct insertion point is ambiguous
+  (decide and document; do not guess an insertion point)
+- fixAll on a document containing all five families applies ONLY the casts
+
+## Related
+B035 (seam), B036, B038.
