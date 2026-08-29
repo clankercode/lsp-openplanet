@@ -1,4 +1,7 @@
 ---
+claimed_at: "2026-08-29T18:19:20Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T15:05:36Z"
 depends_on:
@@ -6,13 +9,11 @@ depends_on:
 estimate_hours: 5
 id: B037
 priority: medium
-status: pending
-tags:
-    - lsp
-    - code-actions
-    - ux
+started_at: "2026-08-29T18:19:20Z"
+status: in_progress
+tags: []
 title: Quick fixes for conversion and structural diagnostics (casts, unreachable, missing return)
-updated_at: "2026-08-29T15:05:36Z"
+updated_at: "2026-08-29T18:19:20Z"
 ---
 Found by a coordinator feature-gap review, 2026-08-30. Depends on B035.
 
