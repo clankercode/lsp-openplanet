@@ -8,7 +8,8 @@ id: B029
 priority: high
 started_at: null
 status: pending
-tags: []
+tags:
+    - tui
 title: TUI diagnostic messages are cut off at narrow widths with no way to read the full text
 updated_at: "2026-08-29T08:52:48Z"
 ---
