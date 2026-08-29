@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-29T13:30:16Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T16:03:50Z"
 complexity: medium
 created_at: "2026-08-23T16:52:13Z"
 depends_on: []
+duration_minutes: 153.57399100036668
 estimate_hours: 3
 id: B019
 priority: high
 started_at: "2026-08-29T13:30:16Z"
-status: in_progress
+status: done
 tags: []
 title: DEPENDENCY_<ID> defined for unresolved optional deps (define-set mismatch with game)
-updated_at: "2026-08-29T13:30:16Z"
+updated_at: "2026-08-29T16:03:50Z"
 ---
 Found by the B013 lane (GH #58) while building the namespace-rule authority
 guard, 2026-08-24. Pre-existing; independent of that rule.
@@ -184,3 +185,77 @@ its numbers.
 Command used:
   ./target/debug/openplanet-lsp check --typedb-dir tests/fixtures/typedb \
       tests/fixtures/<fixture>
+
+## Merged (coordinator, 2026-08-30)
+
+Merged to master as 2f38818. Parent-review gate run independently: 1422
+passed / 0 failed; all five FP fixtures byte-identical to master with full
+check output diffed. History verified unrewritten (9479673 still an ancestor).
+
+Merge conflict in tests/cli_check_tests.rs resolved by keeping BOTH added
+tests — B016's anon-member-enum repro and B019's --plugins-dir probe guard
+were independent additions at the same end-of-file location, base empty.
+cli_check_tests: 97 passed after resolution.
+
+## CAVEAT FOR ALL FUTURE BASELINING (important)
+
+B019 makes fixture output depend on WHICH PLUGINS ARE INSTALLED LOCALLY,
+because the game's define set does too. A dependency that resolves on this
+machine yields a live `#if DEPENDENCY_X` branch; on a machine without it the
+branch is masked and its consumers become unused.
+
+Demonstrated: isolating the plugin install so MLHook stops resolving moves
+tm-dips-plus-plus 283 -> 290 diagnostics, the 7 added all being 'never used'
+warnings for declarations whose only consumers live in the now-masked block.
+Correct behaviour — but it means a fixture baseline is no longer a property of
+the tree alone.
+
+So: B019-adjacent baselining must PIN THE PLUGIN INSTALL, not just the tree.
+Two binaries compared on the same machine at the same time is still a valid
+A/B (that is what the merge gate used); comparing against a number recorded
+elsewhere or earlier is not.
+
+Related hazard found by the Codex review on this branch:
+`check_command_applies_manifest_defines_and_dependency_defines` implicitly
+relied on this machine's installed `Editor` plugin — it asserted a
+DEPENDENCY_EDITOR branch was live, which after B019 only holds if Editor
+resolves. It passed here and would have failed on a clean machine or in CI.
+Fixed on the branch by provisioning the dependency in the fixture.
+
+## Test-suite hermeticity verified (lane, 2026-08-30)
+
+Question asked: does any OTHER test share the machine-dependence Codex found
+in check_command_applies_manifest_defines_and_dependency_defines?
+
+Method (an experiment, not a grep): cargo test cannot run under a fake HOME
+(rustup needs it to locate a toolchain), so the lane built normally, collected
+all 16 test binaries via 'cargo test --no-run', and ran each directly with
+HOME and USERPROFILE pointed at an empty directory. That simulates a machine
+with no Openplanet install AND no user config, since both
+~/OpenplanetNext/Plugins (the auto-detected plugins dir) and
+~/.config/openplanet-lsp/config.toml are HOME-derived.
+
+Result: all 16 binaries, 1426 tests, 0 failures.
+
+CRITICALLY, the detector was validated before the negative result was
+trusted. The pre-fix tree (4ce1e93) was archived to a scratch dir, built in
+isolation, and the offending test run both ways:
+  real HOME (Editor installed) -> passes
+  clean HOME                   -> FAILS
+So the method reproduces the known bug, and the clean sweep is meaningful
+evidence rather than a vacuous pass.
+
+Answer: no other test in the suite has this dependence.
+
+Stated limits of the claim (both honest and worth keeping):
+- It would not catch a test depending on an absolute path OUTSIDE HOME. The
+  lane confirmed by reading call sites that every --plugins-dir in the suite
+  points inside a temp fixture, so there are none today.
+- It cannot catch a test depending on the ABSENCE of a locally installed
+  plugin (would fail here, pass elsewhere) — but the suite is green under
+  both homes, so no such test exists either.
+
+The Codex fix itself: provisions Editor inside the test's own fixture dir,
+points the run at it with an explicit --plugins-dir, and isolates HOME. 15
+added lines, test-only, no production code. Landed as dba3178 on top of
+4ce1e93; no history rewritten.

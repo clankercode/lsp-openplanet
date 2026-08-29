@@ -159,6 +159,20 @@ default_mode = "tui"   # or "lsp"
 # shortcut_disable_default_namespaces = false
 # shortcut_match_enums = false
 
+# Dependency defines. Openplanet defines DEPENDENCY_<ID> only for
+# dependencies it actually LOADED, so openplanet-lsp does the same: a
+# dependency declared in info.toml but not installed here gets no define, and
+# its `#if DEPENDENCY_X` code is masked out exactly as the game masks it.
+# <ID> is the plugin id (the folder name, or a .op file's base name) in
+# uppercase with spaces, dashes and periods replaced by underscores —
+# `static-loading-screen` becomes DEPENDENCY_STATIC_LOADING_SCREEN. Note that
+# mapping collides: my-plugin and my.plugin both give MY_PLUGIN. That is
+# Openplanet's own rule, so it is reproduced rather than "fixed"; declaring
+# two ids that collapse together warns.
+# To check the OTHER branch state — your plugin ships to users who do have the
+# dependency — name the macro as a define_matrix axis (below) or add it to
+# `defines`. Both override the resolution gate deliberately.
+
 # Define matrix (CLI `check` only; the LSP server keeps one live define
 # set). define_matrix lists axes toggled on/off on top of the base define
 # set — check runs the cross-product of all combos through the full
@@ -500,6 +514,44 @@ cargo build --release
 ./target/release/openplanet-lsp --help
 cargo test
 ```
+
+### Hermetic test gate
+
+`DEPENDENCY_<ID>` is defined only when the dependency actually **resolves**, so
+a test can quietly start depending on which plugins exist in the author's
+`~/OpenplanetNext/Plugins` — passing locally and failing for everyone else,
+looking like flakiness rather than a hermeticity bug.
+
+```bash
+just test                     # normal run — what you iterate against
+just test-hermetic            # same suite, HOME/USERPROFILE isolated (also a CI step)
+just test-hermetic-selftest   # proves the gate can actually fail
+```
+
+`just test-hermetic` builds with `cargo test --no-run` and then executes each
+test binary directly with `HOME` and `USERPROFILE` pointed at a fresh empty
+directory (cargo itself cannot run under a fake `HOME` — rustup resolves the
+toolchain through it). That covers both HOME-derived surfaces: the auto-detected
+install dir and `~/.config/openplanet-lsp/config.toml`.
+
+It also **unsets `XDG_CONFIG_HOME`, `APPDATA` and every `OPENPLANET*`
+variable** for the run. Those win over `HOME` — `OPENPLANET_REAL_PLUGINS_DIR`
+is passed straight through as `--plugins-dir` — so exporting one (which is what
+they are for) would otherwise hand a real install back to a run whose `HOME` is
+a sandbox. Tests gated on them take their documented skip path here; use
+`just test` when you want them. Both recipes need `python3`, as the `tui-*`
+recipes already do.
+
+A test that needs a real install is fine, but must say so — provision it inside
+the test's own fixture dir with an explicit `--plugins-dir`, or mark it
+`#[ignore = "<reason>"]`. A test that needs one *by accident* is the bug.
+
+**It does not catch everything.** Absolute paths outside `HOME` (a hardcoded
+`--plugins-dir /opt/...`) are untouched by the isolation, and a test depending
+on a plugin being *absent* is green under the gate and red on a developer box.
+Both limits are kept executable as `uncaught_*` canaries in
+`tests/hermeticity_canary.rs`; the full list is in the header of
+`scripts/test-hermetic.py`.
 
 ## Smoke tests
 

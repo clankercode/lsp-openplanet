@@ -23,6 +23,19 @@ jobs:
       # line inside the suite. Offline — no DB is ever fetched in CI.
       - name: Type-DB fixture shape guard
         run: cargo test --locked --lib typedb_shape_guard
+      # B045: since B019 the DEPENDENCY_<ID> define set depends on which
+      # plugins actually resolve, so a test can silently start depending on
+      # the author's ~/OpenplanetNext install. These two steps ride the build
+      # above (like the guard) rather than forking a job, but are named so a
+      # hermeticity failure is its own line rather than one inside the suite.
+      # The self-test runs first: it is seconds, and it is what proves the gate
+      # below can go red at all. Both are machine-independent — on a runner
+      # with no Openplanet install the isolated HOME is simply an empty dir the
+      # suite never needed, and the canaries fail exactly as they do locally.
+      - name: Hermetic gate self-test
+        run: python3 scripts/test-hermetic.py --selftest
+      - name: Hermetic test run (isolated HOME)
+        run: python3 scripts/test-hermetic.py
       - name: Release build (smoke)
         run: cargo build --release --locked
 

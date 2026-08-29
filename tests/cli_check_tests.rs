@@ -959,6 +959,17 @@ void Main() {}
 #[test]
 fn check_command_applies_manifest_defines_and_dependency_defines() {
     let root = make_temp_plugin("manifest-defines");
+    let home = isolated_home("manifest-defines");
+    let plugins_dir = root.join("plugins");
+    fs::create_dir_all(plugins_dir.join("Editor")).unwrap();
+    // B019 only defines DEPENDENCY_<ID> for installed optional dependencies.
+    // Keep the dependency under this fixture's explicit search root so the
+    // assertion never relies on a developer's Openplanet plugin install.
+    fs::write(
+        plugins_dir.join("Editor/info.toml"),
+        "[meta]\nname = \"Editor\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
     fs::write(
         root.join("info.toml"),
         r#"
@@ -991,7 +1002,10 @@ void Main() {}
     let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
         .arg("check")
         .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(&plugins_dir)
         .arg(&root)
+        .env("HOME", &home)
         .output()
         .unwrap();
 
@@ -1008,6 +1022,7 @@ void Main() {}
     );
 
     let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
 }
 
 #[test]
@@ -2841,14 +2856,20 @@ fn check_command_namespace_members_union_across_modules() {
     let _ = fs::remove_dir_all(base);
 }
 
-/// GH #58 authority guard, optional-dependency half: `apply_manifest`
-/// defines `DEPENDENCY_<ID>` for every DECLARED dependency, resolved or
-/// not, so code behind `#if DEPENDENCY_MISSINGOPT` stays live even when the
-/// optional dep is not installed. The game would not define that macro and
-/// would mask the block out, so firing there is a false positive — an
-/// unresolved dependency of ANY kind must silence the rule.
+/// GH #58 authority guard, optional-dependency half — REWRITTEN by B019.
+///
+/// It used to assert that an uninstalled optional dep silences the namespace
+/// rule entirely, which was correct while `apply_manifest` defined
+/// `DEPENDENCY_<ID>` regardless: the guarded block stayed live against a
+/// module we do not have, so firing anywhere in the file was unsafe.
+///
+/// B019 removed the cause instead of the symptom. The macro is no longer
+/// defined, so the block is masked out exactly as the game masks it — and the
+/// rule REGAINS authority over the rest of the file. Both halves are asserted:
+/// nothing fires inside the (now dead) guard, and a genuinely unknown member
+/// OUTSIDE it is reported again.
 #[test]
-fn check_command_unknown_namespaced_symbol_silent_when_optional_dep_missing() {
+fn check_command_unknown_namespaced_symbol_rearms_when_optional_dep_missing() {
     let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-opt-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(base.join("plugins")).unwrap();
@@ -2860,7 +2881,7 @@ fn check_command_unknown_namespaced_symbol_silent_when_optional_dep_missing() {
     .unwrap();
     fs::write(
         base.join("consumer/src/Main.as"),
-        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n#if DEPENDENCY_MISSINGOPT\n    Shared::FromTheOptionalDep();\n#endif\n}\n",
+        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n    Shared::NotDeclaredAnywhere();\n#if DEPENDENCY_MISSINGOPT\n    Shared::FromTheOptionalDep();\n#endif\n}\n",
     )
     .unwrap();
 
@@ -2875,8 +2896,15 @@ fn check_command_unknown_namespaced_symbol_silent_when_optional_dep_missing() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains("No matching symbol"),
-        "an unresolved optional dependency must silence the rule; stdout={stdout:?}"
+        !stdout.contains("Shared::FromTheOptionalDep"),
+        "the `#if DEPENDENCY_MISSINGOPT` block must be masked out, exactly as \
+         the game masks it; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("No matching symbol 'Shared::NotDeclaredAnywhere'"),
+        "with the phantom define gone the pooled table IS the complete compile \
+         surface, so the rule must re-arm for the rest of the file; \
+         stdout={stdout:?}"
     );
     let _ = fs::remove_dir_all(base);
 }
@@ -3638,24 +3666,168 @@ fn check_help_mentions_errors_flag() {
 /// formerly-collided enums and argument passing are all legal on a member
 /// whose type is an unnamed enum. The LSP must agree, and does.
 ///
-/// The same probe reports 3 ERRs (`No matching symbol`) on the three lines of
-/// `BareEnumValueNames`, where the LSP is deliberately silent — a
-/// PRE-EXISTING false negative in `GlobalScope::has_global_ident` that B016
-/// makes uniform rather than arbitrary, because the ticket forbids
-/// tightening. See the note in the fixture. Narrowing that scan to named
-/// enums is its own ticket; when it lands this assertion must change from
-/// `0 diagnostics` to those three errors.
-///
-/// Red before, green after for part of it: `MinimalReadOnly`,
-/// `TimeHhMmSsMil` and `Text_Icon` were `undefined identifier` on a build of
-/// 91a296c because their enum lost its module's collision. Everything else
-/// was clean there too and must stay that way.
+/// B044 (this assertion's other half): the same probe reports 3 ERRs
+/// (`No matching symbol`) on the three lines of `BareEnumValueNames`, where
+/// the LSP used to be silent. It is not any more — the bare-value scan is
+/// narrowed to enums a source can name. The game stops at the first bad
+/// symbol in a statement and so reports 3; the LSP checks every identifier
+/// and reports all 8. Same verdict, finer granularity.
 #[test]
-fn check_command_issue_repro_b016_anon_member_enums_is_clean() {
-    let (ok, stdout, stderr) = run_issue_repro_typedb("b016-anon-member-enums");
-    assert!(
-        ok && stdout.contains("0 diagnostics"),
-        "engine members typed by an anonymous inline enum must stay silent; \
+fn check_command_issue_repro_b016_anon_member_enums_diagnoses_only_bare_value_names() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b016-anon-member-enums");
+    let undefined: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("undefined identifier"))
+        .collect();
+    assert_eq!(
+        undefined.len(),
+        8,
+        "only the 8 bare unnamed-enum value names may be diagnosed; \
          stdout={stdout:?} stderr={stderr:?}"
     );
+    for name in [
+        "HyperTnL",
+        "SlideNoControl",
+        "NotTimed",
+        "RenderPlaneReflect",
+        "Download_WaitingSources",
+        "MinimalReadOnly",
+        "TimeHhMmSsMil",
+        "Text_Icon",
+    ] {
+        assert!(
+            undefined.iter().any(|l| l.contains(name)),
+            "`{name}` must be diagnosed; stdout={stdout:?}"
+        );
+    }
+    assert!(
+        stdout.contains("8 diagnostics (8 errors)"),
+        "member access, comparison, write and argument passing must stay silent; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+/// B044: the exhaustive probe. Every value name of every anonymous member
+/// enum in the shipped type DB that does NOT also belong to a named enum —
+/// 261 of them, generated by `scripts/gen_b044_probe.py`, one statement per
+/// line so the game reports one error per name.
+///
+/// Game ground truth (RemoteBuild probe 2026-08-30, OP 1.29.5): 258 of the
+/// 261 rejected with `No matching symbol`. Before B044 the LSP was silent on
+/// all 261; it now errors on all 261.
+///
+/// The 3-name difference is a KNOWN residual FALSE POSITIVE, marked in the
+/// fixture: `DoubleJump`, `Jump` and `TechJump` are values of
+/// `Scene::ESceneCharVisNotice`, one of 47 MODULE-LEVEL engine enums the
+/// Nadeo dump cannot represent — its `ns` map holds types only. 52 further
+/// value names of those enums already fail to resolve, so this is a
+/// pre-existing gap that the anonymous-enum scan was accidentally masking
+/// for exactly these 3. When that gap is closed the count here drops to 258.
+#[test]
+fn check_command_issue_repro_b044_anon_enum_value_names_all_error() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b044-anon-enum-value-names");
+    let undefined: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("undefined identifier"))
+        .collect();
+    assert_eq!(
+        undefined.len(),
+        261,
+        "every bare anonymous-enum value name must be diagnosed; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    // Three of the probed names the game ACCEPTS. Pinned so closing the
+    // module-level-enum gap fails here and this test is updated to 258
+    // rather than the residual silently changing size.
+    for name in ["DoubleJump", "Jump", "TechJump"] {
+        assert!(
+            undefined.iter().any(|l| l.contains(&format!("`{name}`"))),
+            "known residual FP `{name}` changed shape; stdout={stdout:?}"
+        );
+    }
+    assert!(
+        stdout.contains("261 diagnostics (261 errors)"),
+        "the probe must produce nothing but the undefined identifiers; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+/// B044: the probe fixture is generated, and it is only ground truth if it
+/// still matches the type DB it was generated from. Regenerate with
+/// `scripts/gen_b044_probe.py` after a `typedb refresh`.
+///
+/// This guards the whole file — header counts and comments included. The
+/// load-bearing half, that the fixture lists exactly the set the checker
+/// narrows, is asserted in Rust by
+/// `global_scope::tests::the_narrowing_touches_only_anonymous_only_value_names`.
+///
+/// A missing `python3` FAILS rather than skips: a guard that quietly
+/// disappears on some machines is worse than no guard, and every runner this
+/// project builds on has it (`scripts/` is Python throughout).
+#[test]
+fn b044_probe_fixture_matches_the_shipped_type_db() {
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new("python3")
+        .arg(repo.join("scripts/gen_b044_probe.py"))
+        .arg("--check")
+        .current_dir(&repo)
+        .output()
+        .expect("python3 must be available to check the generated B044 fixture");
+    assert!(
+        output.status.success(),
+        "tests/fixtures/issue-repros/b044-anon-enum-value-names/Main.as is stale; \
+         regenerate with scripts/gen_b044_probe.py. stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// B019: the config layer decides whether `DEPENDENCY_<ID>` is defined, and it
+/// must resolve dependencies over the SAME search dirs the workspace loader
+/// uses — `--plugins-dir` included. If the probe saw fewer dirs than the
+/// loader it would withhold the define for a dependency whose symbols ARE
+/// pooled, masking out code the game compiles: a silent loss of coverage in
+/// the opposite direction to the bug B019 fixes.
+#[test]
+fn check_command_plugins_dir_flag_is_visible_to_the_dependency_define_probe() {
+    let base = std::env::temp_dir().join(format!(
+        "openplanet-lsp-b019-plugins-dir-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("deps/ZzzFlagOnlyDep/src")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("deps/ZzzFlagOnlyDep/info.toml"),
+        "[meta]\nname = \"ZzzFlagOnlyDep\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"FlagDepConsumer\"\nversion = \"0.1.0\"\n\n[script]\noptional_dependencies = [\"ZzzFlagOnlyDep\"]\n",
+    )
+    .unwrap();
+    // The guarded body is only CHECKED when the define is live, so the
+    // undefined identifier is the observable for "the branch is live".
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "void Main() {\n#if DEPENDENCY_ZZZFLAGONLYDEP\n    ZzzDefinitelyUndefinedIdentifier();\n#endif\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("deps"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ZzzDefinitelyUndefinedIdentifier"),
+        "a dependency resolvable only via --plugins-dir must still define its \
+         DEPENDENCY_ macro, keeping the guarded branch live; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
 }

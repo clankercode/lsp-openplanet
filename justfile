@@ -31,6 +31,20 @@ install: build
 test:
     cargo test --locked
 
+# B045: same suite, but every test binary runs with HOME/USERPROFILE pointed at
+# an empty dir — a test that depends on this machine's Openplanet install or
+# user config goes red here instead of on someone else's machine. ADDITIONAL to
+# `just test`, deliberately not a replacement: the normal run is faster and is
+# what you iterate against. Limits are documented in scripts/test-hermetic.py.
+test-hermetic:
+    python3 scripts/test-hermetic.py
+
+# Proves the gate above can actually fail: runs the #[ignore]d canaries in
+# tests/hermeticity_canary.rs under the same isolated env and checks each lands
+# on its documented side (caught_* must FAIL, uncaught_* must PASS).
+test-hermetic-selftest:
+    python3 scripts/test-hermetic.py --selftest
+
 # Fast unit tests only
 test-lib:
     cargo test --lib

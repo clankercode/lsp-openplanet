@@ -1,0 +1,100 @@
+---
+claimed_at: "2026-08-29T16:12:11Z"
+claimed_by: cli-user
+completed_at: "2026-08-29T16:40:36Z"
+complexity: medium
+created_at: "2026-08-29T16:09:21Z"
+depends_on: []
+duration_minutes: 28.427459922016666
+estimate_hours: 3
+id: B045
+priority: high
+started_at: "2026-08-29T16:12:11Z"
+status: done
+tags: []
+title: No gate stops a test depending on the local machine's Openplanet install
+updated_at: "2026-08-29T16:40:36Z"
+---
+Found during the B019 parent review, 2026-08-30. The bug class it guards is
+newly load-bearing as of B019.
+
+## Why this matters now
+Before B019, `DEPENDENCY_<ID>` was defined for every dependency DECLARED in
+info.toml, so a `#if DEPENDENCY_X` branch was live regardless of what was
+installed. After B019 the define is gated on the dependency actually
+RESOLVING — which means **test outcomes now depend on which plugins exist in
+`~/OpenplanetNext/Plugins` on the machine running them.**
+
+One instance already slipped in and was caught only by a review agent:
+`check_command_applies_manifest_defines_and_dependency_defines` asserted a
+`#if DEPENDENCY_EDITOR` branch was live. `Editor` happens to be installed on
+the dev box, so it passed here and would have failed for anyone without it —
+including CI. It is now hermetic (the dependency is provisioned inside the
+test's own fixture dir, with an explicit `--plugins-dir` and an isolated
+`HOME`).
+
+The suite is currently clean: verified by running all 16 test binaries with
+`HOME`/`USERPROFILE` pointed at an empty directory — 1426 tests, 0 failures —
+with the method itself validated by confirming it FAILS on the pre-fix tree.
+See the B019 ticket for the full procedure.
+
+**But nothing preserves that property.** The check was manual and one-off. The
+next test that reads a real plugin install will pass on the author's machine
+and fail for everyone else, and the failure will look like flakiness rather
+than a hermeticity bug.
+
+## Work
+- Add a gate that runs the suite under an isolated `HOME`, so a test depending
+  on a local Openplanet install or user config fails at the point it is
+  written rather than on someone else's machine.
+- Note the constraint that shaped the manual procedure: `cargo test` cannot
+  simply be run with a fake `HOME`, because rustup needs the real one to
+  locate a toolchain. The working approach is `cargo test --no-run` to build
+  and enumerate the test binaries, then execute each directly with `HOME` and
+  `USERPROFILE` pointed at an empty dir. Reuse that shape.
+- Wire it into the repo's own gate — a `justfile` recipe (e.g. `test-hermetic`)
+  and CI, whichever CI this repo uses. Do not invent a parallel test runner.
+- Both `~/OpenplanetNext/Plugins` (auto-detected plugins dir) and
+  `~/.config/openplanet-lsp/config.toml` (user config) are HOME-derived, so
+  isolating HOME covers both surfaces.
+
+## Design decision (coordinator, 2026-08-30)
+The hermetic run is an ADDITIONAL gate, not a replacement for the normal one.
+Some tests legitimately exercise auto-detection against a real install; if any
+such test exists or is added later, it must be explicitly marked (a feature
+gate or an `#[ignore]` with a named reason) rather than silently relied upon.
+A test that needs a real install is fine; a test that needs one by accident is
+the bug.
+
+Do NOT make the hermetic run the default `just test` — the normal run is
+faster and is what developers iterate against.
+
+## Test plan (TDD, red first)
+Red: write a deliberately non-hermetic test (asserts on a plugin that exists
+only in a real `~/OpenplanetNext/Plugins`), confirm it PASSES under the normal
+gate and FAILS under the new hermetic gate. Then delete it, or keep it behind
+an ignore as the gate's own self-test — decide and document which.
+
+This red step is the whole point: a hermeticity gate that cannot fail is worse
+than none, because it manufactures confidence. The B019 lane validated its
+manual procedure exactly this way (archived the pre-fix tree, confirmed the
+offending test failed under a clean HOME) and that is the standard here.
+
+Variants (per CLAUDE.md, generalize):
+- a test reading `~/OpenplanetNext/Plugins` -> caught
+- a test reading `~/.config/openplanet-lsp/config.toml` -> caught
+- a test reading `$USERPROFILE` (the Windows-style path branch) -> caught
+- a test using an absolute path OUTSIDE HOME -> NOT caught by HOME isolation;
+  document this limit explicitly rather than implying full coverage (every
+  `--plugins-dir` in the suite currently points inside a temp fixture, which
+  is what makes the gate sufficient today)
+- a test depending on the ABSENCE of an installed plugin -> would fail on a
+  dev box and pass in CI; note it as the inverse case the gate cannot catch
+- the gate itself passes on a clean checkout with no Openplanet installed at
+  all (the CI case)
+
+## Related
+B019 (merged, 2f38818) — made the define set depend on actual resolution, and
+carries the full hermeticity procedure and its stated limits. B040 will add
+manifest diagnostics, another surface where a fixture could reach outside
+itself.

@@ -1,18 +1,18 @@
 ---
+claimed_at: "2026-08-29T16:42:04Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T15:06:44Z"
 depends_on: []
 estimate_hours: 5
 id: B040
 priority: high
-status: pending
-tags:
-    - lsp
-    - manifest
-    - dead-code
-    - diagnostics
+started_at: "2026-08-29T16:42:04Z"
+status: in_progress
+tags: []
 title: 'Manifest::validate is dead code: info.toml errors are computed by nobody and shown to nobody'
-updated_at: "2026-08-29T15:06:44Z"
+updated_at: "2026-08-29T16:42:04Z"
 ---
 Found by a coordinator feature-gap review, 2026-08-30. Verified on master
 @ 91a296c. Pre-existing.
