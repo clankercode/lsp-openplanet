@@ -19,6 +19,9 @@ pub struct App {
     selected_key: Option<String>,
     /// Inner list height from last draw (for viewport-aware paging).
     list_inner_h: u16,
+    /// First visible detail row — the detail box scrolls when the message
+    /// wraps past the box cap (B029).
+    detail_scroll: u16,
 }
 
 impl Default for App {
@@ -36,6 +39,7 @@ impl App {
             density: ListDensity::Compact,
             selected_key: None,
             list_inner_h: 10,
+            detail_scroll: 0,
         }
     }
 
@@ -55,6 +59,7 @@ impl App {
 
         let len = snap.diagnostics.len();
         self.snapshot = snap;
+        self.detail_scroll = 0;
         if len == 0 {
             self.list_state.select(None);
             self.selected_key = None;
@@ -102,6 +107,22 @@ impl App {
 
     pub fn toggle_density(&mut self) {
         self.density = self.density.toggle();
+        self.detail_scroll = 0;
+    }
+
+    /// First visible detail-box row (0 = top).
+    pub fn detail_scroll(&self) -> u16 {
+        self.detail_scroll
+    }
+
+    /// Scroll the detail box down one row. Clamped to the content at draw time.
+    pub fn scroll_detail_down(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_add(1);
+    }
+
+    /// Scroll the detail box up one row.
+    pub fn scroll_detail_up(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(1);
     }
 
     pub fn scroll_down(&mut self) {
@@ -144,6 +165,7 @@ impl App {
         if self.snapshot.diagnostics.is_empty() {
             self.list_state.select(None);
             self.selected_key = None;
+            self.detail_scroll = 0;
         } else {
             self.select_index(0);
         }
@@ -154,6 +176,7 @@ impl App {
         if len == 0 {
             self.list_state.select(None);
             self.selected_key = None;
+            self.detail_scroll = 0;
         } else {
             self.select_index(len - 1);
         }
@@ -162,6 +185,7 @@ impl App {
     fn select_index(&mut self, idx: usize) {
         self.list_state.select(Some(idx));
         self.selected_key = self.snapshot.diagnostics.get(idx).map(|d| d.identity_key());
+        self.detail_scroll = 0;
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -848,6 +872,7 @@ fn short_path(path: &std::path::Path) -> String {
 mod tests {
     use super::super::mock::canned_snapshot;
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn scroll_clamps() {
@@ -1032,6 +1057,447 @@ mod tests {
         assert!(h <= 10, "h={h}");
         let empty = detail_box_height(None, 78);
         assert!(empty >= 8, "empty={empty}");
+    }
+
+    // ---- B029: readable messages at narrow widths ------------------------
+
+    /// The ticket's worst case: a long "no matching signatures" message.
+    const LONG_MSG: &str = "no matching signatures to 'MakeTint(bool)' - candidates are \
+                            'vec4 MakeTint(int, int, int)' and 'vec4 MakeTint(const string &in)'";
+    /// Long enough to need two rows at ~44 columns, short enough to fit them.
+    const MEDIUM_MSG: &str = "expected 'int', got 'bool' in argument 1 of MakeTint";
+
+    const SEVERITIES: [Severity; 4] = [
+        Severity::Error,
+        Severity::Warning,
+        Severity::Info,
+        Severity::Hint,
+    ];
+
+    fn diag(sev: Severity, message: &str) -> DiagItem {
+        DiagItem {
+            severity: sev,
+            path: std::path::PathBuf::from("src/Overlay.as"),
+            line: 23,
+            col: 26,
+            end_col: 30,
+            message: message.into(),
+            source_line: Some("    vec4 tint = MakeTint(true);".into()),
+        }
+    }
+
+    fn diag_no_source(sev: Severity, message: &str) -> DiagItem {
+        DiagItem {
+            source_line: None,
+            ..diag(sev, message)
+        }
+    }
+
+    fn line_text(l: &Line<'_>) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn detail_rows(d: &DiagItem, inner_w: usize) -> Vec<String> {
+        pretty_detail_lines(d, inner_w)
+            .iter()
+            .map(line_text)
+            .collect()
+    }
+
+    /// Index of the first message row: after the caret row when a source line
+    /// is shown, else straight after the header + blank.
+    fn detail_msg_start(lines: &[Line<'_>]) -> usize {
+        lines
+            .iter()
+            .position(|l| line_text(l).contains('^'))
+            .map(|i| i + 1)
+            .unwrap_or(2)
+    }
+
+    /// Message text of each detail message row, with the gutter prefix stripped.
+    fn detail_msg_parts(d: &DiagItem, inner_w: usize) -> Vec<String> {
+        let lines = pretty_detail_lines(d, inner_w);
+        let start = detail_msg_start(&lines);
+        lines[start..]
+            .iter()
+            .map(|l| {
+                l.spans
+                    .last()
+                    .map(|s| s.content.to_string())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    fn squash(s: &str) -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn detail_message_wraps_at_narrow_width() {
+        let d = diag(Severity::Error, LONG_MSG);
+        let inner_w = 40usize;
+        let parts = detail_msg_parts(&d, inner_w);
+        assert!(parts.len() > 1, "message should wrap: {parts:?}");
+
+        let lines = pretty_detail_lines(&d, inner_w);
+        let start = detail_msg_start(&lines);
+        for row in detail_rows(&d, inner_w)[start..].iter() {
+            assert!(
+                row.width() <= inner_w,
+                "row {row:?} is {} wide, inner_w={inner_w}",
+                row.width()
+            );
+        }
+        assert_eq!(parts.join(" "), LONG_MSG, "wrapping must not drop content");
+    }
+
+    #[test]
+    fn detail_box_height_grows_with_wrapped_message() {
+        let d = diag(Severity::Error, LONG_MSG);
+        let wide = detail_box_height(Some(&d), 200);
+        let narrow = detail_box_height(Some(&d), 34);
+        assert!(wide >= 8, "wide={wide}");
+        assert!(
+            narrow > wide,
+            "box must grow when the message wraps: {narrow} vs {wide}"
+        );
+        assert!(narrow <= 10, "capped at 8 inner rows + 2 borders: {narrow}");
+    }
+
+    #[test]
+    fn caret_alignment_survives_wrapping() {
+        let d = diag(Severity::Error, LONG_MSG);
+        assert!(
+            detail_msg_parts(&d, 34).len() > 1,
+            "precondition: the message wraps at 34 columns"
+        );
+        let col_of = |inner_w: usize, needle: char| -> usize {
+            detail_rows(&d, inner_w)
+                .into_iter()
+                .find(|r| r.contains(needle))
+                .unwrap_or_else(|| panic!("no row with {needle:?}"))
+                .find(needle)
+                .expect("needle")
+        };
+        assert_eq!(
+            col_of(34, '^'),
+            col_of(200, '^'),
+            "caret column moved when the message wrapped"
+        );
+        assert_eq!(
+            col_of(34, '\u{2502}'),
+            col_of(200, '\u{2502}'),
+            "gutter column moved when the message wrapped"
+        );
+    }
+
+    #[test]
+    fn detail_message_wraps_identically_for_every_severity() {
+        let base = detail_msg_parts(&diag(Severity::Error, LONG_MSG), 40);
+        assert!(base.len() > 1, "precondition: wraps");
+        for sev in SEVERITIES {
+            assert_eq!(
+                detail_msg_parts(&diag(sev, LONG_MSG), 40),
+                base,
+                "severity {sev:?} wrapped differently"
+            );
+            assert_eq!(
+                detail_msg_parts(&diag_no_source(sev, LONG_MSG), 40).len(),
+                detail_msg_parts(&diag_no_source(Severity::Error, LONG_MSG), 40).len(),
+                "severity {sev:?} wrapped differently without a source line"
+            );
+        }
+    }
+
+    /// Width sweep. Source + caret rows are excluded on purpose: they must stay
+    /// column-aligned and are allowed to clip (see `draw_detail`).
+    #[test]
+    fn detail_wrap_width_sweep_never_overflows_or_drops() {
+        for d in [
+            diag(Severity::Error, LONG_MSG),
+            diag_no_source(Severity::Warning, LONG_MSG),
+        ] {
+            for inner_w in [20usize, 40, 60, 100, 200] {
+                let lines = pretty_detail_lines(&d, inner_w);
+                let start = detail_msg_start(&lines);
+                let rows = detail_rows(&d, inner_w);
+                assert!(
+                    rows[0].width() <= inner_w,
+                    "header overflows at {inner_w}: {:?}",
+                    rows[0]
+                );
+                for row in &rows[start..] {
+                    assert!(row.width() <= inner_w, "w={inner_w} row={row:?}");
+                }
+                let parts = detail_msg_parts(&d, inner_w);
+                assert_eq!(
+                    squash(&parts.concat()),
+                    squash(LONG_MSG),
+                    "content dropped at w={inner_w}"
+                );
+                assert!(
+                    !parts.concat().contains('\u{2026}'),
+                    "the detail box must wrap, not ellipsize (w={inner_w})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn detail_hard_wraps_unbroken_token() {
+        let token = "A".repeat(200);
+        let d = diag(Severity::Error, &token);
+        for inner_w in [20usize, 40, 60] {
+            let lines = pretty_detail_lines(&d, inner_w);
+            let start = detail_msg_start(&lines);
+            for row in detail_rows(&d, inner_w)[start..].iter() {
+                assert!(row.width() <= inner_w, "w={inner_w} row={row:?}");
+            }
+            assert_eq!(
+                detail_msg_parts(&d, inner_w).concat(),
+                token,
+                "hard wrap dropped content at w={inner_w}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_wraps_by_display_width_not_char_count() {
+        // Every char here is two columns wide.
+        let msg = "\u{8a3a}\u{65ad}\u{30e1}\u{30c3}\u{30bb}\u{30fc}\u{30b8}\u{304c}\u{9577}\u{3059}\u{304e}\u{3066}\u{6298}\u{308a}\u{8fd4}\u{3057}\u{304c}\u{5fc5}\u{8981}";
+        assert_eq!(msg.width(), msg.chars().count() * 2, "fixture must be wide");
+        let d = diag(Severity::Error, msg);
+        for inner_w in [20usize, 30, 41] {
+            let lines = pretty_detail_lines(&d, inner_w);
+            let start = detail_msg_start(&lines);
+            for row in detail_rows(&d, inner_w)[start..].iter() {
+                assert!(
+                    row.width() <= inner_w,
+                    "w={inner_w} row={row:?} width={}",
+                    row.width()
+                );
+            }
+            assert_eq!(detail_msg_parts(&d, inner_w).concat(), msg);
+        }
+    }
+
+    #[test]
+    fn detail_empty_and_short_messages_are_safe() {
+        for msg in ["", "x"] {
+            for inner_w in [8usize, 40, 200] {
+                for d in [
+                    diag(Severity::Hint, msg),
+                    diag_no_source(Severity::Hint, msg),
+                ] {
+                    let parts = detail_msg_parts(&d, inner_w);
+                    assert_eq!(parts.len(), 1, "msg={msg:?} w={inner_w}: {parts:?}");
+                    assert_eq!(parts[0].trim(), msg, "msg={msg:?} w={inner_w}");
+                    assert!(
+                        !parts[0].contains('\u{2026}'),
+                        "stray ellipsis: {parts:?} (msg={msg:?} w={inner_w})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detail_tiny_widths_do_not_panic() {
+        for inner_w in 0..=12usize {
+            for msg in ["", "x", LONG_MSG] {
+                let _ = pretty_detail_lines(&diag(Severity::Error, msg), inner_w);
+                let _ = pretty_detail_lines(&diag_no_source(Severity::Error, msg), inner_w);
+                let _ = detail_box_height(Some(&diag(Severity::Error, msg)), inner_w);
+            }
+        }
+    }
+
+    #[test]
+    fn detail_header_fits_inner_width() {
+        let mut d = diag(Severity::Error, "short");
+        d.path = std::path::PathBuf::from("/very/long/absolute/path/to/the/plugin/src/Overlay.as");
+        let full = format!("{}:23:26: error", d.path.display());
+        for inner_w in [20usize, 30, 40, 200] {
+            let header = detail_rows(&d, inner_w).remove(0);
+            assert!(
+                header.width() <= inner_w,
+                "header overflows at {inner_w}: {header:?}"
+            );
+            assert!(
+                header.ends_with(":23:26: error"),
+                "header must keep line:col + severity at {inner_w}: {header:?}"
+            );
+            assert_eq!(
+                header.contains('\u{2026}'),
+                full.width() > inner_w,
+                "header \u{2026} iff truncated at {inner_w}: {header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_field_widths_shrink_location_first() {
+        for content_w in [12usize, 20, 26, 40, 60, 78, 120] {
+            for loc_w in [4usize, 12, 20, 40] {
+                let (loc, msg) = compact_field_widths(content_w, loc_w);
+                let avail = content_w.saturating_sub(COMPACT_CHROME);
+                assert_eq!(
+                    loc + msg,
+                    avail,
+                    "budgets must fill the row (cw={content_w} lw={loc_w})"
+                );
+                assert!(
+                    loc <= loc_w,
+                    "location must never grow (cw={content_w} lw={loc_w} -> {loc})"
+                );
+                let floor = COMPACT_MSG_MIN.min(avail - avail / 2);
+                assert!(
+                    msg >= floor,
+                    "message floor {floor} not met: msg={msg} cw={content_w} lw={loc_w}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_long_location_still_leaves_a_readable_message() {
+        let d = diag(Severity::Error, LONG_MSG);
+        // A pathological `path:line:col` that wants the whole row.
+        let loc_w = 40usize;
+        for content_w in [30usize, 40, 60, 78] {
+            let (_, budget) = compact_field_widths(content_w, loc_w);
+            assert!(
+                budget >= 12,
+                "content_w={content_w} left only {budget} columns for the message"
+            );
+            let msg = ellipsize(&d.message, budget);
+            assert!(msg.width() <= budget, "{msg:?} exceeds {budget}");
+            assert!(
+                msg.width() >= 12,
+                "message unreadable at content_w={content_w}: {msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_rows_ellipsize_only_when_truncated() {
+        for msg in ["", "x", "short message", LONG_MSG] {
+            for content_w in [20usize, 40, 60, 78, 120] {
+                let (_, budget) = compact_field_widths(content_w, 20);
+                let out = ellipsize(msg, budget);
+                assert!(
+                    out.width() <= budget,
+                    "compact overflow: {out:?} budget={budget}"
+                );
+                assert_eq!(
+                    out.contains('\u{2026}'),
+                    msg.width() > budget,
+                    "compact \u{2026} iff truncated (msg={msg:?} budget={budget})"
+                );
+
+                let rows = relaxed_msg_rows(msg, content_w, false);
+                assert_eq!(rows.len(), 1, "unselected relaxed row stays single-line");
+                let budget = content_w.saturating_sub(RELAXED_MSG_INDENT);
+                assert!(
+                    rows[0].width() <= budget,
+                    "relaxed overflow: {:?} budget={budget}",
+                    rows[0]
+                );
+                assert_eq!(
+                    rows[0].contains('\u{2026}'),
+                    msg.width() > budget,
+                    "relaxed \u{2026} iff truncated (msg={msg:?} w={content_w})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn relaxed_selected_row_spills_to_second_line() {
+        for content_w in [30usize, 44, 60] {
+            let budget = content_w - RELAXED_MSG_INDENT;
+            let sel = relaxed_msg_rows(LONG_MSG, content_w, true);
+            let unsel = relaxed_msg_rows(LONG_MSG, content_w, false);
+            assert_eq!(unsel.len(), 1, "unselected stays one row");
+            assert_eq!(
+                sel.len(),
+                2,
+                "selected spills to a second row (w={content_w})"
+            );
+            for r in &sel {
+                assert!(r.width() <= budget, "{r:?} exceeds {budget}");
+            }
+            assert!(
+                sel[1].ends_with('\u{2026}'),
+                "LONG_MSG needs more than two rows at {content_w}: {sel:?}"
+            );
+            assert!(
+                squash(&sel.concat()).len() > squash(&unsel.concat()).len(),
+                "spilling must reveal more text: {sel:?} vs {unsel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn relaxed_selected_row_stays_single_when_it_fits() {
+        assert_eq!(relaxed_msg_rows("short", 60, true).len(), 1);
+        assert_eq!(relaxed_msg_rows("", 60, true).len(), 1);
+        // Fits in exactly two rows -> no ellipsis on the spill.
+        let rows = relaxed_msg_rows(MEDIUM_MSG, 33, true);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(
+            !rows.concat().contains('\u{2026}'),
+            "no ellipsis when the spill fits: {rows:?}"
+        );
+        assert_eq!(rows.join(" "), MEDIUM_MSG, "{rows:?}");
+    }
+
+    #[test]
+    fn ellipsize_respects_display_width() {
+        let wide = "\u{8a3a}\u{65ad}\u{30e1}\u{30c3}\u{30bb}\u{30fc}\u{30b8}";
+        assert_eq!(wide.width(), 14);
+        for max in [1usize, 2, 5, 8, 13, 14, 20] {
+            let out = ellipsize(wide, max);
+            assert!(
+                out.width() <= max,
+                "max={max} out={out:?} width={}",
+                out.width()
+            );
+            assert_eq!(
+                out.contains('\u{2026}'),
+                wide.width() > max,
+                "max={max} out={out:?}"
+            );
+        }
+        assert_eq!(ellipsize("abc", 10), "abc");
+        assert_eq!(ellipsize("", 10), "");
+        assert_eq!(ellipsize("abcdef", 4), "abc\u{2026}");
+        assert_eq!(ellipsize("abc", 0), "");
+    }
+
+    #[test]
+    fn detail_scroll_resets_with_the_selection() {
+        let mut app = App::from_snapshot(canned_snapshot());
+        assert_eq!(app.detail_scroll(), 0);
+        app.scroll_detail_down();
+        app.scroll_detail_down();
+        assert_eq!(app.detail_scroll(), 2);
+        app.scroll_down();
+        assert_eq!(
+            app.detail_scroll(),
+            0,
+            "moving the list resets detail scroll"
+        );
+        app.scroll_detail_up();
+        assert_eq!(app.detail_scroll(), 0, "saturates at the top");
+        app.scroll_detail_down();
+        app.toggle_density();
+        assert_eq!(
+            app.detail_scroll(),
+            0,
+            "density toggle resets detail scroll"
+        );
     }
 
     #[test]
