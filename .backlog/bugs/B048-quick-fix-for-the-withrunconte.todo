@@ -1,0 +1,79 @@
+---
+complexity: medium
+created_at: "2026-08-29T18:24:36Z"
+depends_on: []
+estimate_hours: 1
+id: B048
+priority: low
+status: pending
+tags:
+    - lsp
+    - code-actions
+title: Quick fix for the WithRunContext migration needs a call restructure, not a span swap
+updated_at: "2026-08-29T18:24:36Z"
+---
+Found by the B036 lane, 2026-08-30. Split out of B036 because it is a
+different SHAPE of fix.
+
+## The gap
+`RemovedApiUsage { member, hint }` (src/typecheck/checker.rs) flags API that
+compiles clean today but is a deprecated no-op at runtime. B036 added a
+structured `replacement: Option<String>` to that variant so a fix can be
+offered mechanically.
+
+**The only `RemovedApiUsage` producer in the tree sets it to `None`**, on
+purpose. Both hardcoded sites (checker.rs ~:230 and ~:2097) report
+`awaitable.WithRunContext` with the hint "Use Meta::StartWithRunContext
+instead" — and that migration is NOT a span swap:
+
+    startnew(Worker).WithRunContext(ctx)     // before
+    Meta::StartWithRunContext(ctx, Worker)   // after
+
+`Meta::StartWithRunContext` is a FREE FUNCTION, and the receiver has to move
+into the argument list. Replacing the member span would emit
+`Meta::StartWithRunContext(ctx)` and **silently drop the coroutine** — a fix
+that quietly deletes the user's work, which is far worse than offering none.
+So B036 correctly ships the mechanism, the guard, and the
+never-offer-what-you-cannot-make behaviour, with no live fix.
+
+## Work
+Offer a real quick fix for this migration, as a call restructure:
+- Match the diagnosed `WithRunContext` member call.
+- Locate the receiver expression and the argument list.
+- Rewrite to `Meta::StartWithRunContext(<args>, <receiver-inner>)`, where
+  `<receiver-inner>` is the coroutine passed to `startnew(...)` when the
+  receiver has that shape.
+- **Withhold the fix whenever the receiver is not recognisably a
+  `startnew(...)` call**, rather than guessing. The whole reason this is a
+  separate ticket is that a wrong rewrite here is silent data loss.
+
+Determine the exact target signature from the Openplanet docs before
+implementing — argument ORDER matters and must not be inferred from the
+example above. Cite the source in a comment.
+
+## Test plan (TDD, red first)
+Red: `startnew(Worker).WithRunContext(ctx)` -> a quickfix is offered whose
+applied edit is `Meta::StartWithRunContext(ctx, Worker)` and which re-parses
+clean.
+
+Variants (per CLAUDE.md, generalize):
+- receiver `startnew(Worker)` with a coroutine IDENTIFIER, with a method
+  reference `this.M`, and with a funcdef-typed expression
+- `startnew` with extra arguments -> all carried through in the right order
+- receiver NOT a `startnew(...)` call (a stored handle, a function result) ->
+  **NO action offered** (the load-bearing negative case)
+- the call chained further (`startnew(W).WithRunContext(c).Something()`) ->
+  no action, or a correct rewrite; decide and document, do not guess
+- multi-line call spanning several lines -> edit preserves surrounding layout
+- two such calls on one line -> only the diagnosed one is edited
+- the diagnostic still fires when no fix is offered (never suppress the
+  warning just because the fix is unavailable)
+- assert the result RE-PARSES, not merely that the text matches
+
+## Gate
+FP fixtures byte-identical — this adds an action, not a diagnostic. Compare
+two binaries on the same machine at the same time.
+
+## Related
+B036 (added `replacement`, set `None` here), B035 (the fix seam), B047 (the
+two producer paths).
