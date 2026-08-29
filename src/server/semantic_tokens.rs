@@ -459,7 +459,10 @@ impl<'a> TokenEmitter<'a> {
             return;
         }
         let pos = offset_to_position(self.source, span.start as usize);
-        let length = span.end - span.start;
+        // LSP measures `length` in the same units as the position, which is
+        // UTF-16 by default — a byte length overruns any token holding
+        // non-ASCII text.
+        let length = text.encode_utf16().count() as u32;
         let (delta_line, delta_start) = if pos.line == self.prev_line {
             (0, pos.character - self.prev_start)
         } else {
@@ -493,6 +496,33 @@ mod tests {
     fn tokens(src: &str) -> SemanticTokens {
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         semantic_tokens(&analysis)
+    }
+
+    /// LSP measures a semantic token's `length` in the same units as its
+    /// position — UTF-16 code units by default. A byte length would run the
+    /// highlight past the end of any token containing non-ASCII text.
+    #[test]
+    fn token_length_is_in_utf16_code_units() {
+        // "caf\u{e9}" is 5 bytes but 4 UTF-16 units; the emoji is 4 bytes
+        // and 2 UTF-16 units (a surrogate pair).
+        for (literal, expected_len) in [
+            ("\"cafe\"", 6),
+            ("\"caf\u{e9}\"", 6),
+            ("\"a\u{1f600}b\"", 6),
+        ] {
+            let src = format!("void f() {{ string s = {}; }}", literal);
+            let st = tokens(&src);
+            let found = st
+                .data
+                .iter()
+                .find(|t| t.token_type == TT_STRING)
+                .unwrap_or_else(|| panic!("no string token for {}", literal));
+            assert_eq!(
+                found.length, expected_len,
+                "wrong UTF-16 length for {}",
+                literal
+            );
+        }
     }
 
     /// Flatten a `SemanticTokens` into the raw u32 stream, mirroring the
