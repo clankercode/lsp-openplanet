@@ -185,6 +185,16 @@ default_mode = "tui"   # or "lsp"
 # this; workspace .openplanet-lsp.toml wins over the user config.
 # unused = "warn"
 
+# Grey out `#if` branches the current defines switch off, the way an IDE
+# fades `#if 0` in C. Default "hint": the dead body gets a HINT diagnostic
+# tagged Unnecessary, so an editor fades it (VS Code: `editor.showUnused`)
+# without listing it in the problems panel. "info" also lists it; "ignore"
+# marks nothing. LSP-ONLY — `check` and the TUI never report these, at any
+# level, so a plugin full of `#if MP4` does not drown the CLI output. There
+# is deliberately no warn/error level: a branch that is off for your target
+# is dead by design, not a defect.
+# inactive_regions = "hint"
+
 # Human `check` output groups diagnostics by severity. Default "last":
 # warnings / info / hints first, then errors (so a flood of warnings does
 # not bury the two errors you care about). "first" puts errors first;

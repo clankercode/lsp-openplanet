@@ -100,6 +100,11 @@ pub struct LspConfig {
     /// Workspace `.openplanet-lsp.toml` wins over the user global; CLI
     /// `--unused` / `--no-unused` wins over both.
     pub unused: UnusedLevel,
+    /// How preprocessor-dead `#if` branches are surfaced. Default hint.
+    /// LSP-only: `check` and the TUI never emit these. Workspace
+    /// `.openplanet-lsp.toml` wins over the user global; initializationOptions
+    /// win over both.
+    pub inactive_regions: InactiveLevel,
     /// How one-shot `check` groups diagnostics for human formats.
     /// Default last (non-errors, then errors). JSON is never regrouped.
     /// Workspace `.openplanet-lsp.toml` wins over the user global; CLI
@@ -138,6 +143,7 @@ impl Default for LspConfig {
             define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
             unused_callbacks: Vec::new(),
             unused: UnusedLevel::Warn,
+            inactive_regions: InactiveLevel::Hint,
             errors: ErrorGroup::Last,
         }
     }
@@ -249,6 +255,48 @@ impl UnusedLevel {
             Self::Info => "info",
             Self::Warn => "warn",
             Self::Error => "error",
+        }
+    }
+}
+
+/// How preprocessor-dead code (`#if` branches the current defines switch
+/// off) is surfaced.
+///
+/// Default is [`InactiveLevel::Hint`]: a HINT diagnostic tagged
+/// [`tower_lsp::lsp_types::DiagnosticTag::UNNECESSARY`] over each dead body,
+/// which fades the range in the editor while staying out of the problems
+/// list. `info` lists them as well; `ignore` emits nothing.
+///
+/// There is deliberately no warn/error level. A branch that is off for the
+/// current target is dead BY DESIGN, not a defect, and an `error` level would
+/// fail `check` on every `#if MP4`. For the same reason this is an LSP-only
+/// surface — `check` and the TUI never emit it (see
+/// `server::diagnostics::inactive_region_diagnostics`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InactiveLevel {
+    Ignore,
+    #[default]
+    Hint,
+    Info,
+}
+
+impl InactiveLevel {
+    /// Parse a config token. Aliases: off/false/none/disable → ignore;
+    /// on/true/grey/gray/faded → hint; information/note → info.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "ignore" | "off" | "false" | "none" | "disable" | "disabled" => Some(Self::Ignore),
+            "hint" | "on" | "true" | "grey" | "gray" | "faded" => Some(Self::Hint),
+            "info" | "information" | "note" => Some(Self::Info),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignore",
+            Self::Hint => "hint",
+            Self::Info => "info",
         }
     }
 }
@@ -737,6 +785,7 @@ impl LspConfig {
             define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
             unused_callbacks: Vec::new(),
             unused: UnusedLevel::Warn,
+            inactive_regions: InactiveLevel::Hint,
             errors: ErrorGroup::Last,
         };
 
@@ -769,6 +818,11 @@ impl LspConfig {
         // Same workspace-over-user precedence as unused_callbacks: a
         // per-plugin silence/error pin must beat the machine default.
         config.unused = Self::resolve_unused(
+            Self::user_config_path().as_deref(),
+            parent.filter(|p| Some(*p) != workspace_root),
+            workspace_root,
+        );
+        config.inactive_regions = Self::resolve_inactive(
             Self::user_config_path().as_deref(),
             parent.filter(|p| Some(*p) != workspace_root),
             workspace_root,
@@ -1097,6 +1151,30 @@ impl LspConfig {
             .unwrap_or(UnusedLevel::Warn)
     }
 
+    fn resolve_inactive(
+        user: Option<&Path>,
+        parent: Option<&Path>,
+        root: Option<&Path>,
+    ) -> InactiveLevel {
+        let ladder = [
+            user.map(Path::to_path_buf),
+            parent.map(|p| p.join(".openplanet-lsp.toml")),
+            root.map(|r| r.join(".openplanet-lsp.toml")),
+        ];
+        ladder
+            .iter()
+            .flatten()
+            .filter_map(|p| Self::inactive_in_file(p))
+            .next_back()
+            .unwrap_or(InactiveLevel::Hint)
+    }
+
+    fn inactive_in_file(path: &Path) -> Option<InactiveLevel> {
+        let contents = std::fs::read_to_string(path).ok()?;
+        let table: toml::Table = toml::from_str(&contents).ok()?;
+        parse_inactive_toml(table.get("inactive_regions")?)
+    }
+
     fn unused_in_file(path: &Path) -> Option<UnusedLevel> {
         let contents = std::fs::read_to_string(path).ok()?;
         let table: toml::Table = toml::from_str(&contents).ok()?;
@@ -1302,6 +1380,9 @@ impl LspConfig {
         if let Some(match_enums) = opts.get("shortcut_match_enums").and_then(|v| v.as_bool()) {
             self.shortcut_match_enums = match_enums;
         }
+        if let Some(level) = opts.get("inactive_regions").and_then(parse_inactive_json) {
+            self.inactive_regions = level;
+        }
         if let Some(level) = opts.get("unused").and_then(parse_unused_json) {
             self.unused = level;
         }
@@ -1318,6 +1399,26 @@ impl LspConfig {
                 self.plugin_roots = parsed;
             }
         }
+    }
+}
+
+fn parse_inactive_toml(value: &toml::Value) -> Option<InactiveLevel> {
+    match value {
+        toml::Value::String(s) => InactiveLevel::parse(s),
+        toml::Value::Boolean(false) => Some(InactiveLevel::Ignore),
+        toml::Value::Boolean(true) => Some(InactiveLevel::Hint),
+        _ => None,
+    }
+}
+
+fn parse_inactive_json(value: &serde_json::Value) -> Option<InactiveLevel> {
+    if let Some(s) = value.as_str() {
+        return InactiveLevel::parse(s);
+    }
+    match value.as_bool() {
+        Some(false) => Some(InactiveLevel::Ignore),
+        Some(true) => Some(InactiveLevel::Hint),
+        None => None,
     }
 }
 
@@ -1465,6 +1566,109 @@ mod tests {
         let opts = serde_json::json!({ "unused": "error" });
         let cfg = LspConfig::load(Some(&tmp), Some(&opts));
         assert_eq!(cfg.unused, UnusedLevel::Error);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn inactive_level_parse_and_round_trip() {
+        for (input, want) in [
+            ("ignore", InactiveLevel::Ignore),
+            ("IGNORE", InactiveLevel::Ignore),
+            ("off", InactiveLevel::Ignore),
+            ("false", InactiveLevel::Ignore),
+            ("none", InactiveLevel::Ignore),
+            ("hint", InactiveLevel::Hint),
+            ("HINT", InactiveLevel::Hint),
+            ("on", InactiveLevel::Hint),
+            ("true", InactiveLevel::Hint),
+            ("grey", InactiveLevel::Hint),
+            ("gray", InactiveLevel::Hint),
+            ("faded", InactiveLevel::Hint),
+            ("info", InactiveLevel::Info),
+            ("information", InactiveLevel::Info),
+            ("note", InactiveLevel::Info),
+        ] {
+            assert_eq!(InactiveLevel::parse(input), Some(want), "parse {input:?}");
+        }
+        // Deliberately NOT levels: a dead branch is dead by design, and
+        // `error` would fail `check` on every `#if MP4`.
+        assert!(InactiveLevel::parse("warn").is_none());
+        assert!(InactiveLevel::parse("error").is_none());
+        assert!(InactiveLevel::parse("banana").is_none());
+        assert!(InactiveLevel::parse("").is_none());
+
+        for level in [
+            InactiveLevel::Ignore,
+            InactiveLevel::Hint,
+            InactiveLevel::Info,
+        ] {
+            assert_eq!(
+                InactiveLevel::parse(level.as_str()),
+                Some(level),
+                "round-trip {level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_regions_default_to_hint() {
+        assert_eq!(LspConfig::default().inactive_regions, InactiveLevel::Hint);
+        assert_eq!(
+            LspConfig::resolve_inactive(None, None, None),
+            InactiveLevel::Hint
+        );
+    }
+
+    #[test]
+    fn inactive_regions_resolve_through_the_whole_ladder() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-inactive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let user = tmp.join("user.toml");
+        std::fs::write(&user, "inactive_regions = \"info\"\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_inactive(Some(&user), None, None),
+            InactiveLevel::Info,
+            "user global applies when nothing else sets the key"
+        );
+
+        for (toml_value, want) in [
+            ("\"ignore\"", InactiveLevel::Ignore),
+            ("false", InactiveLevel::Ignore),
+            ("true", InactiveLevel::Hint),
+            ("\"grey\"", InactiveLevel::Hint),
+        ] {
+            let ws = tmp.join(format!("ws-{want:?}-{}", toml_value.replace('"', "")));
+            std::fs::create_dir_all(&ws).unwrap();
+            std::fs::write(
+                ws.join(".openplanet-lsp.toml"),
+                format!("inactive_regions = {toml_value}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                LspConfig::resolve_inactive(Some(&user), None, Some(&ws)),
+                want,
+                "workspace inactive_regions = {toml_value} must beat the user global"
+            );
+        }
+
+        let init_root = tmp.join("init");
+        std::fs::create_dir_all(&init_root).unwrap();
+        std::fs::write(
+            init_root.join(".openplanet-lsp.toml"),
+            "inactive_regions = \"ignore\"\n",
+        )
+        .unwrap();
+        for (json_value, want) in [("hint", InactiveLevel::Hint), ("info", InactiveLevel::Info)] {
+            let opts = serde_json::json!({ "inactive_regions": json_value });
+            let cfg = LspConfig::load(Some(&init_root), Some(&opts));
+            assert_eq!(
+                cfg.inactive_regions, want,
+                "initializationOptions must beat the workspace file"
+            );
+        }
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

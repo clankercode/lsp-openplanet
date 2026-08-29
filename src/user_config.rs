@@ -319,6 +319,14 @@ pub const SETTINGS: &[SettingSpec] = &[
         },
     },
     SettingSpec {
+        key: "inactive_regions",
+        help: "Grey out #if branches the defines switch off (LSP only): ignore, hint (default), or info",
+        kind: SettingKind::Enum {
+            choices: &["ignore", "hint", "info"],
+            default: "hint",
+        },
+    },
+    SettingSpec {
         key: "unused_callbacks",
         help: "Extra names treated as runtime-invoked callbacks",
         kind: SettingKind::StringList {
@@ -690,6 +698,7 @@ mod tests {
             "define_matrix_max_combinations",
             "unused",
             "unused_callbacks",
+            "inactive_regions",
             "errors",
         ] {
             assert!(
