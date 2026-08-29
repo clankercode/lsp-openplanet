@@ -13,7 +13,7 @@
 
 use crate::lexer::token::TokenKind;
 use crate::lexer::Span;
-use crate::server::code_actions::fix::{Fix, FixContext, FixDescriptor, FixFamily};
+use crate::server::code_actions::fix::{FixContext, FixDescriptor, FixFamily};
 use crate::server::diagnostics::span_to_range;
 use crate::typecheck::{TypeDiagnostic, TypeDiagnosticKind};
 use tower_lsp::lsp_types::CodeActionKind;
@@ -70,14 +70,15 @@ fn describe(diag: &TypeDiagnostic, _ctx: &FixContext<'_>) -> Vec<FixDescriptor> 
         .collect()
 }
 
-fn materialize(diag: &TypeDiagnostic, ctx: &FixContext<'_>, selected_title: &str) -> Option<Fix> {
+fn materialize(
+    diag: &TypeDiagnostic,
+    ctx: &FixContext<'_>,
+    _selected_title: &str,
+) -> tower_lsp::lsp_types::WorkspaceEdit {
     #[cfg(test)]
     MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
-    let title = title(diag)?;
-    if title != selected_title {
-        return None;
-    }
-    let type_span = param_type_span(&ctx.analysis.tokens, diag.span)?;
+    let type_span = param_type_span(&ctx.analysis.tokens, diag.span)
+        .expect("string-by-value descriptors always have a materializable type span");
     let mut changes = std::collections::HashMap::new();
     changes.insert(
         ctx.uri.clone(),
@@ -86,16 +87,7 @@ fn materialize(diag: &TypeDiagnostic, ctx: &FixContext<'_>, selected_title: &str
             new_text: REPLACEMENT.to_string(),
         }],
     );
-    Some(Fix {
-        title,
-        kind: CodeActionKind::QUICKFIX,
-        edit: tower_lsp::lsp_types::WorkspaceEdit::new(changes),
-        // Unambiguous and lossless: the game compiler asks for exactly this
-        // spelling, and `const string &in` accepts every argument the
-        // by-value form did.
-        is_preferred: true,
-        auto_applicable: true,
-    })
+    tower_lsp::lsp_types::WorkspaceEdit::new(changes)
 }
 
 /// Span of the parameter's type, given the span the diagnostic is anchored

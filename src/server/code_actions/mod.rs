@@ -29,6 +29,7 @@ pub mod test_fixtures;
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tower_lsp::lsp_types::*;
 
 use crate::analysis::DocumentAnalysis;
@@ -38,13 +39,15 @@ use crate::typedb::TypeIndex;
 
 pub use fix::SOURCE_FIX_ALL_OPENPLANET;
 use fix::{
-    collect_fix_descriptors, collect_fixes, kind_selected, materialize_auto_descriptors,
-    materialize_fix, FixCandidate, FixContext, FixDescriptorCandidate, WorkspaceFileResolver,
+    collect_fix_descriptors_from, kind_selected, materialize_auto_descriptors,
+    materialize_descriptor, materialize_fix_from, FixCandidate, FixContext, FixDescriptorCandidate,
+    FixFamily, WorkspaceFileResolver,
 };
 
 /// Tag stamped into `CodeAction.data` so [`resolve_code_action`] never tries
 /// to interpret another provider's payload.
 const FIX_DATA_TAG: &str = "openplanet.codeAction.fix";
+type SourceFingerprint = [u8; 32];
 
 /// Enough to re-derive one seam fix during `codeAction/resolve` without
 /// depending on the order actions happened to be returned in.
@@ -53,7 +56,7 @@ const FIX_DATA_TAG: &str = "openplanet.codeAction.fix";
 struct ResolveData {
     tag: String,
     uri: Url,
-    source_fingerprint: u64,
+    source_fingerprint: SourceFingerprint,
     #[serde(flatten)]
     action: ResolveAction,
 }
@@ -116,13 +119,23 @@ pub struct CodeActionRequest<'a> {
 
 /// Entry point invoked by the LSP `code_action` handler.
 pub fn code_actions(req: &CodeActionRequest<'_>) -> Vec<CodeActionOrCommand> {
+    code_actions_with_families(req, fixes::FAMILIES)
+}
+
+fn code_actions_with_families(
+    req: &CodeActionRequest<'_>,
+    families: &[FixFamily],
+) -> Vec<CodeActionOrCommand> {
     let only = req.context.only.as_deref();
     let mut actions: Vec<CodeAction> = Vec::new();
+    // Every action from one response represents this same document revision.
+    // Carry the digest into its data instead of re-hashing per action.
+    let source_fingerprint = source_fingerprint(&req.analysis.source);
 
     if kind_selected(&CodeActionKind::QUICKFIX, only) {
         actions.extend(quick_fix_did_you_mean(
             req.uri,
-            &req.analysis.source,
+            source_fingerprint,
             &req.context.diagnostics,
             req.workspace,
             req.type_index,
@@ -133,6 +146,7 @@ pub fn code_actions(req: &CodeActionRequest<'_>) -> Vec<CodeActionOrCommand> {
         actions.extend(refactor_wrap_in_try_catch(
             req.uri,
             &req.analysis.source,
+            source_fingerprint,
             req.range,
             req.lazy_edits,
         ));
@@ -148,20 +162,19 @@ pub fn code_actions(req: &CodeActionRequest<'_>) -> Vec<CodeActionOrCommand> {
             type_index: req.type_index,
             files: req.files,
         };
-        let descriptors = collect_fix_descriptors(&ctx);
+        let descriptors = collect_fix_descriptors_from(&ctx, families);
         if wants_registered_quickfix {
             for candidate in &descriptors {
                 if ranges_touch(&candidate.diagnostic.range, &req.range) {
-                    actions.push(descriptor_action(req, candidate));
+                    actions.push(descriptor_action(req, candidate, source_fingerprint));
                 }
             }
         }
-        if wants_fix_all
-            && descriptors
-                .iter()
-                .any(|candidate| candidate.descriptor.auto_applicable)
-        {
-            actions.push(deferred_fix_all_action(req.uri, &req.analysis.source));
+        if wants_fix_all {
+            let candidates = materialize_auto_descriptors(&ctx, &descriptors, families);
+            if fix_all::fix_all_action(req.uri, &candidates).is_some() {
+                actions.push(deferred_fix_all_action(req.uri, source_fingerprint));
+            }
         }
     } else if !req.lazy_edits && (wants_registered_quickfix || wants_fix_all) {
         let ctx = FixContext {
@@ -171,16 +184,21 @@ pub fn code_actions(req: &CodeActionRequest<'_>) -> Vec<CodeActionOrCommand> {
             type_index: req.type_index,
             files: req.files,
         };
-        let candidates = collect_fixes(&ctx);
+        let descriptors = collect_fix_descriptors_from(&ctx, families);
+        let candidates: Vec<_> = descriptors
+            .iter()
+            .map(|descriptor| materialize_descriptor(&ctx, descriptor, families))
+            .collect();
         if wants_registered_quickfix {
             for candidate in &candidates {
                 if ranges_touch(&candidate.diagnostic.range, &req.range) {
-                    actions.push(seam_action(req, candidate));
+                    actions.push(seam_action(req, candidate, source_fingerprint));
                 }
             }
         }
         if wants_fix_all {
-            if let Some(action) = fix_all::fix_all_action(req.uri, &candidates) {
+            if let Some(mut action) = fix_all::fix_all_action(req.uri, &candidates) {
+                action.data = resolve_data(req.uri, source_fingerprint, ResolveAction::FixAll);
                 actions.push(action);
             }
         }
@@ -198,11 +216,29 @@ pub fn code_actions(req: &CodeActionRequest<'_>) -> Vec<CodeActionOrCommand> {
 /// an edit — is returned untouched rather than rejected, because the client
 /// is free to resolve anything it was given.
 pub fn resolve_code_action(
+    action: CodeAction,
+    analysis: &DocumentAnalysis,
+    workspace: &SymbolTable,
+    type_index: Option<&TypeIndex>,
+    files: WorkspaceFileResolver<'_>,
+) -> CodeAction {
+    resolve_code_action_with_families(
+        action,
+        analysis,
+        workspace,
+        type_index,
+        files,
+        fixes::FAMILIES,
+    )
+}
+
+fn resolve_code_action_with_families(
     mut action: CodeAction,
     analysis: &DocumentAnalysis,
     workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
     files: WorkspaceFileResolver<'_>,
+    families: &[FixFamily],
 ) -> CodeAction {
     if action.edit.is_some() {
         return action;
@@ -226,7 +262,9 @@ pub fn resolve_code_action(
                 type_index,
                 files,
             };
-            if let Some(candidate) = materialize_fix(&ctx, &family, diagnostic_range, &title) {
+            if let Some(candidate) =
+                materialize_fix_from(&ctx, &family, diagnostic_range, &title, families)
+            {
                 action.edit = Some(candidate.fix.edit);
             }
         }
@@ -240,8 +278,8 @@ pub fn resolve_code_action(
             };
             // Only the auto-applicable half is worth materializing here:
             // the batch discards everything else anyway.
-            let descriptors = collect_fix_descriptors(&ctx);
-            let candidates = materialize_auto_descriptors(&ctx, &descriptors, fixes::FAMILIES);
+            let descriptors = collect_fix_descriptors_from(&ctx, families);
+            let candidates = materialize_auto_descriptors(&ctx, &descriptors, families);
             if let Some(resolved) = fix_all::fix_all_action(&resolve.uri, &candidates) {
                 action.edit = resolved.edit;
             }
@@ -275,27 +313,33 @@ fn parse_resolve_data(action: &CodeAction) -> Option<ResolveData> {
     (resolve.tag == FIX_DATA_TAG).then_some(resolve)
 }
 
-fn source_fingerprint(source: &str) -> u64 {
-    source.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+fn source_fingerprint(source: &str) -> SourceFingerprint {
+    Sha256::digest(source.as_bytes()).into()
 }
 
-fn resolve_data(uri: &Url, source: &str, action: ResolveAction) -> Option<serde_json::Value> {
+fn resolve_data(
+    uri: &Url,
+    source_fingerprint: SourceFingerprint,
+    action: ResolveAction,
+) -> Option<serde_json::Value> {
     serde_json::to_value(ResolveData {
         tag: FIX_DATA_TAG.to_string(),
         uri: uri.clone(),
-        source_fingerprint: source_fingerprint(source),
+        source_fingerprint,
         action,
     })
     .ok()
 }
 
-fn seam_action(req: &CodeActionRequest<'_>, candidate: &FixCandidate) -> CodeAction {
+fn seam_action(
+    req: &CodeActionRequest<'_>,
+    candidate: &FixCandidate,
+    source_fingerprint: SourceFingerprint,
+) -> CodeAction {
     let edit = candidate.fix.edit.clone();
     let data = resolve_data(
         req.uri,
-        &req.analysis.source,
+        source_fingerprint,
         ResolveAction::Fix {
             family: candidate.family.to_string(),
             diagnostic_range: candidate.diagnostic.range,
@@ -317,6 +361,7 @@ fn seam_action(req: &CodeActionRequest<'_>, candidate: &FixCandidate) -> CodeAct
 fn descriptor_action(
     req: &CodeActionRequest<'_>,
     candidate: &FixDescriptorCandidate,
+    source_fingerprint: SourceFingerprint,
 ) -> CodeAction {
     CodeAction {
         title: candidate.descriptor.title.clone(),
@@ -328,7 +373,7 @@ fn descriptor_action(
         disabled: None,
         data: resolve_data(
             req.uri,
-            &req.analysis.source,
+            source_fingerprint,
             ResolveAction::Fix {
                 family: candidate.family.to_string(),
                 diagnostic_range: candidate.diagnostic.range,
@@ -338,7 +383,7 @@ fn descriptor_action(
     }
 }
 
-fn deferred_fix_all_action(uri: &Url, source: &str) -> CodeAction {
+fn deferred_fix_all_action(uri: &Url, source_fingerprint: SourceFingerprint) -> CodeAction {
     CodeAction {
         title: "Fix all auto-fixable Openplanet problems".to_string(),
         kind: Some(SOURCE_FIX_ALL_OPENPLANET),
@@ -347,7 +392,7 @@ fn deferred_fix_all_action(uri: &Url, source: &str) -> CodeAction {
         command: None,
         is_preferred: None,
         disabled: None,
-        data: resolve_data(uri, source, ResolveAction::FixAll),
+        data: resolve_data(uri, source_fingerprint, ResolveAction::FixAll),
     }
 }
 
@@ -407,7 +452,7 @@ fn is_our_diagnostic(diag: &Diagnostic) -> bool {
 
 fn quick_fix_did_you_mean(
     uri: &Url,
-    source: &str,
+    source_fingerprint: SourceFingerprint,
     diagnostics: &[Diagnostic],
     workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
@@ -447,7 +492,7 @@ fn quick_fix_did_you_mean(
                 disabled: None,
                 data: resolve_data(
                     uri,
-                    source,
+                    source_fingerprint,
                     ResolveAction::DidYouMean {
                         range: diag.range,
                         new_text: name.clone(),
@@ -476,6 +521,7 @@ fn wrap_in_try_catch_edit(uri: &Url, source: &str, range: Range) -> WorkspaceEdi
 fn refactor_wrap_in_try_catch(
     uri: &Url,
     source: &str,
+    source_fingerprint: SourceFingerprint,
     range: Range,
     lazy_edits: bool,
 ) -> Vec<CodeAction> {
@@ -487,7 +533,11 @@ fn refactor_wrap_in_try_catch(
         command: None,
         is_preferred: None,
         disabled: None,
-        data: resolve_data(uri, source, ResolveAction::WrapInTryCatch { range }),
+        data: resolve_data(
+            uri,
+            source_fingerprint,
+            ResolveAction::WrapInTryCatch { range },
+        ),
     }]
 }
 
@@ -597,6 +647,7 @@ mod tests {
     use super::*;
     use crate::lexer::Span;
     use crate::symbols::scope::{Symbol, SymbolKind};
+    use crate::typecheck::{TypeDiagnostic, TypeDiagnosticKind};
 
     fn mk_range(l0: u32, c0: u32, l1: u32, c1: u32) -> Range {
         Range::new(Position::new(l0, c0), Position::new(l1, c1))
@@ -725,6 +776,83 @@ mod tests {
             .and_then(|c| c.get(uri))
             .expect("workspace edit for uri")
     }
+
+    fn unbatchable_auto_matches(kind: &TypeDiagnosticKind) -> bool {
+        matches!(kind, TypeDiagnosticKind::StringByValueParam { .. })
+    }
+
+    fn unbatchable_auto_describe(
+        _: &TypeDiagnostic,
+        _: &FixContext<'_>,
+    ) -> Vec<fix::FixDescriptor> {
+        vec![fix::FixDescriptor {
+            title: "Unbatchable auto fix".to_string(),
+            kind: CodeActionKind::QUICKFIX,
+            is_preferred: false,
+            auto_applicable: true,
+        }]
+    }
+
+    fn unbatchable_auto_materialize(
+        _: &TypeDiagnostic,
+        ctx: &FixContext<'_>,
+        _: &str,
+    ) -> WorkspaceEdit {
+        let other = Url::parse("file:///test/other.as").unwrap();
+        let mut changes = HashMap::new();
+        changes.insert(
+            ctx.uri.clone(),
+            vec![TextEdit::new(Range::default(), "here".into())],
+        );
+        changes.insert(other, vec![TextEdit::new(Range::default(), "there".into())]);
+        WorkspaceEdit::new(changes)
+    }
+
+    const UNBATCHABLE_AUTO_FAMILY: fix::FixFamily = fix::FixFamily {
+        name: "test-unbatchable-auto",
+        matches: unbatchable_auto_matches,
+        describe: unbatchable_auto_describe,
+        materialize: unbatchable_auto_materialize,
+    };
+
+    fn descriptor_owned_matches(kind: &TypeDiagnosticKind) -> bool {
+        matches!(kind, TypeDiagnosticKind::StringByValueParam { .. })
+    }
+
+    fn descriptor_owned_describe(
+        _: &TypeDiagnostic,
+        _: &FixContext<'_>,
+    ) -> Vec<fix::FixDescriptor> {
+        vec![fix::FixDescriptor {
+            title: "Descriptor-owned synthetic fix".to_string(),
+            kind: CodeActionKind::QUICKFIX,
+            is_preferred: false,
+            auto_applicable: false,
+        }]
+    }
+
+    fn descriptor_owned_materialize(
+        _: &TypeDiagnostic,
+        ctx: &FixContext<'_>,
+        _: &str,
+    ) -> WorkspaceEdit {
+        let mut changes = HashMap::new();
+        changes.insert(
+            ctx.uri.clone(),
+            vec![TextEdit::new(
+                mk_range(0, 7, 0, 13),
+                "const string &in".into(),
+            )],
+        );
+        WorkspaceEdit::new(changes)
+    }
+
+    const DESCRIPTOR_OWNED_FAMILY: fix::FixFamily = fix::FixFamily {
+        name: "test-descriptor-owned",
+        matches: descriptor_owned_matches,
+        describe: descriptor_owned_describe,
+        materialize: descriptor_owned_materialize,
+    };
 
     // ── Capability ────────────────────────────────────────────────────────
 
@@ -856,24 +984,170 @@ mod tests {
     }
 
     #[test]
-    fn listing_does_not_materialize_registered_fixes_but_resolve_and_eager_listing_do() {
+    fn quickfix_listing_stays_lazy_while_fix_all_validation_materializes_auto_candidates() {
         use super::fixes::string_by_value::{materialization_count, reset_materialization_count};
 
         let h = Harness::new("void f(string a, string b) {}");
         reset_materialization_count();
-        let lazy = h.all();
-        assert_eq!(materialization_count(), 0, "lazy listing computed edits");
+        let lazy = h.request(
+            CodeActionContext {
+                only: Some(vec![CodeActionKind::QUICKFIX]),
+                ..Default::default()
+            },
+            whole_doc(&h.source),
+            true,
+        );
+        assert_eq!(
+            materialization_count(),
+            0,
+            "per-diagnostic lazy listing must not compute edits"
+        );
 
         let quickfix = of_kind(&lazy, &CodeActionKind::QUICKFIX)[0].clone();
         assert!(h.resolve(quickfix).edit.is_some());
         assert_eq!(materialization_count(), 1, "resolve must compute one edit");
 
         reset_materialization_count();
-        let eager = h.request(CodeActionContext::default(), whole_doc(&h.source), false);
+        let eager = h.request(
+            CodeActionContext {
+                only: Some(vec![CodeActionKind::QUICKFIX]),
+                ..Default::default()
+            },
+            whole_doc(&h.source),
+            false,
+        );
         assert!(of_kind(&eager, &CodeActionKind::QUICKFIX)
             .iter()
             .all(|action| action.edit.is_some()));
         assert_eq!(materialization_count(), 2, "eager listing needs both edits");
+    }
+
+    #[test]
+    fn lazy_fix_all_materializes_only_auto_candidates_to_validate_its_batch() {
+        use super::fixes::string_by_value::{materialization_count, reset_materialization_count};
+
+        let h = Harness::new("void f(string a, string b) {}");
+        reset_materialization_count();
+        let actions = h.request(
+            CodeActionContext {
+                only: Some(vec![SOURCE_FIX_ALL_OPENPLANET]),
+                ..Default::default()
+            },
+            whole_doc(&h.source),
+            true,
+        );
+        assert_eq!(materialization_count(), 2);
+        assert_eq!(of_kind(&actions, &SOURCE_FIX_ALL_OPENPLANET).len(), 1);
+    }
+
+    #[test]
+    fn lazy_and_eager_actions_have_the_same_identities() {
+        let h = Harness::new("void f(string a, string b) {}");
+        let lazy = h.all();
+        let eager = h.request(CodeActionContext::default(), whole_doc(&h.source), false);
+        let identity = |actions: &[CodeAction]| {
+            actions
+                .iter()
+                .map(|action| {
+                    (
+                        action.title.clone(),
+                        action.kind.clone(),
+                        action.diagnostics.clone(),
+                        action.data.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(identity(&lazy), identity(&eager));
+    }
+
+    #[test]
+    fn descriptor_owned_family_has_matching_lazy_eager_actions_and_resolves_its_edit() {
+        let h = Harness::new("void f(string value) {}");
+        let files = [(h.uri.clone(), &h.analysis)];
+        let context = CodeActionContext {
+            only: Some(vec![CodeActionKind::QUICKFIX]),
+            ..Default::default()
+        };
+        let request = |lazy_edits| CodeActionRequest {
+            uri: &h.uri,
+            analysis: &h.analysis,
+            range: whole_doc(&h.source),
+            context: &context,
+            workspace: &h.workspace,
+            type_index: None,
+            files: WorkspaceFileResolver::new(&files),
+            lazy_edits,
+        };
+
+        let lazy = code_actions_with_families(&request(true), &[DESCRIPTOR_OWNED_FAMILY]);
+        let eager = code_actions_with_families(&request(false), &[DESCRIPTOR_OWNED_FAMILY]);
+        let actions = |actions: Vec<CodeActionOrCommand>| {
+            actions
+                .into_iter()
+                .map(|action| match action {
+                    CodeActionOrCommand::CodeAction(action) => action,
+                    CodeActionOrCommand::Command(command) => {
+                        panic!("unexpected command: {command:?}")
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let lazy = actions(lazy);
+        let eager = actions(eager);
+        let identity = |actions: &[CodeAction]| {
+            actions
+                .iter()
+                .map(|action| {
+                    (
+                        action.title.clone(),
+                        action.kind.clone(),
+                        action.diagnostics.clone(),
+                        action.is_preferred,
+                        action.data.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(identity(&lazy), identity(&eager));
+        assert_eq!(lazy.len(), 1, "one descriptor produces one quick fix");
+        assert!(lazy[0].edit.is_none(), "lazy action must defer its edit");
+        let expected = TextEdit::new(mk_range(0, 7, 0, 13), "const string &in".into());
+        assert_eq!(edits_of(&eager[0], &h.uri), std::slice::from_ref(&expected));
+
+        let resolved = resolve_code_action_with_families(
+            lazy.into_iter().next().expect("one synthetic action"),
+            &h.analysis,
+            &h.workspace,
+            None,
+            WorkspaceFileResolver::new(&files),
+            &[DESCRIPTOR_OWNED_FAMILY],
+        );
+        assert_eq!(edits_of(&resolved, &h.uri), &[expected]);
+    }
+
+    #[test]
+    fn lazy_fix_all_is_not_offered_when_auto_descriptor_cannot_be_batched() {
+        let h = Harness::new("void f(string value) {}");
+        let files = [(h.uri.clone(), &h.analysis)];
+        let request = CodeActionRequest {
+            uri: &h.uri,
+            analysis: &h.analysis,
+            range: whole_doc(&h.source),
+            context: &CodeActionContext {
+                only: Some(vec![SOURCE_FIX_ALL_OPENPLANET]),
+                ..Default::default()
+            },
+            workspace: &h.workspace,
+            type_index: None,
+            files: WorkspaceFileResolver::new(&files),
+            lazy_edits: true,
+        };
+        let actions = code_actions_with_families(&request, &[UNBATCHABLE_AUTO_FAMILY]);
+        assert!(
+            actions.is_empty(),
+            "unbatchable auto fix must not advertise fix-all"
+        );
     }
 
     #[test]
@@ -1240,7 +1514,10 @@ mod tests {
         let table = workspace_with_class("Foo");
         let uri = Url::parse("file:///tmp/a.as").unwrap();
         let diag = mk_diag(mk_range(0, 0, 0, 3), "some other error");
-        assert!(quick_fix_did_you_mean(&uri, "", &[diag], &table, None, true).is_empty());
+        assert!(
+            quick_fix_did_you_mean(&uri, source_fingerprint(""), &[diag], &table, None, true)
+                .is_empty()
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@
 //! fn describe(diag: &TypeDiagnostic) -> Vec<FixDescriptor> { .. }
 //! fn materialize(
 //!     diag: &TypeDiagnostic, ctx: &FixContext<'_>, title: &str
-//! ) -> Option<Fix> { .. }
+//! ) -> WorkspaceEdit { .. }
 //! ```
 //!
 //! Both callbacks are deliberately plain `fn` pointers: the registry stays a
@@ -116,8 +116,10 @@ pub struct FixFamily {
     pub matches: fn(&TypeDiagnosticKind) -> bool,
     /// Describe the menu entries for one claimed diagnostic, without edits.
     pub describe: fn(&TypeDiagnostic, &FixContext<'_>) -> Vec<FixDescriptor>,
-    /// Materialize exactly the selected descriptor.
-    pub materialize: fn(&TypeDiagnostic, &FixContext<'_>, &str) -> Option<Fix>,
+    /// Materialize exactly the selected descriptor. This must be total for
+    /// every descriptor returned by [`Self::describe`]. Action identity is
+    /// deliberately absent: the seam owns it through [`FixDescriptor`].
+    pub materialize: fn(&TypeDiagnostic, &FixContext<'_>, &str) -> WorkspaceEdit,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +139,9 @@ pub struct FixCandidate {
     /// `publishDiagnostics` sent it — so the action can be tied back to the
     /// squiggle even when the client did not echo the diagnostic to us.
     pub diagnostic: Diagnostic,
+    /// The seam-built fix, retained for fix-all's existing edit projection.
+    /// Its metadata is copied from the selected descriptor, never supplied
+    /// by a family.
     pub fix: Fix,
 }
 
@@ -154,7 +159,7 @@ pub fn type_diagnostics(ctx: &FixContext<'_>) -> Vec<TypeDiagnostic> {
 pub fn collect_fixes(ctx: &FixContext<'_>) -> Vec<FixCandidate> {
     collect_fix_descriptors(ctx)
         .iter()
-        .filter_map(|descriptor| materialize_descriptor(ctx, descriptor, FAMILIES))
+        .map(|descriptor| materialize_descriptor(ctx, descriptor, FAMILIES))
         .collect()
 }
 
@@ -192,16 +197,23 @@ pub fn materialize_descriptor(
     ctx: &FixContext<'_>,
     candidate: &FixDescriptorCandidate,
     families: &[FixFamily],
-) -> Option<FixCandidate> {
+) -> FixCandidate {
     let family = families
         .iter()
-        .find(|family| family.name == candidate.family)?;
-    let fix = (family.materialize)(&candidate.type_diagnostic, ctx, &candidate.descriptor.title)?;
-    Some(FixCandidate {
+        .find(|family| family.name == candidate.family)
+        .expect("a descriptor can only come from a registered family");
+    let edit = (family.materialize)(&candidate.type_diagnostic, ctx, &candidate.descriptor.title);
+    FixCandidate {
         family: family.name,
         diagnostic: candidate.diagnostic.clone(),
-        fix,
-    })
+        fix: Fix {
+            title: candidate.descriptor.title.clone(),
+            kind: candidate.descriptor.kind.clone(),
+            edit,
+            is_preferred: candidate.descriptor.is_preferred,
+            auto_applicable: candidate.descriptor.auto_applicable,
+        },
+    }
 }
 
 /// Materialize only the descriptors eligible for `source.fixAll.openplanet`.
@@ -217,7 +229,7 @@ pub fn materialize_auto_descriptors(
     descriptors
         .iter()
         .filter(|candidate| candidate.descriptor.auto_applicable)
-        .filter_map(|candidate| materialize_descriptor(ctx, candidate, families))
+        .map(|candidate| materialize_descriptor(ctx, candidate, families))
         .collect()
 }
 
@@ -229,12 +241,26 @@ pub fn materialize_fix(
     diagnostic_range: Range,
     title: &str,
 ) -> Option<FixCandidate> {
-    let descriptor = collect_fix_descriptors(ctx).into_iter().find(|candidate| {
-        candidate.family == family_name
-            && candidate.diagnostic.range == diagnostic_range
-            && candidate.descriptor.title == title
-    })?;
-    materialize_descriptor(ctx, &descriptor, FAMILIES)
+    materialize_fix_from(ctx, family_name, diagnostic_range, title, FAMILIES)
+}
+
+/// As [`materialize_fix`], against an explicit registry. Once a descriptor
+/// matches, its family contract guarantees materialization.
+pub fn materialize_fix_from(
+    ctx: &FixContext<'_>,
+    family_name: &str,
+    diagnostic_range: Range,
+    title: &str,
+    families: &[FixFamily],
+) -> Option<FixCandidate> {
+    let descriptor = collect_fix_descriptors_from(ctx, families)
+        .into_iter()
+        .find(|candidate| {
+            candidate.family == family_name
+                && candidate.diagnostic.range == diagnostic_range
+                && candidate.descriptor.title == title
+        })?;
+    Some(materialize_descriptor(ctx, &descriptor, families))
 }
 
 /// The LSP diagnostic `publishDiagnostics` would have sent for this finding.
@@ -300,15 +326,13 @@ mod tests {
     fn synthetic_materialize(
         _diagnostic: &TypeDiagnostic,
         ctx: &FixContext<'_>,
-        title: &str,
-    ) -> Option<Fix> {
-        if title != "Synthetic cross-file fix" {
-            return None;
-        }
+        _: &str,
+    ) -> WorkspaceEdit {
         let second_uri = ctx
             .files
             .iter()
-            .find(|(_, analysis)| analysis.source.contains("enable synthetic"))?
+            .find(|(_, analysis)| analysis.source.contains("enable synthetic"))
+            .expect("synthetic descriptor requires the second file")
             .0
             .clone();
         let mut changes = std::collections::HashMap::new();
@@ -320,13 +344,7 @@ mod tests {
             second_uri,
             vec![TextEdit::new(Range::default(), "second".to_string())],
         );
-        Some(Fix {
-            title: title.to_string(),
-            kind: CodeActionKind::QUICKFIX,
-            edit: WorkspaceEdit::new(changes),
-            is_preferred: false,
-            auto_applicable: false,
-        })
+        WorkspaceEdit::new(changes)
     }
 
     const SYNTHETIC_FAMILY: FixFamily = FixFamily {
@@ -358,29 +376,23 @@ mod tests {
         vec![counted_descriptor("manual", false)]
     }
 
-    fn counted_fix(ctx: &FixContext<'_>, title: &str) -> Fix {
+    fn counted_fix(ctx: &FixContext<'_>, title: &str) -> WorkspaceEdit {
         let mut changes = std::collections::HashMap::new();
         changes.insert(
             ctx.uri.clone(),
             vec![TextEdit::new(Range::default(), title.to_string())],
         );
-        Fix {
-            title: title.to_string(),
-            kind: CodeActionKind::QUICKFIX,
-            edit: WorkspaceEdit::new(changes),
-            is_preferred: false,
-            auto_applicable: title == "auto",
-        }
+        WorkspaceEdit::new(changes)
     }
 
-    fn auto_materialize(_: &TypeDiagnostic, ctx: &FixContext<'_>, _: &str) -> Option<Fix> {
+    fn auto_materialize(_: &TypeDiagnostic, ctx: &FixContext<'_>, _: &str) -> WorkspaceEdit {
         AUTO_MATERIALIZED.with(|count| count.set(count.get() + 1));
-        Some(counted_fix(ctx, "auto"))
+        counted_fix(ctx, "auto")
     }
 
-    fn manual_materialize(_: &TypeDiagnostic, ctx: &FixContext<'_>, _: &str) -> Option<Fix> {
+    fn manual_materialize(_: &TypeDiagnostic, ctx: &FixContext<'_>, _: &str) -> WorkspaceEdit {
         MANUAL_MATERIALIZED.with(|count| count.set(count.get() + 1));
-        Some(counted_fix(ctx, "manual"))
+        counted_fix(ctx, "manual")
     }
 
     const COUNTED_FAMILIES: [FixFamily; 2] = [
@@ -446,8 +458,7 @@ mod tests {
 
         let descriptors = collect_fix_descriptors_from(&ctx, &[SYNTHETIC_FAMILY]);
         assert_eq!(descriptors.len(), 1);
-        let fix = materialize_descriptor(&ctx, &descriptors[0], &[SYNTHETIC_FAMILY])
-            .expect("synthetic fix materialized");
+        let fix = materialize_descriptor(&ctx, &descriptors[0], &[SYNTHETIC_FAMILY]);
         let changes = fix.fix.edit.changes.expect("plain workspace changes");
         assert_eq!(changes.get(&uri).unwrap()[0].new_text, "current");
         assert_eq!(changes.get(&second_uri).unwrap()[0].new_text, "second");

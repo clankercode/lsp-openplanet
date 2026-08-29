@@ -396,12 +396,11 @@ pub fn report_to_snapshot(report: &CheckReport, root_label: &str, elapsed: Durat
     }
 }
 
-/// Map a 0-based character index on a raw line to a display column after tab expand.
+/// Map a 0-based UTF-8 byte index on a raw line to a display column after tab expand.
 fn lsp_col_to_display(raw_line: &str, lsp_col: usize, tab_width: usize) -> usize {
     let mut display = 0usize;
-    let mut i = 0usize;
-    for ch in raw_line.chars() {
-        if i >= lsp_col {
+    for (byte_index, ch) in raw_line.char_indices() {
+        if byte_index >= lsp_col {
             break;
         }
         if ch == '\t' {
@@ -409,11 +408,10 @@ fn lsp_col_to_display(raw_line: &str, lsp_col: usize, tab_width: usize) -> usize
         } else {
             display += 1;
         }
-        i += 1;
     }
-    // If lsp_col is past the end, pad.
-    if i < lsp_col {
-        display += lsp_col - i;
+    // If the byte column is past the end, pad defensively.
+    if lsp_col > raw_line.len() {
+        display += lsp_col - raw_line.len();
     }
     display
 }
@@ -487,6 +485,16 @@ mod tests {
         assert_eq!(lsp_col_to_display("\tx", 0, 4), 0);
         assert_eq!(lsp_col_to_display("\tx", 1, 4), 4);
         assert_eq!(lsp_col_to_display("a\tb", 2, 4), 4);
+    }
+
+    #[test]
+    fn lsp_col_to_display_translates_utf8_byte_columns_after_unicode_prefixes() {
+        // CLI reports normalize positions to UTF-8 bytes, while the TUI
+        // stores columns in displayed characters (with tabs expanded).
+        assert_eq!(lsp_col_to_display("é\tfoo", 3, 4), 4);
+        assert_eq!(lsp_col_to_display("é\tfoo", 6, 4), 7);
+        assert_eq!(lsp_col_to_display("😀\tfoo", 5, 4), 4);
+        assert_eq!(lsp_col_to_display("😀\tfoo", 8, 4), 7);
     }
 
     fn showcase_options() -> CheckOptions {

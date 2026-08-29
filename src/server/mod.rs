@@ -94,6 +94,18 @@ fn client_resolves_code_actions(caps: &ClientCapabilities) -> bool {
         })
 }
 
+/// A snapshot may be rebuilding while the open-document map already contains
+/// newer text. Code actions must bind their analysis and stale-action digest
+/// to that current text, not to the previous snapshot revision.
+fn analysis_for_current_source<'a>(
+    snapshot_analysis: Option<&'a crate::analysis::DocumentAnalysis>,
+    owned: &'a crate::analysis::DocumentAnalysis,
+) -> &'a crate::analysis::DocumentAnalysis {
+    snapshot_analysis
+        .filter(|analysis| analysis.source == owned.source)
+        .unwrap_or(owned)
+}
+
 /// One isolated plugin workspace (multi-root spec: "one server, N isolated
 /// plugin workspaces"). Own manifest, deps, diagnostics — no cross-plugin
 /// resolution (t0); `workspace/symbol` unions across all of them (t8).
@@ -1646,7 +1658,7 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot_for(uri).await;
         let type_index_guard = self.type_index.read().await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
-        let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
+        let analysis = analysis_for_current_source(snapshot.analysis_of(uri), &owned);
         let uri_map = snapshot.uri_map();
         let workspace_files: Vec<_> = uri_map.into_values().collect();
         let actions = code_actions::code_actions(&code_actions::CodeActionRequest {
@@ -1677,7 +1689,7 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot_for(&uri).await;
         let type_index_guard = self.type_index.read().await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
-        let analysis = snapshot.analysis_of(&uri).unwrap_or(&owned);
+        let analysis = analysis_for_current_source(snapshot.analysis_of(&uri), &owned);
         let uri_map = snapshot.uri_map();
         let workspace_files: Vec<_> = uri_map.into_values().collect();
         Ok(code_actions::resolve_code_action(
@@ -1857,6 +1869,20 @@ mod tests {
                 "{name} must receive eager edits"
             );
         }
+    }
+
+    #[test]
+    fn code_actions_prefer_owned_analysis_when_snapshot_source_is_stale() {
+        let stale = crate::analysis::DocumentAnalysis::analyze_plain("void f(string s) {}");
+        let current = crate::analysis::DocumentAnalysis::analyze_plain("void f(int n) {}");
+        assert!(std::ptr::eq(
+            analysis_for_current_source(Some(&stale), &current),
+            &current
+        ));
+        assert!(std::ptr::eq(
+            analysis_for_current_source(Some(&current), &current),
+            &current
+        ));
     }
 
     fn temp_tree(name: &str) -> PathBuf {
