@@ -188,7 +188,9 @@ impl App {
 
         // Detail height: content-driven, min 6 inner lines, +1 slack, +2 borders.
         // Caps so the list keeps the bulk of the screen (no huge empty detail).
-        let detail_h = detail_box_height(self.selected_diag());
+        // Width-aware: a message that wraps needs more rows (B029).
+        let detail_inner_w = chunks[1].width.saturating_sub(2) as usize;
+        let detail_h = detail_box_height(self.selected_diag(), detail_inner_w);
         let mid = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(4), Constraint::Length(detail_h)])
@@ -303,23 +305,12 @@ impl App {
     }
 
     fn draw_detail(&self, f: &mut Frame<'_>, area: Rect) {
+        let inner_w = area.width.saturating_sub(2) as usize;
         let (title, lines): (String, Vec<Line<'_>>) = match self.selected_diag() {
-            None => (
-                " detail ".to_string(),
-                vec![
-                    Line::from(Span::styled(
-                        "  Nothing selected.",
-                        Style::default().add_modifier(Modifier::DIM),
-                    )),
-                    Line::from(Span::styled(
-                        "  j/k moves the list · Enter is not required.",
-                        Style::default().add_modifier(Modifier::DIM),
-                    )),
-                ],
-            ),
+            None => (" detail ".to_string(), empty_detail_lines()),
             Some(d) => (
                 format!(" detail · {} ", d.severity.label()),
-                pretty_detail_lines(d),
+                pretty_detail_lines(d, inner_w),
             ),
         };
 
@@ -455,12 +446,27 @@ fn format_location(d: &DiagItem, loc_w: usize) -> String {
     format!("{:<loc_w$}", truncated)
 }
 
+/// Placeholder body shown when nothing is selected.
+fn empty_detail_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "  Nothing selected.",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "  j/k moves the list · Enter is not required.",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    ]
+}
+
 /// Total terminal rows for the detail box (borders included).
 /// Inner content height = max(6, content_lines + 1), then +2 for borders.
-fn detail_box_height(selected: Option<&DiagItem>) -> u16 {
+/// `inner_w` is the box's inner width — the message wraps into it (B029).
+fn detail_box_height(selected: Option<&DiagItem>, inner_w: usize) -> u16 {
     let content = match selected {
-        None => 2usize, // empty-state lines
-        Some(d) => pretty_detail_lines(d).len(),
+        None => empty_detail_lines().len(),
+        Some(d) => pretty_detail_lines(d, inner_w).len(),
     };
     let inner = content.saturating_add(1).max(6);
     // Hard cap: never more than 8 content rows (+2 borders = 10).
@@ -497,9 +503,8 @@ fn list_item_for(
     };
     match density {
         ListDensity::Compact => {
-            let loc = format_location(d, loc_w);
-            let used = 3 + loc.chars().count() + 2; // " E " + loc + "  "
-            let msg_budget = content_w.saturating_sub(used).max(4);
+            let (eff_loc_w, msg_budget) = compact_field_widths(content_w, loc_w);
+            let loc = format_location(d, eff_loc_w);
             let msg = ellipsize(&d.message, msg_budget);
             let row = Line::from(vec![
                 Span::styled(format!(" {glyph} "), style.add_modifier(Modifier::BOLD)),
@@ -541,12 +546,40 @@ fn list_item_for(
                 }
             }
             let head = Line::from(head_spans);
-            let msg_budget = content_w.saturating_sub(3).max(4);
-            let msg_txt = ellipsize(&d.message, msg_budget);
-            let msg = Line::from(Span::styled(format!("   {msg_txt}"), msg_style));
-            ListItem::new(vec![head, msg])
+            let mut rows = vec![head];
+            for txt in relaxed_msg_rows(&d.message, content_w, selected) {
+                rows.push(Line::from(Span::styled(
+                    format!("{}{txt}", " ".repeat(RELAXED_MSG_INDENT)),
+                    msg_style,
+                )));
+            }
+            ListItem::new(rows)
         }
     }
+}
+
+/// Fixed chrome around a Compact row's two fields: `" E "` plus the `"  "` gap.
+const COMPACT_CHROME: usize = 5;
+/// Columns the message would like to keep before the location may grow into them.
+const COMPACT_MSG_MIN: usize = 20;
+/// Indent of a Relaxed message row under its header row.
+const RELAXED_MSG_INDENT: usize = 3;
+
+/// Split a Compact row's content width into `(location, message)` budgets.
+fn compact_field_widths(content_w: usize, loc_w: usize) -> (usize, usize) {
+    let _ = COMPACT_MSG_MIN;
+    (
+        loc_w,
+        content_w.saturating_sub(COMPACT_CHROME + loc_w).max(4),
+    )
+}
+
+/// Message row text for a Relaxed list item (one row, or two when selected
+/// and the message does not fit — B029).
+fn relaxed_msg_rows(msg: &str, content_w: usize, selected: bool) -> Vec<String> {
+    let budget = content_w.saturating_sub(RELAXED_MSG_INDENT);
+    let _ = selected;
+    vec![ellipsize(msg, budget.max(4))]
 }
 
 /// Build `› frag ‹`, truncating `frag` only when it exceeds `budget` chars total.
@@ -703,7 +736,9 @@ fn enrich_call_fragment(chars: &[char], start: usize, end: usize) -> Option<Stri
     Some(slice)
 }
 
-fn pretty_detail_lines(d: &DiagItem) -> Vec<Line<'static>> {
+/// Detail-box body for `d`, laid out for an inner width of `inner_w` columns.
+fn pretty_detail_lines(d: &DiagItem, inner_w: usize) -> Vec<Line<'static>> {
+    let _ = inner_w;
     let path = d.path.display().to_string();
     let sev = d.severity.label();
     let sev_style = severity_style(d.severity).add_modifier(Modifier::BOLD);
@@ -888,7 +923,7 @@ mod tests {
     #[test]
     fn pretty_detail_separates_carets_and_message() {
         let d = &canned_snapshot().diagnostics[0];
-        let lines = pretty_detail_lines(d);
+        let lines = pretty_detail_lines(d, 78);
         let rows: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -966,7 +1001,7 @@ mod tests {
     #[test]
     fn detail_has_blank_after_header() {
         let d = &canned_snapshot().diagnostics[0];
-        let lines = pretty_detail_lines(d);
+        let lines = pretty_detail_lines(d, 78);
         let rows: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -992,10 +1027,10 @@ mod tests {
     #[test]
     fn detail_box_height_min_six_inner() {
         // borders + max(6, content+1) — at least 8 total rows
-        let h = detail_box_height(Some(&canned_snapshot().diagnostics[0]));
+        let h = detail_box_height(Some(&canned_snapshot().diagnostics[0]), 78);
         assert!(h >= 8, "h={h}");
         assert!(h <= 10, "h={h}");
-        let empty = detail_box_height(None);
+        let empty = detail_box_height(None, 78);
         assert!(empty >= 8, "empty={empty}");
     }
 
