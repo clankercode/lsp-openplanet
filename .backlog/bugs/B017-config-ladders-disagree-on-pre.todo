@@ -95,3 +95,15 @@ leave the ladder correct but still untestable from a user's point of view.
 The per-key resolvers added for unused_callbacks (B012) and honor_gitignore
 (B015) both sidestep both defects by construction and should fold back onto the
 shared path once it is correct.
+
+
+## Note from B024 (2026-08-29)
+
+The `defines` key no longer participates in the last-file-wins ladder at all:
+config layers now ACCUMULATE their `defines` entries into
+`LspConfig::define_overrides`, applied after target derivation and the
+manifest (`-NAME` / `!NAME` removes). So the precedence work here should
+treat `defines` as already resolved — the remaining inversion is
+`openplanet_dir`, `plugins_dir`, `game_target`, `source_paths`,
+`ignore_paths`, `shortcut_*` and the matrix keys. The whole-file-discard
+defect is untouched by B024.
