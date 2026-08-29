@@ -1,0 +1,165 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:27:25Z"
+depends_on: []
+estimate_hours: 1
+id: B044
+priority: medium
+status: pending
+tags:
+    - typedb
+    - checker
+    - false-negative
+    - gh-59-followup
+title: Bare unnamed-enum value names resolve in the LSP but are rejected by the game (~261 names)
+updated_at: "2026-08-29T15:27:25Z"
+---
+Found by the B016 lane while probing the fixture against the live game,
+2026-08-30. PRE-EXISTING false negative; B016 made it uniform rather than
+causing it. Deliberately NOT fixed in B016 — see "Why not in B016".
+
+## Defect
+A bare value name belonging to an anonymous (inline member) engine enum is
+accepted by the LSP as a resolvable identifier. The game rejects it:
+
+    (83,16) ERR : No matching symbol 'HyperTnL'
+    (84,16) ERR : No matching symbol 'RenderPlaneReflect'
+    (85,16) ERR : No matching symbol 'MinimalReadOnly'
+
+The rule: a bare value name of an UNNAMED engine enum is not a symbol. The
+enum has no name in the game, so nothing in source can reach its values
+without going through the declaring member's type.
+
+## Three sets — do not conflate them
+
+  A = game rejects, LSP silent  ................ ~261 (upper bound)
+  B = pre-existing, silent BEFORE and AFTER B016 ... 53
+  C = newly silenced by B016 ...................... 208
+
+A = B + C. Set B is the values of the 14 collision SURVIVORS (the anonymous
+enums that happened to win their module's `or_insert` race before B016);
+set C is the values of the collision LOSERS that B016 recovered.
+
+Derivation of 261: 387 distinct value names across the 132 anonymous member
+enums, minus 126 that ALSO appear in a named enum (where a bare reference
+resolves legitimately in-game).
+
+**261 is an upper bound, not exact.** It subtracts names shared with a named
+enum but NOT names that resolve for some other reason (a Core global, a
+builtin, a function). The exhaustive probe below would incidentally yield the
+exact number, since anything the game accepts simply would not appear in the
+error list.
+
+## Evidence quality
+
+PROVEN — observed in `Openplanet.log`, RemoteBuild probe 2026-08-30,
+Trackmania + Openplanet 1.29.5, live Wine client, run twice identically:
+
+  HyperTnL            Graphic::CGxLightBall::AttenuationType    (survivor, B)
+  RenderPlaneReflect  Plug::CPlugBitmapHighLevel::Mode          (survivor, B)
+  MinimalReadOnly     Control::CControlColorChooser::StyleType  (loser, C)
+
+INFERRED, present in the same probe but MASKED — AngelScript reports one error
+per STATEMENT, at the first unresolved symbol, and the fixture put three names
+per statement:
+
+  SlideNoControl          Scene::CSceneCharVisState::CharPhyState     (B)
+  NotTimed                Input::CInputPort::InputsMode               (B)
+  Download_WaitingSources Net::CNetFileTransferDownload::DownloadState (B)
+  TimeHhMmSsMil           Control::CControlEntry::Type                (C)
+  Text_Icon               Control::CControlButton::DisplayType        (C)
+
+INFERRED, never probed: the remaining ~253 of set A.
+
+Not in set A at all: `VCenter2` — it also lives in the named enum
+`Game::CGameManialinkControl::EAlignVertical`, so a bare reference to it is
+legitimate. Dropped from the fixture for that reason. Any narrowing MUST
+preserve this case.
+
+**The load-bearing fact: two of the three PROVEN rejections are set B.**
+`HyperTnL` and `RenderPlaneReflect` were silently accepted long before B016
+existed. So the rule holds across BOTH classes, and this is not a regression
+B016 introduced.
+
+## Why not in B016 (decision, carried forward)
+B016's mandate was to stop DROPPING enums, explicitly not to start rejecting
+more code. Narrowing the value scan is a tightening, and it cannot be scoped
+to set C: the same call site governs set B, so fixing C without B would leave
+the checker inconsistent for no principled reason. Taking B too is a
+behaviour change with its own false-positive surface — 53 names that today
+compile clean in the LSP would begin erroring. That is its own red/green plus
+dogfood exercise, which is this ticket.
+
+A Codex reviewer on the B016 branch proposed exactly this narrowing (filtering
+anonymous enums out of `GlobalScope::has_global_ident`). It was REVERTED
+there, correctly: it turned 5 identifiers accepted at 91a296c into fresh
+`undefined identifier` errors with no dogfood pass behind it. That revert is
+not a rejection of the idea — it is this ticket.
+
+## Work
+- Narrow the bare-value scan so a value reachable ONLY through an anonymous
+  member enum is not a global identifier. Expect the call site to be at or
+  near `GlobalScope::has_global_ident`; confirm all callers before changing it
+  (the B016 lane's second review pass traced six).
+- Preserve the shared-name case: a value that ALSO appears in a named enum
+  must keep resolving (`VCenter2`).
+- Members keep reaching their own inline enum's values through the declaring
+  member's type — that path is legitimate and must not regress.
+- Re-measure all five FP fixtures against a binary built from the archived
+  base commit. Expect movement; every delta must be explained. Do NOT trust
+  baselines quoted in tickets — see the correction note on B019.
+
+## Test plan (TDD, red first)
+
+The rule is testable at the LIB level against the type index, no game needed —
+that is the regression test that matters:
+
+Red:
+- `bare_anonymous_enum_value_is_not_a_global_identifier`: each of the five
+  probed names errors (three proven + two inferred-but-probed from set C).
+- `bare_value_shared_with_a_named_enum_still_resolves`: `VCenter2` resolves.
+- `member_path_to_an_anonymous_enum_value_still_resolves`: reaching the value
+  through the declaring member's type is unaffected.
+
+Variants (per CLAUDE.md, generalize):
+- one name from set B and one from set C both error (the fix must not be
+  scoped to the enums B016 recovered)
+- a value name appearing in TWO different anonymous enums -> errors once
+- a value name appearing in an anonymous enum AND as a Core global / builtin /
+  function -> still resolves (this is the residual in the 261 upper bound)
+- a named nested enum's values -> unaffected
+- completion and hover do not offer the narrowed names either (consistency
+  with the checker, and B016 already excludes them from those surfaces)
+- `typedb diff` unaffected
+
+## Acceptance evidence (the exhaustive probe — do this INSIDE this ticket)
+Generate a probe fixture with ONE name per STATEMENT, one statement per line:
+
+    void Probe() {
+        print("" + HyperTnL);
+        print("" + SlideNoControl);
+        ...
+    }
+
+The one-error-per-statement rule is already proven, so every rejected name
+surfaces on its own line and the line number maps back to the name. No file
+per name, no compile per name.
+
+Name list generation: for each of the 132 anonymous member enums take its
+values, drop any that appear in a named enum — the same computation that
+produced 261.
+
+Rounds: unknown whether Openplanet/AngelScript caps errors per compile (not
+hit at 3, ceiling untested). Sequence cheaply — run ONE batch of 50 first; if
+it returns 50 errors there is no cap in that range and the remaining 211 can
+go in one round. Worst case ~6 rounds at ~15s each (stage / RemoteBuild-load /
+read log / unload / remove via `scripts/issue_repro_game.py`), about 2 minutes.
+
+Acceptance: before the fix, all 261 are "LSP silent, game rejects"; after, both
+reject. Keep the probe as a permanent fixture, and record the EXACT count it
+yields in place of the 261 upper bound.
+
+## Related
+B016 (merged, b8df60b) — recovered the 208; its CHANGELOG entry documents this
+false negative as known and deliberate. Probe harness:
+`scripts/issue_repro_game.py`, fixture `tests/fixtures/issue-repros/`.
