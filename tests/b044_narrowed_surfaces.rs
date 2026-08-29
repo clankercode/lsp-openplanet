@@ -29,7 +29,7 @@ const NARROWED: [&str; 4] = [
 ];
 
 /// Also a value of the NAMED `Game::CGameManialinkControl::EAlignVertical`,
-/// so a bare reference to it is legitimate and it must stay offered.
+/// so a bare reference to it is legitimate and must keep resolving.
 const SHARED_WITH_NAMED_ENUM: &str = "VCenter2";
 
 fn fixture_index() -> TypeIndex {
@@ -48,7 +48,7 @@ fn snapshot(source: &str) -> AnalysisSnapshot {
     )
 }
 
-/// Position of the first occurrence of `needle`, as a line 0 offset.
+/// Cursor position just inside the first occurrence of `needle`.
 fn pos_in(source: &str, needle: &str) -> Position {
     let byte = source.find(needle).expect("needle must occur");
     let prefix = &source[..byte];
