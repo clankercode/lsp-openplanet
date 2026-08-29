@@ -1320,22 +1320,14 @@ impl LspConfig {
             );
         }
 
-        // Layer 4: Workspace manifest-derived defines. These are additive and
-        // model how Openplanet compiles the plugin with dependency and
-        // script-defined preprocessor symbols enabled.
-        if let Some(root) = workspace_root {
-            let manifest_path = root.join("info.toml");
-            if let Ok(manifest) = Manifest::load(&manifest_path) {
-                config.apply_manifest(&manifest);
-            }
-        }
-
-        // Layer 5: the user's own `defines` entries, applied LAST so an
-        // explicit `-NAME` can drop anything a lower layer turned on (B024).
-        config.apply_define_overrides();
-
         // Derive JSON paths from openplanet_dir if not set explicitly.
         // The game JSON follows the target's variant (GH #45).
+        //
+        // B019 moved this BEFORE the manifest layer: `plugins_dir` is an
+        // input to dependency resolution, and Layer 4 now has to know which
+        // dependencies actually resolve. Nothing between here and there reads
+        // core_json / game_json / plugins_dir, so the move is order-neutral
+        // for every other key.
         if let Some(op_dir) = &config.openplanet_dir {
             if config.core_json.is_none() {
                 let p = op_dir.join("OpenplanetCore.json");
@@ -1358,7 +1350,72 @@ impl LspConfig {
             }
         }
 
+        // Layer 4: Workspace manifest-derived defines. These are additive and
+        // model how Openplanet compiles the plugin with dependency and
+        // script-defined preprocessor symbols enabled.
+        if let Some(root) = workspace_root {
+            let manifest_path = root.join("info.toml");
+            if let Ok(manifest) = Manifest::load(&manifest_path) {
+                let resolved = config.resolve_declared_dependencies(&manifest, parent);
+                config.apply_manifest(&manifest, &resolved);
+            }
+        }
+
+        // Layer 5: the user's own `defines` entries, applied LAST so an
+        // explicit `-NAME` can drop anything a lower layer turned on (B024).
+        // This is also the escape hatch for an unresolved dependency (B019):
+        // `defines = ["DEPENDENCY_X"]` still forces the branch live.
+        config.apply_define_overrides();
+
         config
+    }
+
+    /// Which of the manifest's DECLARED dependencies actually resolve here
+    /// (B019).
+    ///
+    /// Uses the same resolver, over the same search dirs, as the workspace
+    /// load that runs later — `DependencySearch::finalize_with_config` plus
+    /// the multi-root `parent` folder, which the server appends to
+    /// `extra_plugins_dirs` after this call. Agreement matters: if this
+    /// probe saw FEWER dirs than the loader, we would withhold a define for
+    /// a dependency whose symbols are nonetheless pooled, and mask code the
+    /// game compiles.
+    ///
+    /// Only the root manifest's own declarations are probed. Transitive
+    /// `export_dependencies` of a resolved dep never get a define of their
+    /// own, so their resolution does not belong here.
+    fn resolve_declared_dependencies(
+        &self,
+        manifest: &Manifest,
+        parent: Option<&Path>,
+    ) -> HashSet<String> {
+        let Some(script) = &manifest.script else {
+            return HashSet::new();
+        };
+        let mut search =
+            crate::workspace::load::DependencySearch::with_defaults().finalize_with_config(self);
+        if let Some(parent) = parent {
+            let canonical = parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf());
+            if !search.plugins_dirs.contains(&canonical) {
+                search.plugins_dirs.push(canonical);
+            }
+        }
+        script
+            .dependencies
+            .iter()
+            .chain(&script.optional_dependencies)
+            .chain(&script.export_dependencies)
+            .filter(|dep| {
+                crate::workspace::load::dependency_resolves(
+                    dep,
+                    &search.plugins_dirs,
+                    &search.plugin_files_search_paths,
+                )
+            })
+            .cloned()
+            .collect()
     }
 
     /// Set the signature level from a config / init-option token (GH #64).
@@ -1464,7 +1521,22 @@ impl LspConfig {
         }
     }
 
-    pub fn apply_manifest(&mut self, manifest: &Manifest) {
+    /// Apply the manifest's `[script]` defines and its dependency macros.
+    ///
+    /// `resolved` is the set of declared dependency ids that actually resolve
+    /// on this machine (B019). A dependency NOT in that set gets no
+    /// `DEPENDENCY_<ID>`, matching the game, which defines the macro only for
+    /// dependencies it loaded — and matching `specs/draft-v1.md` 4.1 step 5,
+    /// "For optional_dependencies, if not found, define no DEPENDENCY_X
+    /// preprocessor symbol; if found, define it".
+    ///
+    /// Taking the set as an argument keeps this function pure and testable;
+    /// `load_with_parent` computes it via
+    /// [`Self::resolve_declared_dependencies`]. The deliberate escape hatches
+    /// for an uninstalled dependency are `define_matrix` (per-combo, layered
+    /// after this) and an explicit `defines = ["DEPENDENCY_X"]` entry
+    /// (Layer 5, applied after this).
+    pub fn apply_manifest(&mut self, manifest: &Manifest, resolved: &HashSet<String>) {
         let Some(script) = &manifest.script else {
             return;
         };
@@ -1472,18 +1544,52 @@ impl LspConfig {
         for define in &script.defines {
             self.defines.insert(define.clone());
         }
-        for dep in &script.dependencies {
-            self.defines
-                .insert(format!("DEPENDENCY_{}", dependency_define_suffix(dep)));
+
+        // Openplanet's id → macro mapping collides (`my-plugin` and
+        // `my.plugin` both give MY_PLUGIN). We reproduce the collision rather
+        // than diverge from the game, but never silently: two declared ids
+        // landing on one macro means one of them is indistinguishable from
+        // the other in every `#if`, which is worth saying out loud.
+        let mut claimed: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        let declared = script
+            .dependencies
+            .iter()
+            .chain(&script.optional_dependencies)
+            .chain(&script.export_dependencies);
+        for dep in declared {
+            let Some(name) = dependency_define_name(dep) else {
+                eprintln!("warning: info.toml declares a blank dependency id; ignoring it");
+                continue;
+            };
+            if let Some(previous) = claimed.get(&name) {
+                if previous != dep {
+                    eprintln!(
+                        "warning: dependencies `{previous}` and `{dep}` both map to `{name}`                          (Openplanet replaces spaces, dashes and periods with underscores),                          so `#if {name}` cannot tell them apart"
+                    );
+                }
+            } else {
+                claimed.insert(name.clone(), dep.clone());
+            }
+            if !resolved.contains(dep) {
+                continue;
+            }
+            self.defines.insert(name);
         }
-        for dep in &script.optional_dependencies {
-            self.defines
-                .insert(format!("DEPENDENCY_{}", dependency_define_suffix(dep)));
-        }
+
+        // `export_dependencies` additionally get EXPORT_DEPENDENCY_<ID>, on
+        // the same resolution gate.
         for dep in &script.export_dependencies {
-            let suffix = dependency_define_suffix(dep);
-            self.defines.insert(format!("DEPENDENCY_{}", suffix));
-            self.defines.insert(format!("EXPORT_DEPENDENCY_{}", suffix));
+            if !resolved.contains(dep) {
+                continue;
+            }
+            if dependency_define_name(dep).is_some() {
+                self.defines.insert(format!(
+                    "EXPORT_DEPENDENCY_{}",
+                    dependency_define_suffix(dep)
+                ));
+            }
         }
     }
 
@@ -1746,6 +1852,16 @@ impl LspConfig {
         if let Some(group) = opts.get("errors").and_then(parse_errors_json) {
             self.errors = group;
         }
+        // B019: extra dependency search dirs (the CLI's `--plugins-dir`).
+        // Appended to the LAST-priority list so configured/installed plugins
+        // dirs keep precedence, matching how the server supplies its own.
+        if let Some(dirs) = opts.get("plugins_dirs").and_then(|v| v.as_array()) {
+            for dir in dirs.iter().filter_map(|v| v.as_str()).map(PathBuf::from) {
+                if !self.extra_plugins_dirs.contains(&dir) {
+                    self.extra_plugins_dirs.push(dir);
+                }
+            }
+        }
         if let Some(roots) = opts.get("plugin_roots").and_then(|v| v.as_array()) {
             let parsed: Vec<PathBuf> = roots
                 .iter()
@@ -1817,14 +1933,45 @@ fn parse_errors_json(value: &serde_json::Value) -> Option<ErrorGroup> {
     }
 }
 
+/// The `DEPENDENCY_<SUFFIX>` name for a dependency id, or `None` when the id
+/// is blank — a bare `DEPENDENCY_` would be meaningless and is never emitted.
+pub(crate) fn dependency_define_name(dep: &str) -> Option<String> {
+    (!dep.trim().is_empty()).then(|| format!("DEPENDENCY_{}", dependency_define_suffix(dep)))
+}
+
+/// Openplanet's plugin-id → macro-name mapping.
+///
+/// AUTHORITY — Openplanet docs, "Plugin Dependencies"
+/// (<https://openplanet.dev/docs/tutorials/plugin-dependencies>), verbatim:
+/// "The definition will have a prefix of `DEPENDENCY_` followed by the plugin
+/// ID in uppercase, with spaces, dashes, and periods replaced by
+/// underscores." The same page defines the plugin ID as the folder name, or
+/// the file base name of a `.op`. Corroborated across the real plugin corpus:
+/// `tm-control-mcp` → `DEPENDENCY_TM_CONTROL_MCP`, `ghosts-pp` →
+/// `DEPENDENCY_GHOSTS_PP`, `ManiaExchange` → `DEPENDENCY_MANIAEXCHANGE`.
+///
+/// INFERENCE — three points the docs imply but do not state, and which no
+/// real dependency id exercises, so they are unverified against the game:
+///  1. Characters OUTSIDE {space, `-`, `.`} pass through untouched. We do NOT
+///     sanitise them. Mapping `Dips++` to `DIPS__` would be worse than
+///     leaving `DIPS++`: the game's name is inert (no `#if` can reference it,
+///     the lexer ends the identifier at `+`) whereas `DEPENDENCY_DIPS__` is a
+///     well-formed identifier the game never defines — B019's own failure
+///     mode, a define we have and the game lacks, making dead code live.
+///  2. Replacement is one underscore PER character: `a--b` → `A__B`, never a
+///     collapsed `A_B`.
+///  3. Uppercasing is ASCII-only, so `café` → `CAFé` (a byte-wise C-locale
+///     `toupper` behaves this way).
+///
+/// The mapping COLLIDES by design — `my_plugin`, `my-plugin` and `my.plugin`
+/// all yield `MY_PLUGIN`. That is Openplanet's collision, not ours, so it is
+/// reproduced rather than diverged from; [`LspConfig::apply_manifest`] warns
+/// when one manifest declares two ids that collapse together.
 fn dependency_define_suffix(dep: &str) -> String {
     dep.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
+        .map(|c| match c {
+            ' ' | '-' | '.' => '_',
+            other => other.to_ascii_uppercase(),
         })
         .collect()
 }
@@ -4360,5 +4507,375 @@ shortcut_match_enums = true
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), CONFIG_KEYS.len(), "duplicate CONFIG_KEYS");
+    }
+
+    // ---------------------------------------------------------------------
+    // B019: DEPENDENCY_<ID> naming. Openplanet docs, "Plugin Dependencies":
+    // "The definition will have a prefix of `DEPENDENCY_` followed by the
+    // plugin ID in uppercase, with spaces, dashes, and periods replaced by
+    // underscores."  https://openplanet.dev/docs/tutorials/plugin-dependencies
+    // ---------------------------------------------------------------------
+
+    /// The documented mapping, pinned across every ID shape a plugins dir can
+    /// produce (the ID is a folder name or a `.op` file base name).
+    #[test]
+    fn dependency_define_suffix_matches_the_documented_openplanet_mapping() {
+        let cases: &[(&str, &str, &str)] = &[
+            // (id, suffix, why this row exists)
+            (
+                "my_plugin",
+                "MY_PLUGIN",
+                "underscore is not in the replaced set",
+            ),
+            ("my-plugin", "MY_PLUGIN", "dash -> underscore"),
+            ("my.plugin", "MY_PLUGIN", "period -> underscore"),
+            ("my plugin", "MY_PLUGIN", "space -> underscore"),
+            ("MLHOOK", "MLHOOK", "already upper"),
+            ("MLHook", "MLHOOK", "mixed case"),
+            ("myPlugin", "MYPLUGIN", "camelCase"),
+            ("MyPlugin", "MYPLUGIN", "PascalCase"),
+            ("plugin2", "PLUGIN2", "trailing digit"),
+            // `DEPENDENCY_2FAST` is a valid identifier: the prefix means the
+            // leading character is `D`, so a leading digit needs no rescue.
+            ("2fast", "2FAST", "leading digit"),
+            ("com.example.plugin", "COM_EXAMPLE_PLUGIN", "multi-period"),
+            (
+                "a--b",
+                "A__B",
+                "one underscore PER character, no collapsing",
+            ),
+            ("a...b", "A___B", "likewise for periods"),
+            ("-plugin", "_PLUGIN", "leading dash"),
+            ("plugin-", "PLUGIN_", "trailing dash"),
+            ("_plugin", "_PLUGIN", "leading underscore, untouched"),
+            ("x", "X", "single character"),
+            // Characters OUTSIDE {space, '-', '.'} are left alone. The docs
+            // specify this; it is unverified against the running game, and no
+            // dependency ID in the real corpus exercises it.
+            ("Dips++", "DIPS++", "'+' is NOT in the replaced set"),
+            ("a+b", "A+B", "'+' untouched"),
+            ("a/b", "A/B", "'/' untouched"),
+            ("a@b", "A@B", "'@' untouched"),
+            // to_ascii_uppercase leaves non-ASCII alone. Also inference.
+            ("café", "CAFé", "non-ASCII is not uppercased"),
+            ("日本語", "日本語", "non-ASCII untouched"),
+        ];
+        for (id, want, why) in cases {
+            assert_eq!(
+                dependency_define_suffix(id),
+                *want,
+                "`{id}` -> `{want}` ({why})"
+            );
+        }
+    }
+
+    /// The rejected "safe superset". Mapping every non-alphanumeric to `_`
+    /// agrees with the docs on space/dash/period, but for anything else it
+    /// turns a name the game defines but no `#if` can reference (the lexer
+    /// ends the identifier at `+`) into a WELL-FORMED identifier the game
+    /// never defines. That is B019's own failure mode — a define we have and
+    /// the game does not, making dead code live — inside the function B019
+    /// exists to fix. Negative assertion, so nobody re-introduces it.
+    #[test]
+    fn dependency_define_suffix_does_not_sanitise_beyond_the_documented_set() {
+        assert_ne!(
+            dependency_define_suffix("Dips++"),
+            "DIPS__",
+            "`+` must NOT become `_`: `DEPENDENCY_DIPS__` is a usable identifier \
+             the game never defines, while `DEPENDENCY_DIPS++` is inert"
+        );
+        for (id, forbidden) in [("a+b", "A_B"), ("a/b", "A_B"), ("a@b", "A_B")] {
+            assert_ne!(dependency_define_suffix(id), forbidden, "`{id}`");
+        }
+    }
+
+    /// Openplanet's OWN mapping collides: `-`, `.` and ` ` all become `_`, so
+    /// distinct plugin IDs can share one define. We must REPRODUCE that, not
+    /// diverge from it — but never silently, so `apply_manifest` warns.
+    #[test]
+    fn colliding_dependency_ids_share_one_define_exactly_as_openplanet_does() {
+        let colliding = ["my_plugin", "my-plugin", "my.plugin", "my plugin"];
+        let suffixes: Vec<String> = colliding
+            .iter()
+            .map(|id| dependency_define_suffix(id))
+            .collect();
+        assert!(
+            suffixes.iter().all(|s| s == "MY_PLUGIN"),
+            "the documented rule collides these four ids: {suffixes:?}"
+        );
+        // `_plugin` and `-plugin` are a second instance of the same class.
+        assert_eq!(
+            dependency_define_suffix("_plugin"),
+            dependency_define_suffix("-plugin")
+        );
+    }
+
+    /// An empty or whitespace-only id must never produce a bare
+    /// `DEPENDENCY_`, and must not panic.
+    #[test]
+    fn blank_dependency_ids_produce_no_define() {
+        for blank in ["", "   ", "\t", "\n"] {
+            assert!(
+                dependency_define_name(blank).is_none(),
+                "blank id {blank:?} must yield no define"
+            );
+        }
+        assert_eq!(
+            dependency_define_name("MLHook").as_deref(),
+            Some("DEPENDENCY_MLHOOK")
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // B019: DEPENDENCY_<ID> only for dependencies that actually RESOLVED.
+    //
+    // The game defines the macro only for dependencies it loaded. Defining it
+    // for a declared-but-uninstalled optional dep makes `#if DEPENDENCY_X`
+    // branches live that the game masks out — a define-set mismatch in the
+    // direction that makes dead code live, and a false-positive generator
+    // (the guarded code references X's symbols, absent from the workspace).
+    //
+    // specs/draft-v1.md already mandates this: 4.1 step 5 "For
+    // optional_dependencies, if not found, define no DEPENDENCY_X
+    // preprocessor symbol; if found, define it", restated at 6.4.
+    // ---------------------------------------------------------------------
+
+    /// Plugin root with an `info.toml` `[script]` body, plus an adjacent
+    /// plugins dir the config points at. Returns `(root, plugins_dir)`.
+    fn b019_plugin(name: &str, script: &str) -> (PathBuf, PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("oplsp-b019-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("plugin");
+        let plugins = tmp.join("plugins");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(
+            root.join("info.toml"),
+            format!("[meta]\nname = \"B019 {name}\"\nversion = \"0.1.0\"\n\n[script]\n{script}"),
+        )
+        .unwrap();
+        std::fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+        // Point the ladder at our own plugins dir. The auto-detected game
+        // install is also searched, so every id below is deliberately absurd.
+        std::fs::write(
+            root.join(".openplanet-lsp.toml"),
+            format!("plugins_dir = {:?}\n", plugins.to_str().unwrap()),
+        )
+        .unwrap();
+        (root, plugins)
+    }
+
+    /// Install a resolvable directory plugin into `plugins_dir`.
+    fn b019_install(plugins: &Path, id: &str) {
+        let dir = plugins.join(id);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("info.toml"),
+            format!("[meta]\nname = \"{id}\"\nversion = \"1.0.0\"\n"),
+        )
+        .unwrap();
+    }
+
+    /// RED: an uninstalled OPTIONAL dependency must not define its macro.
+    #[test]
+    fn unresolved_optional_dependency_is_not_defined() {
+        let (root, _plugins) = b019_plugin(
+            "opt-missing",
+            "optional_dependencies = [\"ZzzNoSuchOptDep99\"]\n",
+        );
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(
+            !cfg.defines.contains("DEPENDENCY_ZZZNOSUCHOPTDEP99"),
+            "an uninstalled optional dep must not be defined: {:?}",
+            cfg.defines
+                .iter()
+                .filter(|d| d.starts_with("DEPENDENCY_"))
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// A dependency that DOES resolve keeps its define — the fix gates on
+    /// resolution, it does not stop defining.
+    #[test]
+    fn resolved_dependencies_are_still_defined() {
+        let (root, plugins) = b019_plugin(
+            "resolved",
+            "dependencies = [\"ZzzReqDep\"]\noptional_dependencies = [\"ZzzOptDep\"]\n",
+        );
+        b019_install(&plugins, "ZzzReqDep");
+        b019_install(&plugins, "ZzzOptDep");
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(
+            cfg.defines.contains("DEPENDENCY_ZZZREQDEP"),
+            "{:?}",
+            cfg.defines
+        );
+        assert!(
+            cfg.defines.contains("DEPENDENCY_ZZZOPTDEP"),
+            "{:?}",
+            cfg.defines
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// A dependency shipped as an `.op` archive resolves like a directory one.
+    #[test]
+    fn dependency_resolved_from_an_op_archive_is_defined() {
+        let (root, plugins) = b019_plugin("op-archive", "dependencies = [\"ZzzArchived\"]\n");
+        let mut zip =
+            zip::ZipWriter::new(std::fs::File::create(plugins.join("ZzzArchived.op")).unwrap());
+        zip.start_file("info.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(
+            &mut zip,
+            b"[meta]\nname = \"ZzzArchived\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(
+            cfg.defines.contains("DEPENDENCY_ZZZARCHIVED"),
+            "an .op archive dependency must resolve: {:?}",
+            cfg.defines
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// An unresolved REQUIRED dep gets no define either — the game would not
+    /// load the plugin at all. The separate missing-required REPORTING path
+    /// (`PluginWorkspaceLoad::missing_required_dependencies`) is untouched.
+    #[test]
+    fn unresolved_required_dependency_is_not_defined_but_is_still_reported() {
+        let (root, _plugins) =
+            b019_plugin("req-missing", "dependencies = [\"ZzzNoSuchReqDep99\"]\n");
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(
+            !cfg.defines.contains("DEPENDENCY_ZZZNOSUCHREQDEP99"),
+            "{:?}",
+            cfg.defines
+        );
+        let load = crate::workspace::load::load_plugin_workspace(
+            &root,
+            &crate::workspace::load::DependencySearch::with_defaults().finalize_with_config(&cfg),
+        )
+        .expect("plugin loads");
+        assert!(
+            load.missing_required_dependencies
+                .iter()
+                .any(|d| d == "ZzzNoSuchReqDep99"),
+            "the missing REQUIRED dep must still be reported: {:?}",
+            load.missing_required_dependencies
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// An unresolved `export_dependencies` entry withholds BOTH macros.
+    #[test]
+    fn unresolved_export_dependency_withholds_both_defines() {
+        let (root, _plugins) = b019_plugin(
+            "export-missing",
+            "export_dependencies = [\"ZzzNoSuchExportDep99\"]\n",
+        );
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(
+            !cfg.defines.contains("DEPENDENCY_ZZZNOSUCHEXPORTDEP99"),
+            "{:?}",
+            cfg.defines
+        );
+        assert!(
+            !cfg.defines
+                .contains("EXPORT_DEPENDENCY_ZZZNOSUCHEXPORTDEP99"),
+            "{:?}",
+            cfg.defines
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// A RESOLVED `export_dependencies` entry keeps both macros.
+    #[test]
+    fn resolved_export_dependency_defines_both() {
+        let (root, plugins) = b019_plugin(
+            "export-resolved",
+            "export_dependencies = [\"ZzzExportDep\"]\n",
+        );
+        b019_install(&plugins, "ZzzExportDep");
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(
+            cfg.defines.contains("DEPENDENCY_ZZZEXPORTDEP"),
+            "{:?}",
+            cfg.defines
+        );
+        assert!(
+            cfg.defines.contains("EXPORT_DEPENDENCY_ZZZEXPORTDEP"),
+            "{:?}",
+            cfg.defines
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Coordinator decision: not defined by default, but the define matrix
+    /// MUST still be able to toggle it on. The plugin ships to users who DO
+    /// have the dep, and checking both branch states is what the matrix is
+    /// for. Matrix axes are layered per-combo on top of the base set, so an
+    /// axis naming an unresolved dep's macro still turns the branch live.
+    #[test]
+    fn define_matrix_can_still_toggle_an_unresolved_dependency_on() {
+        let (root, _plugins) = b019_plugin(
+            "matrix-toggle",
+            "optional_dependencies = [\"ZzzMatrixDep99\"]\n",
+        );
+        std::fs::write(
+            root.join(".openplanet-lsp.toml"),
+            "define_matrix = [\"DEPENDENCY_ZZZMATRIXDEP99\"]\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(
+            !cfg.defines.contains("DEPENDENCY_ZZZMATRIXDEP99"),
+            "the BASE set must not define an unresolved dep: {:?}",
+            cfg.defines
+        );
+        assert_eq!(
+            cfg.define_matrix,
+            vec!["DEPENDENCY_ZZZMATRIXDEP99".to_string()],
+            "the axis must survive to the matrix"
+        );
+        let combos = crate::cli::matrix::expand_combinations(
+            &cfg.define_matrix,
+            &cfg.define_groups,
+            cfg.define_combinations.as_deref(),
+            cfg.define_matrix_max_combinations,
+        )
+        .expect("matrix expands");
+        assert!(
+            combos
+                .iter()
+                .any(|c| c.iter().any(|d| d == "DEPENDENCY_ZZZMATRIXDEP99")),
+            "a combo must turn the unresolved dep ON: {combos:?}"
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// An explicit `defines` entry is the other deliberate escape hatch: a
+    /// user modelling "a machine that has X" must still be able to say so.
+    #[test]
+    fn explicit_defines_entry_can_force_an_unresolved_dependency_on() {
+        let (root, _plugins) = b019_plugin(
+            "explicit-force",
+            "optional_dependencies = [\"ZzzForcedDep99\"]\n",
+        );
+        std::fs::write(
+            root.join(".openplanet-lsp.toml"),
+            "defines = [\"DEPENDENCY_ZZZFORCEDDEP99\"]\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(
+            cfg.defines.contains("DEPENDENCY_ZZZFORCEDDEP99"),
+            "an explicit `defines` entry must still win: {:?}",
+            cfg.defines
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 }

@@ -159,6 +159,20 @@ default_mode = "tui"   # or "lsp"
 # shortcut_disable_default_namespaces = false
 # shortcut_match_enums = false
 
+# Dependency defines. Openplanet defines DEPENDENCY_<ID> only for
+# dependencies it actually LOADED, so openplanet-lsp does the same: a
+# dependency declared in info.toml but not installed here gets no define, and
+# its `#if DEPENDENCY_X` code is masked out exactly as the game masks it.
+# <ID> is the plugin id (the folder name, or a .op file's base name) in
+# uppercase with spaces, dashes and periods replaced by underscores —
+# `static-loading-screen` becomes DEPENDENCY_STATIC_LOADING_SCREEN. Note that
+# mapping collides: my-plugin and my.plugin both give MY_PLUGIN. That is
+# Openplanet's own rule, so it is reproduced rather than "fixed"; declaring
+# two ids that collapse together warns.
+# To check the OTHER branch state — your plugin ships to users who do have the
+# dependency — name the macro as a define_matrix axis (below) or add it to
+# `defines`. Both override the resolution gate deliberately.
+
 # Define matrix (CLI `check` only; the LSP server keeps one live define
 # set). define_matrix lists axes toggled on/off on top of the base define
 # set — check runs the cross-product of all combos through the full

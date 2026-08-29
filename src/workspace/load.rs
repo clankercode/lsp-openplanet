@@ -44,12 +44,17 @@ pub struct PluginWorkspaceLoad {
     /// 1. **A real plugin root was walked on disk.** Every
     ///    open-documents-only fallback (the server's, built when the disk
     ///    load fails or no root is set) pools just the open buffers.
-    /// 2. **Every DECLARED dependency resolved** — required, optional, and
-    ///    the transitive `export_dependencies` of a resolved dep alike. An
-    ///    unreadable module may declare the symbol; and
-    ///    `LspConfig::apply_manifest` defines `DEPENDENCY_<ID>` for a
-    ///    declared optional dep whether or not it resolved, so `#if`-guarded
-    ///    code the game would mask out stays live in our view (B019).
+    /// 2. **Every dependency whose absence hides symbols resolved** —
+    ///    required ones, and the transitive `export_dependencies` of a
+    ///    resolved dep, whose exports reference the absent module. An
+    ///    unreadable module may declare the symbol.
+    ///    NOT a root-manifest OPTIONAL dependency that is merely uninstalled
+    ///    (B019): since `apply_manifest` no longer defines `DEPENDENCY_<ID>`
+    ///    for it, its `#if`-guarded code is masked out for us exactly as it
+    ///    is for the game, and what remains is the complete surface. That
+    ///    reasoning holds only while nothing force-defines the macro, which
+    ///    is why `unresolved_optional_dependencies` is carried forward for
+    ///    `AnalysisSnapshot::from_load` to re-check against the live defines.
     /// 3. **Every resolved dependency contributed all of its declared
     ///    exports.** Resolving a dep is not enough: a missing or unreadable
     ///    file in its `[script] exports`/`shared_exports` leaves that dep's
@@ -71,6 +76,14 @@ pub struct PluginWorkspaceLoad {
     /// the discovery walk — so no gitignore in a dep's own repo can silently
     /// shrink what a consumer sees.
     pub dependency_closure_complete: bool,
+    /// Root-manifest optional dependencies that did not resolve (B019).
+    /// Not a closure breaker by itself — but if something force-defines one
+    /// of their `DEPENDENCY_<ID>` macros anyway (a `define_matrix` axis, or
+    /// an explicit `defines` entry), the guarded code goes live against a
+    /// module we do not have, and the pooled table stops being authoritative.
+    /// `AnalysisSnapshot::from_load` makes that call, because only it can see
+    /// the resolved define set.
+    pub unresolved_optional_dependencies: Vec<String>,
     /// Canonicalized absolute paths of files listed in this plugin's own
     /// info.toml `[script]` `exports` + `shared_exports`; decls in these
     /// files are public API and exempt from unused-declaration warnings.
@@ -326,6 +339,7 @@ fn load_plugin_workspace_with_source_reader(
         files,
         missing_required_dependencies: dep.missing_required,
         dependency_closure_complete,
+        unresolved_optional_dependencies: dep.unresolved_optional,
         usage_only_sources,
         usage_only_sources_complete,
         usage_only_unreadable_paths,
@@ -432,6 +446,7 @@ pub fn merge_open_documents(
         files,
         missing_required_dependencies: base.missing_required_dependencies.clone(),
         dependency_closure_complete: base.dependency_closure_complete,
+        unresolved_optional_dependencies: base.unresolved_optional_dependencies.clone(),
         usage_only_sources,
         usage_only_sources_complete: usage_only_unreadable_paths.is_empty(),
         usage_only_unreadable_paths,
@@ -454,9 +469,18 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 struct DepLoad {
     loaded_files: Vec<(PathBuf, String)>,
     missing_required: Vec<String>,
-    /// Every declared dependency that failed to resolve, whatever its kind
-    /// — drives `PluginWorkspaceLoad::dependency_closure_complete`.
+    /// Declared dependencies that failed to resolve and DO break the module
+    /// closure: required ones, and transitive `export_dependencies` of a
+    /// resolved dep (whose exports reference the absent module's symbols).
     unresolved: Vec<String>,
+    /// Root-manifest OPTIONAL dependencies that failed to resolve (B019).
+    /// These no longer break the closure on their own: the game does not
+    /// define `DEPENDENCY_<ID>` for them either, so the `#if`-guarded code
+    /// that would reference the absent module is masked out in our view too,
+    /// and what remains IS the complete compile surface. They are retained
+    /// because that reasoning collapses if something force-defines the macro
+    /// anyway — see `AnalysisSnapshot::from_load`.
+    unresolved_optional: Vec<String>,
     /// Resolved dependencies with manifest-declared exports that were missing
     /// or unreadable. Preserve the exact export names as evidence that their
     /// namespace surface is incomplete.
@@ -532,10 +556,15 @@ fn load_dependency_exports(
                 }
             }
             None => {
-                // Any unresolved dependency, whatever its kind, means the
-                // pooled symbol set is no longer the complete module
-                // closure (GH #58).
-                result.unresolved.push(dep_id.clone());
+                // B019: a root-manifest OPTIONAL dependency that is simply
+                // not installed does NOT break the closure — its guarded code
+                // is masked out for us exactly as it is for the game. Every
+                // other unresolved kind still does (GH #58).
+                if is_required || required_by.is_some() {
+                    result.unresolved.push(dep_id.clone());
+                } else {
+                    result.unresolved_optional.push(dep_id.clone());
+                }
                 if is_required {
                     result.missing_required.push(dep_id);
                 } else if let Some(parent) = required_by {
@@ -552,6 +581,21 @@ fn load_dependency_exports(
     }
 
     Ok(result)
+}
+
+/// Does this dependency id resolve in any of `plugins_dirs` (B019)?
+///
+/// Deliberately the SAME call the loader makes, so the config layer's define
+/// set and the loader's pooled symbols can never disagree about whether a
+/// dependency is present. A cheaper existence probe would risk exactly that
+/// divergence — `resolve_dependency` also matches by manifest module and by
+/// normalized display name, not just by folder name.
+pub(crate) fn dependency_resolves(
+    dep_id: &str,
+    plugins_dirs: &[PathBuf],
+    plugin_files_search_paths: &[PathBuf],
+) -> bool {
+    resolve_in_dirs(dep_id, plugins_dirs, plugin_files_search_paths).is_some()
 }
 
 fn resolve_in_dirs(
