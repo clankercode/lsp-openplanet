@@ -47,6 +47,13 @@ pub struct FunctionInfo {
     pub namespace: Option<String>,
     pub return_type: String,
     pub params: Vec<ParamInfo>,
+    /// The database's own declaration text (`bool Button(const string&in
+    /// label)`), when the source format carries one. Kept verbatim because
+    /// it is the only place `const` on a handle parameter survives — the
+    /// `typeflags` bits do not encode it — so hover renders the game's exact
+    /// signature instead of a lossy reconstruction (B033). `None` for the
+    /// Nadeo half of the database, which stores no declaration text.
+    pub decl: Option<String>,
     pub doc: Option<String>,
     pub source: TypeSource,
 }
@@ -57,6 +64,8 @@ pub struct MethodInfo {
     pub return_type: String,
     pub params: Vec<ParamInfo>,
     pub is_const: bool,
+    /// Declaration text as stored by the database — see [`FunctionInfo::decl`].
+    pub decl: Option<String>,
     pub doc: Option<String>,
 }
 
@@ -311,6 +320,7 @@ impl TypeIndex {
                         is_inout: a.typeflags & 0b11 == 0b11,
                     })
                     .collect(),
+                decl: func.decl.clone(),
                 doc: func.desc.clone(),
                 source: TypeSource::Core,
             };
@@ -342,6 +352,7 @@ impl TypeIndex {
                             })
                             .collect(),
                         is_const: m.is_const,
+                        decl: m.decl.clone(),
                         doc: m.desc.clone(),
                     })
                     .collect(),
@@ -485,6 +496,8 @@ impl TypeIndex {
                                     })
                                     .collect(),
                                 is_const: false,
+                                // The Nadeo dump stores no declaration text.
+                                decl: None,
                                 doc: None,
                             });
                         }
