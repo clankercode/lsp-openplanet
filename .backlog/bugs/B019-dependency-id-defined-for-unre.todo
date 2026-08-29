@@ -1,16 +1,14 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-23T16:52:13Z"
 depends_on: []
 estimate_hours: 3
 id: B019
 priority: high
+started_at: null
 status: pending
-tags:
-    - config
-    - defines
-    - followup
-    - gh-58-followup
+tags: []
 title: DEPENDENCY_<ID> defined for unresolved optional deps (define-set mismatch with game)
 updated_at: "2026-08-23T16:52:13Z"
 ---
@@ -72,3 +70,26 @@ per the decision above); a dep resolved from an `.op` archive; transitive
 `export_dependencies` unresolved. Also assert the GH #58 namespace rule re-arms
 on tm-dips-plus-plus once its only gap is gone, and that its error set matches
 the force-armed baseline recorded on the B013 branch.
+
+## Decision (coordinator, 2026-08-29) — matrix axis for unresolved deps
+
+Do NOT define DEPENDENCY_<ID> for a dependency that did not resolve. The
+define_matrix MUST still be able to toggle it on explicitly (an axis naming
+DEPENDENCY_X is honoured even when X is uninstalled) — the plugin ships to
+users who do have X, and checking both branch states is exactly what the
+matrix is for. So: not defined by default, matrix-toggleable.
+
+Required deps that fail to resolve keep their current behaviour (reported
+separately) — do not regress that path.
+
+## Decision (coordinator) — where resolution is known
+
+apply_manifest currently sees only &Manifest, which has no resolution info.
+Either pass the resolved-dependency set in, or move/gate the DEPENDENCY_ define
+insertion to the point where resolution is known. Prefer passing an explicit
+resolved-set argument so the function stays pure and testable.
+
+## Sequencing (coordinator)
+
+Runs SERIAL after B017 in the same worktree — both edit src/config.rs.
+Expect FP fixture baselines to move; record the deltas and explain each.
