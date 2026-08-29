@@ -55,3 +55,5 @@ Mirror the game: `startnew(FDI(IntOut))` / `startnew(FDO(Plain))` (and the free-
 ## Fix sketch
 
 Carry the modifier through the symbol table: `extract_params` appends the modifier to the stored type text (e.g. `int &out`) or a parallel `Vec<ParamModifier>`; then `func_matches_funcdef` compares mode flags from `sig.param_out` / parsed funcdef param text. Watch string-comparison consumers of param type text (hover, signature help, unused analysis) before changing the stored form.
+
+Decision (2026-08-29, coordinator): lane order B027 -> B023 — B027 lands first because carrying ast::Param.modifier through extract_params is what lets B023's overload-path rejections (check_external_overload_set) compare signatures with real modes instead of the all-false workspace param_out. Ops: RemoteBuild is one shared game — wrap EVERY scripts/issue_repro_game.py run in: flock /tmp/lsp-openplanet-game-probe.lock -c '<cmd>' (another agent probes the same game concurrently).
