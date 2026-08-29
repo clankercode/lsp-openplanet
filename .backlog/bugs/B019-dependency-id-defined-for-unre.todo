@@ -221,3 +221,41 @@ relied on this machine's installed `Editor` plugin — it asserted a
 DEPENDENCY_EDITOR branch was live, which after B019 only holds if Editor
 resolves. It passed here and would have failed on a clean machine or in CI.
 Fixed on the branch by provisioning the dependency in the fixture.
+
+## Test-suite hermeticity verified (lane, 2026-08-30)
+
+Question asked: does any OTHER test share the machine-dependence Codex found
+in check_command_applies_manifest_defines_and_dependency_defines?
+
+Method (an experiment, not a grep): cargo test cannot run under a fake HOME
+(rustup needs it to locate a toolchain), so the lane built normally, collected
+all 16 test binaries via 'cargo test --no-run', and ran each directly with
+HOME and USERPROFILE pointed at an empty directory. That simulates a machine
+with no Openplanet install AND no user config, since both
+~/OpenplanetNext/Plugins (the auto-detected plugins dir) and
+~/.config/openplanet-lsp/config.toml are HOME-derived.
+
+Result: all 16 binaries, 1426 tests, 0 failures.
+
+CRITICALLY, the detector was validated before the negative result was
+trusted. The pre-fix tree (4ce1e93) was archived to a scratch dir, built in
+isolation, and the offending test run both ways:
+  real HOME (Editor installed) -> passes
+  clean HOME                   -> FAILS
+So the method reproduces the known bug, and the clean sweep is meaningful
+evidence rather than a vacuous pass.
+
+Answer: no other test in the suite has this dependence.
+
+Stated limits of the claim (both honest and worth keeping):
+- It would not catch a test depending on an absolute path OUTSIDE HOME. The
+  lane confirmed by reading call sites that every --plugins-dir in the suite
+  points inside a temp fixture, so there are none today.
+- It cannot catch a test depending on the ABSENCE of a locally installed
+  plugin (would fail here, pass elsewhere) — but the suite is green under
+  both homes, so no such test exists either.
+
+The Codex fix itself: provisions Editor inside the test's own fixture dir,
+points the run at it with an explicit --plugins-dir, and isolates HOME. 15
+added lines, test-only, no production code. Landed as dba3178 on top of
+4ce1e93; no history rewritten.
