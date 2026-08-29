@@ -72,3 +72,5 @@ LINUX pair; `os_target = "wine"` defines WINDOWS and WINDOWS_WINE together;
 `#if SERVER` code is not analyzed under a client profile; `defines` overrides
 still get the last word (`defines = ["SERVER"]` re-enables it); CLI flags beat
 config; unknown values are a usage error / warn-and-keep like #64.
+
+Decision (2026-08-29, coordinator): adopt the ticket's option (a) — developer_build/has_dev/logs/server default ON (no default churn); os_target (windows|linux|wine, default windows; wine => WINDOWS + WINDOWS_WINE) and arch_target (64|32, default 64) get realistic defaults since the OS/arch duplicate-declaration is the reported failure mode. Operator note (Max): verify the wine define set EMPIRICALLY with a spite probe plugin before baking it in — expected WINDOWS + WINDOWS_WINE (and NOT LINUX); probe arch + SERVER/LOGS/HAS_DEV/DEVELOPER the same way while at it. Parallel lane with B023/B027 (disjoint src files: config.rs/cli/preprocessor vs checker.rs); shared append-only files (fixture README, cli_check_tests.rs) merge last. Ops: wrap EVERY game probe in: flock /tmp/lsp-openplanet-game-probe.lock -c '<cmd>'.

@@ -70,3 +70,5 @@ Mirror the game: when a candidate's funcdef-typed param cannot bind the arg (arg
 ## Fix sketch
 
 In `check_external_overload_set`, for each candidate param that resolves to a typedb funcdef (`GlobalScope::lookup_funcdef`), run the same bind test as `check_funcdef_ctor_arg`; a resolvable-function arg that matches no candidate's signature — or a literal that is clearly not a function — is rejection evidence. Reuse `is_clearly_not_a_function` for the literal case.
+
+Decision (2026-08-29, coordinator): implemented after B027 in the same lane/worktree — both edit src/typecheck/checker.rs (serial by file overlap); B027's mode plumbing (extract_params + func_matches_funcdef) is a prerequisite so overload-path signature comparison sees real &out modes. Ops: wrap EVERY scripts/issue_repro_game.py run in: flock /tmp/lsp-openplanet-game-probe.lock -c '<cmd>'.
