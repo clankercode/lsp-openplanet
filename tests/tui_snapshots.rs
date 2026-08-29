@@ -364,8 +364,21 @@ fn detail_range_stays_exact_past_the_u16_row_limit() {
     // header + blank + one row per line (the trailing "\n" yields a final empty).
     let total = rows + 1 + 2;
     assert!(
-        text.contains(&format!("/{total}")),
-        "range not reported exactly (expected /{total}):\n{text}"
+        text.contains(&format!("1-8/{total}")),
+        "range not reported exactly (expected 1-8/{total}):\n{text}"
     );
     assert!(text.contains("J/K"), "scroll affordance missing:\n{text}");
+
+    // The last row is still reachable: max_scroll here is exactly u16::MAX, the
+    // ceiling ratatui's scroll offset imposes.
+    for _ in 0..70_000 {
+        app.scroll_detail_down();
+    }
+    terminal.draw(|frame| app.draw(frame)).expect("draw");
+    let text = rendered_text(&terminal).join("\n");
+    assert!(
+        text.contains(&format!("{}-{total}/{total}", total - 7)),
+        "final row unreachable (expected {}-{total}/{total}):\n{text}",
+        total - 7
+    );
 }
