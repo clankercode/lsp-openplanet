@@ -254,7 +254,7 @@ fn strip_comments(line: &str, in_block_comment: &mut bool) -> String {
             let block = rest.find("/*");
             let line_comment = rest.find("//");
             match (block, line_comment) {
-                (_, Some(line_end)) if block.map_or(true, |block_start| line_end < block_start) => {
+                (_, Some(line_end)) if block.is_none_or(|block_start| line_end < block_start) => {
                     out.push_str(&rest[..line_end]);
                     return out;
                 }
