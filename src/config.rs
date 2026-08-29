@@ -1985,6 +1985,9 @@ mod tests {
     /// `set_var`, so no sibling test can observe them (B032).
     const UNUSED_CALLBACKS_LOAD_CHILD: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_CHILD";
     const UNUSED_CALLBACKS_LOAD_ROOT: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_ROOT";
+    /// Written into each scenario's fixture by the parent, read back by the
+    /// child: proves the invocation is this harness's, not a stale export.
+    const LOAD_HANDSHAKE_FILE: &str = ".b051-load-wiring-handshake";
 
     #[test]
     fn unused_level_parse_accepts_canonical_and_alias_variants() {
@@ -2915,7 +2918,7 @@ shortcut_match_enums = true
     /// SUBPROCESS with a fake `HOME`, so the ladder is exercised end to end
     /// without an in-process `set_var` racing a sibling test (B032).
     ///
-    /// The child prints `SCENARIO OK: <name>` and the parent requires it:
+    /// The child prints `[SCENARIO OK: <name>]` and the parent requires it:
     /// `libtest --exact` exits 0 when the filter matches NOTHING, so a
     /// renamed child or an unpropagated env var would otherwise show green
     /// while asserting nothing at all.
@@ -2923,6 +2926,10 @@ shortcut_match_enums = true
     fn unused_callbacks_load_wiring_end_to_end() {
         let tmp = std::env::temp_dir().join(format!("oplsp-uc-load-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        // Scenario outcomes are collected rather than asserted in the loop, so
+        // a red scenario still reaches the cleanup below instead of leaving its
+        // fixture behind in a shared /tmp.
+        let mut failures: Vec<String> = Vec::new();
         // Derived, not hardcoded: a module rename cannot silently turn this
         // into a filter that matches no test. libtest names omit the crate
         // segment that `module_path!` starts with, hence the split.
@@ -2972,10 +2979,18 @@ shortcut_match_enums = true
                 "user-only" => {}
                 _ => unreachable!(),
             }
+            // Handshake: the child refuses to assert unless this file, written
+            // moments ago by this parent, names the scenario its env claims.
+            std::fs::write(case.join(LOAD_HANDSHAKE_FILE), scenario).unwrap();
 
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .arg("--exact")
                 .arg(&child_filter)
+                // The child is `#[ignore]`d so an ordinary run cannot execute
+                // it; only this deliberate invocation opts it back in.
+                .arg("--include-ignored")
+                // libtest captures stdout by default and prints it only for a
+                // FAILING test, so the success marker needs `--nocapture`.
                 .arg("--nocapture")
                 // One test runs; keep the child from claiming a thread per
                 // core on a machine shared with other builds.
@@ -2988,26 +3003,42 @@ shortcut_match_enums = true
                 .unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                output.status.success(),
-                "scenario {scenario} failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
-            );
-            assert!(
-                stdout.contains(&format!("SCENARIO OK: {scenario}")),
-                "scenario {scenario} exited 0 without running its assertions \
-                 (filter {child_filter:?} matched no test, or the env did not \
-                 propagate):\nstdout:\n{stdout}\nstderr:\n{stderr}"
-            );
+            // Delimited on BOTH sides, so one scenario name can never satisfy
+            // another's marker by being a prefix of it — and so the check does
+            // not depend on where libtest puts the text. Under `--nocapture`
+            // it lands inline on the progress line, not on one of its own.
+            let ran = stdout.contains(&format!("[SCENARIO OK: {scenario}]"));
+            if !output.status.success() {
+                failures.push(format!(
+                    "scenario {scenario} failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                ));
+            } else if !ran {
+                failures.push(format!(
+                    "scenario {scenario} exited 0 without running its assertions \
+                     (filter {child_filter:?} matched no test, or the env did not \
+                     propagate):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                ));
+            }
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     }
 
-    /// The child half of [`unused_callbacks_load_wiring_end_to_end`]. Inert
-    /// unless BOTH protocol variables are set, which only the parent above
-    /// does — in the ordinary run this returns before touching `$HOME`, so
-    /// it neither reads nor writes process-global state.
+    /// The child half of [`unused_callbacks_load_wiring_end_to_end`].
+    ///
+    /// `#[ignore]` is the load-bearing guard, not a convenience: without it an
+    /// ordinary `cargo test` runs this in the SHARED lib-test process, and a
+    /// developer who happens to export both protocol variables gets an
+    /// unlocked `$HOME` read racing every sibling test — precisely the
+    /// process-global env race B032 fixed. Ignored, it cannot run at all
+    /// unless something opts it in, which only the parent above does.
+    ///
+    /// The env protocol and the on-disk handshake remain as belt and braces
+    /// for the one case `#[ignore]` leaves open: a developer running
+    /// `--include-ignored` who ALSO has both variables exported.
     #[test]
+    #[ignore = "child of unused_callbacks_load_wiring_end_to_end; that test spawns it"]
     fn unused_callbacks_load_wiring_child() {
         let (Ok(scenario), Some(root)) = (
             std::env::var(UNUSED_CALLBACKS_LOAD_CHILD),
@@ -3016,6 +3047,11 @@ shortcut_match_enums = true
             return;
         };
         let case = PathBuf::from(root);
+        // A stale or hand-exported environment cannot forge this: only the
+        // parent writes the file, into the fixture it just built.
+        if std::fs::read_to_string(case.join(LOAD_HANDSHAKE_FILE)).ok() != Some(scenario.clone()) {
+            return;
+        }
 
         match scenario.as_str() {
             "user-only" => {
@@ -3066,7 +3102,7 @@ shortcut_match_enums = true
             }
             other => panic!("unknown child scenario: {other}"),
         }
-        println!("SCENARIO OK: {scenario}");
+        println!("[SCENARIO OK: {scenario}]");
     }
 
     /// Malformed values are ignored, never panic, and never poison the
