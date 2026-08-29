@@ -59,7 +59,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
         .map(|plan| FixDescriptor {
             title: title(&plan),
             kind: CodeActionKind::QUICKFIX,
-            is_preferred: false,
+            is_preferred: None,
             auto_applicable: false,
         })
         .into_iter()

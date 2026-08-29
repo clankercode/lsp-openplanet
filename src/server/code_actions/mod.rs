@@ -1,15 +1,16 @@
 //! `textDocument/codeAction` and `codeAction/resolve` handlers.
 //!
-//! Two sources of actions, in the order the client sees them:
+//! Action phases, in the order the client sees them:
 //!
-//! 1. **The fix seam** ([`fix`]) — every quick fix in the server, from
-//!    either registry: families keyed on a `TypeDiagnosticKind`
-//!    ([`fixes::FAMILIES`]) and families keyed on the published diagnostic
-//!    the client echoed back ([`fixes::DIAGNOSTIC_FAMILIES`]). Plus the
-//!    batched `source.fixAll.openplanet` source action ([`fix_all`]). New
-//!    families plug in at those two registries and touch nothing here.
+//! 1. Published-diagnostic families, in registry order (did-you-mean, then
+//!    unused declarations), independently of client diagnostic ordering.
 //! 2. **"Wrap in try/catch" refactor** — the one action no diagnostic
 //!    drives: it is offered for whatever range the client asked about.
+//! 3. Checker-keyed families, then the batched
+//!    `source.fixAll.openplanet` source action ([`fix_all`]).
+//!
+//! Both family groups use the same fix seam ([`fix`]); this phase split only
+//! preserves the response order published before B047 unified production.
 //!
 //! Seam actions are returned **without** their edit when the client
 //! advertises `codeAction/resolve` support; the edit is materialised in
@@ -17,7 +18,8 @@
 //! are pure, so re-entering them on resolve is cheap and cannot diverge —
 //! with one wrinkle a diagnostic-keyed producer has to be given for free:
 //! `codeAction/resolve` carries no `CodeActionContext`, so the diagnostic
-//! such a producer reads travels inside the action's own `data`.
+//! such a producer reads travels inside the action's own `data` as a compact
+//! range/message/code record, never as the arbitrary full client diagnostic.
 
 pub mod fix;
 pub mod fix_all;
@@ -58,6 +60,39 @@ struct ResolveData {
     action: ResolveAction,
 }
 
+/// Only the diagnostic fields the registered published-diagnostic families
+/// need to match and materialize an action. The full client diagnostic stays
+/// on `CodeAction.diagnostics`; arbitrary metadata is not echoed into data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveDiagnostic {
+    range: Range,
+    message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<NumberOrString>,
+}
+
+impl From<&Diagnostic> for ResolveDiagnostic {
+    fn from(diagnostic: &Diagnostic) -> Self {
+        Self {
+            range: diagnostic.range,
+            message: diagnostic.message.clone(),
+            code: diagnostic.code.clone(),
+        }
+    }
+}
+
+impl From<ResolveDiagnostic> for Diagnostic {
+    fn from(diagnostic: ResolveDiagnostic) -> Self {
+        Diagnostic {
+            range: diagnostic.range,
+            message: diagnostic.message,
+            code: diagnostic.code,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum ResolveAction {
@@ -65,20 +100,19 @@ enum ResolveAction {
         family: String,
         diagnostic_range: Range,
         title: String,
-        /// The published diagnostic a diagnostic-keyed producer answers.
-        /// The client echoes diagnostics on `textDocument/codeAction` but
-        /// not on `codeAction/resolve`, so the one this action was built
-        /// from rides along. Empty for a checker-keyed family, which the
-        /// seam re-derives from the document instead.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        echoed: Vec<Diagnostic>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        materialization_id: Option<String>,
+        /// Compact identity of the published diagnostic this action answers.
+        /// Checker-keyed families omit it and re-derive their finding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        published: Option<ResolveDiagnostic>,
     },
     FixAll {
         /// As above, for every diagnostic that fed an auto-applicable
         /// descriptor — otherwise the resolved batch would quietly be a
         /// subset of the one the offer was validated against.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        echoed: Vec<Diagnostic>,
+        published: Vec<ResolveDiagnostic>,
     },
     WrapInTryCatch {
         range: Range,
@@ -142,7 +176,7 @@ pub(crate) fn code_actions_with(
 
     let wants_quickfix = kind_selected(&CodeActionKind::QUICKFIX, only);
     let wants_fix_all = kind_selected(&SOURCE_FIX_ALL_OPENPLANET, only);
-    if wants_quickfix || wants_fix_all {
+    let fix_state = if wants_quickfix || wants_fix_all {
         let ctx = FixContext {
             uri: req.uri,
             analysis: req.analysis,
@@ -152,12 +186,42 @@ pub(crate) fn code_actions_with(
         };
         let descriptors = collect_fix_descriptors_from(&ctx, &req.context.diagnostics, registries);
         if wants_quickfix {
-            for candidate in &descriptors {
+            for candidate in descriptors
+                .iter()
+                .filter(|candidate| candidate.is_published())
+            {
                 if !ranges_touch(&candidate.diagnostic.range, &req.range) {
                     continue;
                 }
                 // A resolving client gets the menu entry alone; the edit is
                 // materialized for the one action it picks.
+                let edit = (!req.lazy_edits)
+                    .then(|| materialize_descriptor(&ctx, candidate, registries).fix.edit);
+                actions.push(candidate_action(req, candidate, edit, source_fingerprint));
+            }
+        }
+        Some((ctx, descriptors))
+    } else {
+        None
+    };
+    if kind_selected(&CodeActionKind::REFACTOR_REWRITE, only) {
+        actions.extend(refactor_wrap_in_try_catch(
+            req.uri,
+            &req.analysis.source,
+            source_fingerprint,
+            req.range,
+            req.lazy_edits,
+        ));
+    }
+    if let Some((ctx, descriptors)) = fix_state {
+        if wants_quickfix {
+            for candidate in descriptors
+                .iter()
+                .filter(|candidate| !candidate.is_published())
+            {
+                if !ranges_touch(&candidate.diagnostic.range, &req.range) {
+                    continue;
+                }
                 let edit = (!req.lazy_edits)
                     .then(|| materialize_descriptor(&ctx, candidate, registries).fix.edit);
                 actions.push(candidate_action(req, candidate, edit, source_fingerprint));
@@ -172,7 +236,7 @@ pub(crate) fn code_actions_with(
                     req.uri,
                     source_fingerprint,
                     ResolveAction::FixAll {
-                        echoed: auto_published_diagnostics(&descriptors),
+                        published: auto_published_diagnostics(&descriptors),
                     },
                 );
                 if req.lazy_edits {
@@ -181,15 +245,6 @@ pub(crate) fn code_actions_with(
                 actions.push(action);
             }
         }
-    }
-    if kind_selected(&CodeActionKind::REFACTOR_REWRITE, only) {
-        actions.extend(refactor_wrap_in_try_catch(
-            req.uri,
-            &req.analysis.source,
-            source_fingerprint,
-            req.range,
-            req.lazy_edits,
-        ));
     }
 
     actions
@@ -249,15 +304,24 @@ pub(crate) fn resolve_code_action_with(
             family,
             diagnostic_range,
             title,
-            echoed,
+            materialization_id,
+            published,
         } => {
-            if let Some(candidate) =
-                materialize_fix_from(&ctx, &echoed, &family, diagnostic_range, &title, registries)
-            {
-                action.edit = Some(candidate.fix.edit);
+            let echoed: Vec<Diagnostic> = published.map(Diagnostic::from).into_iter().collect();
+            if let Some(edit) = materialize_fix_from(
+                &ctx,
+                &echoed,
+                &family,
+                diagnostic_range,
+                &title,
+                materialization_id.as_deref(),
+                registries,
+            ) {
+                action.edit = Some(edit);
             }
         }
-        ResolveAction::FixAll { echoed } => {
+        ResolveAction::FixAll { published } => {
+            let echoed: Vec<Diagnostic> = published.into_iter().map(Diagnostic::from).collect();
             let descriptors = collect_fix_descriptors_from(&ctx, &echoed, registries);
             let candidates = materialize_auto_descriptors(&ctx, &descriptors, registries);
             if let Some(resolved) = fix_all::fix_all_action(&resolve.uri, &candidates) {
@@ -321,7 +385,7 @@ fn candidate_action(
         diagnostics: Some(vec![client_diagnostic(req, &candidate.diagnostic)]),
         edit,
         command: None,
-        is_preferred: candidate.descriptor.is_preferred.then_some(true),
+        is_preferred: candidate.descriptor.is_preferred,
         disabled: None,
         data: resolve_data(
             req.uri,
@@ -330,7 +394,8 @@ fn candidate_action(
                 family: candidate.family.to_string(),
                 diagnostic_range: candidate.diagnostic.range,
                 title: candidate.descriptor.title.clone(),
-                echoed: candidate.published_subject().cloned().into_iter().collect(),
+                materialization_id: candidate.materialization_id().map(str::to_string),
+                published: candidate.published_subject().map(ResolveDiagnostic::from),
             },
         ),
     }
@@ -341,17 +406,18 @@ fn candidate_action(
 /// diagnostic-keyed family would contribute to the batch the client was
 /// offered and then silently drop out of the batch it is handed.
 ///
-/// Empty while no diagnostic-keyed family is auto-applicable, which is the
-/// case today — see `fixes::unused_decl`.
-fn auto_published_diagnostics(descriptors: &[FixDescriptorCandidate]) -> Vec<Diagnostic> {
-    let mut out: Vec<Diagnostic> = Vec::new();
+/// Only compact range/message/code values are retained; the full client
+/// diagnostics remain attached to the individual quick-fix actions.
+fn auto_published_diagnostics(descriptors: &[FixDescriptorCandidate]) -> Vec<ResolveDiagnostic> {
+    let mut out: Vec<ResolveDiagnostic> = Vec::new();
     for candidate in descriptors
         .iter()
         .filter(|candidate| candidate.descriptor.auto_applicable)
     {
         if let Some(diagnostic) = candidate.published_subject() {
-            if !out.contains(diagnostic) {
-                out.push(diagnostic.clone());
+            let diagnostic = ResolveDiagnostic::from(diagnostic);
+            if !out.contains(&diagnostic) {
+                out.push(diagnostic);
             }
         }
     }
@@ -443,19 +509,26 @@ mod tests {
     }
 
     fn workspace_with_class(name: &str) -> SymbolTable {
+        workspace_with_classes(&[name])
+    }
+
+    fn workspace_with_classes(names: &[&str]) -> SymbolTable {
         let mut table = SymbolTable::new();
         let fid = table.allocate_file_id();
-        let sym = Symbol {
-            name: name.to_string(),
-            kind: SymbolKind::Class {
-                parents: Vec::new(),
-                members: Vec::new(),
-            },
-            span: Span { start: 0, end: 0 },
-            file_id: fid,
-            doc: None,
-        };
-        table.set_file_symbols(fid, vec![sym]);
+        let symbols = names
+            .iter()
+            .map(|name| Symbol {
+                name: (*name).to_string(),
+                kind: SymbolKind::Class {
+                    parents: Vec::new(),
+                    members: Vec::new(),
+                },
+                span: Span { start: 0, end: 0 },
+                file_id: fid,
+                doc: None,
+            })
+            .collect();
+        table.set_file_symbols(fid, symbols);
         table
     }
 
@@ -610,7 +683,7 @@ mod tests {
         vec![fix::FixDescriptor {
             title: "Unbatchable auto fix".to_string(),
             kind: CodeActionKind::QUICKFIX,
-            is_preferred: false,
+            is_preferred: None,
             auto_applicable: true,
         }]
     }
@@ -648,7 +721,7 @@ mod tests {
         vec![fix::FixDescriptor {
             title: "Descriptor-owned synthetic fix".to_string(),
             kind: CodeActionKind::QUICKFIX,
-            is_preferred: false,
+            is_preferred: None,
             auto_applicable: false,
         }]
     }
@@ -1315,6 +1388,21 @@ mod tests {
     }
 
     #[test]
+    fn did_you_mean_preserves_explicit_false_for_alternative_suggestions() {
+        let table = workspace_with_classes(&["Foo", "Food"]);
+        let h = Harness::with_workspace("Foa value;", table);
+        let range = mk_range(0, 0, 0, 3);
+        let suggestions: Vec<_> = h
+            .at(range, vec![mk_diag(range, "unknown type `Foa`")])
+            .into_iter()
+            .filter(|action| action.title.starts_with("Did you mean"))
+            .collect();
+        assert!(suggestions.len() >= 2, "titles: {:?}", titles(&suggestions));
+        assert_eq!(suggestions[0].is_preferred, Some(true));
+        assert_eq!(suggestions[1].is_preferred, Some(false));
+    }
+
+    #[test]
     fn quickfix_did_you_mean_ignores_unrelated_diagnostics() {
         let h = Harness::with_workspace("Foa value;", workspace_with_class("Foo"));
         let range = mk_range(0, 0, 0, 3);
@@ -1365,21 +1453,30 @@ mod tests {
         matches!(&diagnostic.code, Some(NumberOrString::String(c)) if c == SYNTH_AUTO_CODE)
     }
 
-    fn synth_describe(_: &Diagnostic, _: &FixContext<'_>) -> Vec<fix::FixDescriptor> {
-        vec![fix::FixDescriptor {
-            title: "Synthetic published fix".to_string(),
-            kind: CodeActionKind::QUICKFIX,
-            is_preferred: false,
-            auto_applicable: false,
+    fn synth_describe(_: &Diagnostic, _: &FixContext<'_>) -> Vec<fix::DiagnosticFixDescriptor> {
+        vec![fix::DiagnosticFixDescriptor {
+            descriptor: fix::FixDescriptor {
+                title: "Synthetic published fix".to_string(),
+                kind: CodeActionKind::QUICKFIX,
+                is_preferred: None,
+                auto_applicable: false,
+            },
+            materialization_id: None,
         }]
     }
 
-    fn synth_auto_describe(_: &Diagnostic, _: &FixContext<'_>) -> Vec<fix::FixDescriptor> {
-        vec![fix::FixDescriptor {
-            title: "Synthetic batchable fix".to_string(),
-            kind: CodeActionKind::QUICKFIX,
-            is_preferred: false,
-            auto_applicable: true,
+    fn synth_auto_describe(
+        _: &Diagnostic,
+        _: &FixContext<'_>,
+    ) -> Vec<fix::DiagnosticFixDescriptor> {
+        vec![fix::DiagnosticFixDescriptor {
+            descriptor: fix::FixDescriptor {
+                title: "Synthetic batchable fix".to_string(),
+                kind: CodeActionKind::QUICKFIX,
+                is_preferred: None,
+                auto_applicable: true,
+            },
+            materialization_id: None,
         }]
     }
 
@@ -1527,6 +1624,40 @@ mod tests {
         );
         let again = h.request_with(context, range, true, registries);
         assert_eq!(titles(&first), titles(&again));
+    }
+
+    /// Preserve the published response contract, independently of the order
+    /// diagnostics happen to arrive from the client: all did-you-mean
+    /// actions, all unused actions, the refactor, then checker seam actions
+    /// and its fix-all batch.
+    #[test]
+    fn real_producers_keep_their_published_order_across_mixed_diagnostics() {
+        let source = "void f(string s, int p) { Foa x; Print(s); }\nvoid Main() { f(\"x\", 1); }";
+        let mut echoed = published_unused_diagnostics(source);
+        let unused_p = echoed
+            .drain(..)
+            .find(|diagnostic| diagnostic.message.contains("`p`"))
+            .expect("unused parameter p");
+        let typo_start = source.find("Foa").expect("typo") as u32;
+        let typo = mk_diag(
+            mk_range(0, typo_start, 0, typo_start + 3),
+            "unknown type `Foa`",
+        );
+        let h = Harness::with_workspace(source, workspace_with_class("Foo"));
+
+        // Deliberately echo unused first; producer ordering must win over
+        // diagnostic ordering.
+        let actions = h.with_diags(vec![unused_p, typo]);
+        assert_eq!(
+            titles(&actions),
+            vec![
+                "Did you mean 'Foo'?",
+                "Prefix `p` with `_` to mark it unused",
+                "Wrap in try/catch",
+                "Pass `s` by reference (`const string &in`)",
+                "Fix all auto-fixable Openplanet problems",
+            ]
+        );
     }
 
     /// `source.fixAll.openplanet` batches exactly the auto-applicable
@@ -1682,6 +1813,112 @@ void SYNTH() { }";
         let range = mk_range(0, 0, 0, 3);
         let diagnostics = vec![mk_diag(range, "unknown type `Foa`")];
         assert_eq!(h.round_trip(range, diagnostics, "Foo"), "Foo value;");
+    }
+
+    /// The action identifies the spelling that was offered. A workspace
+    /// rebuild may legitimately remove that candidate before the user
+    /// clicks the lightbulb; as long as the target document itself is byte-
+    /// identical, resolve must still apply the already-offered spelling.
+    #[test]
+    fn did_you_mean_resolves_the_offered_spelling_after_workspace_candidates_change() {
+        let source = "Foa value;";
+        let range = mk_range(0, 0, 0, 3);
+        let offered = Harness::with_workspace(source, workspace_with_class("Foo"))
+            .at(range, vec![mk_diag(range, "unknown type `Foa`")])
+            .into_iter()
+            .find(|action| action.title == "Did you mean 'Foo'?")
+            .expect("the Foo spelling was offered");
+
+        let current = Harness::new(source);
+        let resolved = current.resolve(offered);
+        assert_eq!(
+            apply_edits(source, edits_of(&resolved, &current.uri)),
+            "Foo value;"
+        );
+    }
+
+    #[test]
+    fn published_action_json_uses_compact_resolve_data_but_keeps_attached_diagnostic() {
+        let source = "Foa value;";
+        let range = mk_range(0, 0, 0, 3);
+        let mut diagnostic = mk_diag(range, "unknown type `Foa`");
+        diagnostic.code = Some(NumberOrString::String("client-code".into()));
+        diagnostic.severity = Some(DiagnosticSeverity::WARNING);
+        diagnostic.tags = Some(vec![DiagnosticTag::UNNECESSARY]);
+        diagnostic.data = Some(serde_json::json!({
+            "arbitraryClientPayload": "MUST_NOT_BE_AMPLIFIED"
+        }));
+        let offered = Harness::with_workspace(source, workspace_with_class("Foo"))
+            .at(range, vec![diagnostic.clone()])
+            .into_iter()
+            .find(|action| action.title == "Did you mean 'Foo'?")
+            .expect("did-you-mean action");
+        assert_eq!(
+            offered.diagnostics.as_deref(),
+            Some(std::slice::from_ref(&diagnostic)),
+            "the action still points at the exact client diagnostic"
+        );
+
+        let json = serde_json::to_value(&offered).expect("serialize CodeAction");
+        let resolve_json = json.get("data").expect("resolve data").to_string();
+        for forbidden in [
+            "MUST_NOT_BE_AMPLIFIED",
+            "arbitraryClientPayload",
+            "severity",
+            "tags",
+        ] {
+            assert!(
+                !resolve_json.contains(forbidden),
+                "resolve data copied arbitrary diagnostic field `{forbidden}`: {resolve_json}"
+            );
+        }
+
+        let wire = serde_json::to_string(&offered).expect("serialize action to wire JSON");
+        let decoded: CodeAction = serde_json::from_str(&wire).expect("deserialize wire action");
+        let current = Harness::new(source);
+        let resolved = current.resolve(decoded);
+        assert_eq!(
+            apply_edits(source, edits_of(&resolved, &current.uri)),
+            "Foo value;"
+        );
+    }
+
+    #[test]
+    fn fix_all_json_also_compacts_published_diagnostics_and_round_trips() {
+        let source = "void Main() { int x = 1; Print(\"hi\"); }";
+        let mut diagnostics = published_unused_diagnostics(source);
+        for diagnostic in &mut diagnostics {
+            diagnostic.data = Some(serde_json::json!({
+                "arbitraryClientPayload": "FIX_ALL_MUST_NOT_AMPLIFY"
+            }));
+            diagnostic.tags = Some(vec![DiagnosticTag::UNNECESSARY]);
+        }
+        let h = Harness::new(source);
+        let offered = h
+            .request(
+                CodeActionContext {
+                    diagnostics,
+                    only: Some(vec![SOURCE_FIX_ALL_OPENPLANET]),
+                    ..Default::default()
+                },
+                whole_doc(source),
+                true,
+            )
+            .into_iter()
+            .find(|action| action.kind == Some(SOURCE_FIX_ALL_OPENPLANET))
+            .expect("fix-all action");
+        let resolve_json = offered.data.as_ref().expect("resolve data").to_string();
+        assert!(!resolve_json.contains("FIX_ALL_MUST_NOT_AMPLIFY"));
+        assert!(!resolve_json.contains("arbitraryClientPayload"));
+        assert!(!resolve_json.contains("tags"));
+
+        let wire = serde_json::to_string(&offered).expect("serialize action");
+        let decoded: CodeAction = serde_json::from_str(&wire).expect("deserialize action");
+        let resolved = h.resolve(decoded);
+        assert_eq!(
+            apply_edits(source, edits_of(&resolved, &h.uri)),
+            "void Main() { int _x = 1; Print(\"hi\"); }"
+        );
     }
 
     /// A published diagnostic the request did not ask about must not drive

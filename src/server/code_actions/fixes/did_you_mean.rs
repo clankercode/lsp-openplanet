@@ -20,7 +20,8 @@
 use tower_lsp::lsp_types::*;
 
 use crate::server::code_actions::fix::{
-    extract_name_from_diagnostic, single_file_edit, DiagnosticFixFamily, FixContext, FixDescriptor,
+    extract_name_from_diagnostic, single_file_edit, DiagnosticFixDescriptor, DiagnosticFixFamily,
+    FixContext, FixDescriptor,
 };
 use crate::symbols::SymbolTable;
 use crate::typedb::TypeIndex;
@@ -36,38 +37,35 @@ fn matches(diagnostic: &Diagnostic) -> bool {
     is_did_you_mean_candidate(&diagnostic.message)
 }
 
-fn describe(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
+fn describe(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<DiagnosticFixDescriptor> {
     candidates(diagnostic, ctx)
         .into_iter()
         .enumerate()
-        .map(|(i, name)| FixDescriptor {
-            title: title_for(&name),
-            kind: CodeActionKind::QUICKFIX,
-            // The closest candidate leads the menu; the rest are guesses
-            // the user is choosing between.
-            is_preferred: i == 0,
-            auto_applicable: false,
+        .map(|(i, name)| DiagnosticFixDescriptor {
+            descriptor: FixDescriptor {
+                title: title_for(&name),
+                kind: CodeActionKind::QUICKFIX,
+                // The closest candidate leads the menu; the rest are guesses
+                // the user is choosing between.
+                is_preferred: Some(i == 0),
+                auto_applicable: false,
+            },
+            materialization_id: Some(name),
         })
         .collect()
 }
 
-/// Re-run the search and pick the candidate whose menu entry this is. Both
-/// callbacks pay for [`find_candidates`]; splitting the work would mean
-/// running it twice anyway, and it is a bounded scan of names already in
-/// memory.
-fn materialize(diagnostic: &Diagnostic, ctx: &FixContext<'_>, title: &str) -> WorkspaceEdit {
-    candidates(diagnostic, ctx)
-        .into_iter()
-        .find(|name| title_for(name) == title)
-        .map_or_else(WorkspaceEdit::default, |name| {
-            single_file_edit(
-                ctx.uri,
-                vec![TextEdit {
-                    range: diagnostic.range,
-                    new_text: name,
-                }],
-            )
-        })
+/// Apply the stable spelling recorded when the action was offered. Resolve
+/// deliberately does not repeat the workspace candidate search: unrelated
+/// workspace files may change while this document remains identical.
+fn materialize(diagnostic: &Diagnostic, ctx: &FixContext<'_>, spelling: &str) -> WorkspaceEdit {
+    single_file_edit(
+        ctx.uri,
+        vec![TextEdit {
+            range: diagnostic.range,
+            new_text: spelling.to_string(),
+        }],
+    )
 }
 
 fn title_for(name: &str) -> String {

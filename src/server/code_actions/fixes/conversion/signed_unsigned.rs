@@ -133,7 +133,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
     .map(|title| FixDescriptor {
         title,
         kind: CodeActionKind::QUICKFIX,
-        is_preferred: false,
+        is_preferred: None,
         auto_applicable: false,
     })
     .collect()

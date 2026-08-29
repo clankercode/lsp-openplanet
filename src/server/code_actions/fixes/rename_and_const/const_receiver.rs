@@ -117,7 +117,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
                 // Two legitimate intents the tool cannot choose between:
                 // neither may be marked preferred, and neither may be
                 // applied by `source.fixAll.openplanet` on save.
-                is_preferred: false,
+                is_preferred: None,
                 auto_applicable: false,
             })
         })
@@ -876,7 +876,7 @@ mod tests {
                 "must not choose an overload in `{src}`"
             );
             assert!(described.iter().all(|descriptor| {
-                !descriptor.is_preferred && !descriptor.auto_applicable
+                descriptor.is_preferred.is_none() && !descriptor.auto_applicable
             }));
         }
     }
@@ -899,9 +899,9 @@ mod tests {
         };
         let described = describe(&diag, &ctx);
         assert_eq!(described.len(), 2);
-        assert!(described
-            .iter()
-            .all(|descriptor| { !descriptor.is_preferred && !descriptor.auto_applicable }));
+        assert!(described.iter().all(|descriptor| {
+            descriptor.is_preferred.is_none() && !descriptor.auto_applicable
+        }));
         for descriptor in described {
             assert!(
                 !edits_for(

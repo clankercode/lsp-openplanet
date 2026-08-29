@@ -25,9 +25,12 @@
 //!   is provably lossless, and never as the preferred fix: a name may be
 //!   unused today and wanted tomorrow, and the `_` prefix keeps it.
 //!
-//! **Neither is `auto_applicable`.** The decision and the evidence behind it
-//! are recorded on the tests `no_unused_fix_is_batched_into_fix_all` and
-//! `the_two_fixes_overlap_and_the_batcher_would_keep_the_removal` below.
+//! For a local, the `_` prefix is mechanical and reversible, so it joins
+//! `source.fixAll.openplanet`. Removal never does: it is lossy, and the
+//! auto-applicable filter runs before edits are materialized, so the two
+//! overlapping alternatives never compete in the batcher. Parameter
+//! prefixes remain manual because AngelScript named arguments make the
+//! parameter name part of the callable API.
 //!
 //! **The side-effecting initializer.** `int x = Foo();` cannot simply be
 //! deleted — that silently drops the call. The alternative of "remove the
@@ -49,7 +52,7 @@
 //! declaration that is not an element of a statement LIST — a `for`
 //! initializer, where that `;` is the loop's separator, or an unbraced
 //! branch body, where the declaration IS the body — would leave
-//! `for ( c; s)` or a branch with nothing to run. See `classify_stmts`.
+//! `for ( c; s)` or a branch with nothing to run. See [`classify_stmts`].
 
 use tower_lsp::lsp_types::*;
 
@@ -60,7 +63,8 @@ use crate::parser::ast::{
     StmtKind, VarDeclStmt,
 };
 use crate::server::code_actions::fix::{
-    extract_name_from_diagnostic, single_file_edit, DiagnosticFixFamily, FixContext, FixDescriptor,
+    extract_name_from_diagnostic, single_file_edit, DiagnosticFixDescriptor, DiagnosticFixFamily,
+    FixContext, FixDescriptor,
 };
 use crate::server::diagnostics::{position_to_offset, span_to_range};
 
@@ -83,21 +87,21 @@ pub const FAMILY: DiagnosticFixFamily = DiagnosticFixFamily {
 struct Offer {
     title: String,
     is_preferred: bool,
+    auto_applicable: bool,
     edit: TextEdit,
 }
 
-fn describe(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
+fn describe(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<DiagnosticFixDescriptor> {
     offers(diagnostic, ctx)
         .into_iter()
-        .map(|offer| FixDescriptor {
-            title: offer.title,
-            kind: CodeActionKind::QUICKFIX,
-            is_preferred: offer.is_preferred,
-            // Never batched into `source.fixAll.openplanet`: see the module
-            // docs. Removal is lossy, and the prefix renames a binding in
-            // the one state where a declaration is legitimately unused —
-            // code the user is still writing.
-            auto_applicable: false,
+        .map(|offer| DiagnosticFixDescriptor {
+            descriptor: FixDescriptor {
+                title: offer.title,
+                kind: CodeActionKind::QUICKFIX,
+                is_preferred: offer.is_preferred.then_some(true),
+                auto_applicable: offer.auto_applicable,
+            },
+            materialization_id: None,
         })
         .collect()
 }
@@ -140,6 +144,7 @@ fn offers(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<Offer> {
         return Vec::new();
     }
     let binding = classify(&analysis.file, span);
+    let prefix_is_auto_applicable = matches!(binding, Binding::Local { .. });
     let mut out = vec![Offer {
         title: format!("Prefix `{name}` with `_` to mark it unused"),
         // Deleting a parameter changes the signature and every call
@@ -147,6 +152,7 @@ fn offers(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<Offer> {
         // leads the menu. For a local it competes with removal, and a
         // family offering two alternatives leads with neither.
         is_preferred: matches!(binding, Binding::Param),
+        auto_applicable: prefix_is_auto_applicable,
         edit: TextEdit {
             range: span_to_range(source, span),
             new_text: format!("_{name}"),
@@ -157,6 +163,7 @@ fn offers(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<Offer> {
             out.push(Offer {
                 title,
                 is_preferred: false,
+                auto_applicable: false,
                 edit: TextEdit { range, new_text },
             });
         }
@@ -505,9 +512,6 @@ mod tests {
     use super::*;
     use crate::server::code_actions::fix::{
         Registries, WorkspaceFileResolver, SOURCE_FIX_ALL_OPENPLANET,
-    };
-    use crate::server::code_actions::fix_all::{
-        merged_edits, ranges_overlap, select_non_overlapping, DocumentFix,
     };
     use crate::server::code_actions::test_fixtures::{apply_edits, published_unused_diagnostics};
     use crate::server::code_actions::{code_actions_with, resolve_code_action, CodeActionRequest};
@@ -1260,109 +1264,89 @@ mod tests {
         }
     }
 
-    /// **The fix-all decision (B047).** Neither fix is `auto_applicable`,
-    /// so `source.fixAll.openplanet` never applies one on save.
-    ///
-    /// Since B047 that is a decision rather than an accident of wiring: a
-    /// diagnostic-keyed family CAN be batched now. Three reasons it is not:
-    ///
-    /// 1. The two edits overlap, and the batcher would keep the LOSSY one —
-    ///    see
-    ///    `the_two_fixes_overlap_and_the_batcher_would_keep_the_removal`.
-    /// 2. "Declared but not yet referenced" is the normal state of code
-    ///    being typed. Every other auto-applicable family fires on code
-    ///    that is finished and wrong; this one fires on code that is
-    ///    unfinished, so renaming `count` to `_count` on save turns the
-    ///    next keystroke into an undefined identifier.
-    /// 3. For a parameter the prefix is a rename of an API surface —
-    ///    AngelScript has named arguments — which is exactly the class
-    ///    `rename_and_const/*` already refuses to auto-apply.
+    /// The ticket's safe automatic policy, exercised through the complete
+    /// lazy client path: offer fix-all, serde-shaped resolve data included,
+    /// resolve it, apply its edit, and compare the whole document. Locals
+    /// may be mechanically prefixed; removal is never selected, including
+    /// when a removal action is independently available.
     #[test]
-    fn no_unused_fix_is_batched_into_fix_all() {
-        let source = "void Main() {\n    int x = 1;\n    Print(\"hi\");\n}";
+    fn resolved_fix_all_prefixes_locals_and_never_removes_them() {
+        for (source, expected) in [
+            (
+                "void Main() {\n    int x = 1;\n    Print(\"hi\");\n}",
+                "void Main() {\n    int _x = 1;\n    Print(\"hi\");\n}",
+            ),
+            (
+                "int Foo() { return 1; }\nvoid Main() {\n    int x = Foo();\n    Print(\"hi\");\n}",
+                "int Foo() { return 1; }\nvoid Main() {\n    int _x = Foo();\n    Print(\"hi\");\n}",
+            ),
+            (
+                "int a = 1; int b = 2;\nvoid Main() { int x = a + b; }",
+                "int a = 1; int b = 2;\nvoid Main() { int _x = a + b; }",
+            ),
+        ] {
+            let (analysis, diagnostics) = published(source);
+            let (_, workspace, uri) = crate::server::code_actions::test_fixtures::ctx_for(source);
+            let context = CodeActionContext {
+                diagnostics,
+                only: Some(vec![SOURCE_FIX_ALL_OPENPLANET]),
+                ..Default::default()
+            };
+            let files = [(uri.clone(), &analysis)];
+            let offered = code_actions_with(
+                &request(&uri, &analysis, &context, &files, &workspace, true),
+                ONLY_THIS,
+            )
+            .into_iter()
+            .find_map(|action| match action {
+                CodeActionOrCommand::CodeAction(action)
+                    if action.kind == Some(SOURCE_FIX_ALL_OPENPLANET) =>
+                {
+                    Some(action)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no fix-all action for `{source}`"));
+            assert!(offered.edit.is_none(), "fix-all must resolve lazily");
+
+            let resolved = crate::server::code_actions::resolve_code_action_with(
+                offered,
+                &analysis,
+                &workspace,
+                None,
+                WorkspaceFileResolver::new(&files),
+                ONLY_THIS,
+            );
+            let edits = resolved
+                .edit
+                .expect("resolved fix-all edit")
+                .changes
+                .expect("single-file edit")
+                .remove(&uri)
+                .expect("edits for current document");
+            assert_eq!(apply_edits(source, &edits), expected, "for `{source}`");
+        }
+    }
+
+    /// Parameters are public signature surface in AngelScript because named
+    /// arguments exist. Prefixing one is useful as an explicit quick fix,
+    /// but is not safe to perform implicitly on save.
+    #[test]
+    fn fix_all_does_not_rename_an_unused_parameter() {
+        let source = "void f(int p) { Print(\"hi\"); }\nvoid Main() { f(1); }";
         let (analysis, diagnostics) = published(source);
         let (_, workspace, uri) = crate::server::code_actions::test_fixtures::ctx_for(source);
         let context = CodeActionContext {
-            diagnostics: diagnostics.clone(),
+            diagnostics,
             only: Some(vec![SOURCE_FIX_ALL_OPENPLANET]),
             ..Default::default()
         };
         let files = [(uri.clone(), &analysis)];
-        for action in crate::server::code_actions::code_actions(&CodeActionRequest {
-            uri: &uri,
-            analysis: &analysis,
-            range: diagnostics[0].range,
-            context: &context,
-            workspace: &workspace,
-            type_index: None,
-            files: WorkspaceFileResolver::new(&files),
-            lazy_edits: false,
-        }) {
-            let CodeActionOrCommand::CodeAction(action) = action else {
-                continue;
-            };
-            assert!(
-                !action.title.contains("unused"),
-                "an unused fix must never be applied on save, got {:?}",
-                action.title
-            );
-        }
-    }
-
-    /// The evidence behind [`no_unused_fix_is_batched_into_fix_all`]: the
-    /// two fixes for one declarator do not merely compete, their edits
-    /// properly OVERLAP — the name span sits inside the statement span — so
-    /// the batcher must drop one of them. Its rule is earliest start first,
-    /// and the removal starts at the line start, so the survivor is the
-    /// LOSSY fix. Marking the `_` prefix `auto_applicable` would therefore
-    /// not add a safe fix on save; it would delete the declaration.
-    #[test]
-    fn the_two_fixes_overlap_and_the_batcher_would_keep_the_removal() {
-        for (source, deleted) in [
-            (
-                "void Main() {\n    int x = 1;\n    Print(\"hi\");\n}",
-                "void Main() {\n    Print(\"hi\");\n}",
-            ),
-            // The keep-call rung overlaps the prefix just the same, and
-            // batching it would still drop the declaration.
-            (
-                "int Foo() { return 1; }\nvoid Main() {\n    int x = Foo();\n    Print(\"hi\");\n}",
-                "int Foo() { return 1; }\nvoid Main() {\n    Foo();\n    Print(\"hi\");\n}",
-            ),
-        ] {
-            let offered = actions(source);
-            assert_eq!(offered.len(), 2, "test premise: {:?}", titles(source));
-            let fixes: Vec<DocumentFix> = offered
-                .iter()
-                .map(|action| DocumentFix {
-                    title: action.title.clone(),
-                    edits: action
-                        .edit
-                        .clone()
-                        .expect("eager edit")
-                        .changes
-                        .expect("single-file edit")
-                        .remove(&uri())
-                        .expect("edits for this document"),
-                })
-                .collect();
-            assert!(
-                ranges_overlap(&fixes[0].edits[0].range, &fixes[1].edits[0].range),
-                "the prefix and the removal must be shown to overlap, not assumed to"
-            );
-            let kept = select_non_overlapping(&fixes);
-            assert_eq!(kept.len(), 1, "the batcher can only keep one of them");
-            assert!(
-                fixes[kept[0]].title.starts_with("Remove"),
-                "the batcher keeps `{}` — the lossy fix wins on start position",
-                fixes[kept[0]].title
-            );
-            assert_eq!(
-                apply_edits(source, &merged_edits(&fixes)),
-                deleted,
-                "batching these would delete the declaration on save"
-            );
-        }
+        let actions = code_actions_with(
+            &request(&uri, &analysis, &context, &files, &workspace, true),
+            ONLY_THIS,
+        );
+        assert!(actions.is_empty(), "parameter prefix leaked into fix-all");
     }
 
     /// End-to-end, the way the editor drives it: ask

@@ -123,7 +123,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
         kind: CodeActionKind::QUICKFIX,
         // The cast is what the game already does implicitly, so it is both
         // the right default and safe to apply on save.
-        is_preferred: true,
+        is_preferred: Some(true),
         auto_applicable: true,
     }];
     if let Some(replacement) = truncated_literal(diag, ctx, target.keyword) {
@@ -131,7 +131,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
             title: literal_title(target.init_text, &replacement),
             kind: CodeActionKind::QUICKFIX,
             // Silently changes the value the program stores.
-            is_preferred: false,
+            is_preferred: None,
             auto_applicable: false,
         });
     }

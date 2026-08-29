@@ -89,7 +89,7 @@ mod tests {
         let ctx = context(&workspace, &pairs, 0);
         for candidate in collect_fix_descriptors(&ctx) {
             assert!(
-                !candidate.descriptor.is_preferred,
+                candidate.descriptor.is_preferred.is_none(),
                 "{} marked preferred",
                 candidate.descriptor.title
             );

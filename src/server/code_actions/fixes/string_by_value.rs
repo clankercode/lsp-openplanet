@@ -69,7 +69,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
         .map(|title| FixDescriptor {
             title,
             kind: CodeActionKind::QUICKFIX,
-            is_preferred: true,
+            is_preferred: Some(true),
             auto_applicable: true,
         })
         .into_iter()

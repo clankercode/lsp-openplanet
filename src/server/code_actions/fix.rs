@@ -90,7 +90,10 @@ pub struct Fix {
 pub struct FixDescriptor {
     pub title: String,
     pub kind: CodeActionKind,
-    pub is_preferred: bool,
+    /// Preserve the LSP tri-state: absent for ordinary actions, `true` for
+    /// the leading choice, and explicit `false` where a producer intentionally
+    /// ranks an alternative behind that leading choice.
+    pub is_preferred: Option<bool>,
     pub auto_applicable: bool,
 }
 
@@ -163,10 +166,24 @@ pub struct DiagnosticFixFamily {
     /// Does this family claim that published diagnostic?
     pub matches: fn(&Diagnostic) -> bool,
     /// Describe the menu entries for one claimed diagnostic, without edits.
-    pub describe: fn(&Diagnostic, &FixContext<'_>) -> Vec<FixDescriptor>,
+    pub describe: fn(&Diagnostic, &FixContext<'_>) -> Vec<DiagnosticFixDescriptor>,
     /// Materialize exactly the selected descriptor. Total for every
-    /// descriptor [`Self::describe`] returned.
+    /// descriptor [`Self::describe`] returned. The last argument is the
+    /// descriptor's stable `materialization_id` when present, otherwise its
+    /// title.
     pub materialize: fn(&Diagnostic, &FixContext<'_>, &str) -> WorkspaceEdit,
+}
+
+/// Menu metadata from a published-diagnostic family, plus the optional
+/// stable value its materializer needs after the offer is made.
+///
+/// Most families can re-enter by title and leave `materialization_id` empty.
+/// A family whose choices depend on mutable workspace state records the
+/// chosen value here instead of repeating the search during resolve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiagnosticFixDescriptor {
+    pub descriptor: FixDescriptor,
+    pub materialization_id: Option<String>,
 }
 
 /// The pair of registries one request dispatches through.
@@ -215,6 +232,7 @@ pub struct FixDescriptorCandidate {
     pub family: &'static str,
     pub diagnostic: Diagnostic,
     pub descriptor: FixDescriptor,
+    materialization_id: Option<String>,
     subject: Subject,
 }
 
@@ -229,6 +247,20 @@ impl FixDescriptorCandidate {
     /// input at all.
     pub fn published_subject(&self) -> Option<&Diagnostic> {
         matches!(self.subject, Subject::Published).then_some(&self.diagnostic)
+    }
+
+    pub fn is_published(&self) -> bool {
+        matches!(self.subject, Subject::Published)
+    }
+
+    /// Stable producer-owned selection data, when title alone is not enough
+    /// to materialize an already-offered action.
+    pub fn materialization_id(&self) -> Option<&str> {
+        self.materialization_id.as_deref()
+    }
+
+    fn selected_value(&self) -> &str {
+        self.materialization_id().unwrap_or(&self.descriptor.title)
     }
 }
 
@@ -305,10 +337,10 @@ pub fn collect_fix_descriptors(ctx: &FixContext<'_>) -> Vec<FixDescriptorCandida
     collect_fix_descriptors_from(ctx, &[], REGISTRIES)
 }
 
-/// Every descriptor both registries offer, in the order the client sees
-/// them: diagnostic-keyed producers first (in the order the client echoed
-/// their diagnostics), then checker-keyed ones (checker order, then registry
-/// order).
+/// Every descriptor both registries offer, in stable producer order:
+/// diagnostic-keyed families in registry order (then client diagnostic
+/// order within one family), followed by checker findings in checker order
+/// (then registry order within one finding).
 ///
 /// `echoed` is `CodeActionContext.diagnostics` — the client's own copy of
 /// what we published. Foreign diagnostics are dropped here, once, so no
@@ -319,19 +351,22 @@ pub fn collect_fix_descriptors_from(
     registries: Registries<'_>,
 ) -> Vec<FixDescriptorCandidate> {
     let mut out = Vec::new();
-    for diagnostic in echoed {
-        if !is_our_diagnostic(diagnostic) {
-            continue;
-        }
-        for family in registries.published {
+    // Producer-major order preserves the independently published producer
+    // groups even when clients echo diagnostics in a different order.
+    for family in registries.published {
+        for diagnostic in echoed {
+            if !is_our_diagnostic(diagnostic) {
+                continue;
+            }
             if !(family.matches)(diagnostic) {
                 continue;
             }
-            for descriptor in (family.describe)(diagnostic, ctx) {
+            for published in (family.describe)(diagnostic, ctx) {
                 out.push(FixDescriptorCandidate {
                     family: family.name,
                     diagnostic: diagnostic.clone(),
-                    descriptor,
+                    descriptor: published.descriptor,
+                    materialization_id: published.materialization_id,
                     subject: Subject::Published,
                 });
             }
@@ -355,6 +390,7 @@ pub fn collect_fix_descriptors_from(
                     family: family.name,
                     diagnostic: published.clone(),
                     descriptor,
+                    materialization_id: None,
                     subject: Subject::Checker(diag.clone()),
                 });
             }
@@ -371,18 +407,18 @@ pub fn materialize_descriptor(
     // Callers pair descriptors with the registries that produced them, so a
     // miss is a programming error — loud in development, but an editor-
     // facing daemon must not die of it mid-session.
-    let title = &candidate.descriptor.title;
+    let selected = candidate.selected_value();
     let edit = match &candidate.subject {
         Subject::Checker(diag) => registries
             .checker
             .iter()
             .find(|family| family.name == candidate.family)
-            .map(|family| (family.materialize)(diag, ctx, title)),
+            .map(|family| (family.materialize)(diag, ctx, selected)),
         Subject::Published => registries
             .published
             .iter()
             .find(|family| family.name == candidate.family)
-            .map(|family| (family.materialize)(&candidate.diagnostic, ctx, title)),
+            .map(|family| (family.materialize)(&candidate.diagnostic, ctx, selected)),
     };
     debug_assert!(
         edit.is_some(),
@@ -397,7 +433,7 @@ pub fn materialize_descriptor(
             title: candidate.descriptor.title.clone(),
             kind: candidate.descriptor.kind.clone(),
             edit,
-            is_preferred: candidate.descriptor.is_preferred,
+            is_preferred: candidate.descriptor.is_preferred.unwrap_or(false),
             auto_applicable: candidate.descriptor.auto_applicable,
         },
     }
@@ -432,8 +468,27 @@ pub fn materialize_fix_from(
     family_name: &str,
     diagnostic_range: Range,
     title: &str,
+    materialization_id: Option<&str>,
     registries: Registries<'_>,
-) -> Option<FixCandidate> {
+) -> Option<WorkspaceEdit> {
+    // Published-diagnostic actions carry their compact subject and stable
+    // producer-owned selection. Re-describing here would make resolution
+    // depend on mutable workspace state that was not part of the offer.
+    if let Some(diagnostic) = echoed.first() {
+        if diagnostic.range != diagnostic_range {
+            return None;
+        }
+        let family = registries
+            .published
+            .iter()
+            .find(|family| family.name == family_name && (family.matches)(diagnostic))?;
+        return Some((family.materialize)(
+            diagnostic,
+            ctx,
+            materialization_id.unwrap_or(title),
+        ));
+    }
+
     let descriptor = collect_fix_descriptors_from(ctx, echoed, registries)
         .into_iter()
         .find(|candidate| {
@@ -441,7 +496,11 @@ pub fn materialize_fix_from(
                 && candidate.diagnostic.range == diagnostic_range
                 && candidate.descriptor.title == title
         })?;
-    Some(materialize_descriptor(ctx, &descriptor, registries))
+    Some(
+        materialize_descriptor(ctx, &descriptor, registries)
+            .fix
+            .edit,
+    )
 }
 
 /// The LSP diagnostic `publishDiagnostics` would have sent for this finding.
@@ -497,7 +556,7 @@ mod tests {
             .then(|| FixDescriptor {
                 title: "Synthetic cross-file fix".to_string(),
                 kind: CodeActionKind::QUICKFIX,
-                is_preferred: false,
+                is_preferred: None,
                 auto_applicable: false,
             })
             .into_iter()
@@ -544,7 +603,7 @@ mod tests {
         FixDescriptor {
             title: title.to_string(),
             kind: CodeActionKind::QUICKFIX,
-            is_preferred: false,
+            is_preferred: None,
             auto_applicable,
         }
     }

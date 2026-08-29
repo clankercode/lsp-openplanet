@@ -149,7 +149,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
             title,
             kind: CodeActionKind::QUICKFIX,
             // The value is a guess; the user must read it before taking it.
-            is_preferred: false,
+            is_preferred: None,
             auto_applicable: false,
         })
         .into_iter()
