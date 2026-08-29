@@ -101,8 +101,15 @@ pub fn handle_key(app: &mut App, source: &mut impl TuiDataSource, key: KeyEvent)
     }
 
     let page = app.page_step();
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        // Shift+J/K scroll the detail box (B029: long messages wrap past its cap).
+        // Terminals report either the uppercase char or the lowercase char + SHIFT.
+        KeyCode::Char('J') => app.scroll_detail_down(),
+        KeyCode::Char('K') => app.scroll_detail_up(),
+        KeyCode::Char('j') if shift => app.scroll_detail_down(),
+        KeyCode::Char('k') if shift => app.scroll_detail_up(),
         KeyCode::Char('j') | KeyCode::Down => app.scroll_down(),
         KeyCode::Char('k') | KeyCode::Up => app.scroll_up(),
         KeyCode::PageDown | KeyCode::Char(' ') => app.page_down(page),
@@ -110,10 +117,8 @@ pub fn handle_key(app: &mut App, source: &mut impl TuiDataSource, key: KeyEvent)
         KeyCode::Home => app.select_first(),
         KeyCode::End => app.select_last(),
         // g = top; Shift+G = end (crossterm reports 'G' with SHIFT)
-        KeyCode::Char('g') if !key.modifiers.contains(KeyModifiers::SHIFT) => app.select_first(),
-        KeyCode::Char('G') | KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            app.select_last()
-        }
+        KeyCode::Char('g') if !shift => app.select_first(),
+        KeyCode::Char('G') | KeyCode::Char('g') if shift => app.select_last(),
         KeyCode::Char('G') => app.select_last(),
         KeyCode::Char('c') => app.toggle_density(),
         KeyCode::Char('r') => source.request_refresh(),
@@ -215,6 +220,63 @@ mod tests {
             press_mod(KeyCode::Char('r'), KeyModifiers::CONTROL),
         );
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn shift_j_k_scroll_the_detail_box() {
+        let mut app = App::from_snapshot(canned_snapshot());
+        let mut src = NopSource;
+        let start = app.selected();
+
+        handle_key(&mut app, &mut src, press(KeyCode::Char('J')));
+        handle_key(&mut app, &mut src, press(KeyCode::Char('J')));
+        assert_eq!(app.detail_scroll(), 2);
+        assert_eq!(
+            app.selected(),
+            start,
+            "detail scroll must not move the list"
+        );
+
+        handle_key(&mut app, &mut src, press(KeyCode::Char('K')));
+        assert_eq!(app.detail_scroll(), 1);
+
+        // Terminals that report lowercase + SHIFT behave the same.
+        handle_key(
+            &mut app,
+            &mut src,
+            press_mod(KeyCode::Char('j'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(app.detail_scroll(), 2);
+        handle_key(
+            &mut app,
+            &mut src,
+            press_mod(KeyCode::Char('k'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(app.detail_scroll(), 1);
+        assert_eq!(app.selected(), start);
+    }
+
+    #[test]
+    fn plain_j_k_move_the_list_not_the_detail_box() {
+        let mut app = App::from_snapshot(canned_snapshot());
+        let mut src = NopSource;
+        handle_key(&mut app, &mut src, press(KeyCode::Char('j')));
+        assert_eq!(app.selected(), Some(1));
+        assert_eq!(app.detail_scroll(), 0);
+    }
+
+    #[test]
+    fn shift_g_still_selects_last() {
+        let mut app = App::from_snapshot(canned_snapshot());
+        let mut src = NopSource;
+        handle_key(
+            &mut app,
+            &mut src,
+            press_mod(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(app.selected(), Some(2));
+        handle_key(&mut app, &mut src, press(KeyCode::Char('g')));
+        assert_eq!(app.selected(), Some(0));
     }
 
     #[test]

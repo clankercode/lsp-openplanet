@@ -321,13 +321,18 @@ Interactive diagnostics browser (requires a real TTY).
 | `j` / `k` or arrows | Move selection |
 | `PgUp` / `PgDn` / Space | Page |
 | `g` / `G` (Home/End) | Top / end |
+| `Shift+J` / `Shift+K` | Scroll the **detail** box (long messages) |
 | `c` | Toggle **compact** ↔ **relaxed** density |
 | `r` | Manual refresh |
 | `q` / Esc / Ctrl-C | Quit |
 
-- **Compact:** one row per diagnostic (message ellipsized).
+- **Compact:** one row per diagnostic (message ellipsized — the location shrinks
+  first, so the message always keeps a readable share of the row).
 - **Relaxed:** location + message; right-aligned `› fragment ‹` on the location row.
-- **Detail:** pretty source excerpt with carets for the selected item.
+  The selected row spills its message onto a second line when it does not fit.
+- **Detail:** pretty source excerpt with carets for the selected item. The
+  message wraps to the pane width and the box grows to fit; past its cap the box
+  scrolls with `Shift+J` / `Shift+K` and the title shows the visible range.
 - Auto-refresh watches `*.as`, `*.inc`, and `info.toml` under the plugin root. If the watcher fails to start, the header shows `watch off · r to refresh`.
 - Header status: `checking…` while a run is in flight; `checked in N ms` when ready; last-good list is labeled **stale** during a check or after failure.
 - Checks run off the UI thread so navigation stays responsive.

@@ -1,0 +1,28 @@
+---
+source: tests/tui_snapshots.rs
+expression: terminal.backend()
+---
+"┌ openplanet-lsp · watch ──────────────────┐"
+"│ ./MyPlugin  ·  2 diagnostics (1 error · 1│"
+"└──────────────────────────────────────────┘"
+"┌ diagnostics · compact · 1/2 ─────────────┐"
+"│▸ E …erlay.as:123:26  no matching signatu…│"
+"│  W …Helpers.as:4:24  Use 'const string &…│"
+"│                                          │"
+"│                                          │"
+"│                                          │"
+"│                                          │"
+"│                                          │"
+"│                                          │"
+"└──────────────────────────────────────────┘"
+"┌ detail · error · 3-10/10 · J/K ──────────┐"
+"│  123 │     vec4 tint = MakeTint(true);   │"
+"│      │                          ^^^^     │"
+"│      │ no matching signatures to         │"
+"│      │ 'MakeTint(bool)' - candidates are │"
+"│      │ 'vec4 MakeTint(int, int, int)',   │"
+"│      │ 'vec4 MakeTint(const string &in)' │"
+"│      │ and 'vec4 MakeTint(const vec3 &in,│"
+"│      │ float alpha)'                     │"
+"└──────────────────────────────────────────┘"
+" j/k move · PgUp/Dn page · g/G top/end · r r"
