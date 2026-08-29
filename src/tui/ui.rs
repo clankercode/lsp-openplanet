@@ -57,6 +57,7 @@ impl App {
             .clone()
             .or_else(|| self.selected_diag().map(|d| d.identity_key()));
         let prev_idx = self.list_state.selected();
+        let prev_detail_scroll = self.detail_scroll;
 
         let len = snap.diagnostics.len();
         self.snapshot = snap;
@@ -74,8 +75,12 @@ impl App {
         } else {
             prev_idx.unwrap_or(0).min(len - 1)
         };
-        self.list_state.select(Some(idx));
-        self.selected_key = self.snapshot.diagnostics.get(idx).map(|d| d.identity_key());
+        self.select_index(idx);
+        // The identity key embeds the message, so an unchanged key means the
+        // detail box shows the same text — keep the reader's place in it.
+        if self.selected_key == prev_key {
+            self.detail_scroll = prev_detail_scroll;
+        }
     }
 
     pub fn apply_status(&mut self, status: RunStatus) {
@@ -537,23 +542,30 @@ fn wrap_display(s: &str, width: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut cur_w = 0usize;
+    // Whether a word has been placed on `cur`. Not the same as `!cur.is_empty()`:
+    // an empty word (from a double space) starts the line without adding text,
+    // and the following word still needs its separating space.
+    let mut started = false;
 
     for word in s.split(' ') {
         let word_w = str_w(word);
-        let sep = usize::from(!cur.is_empty());
+        let sep = usize::from(started);
         if cur_w + sep + word_w <= width {
-            if sep == 1 {
+            if started {
                 cur.push(' ');
+                cur_w += 1;
             }
             cur.push_str(word);
-            cur_w += sep + word_w;
+            cur_w += word_w;
+            started = true;
             continue;
         }
         // Does not fit here — start a fresh line.
-        if !cur.is_empty() {
+        if started {
             out.push(std::mem::take(&mut cur));
             cur_w = 0;
         }
+        started = true;
         if word_w <= width {
             cur.push_str(word);
             cur_w = word_w;
@@ -562,7 +574,7 @@ fn wrap_display(s: &str, width: usize) -> Vec<String> {
         // Oversized token: hard-break it by display width.
         for ch in word.chars() {
             let cw = char_w(ch);
-            if cur_w + cw > width && !cur.is_empty() {
+            if cur_w + cw > width && cur_w > 0 {
                 out.push(std::mem::take(&mut cur));
                 cur_w = 0;
             }
@@ -671,8 +683,8 @@ fn list_item_for(
                 let min_gap = 3usize;
                 let rhs_budget = content_w.saturating_sub(lhs_max.saturating_add(min_gap));
                 if let Some(rhs) = format_fragment_rhs(&frag, rhs_budget) {
-                    let lhs_len = lhs.chars().count();
-                    let rhs_len = rhs.chars().count();
+                    let lhs_len = str_w(&lhs);
+                    let rhs_len = str_w(&rhs);
                     let gap = content_w.saturating_sub(lhs_len).saturating_sub(rhs_len);
                     // Prefer at least min_gap when budget allows; right-align uses full remainder.
                     let gap = gap.max(min_gap.min(content_w.saturating_sub(lhs_len)));
@@ -743,28 +755,14 @@ fn relaxed_msg_rows(msg: &str, content_w: usize, selected: bool) -> Vec<String> 
     vec![wrapped[0].clone(), second]
 }
 
-/// Build `› frag ‹`, truncating `frag` only when it exceeds `budget` chars total.
+/// Build `› frag ‹`, truncating `frag` only when it exceeds `budget` columns total.
 fn format_fragment_rhs(frag: &str, budget: usize) -> Option<String> {
     // overhead: '›' + ' ' + ' ' + '‹' = 4
     const OVERHEAD: usize = 4;
     if budget <= OVERHEAD {
         return None;
     }
-    let max_inner = budget - OVERHEAD;
-    let inner = if frag.chars().count() > max_inner {
-        if max_inner == 0 {
-            return None;
-        }
-        if max_inner == 1 {
-            "…".to_string()
-        } else {
-            let take: String = frag.chars().take(max_inner - 1).collect();
-            format!("{take}…")
-        }
-    } else {
-        frag.to_string()
-    };
-    Some(format!("› {inner} ‹"))
+    Some(format!("› {} ‹", ellipsize(frag, budget - OVERHEAD)))
 }
 
 fn code_fragment(d: &DiagItem) -> Option<String> {
@@ -1263,21 +1261,20 @@ mod tests {
             .collect()
     }
 
-    /// Index of the first message row: after the caret row when a source line
-    /// is shown, else straight after the header + blank.
-    fn detail_msg_start(lines: &[Line<'_>]) -> usize {
-        lines
-            .iter()
-            .position(|l| line_text(l).contains('^'))
-            .map(|i| i + 1)
-            .unwrap_or(2)
+    /// Index of the first message row. The layout is fixed:
+    /// header, blank, [source, caret,] message rows.
+    fn detail_msg_start(d: &DiagItem) -> usize {
+        if d.source_line.is_some() {
+            4
+        } else {
+            2
+        }
     }
 
     /// Message text of each detail message row, with the gutter prefix stripped.
     fn detail_msg_parts(d: &DiagItem, inner_w: usize) -> Vec<String> {
         let lines = pretty_detail_lines(d, inner_w);
-        let start = detail_msg_start(&lines);
-        lines[start..]
+        lines[detail_msg_start(d)..]
             .iter()
             .map(|l| {
                 l.spans
@@ -1299,9 +1296,7 @@ mod tests {
         let parts = detail_msg_parts(&d, inner_w);
         assert!(parts.len() > 1, "message should wrap: {parts:?}");
 
-        let lines = pretty_detail_lines(&d, inner_w);
-        let start = detail_msg_start(&lines);
-        for row in detail_rows(&d, inner_w)[start..].iter() {
+        for row in detail_rows(&d, inner_w)[detail_msg_start(&d)..].iter() {
             assert!(
                 row.width() <= inner_w,
                 "row {row:?} is {} wide, inner_w={inner_w}",
@@ -1378,8 +1373,7 @@ mod tests {
             diag_no_source(Severity::Warning, LONG_MSG),
         ] {
             for inner_w in [20usize, 40, 60, 100, 200] {
-                let lines = pretty_detail_lines(&d, inner_w);
-                let start = detail_msg_start(&lines);
+                let start = detail_msg_start(&d);
                 let rows = detail_rows(&d, inner_w);
                 assert!(
                     rows[0].width() <= inner_w,
@@ -1408,9 +1402,7 @@ mod tests {
         let token = "A".repeat(200);
         let d = diag(Severity::Error, &token);
         for inner_w in [20usize, 40, 60] {
-            let lines = pretty_detail_lines(&d, inner_w);
-            let start = detail_msg_start(&lines);
-            for row in detail_rows(&d, inner_w)[start..].iter() {
+            for row in detail_rows(&d, inner_w)[detail_msg_start(&d)..].iter() {
                 assert!(row.width() <= inner_w, "w={inner_w} row={row:?}");
             }
             assert_eq!(
@@ -1428,9 +1420,7 @@ mod tests {
         assert_eq!(msg.width(), msg.chars().count() * 2, "fixture must be wide");
         let d = diag(Severity::Error, msg);
         for inner_w in [20usize, 30, 41] {
-            let lines = pretty_detail_lines(&d, inner_w);
-            let start = detail_msg_start(&lines);
-            for row in detail_rows(&d, inner_w)[start..].iter() {
+            for row in detail_rows(&d, inner_w)[detail_msg_start(&d)..].iter() {
                 assert!(
                     row.width() <= inner_w,
                     "w={inner_w} row={row:?} width={}",
@@ -1633,6 +1623,78 @@ mod tests {
         assert_eq!(ellipsize("", 10), "");
         assert_eq!(ellipsize("abcdef", 4), "abc\u{2026}");
         assert_eq!(ellipsize("abc", 0), "");
+    }
+
+    #[test]
+    fn wrap_display_round_trips_and_never_overflows() {
+        for (label, msg) in [
+            ("plain", LONG_MSG.to_string()),
+            ("leading space", format!(" {LONG_MSG}")),
+            ("trailing space", format!("{LONG_MSG} ")),
+            ("double spaces", LONG_MSG.replace(' ', "  ")),
+            ("one word", "x".to_string()),
+            ("empty", String::new()),
+        ] {
+            let longest_word = msg.split(' ').map(str_w).max().unwrap_or(0);
+            for width in 1..=60usize {
+                let out = wrap_display(&msg, width);
+                assert!(!out.is_empty(), "{label} w={width}: no rows");
+                for row in &out {
+                    assert!(row.width() <= width, "{label} w={width} row={row:?}");
+                }
+                if width >= longest_word {
+                    // No hard breaks: the separators are recoverable exactly.
+                    assert_eq!(out.join(" "), msg, "{label} w={width} lost content");
+                } else {
+                    // Hard-broken tokens lose only the row-boundary spaces.
+                    assert_eq!(
+                        squash(&out.concat()),
+                        squash(&msg),
+                        "{label} w={width} dropped characters"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_display_zero_width_is_a_single_empty_row() {
+        assert_eq!(wrap_display(LONG_MSG, 0), vec![String::new()]);
+        assert_eq!(wrap_display("", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn wrap_display_only_overflows_for_a_char_wider_than_the_line() {
+        // A 2-column char cannot fit a 1-column line; every row still holds
+        // exactly one char rather than looping or dropping it.
+        let msg = "\u{8a3a}\u{65ad}\u{30e1}";
+        let out = wrap_display(msg, 1);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out.concat(), msg);
+        // From width 2 up, nothing overflows.
+        for width in 2..=12usize {
+            for row in wrap_display(msg, width) {
+                assert!(row.width() <= width, "w={width} row={row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn detail_scroll_survives_an_identical_refresh() {
+        let mut app = App::from_snapshot(canned_snapshot());
+        app.scroll_detail_down();
+        app.scroll_detail_down();
+        assert_eq!(app.detail_scroll(), 2);
+        // A watch re-check that produces the same list must not yank the
+        // reader back to the top of the message.
+        app.apply_snapshot(canned_snapshot());
+        assert_eq!(app.detail_scroll(), 2);
+
+        // ...but a refresh that changes the selected diagnostic does reset it.
+        let mut snap = canned_snapshot();
+        snap.diagnostics[0].message = "a completely different message".into();
+        app.apply_snapshot(snap);
+        assert_eq!(app.detail_scroll(), 0);
     }
 
     #[test]
