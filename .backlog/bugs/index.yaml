@@ -21,3 +21,4 @@ bugs:
     - file: B020-unused-declaration-fp-usage-fr.todo
     - file: B021-check-parser-swallows-a-follow.todo
     - file: B022-false-error-no-matching-symbol.todo
+    - file: B023-wrong-signature-non-function-c.todo

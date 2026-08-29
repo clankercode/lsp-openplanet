@@ -1,0 +1,71 @@
+---
+complexity: medium
+created_at: "2026-08-29T04:33:46Z"
+depends_on: []
+estimate_hours: 3
+id: B023
+priority: medium
+status: pending
+tags:
+    - typecheck
+    - funcdef
+    - false-negative
+title: Wrong-signature / non-function callback args silently accepted at typedb funcdef parameter slots
+updated_at: "2026-08-29T04:33:46Z"
+---
+## Broken (game-verified 2026-08-29, OP 1.29.5 / OpenplanetNext, master @ 7204c86)
+
+Misuses passed **directly** into a typedb funcdef-typed parameter slot are silently accepted by `openplanet-lsp check` while the game compiler rejects them. The ctor form is correct (GH #63 / B022); this is the overload-set call path.
+
+Repro:
+
+```angelscript
+void Good(UI::InputTextCallbackData@ data) { data.SelectAll(); }
+void WrongSig(int x) {}
+void Render() {
+    string s = "test";
+    // A: game ERR, LSP silent
+    UI::InputText("##a", s, UI::InputTextFlags::None, WrongSig);
+    // B: game ERR, LSP silent
+    UI::InputText("##b", s, UI::InputTextFlags::None, "nope");
+    // C: correctly flagged by both
+    UI::InputTextCallback@ c = UI::InputTextCallback(WrongSig);
+}
+```
+
+Game ground truth (RemoteBuild probe, `scripts/issue_repro_game.py`):
+
+```
+(6,5)  ERR: No matching signatures to 'UI::InputText(const string, string, const UI::InputTextFlags, ::WrongSig)'
+(8,5)  ERR: No matching signatures to 'UI::InputText(const string, string, const UI::InputTextFlags, const string)'
+(10,32) ERR: Can't implicitly convert from '<function>@const' to 'UI::InputTextCallback@&'.
+```
+
+LSP: 0 errors (C only: `argument 1 of 'UI::InputTextCallback': expected 'void (UI::InputTextCallbackData@)', got 'void (int)'`).
+
+## Root cause
+
+`check_external_overload_set` (`src/typecheck/checker.rs`, GH #47 machinery) never rejects a candidate on function-shaped args — its FP guard is "Named/unknown-shape args never reject a candidate on their own". A bare function identifier resolves via `lookup_global_value_type` to `TypeRepr::Funcdef("WrongSig")`, which is not name-equivalent to the param, so `funcdef_handle_compatible` is false — but the arg then just fails to produce *evidence*, both 4-arg candidates stay "compatible", and nothing is emitted. The ctor path already has the needed signature-match helpers (`arg_binds_to_funcdef`, `lookup_arg_function_sigs`, `func_matches_funcdef`); the overload-set path doesn't use them for candidate rejection.
+
+## Expected
+
+Mirror the game: when a candidate's funcdef-typed param cannot bind the arg (arg is a resolvable function with an incompatible signature, or provably not a function such as a string literal), that candidate is rejected; if no candidate binds, emit `NoMatchingSignatures` (like GH #47 does for bool-literal-into-`&out`).
+
+## Not
+
+- Do not reject Named/unknown-shape args (workspace classes the typedb can't see, `auto`) — the existing FP guard for those must stay.
+- Do not touch the ctor path; it is already correct.
+- Legal patterns must stay silent (regression fixture `63-inputtext-callback-funcdef` asserts 0 diagnostics).
+
+## Test plan (TDD, red first; generalize per CLAUDE.md)
+
+- Wrong-signature function into `UI::InputText` / `UI::InputTextMultiline` callback slot → error.
+- String literal (non-function) into the slot → error.
+- Generalize to other funcdef families: wrong-sig fn into `startnew(...)` (CoroutineFunc family) and a UI::NodTree callback slot if reachable.
+- Variants of the matching-fn case: `void(UI::InputTextCallbackData@)` free fn, class method, funcdef-typed local, ctor-wrapped fn — all stay silent.
+- Correctly-typed but wrong-signature funcdef-typed variable (`void(int)` stored in a funcdef handle) if representable.
+- New `tests/fixtures/issue-repros/<n>-*` fixture asserting diagnosis (47-style), game ground truth via `scripts/issue_repro_game.py`.
+
+## Fix sketch
+
+In `check_external_overload_set`, for each candidate param that resolves to a typedb funcdef (`GlobalScope::lookup_funcdef`), run the same bind test as `check_funcdef_ctor_arg`; a resolvable-function arg that matches no candidate's signature — or a literal that is clearly not a function — is rejection evidence. Reuse `is_clearly_not_a_function` for the literal case.
