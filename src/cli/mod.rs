@@ -255,7 +255,9 @@ impl CheckOptions {
     /// layer reads `$HOME/.config/openplanet-lsp/config.toml`.
     pub fn resolve_warnings_as_errors_with_config(&self) -> bool {
         let workspace_root = project::find_workspace_root(&self.path);
-        let prefs = UserPrefs::load(workspace_root.as_deref());
+        // `run_check` immediately loads the full LspConfig, whose shared
+        // reader owns reporting these same issues for the check invocation.
+        let prefs = UserPrefs::load_silent(workspace_root.as_deref());
         self.resolve_warnings_as_errors(&prefs)
     }
 

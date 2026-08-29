@@ -40,6 +40,28 @@ openplanet-lsp --help
 
 Config (`~/.config/openplanet-lsp/config.toml` or workspace `.openplanet-lsp.toml`):
 
+**Precedence.** Every key resolves through one ladder, highest first:
+
+1. `initializationOptions` (your editor's LSP client settings)
+2. CLI flags (`check --game-target`, `--unused`, `--no-gitignore`, …) — these
+   ride the same layer as initializationOptions
+3. per-root workspace `.openplanet-lsp.toml` (the plugin's own file)
+4. the opened folder's `.openplanet-lsp.toml`, when it hosts several plugins
+5. user global `~/.config/openplanet-lsp/config.toml`
+6. auto-detection (Openplanet install folder, type DB, plugins dir)
+
+Project config always beats machine config: a machine-wide `source_paths` or
+`game_target` is a default your plugin can override, never the other way
+round. `defines` is the one exception, and it does not compete — entries
+ACCUMULATE across all layers and are applied last (prefix `-`/`!` to remove).
+
+**Bad keys are per-key.** A key whose value has the wrong type, has an unknown
+enum value, or does not exist is skipped with a warning naming the file, the
+key and the expected value; every other key in the same file still applies.
+Only a file that is not valid TOML at all is skipped whole — and that warns
+too. Warnings go to stderr, and to the editor as `window/showMessage` under
+the LSP.
+
 ```toml
 # bare TTY default when no subcommand is given
 default_mode = "tui"   # or "lsp"
@@ -58,9 +80,9 @@ default_mode = "tui"   # or "lsp"
 #   developer -> all four                                (default)
 # Set it to check the plugin the way it compiles once signed — `#if
 # SIG_DEVELOPER` blocks go dead below developer. Aliases: dev, reg, and the
-# SIG_* token itself; an unknown value warns and keeps developer (falling back
-# permissive, since masking code out is what invents undefined-identifier
-# errors). CLI `--signature MODE` wins over this.
+# SIG_* token itself; an unknown value warns and falls through to the next
+# lower config layer (or the permissive developer default). CLI `--signature
+# MODE` wins over this.
 # signature_mode = "developer"
 
 # Host OS / game arch whose defines are live. Exactly one OS and one arch
@@ -87,7 +109,7 @@ default_mode = "tui"   # or "lsp"
 # set (game platform, OS/arch, signature level, build flags).
 # Prefix an entry with `-` or `!` to turn a define OFF (`-LOGS`); removals are
 # applied after additions, so a removal wins. Entries ACCUMULATE across layers
-# (parent config, per-root config, user global, initializationOptions), so a
+# (user global, parent config, per-root config, initializationOptions), so a
 # plugin adds to a machine-wide list instead of replacing it. Listing a
 # platform selector of another game (`MP4` while game_target is TMNEXT)
 # replaces the target's selectors rather than stacking on them, so exactly one

@@ -279,8 +279,8 @@ fn should_recheck_path(path: &Path) -> bool {
     if config_watch::is_config_path(path) {
         return match config_watch::config_reload_action(path) {
             ConfigReloadAction::Reload => true,
-            ConfigReloadAction::KeepLastGood { reason } => {
-                tracing::warn!("keeping last-good config ({reason})");
+            ConfigReloadAction::KeepLastGood { issue } => {
+                tracing::warn!("keeping last-good config ({issue})");
                 false
             }
         };

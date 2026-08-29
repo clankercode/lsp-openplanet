@@ -143,6 +143,41 @@ fn check_command_exits_zero_when_clean() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn check_command_reports_each_config_problem_once() {
+    let root = make_temp_plugin("single-config-warning");
+    let home = isolated_home("single-config-warning");
+    fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
+    fs::write(root.join(".openplanet-lsp.toml"), "unused = \"banana\"\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "invalid config values should warn without failing check; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert_eq!(
+        stderr.matches("warning: config:").count(),
+        1,
+        "each config problem must be reported once; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("key `unused`") && stderr.contains("expected one of"),
+        "warning should identify the bad key and accepted values; stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
 /// A source filter can omit a sibling file that contributes to an open
 /// AngelScript namespace. The real plugin module still includes that file, so
 /// `check` must not claim its remaining namespace surface is authoritative.

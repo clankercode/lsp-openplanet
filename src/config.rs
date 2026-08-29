@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -29,8 +28,8 @@ pub struct LspConfig {
     /// narrow via config / CLI to model a real client.
     pub build_flags: BuildFlags,
     pub defines: HashSet<String>,
-    /// Raw `defines` entries from every config layer (parent config, per-root
-    /// config, user global, init options), in the order they were read. They
+    /// Raw `defines` entries from every config layer (user global, parent
+    /// config, per-root config, init options), in the order they were read. They
     /// are ADDITIVE over the target-derived set and are applied last — after
     /// `defines_for_target` and the manifest — by
     /// [`LspConfig::apply_define_overrides`] (B024). An entry prefixed `-` or
@@ -93,7 +92,7 @@ pub struct LspConfig {
     /// runtime-invoked callbacks (`unused_callbacks`), on top of the
     /// built-in `OPENPLANET_CALLBACKS`. Frameworks that dispatch by name
     /// reflection (MLHook's `OnCounterUpdate`) are invisible to a fixed
-    /// list. Resolved by [`LspConfig::resolve_unused_callbacks`] — empty
+    /// list. Resolved through the shared config ladder (B017) — empty
     /// when no config file sets the key.
     pub unused_callbacks: Vec<String>,
     /// How unused-declaration findings are reported. Default warn.
@@ -110,6 +109,11 @@ pub struct LspConfig {
     /// Workspace `.openplanet-lsp.toml` wins over the user global; CLI
     /// `--errors` wins over both.
     pub errors: ErrorGroup,
+    /// B017: config-file keys the ladder could not use (wrong type, unknown
+    /// key, unparseable file). Recorded rather than silently dropped so the
+    /// CLI can warn on stderr and the LSP can surface a `window/showMessage`.
+    /// Never affects analysis; empty on a clean load.
+    pub config_issues: Vec<ConfigIssue>,
 }
 
 impl Default for LspConfig {
@@ -145,11 +149,170 @@ impl Default for LspConfig {
             unused: UnusedLevel::Warn,
             inactive_regions: InactiveLevel::Hint,
             errors: ErrorGroup::Last,
+            config_issues: Vec::new(),
         }
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// Every key the config ladder reads out of a workspace
+/// `.openplanet-lsp.toml` or the user-global
+/// `~/.config/openplanet-lsp/config.toml` (B017).
+///
+/// Both files share one schema, so this is also the typo detector: a key that
+/// is not here is reported as an unknown key and ignored. Keep it in lockstep
+/// with [`ConfigFile`] and `crate::user_config::SETTINGS` (guarded by a test).
+pub const CONFIG_KEYS: &[&str] = &[
+    "openplanet_dir",
+    "plugins_dir",
+    "game_target",
+    "signature_mode",
+    "os_target",
+    "arch_target",
+    "developer_build",
+    "has_dev",
+    "logs",
+    "server",
+    "defines",
+    "default_mode",
+    "source_paths",
+    "ignore_paths",
+    "honor_gitignore",
+    "shortcut_namespaces",
+    "shortcut_disable_default_namespaces",
+    "shortcut_match_enums",
+    "warnings_as_errors",
+    "define_matrix",
+    "define_groups",
+    "define_combinations",
+    "define_matrix_max_combinations",
+    "unused",
+    "unused_callbacks",
+    "inactive_regions",
+    "errors",
+    // Written by the TUI first-run prompt (`src/tui/first_run.rs`), not read
+    // by this ladder — listed so the tool never warns about its own key.
+    "first_run_prompt_done",
+];
+
+/// One config-file key the ladder could not use (B017).
+///
+/// Before B017 a single mistyped key discarded the WHOLE file — `game_target
+/// = 7` silently dropped `source_paths`, `defines` and the entire matrix
+/// config with no diagnostic. Now the offending key is skipped and recorded
+/// here so the loader can name the file, the key, and the expected type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigIssue {
+    /// The config file the key came from.
+    pub file: PathBuf,
+    /// The offending key. Empty for a whole-file problem (unparseable TOML).
+    pub key: String,
+    /// What the loader wanted, e.g. `an array of strings`.
+    pub expected: String,
+    /// What was actually there, e.g. `an integer` / `an unknown key`, or the
+    /// TOML parse error for an unparseable file.
+    pub found: String,
+}
+
+impl ConfigIssue {
+    fn new(file: &Path, key: &str, expected: impl Into<String>, found: impl Into<String>) -> Self {
+        Self {
+            file: file.to_path_buf(),
+            key: key.to_string(),
+            expected: expected.into(),
+            found: found.into(),
+        }
+    }
+
+    /// A key whose value had the wrong type; the key is skipped, its siblings
+    /// in the same file stay effective.
+    fn wrong_type(file: &Path, key: &str, expected: &str, value: &toml::Value) -> Self {
+        Self::new(file, key, expected, describe_value(value))
+    }
+
+    /// A value with the right TOML shape but outside the key's accepted
+    /// vocabulary. Preserve the value itself so the diagnostic is actionable.
+    fn invalid_value(file: &Path, key: &str, expected: &str, value: &str) -> Self {
+        Self::new(file, key, expected, format!("the string {value:?}"))
+    }
+
+    /// A key this loader does not read — almost always a typo.
+    fn unknown_key(file: &Path, key: &str) -> Self {
+        Self::new(file, key, "a known config key", "an unknown key")
+    }
+
+    /// The file is not TOML at all; it is skipped whole, but never silently.
+    pub(crate) fn unparseable(file: &Path, err: &toml::de::Error) -> Self {
+        Self::new(
+            file,
+            "",
+            "valid TOML (the whole file was skipped)",
+            err.message().to_string(),
+        )
+    }
+
+    /// The file exists but could not be read, so a watcher must retain the
+    /// current config rather than interpreting the failure as a deletion.
+    pub(crate) fn unreadable(file: &Path, err: &std::io::Error) -> Self {
+        Self::new(file, "", "a readable config file", err.to_string())
+    }
+}
+
+impl std::fmt::Display for ConfigIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.key.is_empty() {
+            write!(
+                f,
+                "{}: expected {}, found: {}",
+                self.file.display(),
+                self.expected,
+                self.found
+            )
+        } else {
+            write!(
+                f,
+                "{}: key `{}`: expected {}, found {}",
+                self.file.display(),
+                self.key,
+                self.expected,
+                self.found
+            )
+        }
+    }
+}
+
+/// Human description of a TOML value's shape, for [`ConfigIssue::found`].
+/// Arrays describe their element types so `source_paths = [1, 2]` reads as
+/// "found an array of integers", not the useless "found an array".
+fn describe_value(value: &toml::Value) -> String {
+    fn article(kind: &str) -> &'static str {
+        if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "an"
+        } else {
+            "a"
+        }
+    }
+    match value {
+        toml::Value::Array(items) if items.is_empty() => "an empty array".to_string(),
+        toml::Value::Array(items) => {
+            let first = items[0].type_str();
+            if items.iter().all(|i| i.type_str() == first) {
+                format!("an array of {first}s")
+            } else {
+                "an array of mixed types".to_string()
+            }
+        }
+        other => format!("{} {}", article(other.type_str()), other.type_str()),
+    }
+}
+
+/// One config file's keys, read leniently (B017).
+///
+/// Deliberately NOT `#[derive(Deserialize)]`: deserializing the struct in one
+/// go discards the WHOLE file on any type error, so `game_target = 7` used to
+/// silently drop `source_paths`, `defines` and the entire matrix config with
+/// no diagnostic. [`ConfigFile::from_table`] reads key by key instead and
+/// records each bad key as a [`ConfigIssue`].
+#[derive(Debug, Default)]
 struct ConfigFile {
     openplanet_dir: Option<String>,
     plugins_dir: Option<String>,
@@ -205,6 +368,298 @@ struct ConfigFile {
     define_combinations: Option<Vec<Vec<String>>>,
     /// GH #57: matrix size cap (default 16); exceeding it is a hard error.
     define_matrix_max_combinations: Option<usize>,
+    /// GH #56: extra runtime-invoked callback names. Folded back onto this
+    /// shared path by B017 — it had its own resolver only to escape the
+    /// inverted ladder.
+    unused_callbacks: Option<Vec<String>>,
+    /// How unused-declaration findings are reported (B012). Accepts a level
+    /// name or a bool; folded back onto this path by B017.
+    unused: Option<UnusedLevel>,
+    /// How preprocessor-dead `#if` branches are surfaced. Level name or bool.
+    inactive_regions: Option<InactiveLevel>,
+    /// How `check` groups diagnostics for human formats. Name or `false`.
+    errors: Option<ErrorGroup>,
+}
+
+/// Reads one config file's keys off a raw [`toml::Table`], recording a
+/// [`ConfigIssue`] per unusable key instead of discarding the file (B017).
+struct FileReader<'a> {
+    file: &'a Path,
+    table: &'a toml::Table,
+    issues: &'a mut Vec<ConfigIssue>,
+    /// Every key this reader was asked for, in call order. Feeds the
+    /// CONFIG_KEYS drift guard; see [`ConfigFile::read_recording`].
+    read: &'a mut Vec<&'static str>,
+}
+
+impl<'a> FileReader<'a> {
+    /// Fetch one key's value, recording that this key was read. EVERY
+    /// accessor goes through here — that is what makes the recorded list a
+    /// faithful account of what `from_table` reads, absent keys included.
+    fn lookup(&mut self, key: &'static str) -> Option<&'a toml::Value> {
+        self.read.push(key);
+        self.table.get(key)
+    }
+
+    fn typed<T: serde::de::DeserializeOwned>(
+        &mut self,
+        key: &'static str,
+        expected: &str,
+    ) -> Option<T> {
+        let value = self.lookup(key)?;
+        match value.clone().try_into::<T>() {
+            Ok(parsed) => Some(parsed),
+            Err(_) => {
+                self.issues
+                    .push(ConfigIssue::wrong_type(self.file, key, expected, value));
+                None
+            }
+        }
+    }
+
+    fn string(&mut self, key: &'static str) -> Option<String> {
+        self.typed(key, "a string")
+    }
+
+    /// A string whose accepted vocabulary is known at file-parse time.
+    /// Both wrong TOML shapes and unknown string values make this one key
+    /// unusable, leaving lower config layers intact.
+    fn validated_string<T>(
+        &mut self,
+        key: &'static str,
+        expected: &str,
+        parse: fn(&str) -> Option<T>,
+    ) -> Option<String> {
+        let value = self.lookup(key)?;
+        let Some(token) = value.as_str() else {
+            self.issues
+                .push(ConfigIssue::wrong_type(self.file, key, expected, value));
+            return None;
+        };
+        if parse(token).is_none() {
+            self.issues
+                .push(ConfigIssue::invalid_value(self.file, key, expected, token));
+            return None;
+        }
+        Some(token.to_string())
+    }
+
+    /// A game target follows the CLI contract: trim surrounding whitespace,
+    /// compare case-insensitively, and retain the canonical uppercase token.
+    fn game_target(&mut self) -> Option<String> {
+        const KEY: &str = "game_target";
+        let value = self.lookup("game_target")?;
+        let expected = format!("one of {}", LspConfig::GAME_TARGETS.join(", "));
+        let Some(token) = value.as_str() else {
+            self.issues
+                .push(ConfigIssue::wrong_type(self.file, KEY, &expected, value));
+            return None;
+        };
+        let normalized = token.trim().to_ascii_uppercase();
+        if !LspConfig::GAME_TARGETS.contains(&normalized.as_str()) {
+            self.issues
+                .push(ConfigIssue::invalid_value(self.file, KEY, &expected, token));
+            return None;
+        }
+        Some(normalized)
+    }
+
+    fn boolean(&mut self, key: &'static str) -> Option<bool> {
+        self.typed(key, "a boolean")
+    }
+
+    fn size(&mut self, key: &'static str) -> Option<usize> {
+        self.typed(key, "a non-negative integer")
+    }
+
+    /// An ordinary array-of-strings config key. Any unusable entry makes the
+    /// whole key unusable, allowing the valid lower-precedence layer to
+    /// survive unchanged. An explicit empty array remains a valid value.
+    fn string_list(&mut self, key: &'static str) -> Option<Vec<String>> {
+        self.typed(key, ARRAY_OF_STRINGS)
+    }
+
+    /// The deliberately lenient legacy contract for `unused_callbacks`:
+    /// retain usable callback names from a mixed array, but treat an
+    /// all-unusable array as a bad key so it falls through to a lower layer.
+    fn callback_list(&mut self, key: &'static str) -> Option<Vec<String>> {
+        let value = self.lookup(key)?;
+        let Some(entries) = value.as_array() else {
+            self.issues.push(ConfigIssue::wrong_type(
+                self.file,
+                key,
+                ARRAY_OF_STRINGS,
+                value,
+            ));
+            return None;
+        };
+        let kept: Vec<String> = entries
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if kept.len() != entries.len() {
+            self.issues.push(ConfigIssue::wrong_type(
+                self.file,
+                key,
+                ARRAY_OF_STRINGS,
+                value,
+            ));
+            if kept.is_empty() {
+                return None;
+            }
+        }
+        Some(kept)
+    }
+
+    fn nested_string_list(&mut self, key: &'static str) -> Option<Vec<Vec<String>>> {
+        self.typed(key, "an array of arrays of strings")
+    }
+
+    /// A key whose value is parsed by a hand-written reader (a level name or
+    /// a bool). An unusable value reports `expected` verbatim.
+    fn parsed<T>(
+        &mut self,
+        key: &'static str,
+        expected: &str,
+        parse: fn(&toml::Value) -> Option<T>,
+    ) -> Option<T> {
+        let value = self.lookup(key)?;
+        match parse(value) {
+            Some(parsed) => Some(parsed),
+            None => {
+                self.issues
+                    .push(ConfigIssue::wrong_type(self.file, key, expected, value));
+                None
+            }
+        }
+    }
+}
+
+const ARRAY_OF_STRINGS: &str = "an array of strings";
+
+impl ConfigFile {
+    /// Read every known key off `table`, appending one [`ConfigIssue`] per
+    /// unusable or unknown key. Never fails: unusable keys are skipped and
+    /// their siblings in the same file stay effective.
+    fn from_table(file: &Path, table: &toml::Table, issues: &mut Vec<ConfigIssue>) -> Self {
+        Self::read_recording(file, table, issues, &mut Vec::new())
+    }
+
+    /// [`Self::from_table`], additionally recording every key the reader was
+    /// asked for into `read`.
+    ///
+    /// Drift guard (B017): dropping `#[derive(Deserialize)]` made it possible
+    /// to add a field here and forget it in [`CONFIG_KEYS`], or vice versa —
+    /// a silent return of the original defect, where the key parses to
+    /// nothing AND the loader warns "unknown key" about a key we define.
+    /// Production goes through `from_table` with a throwaway `Vec` (which
+    /// never allocates), so there is no `cfg(test)` divergence between what
+    /// ships and what the guard inspects.
+    fn read_recording(
+        file: &Path,
+        table: &toml::Table,
+        issues: &mut Vec<ConfigIssue>,
+        read: &mut Vec<&'static str>,
+    ) -> Self {
+        for key in table.keys() {
+            if !CONFIG_KEYS.contains(&key.as_str()) {
+                issues.push(ConfigIssue::unknown_key(file, key));
+            }
+        }
+        let mut r = FileReader {
+            file,
+            table,
+            issues,
+            read,
+        };
+        Self {
+            openplanet_dir: r.string("openplanet_dir"),
+            plugins_dir: r.string("plugins_dir"),
+            game_target: r.game_target(),
+            signature_mode: r.validated_string(
+                "signature_mode",
+                "one of developer, school, regular, official",
+                SignatureMode::parse,
+            ),
+            os_target: r.validated_string(
+                "os_target",
+                "one of windows, wine, linux",
+                OsTarget::parse,
+            ),
+            arch_target: r.validated_string("arch_target", "one of 64, 32", ArchTarget::parse),
+            developer_build: r.boolean("developer_build"),
+            has_dev: r.boolean("has_dev"),
+            logs: r.boolean("logs"),
+            server: r.boolean("server"),
+            defines: r.string_list("defines"),
+            default_mode: r.validated_string(
+                "default_mode",
+                "one of tui, lsp (aliases: watch, check, server, stdio)",
+                DefaultMode::parse,
+            ),
+            source_paths: r.string_list("source_paths"),
+            ignore_paths: r.string_list("ignore_paths"),
+            honor_gitignore: r.boolean("honor_gitignore"),
+            shortcut_namespaces: r.string_list("shortcut_namespaces"),
+            shortcut_disable_default_namespaces: r.boolean("shortcut_disable_default_namespaces"),
+            shortcut_match_enums: r.boolean("shortcut_match_enums"),
+            warnings_as_errors: r.boolean("warnings_as_errors"),
+            define_matrix: r.string_list("define_matrix"),
+            define_groups: r.nested_string_list("define_groups"),
+            define_combinations: r.nested_string_list("define_combinations"),
+            define_matrix_max_combinations: r.size("define_matrix_max_combinations"),
+            unused_callbacks: r.callback_list("unused_callbacks"),
+            unused: r.parsed(
+                "unused",
+                "one of ignore, hint, info, warn, error (or a boolean)",
+                parse_unused_toml,
+            ),
+            inactive_regions: r.parsed(
+                "inactive_regions",
+                "one of ignore, hint, info (or a boolean)",
+                parse_inactive_toml,
+            ),
+            errors: r.parsed(
+                "errors",
+                "one of last, first, off (or false)",
+                parse_errors_toml,
+            ),
+        }
+    }
+}
+
+/// Read one config file leniently (B017).
+///
+/// `None` when the file does not exist. Otherwise the parsed keys plus every
+/// issue found: a wrong-typed or unknown key is skipped, and TOML that does
+/// not parse at all yields an empty [`ConfigFile`] and one whole-file issue —
+/// skipped, but never silently.
+fn read_config_file(path: &Path) -> Option<(ConfigFile, Vec<ConfigIssue>)> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let mut issues = Vec::new();
+    match contents.parse::<toml::Table>() {
+        Ok(table) => {
+            let cfg = ConfigFile::from_table(path, &table, &mut issues);
+            Some((cfg, issues))
+        }
+        Err(err) => {
+            issues.push(ConfigIssue::unparseable(path, &err));
+            Some((ConfigFile::default(), issues))
+        }
+    }
+}
+
+/// Render config issues consistently on CLI/UserPrefs-only paths. Kept as a
+/// writer seam so tests can prove reporting without redirecting process-wide
+/// stderr or mutating HOME.
+fn write_config_issues(
+    writer: &mut impl std::io::Write,
+    issues: &[ConfigIssue],
+) -> std::io::Result<()> {
+    for issue in issues {
+        writeln!(writer, "warning: config: {issue}")?;
+    }
+    Ok(())
 }
 
 /// How unused-declaration findings are reported.
@@ -553,36 +1008,66 @@ pub struct UserPrefs {
 }
 
 impl UserPrefs {
-    /// Load `default_mode` from workspace `.openplanet-lsp.toml` then
-    /// `~/.config/openplanet-lsp/config.toml` (later wins? workspace should win).
-    /// Order: user global first, workspace overrides.
+    /// Resolve `default_mode` / `warnings_as_errors` through the same
+    /// ladder as [`LspConfig`] (B017): user global
+    /// `~/.config/openplanet-lsp/config.toml` first, then the workspace
+    /// `.openplanet-lsp.toml` — project config wins. The CLI flag, where
+    /// there is one, still beats both.
     pub fn load(workspace_root: Option<&Path>) -> Self {
-        let mut prefs = Self::default();
-        prefs.apply_user_config();
-        if let Some(root) = workspace_root {
-            prefs.apply_workspace_config(root);
-        }
+        let (prefs, issues) = Self::load_with_issues(workspace_root);
+        let _ = write_config_issues(&mut std::io::stderr().lock(), &issues);
         prefs
     }
 
-    fn apply_user_config(&mut self) {
-        if let Ok(home) = std::env::var("HOME") {
-            let path = PathBuf::from(home).join(".config/openplanet-lsp/config.toml");
-            self.apply_file(&path);
+    /// Load the CLI preferences without choosing how to report config issues.
+    /// Callers that also load [`LspConfig`] use this to avoid reporting the
+    /// shared config-reader issues twice.
+    pub(crate) fn load_silent(workspace_root: Option<&Path>) -> Self {
+        Self::load_with_issues(workspace_root).0
+    }
+
+    fn load_with_issues(workspace_root: Option<&Path>) -> (Self, Vec<ConfigIssue>) {
+        Self::from_layers_with_issues(LspConfig::user_config_path().as_deref(), workspace_root)
+    }
+
+    /// Pure variant of [`Self::load`]: `user` is the user-global config
+    /// FILE, `root` the workspace DIRECTORY. Explicit paths so precedence
+    /// tests never mutate `$HOME`.
+    pub fn from_layers(user: Option<&Path>, root: Option<&Path>) -> Self {
+        Self::from_layers_with_issues(user, root).0
+    }
+
+    /// Pure issue-carrying variant used by tests and callers that need to
+    /// surface config diagnostics through a channel other than stderr.
+    pub fn from_layers_with_issues(
+        user: Option<&Path>,
+        root: Option<&Path>,
+    ) -> (Self, Vec<ConfigIssue>) {
+        let mut prefs = Self::default();
+        let mut issues = Vec::new();
+        if let Some(user) = user {
+            prefs.apply_file(user, &mut issues);
         }
+        if let Some(root) = root {
+            prefs.apply_workspace_config(root, &mut issues);
+        }
+        (prefs, issues)
     }
 
-    fn apply_workspace_config(&mut self, root: &Path) {
-        self.apply_file(&root.join(".openplanet-lsp.toml"));
+    fn apply_workspace_config(&mut self, root: &Path, issues: &mut Vec<ConfigIssue>) {
+        self.apply_file(
+            &root.join(crate::config_watch::WORKSPACE_CONFIG_FILE),
+            issues,
+        );
     }
 
-    fn apply_file(&mut self, path: &Path) {
-        let Ok(contents) = std::fs::read_to_string(path) else {
+    /// One layer. Reads through the shared lenient reader (B017), so a
+    /// mistyped `game_target` no longer takes `default_mode` down with it.
+    fn apply_file(&mut self, path: &Path, issues: &mut Vec<ConfigIssue>) {
+        let Some((cfg, mut file_issues)) = read_config_file(path) else {
             return;
         };
-        let Ok(cfg) = toml::from_str::<ConfigFile>(&contents) else {
-            return;
-        };
+        issues.append(&mut file_issues);
         if let Some(mode) = cfg.default_mode.as_deref().and_then(DefaultMode::parse) {
             self.default_mode = mode;
         }
@@ -742,96 +1227,64 @@ impl LspConfig {
         out
     }
 
-    /// Build config from layers: auto-detect → parent (opened-folder) config
-    /// → config file → init params. The parent layer only applies when the
-    /// workspace root differs from the per-root path (multi-root t5).
+    /// Build config in ascending precedence: auto-detect → user global →
+    /// parent (opened-folder) config → per-root config → init params. The
+    /// parent layer only applies when it differs from the per-root path
+    /// (multi-root t5).
     pub fn load(workspace_root: Option<&Path>, init_options: Option<&serde_json::Value>) -> Self {
         Self::load_with_parent(workspace_root, None, init_options)
     }
 
+    /// Resolve the FILE layers of the ladder, and nothing else — no
+    /// auto-detect, no manifest, no init options.
+    ///
+    /// `user` is the user-global config FILE; `parent` and `root` are
+    /// DIRECTORIES whose `.openplanet-lsp.toml` is read. Every layer path is
+    /// explicit, so precedence tests never mutate `$HOME` (which races other
+    /// tests in-process).
+    pub fn from_layers(
+        user: Option<&Path>,
+        parent: Option<&Path>,
+        root: Option<&Path>,
+    ) -> (Self, Vec<ConfigIssue>) {
+        let mut config = Self::default();
+        let issues = config.apply_config_layers(user, parent, root);
+        (config, issues)
+    }
+
     /// Multi-root aware load: `parent` is the opened folder hosting multiple
-    /// plugin roots. Ladder (lowest→highest): auto-detect defaults < parent
-    /// config < per-root config < user config < init options < manifest
-    /// defines. typedb settings stay global (resolved init > user > first
+    /// plugin roots. Ladder (lowest→highest): auto-detect defaults < user
+    /// global < parent config < per-root config < init options. Manifest and
+    /// accumulated config/init define overrides are applied after target
+    /// derivation. typedb settings stay global (resolved init > user > first
     /// root) — per-root: defines, plugins_dir, source_paths, ignore_paths.
     pub fn load_with_parent(
         workspace_root: Option<&Path>,
         parent: Option<&Path>,
         init_options: Option<&serde_json::Value>,
     ) -> Self {
-        let mut config = Self {
-            openplanet_dir: None,
-            plugins_dir: None,
-            core_json: None,
-            game_json: None,
-            game_target: "TMNEXT".to_string(),
-            signature_mode: SignatureMode::default(),
-            os_target: OsTarget::default(),
-            arch_target: ArchTarget::default(),
-            build_flags: BuildFlags::default(),
-            defines: Self::default_defines(),
-            define_overrides: Vec::new(),
-            source_paths: None,
-            ignore_paths: None,
-            honor_gitignore: None,
-            plugin_roots: Vec::new(),
-            extra_plugins_dirs: Vec::new(),
-            shortcut_namespaces: None,
-            shortcut_disable_default_namespaces: false,
-            shortcut_match_enums: false,
-            define_matrix: Vec::new(),
-            define_groups: Vec::new(),
-            define_combinations: None,
-            define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
-            unused_callbacks: Vec::new(),
-            unused: UnusedLevel::Warn,
-            inactive_regions: InactiveLevel::Hint,
-            errors: ErrorGroup::Last,
-        };
+        // Every field starts at its documented default; the layers below
+        // overwrite in ascending precedence. (Kept as `default()` rather than
+        // a second struct literal so a new field cannot be added to one and
+        // forgotten in the other.)
+        let mut config = Self::default();
 
         // Layer 1: Auto-detect
         config.auto_detect();
 
-        // Layer 2a: Parent (opened-folder) config — base for all shards.
-        if let Some(parent) = parent {
-            if Some(parent) != workspace_root {
-                config.load_config_file(parent);
-            }
-        }
-
-        // Layer 2b: Per-root config.
-        if let Some(root) = workspace_root {
-            config.load_config_file(root);
-        }
-        config.load_user_config_file();
-
-        // GH #56: `unused_callbacks` does NOT follow the ladder above.
-        // That ladder applies the user-global file LAST, so user-global
-        // wins; this key follows the `warnings_as_errors` precedence
-        // instead (workspace overrides user-global), which is what a
-        // per-project exemption list has to do.
-        config.unused_callbacks = Self::resolve_unused_callbacks(
+        // Layers 2a-2c: the config files, lowest precedence FIRST (B017) —
+        // user global, then the opened-folder parent (multi-root t5), then
+        // the per-root file. Every key obeys this one order; the per-key
+        // resolvers that `unused_callbacks` (GH #56), `unused`,
+        // `inactive_regions`, `errors` and `honor_gitignore` (GH #60) used
+        // to need existed only to escape the old inverted order and are gone.
+        let issues = config.apply_config_layers(
             Self::user_config_path().as_deref(),
             parent.filter(|p| Some(*p) != workspace_root),
             workspace_root,
         );
-        // Same workspace-over-user precedence as unused_callbacks: a
-        // per-plugin silence/error pin must beat the machine default.
-        config.unused = Self::resolve_unused(
-            Self::user_config_path().as_deref(),
-            parent.filter(|p| Some(*p) != workspace_root),
-            workspace_root,
-        );
-        config.inactive_regions = Self::resolve_inactive(
-            Self::user_config_path().as_deref(),
-            parent.filter(|p| Some(*p) != workspace_root),
-            workspace_root,
-        );
-        config.errors = Self::resolve_errors(
-            Self::user_config_path().as_deref(),
-            parent.filter(|p| Some(*p) != workspace_root),
-            workspace_root,
-        );
+        let _ = write_config_issues(&mut std::io::stderr().lock(), &issues);
+        config.config_issues = issues;
 
         // Layer 3: Init params (highest priority)
         if let Some(opts) = init_options {
@@ -1108,148 +1561,38 @@ impl LspConfig {
             .map(|home| PathBuf::from(home).join(".config/openplanet-lsp/config.toml"))
     }
 
-    /// GH #56: resolve `unused_callbacks` across the config ladder in
-    /// ASCENDING precedence — user global, then the opened-folder parent,
-    /// then the plugin root. The last file that *sets* the key wins;
-    /// lists never merge, so the winning file's list is the whole list
-    /// (there is deliberately no "disable the defaults" switch — dropping
-    /// engine callbacks from the exemption list only manufactures false
-    /// positives).
-    fn resolve_unused_callbacks(
+    /// Apply the three config-file layers in ASCENDING precedence — user
+    /// global, opened-folder parent, per-root workspace — each one an
+    /// unconditional overwrite of the keys it sets (B017).
+    ///
+    /// Before B017 this ran the user global LAST, so a machine-wide
+    /// `~/.config/openplanet-lsp/config.toml` silently overrode every
+    /// plugin's own `.openplanet-lsp.toml` with no way to override it
+    /// locally — while `UserPrefs` resolved the opposite way for
+    /// `default_mode` / `warnings_as_errors` in the same files. One order
+    /// now, for every key: project config beats machine config.
+    ///
+    /// `user` is a FILE path; `parent` and `root` are DIRECTORIES.
+    /// Returns every [`ConfigIssue`] the layers produced, in layer order.
+    fn apply_config_layers(
+        &mut self,
         user: Option<&Path>,
         parent: Option<&Path>,
         root: Option<&Path>,
-    ) -> Vec<String> {
-        let ladder = [
+    ) -> Vec<ConfigIssue> {
+        let layers = [
             user.map(Path::to_path_buf),
-            parent.map(|p| p.join(".openplanet-lsp.toml")),
-            root.map(|r| r.join(".openplanet-lsp.toml")),
+            parent.map(|p| p.join(crate::config_watch::WORKSPACE_CONFIG_FILE)),
+            root.map(|r| r.join(crate::config_watch::WORKSPACE_CONFIG_FILE)),
         ];
-        ladder
-            .iter()
-            .flatten()
-            .filter_map(|p| Self::unused_callbacks_in_file(p))
-            .next_back()
-            .unwrap_or_default()
-    }
-
-    fn resolve_unused(
-        user: Option<&Path>,
-        parent: Option<&Path>,
-        root: Option<&Path>,
-    ) -> UnusedLevel {
-        let ladder = [
-            user.map(Path::to_path_buf),
-            parent.map(|p| p.join(".openplanet-lsp.toml")),
-            root.map(|r| r.join(".openplanet-lsp.toml")),
-        ];
-        ladder
-            .iter()
-            .flatten()
-            .filter_map(|p| Self::unused_in_file(p))
-            .next_back()
-            .unwrap_or(UnusedLevel::Warn)
-    }
-
-    fn resolve_inactive(
-        user: Option<&Path>,
-        parent: Option<&Path>,
-        root: Option<&Path>,
-    ) -> InactiveLevel {
-        let ladder = [
-            user.map(Path::to_path_buf),
-            parent.map(|p| p.join(".openplanet-lsp.toml")),
-            root.map(|r| r.join(".openplanet-lsp.toml")),
-        ];
-        ladder
-            .iter()
-            .flatten()
-            .filter_map(|p| Self::inactive_in_file(p))
-            .next_back()
-            .unwrap_or(InactiveLevel::Hint)
-    }
-
-    fn inactive_in_file(path: &Path) -> Option<InactiveLevel> {
-        let contents = std::fs::read_to_string(path).ok()?;
-        let table: toml::Table = toml::from_str(&contents).ok()?;
-        parse_inactive_toml(table.get("inactive_regions")?)
-    }
-
-    fn unused_in_file(path: &Path) -> Option<UnusedLevel> {
-        let contents = std::fs::read_to_string(path).ok()?;
-        let table: toml::Table = toml::from_str(&contents).ok()?;
-        parse_unused_toml(table.get("unused")?)
-    }
-
-    fn resolve_errors(
-        user: Option<&Path>,
-        parent: Option<&Path>,
-        root: Option<&Path>,
-    ) -> ErrorGroup {
-        let ladder = [
-            user.map(Path::to_path_buf),
-            parent.map(|p| p.join(".openplanet-lsp.toml")),
-            root.map(|r| r.join(".openplanet-lsp.toml")),
-        ];
-        ladder
-            .iter()
-            .flatten()
-            .filter_map(|p| Self::errors_in_file(p))
-            .next_back()
-            .unwrap_or(ErrorGroup::Last)
-    }
-
-    fn errors_in_file(path: &Path) -> Option<ErrorGroup> {
-        let contents = std::fs::read_to_string(path).ok()?;
-        let table: toml::Table = toml::from_str(&contents).ok()?;
-        parse_errors_toml(table.get("errors")?)
-    }
-
-    /// Read `unused_callbacks` out of one TOML file, leniently: `None`
-    /// when the file is missing, unparseable, or the key is absent or not
-    /// an array. Non-string entries are dropped rather than rejecting the
-    /// list. Parsed off a raw `toml::Table` on purpose — deserializing
-    /// `ConfigFile` discards the WHOLE file on any type error, so a typo
-    /// here would silently drop every other key in it.
-    fn unused_callbacks_in_file(path: &Path) -> Option<Vec<String>> {
-        let contents = std::fs::read_to_string(path).ok()?;
-        let table: toml::Table = toml::from_str(&contents).ok()?;
-        let entries = table.get("unused_callbacks")?.as_array()?;
-        Some(
-            entries
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect(),
-        )
-    }
-
-    fn load_config_file(&mut self, workspace_root: &Path) {
-        let path = workspace_root.join(".openplanet-lsp.toml");
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(file_config) = toml::from_str::<ConfigFile>(&contents) {
-                self.apply_config_file(file_config);
+        let mut issues = Vec::new();
+        for path in layers.iter().flatten() {
+            if let Some((cfg, mut file_issues)) = read_config_file(path) {
+                issues.append(&mut file_issues);
+                self.apply_config_file(cfg);
             }
         }
-    }
-
-    fn load_user_config_file(&mut self) {
-        // GH #60: the user global is applied AFTER the workspace layers in
-        // this ladder, so a repo-local `honor_gitignore` would otherwise lose
-        // to it. Which files get checked is a per-repo decision (the same rule
-        // `warnings_as_errors` follows), so a workspace-set value is restored
-        // afterwards. The rest of the keys keep their existing precedence.
-        let workspace_honor_gitignore = self.honor_gitignore;
-        if let Ok(home) = std::env::var("HOME") {
-            let path = PathBuf::from(home).join(".config/openplanet-lsp/config.toml");
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                if let Ok(file_config) = toml::from_str::<ConfigFile>(&contents) {
-                    self.apply_config_file(file_config);
-                }
-            }
-        }
-        if workspace_honor_gitignore.is_some() {
-            self.honor_gitignore = workspace_honor_gitignore;
-        }
+        issues
     }
 
     /// Effective `honor_gitignore` (GH #60): unset means enabled. The CLI
@@ -1322,6 +1665,20 @@ impl LspConfig {
         }
         if let Some(max) = cfg.define_matrix_max_combinations {
             self.define_matrix_max_combinations = max;
+        }
+        // Folded back onto the shared ladder by B017 — lists never merge, so
+        // the winning layer's list is the whole list.
+        if let Some(callbacks) = cfg.unused_callbacks {
+            self.unused_callbacks = callbacks;
+        }
+        if let Some(level) = cfg.unused {
+            self.unused = level;
+        }
+        if let Some(level) = cfg.inactive_regions {
+            self.inactive_regions = level;
+        }
+        if let Some(group) = cfg.errors {
+            self.errors = group;
         }
     }
 
@@ -1513,7 +1870,7 @@ mod tests {
     fn unused_defaults_to_warn() {
         assert_eq!(LspConfig::default().unused, UnusedLevel::Warn);
         assert_eq!(
-            LspConfig::resolve_unused(None, None, None),
+            LspConfig::from_layers(None, None, None).0.unused,
             UnusedLevel::Warn
         );
     }
@@ -1534,7 +1891,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            LspConfig::resolve_unused(Some(&user), None, Some(&ws_ignore)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_ignore))
+                .0
+                .unused,
             UnusedLevel::Ignore,
             "workspace ignore must beat user error"
         );
@@ -1543,13 +1902,15 @@ mod tests {
         std::fs::create_dir_all(&ws_bool).unwrap();
         std::fs::write(ws_bool.join(".openplanet-lsp.toml"), "unused = false\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_unused(Some(&user), None, Some(&ws_bool)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_bool))
+                .0
+                .unused,
             UnusedLevel::Ignore,
             "unused = false is ignore"
         );
 
         assert_eq!(
-            LspConfig::resolve_unused(Some(&user), None, None),
+            LspConfig::from_layers(Some(&user), None, None).0.unused,
             UnusedLevel::Error,
             "user-global unused = error when workspace does not set it"
         );
@@ -1614,7 +1975,7 @@ mod tests {
     fn inactive_regions_default_to_hint() {
         assert_eq!(LspConfig::default().inactive_regions, InactiveLevel::Hint);
         assert_eq!(
-            LspConfig::resolve_inactive(None, None, None),
+            LspConfig::from_layers(None, None, None).0.inactive_regions,
             InactiveLevel::Hint
         );
     }
@@ -1628,7 +1989,9 @@ mod tests {
         let user = tmp.join("user.toml");
         std::fs::write(&user, "inactive_regions = \"info\"\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_inactive(Some(&user), None, None),
+            LspConfig::from_layers(Some(&user), None, None)
+                .0
+                .inactive_regions,
             InactiveLevel::Info,
             "user global applies when nothing else sets the key"
         );
@@ -1647,7 +2010,9 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                LspConfig::resolve_inactive(Some(&user), None, Some(&ws)),
+                LspConfig::from_layers(Some(&user), None, Some(&ws))
+                    .0
+                    .inactive_regions,
                 want,
                 "workspace inactive_regions = {toml_value} must beat the user global"
             );
@@ -1701,7 +2066,7 @@ mod tests {
         let user = tmp.join("user.toml");
         std::fs::write(&user, "unused = \"hint\"\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_unused(Some(&user), None, None),
+            LspConfig::from_layers(Some(&user), None, None).0.unused,
             UnusedLevel::Hint,
             "user-global hint applies when nothing else sets the key"
         );
@@ -1720,7 +2085,9 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                LspConfig::resolve_unused(Some(&user), None, Some(&ws)),
+                LspConfig::from_layers(Some(&user), None, Some(&ws))
+                    .0
+                    .unused,
                 want,
                 "workspace unused = {toml_value} must beat the user global"
             );
@@ -1770,7 +2137,7 @@ mod tests {
     fn errors_defaults_to_last() {
         assert_eq!(LspConfig::default().errors, ErrorGroup::Last);
         assert_eq!(
-            LspConfig::resolve_errors(None, None, None),
+            LspConfig::from_layers(None, None, None).0.errors,
             ErrorGroup::Last
         );
     }
@@ -1787,7 +2154,9 @@ mod tests {
         std::fs::create_dir_all(&ws_last).unwrap();
         std::fs::write(ws_last.join(".openplanet-lsp.toml"), "errors = \"last\"\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, Some(&ws_last)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_last))
+                .0
+                .errors,
             ErrorGroup::Last,
             "workspace last must beat user first"
         );
@@ -1796,7 +2165,9 @@ mod tests {
         std::fs::create_dir_all(&ws_end).unwrap();
         std::fs::write(ws_end.join(".openplanet-lsp.toml"), "errors = \"end\"\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, Some(&ws_end)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_end))
+                .0
+                .errors,
             ErrorGroup::Last,
             "end is last"
         );
@@ -1809,7 +2180,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, Some(&ws_start)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_start))
+                .0
+                .errors,
             ErrorGroup::First,
             "start is first"
         );
@@ -1822,7 +2195,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, Some(&ws_begin)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_begin))
+                .0
+                .errors,
             ErrorGroup::First,
             "begin is first"
         );
@@ -1831,7 +2206,9 @@ mod tests {
         std::fs::create_dir_all(&ws_off).unwrap();
         std::fs::write(ws_off.join(".openplanet-lsp.toml"), "errors = \"off\"\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, Some(&ws_off)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_off))
+                .0
+                .errors,
             ErrorGroup::Off
         );
 
@@ -1839,7 +2216,9 @@ mod tests {
         std::fs::create_dir_all(&ws_bool).unwrap();
         std::fs::write(ws_bool.join(".openplanet-lsp.toml"), "errors = false\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, Some(&ws_bool)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_bool))
+                .0
+                .errors,
             ErrorGroup::Off,
             "errors = false is off"
         );
@@ -1848,7 +2227,9 @@ mod tests {
         std::fs::create_dir_all(&ws_none).unwrap();
         std::fs::write(ws_none.join(".openplanet-lsp.toml"), "errors = \"none\"\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, Some(&ws_none)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_none))
+                .0
+                .errors,
             ErrorGroup::Off
         );
 
@@ -1860,12 +2241,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, Some(&ws_interleaved)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_interleaved))
+                .0
+                .errors,
             ErrorGroup::Off
         );
 
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, None),
+            LspConfig::from_layers(Some(&user), None, None).0.errors,
             ErrorGroup::First,
             "user-global errors = first when workspace does not set it"
         );
@@ -1874,7 +2257,9 @@ mod tests {
         std::fs::create_dir_all(&ws_bad).unwrap();
         std::fs::write(ws_bad.join(".openplanet-lsp.toml"), "errors = \"banana\"\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_errors(Some(&user), None, Some(&ws_bad)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws_bad))
+                .0
+                .errors,
             ErrorGroup::First,
             "invalid workspace value is ignored; user first remains"
         );
@@ -2305,7 +2690,9 @@ shortcut_match_enums = true
 
         // User global alone.
         assert_eq!(
-            LspConfig::resolve_unused_callbacks(Some(&user), None, None),
+            LspConfig::from_layers(Some(&user), None, None)
+                .0
+                .unused_callbacks,
             vec!["FromUser".to_string()]
         );
 
@@ -2316,18 +2703,25 @@ shortcut_match_enums = true
         )
         .unwrap();
         assert_eq!(
-            LspConfig::resolve_unused_callbacks(Some(&user), None, Some(&ws)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws))
+                .0
+                .unused_callbacks,
             vec!["FromWorkspace".to_string()]
         );
 
         // An explicitly EMPTY workspace list still wins.
         std::fs::write(ws.join(".openplanet-lsp.toml"), "unused_callbacks = []\n").unwrap();
-        assert!(LspConfig::resolve_unused_callbacks(Some(&user), None, Some(&ws)).is_empty());
+        assert!(LspConfig::from_layers(Some(&user), None, Some(&ws))
+            .0
+            .unused_callbacks
+            .is_empty());
 
         // Workspace file that does not mention the key falls through.
         std::fs::write(ws.join(".openplanet-lsp.toml"), "game_target = \"MP4\"\n").unwrap();
         assert_eq!(
-            LspConfig::resolve_unused_callbacks(Some(&user), None, Some(&ws)),
+            LspConfig::from_layers(Some(&user), None, Some(&ws))
+                .0
+                .unused_callbacks,
             vec!["FromUser".to_string()]
         );
 
@@ -2345,11 +2739,15 @@ shortcut_match_enums = true
         )
         .unwrap();
         assert_eq!(
-            LspConfig::resolve_unused_callbacks(Some(&user), Some(&parent), Some(&ws)),
+            LspConfig::from_layers(Some(&user), Some(&parent), Some(&ws))
+                .0
+                .unused_callbacks,
             vec!["FromRoot".to_string()]
         );
         assert_eq!(
-            LspConfig::resolve_unused_callbacks(Some(&user), Some(&parent), None),
+            LspConfig::from_layers(Some(&user), Some(&parent), None)
+                .0
+                .unused_callbacks,
             vec!["FromParent".to_string()]
         );
 
@@ -2382,7 +2780,9 @@ shortcut_match_enums = true
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join(".openplanet-lsp.toml"), body).unwrap();
             assert_eq!(
-                LspConfig::resolve_unused_callbacks(None, None, Some(&dir)),
+                LspConfig::from_layers(None, None, Some(&dir))
+                    .0
+                    .unused_callbacks,
                 *want,
                 "case {name}"
             );
@@ -2397,7 +2797,7 @@ shortcut_match_enums = true
         )
         .unwrap();
         let mut cfg = LspConfig::default();
-        cfg.load_config_file(&dir);
+        cfg.apply_config_layers(None, None, Some(&dir));
         assert_eq!(cfg.game_target, "MP4");
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -3040,4 +3440,925 @@ shortcut_match_enums = true
     // with `test_game_json_derivation_uses_variant_folder` above (lib tests
     // share one process). It's covered end-to-end by the subprocess tests in
     // tests/cli_check_tests.rs, which own their environment.
+
+    // ---------------------------------------------------------------------
+    // B017: ONE ladder — init options > CLI flag > per-root workspace config
+    // > parent config > user global > auto-detect — plus per-key-tolerant
+    // parsing so a single mistyped key cannot discard the whole file.
+    // ---------------------------------------------------------------------
+
+    /// Fresh temp dir for a B017 case, with `user.toml` + `parent/` + `root/`
+    /// laid out. Returns `(tmp, user_file, parent_dir, root_dir)`.
+    fn b017_layers(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("oplsp-b017-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let parent = tmp.join("parent");
+        let root = tmp.join("root");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        (tmp.clone(), tmp.join("user.toml"), parent, root)
+    }
+
+    fn write_ws(dir: &Path, body: &str) {
+        std::fs::write(dir.join(".openplanet-lsp.toml"), body).unwrap();
+    }
+
+    /// One row of the ladder table: a key, a user-global value, a workspace
+    /// value, and how to render the resolved value for comparison.
+    struct LadderCase {
+        key: &'static str,
+        user: &'static str,
+        workspace: &'static str,
+        render: fn(&LspConfig) -> String,
+        want_workspace: &'static str,
+        want_user: &'static str,
+    }
+
+    fn ladder_cases() -> Vec<LadderCase> {
+        vec![
+            LadderCase {
+                key: "game_target",
+                user: "game_target = \"MP4\"",
+                workspace: "game_target = \"TURBO\"",
+                render: |c| c.game_target.clone(),
+                want_workspace: "TURBO",
+                want_user: "MP4",
+            },
+            LadderCase {
+                key: "openplanet_dir",
+                user: "openplanet_dir = \"/from/user\"",
+                workspace: "openplanet_dir = \"/from/workspace\"",
+                render: |c| format!("{:?}", c.openplanet_dir),
+                want_workspace: "Some(\"/from/workspace\")",
+                want_user: "Some(\"/from/user\")",
+            },
+            LadderCase {
+                key: "plugins_dir",
+                user: "plugins_dir = \"/user/plugins\"",
+                workspace: "plugins_dir = \"/ws/plugins\"",
+                render: |c| format!("{:?}", c.plugins_dir),
+                want_workspace: "Some(\"/ws/plugins\")",
+                want_user: "Some(\"/user/plugins\")",
+            },
+            LadderCase {
+                key: "source_paths",
+                user: "source_paths = [\"b\"]",
+                workspace: "source_paths = [\"a\"]",
+                render: |c| format!("{:?}", c.source_paths),
+                want_workspace: "Some([\"a\"])",
+                want_user: "Some([\"b\"])",
+            },
+            LadderCase {
+                key: "ignore_paths",
+                user: "ignore_paths = [\"vendor\"]",
+                workspace: "ignore_paths = [\"OtherPacks\"]",
+                render: |c| format!("{:?}", c.ignore_paths),
+                want_workspace: "Some([\"OtherPacks\"])",
+                want_user: "Some([\"vendor\"])",
+            },
+            LadderCase {
+                key: "honor_gitignore",
+                user: "honor_gitignore = true",
+                workspace: "honor_gitignore = false",
+                render: |c| format!("{:?}", c.honor_gitignore),
+                want_workspace: "Some(false)",
+                want_user: "Some(true)",
+            },
+            LadderCase {
+                key: "shortcut_namespaces",
+                user: "shortcut_namespaces = [\"FromUser\"]",
+                workspace: "shortcut_namespaces = [\"FromWorkspace\"]",
+                render: |c| format!("{:?}", c.shortcut_namespaces),
+                want_workspace: "Some([\"FromWorkspace\"])",
+                want_user: "Some([\"FromUser\"])",
+            },
+            LadderCase {
+                key: "shortcut_disable_default_namespaces",
+                user: "shortcut_disable_default_namespaces = true",
+                workspace: "shortcut_disable_default_namespaces = false",
+                render: |c| c.shortcut_disable_default_namespaces.to_string(),
+                want_workspace: "false",
+                want_user: "true",
+            },
+            LadderCase {
+                key: "shortcut_match_enums",
+                user: "shortcut_match_enums = true",
+                workspace: "shortcut_match_enums = false",
+                render: |c| c.shortcut_match_enums.to_string(),
+                want_workspace: "false",
+                want_user: "true",
+            },
+            LadderCase {
+                key: "define_matrix",
+                user: "define_matrix = [\"FROM_USER\"]",
+                workspace: "define_matrix = [\"FROM_WORKSPACE\"]",
+                render: |c| format!("{:?}", c.define_matrix),
+                want_workspace: "[\"FROM_WORKSPACE\"]",
+                want_user: "[\"FROM_USER\"]",
+            },
+            LadderCase {
+                key: "define_groups",
+                user: "define_groups = [[\"U1\", \"U2\"]]",
+                workspace: "define_groups = [[\"W1\", \"W2\"]]",
+                render: |c| format!("{:?}", c.define_groups),
+                want_workspace: "[[\"W1\", \"W2\"]]",
+                want_user: "[[\"U1\", \"U2\"]]",
+            },
+            LadderCase {
+                key: "define_combinations",
+                user: "define_combinations = [[\"U\"]]",
+                workspace: "define_combinations = [[\"W\"]]",
+                render: |c| format!("{:?}", c.define_combinations),
+                want_workspace: "Some([[\"W\"]])",
+                want_user: "Some([[\"U\"]])",
+            },
+            LadderCase {
+                key: "define_matrix_max_combinations",
+                user: "define_matrix_max_combinations = 4",
+                workspace: "define_matrix_max_combinations = 32",
+                render: |c| c.define_matrix_max_combinations.to_string(),
+                want_workspace: "32",
+                want_user: "4",
+            },
+            LadderCase {
+                key: "signature_mode",
+                user: "signature_mode = \"official\"",
+                workspace: "signature_mode = \"school\"",
+                render: |c| c.signature_mode.as_str().to_string(),
+                want_workspace: "school",
+                want_user: "official",
+            },
+            LadderCase {
+                key: "os_target",
+                user: "os_target = \"linux\"",
+                workspace: "os_target = \"wine\"",
+                render: |c| c.os_target.as_str().to_string(),
+                want_workspace: "wine",
+                want_user: "linux",
+            },
+            LadderCase {
+                key: "arch_target",
+                user: "arch_target = \"64\"",
+                workspace: "arch_target = \"32\"",
+                render: |c| c.arch_target.as_str().to_string(),
+                want_workspace: "32",
+                want_user: "64",
+            },
+            LadderCase {
+                key: "developer_build",
+                user: "developer_build = true",
+                workspace: "developer_build = false",
+                render: |c| c.build_flags.developer_build.to_string(),
+                want_workspace: "false",
+                want_user: "true",
+            },
+            LadderCase {
+                key: "has_dev",
+                user: "has_dev = true",
+                workspace: "has_dev = false",
+                render: |c| c.build_flags.has_dev.to_string(),
+                want_workspace: "false",
+                want_user: "true",
+            },
+            LadderCase {
+                key: "logs",
+                user: "logs = true",
+                workspace: "logs = false",
+                render: |c| c.build_flags.logs.to_string(),
+                want_workspace: "false",
+                want_user: "true",
+            },
+            LadderCase {
+                key: "server",
+                user: "server = true",
+                workspace: "server = false",
+                render: |c| c.build_flags.server.to_string(),
+                want_workspace: "false",
+                want_user: "true",
+            },
+            // The four keys that needed their own per-key resolver before
+            // B017 (B012 / B015 / GH #56 / GH #60) must keep workspace-wins
+            // once they are folded back onto the shared ladder.
+            LadderCase {
+                key: "unused",
+                user: "unused = \"error\"",
+                workspace: "unused = \"ignore\"",
+                render: |c| c.unused.as_str().to_string(),
+                want_workspace: "ignore",
+                want_user: "error",
+            },
+            LadderCase {
+                key: "unused_callbacks",
+                user: "unused_callbacks = [\"FromUser\"]",
+                workspace: "unused_callbacks = [\"FromWorkspace\"]",
+                render: |c| format!("{:?}", c.unused_callbacks),
+                want_workspace: "[\"FromWorkspace\"]",
+                want_user: "[\"FromUser\"]",
+            },
+            LadderCase {
+                key: "inactive_regions",
+                user: "inactive_regions = \"info\"",
+                workspace: "inactive_regions = \"ignore\"",
+                render: |c| c.inactive_regions.as_str().to_string(),
+                want_workspace: "ignore",
+                want_user: "info",
+            },
+            LadderCase {
+                key: "errors",
+                user: "errors = \"first\"",
+                workspace: "errors = \"off\"",
+                render: |c| c.errors.as_str().to_string(),
+                want_workspace: "off",
+                want_user: "first",
+            },
+        ]
+    }
+
+    /// B017 defect 1: a machine-wide `~/.config/openplanet-lsp/config.toml`
+    /// must NEVER override a plugin's own `.openplanet-lsp.toml`. Checked for
+    /// every key the shared ladder carries, not just `source_paths`.
+    #[test]
+    fn per_root_workspace_config_beats_the_user_global_for_every_ladder_key() {
+        let (tmp, user, _parent, root) = b017_layers("ws-over-user");
+        for case in ladder_cases() {
+            std::fs::write(&user, format!("{}\n", case.user)).unwrap();
+            write_ws(&root, &format!("{}\n", case.workspace));
+            let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+            assert_eq!(
+                (case.render)(&cfg),
+                case.want_workspace,
+                "workspace `{}` must beat the user global",
+                case.key
+            );
+            assert!(issues.is_empty(), "clean files must report no issues");
+
+            // ...and the user global still applies when the workspace file
+            // does not mention the key at all.
+            write_ws(&root, "# nothing relevant here\n");
+            let (cfg, _) = LspConfig::from_layers(Some(&user), None, Some(&root));
+            assert_eq!(
+                (case.render)(&cfg),
+                case.want_user,
+                "user global `{}` must apply when the workspace file is silent",
+                case.key
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Multi-root: the per-root file beats the opened-folder parent, and the
+    /// parent beats the user global.
+    #[test]
+    fn per_root_beats_parent_which_beats_user_global() {
+        let (tmp, user, parent, root) = b017_layers("root-parent-user");
+        for case in ladder_cases() {
+            std::fs::write(&user, format!("{}\n", case.user)).unwrap();
+            write_ws(&parent, &format!("{}\n", case.user));
+            write_ws(&root, &format!("{}\n", case.workspace));
+            let (cfg, _) = LspConfig::from_layers(Some(&user), Some(&parent), Some(&root));
+            assert_eq!(
+                (case.render)(&cfg),
+                case.want_workspace,
+                "per-root `{}` must beat the parent config",
+                case.key
+            );
+
+            write_ws(&parent, &format!("{}\n", case.workspace));
+            write_ws(&root, "# silent\n");
+            let (cfg, _) = LspConfig::from_layers(Some(&user), Some(&parent), Some(&root));
+            assert_eq!(
+                (case.render)(&cfg),
+                case.want_workspace,
+                "parent `{}` must beat the user global",
+                case.key
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// initializationOptions stay at the top of the ladder after the flip.
+    #[test]
+    fn init_options_still_beat_every_config_file_layer() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-b017-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "game_target = \"TURBO\"\nshortcut_match_enums = false\nunused = \"ignore\"\n\
+             errors = \"off\"\ninactive_regions = \"ignore\"\n",
+        )
+        .unwrap();
+        let opts = serde_json::json!({
+            "game_target": "MP4",
+            "shortcut_match_enums": true,
+            "unused": "error",
+            "errors": "first",
+            "inactive_regions": "info",
+        });
+        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        assert_eq!(cfg.game_target, "MP4");
+        assert!(cfg.shortcut_match_enums);
+        assert_eq!(cfg.unused, UnusedLevel::Error);
+        assert_eq!(cfg.errors, ErrorGroup::First);
+        assert_eq!(cfg.inactive_regions, InactiveLevel::Info);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// B017 defect 2: ONE mistyped key must not take its siblings down with
+    /// it. Every type class the schema uses gets a variant.
+    #[test]
+    fn one_mistyped_key_leaves_sibling_keys_in_the_same_file_effective() {
+        let (tmp, _user, _parent, root) = b017_layers("bad-key-siblings");
+        // (case name, the bad line, the key that must be reported)
+        let bad_lines: &[(&str, &str, &str)] = &[
+            ("wrong-scalar-type", "game_target = 7", "game_target"),
+            (
+                "string-instead-of-array",
+                "source_paths = \"src\"",
+                "source_paths",
+            ),
+            (
+                "wrong-array-element-type",
+                "ignore_paths = [1, 2]",
+                "ignore_paths",
+            ),
+            (
+                "bool-instead-of-string",
+                "openplanet_dir = true",
+                "openplanet_dir",
+            ),
+            (
+                "string-instead-of-bool",
+                "shortcut_match_enums = \"yes\"",
+                "shortcut_match_enums",
+            ),
+            (
+                "string-instead-of-int",
+                "define_matrix_max_combinations = \"lots\"",
+                "define_matrix_max_combinations",
+            ),
+            (
+                "flat-instead-of-nested",
+                "define_groups = [\"A\", \"B\"]",
+                "define_groups",
+            ),
+            (
+                "table-instead-of-array",
+                "unused_callbacks = { a = 1 }",
+                "unused_callbacks",
+            ),
+            ("unknown-enum-shape", "unused = 7", "unused"),
+            ("unknown-key", "sorce_paths = [\"src\"]", "sorce_paths"),
+        ];
+        for (name, bad, reported_key) in bad_lines {
+            write_ws(
+                &root,
+                &format!("{bad}\ndefine_matrix = [\"SIBLING\"]\nplugins_dir = \"/sibling\"\n"),
+            );
+            let (cfg, issues) = LspConfig::from_layers(None, None, Some(&root));
+            assert_eq!(
+                cfg.define_matrix,
+                vec!["SIBLING".to_string()],
+                "case {name}: sibling array key must survive a bad key"
+            );
+            assert_eq!(
+                cfg.plugins_dir,
+                Some(PathBuf::from("/sibling")),
+                "case {name}: sibling scalar key must survive a bad key"
+            );
+            assert!(
+                issues.iter().any(|i| i.key == *reported_key),
+                "case {name}: expected an issue naming `{reported_key}`, got {issues:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A recorded issue names the file, the key, the expected type and what
+    /// was actually there — enough to fix the file without reading the source.
+    #[test]
+    fn config_issues_name_the_file_key_expected_and_found() {
+        let (tmp, _user, _parent, root) = b017_layers("issue-shape");
+        write_ws(&root, "source_paths = 7\n");
+        let (_cfg, issues) = LspConfig::from_layers(None, None, Some(&root));
+        assert_eq!(issues.len(), 1, "one bad key, one issue: {issues:?}");
+        let issue = &issues[0];
+        assert_eq!(issue.file, root.join(".openplanet-lsp.toml"));
+        assert_eq!(issue.key, "source_paths");
+        assert!(
+            issue.expected.contains("array") && issue.expected.contains("string"),
+            "expected should name the wanted type, got {:?}",
+            issue.expected
+        );
+        assert!(
+            issue.found.contains("integer"),
+            "found should name the actual type, got {:?}",
+            issue.found
+        );
+        let rendered = issue.to_string();
+        assert!(
+            rendered.contains("source_paths") && rendered.contains(".openplanet-lsp.toml"),
+            "rendered issue must name key + file: {rendered}"
+        );
+
+        // Element-type mismatches say what the array actually held.
+        write_ws(&root, "source_paths = [1, 2]\n");
+        let (_cfg, issues) = LspConfig::from_layers(None, None, Some(&root));
+        assert!(
+            issues[0].found.contains("integer"),
+            "array element type should be described: {:?}",
+            issues[0].found
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Genuinely malformed TOML stays a whole-file skip — but it must warn,
+    /// naming the file, and must not panic or poison the other layers.
+    #[test]
+    fn malformed_toml_degrades_to_defaults_and_names_the_file() {
+        let (tmp, user, _parent, root) = b017_layers("malformed");
+        std::fs::write(&user, "source_paths = [\"from-user\"]\n").unwrap();
+        write_ws(&root, "this is not toml =\n");
+        let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+        assert_eq!(
+            cfg.source_paths,
+            Some(vec![PathBuf::from("from-user")]),
+            "an unparseable per-root file must fall through to the layer below"
+        );
+        assert_eq!(issues.len(), 1, "expected one whole-file issue: {issues:?}");
+        assert_eq!(issues[0].file, root.join(".openplanet-lsp.toml"));
+        assert!(
+            issues[0].key.is_empty(),
+            "a whole-file problem has no single key"
+        );
+        assert!(
+            issues[0].to_string().contains(".openplanet-lsp.toml"),
+            "the warning must name the file: {}",
+            issues[0]
+        );
+
+        // Missing files are not a problem at all.
+        let (_cfg, issues) = LspConfig::from_layers(None, None, Some(&tmp.join("nonexistent")));
+        assert!(issues.is_empty(), "a missing file is not an issue");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Unknown keys are reported (they are nearly always typos) and ignored.
+    #[test]
+    fn unknown_keys_are_reported_and_never_drop_the_file() {
+        let (tmp, _user, _parent, root) = b017_layers("unknown-key");
+        write_ws(&root, "definitely_not_a_key = 1\ngame_target = \"MP4\"\n");
+        let (cfg, issues) = LspConfig::from_layers(None, None, Some(&root));
+        assert_eq!(cfg.game_target, "MP4");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].key, "definitely_not_a_key");
+        assert!(
+            issues[0].found.contains("unknown"),
+            "issue should say the key is unknown: {:?}",
+            issues[0].found
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// B024 must not regress: `defines` ACCUMULATE across layers rather than
+    /// obeying the last-file-wins ladder, and `-NAME` still removes.
+    #[test]
+    fn defines_still_accumulate_across_every_layer_after_the_ladder_flip() {
+        let (tmp, user, parent, root) = b017_layers("defines-accumulate");
+        std::fs::write(&user, "defines = [\"FROM_USER\"]\n").unwrap();
+        write_ws(&parent, "defines = [\"FROM_PARENT\"]\n");
+        write_ws(&root, "defines = [\"FROM_ROOT\", \"-FROM_USER\"]\n");
+        let (mut cfg, _) = LspConfig::from_layers(Some(&user), Some(&parent), Some(&root));
+        cfg.apply_define_overrides();
+        assert!(cfg.defines.contains("FROM_PARENT"), "{:?}", cfg.defines);
+        assert!(cfg.defines.contains("FROM_ROOT"), "{:?}", cfg.defines);
+        assert!(
+            !cfg.defines.contains("FROM_USER"),
+            "an explicit removal in a higher layer still wins: {:?}",
+            cfg.defines
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A malformed replacement list is an unusable KEY, not a partially
+    /// usable value. Every ordinary string-list key therefore falls through
+    /// to the lower layer as a unit. Empty arrays remain valid, explicit
+    /// values; `defines` is the B024 exception whose valid layers accumulate.
+    #[test]
+    fn strict_string_list_keys_fall_through_as_a_unit_and_accept_empty() {
+        struct Case {
+            key: &'static str,
+            lower: &'static str,
+            mixed: &'static str,
+            all_invalid: &'static str,
+            empty: &'static str,
+            render: fn(&LspConfig) -> String,
+            lower_rendered: &'static str,
+            empty_rendered: &'static str,
+        }
+
+        let cases = [
+            Case {
+                key: "source_paths",
+                lower: "source_paths = [\"lower\"]",
+                mixed: "source_paths = [\"partial\", 7]",
+                all_invalid: "source_paths = [7, true]",
+                empty: "source_paths = []",
+                render: |c| format!("{:?}", c.source_paths),
+                lower_rendered: "Some([\"lower\"])",
+                empty_rendered: "Some([])",
+            },
+            Case {
+                key: "ignore_paths",
+                lower: "ignore_paths = [\"lower\"]",
+                mixed: "ignore_paths = [\"partial\", 7]",
+                all_invalid: "ignore_paths = [7, true]",
+                empty: "ignore_paths = []",
+                render: |c| format!("{:?}", c.ignore_paths),
+                lower_rendered: "Some([\"lower\"])",
+                empty_rendered: "Some([])",
+            },
+            Case {
+                key: "shortcut_namespaces",
+                lower: "shortcut_namespaces = [\"Lower\"]",
+                mixed: "shortcut_namespaces = [\"Partial\", 7]",
+                all_invalid: "shortcut_namespaces = [7, true]",
+                empty: "shortcut_namespaces = []",
+                render: |c| format!("{:?}", c.shortcut_namespaces),
+                lower_rendered: "Some([\"Lower\"])",
+                empty_rendered: "Some([])",
+            },
+            Case {
+                key: "define_matrix",
+                lower: "define_matrix = [\"LOWER\"]",
+                mixed: "define_matrix = [\"PARTIAL\", 7]",
+                all_invalid: "define_matrix = [7, true]",
+                empty: "define_matrix = []",
+                render: |c| format!("{:?}", c.define_matrix),
+                lower_rendered: "[\"LOWER\"]",
+                empty_rendered: "[]",
+            },
+            Case {
+                key: "defines",
+                lower: "defines = [\"LOWER\"]",
+                mixed: "defines = [\"PARTIAL\", 7]",
+                all_invalid: "defines = [7, true]",
+                empty: "defines = []",
+                render: |c| format!("{:?}", c.define_overrides),
+                lower_rendered: "[\"LOWER\"]",
+                // B024: a valid empty higher layer contributes nothing; it
+                // does not erase accumulated lower-layer overrides.
+                empty_rendered: "[\"LOWER\"]",
+            },
+        ];
+
+        for case in cases {
+            let (tmp, user, _parent, root) = b017_layers(case.key);
+            std::fs::write(&user, format!("{}\n", case.lower)).unwrap();
+
+            for (variant, higher) in [("mixed", case.mixed), ("all-invalid", case.all_invalid)] {
+                write_ws(&root, &format!("{higher}\n"));
+                let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+                assert_eq!(
+                    (case.render)(&cfg),
+                    case.lower_rendered,
+                    "{} {variant} must fall through as one bad key",
+                    case.key
+                );
+                assert!(
+                    issues.iter().any(|issue| issue.key == case.key),
+                    "{} {variant} must report its unusable key: {issues:?}",
+                    case.key
+                );
+            }
+
+            write_ws(&root, &format!("{}\n", case.empty));
+            let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+            assert_eq!(
+                (case.render)(&cfg),
+                case.empty_rendered,
+                "{} empty array is a valid explicit value",
+                case.key
+            );
+            assert!(issues.is_empty(), "{} empty array: {issues:?}", case.key);
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+
+    /// String-shaped selector values can still be semantically unusable.
+    /// They are bad keys at their file layer (with attribution), so each
+    /// selector falls through independently and valid siblings still apply.
+    #[test]
+    fn semantic_selector_errors_report_and_fall_through_per_key() {
+        let (tmp, user, _parent, root) = b017_layers("semantic-selectors");
+        std::fs::write(
+            &user,
+            "signature_mode = \"official\"\nos_target = \"linux\"\narch_target = \"32\"\n",
+        )
+        .unwrap();
+
+        let variants = [
+            (
+                "unknown-values",
+                "signature_mode = \"banana-sig\"\nos_target = \"beos\"\narch_target = \"128\"\ngame_target = \"TURBO\"\n",
+                ["banana-sig", "beos", "128"],
+            ),
+            (
+                "wrong-scalars",
+                "signature_mode = 7\nos_target = true\narch_target = [\"32\"]\ngame_target = \"TURBO\"\n",
+                ["integer", "boolean", "array"],
+            ),
+        ];
+
+        for (name, body, found_fragments) in variants {
+            write_ws(&root, body);
+            let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+            assert_eq!(cfg.signature_mode, SignatureMode::Official, "{name}");
+            assert_eq!(cfg.os_target, OsTarget::Linux, "{name}");
+            assert_eq!(cfg.arch_target, ArchTarget::Arch32, "{name}");
+            assert_eq!(
+                cfg.game_target, "TURBO",
+                "{name}: a valid sibling must still apply"
+            );
+
+            for (key, found) in ["signature_mode", "os_target", "arch_target"]
+                .into_iter()
+                .zip(found_fragments)
+            {
+                let issue = issues
+                    .iter()
+                    .find(|issue| issue.key == key)
+                    .unwrap_or_else(|| panic!("{name}: missing issue for {key}: {issues:?}"));
+                assert_eq!(issue.file, root.join(".openplanet-lsp.toml"));
+                assert!(
+                    issue.expected.contains("one of"),
+                    "{name} {key}: expected choices, got {issue:?}"
+                );
+                assert!(
+                    issue.found.contains(found),
+                    "{name} {key}: expected found value/type {found:?}, got {issue:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn game_target_errors_fall_through_while_valid_forms_normalize() {
+        let (tmp, user, _parent, root) = b017_layers("game-target-validation");
+        std::fs::write(
+            &user,
+            "game_target = \"MP4\"\nsource_paths = [\"user-src\"]\n",
+        )
+        .unwrap();
+
+        write_ws(
+            &root,
+            "game_target = \"unknown-game\"\nsource_paths = [\"workspace-src\"]\n",
+        );
+        let (fallback, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+        assert_eq!(
+            fallback.game_target, "MP4",
+            "an invalid workspace target must leave the valid lower layer intact"
+        );
+        assert_eq!(
+            fallback.source_paths,
+            Some(vec![PathBuf::from("workspace-src")]),
+            "a valid sibling in the same file must still apply"
+        );
+        let issue = issues
+            .iter()
+            .find(|issue| issue.key == "game_target")
+            .unwrap_or_else(|| panic!("missing game_target issue: {issues:?}"));
+        assert_eq!(issue.file, root.join(".openplanet-lsp.toml"));
+        assert!(issue.expected.contains("TMNEXT"), "{issue:?}");
+        assert!(issue.expected.contains("NATIONS_FOREVER"), "{issue:?}");
+        assert!(issue.found.contains("unknown-game"), "{issue:?}");
+
+        write_ws(&root, "game_target = \" turbo \"\n");
+        let (accepted, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+        assert_eq!(accepted.game_target, "TURBO");
+        assert!(
+            !issues.iter().any(|issue| issue.key == "game_target"),
+            "CLI-compatible case/whitespace must be accepted: {issues:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `unused_callbacks` keeps its pre-B017 legacy tolerance: usable names
+    /// survive a mixed list. An all-unusable higher list is still a bad key
+    /// and falls through; an explicit empty list wins outright.
+    #[test]
+    fn unused_callbacks_mixed_all_invalid_and_empty_keep_legacy_contract() {
+        let (tmp, user, _parent, root) = b017_layers("callbacks-list-contract");
+        std::fs::write(&user, "unused_callbacks = [\"Lower\"]\n").unwrap();
+
+        let variants = [
+            (
+                "mixed",
+                "unused_callbacks = [\"Kept\", 7, true]\n",
+                vec!["Kept".to_string()],
+                true,
+            ),
+            (
+                "all-invalid",
+                "unused_callbacks = [7, true]\n",
+                vec!["Lower".to_string()],
+                true,
+            ),
+            ("empty", "unused_callbacks = []\n", vec![], false),
+        ];
+        for (name, body, expected, has_issue) in variants {
+            write_ws(&root, body);
+            let (cfg, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+            assert_eq!(cfg.unused_callbacks, expected, "case {name}");
+            assert_eq!(
+                issues.iter().any(|issue| issue.key == "unused_callbacks"),
+                has_issue,
+                "case {name}: {issues:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The second ladder (`UserPrefs`) obeys the same order, and a bad key
+    /// no longer discards its siblings either.
+    #[test]
+    fn user_prefs_workspace_beats_user_global_and_survives_a_bad_key() {
+        let (tmp, user, _parent, root) = b017_layers("user-prefs");
+        std::fs::write(&user, "default_mode = \"lsp\"\nwarnings_as_errors = true\n").unwrap();
+        write_ws(
+            &root,
+            "default_mode = \"tui\"\nwarnings_as_errors = false\n",
+        );
+        let prefs = UserPrefs::from_layers(Some(&user), Some(&root));
+        assert_eq!(prefs.default_mode, DefaultMode::Tui);
+        assert!(!prefs.warnings_as_errors);
+
+        // User global applies when the workspace file is silent.
+        write_ws(&root, "game_target = \"MP4\"\n");
+        let prefs = UserPrefs::from_layers(Some(&user), Some(&root));
+        assert_eq!(prefs.default_mode, DefaultMode::Lsp);
+        assert!(prefs.warnings_as_errors);
+
+        // One bad key must not discard the sibling in the same file.
+        write_ws(&root, "game_target = 7\nwarnings_as_errors = false\n");
+        let prefs = UserPrefs::from_layers(Some(&user), Some(&root));
+        assert!(
+            !prefs.warnings_as_errors,
+            "a bad `game_target` must not take `warnings_as_errors` with it"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The bare-TTY/UserPrefs-only loader must diagnose semantic and scalar
+    /// `default_mode` errors itself: there may be no later LspConfig load to
+    /// report them. This pure seam avoids mutating process-global HOME.
+    #[test]
+    fn user_prefs_reports_default_mode_issues_and_keeps_valid_siblings() {
+        let (tmp, user, _parent, root) = b017_layers("user-prefs-issues");
+        std::fs::write(&user, "default_mode = \"lsp\"\nwarnings_as_errors = true\n").unwrap();
+
+        for (name, bad_mode, found) in [
+            ("unknown-value", "default_mode = \"graphical\"", "graphical"),
+            ("wrong-scalar", "default_mode = 7", "integer"),
+        ] {
+            write_ws(&root, &format!("{bad_mode}\nwarnings_as_errors = false\n"));
+            let (prefs, issues) = UserPrefs::from_layers_with_issues(Some(&user), Some(&root));
+            assert_eq!(
+                prefs.default_mode,
+                DefaultMode::Lsp,
+                "{name}: invalid higher key must fall through"
+            );
+            assert!(
+                !prefs.warnings_as_errors,
+                "{name}: valid sibling must still apply"
+            );
+            let issue = issues
+                .iter()
+                .find(|issue| issue.key == "default_mode")
+                .unwrap_or_else(|| panic!("{name}: missing default_mode issue: {issues:?}"));
+            assert_eq!(issue.file, root.join(".openplanet-lsp.toml"));
+            assert!(issue.expected.contains("one of"), "{name}: {issue:?}");
+            assert!(issue.found.contains(found), "{name}: {issue:?}");
+
+            let mut stderr = Vec::new();
+            write_config_issues(&mut stderr, &issues).unwrap();
+            let stderr = String::from_utf8(stderr).unwrap();
+            assert!(stderr.contains("warning: config:"), "{name}: {stderr:?}");
+            assert!(stderr.contains("default_mode"), "{name}: {stderr:?}");
+            assert!(
+                stderr.contains(".openplanet-lsp.toml"),
+                "{name}: {stderr:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Keys the catalog lists that the LADDER deliberately does not read.
+    /// Everything else in [`CONFIG_KEYS`] must be read by `from_table`.
+    const CATALOG_KEYS_NOT_READ_BY_THE_LADDER: &[&str] = &[
+        // Written by the TUI first-run prompt (src/tui/first_run.rs).
+        "first_run_prompt_done",
+    ];
+
+    /// Drift guard 1 (B017). Dropping `#[derive(Deserialize)]` for a
+    /// hand-rolled `from_table` bought per-key tolerance but created a new
+    /// failure mode the derive made impossible: a field added to
+    /// `ConfigFile` and forgotten in `from_table` and/or [`CONFIG_KEYS`].
+    /// The symptom is the ORIGINAL B017 defect in a new mask — the key
+    /// parses to nothing, the config silently does nothing, and the loader
+    /// warns "unknown key" about a key we ourselves define. Invisible to
+    /// every other test in this file, so it is pinned in both directions.
+    #[test]
+    fn config_key_catalog_and_from_table_read_exactly_the_same_keys() {
+        let table = toml::Table::new();
+        let mut issues = Vec::new();
+        let mut read: Vec<&'static str> = Vec::new();
+        let _ = ConfigFile::read_recording(Path::new("<none>"), &table, &mut issues, &mut read);
+
+        for key in &read {
+            assert!(
+                CONFIG_KEYS.contains(key),
+                "`from_table` reads `{key}` but CONFIG_KEYS omits it — the \
+                 loader would warn 'unknown key' about our own key"
+            );
+        }
+        for key in CONFIG_KEYS {
+            if CATALOG_KEYS_NOT_READ_BY_THE_LADDER.contains(key) {
+                continue;
+            }
+            assert!(
+                read.contains(key),
+                "CONFIG_KEYS lists `{key}` but `from_table` never reads it — \
+                 the key would parse to nothing and silently do nothing"
+            );
+        }
+        let mut sorted = read.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), read.len(), "`from_table` reads a key twice");
+    }
+
+    /// Drift guard 2 (B017): a config file written by our OWN writer must
+    /// read back with zero issues. `first_run_prompt_done` was caught by
+    /// hand; this makes the whole class permanent, so a new `SETTINGS` key
+    /// cannot ship a tool that warns about the file it just wrote.
+    #[test]
+    fn a_config_file_written_by_our_own_writer_produces_no_issues() {
+        use crate::user_config::{SettingKind, UserConfigFile, SETTINGS};
+
+        let dir = std::env::temp_dir().join(format!("oplsp-b017-writer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        let mut file = UserConfigFile::load(&path).unwrap();
+        for spec in SETTINGS {
+            match spec.kind {
+                SettingKind::Bool { default } => file.set_bool(spec.key, !default),
+                SettingKind::Enum { choices, .. } => file.set_string(spec.key, choices[0]),
+                SettingKind::String | SettingKind::Path => file.set_string(spec.key, "some/value"),
+                SettingKind::StringList { .. } => {
+                    file.set_string_list(spec.key, &["Alpha".to_string(), "Beta".to_string()])
+                }
+                SettingKind::NestedStringList => {
+                    file.set_nested_string_list(spec.key, &[vec!["Alpha".to_string()]])
+                }
+                SettingKind::Usize { .. } => file.set_usize(spec.key, 8),
+            }
+        }
+        // Written by the TUI first-run prompt into this same document.
+        file.set_bool("first_run_prompt_done", true);
+        file.save().unwrap();
+
+        let (_cfg, issues) = read_config_file(&path).expect("the writer produced a file");
+        assert!(
+            issues.is_empty(),
+            "openplanet-lsp must not warn about a config file it wrote itself: {issues:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The known-key catalog must cover every key the tool itself writes —
+    /// otherwise openplanet-lsp would warn about its own config files.
+    #[test]
+    fn config_key_catalog_covers_every_settings_key() {
+        for spec in crate::user_config::SETTINGS {
+            assert!(
+                CONFIG_KEYS.contains(&spec.key),
+                "SETTINGS key `{}` missing from CONFIG_KEYS",
+                spec.key
+            );
+        }
+        // Written by the TUI first-run prompt (src/tui/first_run.rs), never
+        // read here — but it lives in the same file, so it must not warn.
+        assert!(CONFIG_KEYS.contains(&"first_run_prompt_done"));
+        let mut sorted = CONFIG_KEYS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), CONFIG_KEYS.len(), "duplicate CONFIG_KEYS");
+    }
 }

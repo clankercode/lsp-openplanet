@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use futures_util::StreamExt;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{LanguageServer, LspService};
 
@@ -50,6 +51,44 @@ async fn watched(backend: &Backend, path: &Path, typ: FileChangeType) {
             changes: vec![FileEvent::new(Url::from_file_path(path).unwrap(), typ)],
         })
         .await;
+}
+
+async fn next_show_message(socket: &mut tower_lsp::ClientSocket) -> ShowMessageParams {
+    loop {
+        let request = socket.next().await.expect("client socket remains open");
+        if request.method() != "window/showMessage" {
+            continue;
+        }
+        return serde_json::from_value(
+            request
+                .params()
+                .expect("showMessage carries params")
+                .clone(),
+        )
+        .expect("valid showMessage params");
+    }
+}
+
+fn assert_whole_file_toml_warning(warning: &ShowMessageParams, config_file: &Path) {
+    assert_eq!(warning.typ, MessageType::WARNING);
+    assert!(
+        warning.message.contains(&config_file.display().to_string()),
+        "warning must carry the structured issue file: {warning:?}"
+    );
+    assert!(
+        warning
+            .message
+            .contains("expected valid TOML (the whole file was skipped)"),
+        "warning must carry the whole-file expected field: {warning:?}"
+    );
+    assert!(
+        warning.message.contains("found: invalid array"),
+        "warning must carry the parse error in the found field: {warning:?}"
+    );
+    assert!(
+        !warning.message.contains("key ``"),
+        "whole-file issues must render without a key: {warning:?}"
+    );
 }
 
 async fn config_of(backend: &Backend) -> openplanet_lsp::config::LspConfig {
@@ -163,6 +202,127 @@ async fn workspace_config_invalid_toml_keeps_last_good() {
         resolves(backend, "GeneratedFunc").await,
         "invalid TOML must keep last-good discovery"
     );
+}
+
+/// Client-driven watched-file notifications must surface malformed TOML in
+/// the editor, preserve the cached config, and deduplicate repeated events.
+#[tokio::test(flavor = "current_thread")]
+async fn watched_file_invalid_toml_warns_client_once_and_keeps_last_good() {
+    let root = temp_plugin("ws-invalid-warning");
+    let cfg = root.join(".openplanet-lsp.toml");
+    fs::write(&cfg, "game_target = \"TURBO\"\nhonor_gitignore = false\n").unwrap();
+
+    let (service, mut socket) = LspService::new(Backend::new);
+    let backend = service.inner();
+    backend.initialize(init_params(&root)).await.unwrap();
+
+    fs::write(&cfg, "game_target = [\n").unwrap();
+    watched(backend, &cfg, FileChangeType::CHANGED).await;
+    let warning = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        next_show_message(&mut socket),
+    )
+    .await
+    .expect("invalid watched file must warn the LSP client");
+    assert_whole_file_toml_warning(&warning, &cfg);
+    let after = config_of(backend).await;
+    assert_eq!(after.game_target, "TURBO");
+    assert_eq!(after.honor_gitignore, Some(false));
+
+    watched(backend, &cfg, FileChangeType::CHANGED).await;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            next_show_message(&mut socket),
+        )
+        .await
+        .is_err(),
+        "the same invalid TOML warning must be deduplicated"
+    );
+}
+
+/// B017 positive guard for a REJECTED review finding.
+///
+/// A Codex review pass proposed suppressing the reload whenever ANY config in
+/// a watched-file batch was invalid. That moves "one bad file blocks
+/// everything" from the parser up into the watcher: a half-saved user-global
+/// config would silently discard an unrelated, valid workspace edit, while
+/// every B017 unit test stayed green. The batch must do BOTH — warn about the
+/// broken file AND apply the valid one.
+///
+/// Without this test the rejection lives only in review history, and the next
+/// reviewer proposes the same change unopposed.
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_config_in_a_batch_does_not_suppress_a_valid_sibling_reload() {
+    let root = temp_plugin("batch-mixed-validity");
+    let workspace_cfg = root.join(".openplanet-lsp.toml");
+    let broken_cfg = root.join("sub/.openplanet-lsp.toml");
+    fs::create_dir_all(broken_cfg.parent().unwrap()).unwrap();
+    fs::write(&workspace_cfg, "game_target = \"TURBO\"\n").unwrap();
+
+    let (service, mut socket) = LspService::new(Backend::new);
+    let backend = service.inner();
+    backend.initialize(init_params(&root)).await.unwrap();
+    assert_eq!(config_of(backend).await.game_target, "TURBO");
+
+    // One VALID edit and one BROKEN file arrive in the same batch.
+    fs::write(&workspace_cfg, "game_target = \"MP4\"\n").unwrap();
+    fs::write(&broken_cfg, "game_target = [\n").unwrap();
+    backend
+        .did_change_watched_files(DidChangeWatchedFilesParams {
+            changes: vec![
+                FileEvent::new(
+                    Url::from_file_path(&broken_cfg).unwrap(),
+                    FileChangeType::CHANGED,
+                ),
+                FileEvent::new(
+                    Url::from_file_path(&workspace_cfg).unwrap(),
+                    FileChangeType::CHANGED,
+                ),
+            ],
+        })
+        .await;
+
+    let warning = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        next_show_message(&mut socket),
+    )
+    .await
+    .expect("the broken file in the batch must still warn");
+    assert_whole_file_toml_warning(&warning, &broken_cfg);
+
+    assert_eq!(
+        config_of(backend).await.game_target,
+        "MP4",
+        "a broken sibling must NOT swallow the valid edit in the same batch"
+    );
+}
+
+/// The server-owned native notify watcher has the same visible warning and
+/// last-good contract as `workspace/didChangeWatchedFiles`.
+#[tokio::test(flavor = "current_thread")]
+async fn native_config_watcher_invalid_toml_warns_client_and_keeps_last_good() {
+    let root = temp_plugin("native-invalid-warning");
+    let cfg = root.join(".openplanet-lsp.toml");
+    fs::write(&cfg, "game_target = \"MP4\"\nsource_paths = [\"src\"]\n").unwrap();
+
+    let (service, mut socket) = LspService::new(Backend::new);
+    let backend = service.inner();
+    backend.initialize(init_params(&root)).await.unwrap();
+    backend.initialized(InitializedParams {}).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    fs::write(&cfg, "source_paths = [\n").unwrap();
+    let warning = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        next_show_message(&mut socket),
+    )
+    .await
+    .expect("native config watcher must warn the LSP client");
+    assert_whole_file_toml_warning(&warning, &cfg);
+    let after = config_of(backend).await;
+    assert_eq!(after.game_target, "MP4");
+    assert_eq!(after.source_paths, Some(vec![PathBuf::from("src")]));
 }
 
 /// Completion shortcuts live on the cached shard config; a reload must
