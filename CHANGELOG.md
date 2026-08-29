@@ -99,6 +99,24 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **A bare enum value two enums define is now an error, as in the game
+  (B053)** — the game refuses to choose between them (`Found multiple matching
+  enum values`); `openplanet-lsp` took the first match and said nothing, so the
+  problem only appeared when you compiled the plugin. The diagnostic names the
+  candidate enums, so qualifying it — `ESceneCharVisNotice::Turbo` — is the
+  obvious fix.
+
+  Which enums are in scope for a BARE name is narrower than it looks, and this
+  follows the game exactly: only enums the engine puts in the global namespace
+  take part. A nested enum's values (`CGameMenu::EMenuOrder`) and a namespaced
+  one's (`UI::Cond`) are not reachable bare at all, so they cannot collide.
+  Your own plugin counts too: a global `enum` of yours JOINS the pool and can
+  make a previously fine name ambiguous, while a global variable or function
+  of that name simply wins and nothing is reported.
+
+  22 engine value names are affected, `Turbo`, `None`, `High`, `Medium` and
+  `Up` among them.
+
 - **Qualified paths to a global engine enum are checked against real scopes
   (B052)** — `Scene::ESceneCharVisNotice` used to resolve, and the game
   answers `Namespace 'Scene' doesn't exist.` The `Game`, `Scene`, `Plug`,

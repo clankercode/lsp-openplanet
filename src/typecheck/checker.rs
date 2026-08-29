@@ -28,6 +28,15 @@ pub enum TypeDiagnosticSeverity {
 pub enum TypeDiagnosticKind {
     UnknownType(String),
     UndefinedIdentifier(String),
+    /// B053: a bare enum-value name that two or more GLOBALLY VISIBLE engine
+    /// enums carry. The game refuses to pick one — `Found multiple matching
+    /// enum values` — where openplanet-lsp used to take the first hit and say
+    /// nothing. `candidates` are the enum names, sorted, so the message can
+    /// show the qualification that fixes it.
+    AmbiguousEnumValue {
+        name: String,
+        candidates: Vec<String>,
+    },
     UndefinedMember {
         object_type: String,
         member: String,
@@ -231,6 +240,14 @@ impl TypeDiagnostic {
                 m
             }
             TypeDiagnosticKind::UndefinedIdentifier(n) => format!("undefined identifier `{}`", n),
+            TypeDiagnosticKind::AmbiguousEnumValue { name, candidates } => format!(
+                "ambiguous enum value `{}`: {} enums define it ({}); qualify it, e.g. `{}::{}`",
+                name,
+                candidates.len(),
+                candidates.join(", "),
+                candidates.first().map(String::as_str).unwrap_or(""),
+                name,
+            ),
             TypeDiagnosticKind::UndefinedMember {
                 object_type,
                 member,
@@ -3890,6 +3907,28 @@ impl<'a> Checker<'a> {
                         self.record_value_use_variants(&qualified);
                         return TypeRepr::Error(String::new());
                     }
+                }
+                // B053: two or more enums in scope carry this value name, and
+                // the game refuses to choose between them: `Found multiple
+                // matching enum values`.
+                //
+                // BEFORE the global value lookup, not after: a global enum
+                // the workspace declares is a CANDIDATE, not an answer, so
+                // letting `lookup_global_value_type` resolve it first would
+                // hide exactly the ambiguity the plugin's own enum created.
+                // The lookups that do outrank the enums — a variable, a
+                // function, a virtual property — are checked inside
+                // `ambiguous_global_enum_value`, which stays quiet for them.
+                if let Some(candidates) = self.scope.ambiguous_global_enum_value(&name) {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: expr.span,
+                        kind: TypeDiagnosticKind::AmbiguousEnumValue {
+                            name: name.clone(),
+                            candidates,
+                        },
+                    });
+                    self.record_value_use_variants(&name);
+                    return TypeRepr::Error(String::new());
                 }
                 // 4. Global top-level lookup (vars, functions-as-values, enums).
                 if let Some(ty) = self.scope.lookup_global_value_type(&name) {

@@ -3819,20 +3819,51 @@ fn b044_probe_fixture_matches_the_shipped_type_db() {
 /// anywhere, so `Openplanet.h` is the only source that names them. Between
 /// them they carry 55 value names that resolved nowhere.
 ///
-/// Game ground truth (RemoteBuild probe, OP 1.29.5, 2026-08-30): every
-/// statement in the fixture compiles except the four `SharedValues_*` ones,
-/// which the game rejects as AMBIGUOUS ("Found multiple matching enum
-/// values") rather than unknown. The LSP does not model that ambiguity, so it
-/// is silent there — a pre-existing false NEGATIVE, documented in the fixture
-/// and out of scope here.
+/// Game ground truth (RemoteBuild probe, OP 1.29.5, 2026-08-30, re-probed
+/// the same day for B053): every statement in the fixture compiles except the
+/// four `SharedValues_*` ones, which the game rejects as AMBIGUOUS ("Found
+/// multiple matching enum values") rather than unknown. The LSP reports the
+/// same four statements, line for line.
+///
+/// B046 landed with those four SILENT and said so in the fixture, because
+/// modelling the ambiguity needed its own probe and its own ticket. B053 is
+/// that ticket, so the count here is 4 rather than 0. B046's own rule is
+/// untouched: the names still RESOLVE, and what they now get is an ambiguity
+/// error naming the candidate enums — not `No matching symbol`, which is what
+/// a regression that lost the module-level enums would produce.
 #[test]
 fn check_command_issue_repro_b046_module_level_enums_resolve() {
     let (_, stdout, stderr) = run_issue_repro_typedb("b046-module-level-enums");
     assert!(
-        stdout.contains("0 diagnostics"),
-        "module-level enum values, the enum name as a type, and a value \
-         reached through it must all resolve; stdout={stdout:?} stderr={stderr:?}"
+        stdout.contains("4 diagnostics (4 errors)"),
+        "only the four ambiguous shared values may be diagnosed; \
+         stdout={stdout:?} stderr={stderr:?}"
     );
+    // Exactly the game's four, and each as AMBIGUITY, not as unknown.
+    let ambiguous: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("ambiguous enum value"))
+        .collect();
+    assert_eq!(
+        ambiguous.len(),
+        4,
+        "the four shared values must be diagnosed as ambiguous; stdout={stdout:?}"
+    );
+    for name in ["WallJump", "Turbo", "FreeWheeling"] {
+        assert!(
+            ambiguous.iter().any(|l| l.contains(&format!("`{name}`"))),
+            "`{name}` is ambiguous in-game and must say so; stdout={stdout:?}"
+        );
+    }
+    assert!(
+        !stdout.contains("undefined identifier"),
+        "an ambiguous name still RESOLVES; `No matching symbol` here would mean \
+         the module-level enums were lost again; stdout={stdout:?}"
+    );
+    // Unambiguous module-level values, and the enum name used as a type,
+    // must still be silent. Checked as a DIAGNOSED name rather than as a
+    // substring: `ESceneCharVisNotice` now appears legitimately inside the
+    // ambiguity messages, as one of the candidate enums it names.
     for name in [
         "DoubleJump",
         "TechJump",
@@ -3840,7 +3871,11 @@ fn check_command_issue_repro_b046_module_level_enums_resolve() {
         "ESceneCharVisNotice",
     ] {
         assert!(
-            !stdout.contains(name),
+            !stdout
+                .lines()
+                .any(|l| l.contains(&format!("error: unknown type `{name}`"))
+                    || l.contains(&format!("error: undefined identifier `{name}`"))
+                    || l.contains(&format!("error: ambiguous enum value `{name}`"))),
             "`{name}` must not be diagnosed; stdout={stdout:?}"
         );
     }
@@ -3927,6 +3962,96 @@ fn check_command_issue_repro_b052_qualified_enum_paths() {
         "77 rejected paths plus the 3 pre-existing `string::` parse errors, \
          and nothing else; stdout={stdout:?} stderr={stderr:?}"
     );
+}
+
+/// B053: a bare enum value two globally visible enums carry.
+///
+/// The game resolves a bare enum-value name against the enums in scope and
+/// refuses to choose when two of them carry it: `Found multiple matching enum
+/// values`. openplanet-lsp took the first match and said nothing.
+///
+/// Game ground truth (RemoteBuild, OP 1.29.5, 2026-08-30): all 2989 bare
+/// value names of the shipped DB's named enums were submitted individually —
+/// 2373 `No matching symbol`, 592 accepted, 22 ambiguous, 2 resolving to a
+/// non-enum symbol. This fixture then compiled in-game as one plugin and
+/// produced exactly 22 errors, on exactly the `Ambiguous()` statements, line
+/// for line with what the LSP reports here.
+///
+/// The ticket predicted this set from "carried by two or more NAMED enums",
+/// which is 758 names — 34x too many, because nested and namespaced enums are
+/// not in scope for a bare name at all. Only enums the game puts in the
+/// GLOBAL namespace take part.
+///
+/// `Unambiguous()` is the fence: 40 names carried by exactly one such enum,
+/// which the game compiles and the LSP must not touch.
+#[test]
+fn check_command_issue_repro_b053_ambiguous_enum_values() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b053-ambiguous-enum-values");
+    let ambiguous: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("ambiguous enum value"))
+        .collect();
+    assert_eq!(
+        ambiguous.len(),
+        22,
+        "every name the game rejects as ambiguous must be diagnosed; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    // The message has to name the candidates, or "qualify it" is not
+    // actionable advice.
+    assert!(
+        ambiguous.iter().any(|l| l.contains("`Turbo`")
+            && l.contains("ESceneCharVisNotice")
+            && l.contains("ESceneVehicleVisEvent")),
+        "the message must name the candidate enums; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("22 diagnostics (22 errors)"),
+        "the 40 unambiguous names and the 4 qualified ones must stay silent; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+/// B053, second half: how a plugin's OWN declarations meet the engine enums.
+///
+/// Game ground truth (RemoteBuild, OP 1.29.5, 2026-08-30) — ONE error, on the
+/// bare `GlassSmash`:
+///
+/// * a global `enum` of the plugin's own JOINS the pool. `GlassSmash` is
+///   carried by one engine enum and compiles bare until the plugin declares
+///   it too. A workspace enum is a candidate, not a shield — the
+///   counter-intuitive half of the rule.
+/// * a global VARIABLE outranks the enums: `int Down = 1;` makes bare `Down`
+///   compile even though two engine enums carry it.
+/// * a NAMESPACED enum and a class member take no part at all.
+#[test]
+fn check_command_issue_repro_b053_workspace_and_ambiguity() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b053-ambiguous-enum-values-workspace");
+    let ambiguous: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("ambiguous enum value"))
+        .collect();
+    assert_eq!(
+        ambiguous.len(),
+        1,
+        "only the plugin's own enum creates a collision here; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        ambiguous[0].contains("`GlassSmash`")
+            && ambiguous[0].contains("ESceneVehicleVisEvent")
+            && ambiguous[0].contains("LocalPick"),
+        "the workspace enum must appear as a candidate by name; stdout={stdout:?}"
+    );
+    // `Down` is ambiguous in the engine and must NOT be reported: the
+    // plugin's `int Down = 1;` is the answer, and the game accepts it.
+    for silent in ["`Down`", "`Horn`", "`JumpChain1`"] {
+        assert!(
+            !ambiguous.iter().any(|l| l.contains(silent)),
+            "the game accepts {silent} here; reporting it would be a false \
+             positive; stdout={stdout:?}"
+        );
+    }
 }
 
 /// B046: the header is OPTIONAL. An install with no `Openplanet.h` must still

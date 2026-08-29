@@ -29,6 +29,11 @@ pub struct TypeIndex {
     /// [`Self::scope_exists`] for what qualifies and why the Nadeo module
     /// prefixes this crate keys the dump under are excluded.
     scopes: HashSet<String>,
+    /// Bare enum-value name → the distinct NAMES of the globally visible
+    /// enums that carry it (B053). Built by `build_global_enum_value_index`;
+    /// see [`Self::global_enum_value_owners`] for what "globally visible"
+    /// means and why the names, not the keys, are what get counted.
+    global_enum_values: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +245,7 @@ impl Default for TypeIndex {
             funcdefs: HashMap::new(),
             short_type_index: HashMap::new(),
             scopes: HashSet::new(),
+            global_enum_values: HashMap::new(),
         }
     }
 }
@@ -336,6 +342,7 @@ impl TypeIndex {
             self.short_type_index.entry(short).or_default().push(qname);
         }
         self.build_scope_index();
+        self.build_global_enum_value_index();
     }
 
     /// Rebuild [`Self::scopes`] — every namespace-like scope the GAME has.
@@ -413,6 +420,78 @@ impl TypeIndex {
             }
         }
         self.scopes.remove("");
+    }
+
+    /// True when the game puts this enum in the GLOBAL namespace, so its
+    /// values are reachable by a bare name (B053).
+    ///
+    /// Exactly the enums with no enclosing scope once the loader's synthetic
+    /// Nadeo module prefix is dropped:
+    ///
+    /// * `Openplanet.h` enums — module-level by construction (B046);
+    /// * a Nadeo key with ONE module segment (`Game::EGhostNameLogoType`).
+    ///   The module is this crate's invention, so the enum is global;
+    /// * a Core enum with no namespace (`VirtualKey`).
+    ///
+    /// And nothing else. A NESTED Nadeo enum (`Game::CGameMenu::EMenuOrder`)
+    /// lives in the `CGameMenu` namespace and a Core enum with a namespace
+    /// (`UI::Cond`) lives in `UI`; the game answers `No matching symbol` for
+    /// a bare reference to either one's values.
+    ///
+    /// Two enums of the same NAME under different modules are one engine
+    /// enum the loader keyed twice (`Hms::EHmsLightMapQuality` and
+    /// `MetaNotPersistent::EHmsLightMapQuality`), which is why callers count
+    /// distinct names rather than keys.
+    fn enum_is_global(qname: &str, info: &EnumInfo) -> bool {
+        if info.anonymous {
+            return false;
+        }
+        match info.source {
+            TypeSource::Header => true,
+            TypeSource::Nadeo => qname.matches("::").count() <= 1,
+            TypeSource::Core => info.namespace.is_none(),
+        }
+    }
+
+    /// Rebuild [`Self::global_enum_values`].
+    ///
+    /// Ground truth: all 2989 bare value names of the shipped DB's named
+    /// enums were submitted to the live game (RemoteBuild, Trackmania +
+    /// Openplanet 1.29.5, 2026-08-30). The rule below predicted 2987 of
+    /// them; the 2 it missed (`Main`, `RGBAColor`) resolve to a non-enum
+    /// symbol, so they are not counterexamples.
+    ///
+    ///   0 owners → `No matching symbol`          (2373 names)
+    ///   1 owner  → accepted                      ( 592 names)
+    ///  ≥2 owners → `Found multiple matching enum values` (22 names)
+    fn build_global_enum_value_index(&mut self) {
+        self.global_enum_values.clear();
+        for (qname, info) in &self.enums {
+            if !Self::enum_is_global(qname, info) {
+                continue;
+            }
+            let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
+            for (value, _) in &info.values {
+                let owners = self.global_enum_values.entry(value.clone()).or_default();
+                if !owners.contains(&name) {
+                    owners.push(name.clone());
+                }
+            }
+        }
+        for owners in self.global_enum_values.values_mut() {
+            owners.sort();
+        }
+    }
+
+    /// B053: the globally visible enums that carry the bare value name
+    /// `value`, by enum name and sorted. Empty when nothing global carries
+    /// it; TWO OR MORE is what the game rejects with `Found multiple
+    /// matching enum values`.
+    pub fn global_enum_value_owners(&self, value: &str) -> &[String] {
+        self.global_enum_values
+            .get(value)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// B052: does `path` name a scope the game will resolve a qualified name
