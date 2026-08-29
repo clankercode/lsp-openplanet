@@ -11,6 +11,10 @@ pub struct LspConfig {
     pub core_json: Option<PathBuf>,
     pub game_json: Option<PathBuf>,
     pub game_target: String,
+    /// Which signature level's `SIG_*` defines are live (GH #64). Resolved
+    /// through the same ladder as `game_target`; the defines are derived
+    /// from it in [`LspConfig::defines_for_target`], never hand-listed.
+    pub signature_mode: SignatureMode,
     pub defines: HashSet<String>,
     /// Raw `defines` entries from every config layer (parent config, per-root
     /// config, user global, init options), in the order they were read. They
@@ -101,6 +105,7 @@ impl Default for LspConfig {
             core_json: None,
             game_json: None,
             game_target: "TMNEXT".to_string(),
+            signature_mode: SignatureMode::default(),
             defines: Self::default_defines(),
             define_overrides: Vec::new(),
             source_paths: None,
@@ -127,6 +132,8 @@ struct ConfigFile {
     openplanet_dir: Option<String>,
     plugins_dir: Option<String>,
     game_target: Option<String>,
+    /// GH #64: `official` / `regular` / `school` / `developer` (default).
+    signature_mode: Option<String>,
     defines: Option<Vec<String>>,
     /// Bare-TTY default: `"tui"` (default) or `"lsp"`.
     default_mode: Option<String>,
@@ -199,6 +206,63 @@ impl UnusedLevel {
             Self::Error => "error",
         }
     }
+}
+
+/// Which Openplanet signature level the analysis models (GH #64).
+///
+/// Openplanet defines a signature macro "when the current signature level is
+/// equal or below their respective level"
+/// (<https://openplanet.dev/docs/reference/preprocessor>), so the levels are
+/// CUMULATIVE rather than exclusive: Official defines `SIG_OFFICIAL` alone,
+/// Developer defines all four. Default is [`SignatureMode::Developer`] —
+/// the all-four set the LSP always used, so nothing moves until you opt in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SignatureMode {
+    Official,
+    Regular,
+    School,
+    #[default]
+    Developer,
+}
+
+impl SignatureMode {
+    /// Parse a config / CLI / init-option token, case-insensitively.
+    /// Aliases: `dev` → developer, `reg` → regular, and the define token
+    /// itself (`SIG_SCHOOL` → school) since that is how the docs name them.
+    /// Deliberately no `off` alias — that token means "disabled" for
+    /// `unused` / `errors` and would read as the opposite of a level here.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "official" | "sig_official" => Some(Self::Official),
+            "regular" | "reg" | "sig_regular" => Some(Self::Regular),
+            "school" | "sig_school" => Some(Self::School),
+            "developer" | "dev" | "sig_developer" => Some(Self::Developer),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Official => "official",
+            Self::Regular => "regular",
+            Self::School => "school",
+            Self::Developer => "developer",
+        }
+    }
+
+    /// The signature defines live at this level, lowest level first.
+    pub fn defines(self) -> &'static [&'static str] {
+        const ALL: &[&str] = &["SIG_OFFICIAL", "SIG_REGULAR", "SIG_SCHOOL", "SIG_DEVELOPER"];
+        match self {
+            Self::Official => &ALL[..1],
+            Self::Regular => &ALL[..2],
+            Self::School => &ALL[..3],
+            Self::Developer => ALL,
+        }
+    }
+
+    /// Every accepted canonical name, for help text and the config TUI.
+    pub const CHOICES: &'static [&'static str] = &["developer", "school", "regular", "official"];
 }
 
 /// How `check` groups diagnostics for human (plain/pretty) output.
@@ -305,16 +369,21 @@ impl UserPrefs {
 }
 
 impl LspConfig {
-    /// Default all-permissive define set (spec Section 4.4)
-    /// Preprocessor defines for a game target. Platform selectors are
-    /// target-specific so the LSP only compiles the `#if` branches the real
-    /// game would (GH #36): defining every platform at once made dead
-    /// `#if MP4` / `#elif TURBO` branches live and flooded undefined-identifier
-    /// false positives. Default target is TMNEXT (TM2020); overridable via
-    /// `game_target` (config file / init options / repo-local config).
-    pub fn defines_for_target(target: &str) -> HashSet<String> {
-        // Always-on flags (OS, signature, build caps) — independent of which
-        // game the plugin targets.
+    /// Preprocessor defines for a game target and signature level.
+    ///
+    /// Platform selectors are target-specific so the LSP only compiles the
+    /// `#if` branches the real game would (GH #36): defining every platform
+    /// at once made dead `#if MP4` / `#elif TURBO` branches live and flooded
+    /// undefined-identifier false positives. Default target is TMNEXT
+    /// (TM2020); overridable via `game_target` (config file / init options /
+    /// repo-local config).
+    ///
+    /// The `SIG_*` names come from `signature` (GH #64) on the same
+    /// reasoning — they used to be unconditionally on, which is exactly
+    /// [`SignatureMode::Developer`], still the default.
+    pub fn defines_for_target(target: &str, signature: SignatureMode) -> HashSet<String> {
+        // Always-on flags (OS and build caps) — independent of both the game
+        // the plugin targets and how it is signed.
         const ALWAYS_ON: &[&str] = &[
             "MANIA64",
             "MANIA32",
@@ -325,10 +394,6 @@ impl LspConfig {
             "LOGS",
             "HAS_DEV",
             "DEVELOPER",
-            "SIG_OFFICIAL",
-            "SIG_REGULAR",
-            "SIG_SCHOOL",
-            "SIG_DEVELOPER",
         ];
         // Platform selector(s) for the requested game. The game defines
         // exactly one ManiaPlanet-generation family; the others stay off so
@@ -338,16 +403,36 @@ impl LspConfig {
         let Some(platform) = Self::platform_family_for_target(target) else {
             // Unknown target: define the target token itself so its `#if`
             // branch is live; everything else off (conservative).
-            let mut s: HashSet<String> = ALWAYS_ON.iter().map(|x| x.to_string()).collect();
+            let mut s: HashSet<String> = ALWAYS_ON
+                .iter()
+                .chain(signature.defines().iter())
+                .map(|x| x.to_string())
+                .collect();
             s.insert(target.to_string());
             return s;
         };
         ALWAYS_ON
             .iter()
             .chain(platform.iter())
+            .chain(signature.defines().iter())
             .map(|s| s.to_string())
             .collect()
     }
+
+    /// Every accepted `game_target` token, for CLI validation, the config
+    /// TUI's choice list and help text. Kept in lockstep with
+    /// [`Self::PLATFORM_FAMILIES`] by `game_targets_match_platform_families`.
+    pub const GAME_TARGETS: &'static [&'static str] = &[
+        "TMNEXT",
+        "MP4",
+        "MP40",
+        "MP41",
+        "TURBO",
+        "MP3",
+        "UNITED_FOREVER",
+        "UNITED",
+        "NATIONS_FOREVER",
+    ];
 
     /// The ManiaPlanet-generation families. Exactly one family may be live
     /// at a time (GH #36) — the members of the others must stay undefined so
@@ -375,9 +460,10 @@ impl LspConfig {
         Self::platform_family_for_target(name).is_some()
     }
 
-    /// Standard defines for the default target (TMNEXT / TM2020).
+    /// Standard defines for the default target (TMNEXT / TM2020) at the
+    /// default signature level (developer — every `SIG_*` on).
     pub fn default_defines() -> HashSet<String> {
-        Self::defines_for_target("TMNEXT")
+        Self::defines_for_target("TMNEXT", SignatureMode::default())
     }
 
     /// GH #45: the Openplanet install folder name for a game target.
@@ -445,6 +531,7 @@ impl LspConfig {
             core_json: None,
             game_json: None,
             game_target: "TMNEXT".to_string(),
+            signature_mode: SignatureMode::default(),
             defines: Self::default_defines(),
             define_overrides: Vec::new(),
             source_paths: None,
@@ -513,7 +600,7 @@ impl LspConfig {
         // gets matching platform defines and dead `#if <other-platform>`
         // branches stay dead. B024: custom `defines` no longer suppress this
         // step; they are layered on top further down, after the manifest.
-        config.defines = Self::defines_for_target(&config.game_target);
+        config.defines = Self::defines_for_target(&config.game_target, config.signature_mode);
 
         // GH #45: the finalized target may expect a different install folder
         // than the Layer-1 TMNEXT default — re-probe before deriving paths.
@@ -568,6 +655,22 @@ impl LspConfig {
         }
 
         config
+    }
+
+    /// Set the signature level from a config / init-option token (GH #64).
+    /// An unparseable value warns and leaves the previous level in place —
+    /// the default is the permissive one, and narrowing on a typo would mask
+    /// code out and manufacture undefined-identifier errors.
+    fn set_signature_mode(&mut self, token: &str) {
+        match SignatureMode::parse(token) {
+            Some(mode) => self.signature_mode = mode,
+            None => eprintln!(
+                "warning: unknown signature_mode `{token}` (expected {}); \
+                 keeping `{}`",
+                SignatureMode::CHOICES.join(", "),
+                self.signature_mode.as_str()
+            ),
+        }
     }
 
     /// Apply the user's `defines` entries (B024) on top of the target-derived
@@ -864,6 +967,9 @@ impl LspConfig {
         if let Some(target) = cfg.game_target {
             self.game_target = target;
         }
+        if let Some(mode) = cfg.signature_mode {
+            self.set_signature_mode(&mode);
+        }
         if let Some(defines) = cfg.defines {
             self.define_overrides.extend(defines);
         }
@@ -908,6 +1014,9 @@ impl LspConfig {
         }
         if let Some(target) = opts.get("game_target").and_then(|v| v.as_str()) {
             self.game_target = target.to_string();
+        }
+        if let Some(mode) = opts.get("signature_mode").and_then(|v| v.as_str()) {
+            self.set_signature_mode(mode);
         }
         if let Some(defines) = opts.get("defines").and_then(|v| v.as_array()) {
             self.define_overrides
@@ -1254,13 +1363,13 @@ mod tests {
 
     #[test]
     fn test_defines_for_target_selects_platform() {
-        let turbo = LspConfig::defines_for_target("TURBO");
+        let turbo = LspConfig::defines_for_target("TURBO", SignatureMode::default());
         assert!(turbo.contains("TURBO"));
         assert!(turbo.contains("WINDOWS")); // always-on still present
         assert!(!turbo.contains("TMNEXT"));
         assert!(!turbo.contains("MP4"));
 
-        let mp4 = LspConfig::defines_for_target("MP4");
+        let mp4 = LspConfig::defines_for_target("MP4", SignatureMode::default());
         assert!(mp4.contains("MP4"));
         assert!(!mp4.contains("TMNEXT"));
         assert!(!mp4.contains("TURBO"));
@@ -1890,6 +1999,179 @@ shortcut_match_enums = true
         assert!(cfg.defines.contains("DEV"));
         assert!(cfg.defines.contains("TMNEXT"));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- GH #64: signature-mode selector (which SIG_* defines are live) ---
+
+    /// Openplanet defines a signature define "when the current signature
+    /// level is equal or below their respective level" — the levels are
+    /// CUMULATIVE, not exclusive (openplanet.dev/docs/reference/preprocessor).
+    #[test]
+    fn signature_mode_defines_are_cumulative() {
+        let cases = [
+            (SignatureMode::Official, vec!["SIG_OFFICIAL"]),
+            (SignatureMode::Regular, vec!["SIG_OFFICIAL", "SIG_REGULAR"]),
+            (
+                SignatureMode::School,
+                vec!["SIG_OFFICIAL", "SIG_REGULAR", "SIG_SCHOOL"],
+            ),
+            (
+                SignatureMode::Developer,
+                vec!["SIG_OFFICIAL", "SIG_REGULAR", "SIG_SCHOOL", "SIG_DEVELOPER"],
+            ),
+        ];
+        for (mode, want) in cases {
+            let got = mode.defines();
+            assert_eq!(got, want.as_slice(), "{} defines", mode.as_str());
+        }
+    }
+
+    /// The default set is unchanged by the feature: all four SIG_* on, which
+    /// is exactly Developer. Nobody's analysis moves unless they opt in.
+    #[test]
+    fn default_signature_mode_is_developer_and_keeps_every_sig_define() {
+        assert_eq!(
+            LspConfig::default().signature_mode,
+            SignatureMode::Developer
+        );
+        let defs = LspConfig::default_defines();
+        for d in ["SIG_OFFICIAL", "SIG_REGULAR", "SIG_SCHOOL", "SIG_DEVELOPER"] {
+            assert!(defs.contains(d), "{d} missing from the default set");
+        }
+    }
+
+    #[test]
+    fn signature_mode_parses_names_aliases_and_define_tokens() {
+        for (input, want) in [
+            ("developer", SignatureMode::Developer),
+            ("Developer", SignatureMode::Developer),
+            ("  DEV  ", SignatureMode::Developer),
+            ("SIG_DEVELOPER", SignatureMode::Developer),
+            ("school", SignatureMode::School),
+            ("sig_school", SignatureMode::School),
+            ("regular", SignatureMode::Regular),
+            ("reg", SignatureMode::Regular),
+            ("official", SignatureMode::Official),
+            ("sig_official", SignatureMode::Official),
+        ] {
+            assert_eq!(SignatureMode::parse(input), Some(want), "parse {input:?}");
+        }
+        assert!(SignatureMode::parse("banana").is_none());
+        assert!(SignatureMode::parse("").is_none());
+        // `off` belongs to `errors`/`unused`; it must not silently mean
+        // "official" here.
+        assert!(SignatureMode::parse("off").is_none());
+    }
+
+    /// A workspace `signature_mode` narrows the SIG_* set without touching
+    /// the platform or always-on defines.
+    #[test]
+    fn config_file_signature_mode_narrows_sig_defines() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-sigmode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "signature_mode = \"regular\"\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert_eq!(cfg.signature_mode, SignatureMode::Regular);
+        assert!(cfg.defines.contains("SIG_OFFICIAL"));
+        assert!(cfg.defines.contains("SIG_REGULAR"));
+        assert!(!cfg.defines.contains("SIG_SCHOOL"), "{:?}", cfg.defines);
+        assert!(!cfg.defines.contains("SIG_DEVELOPER"));
+        assert!(cfg.defines.contains("TMNEXT"), "platform defines untouched");
+        assert!(cfg.defines.contains("WINDOWS"), "always-on flags untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn init_options_signature_mode_wins_over_config_file() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-sigmode-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "signature_mode = \"official\"\n",
+        )
+        .unwrap();
+        let opts = serde_json::json!({ "signature_mode": "school" });
+        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        assert_eq!(cfg.signature_mode, SignatureMode::School);
+        assert!(cfg.defines.contains("SIG_SCHOOL"));
+        assert!(!cfg.defines.contains("SIG_DEVELOPER"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// An unknown value falls back PERMISSIVE (developer): masking code out
+    /// is what manufactures false "undefined identifier" errors, so the safe
+    /// direction is more defines, not fewer. Sibling keys keep working.
+    #[test]
+    fn invalid_signature_mode_keeps_developer_and_sibling_keys() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-sigmode-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "signature_mode = \"banana\"\ngame_target = \"TURBO\"\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert_eq!(cfg.signature_mode, SignatureMode::Developer);
+        assert!(cfg.defines.contains("SIG_DEVELOPER"));
+        assert_eq!(cfg.game_target, "TURBO", "sibling key must still apply");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `defines` overrides still get the last word over the derived SIG_ set,
+    /// in both directions (B024 ordering).
+    #[test]
+    fn define_overrides_beat_the_signature_mode_set() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-sigmode-ovr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let add = tmp.join("add-back");
+        std::fs::create_dir_all(&add).unwrap();
+        std::fs::write(
+            add.join(".openplanet-lsp.toml"),
+            "signature_mode = \"official\"\ndefines = [\"SIG_DEVELOPER\"]\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&add), None);
+        assert!(
+            cfg.defines.contains("SIG_DEVELOPER"),
+            "explicit add ignored"
+        );
+        assert!(!cfg.defines.contains("SIG_SCHOOL"), "level still official");
+
+        let drop = tmp.join("drop-one");
+        std::fs::create_dir_all(&drop).unwrap();
+        std::fs::write(
+            drop.join(".openplanet-lsp.toml"),
+            "signature_mode = \"developer\"\ndefines = [\"-SIG_DEVELOPER\"]\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&drop), None);
+        assert!(!cfg.defines.contains("SIG_DEVELOPER"), "removal ignored");
+        assert!(cfg.defines.contains("SIG_SCHOOL"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The CLI/TUI target list and the platform-family table must not drift
+    /// apart — a target missing from one silently loses validation or its
+    /// family.
+    #[test]
+    fn game_targets_match_platform_families() {
+        let mut from_families: Vec<&str> = LspConfig::PLATFORM_FAMILIES
+            .iter()
+            .flat_map(|f| f.iter().copied())
+            .collect();
+        from_families.sort_unstable();
+        let mut listed: Vec<&str> = LspConfig::GAME_TARGETS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(listed, from_families);
     }
 
     // NOTE: the user-global layer ($HOME/.config/openplanet-lsp/config.toml)

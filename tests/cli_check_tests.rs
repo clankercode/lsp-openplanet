@@ -445,6 +445,184 @@ fn check_command_define_flag_beats_a_config_removal() {
     let _ = fs::remove_dir_all(home);
 }
 
+/// GH #64: `--signature` narrows the SIG_* set for one run, so a plugin can
+/// be checked the way it compiles once signed.
+#[test]
+fn check_command_signature_flag_narrows_sig_defines() {
+    let root = make_temp_plugin("signature-flag");
+    let home = isolated_home("signature-flag");
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if SIG_DEVELOPER
+MissingType developer_branch_should_be_dead;
+#endif
+
+#if SIG_SCHOOL
+MissingType school_branch_should_be_dead;
+#endif
+
+#if !SIG_REGULAR
+MissingType regular_branch_should_be_live;
+#endif
+
+#if !SIG_OFFICIAL
+MissingType official_branch_should_be_live;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let run = |extra: &[&str]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"));
+        cmd.arg("check").arg("--no-typedb");
+        for a in extra {
+            cmd.arg(a);
+        }
+        cmd.arg(&root).env("HOME", &home).output().unwrap()
+    };
+
+    let output = run(&["--signature", "regular"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "--signature regular must leave exactly SIG_OFFICIAL + SIG_REGULAR; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    // The alias form and `=value` spelling behave identically.
+    let output = run(&["--signature=REG"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "--signature=REG must match `regular`; stdout={stdout:?}"
+    );
+
+    // Default (no flag) is developer: the dev branches are live, so the
+    // fixture's `#if SIG_DEVELOPER` block errors.
+    let output = run(&[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success() && !stdout.contains("0 diagnostics"),
+        "default must stay developer (all four SIG_* on); stdout={stdout:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// GH #64: `--signature` is the top layer — it beats a workspace
+/// `signature_mode`, and `defines` removals still apply after it.
+#[test]
+fn check_command_signature_flag_beats_config_signature_mode() {
+    let root = make_temp_plugin("signature-flag-precedence");
+    let home = isolated_home("signature-flag-precedence");
+    fs::write(
+        root.join(".openplanet-lsp.toml"),
+        "signature_mode = \"official\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        "#if !SIG_DEVELOPER\nMissingType flag_did_not_win;\n#endif\n\nvoid Main() {}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--signature")
+        .arg("developer")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "--signature must beat config signature_mode; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// GH #64: `--game-target` selects the platform family for one run, beating
+/// a workspace `game_target`.
+#[test]
+fn check_command_game_target_flag_selects_platform() {
+    let root = make_temp_plugin("game-target-flag");
+    let home = isolated_home("game-target-flag");
+    fs::write(
+        root.join(".openplanet-lsp.toml"),
+        "game_target = \"TMNEXT\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if TMNEXT
+MissingType tmnext_should_be_dead;
+#endif
+
+#if !MP4
+MissingType mp4_should_be_live;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--game-target=mp4")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "--game-target must beat config game_target; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// A typo'd selector is a usage error (exit 2), never a silently different
+/// define set.
+#[test]
+fn check_command_rejects_unknown_selector_values() {
+    let root = make_temp_plugin("selector-usage");
+    for (flag, value, needle) in [
+        ("--game-target", "BANANA", "unknown --game-target value"),
+        ("--signature", "banana", "unknown --signature value"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+            .arg("check")
+            .arg("--no-typedb")
+            .arg(flag)
+            .arg(value)
+            .arg(&root)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{flag} exit code: {stderr}");
+        assert!(stderr.contains(needle), "{flag} message: {stderr}");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
 /// B024 + GH #36: a hand-listed platform selector REPLACES the target's, so
 /// exactly one `#if <platform>` family stays live — and the run says so.
 #[test]

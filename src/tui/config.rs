@@ -606,10 +606,10 @@ mod tests {
     #[test]
     fn space_toggles_bool_and_writes_file() {
         let mut app = temp_app("toggle");
-        // warnings_as_errors is the third setting (index 2).
-        handle_key(&mut app, press(KeyCode::Char('j')));
-        handle_key(&mut app, press(KeyCode::Char('j')));
-        assert_eq!(app.selected_spec().key, "warnings_as_errors");
+        // Navigate by key: the catalog's order changes as settings land.
+        while app.selected_spec().key != "warnings_as_errors" {
+            handle_key(&mut app, press(KeyCode::Char('j')));
+        }
         handle_key(&mut app, press(KeyCode::Char(' ')));
         assert_eq!(app.status(), "saved");
         let written = std::fs::read_to_string(app.path()).unwrap();
@@ -1051,6 +1051,46 @@ mod tests {
             out.contains("game_target"),
             "selected setting fell off a narrow screen:\n{out}"
         );
+    }
+
+    /// GH #64: the signature level is editable in the TUI, and the value-hint
+    /// line lists the four levels.
+    #[test]
+    fn signature_mode_row_cycles_and_persists() {
+        let mut app = temp_app("signature-mode");
+        while app.selected_spec().key != "signature_mode" {
+            handle_key(&mut app, press(KeyCode::Char('j')));
+        }
+        let out = frame_size(&mut app, 80, 30);
+        assert!(
+            out.contains("developer, school, regular, official"),
+            "signature levels not offered:\n{out}"
+        );
+        assert!(
+            out.contains("developer (default)"),
+            "default level not shown:\n{out}"
+        );
+
+        handle_key(&mut app, press(KeyCode::Right));
+        let written = std::fs::read_to_string(app.path()).unwrap();
+        assert!(
+            written.contains("signature_mode = \"school\""),
+            "cycle right must persist the next level:\n{written}"
+        );
+    }
+
+    /// The TUI choice list is the server's own target list — no second copy
+    /// to drift.
+    #[test]
+    fn game_target_choices_come_from_the_server_list() {
+        let spec = SETTINGS
+            .iter()
+            .find(|s| s.key == "game_target")
+            .expect("game_target setting");
+        let SettingKind::Enum { choices, .. } = spec.kind else {
+            panic!("game_target must be an enum setting");
+        };
+        assert_eq!(choices, crate::config::LspConfig::GAME_TARGETS);
     }
 
     #[test]

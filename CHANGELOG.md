@@ -13,6 +13,28 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Added
+- **`signature_mode` — choose which `SIG_*` defines are live (#64)** — the LSP
+  used to define `SIG_OFFICIAL`, `SIG_REGULAR`, `SIG_SCHOOL` and
+  `SIG_DEVELOPER` unconditionally, so a plugin could never be analysed the way
+  it compiles once signed. Openplanet defines a signature macro "when the
+  current signature level is equal or below their respective level", so the
+  levels are cumulative: `official` → `SIG_OFFICIAL`; `regular` → + 
+  `SIG_REGULAR`; `school` → + `SIG_SCHOOL`; `developer` → all four. The new
+  `signature_mode` key (`.openplanet-lsp.toml`, user config,
+  `initializationOptions`, config TUI) defaults to `developer` — exactly the
+  old set — so nothing moves until you opt in. Aliases `dev` / `reg` / the
+  `SIG_*` token itself are accepted; an unknown value warns and keeps
+  `developer`, falling back permissive because masking code out is what
+  manufactures undefined-identifier errors. `defines` overrides still get the
+  last word, so `defines = ["-SIG_DEVELOPER"]` works on top of any level.
+- **`check --game-target NAME` and `check --signature MODE` (#64)** — the two
+  selectors are now settable per run, for CI that asks "does this still
+  compile as Regular on MP4?". Both ride the `initializationOptions` layer, so
+  the define set is re-derived AND the typedb variant / game JSON re-probe
+  follows the target (GH #45); both reject an unknown value with a usage error
+  naming the valid set, and neither can swallow a following flag (GH #62).
+
 ### Fixed
 - **`check` no longer undoes `defines` removals of manifest defines (B026)** —
   `run_check` re-applied `info.toml`'s `[script].defines` and the
