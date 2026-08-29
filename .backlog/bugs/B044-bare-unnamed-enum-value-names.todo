@@ -1,8 +1,8 @@
 ---
-complexity: medium
+complexity: high
 created_at: "2026-08-29T15:27:25Z"
 depends_on: []
-estimate_hours: 1
+estimate_hours: 6
 id: B044
 priority: medium
 status: pending
