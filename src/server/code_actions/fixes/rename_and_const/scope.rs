@@ -423,7 +423,10 @@ pub fn params_close_paren(tokens: &[Token], from: u32) -> Option<Span> {
         match tok.kind {
             TokenKind::LParen => depth += 1,
             TokenKind::RParen => {
-                depth -= 1;
+                // `checked_sub` rather than `-=`: this runs inside a
+                // code-action request, where an arithmetic panic would take
+                // the language server down for every later request.
+                depth = depth.checked_sub(1)?;
                 if depth == 0 {
                     return Some(tok.span);
                 }

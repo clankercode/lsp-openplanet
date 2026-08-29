@@ -556,6 +556,60 @@ mod tests {
         assert_eq!(candidates[0].fix.title, "Rename the shadowing `x` to `x2`");
     }
 
+    // ── Source-text hazards ──────────────────────────────────────────────
+
+    #[test]
+    fn a_string_literal_holding_the_name_is_not_renamed() {
+        // The analysis masks literals to same-length blanks, so no `Ident`
+        // token ever lands inside one — assert it, because the whole
+        // occurrence set depends on that.
+        assert_eq!(
+            fixed(r#"void f() { int x = 1; { int x = 2; print("x = " + x); } }"#),
+            r#"void f() { int x = 1; { int x2 = 2; print("x = " + x2); } }"#
+        );
+    }
+
+    #[test]
+    fn a_comment_holding_the_name_is_not_renamed() {
+        assert_eq!(
+            fixed("void f() { int x = 1; { int x = 2; /* x */ x++; // x\n } }"),
+            "void f() { int x = 1; { int x2 = 2; /* x */ x2++; // x\n } }"
+        );
+    }
+
+    #[test]
+    fn multibyte_text_before_the_declaration_does_not_shift_the_edits() {
+        // Spans are byte offsets and LSP positions are UTF-16 columns, so
+        // a non-ASCII prefix is where an off-by-one would show up.
+        assert_eq!(
+            fixed("void f() { /* héllo ✓ */ int x = 1; { int x = 2; x++; } }"),
+            "void f() { /* héllo ✓ */ int x = 1; { int x2 = 2; x2++; } }"
+        );
+    }
+
+    #[test]
+    fn crlf_line_endings_are_handled() {
+        assert_eq!(
+            fixed("void f() {\r\n    int x = 1;\r\n    {\r\n        int x = 2;\r\n        x++;\r\n    }\r\n}"),
+            "void f() {\r\n    int x = 1;\r\n    {\r\n        int x2 = 2;\r\n        x2++;\r\n    }\r\n}"
+        );
+    }
+
+    #[test]
+    fn a_truncated_or_unbalanced_source_never_panics() {
+        // `materialize` runs inside `textDocument/codeAction`; a panic
+        // there takes the server down for every later request.
+        for src in [
+            "void f() { int x = 1; { int x = 2; x++;",
+            "void f() { int x = 1; { int x = 2; }",
+            "void f() { int x = 1; { { int x = 2; x++; }",
+            "void f( { int x = 1; { int x = 2; } }",
+            "void f() { int x = 1; { int x = 2; x++; } } }",
+        ] {
+            let _ = shadow_fixes(src);
+        }
+    }
+
     #[test]
     fn describe_and_materialize_agree() {
         // The seam declares `materialize` total over everything `describe`
