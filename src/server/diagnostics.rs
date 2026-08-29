@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use tower_lsp::lsp_types::*;
 
 use crate::analysis::unused::UnusedDeclaration;
@@ -6,6 +8,9 @@ use crate::config::{InactiveLevel, LspConfig, UnusedLevel};
 use crate::symbols::SymbolTable;
 use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticSeverity};
 use crate::typedb::TypeIndex;
+use crate::workspace::manifest::{
+    DiagSeverity, Manifest, ManifestAnchor, ManifestDiagnostic, ManifestWorkspace,
+};
 
 /// The `source` field on every diagnostic this server publishes. Code
 /// actions key on it so another server's diagnostics can never drive our
@@ -52,15 +57,19 @@ pub fn missing_required_dependency_diagnostics(dependencies: &[String]) -> Vec<D
         .collect()
 }
 
-/// Manifest diagnostics, including unresolved required plugin dependencies.
-/// Kept together so replacing the LSP diagnostic set never drops TOML errors.
-pub fn compute_manifest_diagnostics(
-    uri: &Url,
+/// Every diagnostic that belongs on an info.toml: the manifest rules plus
+/// unresolved required plugin dependencies. Kept together so replacing the
+/// published set never drops one kind while refreshing the other.
+///
+/// Takes the workspace root explicitly. The URI a client opened may be a
+/// symlink alias (dips++-all layout), so it is publication identity only —
+/// never the directory `exports` entries resolve against.
+pub fn compute_manifest_diagnostics_in_workspace(
     source: &str,
-    config: &LspConfig,
+    workspace: &ManifestWorkspace<'_>,
     missing_required_dependencies: &[String],
 ) -> Vec<Diagnostic> {
-    let mut diagnostics = compute_diagnostics(uri, source, config, None);
+    let mut diagnostics = manifest_rule_diagnostics(source, Some(workspace));
     diagnostics.extend(missing_required_dependency_diagnostics(
         missing_required_dependencies,
     ));
@@ -79,7 +88,7 @@ pub fn compute_diagnostics_from_analysis(
     let source = analysis.source.as_str();
 
     if uri.path().ends_with("info.toml") {
-        compute_toml_diagnostics(source, &mut diagnostics);
+        diagnostics.extend(manifest_diagnostics_for_uri(uri, source));
         return diagnostics;
     }
 
@@ -125,32 +134,80 @@ pub fn compute_diagnostics_from_analysis(
     diagnostics
 }
 
-fn compute_toml_diagnostics(source: &str, diagnostics: &mut Vec<Diagnostic>) {
-    use crate::workspace::manifest::Manifest;
+/// Every info.toml rule, as LSP diagnostics: a TOML syntax error, or the
+/// findings of [`Manifest::validate`].
+///
+/// B040: `validate` was written but never called, so a manifest that stops
+/// the plugin loading in-game produced no editor signal at all. This is the
+/// one place its findings become diagnostics; the LSP publish path and CLI
+/// `check` both come through here, so they cannot drift apart.
+///
+/// `workspace` is `None` when the manifest has no directory we can stat —
+/// the export rules are then skipped (see [`Manifest::validate`]).
+pub fn manifest_rule_diagnostics(
+    source: &str,
+    workspace: Option<&ManifestWorkspace<'_>>,
+) -> Vec<Diagnostic> {
+    let to_diagnostic = |diag: ManifestDiagnostic| Diagnostic {
+        range: manifest_range(source, &diag.anchor),
+        severity: Some(match diag.severity {
+            // A plugin that cannot load is not a passing check: Error here
+            // is also what makes CLI `check` exit non-zero.
+            DiagSeverity::Error => DiagnosticSeverity::ERROR,
+            DiagSeverity::Warning => DiagnosticSeverity::WARNING,
+        }),
+        message: diag.message,
+        source: Some(DIAGNOSTIC_SOURCE.to_string()),
+        code: Some(NumberOrString::String("manifest".to_string())),
+        ..Default::default()
+    };
     match Manifest::parse(source) {
-        Ok(manifest) => {
-            // Can't validate export file paths without workspace root here,
-            // but can check for missing required fields
-            if manifest.meta.version.is_none() {
-                diagnostics.push(Diagnostic {
-                    range: Range::new(Position::new(0, 0), Position::new(0, 1)),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: "Missing required field: [meta].version".to_string(),
-                    source: Some("openplanet-lsp".to_string()),
-                    ..Default::default()
-                });
-            }
-        }
-        Err(diag) => {
-            diagnostics.push(Diagnostic {
-                range: Range::new(Position::new(0, 0), Position::new(0, 1)),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: diag.message,
-                source: Some("openplanet-lsp".to_string()),
-                ..Default::default()
-            });
-        }
+        Ok(manifest) => manifest
+            .validate(workspace)
+            .into_iter()
+            .map(to_diagnostic)
+            .collect(),
+        // A manifest we cannot parse is reported, not skipped: silence here
+        // reads as "your info.toml is fine" while the game refuses to load it.
+        Err(parse_error) => vec![to_diagnostic(parse_error)],
     }
+}
+
+/// Byte-range anchor → LSP range. Both ends are clamped into `source` by
+/// [`manifest_span::anchor_range`], so this cannot produce an out-of-bounds
+/// position.
+fn manifest_range(source: &str, anchor: &ManifestAnchor) -> Range {
+    let span = crate::workspace::manifest_span::anchor_range(source, anchor);
+    Range::new(
+        offset_to_position(source, span.start),
+        offset_to_position(source, span.end),
+    )
+}
+
+/// The plugin root a manifest URI implies: info.toml sits AT the plugin
+/// root, so its parent directory is that root by definition. `None` for a
+/// URI with no local path — a `.op` archive entry or an unsaved buffer,
+/// where there is no directory to resolve `exports` against.
+fn manifest_workspace_root(uri: &Url) -> Option<PathBuf> {
+    let path = uri.to_file_path().ok()?;
+    path.parent().map(Path::to_path_buf)
+}
+
+/// Manifest rules for a document addressed by URI: the plugin root and the
+/// loader's default file search paths are derived from the URI itself.
+///
+/// The LSP never overrides those search paths; the CLI can
+/// (`--plugin-files-search-path`) and calls [`manifest_rule_diagnostics`]
+/// directly with its own.
+pub fn manifest_diagnostics_for_uri(uri: &Url, source: &str) -> Vec<Diagnostic> {
+    let root = manifest_workspace_root(uri);
+    let search_paths =
+        crate::workspace::load::DependencySearch::with_defaults().plugin_files_search_paths;
+    let workspace = root.as_deref().map(|root| ManifestWorkspace {
+        root,
+        plugin_files_search_paths: &search_paths,
+    });
+    manifest_rule_diagnostics(source, workspace.as_ref())
 }
 
 /// Unused-declaration warnings for one file of a snapshot, converted to
@@ -350,11 +407,14 @@ mod tests {
 
     #[test]
     fn manifest_diagnostics_preserve_toml_and_missing_dependency_errors() {
-        let uri = Url::parse("file:///tmp/info.toml").unwrap();
-        let diagnostics = compute_manifest_diagnostics(
-            &uri,
+        let search = [std::path::PathBuf::from("src")];
+        let workspace = ManifestWorkspace {
+            root: Path::new("/tmp"),
+            plugin_files_search_paths: &search,
+        };
+        let diagnostics = compute_manifest_diagnostics_in_workspace(
             "[meta]\nname = \"Missing Version\"\n",
-            &LspConfig::default(),
+            &workspace,
             &["MissingDep".to_string()],
         );
         assert!(diagnostics
@@ -363,6 +423,57 @@ mod tests {
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("MissingDep")));
+    }
+
+    /// B040: the manifest seam both `check` and the LSP publish through.
+    /// Severity is the contract with the CLI exit code — Error fails a run,
+    /// Warning does not — so pin it here rather than only end to end.
+    #[test]
+    fn manifest_rule_severities_map_error_and_warning() {
+        let source = "[meta]\nname = \"T\"\nperms = \"full\"\n";
+        let diagnostics = manifest_rule_diagnostics(source, None);
+        let by_message = |needle: &str| {
+            diagnostics
+                .iter()
+                .find(|d| d.message.contains(needle))
+                .unwrap_or_else(|| panic!("no diagnostic mentioning {needle}: {diagnostics:?}"))
+        };
+        assert_eq!(
+            by_message("version").severity,
+            Some(DiagnosticSeverity::ERROR),
+            "a plugin that cannot load is not a passing check"
+        );
+        assert_eq!(
+            by_message("deprecated").severity,
+            Some(DiagnosticSeverity::WARNING)
+        );
+        for diagnostic in &diagnostics {
+            assert_eq!(diagnostic.source.as_deref(), Some(DIAGNOSTIC_SOURCE));
+            assert_eq!(
+                diagnostic.code,
+                Some(NumberOrString::String("manifest".into()))
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_manifest_produces_no_rule_diagnostics() {
+        let source = "[meta]\nname = \"T\"\nversion = \"1.0\"\n";
+        assert_eq!(manifest_rule_diagnostics(source, None), Vec::new());
+    }
+
+    /// The manifest URI decides the plugin root, because info.toml sits AT
+    /// the root. A URI with no local path (a `.op` entry) yields none, and
+    /// the export rules are then skipped rather than guessed at.
+    #[test]
+    fn manifest_workspace_root_is_the_manifest_directory() {
+        let uri = Url::parse("file:///plugins/Counter/info.toml").unwrap();
+        assert_eq!(
+            manifest_workspace_root(&uri).as_deref(),
+            Some(Path::new("/plugins/Counter"))
+        );
+        let uri = Url::parse("untitled:Untitled-1").unwrap();
+        assert_eq!(manifest_workspace_root(&uri), None);
     }
 
     fn dead_analysis(source: &str) -> crate::analysis::DocumentAnalysis {
