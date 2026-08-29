@@ -195,10 +195,12 @@ mod tests {
             ("int", "0"),
             ("int8", "0"),
             ("int16", "0"),
+            ("int32", "0"),
             ("int64", "0"),
             ("uint", "0"),
             ("uint8", "0"),
             ("uint16", "0"),
+            ("uint32", "0"),
             ("uint64", "0"),
             ("bool", "false"),
             ("float", "0.0f"),
@@ -269,6 +271,14 @@ mod tests {
         assert_eq!(
             fixed("int f() {\n    g();\n}"),
             "int f() {\n    g();\n    return 0;\n}"
+        );
+    }
+
+    #[test]
+    fn strings_and_comments_cannot_masquerade_as_the_body_close_brace() {
+        assert_eq!(
+            fixed("int f() {\n    string marker = \"}\";\n    // } is not the body close\n}"),
+            "int f() {\n    string marker = \"}\";\n    // } is not the body close\n    return 0;\n}"
         );
     }
 

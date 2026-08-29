@@ -135,6 +135,16 @@ mod tests {
     }
 
     #[test]
+    fn dead_tail_with_strings_and_comments_is_deleted_whole() {
+        assert_eq!(
+            fixed(
+                "void f() {\n    return;\n    string marker = \"} // not syntax\"; // dead\n    // still part of the dead run\n    int x = 1;\n}"
+            ),
+            "void f() {\n    return;\n}"
+        );
+    }
+
+    #[test]
     fn dead_tail_after_break_is_deleted() {
         assert_eq!(
             fixed("void f() {\n    while (true) {\n        break;\n        int x = 1;\n    }\n}"),

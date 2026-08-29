@@ -77,7 +77,10 @@ fn truncated_literal(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<Stri
         return None;
     };
     let truncated = value.trunc();
-    if !truncated.is_finite() || truncated < i64::MIN as f64 || truncated > i64::MAX as f64 {
+    // `i64::MAX as f64` rounds up to 2^63, the first out-of-range value,
+    // so the upper comparison must be exclusive. The lower bound is exactly
+    // representable and remains valid.
+    if !truncated.is_finite() || truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
         return None;
     }
     Some((truncated as i64).to_string())
@@ -375,6 +378,36 @@ mod tests {
     }
 
     #[test]
+    fn i64_float_boundaries_only_offer_faithful_literal_rewrites() {
+        assert_eq!(
+            fix_titles("void f() { int64 n = 9223372036854775808.0; }"),
+            vec!["Cast the initializer to `int64`".to_string()],
+            "2^63 is outside the i64 range even though i64::MAX rounds to it as f64"
+        );
+
+        let greatest_below = "void f() { int64 n = 9223372036854774784.0; }";
+        assert_eq!(
+            fix_titles(greatest_below),
+            vec![
+                "Cast the initializer to `int64`".to_string(),
+                "Change the literal `9223372036854774784.0` to `9223372036854774784`".to_string(),
+            ]
+        );
+        assert_eq!(
+            apply(greatest_below, FAMILY_NAME, "Change the literal"),
+            "void f() { int64 n = 9223372036854774784; }"
+        );
+
+        // The checker classifies a negated literal as a non-literal unary
+        // expression. At the exactly representable lower bound, the public
+        // action set therefore remains the safe cast alone.
+        assert_eq!(
+            fix_titles("void f() { int64 n = -9223372036854775808.0; }"),
+            vec!["Cast the initializer to `int64`".to_string()]
+        );
+    }
+
+    #[test]
     fn each_declarator_in_a_multi_declarator_statement_is_fixed_independently() {
         assert_eq!(count("void f() { int a = 3.7, b = 4.2; }", FAMILY_NAME), 4);
         assert_eq!(
@@ -407,6 +440,23 @@ mod tests {
         ] {
             assert_eq!(apply(source, FAMILY_NAME, "Cast"), fixed);
         }
+    }
+
+    #[test]
+    fn active_preprocessor_branch_edits_the_original_source_offset() {
+        let source = "#if NEVER\n\
+void inactive() { string padding = \"3.7 and }\"; }\n\
+#else\n\
+void active() { int n = 3.7; }\n\
+#endif\n";
+        assert_eq!(
+            apply(source, FAMILY_NAME, "Cast"),
+            "#if NEVER\n\
+void inactive() { string padding = \"3.7 and }\"; }\n\
+#else\n\
+void active() { int n = int(3.7); }\n\
+#endif\n"
+        );
     }
 
     // ── Metadata ──────────────────────────────────────────────────────────
