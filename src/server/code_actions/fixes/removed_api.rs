@@ -527,6 +527,55 @@ mod tests {
         }));
     }
 
+    /// End-to-end, the way the editor drives it: ask
+    /// `textDocument/codeAction` at the DIAGNOSTIC'S OWN RANGE for the real
+    /// `awaitable.WithRunContext` finding, and assert that NO action comes
+    /// back. That is this family's actual behaviour today — every producer
+    /// in the tree sets `replacement: None` — and asserting it through the
+    /// handler is what proves the "never offer a fix you cannot make" rule
+    /// holds where the user meets it, not just inside `describe`.
+    #[test]
+    fn requesting_at_the_diagnostic_range_offers_no_action_for_the_real_finding() {
+        use crate::server::code_actions::{code_actions, CodeActionRequest};
+        use crate::server::diagnostics::span_to_range;
+        use tower_lsp::lsp_types::{CodeActionContext, CodeActionOrCommand};
+
+        let (analysis, workspace, uri) = ctx_for(AWAITABLE);
+        let ctx = FixContext {
+            uri: &uri,
+            analysis: &analysis,
+            workspace: &workspace,
+            type_index: Some(typedb()),
+            files: WorkspaceFileResolver::empty(),
+        };
+        let found = findings(&ctx, None);
+        assert_eq!(found.len(), 1, "test premise: the finding is published");
+        let range = span_to_range(&analysis.source, found[0].span);
+
+        let files = [(uri.clone(), &analysis)];
+        let titles: Vec<_> = code_actions(&CodeActionRequest {
+            uri: &uri,
+            analysis: &analysis,
+            range,
+            context: &CodeActionContext::default(),
+            workspace: &workspace,
+            type_index: Some(typedb()),
+            files: WorkspaceFileResolver::new(&files),
+            lazy_edits: false,
+        })
+        .into_iter()
+        .filter_map(|action| match action {
+            CodeActionOrCommand::CodeAction(action) => Some(action.title),
+            CodeActionOrCommand::Command(_) => None,
+        })
+        .filter(|title| title.contains("WithRunContext"))
+        .collect();
+        assert!(
+            titles.is_empty(),
+            "the migration is not a span swap, so nothing may be offered; got {titles:?}"
+        );
+    }
+
     /// The seam re-enters a family by name on `codeAction/resolve`; a
     /// renamed family silently stops resolving.
     #[test]

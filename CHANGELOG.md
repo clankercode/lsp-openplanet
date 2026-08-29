@@ -14,6 +14,21 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **Quick fixes for unused declarations** (B036) — an unused local or
+  parameter now offers an edit, not just a squiggle. Prefixing the name with
+  `_` is offered for both and is the preferred fix for a **parameter**, where
+  deleting it would change the signature and every call site. A **local** also
+  offers removal, and neither fix is preferred there because removal is lossy.
+
+  Removal is withheld wherever it could lose something: an initializer that is
+  not a literal gets no removal action at all, except a **call**, which is kept
+  as a statement (`int x = Foo();` becomes `Foo();`) rather than silently
+  dropped. A statement declaring several names, a `for` initializer, and an
+  unbraced branch body are never removed either — in the last two the
+  declaration's `;` is structural, so deleting it would break the code. A name
+  that already starts with `_` is offered nothing, and file-level declarations
+  and class fields are out of scope.
+
 - **Inactive `#if` branches are greyed out in the editor (`inactive_regions`)**
   — code the current defines switch off now gets a HINT diagnostic tagged
   `Unnecessary` over each dead body, so an editor fades it the way it fades
