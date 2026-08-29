@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T09:47:38Z"
 depends_on: []
 estimate_hours: 4
 id: B031
 priority: medium
+started_at: null
 status: pending
 tags: []
 title: 'Grey out inactive #if regions: LSP-only Unnecessary/Hint diagnostics for preprocessor-dead code'
@@ -12,3 +14,82 @@ updated_at: "2026-08-29T09:47:38Z"
 ---
 
 Grey out inactive #if regions: LSP-only Unnecessary/Hint diagnostics for preprocessor-dead code
+
+Requested 2026-08-29 by Max, follow-up to B030: can an IDE grey out code that
+is dead because of the current defines, using the same Unnecessary tag?
+
+## Approach
+`DiagnosticTag::UNNECESSARY` on a HINT-severity diagnostic spanning each
+inactive region. VS Code fades the range (`editor.showUnused`) and HINT keeps
+it out of the Problems panel. This is what clangd does for `#if 0` blocks.
+The non-portable alternatives (clangd's custom
+`textDocument/inactiveRegions` notification, a bespoke semantic-token
+modifier) only work in one client each — not worth it. B030 already ships the
+tag plumbing.
+
+## Gap
+`preprocess()` (src/preprocessor/filter.rs:75) masks inactive lines with
+spaces, preserving byte offsets exactly, but `PreprocessResult`
+(src/preprocessor/filter.rs:29) carries only `masked_source` + `errors` — the
+per-line mask decision is discarded. The filter must also emit the regions.
+
+## Design calls (agreed with Max)
+1. LSP-only, NOT `check`. A plugin with hundreds of `#if MP4` lines would
+   spew hints into CLI output and the TUI, and HINT does not save us there —
+   `check` prints hints. Call the new emitter only from the two server
+   sites in src/server/mod.rs (sharded + non-sharded), never from
+   `run_check` in src/cli/mod.rs.
+2. Body only, not the directive lines. `#if` / `#else` / `#endif` stay at
+   normal weight; only the dead body is faded. Matches clangd and keeps the
+   structure readable.
+3. One diagnostic per coalesced region, outermost only. A nested `#if`
+   inside an already-dead block must not stack a second overlapping range.
+
+## Plan
+- `PreprocessResult` gains `inactive_regions: Vec<Span>` — contiguous dead
+  bodies, outermost only, directive lines excluded.
+- New `InactiveLevel { Ignore, Hint, Info }` config enum, default `Hint`,
+  resolved through the same ladder as `unused` (TOML key, user config,
+  initializationOptions, and a CLI flag only insofar as it is a config key).
+  Deliberately no warn/error: a dead branch is dead by design, not a defect,
+  and `error` would let one key fail `check` on every `#if MP4`.
+- Emitter builds one HINT/INFO diagnostic per region, tagged UNNECESSARY,
+  code `inactive-region`, message naming the condition that is off.
+- VS Code extension: `openplanetLsp.inactiveRegions` enum, unset default,
+  same "only forward what the user set" contract as B030.
+
+## Test plan (TDD, red first)
+Preprocessor (pure, no LSP):
+- simple `#if OFF` body → one region covering the body only; the `#if` and
+  `#endif` lines are NOT in it.
+- `#if ON / #else / #endif` → the else body is the region; and the mirror
+  case `#if OFF` → the if body is the region, else body is not.
+- `#elif` chains: exactly the non-taken arms are regions; the taken arm is
+  never a region (including when the taken arm is an `#elif`).
+- nested `#if OFF { #if ON ... }` → ONE outermost region, not two.
+- nested `#if ON { #if OFF ... }` → the inner body only.
+- adjacent dead blocks separated by a live line → two regions, not coalesced.
+- adjacent dead lines inside one block → one region, not per-line.
+- unterminated `#if` at EOF → region runs to EOF, no panic.
+- empty dead body (`#if OFF` immediately followed by `#endif`) → no
+  zero-width region emitted.
+- byte offsets round-trip: every region span slices out of the ORIGINAL
+  source (not the masked one) and every byte inside it is masked in
+  `masked_source` (guards offset drift).
+- CRLF and multi-byte content inside a dead body → spans stay on char
+  boundaries.
+
+Server:
+- level map: Ignore → no diagnostics, Hint → HINT, Info → INFORMATION.
+- every emitted diagnostic carries `DiagnosticTag::UNNECESSARY` and code
+  `inactive-region`, at both levels.
+- generalise over what is dead: a function body, a whole function, a class
+  member, a global, and an `#if` inside a namespace.
+- CLI guard (the point of design call 1): `check` output on a fixture with a
+  dead `#if` must contain NO inactive-region diagnostic at any level, and
+  exit 0.
+- ladder: TOML key / user config / initializationOptions each resolve it,
+  workspace beats user, init options beat both (mirrors the B030 tests).
+
+Extension (vitest): unset/empty/whitespace forwards nothing; each valid level
+forwards verbatim; invalid dropped.
