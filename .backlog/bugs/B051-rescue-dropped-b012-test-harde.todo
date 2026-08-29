@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T20:02:56Z"
 depends_on: []
 estimate_hours: 1
 id: B051
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Rescue dropped B012 test-hardening: config ladder end-to-end coverage stranded on an unmerged branch'
@@ -24,3 +26,79 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by the coordinator during worktree cleanup, 2026-08-30. Not a code
+defect — real, finished work that was never merged and would have been lost to
+anyone who did not go looking.
+
+## What exists
+Branch `review/b012-retrospective` (tip `d7aca73`), two commits ahead of
+master, never merged:
+
+- `7e68eb6` test(unused): harden callback configuration coverage
+- `d7aca73` test(unused): make callback exemption regression effective
+
+Diff vs master: `src/analysis/unused.rs` (+43/-24 in tests) and
+`src/config.rs` (+140). Its worktree has been removed; **the branch is
+preserved** and is the only copy.
+
+## Why it is worth rescuing
+Both commits attack the failure mode where a test passes whether or not the
+feature works — the same class of vacuous-green this session hit on B040.
+Concretely:
+
+- `an_empty_callback_list_is_a_no_op` asserted only `["Dead"]`. It now
+  compares the empty-config run against a genuinely unconfigured run AND keeps
+  a positive control, so it can no longer pass if the config path is skipped
+  entirely.
+- `non_matching_callback_patterns_still_warn` and the class/namespace
+  exemption tests gained a `ConfiguredSentinel` free function that MUST be
+  exempted. Before, every one of them would have passed if the configured
+  callback list were ignored outright — they only checked that something was
+  still warned.
+- `configured_callback_exempts_the_function_and_its_params` gained a body, so
+  the function is not trivially empty.
+
+The `config.rs` half adds `unused_callbacks_load_wiring_end_to_end`:
+public-seam coverage of the whole loading ladder (user-only, workspace,
+parent/root, malformed), each scenario in a SUBPROCESS with a fake HOME so it
+cannot race sibling tests. The pre-existing coverage deliberately tested the
+pure resolver instead, its comment noting that mutating $HOME in-process races
+other tests. That subprocess pattern is also the right shape for the flake
+class B032 fixed.
+
+## Why this is now aligned, not stale
+The branch predates B017, which rewrote much of `config.rs`. But its
+assertions are the behaviour B017 ESTABLISHED, not the behaviour B017 removed:
+`workspace overrides user`, `root must override parent`, `parent must
+override user when the root omits the key`, and — verbatim B017's second
+defect — `malformed unused_callbacks must not discard a sibling key`.
+So this is independent end-to-end confirmation of B017's fix at the public
+seam, which B017 covered at the resolver level.
+
+## Work
+- `git merge-tree master review/b012-retrospective` conflicts in
+  `src/config.rs` (only there; `unused.rs` is clean). Expected: B017/B019
+  rewrote that test module. Resolve by taking master's structure and
+  re-expressing these tests against it — do NOT resurrect the branch's version
+  of any function B017 changed.
+- Verify each rescued assertion still describes current behaviour. Where one
+  contradicts B017, B017 wins and the assertion is rewritten to match, with a
+  note saying which and why.
+- Confirm the subprocess harness still works after B032's env-lock changes —
+  B032 fixed a race on `OPENPLANET_LSP_PACKAGE_MANAGER` where readers never
+  took the test env lock. These tests use two env vars of their own
+  (`OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_CHILD`/`_ROOT`); check they
+  participate correctly rather than reintroducing the same race.
+- Delete the branch once merged.
+
+## Gate
+Pure test-only change: FP fixtures must be byte-identical, `just test-hermetic`
+green, and the suite up by exactly the rescued tests. Note the subprocess
+tests spawn the test binary — confirm they stay hermetic and honour the
+2-thread cap.
+
+## Related
+B012 (the task this reviewed; already marked done), B017 (config precedence +
+the sibling-key discard), B032 (test env-var race), B040 (the vacuous-green
+lesson that made this worth rescuing rather than deleting).
