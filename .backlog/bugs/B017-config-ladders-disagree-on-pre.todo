@@ -1,4 +1,6 @@
 ---
+claimed_at: "2026-08-29T13:30:16Z"
+claimed_by: cli-user
 completed_at: null
 complexity: medium
 created_at: "2026-08-23T15:53:23Z"
@@ -6,11 +8,11 @@ depends_on: []
 estimate_hours: 4
 id: B017
 priority: high
-started_at: null
-status: pending
+started_at: "2026-08-29T13:30:16Z"
+status: in_progress
 tags: []
 title: Config ladders disagree on precedence; one bad key discards whole file
-updated_at: "2026-08-23T15:53:23Z"
+updated_at: "2026-08-29T13:30:16Z"
 ---
 Found while coordinating the GH #55/56/58/59/60 batch, 2026-08-24. Verified by
 reading src/config.rs on master @ 95d1d04. Pre-existing; not a regression.
