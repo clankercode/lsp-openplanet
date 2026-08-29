@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-29T16:07:12Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T17:29:06Z"
 complexity: high
 created_at: "2026-08-29T15:27:25Z"
 depends_on: []
+duration_minutes: 81.91061600663333
 estimate_hours: 6
 id: B044
 priority: medium
 started_at: "2026-08-29T16:07:12Z"
-status: in_progress
+status: done
 tags: []
 title: Bare unnamed-enum value names resolve in the LSP but are rejected by the game (~261 names)
-updated_at: "2026-08-29T16:07:12Z"
+updated_at: "2026-08-29T17:29:06Z"
 ---
 Found by the B016 lane while probing the fixture against the live game,
 2026-08-30. PRE-EXISTING false negative; B016 made it uniform rather than
