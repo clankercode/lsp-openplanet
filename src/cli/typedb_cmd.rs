@@ -588,7 +588,24 @@ fn run_refresh(args: &[String]) -> i32 {
         core: into.join(file_name_of(&source.core)),
         game: into.join(file_name_of(&source.game)),
     };
-    if let Err(err) = validate_refresh_destination(&source, &into, &target_paths) {
+    // B046: `Openplanet.h` travels with the pair. It is the only source for
+    // the module-level enums the dump's shape cannot express, so a refresh
+    // that left it behind would produce a destination that diffs non-empty
+    // against its own source and silently reintroduces those false
+    // positives. Resolved before validation so the header destination gets
+    // the same symlink refusal the two JSON files get.
+    let source_header = source
+        .core
+        .parent()
+        .map(|d| d.join(crate::typedb::index::HEADER_FILENAME))
+        .filter(|p| p.is_file());
+    let target_header = source_header
+        .as_ref()
+        .map(|_| into.join(crate::typedb::index::HEADER_FILENAME));
+
+    if let Err(err) =
+        validate_refresh_destination(&source, &into, &target_paths, target_header.as_deref())
+    {
         return fail(&err);
     }
 
@@ -640,21 +657,8 @@ fn run_refresh(args: &[String]) -> i32 {
     // Byte comparison decides what actually needs writing: an `op`-identical
     // re-dump with no symbol drift can still differ byte-wise, and a
     // byte-identical file never needs a write.
-    // B046: `Openplanet.h` travels with the pair. It is the only source for
-    // the module-level enums the dump's shape cannot express, so a refresh
-    // that left it behind would produce a destination that diffs non-empty
-    // against its own source and silently reintroduces those false
-    // positives. Included only when the source actually has one, so an
-    // install or fixture without a header still refreshes as two files.
-    let source_header = source
-        .core
-        .parent()
-        .map(|d| d.join(crate::typedb::index::HEADER_FILENAME))
-        .filter(|p| p.is_file());
-    let target_header = source_header
-        .as_ref()
-        .map(|_| into.join(crate::typedb::index::HEADER_FILENAME));
-
+    // Included only when the source actually has a header, so an install or
+    // fixture without one still refreshes as two files.
     let mut files: Vec<(&Path, &Path)> = vec![
         (source.core.as_path(), target.core.as_path()),
         (source.game.as_path(), target.game.as_path()),
@@ -730,6 +734,7 @@ fn validate_refresh_destination(
     source: &DbPair,
     into: &Path,
     target: &DbPair,
+    header_target: Option<&Path>,
 ) -> Result<(), String> {
     if let Ok(meta) = fs::symlink_metadata(into) {
         if meta.file_type().is_symlink() {
@@ -766,7 +771,14 @@ fn validate_refresh_destination(
         }
     }
 
-    for path in [&target.core, &target.game] {
+    // B046: the header is a write destination like the two JSON files, so it
+    // gets the same refusal. Missing it would leave one unguarded write path.
+    let targets = [
+        Some(target.core.as_path()),
+        Some(target.game.as_path()),
+        header_target,
+    ];
+    for path in targets.into_iter().flatten() {
         match fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(format!(
@@ -1268,7 +1280,7 @@ mod tests {
             core: link.join(CORE_DB_FILENAME),
             game: link.join("OpenplanetNext.json"),
         };
-        let err = validate_refresh_destination(&source, &link, &target).unwrap_err();
+        let err = validate_refresh_destination(&source, &link, &target, None).unwrap_err();
         assert!(err.contains("symbolic-link directory"), "{err}");
     }
 
@@ -1296,7 +1308,38 @@ mod tests {
             core: into.join(CORE_DB_FILENAME),
             game: into.join("OpenplanetNext.json"),
         };
-        let err = validate_refresh_destination(&source, &into, &target).unwrap_err();
+        let err = validate_refresh_destination(&source, &into, &target, None).unwrap_err();
+        assert!(err.contains("symbolic link destination"), "{err}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside");
+    }
+
+    /// B046: `Openplanet.h` is a refresh destination too, so it must get the
+    /// same symlink refusal the two JSON files get. Without this the header
+    /// would be the one unguarded write path in `refresh`.
+    #[test]
+    fn validate_refresh_destination_refuses_symlinked_header_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp_dir("symlink-header");
+        let source_dir = root.join("source");
+        let into = root.join("into");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&into).unwrap();
+        let outside = root.join("outside.h");
+        std::fs::write(&outside, "outside").unwrap();
+        symlink(&outside, into.join(crate::typedb::index::HEADER_FILENAME)).unwrap();
+
+        let source = DbPair {
+            core: source_dir.join(CORE_DB_FILENAME),
+            game: source_dir.join("OpenplanetNext.json"),
+        };
+        let target = DbPair {
+            core: into.join(CORE_DB_FILENAME),
+            game: into.join("OpenplanetNext.json"),
+        };
+        let header_target = into.join(crate::typedb::index::HEADER_FILENAME);
+        let err = validate_refresh_destination(&source, &into, &target, Some(&header_target))
+            .unwrap_err();
         assert!(err.contains("symbolic link destination"), "{err}");
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside");
     }
