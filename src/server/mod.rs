@@ -1496,7 +1496,12 @@ impl LanguageServer for Backend {
         let snapshot = self.snapshot_for(uri).await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
-        let files = snapshot.uri_map();
+        // Own files only, for the same reason rename uses them: a
+        // dependency plugin is a SEPARATE module, so a symbol there that
+        // merely shares a spelling is a different symbol, and reporting
+        // its occurrences as references to this one is the very
+        // false-positive class B049 exists to remove.
+        let files = snapshot.own_uri_map();
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
