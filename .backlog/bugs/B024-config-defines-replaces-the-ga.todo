@@ -1,0 +1,46 @@
+---
+complexity: medium
+created_at: "2026-08-29T04:35:19Z"
+depends_on: []
+estimate_hours: 3
+id: B024
+priority: high
+status: pending
+tags: []
+title: Config `defines` replaces the game-target defines instead of adding to them
+updated_at: "2026-08-29T04:35:19Z"
+---
+Reported by Max, 2026-08-29, from ~/src/openplanet/my-plugins/tm-editor-plus-plus.
+
+## Symptom
+`.openplanet-lsp.toml` containing `defines = ["DEV"]` leaves the analysis with
+EXACTLY `{DEV}`: TMNEXT, WINDOWS, MANIA64, SIG_* and every other target-derived
+define disappear. Every `#if TMNEXT` branch in the plugin goes dead, so real
+code is masked out and floods undefined-identifier false positives.
+
+## Cause
+src/config.rs `apply_config_file` / `apply_init_options` do
+`self.defines = defines.into_iter().collect(); self.defines_overridden = true;`
+— a whole-set replace — and `load_with_parent` then SKIPS the
+`defines_for_target(game_target)` re-derivation whenever `defines_overridden`
+is set (added for GH #36).
+
+## Expected
+A user's custom defines are ADDITIVE on top of the target-derived set. Turning
+a define OFF needs an explicit opt-out (`-NAME` / `!NAME`), not a silent wipe.
+A platform selector listed by hand (e.g. `defines = ["MP4"]` while the target
+is TMNEXT) must still leave exactly one platform family live — GH #36's
+invariant.
+
+## Second, smaller item (same report)
+The config TUI's `defines` row gives no format hint: nothing says the editor
+takes a comma-separated list, and there is no example. Same for the other
+StringList keys.
+
+## Test plan (TDD, red first)
+Red: workspace `.openplanet-lsp.toml` with `defines = ["DEV"]` -> config.defines
+contains DEV **and** TMNEXT + WINDOWS. Variants: init options; user-global file;
+parent + per-root accumulation in a multi-root workspace; `game_target = "TURBO"`
+plus `defines = ["DEV"]` -> TURBO kept, TMNEXT absent; `-TMNEXT` / `!LOGS`
+removal; `defines = ["MP4"]` under a TMNEXT target -> MP4 live, TMNEXT dead;
+manifest `[script].defines` still additive and a `-NAME` still wins over it.
