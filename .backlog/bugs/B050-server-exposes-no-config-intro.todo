@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T20:00:47Z"
 depends_on: []
 estimate_hours: 1
 id: B050
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Server exposes no config introspection: the extension cannot show which defines are actually active'
@@ -24,3 +26,66 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Deferred deliberately by the B034 lane, 2026-08-30, with the client-side seam
+already built for it. Not a regression — a capability that has never existed.
+
+## Defect
+The effective define set is computed entirely server-side and is never
+readable by any client. The extension's new defines UI (B034) can therefore
+only list **the user's own settings array**, not the set the compiler actually
+sees. Everything derived is invisible:
+
+- manifest-derived `DEPENDENCY_<ID>` defines (B019)
+- the OS/arch/build set (B028: MANIA64/MANIA32, WINDOWS/LINUX/WINDOWS_WINE)
+- the `game_target` platform selectors (TMNEXT, MP4x, TURBO, ...)
+- the signature-mode defines
+
+Verified by the B034 lane rather than assumed: `execute_command` handles only
+`openplanet.regenerateTypeDb` (capability `src/server/mod.rs:1138`, handler
+`:1708`); `openplanet-lsp config` is an interactive TUI editor
+(`src/cli/config_cmd.rs`), not a printer; and `check --format json` emits
+diagnostics plus typedb versions, with no defines. There is no path.
+
+## Consequence
+A user reading the Manage Defines checklist sees a partial truth with no
+indication it is partial. The likeliest confusion is a `#if` branch that is
+live or dead for a reason the UI cannot show — and the LSP's whole value here
+is explaining why a branch is greyed out (B031).
+
+It also blocks the honest fix for the platform-selector footgun. B034 shipped
+a client-side family-table guard (option (ii)) precisely because the client
+cannot ask the server what is active; with introspection the guard becomes a
+question rather than a duplicated constant.
+
+## Work
+- Add a server request returning the resolved define set with an ORIGIN per
+  entry (user setting / manifest dependency / OS-arch / game target /
+  signature mode), plus whether each is currently active.
+- Prefer a custom LSP request over `executeCommand` — this is a query, not a
+  mutation, and `executeCommand` responses are awkward to type.
+- Client seam already exists: `buildDefineRows` in
+  `packages/vscode-ext/src/defines.ts` already accepts a `ResolvedDefine[]`
+  carrying `derivedActive` and already produces minimal writes from it. Pass
+  the server's answer in; per the B034 lane, nothing else changes.
+- Then reconsider the duplicated `PLATFORM_FAMILIES` table in `settings.ts`
+  (mirrors `src/config.rs:1152`) — it can become a server question.
+- Do NOT re-derive the base set client-side. That was explicitly rejected in
+  B034: it would be a second implementation of precedence rules that B017,
+  B024, B026 and B028 all had to fix once already.
+
+## Test plan
+- resolved set includes each origin class, with a fixture plugin whose
+  info.toml declares a resolvable and an unresolvable optional dependency
+- a user `-NAME` entry shows the derived define as present-but-disabled, not
+  absent (remove and disable are different states — B034 made that distinction
+  visible and it must survive)
+- origins stay correct across the config precedence ladder B017 fixed
+- extension test: rows render derived entries as read-only, and no write path
+  can delete one
+
+## Related
+B034 (defines UI, the deferring lane), B019 (DEPENDENCY_ defines), B028 (OS/
+arch/build set), B031 (greyed-out inactive regions — the feature this makes
+explicable), B017 (config precedence), B039 (the other unreachable
+executeCommand, same capability surface).
