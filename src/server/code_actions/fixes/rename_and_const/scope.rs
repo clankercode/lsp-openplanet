@@ -224,8 +224,9 @@ fn collect_brace_scopes(tokens: &[Token], offset: u32, out: &mut Vec<Span>) {
 /// itself.
 ///
 /// Skips identifiers that only *look* like the local: a member name after
-/// `.` and a namespace-qualified name on either side of `::` are different
-/// symbols.
+/// `.`, a namespace-qualified name on either side of `::`, and a named
+/// argument's label (`g(w: 1)` names one of *g's* parameters, not our
+/// local) are all different symbols.
 /// `excluded` ranges (a nested redeclaration's own scope) are skipped
 /// wholesale — inside them the name belongs to the deeper binding.
 pub fn local_occurrences(
@@ -253,6 +254,9 @@ pub fn local_occurrences(
         {
             continue;
         }
+        if is_named_argument_label(tokens, idx) {
+            continue;
+        }
         if excluded
             .iter()
             .any(|(start, end)| tok.span.start >= *start && tok.span.start < *end)
@@ -262,6 +266,27 @@ pub fn local_occurrences(
         out.push(tok.span);
     }
     out
+}
+
+/// True when `tokens[idx]` is the label of an AngelScript named argument
+/// (`g(w: 1)`, `g(a, w: 1)`) — one of the CALLEE's parameter names, which
+/// happens to be spelled like our local.
+///
+/// The parser accepts a label as `Ident` `:` at the start of an argument
+/// (`Parser::parse_call_argument`), so requiring `(` or `,` before it is
+/// exactly that position. Being that specific matters: a ternary
+/// (`c ? x : y`) and a switch label (`case x:`) both put an identifier
+/// before a `:` too, and skipping either would leave a reference to a
+/// variable that no longer exists.
+fn is_named_argument_label(tokens: &[Token], idx: usize) -> bool {
+    let follows_colon = tokens
+        .get(idx + 1)
+        .is_some_and(|tok| tok.kind == TokenKind::Colon);
+    let opens_argument = idx
+        .checked_sub(1)
+        .and_then(|prev| tokens.get(prev))
+        .is_some_and(|tok| matches!(tok.kind, TokenKind::LParen | TokenKind::Comma));
+    follows_colon && opens_argument
 }
 
 /// Every declarator/parameter named `name` inside `(after, until)`,
@@ -549,6 +574,21 @@ mod tests {
         assert_eq!(
             spans.iter().map(|span| span.start).collect::<Vec<_>>(),
             vec![0, src.rfind("N.M").expect("receiver") as u32],
+        );
+    }
+
+    #[test]
+    fn occurrences_skip_named_argument_labels_only_in_argument_position() {
+        // `g(x: 1)` labels one of g's parameters; `c ? x : 1` and
+        // `case x:` are our local and must still be renamed.
+        let src = "x; g(x: 1); g(1, x: 2); c ? x : 1;";
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        let spans = local_occurrences(&analysis.tokens, src, "x", 0, src.len() as u32, &[]);
+        let starts: Vec<usize> = spans.iter().map(|span| span.start as usize).collect();
+        assert_eq!(
+            starts,
+            vec![0, src.find("x : 1").expect("ternary operand")],
+            "only the two labels may be skipped"
         );
     }
 

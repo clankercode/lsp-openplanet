@@ -281,7 +281,7 @@ fn locate_receiver_const_deletion(
         &receiver,
         callee_span.start,
     )?;
-    let deletion = sole_const_qualifier(&analysis.tokens, type_span)?;
+    let deletion = sole_const_qualifier(&analysis.tokens, source, type_span)?;
     Some((deletion, receiver))
 }
 
@@ -401,7 +401,11 @@ fn receiver_type_expr_span(
 /// Refuses when the type has zero or several `const` keywords — with two
 /// of them (`const T@ const`) it is not clear which one the diagnostic is
 /// about, and a wrong deletion silently changes a signature.
-fn sole_const_qualifier(tokens: &[crate::lexer::Token], type_span: Span) -> Option<Span> {
+fn sole_const_qualifier(
+    tokens: &[crate::lexer::Token],
+    source: &str,
+    type_span: Span,
+) -> Option<Span> {
     let consts: Vec<usize> = tokens
         .iter()
         .enumerate()
@@ -416,9 +420,19 @@ fn sole_const_qualifier(tokens: &[crate::lexer::Token], type_span: Span) -> Opti
         return None;
     };
     let next = tokens.get(idx + 1)?;
+    // Take the keyword plus the whitespace run behind it, but stop at the
+    // next token — extending all the way to it would swallow a comment
+    // (`const /* why */ C &in h`).
+    let keyword = tokens[*idx].span;
+    let mut end = keyword.end as usize;
+    let limit = next.span.start as usize;
+    let bytes = source.as_bytes();
+    while end < limit && bytes.get(end).is_some_and(u8::is_ascii_whitespace) {
+        end += 1;
+    }
     Some(Span {
-        start: tokens[*idx].span.start,
-        end: next.span.start,
+        start: keyword.start,
+        end: end as u32,
     })
 }
 
@@ -695,6 +709,19 @@ mod tests {
                 RECEIVER_TITLE
             ),
             "class C { bool M() { return true; } } void f(C@ &in h) { h.M(); }"
+        );
+    }
+
+    #[test]
+    fn dropping_the_receiver_const_keeps_a_comment_in_the_type() {
+        assert_eq!(
+            apply_titled(
+                "class C { bool M() { return true; } } \
+                 void f(const /* why */ C &in h) { h.M(); }",
+                RECEIVER_TITLE
+            ),
+            "class C { bool M() { return true; } } \
+             void f(/* why */ C &in h) { h.M(); }"
         );
     }
 
