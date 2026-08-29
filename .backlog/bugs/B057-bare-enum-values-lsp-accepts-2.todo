@@ -1,0 +1,26 @@
+---
+complexity: medium
+created_at: "2026-08-29T23:31:39Z"
+depends_on: []
+estimate_hours: 1
+id: B057
+priority: high
+status: pending
+tags: []
+title: 'Bare enum values: LSP accepts 2373 names the game answers ''No matching symbol'' for (non-global named enums)'
+updated_at: "2026-08-29T23:31:39Z"
+---
+
+# Bare enum values: LSP accepts 2373 names the game answers 'No matching symbol' for (non-global named enums)
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior
