@@ -1,14 +1,13 @@
-//! Lexical-scope machinery shared by the B038 fix families.
+//! Lexical-scope machinery: given a binding's declarator, which byte range
+//! do its references live in, and which identifier tokens in that range are
+//! actually it?
 //!
-//! The server already has two identifier-occurrence finders
-//! ([`crate::server::navigation::rename`] and
-//! [`crate::server::highlights`]) and **neither is scope-aware**: both
-//! rewrite/light-up every `Ident` token in the workspace whose text matches
-//! a bare name. That is acceptable for a highlight and tolerable for a
-//! user-driven rename where the user picks the symbol, but it is exactly
-//! wrong for the shadow fix, whose entire point is to rename the *inner*
-//! binding and leave the outer one alone. So the rename here is built on a
-//! narrow, conservative scope model instead.
+//! Built by B038 for the shadowed-variable quick fix and promoted here by
+//! B049, which made `textDocument/rename` and `textDocument/references`
+//! scope-aware. Before B049 both of those rewrote/reported every `Ident`
+//! token in the workspace whose text matched a bare name, so renaming a
+//! loop counter `i` rewrote every unrelated `i`, every `obj.i`, and both
+//! sides of every `A::i` in every open file.
 //!
 //! The model has one job: given the offset of a local's declarator, decide
 //! the half-open byte range `[decl, scope_end)` in which references to that
@@ -32,18 +31,13 @@
 //! ## Cost
 //!
 //! [`innermost_scope_end`] walks the AST and the whole token stream once
-//! per call, and a fix family calls it once per diagnostic it answers — so
+//! per call, and a caller calls it once per binding it resolves — so
 //! describing N shadow warnings in one document is O(N x tokens). Measured
 //! on a synthetic worst case (release build): 50 warnings 0.6ms, 200 6ms,
 //! 500 26ms. Real plugins sit at the other end of that curve — the five
 //! false-positive fixture plugins in `tests/fixtures/` contain **zero**
 //! shadow warnings between them — so this is a deliberate trade of a
 //! quadratic term for a model that is simple enough to be obviously right.
-//!
-//! Everything in this module is intentionally local to the B038 families.
-//! Promoting it to `navigation` so `textDocument/rename` becomes
-//! scope-aware is a worthwhile follow-up, but that would change a live
-//! request handler's behaviour and is out of this ticket's scope.
 
 use crate::lexer::{self, Span, Token, TokenKind};
 use crate::parser::ast::{
@@ -479,6 +473,120 @@ pub fn params_close_paren(tokens: &[Token], from: u32) -> Option<Span> {
     None
 }
 
+/// Span of the initialiser expression belonging to the declarator that
+/// starts at `decl_start`, if it has one.
+pub fn own_initializer_span(file: &SourceFile, decl_start: u32) -> Option<Span> {
+    let mut found = None;
+    for item in &file.items {
+        visit_item_var_decls(item, &mut |var| {
+            for declarator in &var.declarators {
+                if declarator.name.span.start == decl_start {
+                    found = declarator.init.as_ref().map(|init| init.span);
+                }
+            }
+        });
+    }
+    found
+}
+
+fn visit_item_var_decls(item: &Item, f: &mut impl FnMut(&VarDeclStmt)) {
+    match item {
+        Item::Function(func) => {
+            if let Some(body) = &func.body {
+                visit_body_var_decls(body, f);
+            }
+        }
+        Item::Class(cls) => {
+            for member in &cls.members {
+                match member {
+                    ClassMember::Method(m)
+                    | ClassMember::Constructor(m)
+                    | ClassMember::Destructor(m) => {
+                        if let Some(body) = &m.body {
+                            visit_body_var_decls(body, f);
+                        }
+                    }
+                    ClassMember::Property(prop) => {
+                        for body in prop
+                            .getter
+                            .iter()
+                            .chain(prop.setter.iter().map(|(_, body)| body))
+                        {
+                            visit_body_var_decls(body, f);
+                        }
+                    }
+                    ClassMember::Field(_) => {}
+                }
+            }
+        }
+        Item::Namespace(ns) => {
+            for nested in &ns.items {
+                visit_item_var_decls(nested, f);
+            }
+        }
+        Item::Property(prop) => {
+            for body in prop
+                .getter
+                .iter()
+                .chain(prop.setter.iter().map(|(_, body)| body))
+            {
+                visit_body_var_decls(body, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn visit_body_var_decls(body: &FunctionBody, f: &mut impl FnMut(&VarDeclStmt)) {
+    for stmt in &body.stmts {
+        visit_stmt_var_decls(stmt, f);
+    }
+}
+
+fn visit_stmt_var_decls(stmt: &Stmt, f: &mut impl FnMut(&VarDeclStmt)) {
+    match &stmt.kind {
+        StmtKind::VarDecl(var) => f(var),
+        StmtKind::Block(stmts) => {
+            for nested in stmts {
+                visit_stmt_var_decls(nested, f);
+            }
+        }
+        StmtKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            visit_stmt_var_decls(then_branch, f);
+            if let Some(branch) = else_branch {
+                visit_stmt_var_decls(branch, f);
+            }
+        }
+        StmtKind::For { init, body, .. } => {
+            if let Some(init) = init {
+                visit_stmt_var_decls(init, f);
+            }
+            visit_stmt_var_decls(body, f);
+        }
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
+            visit_stmt_var_decls(body, f)
+        }
+        StmtKind::Switch { cases, .. } => {
+            for case in cases {
+                for nested in &case.stmts {
+                    visit_stmt_var_decls(nested, f);
+                }
+            }
+        }
+        StmtKind::TryCatch {
+            try_body,
+            catch_body,
+        } => {
+            visit_stmt_var_decls(try_body, f);
+            visit_stmt_var_decls(catch_body, f);
+        }
+        _ => {}
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

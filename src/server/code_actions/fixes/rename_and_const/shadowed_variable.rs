@@ -29,9 +29,6 @@
 use tower_lsp::lsp_types::{CodeActionKind, TextEdit, WorkspaceEdit};
 
 use crate::lexer::{Span, TokenKind};
-use crate::parser::ast::{
-    ClassMember, FunctionBody, Item, SourceFile, Stmt, StmtKind, VarDeclStmt,
-};
 use crate::server::code_actions::fix::{FixContext, FixDescriptor, FixFamily};
 use crate::server::diagnostics::span_to_range;
 use crate::typecheck::{GlobalScope, TypeDiagnostic, TypeDiagnosticKind};
@@ -134,7 +131,7 @@ fn plan(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<RenamePlan> {
         // before binding the nested name. Exclude its declarator and all
         // later uses, but leave its initializer available to the parent
         // rename plan because those references still resolve to us.
-        if let Some(init) = own_initializer_span(&analysis.file, redecl) {
+        if let Some(init) = scope::own_initializer_span(&analysis.file, redecl) {
             excluded.push((redecl, init.start));
             excluded.push((init.end, end));
         } else {
@@ -144,7 +141,7 @@ fn plan(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<RenamePlan> {
     // `int x = x;` initialises from the OUTER binding — the checker types
     // the initialiser before defining the local. Rewriting it would change
     // which variable the initialiser reads.
-    if let Some(init) = own_initializer_span(&analysis.file, decl_start) {
+    if let Some(init) = scope::own_initializer_span(&analysis.file, decl_start) {
         excluded.push((init.start, init.end));
     }
 
@@ -171,121 +168,6 @@ fn plan(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<RenamePlan> {
         new_name,
         spans,
     })
-}
-
-/// Span of the initialiser expression belonging to the declarator that
-/// starts at `decl_start`, if it has one.
-fn own_initializer_span(file: &SourceFile, decl_start: u32) -> Option<Span> {
-    let mut found = None;
-    for item in &file.items {
-        visit_item_var_decls(item, &mut |var| {
-            for declarator in &var.declarators {
-                if declarator.name.span.start == decl_start {
-                    found = declarator.init.as_ref().map(|init| init.span);
-                }
-            }
-        });
-    }
-    found
-}
-
-fn visit_item_var_decls(item: &Item, f: &mut impl FnMut(&VarDeclStmt)) {
-    match item {
-        Item::Function(func) => {
-            if let Some(body) = &func.body {
-                visit_body_var_decls(body, f);
-            }
-        }
-        Item::Class(cls) => {
-            for member in &cls.members {
-                match member {
-                    ClassMember::Method(m)
-                    | ClassMember::Constructor(m)
-                    | ClassMember::Destructor(m) => {
-                        if let Some(body) = &m.body {
-                            visit_body_var_decls(body, f);
-                        }
-                    }
-                    ClassMember::Property(prop) => {
-                        for body in prop
-                            .getter
-                            .iter()
-                            .chain(prop.setter.iter().map(|(_, body)| body))
-                        {
-                            visit_body_var_decls(body, f);
-                        }
-                    }
-                    ClassMember::Field(_) => {}
-                }
-            }
-        }
-        Item::Namespace(ns) => {
-            for nested in &ns.items {
-                visit_item_var_decls(nested, f);
-            }
-        }
-        Item::Property(prop) => {
-            for body in prop
-                .getter
-                .iter()
-                .chain(prop.setter.iter().map(|(_, body)| body))
-            {
-                visit_body_var_decls(body, f);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn visit_body_var_decls(body: &FunctionBody, f: &mut impl FnMut(&VarDeclStmt)) {
-    for stmt in &body.stmts {
-        visit_stmt_var_decls(stmt, f);
-    }
-}
-
-fn visit_stmt_var_decls(stmt: &Stmt, f: &mut impl FnMut(&VarDeclStmt)) {
-    match &stmt.kind {
-        StmtKind::VarDecl(var) => f(var),
-        StmtKind::Block(stmts) => {
-            for nested in stmts {
-                visit_stmt_var_decls(nested, f);
-            }
-        }
-        StmtKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            visit_stmt_var_decls(then_branch, f);
-            if let Some(branch) = else_branch {
-                visit_stmt_var_decls(branch, f);
-            }
-        }
-        StmtKind::For { init, body, .. } => {
-            if let Some(init) = init {
-                visit_stmt_var_decls(init, f);
-            }
-            visit_stmt_var_decls(body, f);
-        }
-        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => {
-            visit_stmt_var_decls(body, f)
-        }
-        StmtKind::Switch { cases, .. } => {
-            for case in cases {
-                for nested in &case.stmts {
-                    visit_stmt_var_decls(nested, f);
-                }
-            }
-        }
-        StmtKind::TryCatch {
-            try_body,
-            catch_body,
-        } => {
-            visit_stmt_var_decls(try_body, f);
-            visit_stmt_var_decls(catch_body, f);
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]

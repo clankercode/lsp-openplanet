@@ -7,6 +7,7 @@ pub mod formatter;
 pub mod highlights;
 pub mod hover;
 pub mod inlay_hints;
+pub mod lexical_scope;
 pub mod navigation;
 pub mod scope_query;
 pub mod semantic_tokens;
