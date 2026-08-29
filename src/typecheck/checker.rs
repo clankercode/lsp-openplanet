@@ -35,9 +35,19 @@ pub enum TypeDiagnosticKind {
     /// Removed-API usage on the member path (GH #27/#28 family). The
     /// member name compiles clean today but is a deprecated no-op at
     /// runtime (e.g. `awaitable.WithRunContext`).
+    ///
+    /// `hint` is the human sentence that goes in the message. `replacement`
+    /// is the same migration as DATA, for the quick fix (B036): `Some(name)`
+    /// only where swapping the member span alone is a correct migration —
+    /// i.e. the member was renamed and the call keeps its shape. `None`
+    /// wherever the migration moves the receiver, reorders arguments, or
+    /// otherwise changes the call, because a span swap would then produce
+    /// code that compiles and silently does the wrong thing. Never parse
+    /// `hint` to recover this: prose is for humans, the edit needs data.
     RemovedApiUsage {
         member: String,
         hint: String,
+        replacement: Option<String>,
     },
     MissingReturn {
         function_name: String,
@@ -225,7 +235,9 @@ impl TypeDiagnostic {
                 object_type,
                 member,
             } => format!("type `{}` has no member `{}`", object_type, member),
-            TypeDiagnosticKind::RemovedApiUsage { member, hint } => format!(
+            // `replacement` is for the quick fix, never for the message: the
+            // published text must not move (fixture baselines depend on it).
+            TypeDiagnosticKind::RemovedApiUsage { member, hint, .. } => format!(
                 // Match the runtime deprecation text shape (OP 1.29.5
                 // ScriptRuntime): "`awaitable.WithRunContext()` is no longer
                 // valid. Use Meta::StartWithRunContext instead."
@@ -2108,6 +2120,13 @@ impl<'a> Checker<'a> {
                 kind: TypeDiagnosticKind::RemovedApiUsage {
                     member: member_name.clone(),
                     hint: "Meta::StartWithRunContext".to_string(),
+                    // No mechanical replacement: `Meta::StartWithRunContext`
+                    // is a free function taking the coroutine as an
+                    // argument, so migrating `startnew(W).WithRunContext(c)`
+                    // moves the receiver into the call. Swapping the member
+                    // span would emit `Meta::StartWithRunContext(c)` and
+                    // silently drop the coroutine, so no fix is offered.
+                    replacement: None,
                 },
             });
             return TypeRepr::Error(String::new());
@@ -3419,6 +3438,10 @@ impl<'a> Checker<'a> {
                         kind: TypeDiagnosticKind::RemovedApiUsage {
                             member: member_name.clone(),
                             hint: "Meta::StartWithRunContext".to_string(),
+                            // Same reasoning as the member-access site: the
+                            // migration moves the receiver into the call, so
+                            // there is no correct span swap.
+                            replacement: None,
                         },
                     });
                     self.walk_args(args);
@@ -10856,12 +10879,41 @@ void f() {
             .filter(|d| {
                 matches!(
                     &d.kind,
-                    TypeDiagnosticKind::RemovedApiUsage { member, hint }
+                    TypeDiagnosticKind::RemovedApiUsage { member, hint, .. }
                         if member == "WithRunContext" && hint.contains("Meta::StartWithRunContext")
                 )
             })
             .collect();
         assert_eq!(bad.len(), 1, "expected 1 RemovedApiUsage, got {:?}", diags);
+    }
+
+    /// B036: the replacement an editor needs is DATA, not prose. `hint` is
+    /// the human sentence; a quick fix must not re-parse English out of it,
+    /// so the variant carries a structured `replacement` beside it.
+    #[test]
+    fn removed_api_usage_carries_a_structured_replacement_field() {
+        let diags = check_with_typedb(
+            r#"
+            void Worker() {}
+            void Main() { startnew(Worker).WithRunContext(Meta::RunContext::AfterMainLoop); }
+            "#,
+        );
+        let found = diags.iter().find_map(|d| match &d.kind {
+            TypeDiagnosticKind::RemovedApiUsage { replacement, .. } => Some(replacement.clone()),
+            _ => None,
+        });
+        // Deliberately `None` for this member: `Meta::StartWithRunContext`
+        // is a FREE function that takes the coroutine as an argument, so
+        // `startnew(W).WithRunContext(ctx)` cannot be migrated by swapping
+        // the member span — the receiver has to move into the call. A
+        // structured replacement here would produce
+        // `Meta::StartWithRunContext(ctx)` and silently drop the coroutine.
+        assert_eq!(
+            found,
+            Some(None),
+            "expected the awaitable finding to carry `replacement: None`, got {:?}",
+            diags
+        );
     }
 
     /// Other awaitable members must NOT fire (the type still exists and

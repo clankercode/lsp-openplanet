@@ -10,9 +10,10 @@
 
 use super::fix::FixFamily;
 
+pub mod removed_api;
 pub mod string_by_value;
 
 /// The registry. Order here decides the order fixes are offered in when two
 /// families claim the same diagnostic; it does not affect which fixes the
 /// fix-all batcher keeps (see [`super::fix_all::select_non_overlapping`]).
-pub const FAMILIES: &[FixFamily] = &[string_by_value::FAMILY];
+pub const FAMILIES: &[FixFamily] = &[removed_api::FAMILY, string_by_value::FAMILY];
