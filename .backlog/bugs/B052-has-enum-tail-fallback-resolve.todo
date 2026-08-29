@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T20:16:25Z"
 depends_on: []
 estimate_hours: 1
 id: B052
 priority: high
+started_at: null
 status: pending
 tags: []
 title: has_enum tail fallback resolves namespaced enum paths the game rejects
@@ -24,3 +26,58 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by the B046 lane, 2026-08-30, while probing the game for module-level
+enum resolution. Flagged rather than fixed — deliberately out of B046's scope.
+
+## Defect
+`global_scope.rs:302-325` resolves an enum reference by falling back to a
+TAIL match on the index key. So `has_enum("Scene::ESceneCharVisNotice")`
+returns true because some key ends with `ESceneCharVisNotice`, regardless of
+whether the leading namespace path is real.
+
+The game disagrees. Live RemoteBuild probe (Trackmania + Openplanet 1.29.5,
+2026-08-30, by the B046 lane):
+
+- `ESceneCharVisNotice` bare, as a type — ACCEPTED
+- `ESceneCharVisNotice::DoubleJump` — ACCEPTED
+- `Scene::ESceneCharVisNotice` — REJECTED, `Namespace 'Scene' doesn't exist.`
+- `Enums::ESceneCharVisNotice` — REJECTED, `Namespace 'Enums' doesn't exist.`
+
+So the LSP accepts qualified paths the game rejects: FALSE NEGATIVES, the
+direction where the tool stays silent on code that will not compile. Less
+damaging than a false positive, but it is the LSP failing at its actual job.
+
+## Scope — this is NOT specific to module-level enums
+The fallback is generic to every enum in the index. B046 merely exposed it:
+after B046 lands, `Scene::ESceneCharVisNotice` resolves through this fallback
+even though B046 deliberately keys that enum with `namespace: None` precisely
+because the game only accepts it bare. The two behaviours will disagree, and
+the fallback wins.
+
+Any fix must therefore be measured across ALL enums, not just the two B046
+adds. Expect the same shape as B044: a permissive scan that has been masking
+its own inaccuracy, where narrowing it turns invisible wrong-accepts into
+visible diagnostics that then need explaining.
+
+## Work
+- Establish ground truth with a live probe BEFORE changing anything. B044's
+  method is the template: enumerate candidate qualified paths across the index,
+  submit them to the game, and classify. Do not reason from the dump about what
+  the game accepts — B046 showed that reasoning from the header alone produced
+  a confidently wrong prediction.
+- Then decide whether the fallback narrows, disappears, or becomes
+  namespace-aware, and what each option costs in false positives.
+
+## Gate
+FP fixture ERROR counts must not RISE. Narrowing this fallback can only ADD
+errors, so this is the direction that needs the most care — every new error
+must be shown to be a name the game genuinely rejects, not a name the index
+merely keys differently. Measure two binaries on the same machine at the same
+time (current baselines: 14/1485, 5/276, 2/35, 4/2, 4/4).
+
+## Related
+B046 (exposed it; explicitly did not touch it), B044 (the same class of
+permissive-scan narrowing, with the probe methodology to copy), B007 (the
+ticket the tail fallback was originally written for — check what it needed
+before removing anything), B016.
