@@ -15,6 +15,19 @@ pub struct LspConfig {
     /// through the same ladder as `game_target`; the defines are derived
     /// from it in [`LspConfig::defines_for_target`], never hand-listed.
     pub signature_mode: SignatureMode,
+    /// Which host OS's defines are live (B028): `windows` (default) |
+    /// `wine` | `linux`, via the same ladder as `game_target`. Wine keeps
+    /// plain `WINDOWS` and adds `WINDOWS_WINE` (verified in the live game,
+    /// 2026-08-29). Defaults changed in B028: `LINUX` / `WINDOWS_WINE` are
+    /// no longer always-on.
+    pub os_target: OsTarget,
+    /// Which game architecture's define is live (B028): `64` (default) |
+    /// `32` — exactly one of `MANIA64` / `MANIA32`, never both.
+    pub arch_target: ArchTarget,
+    /// Build-shape flags (B028): `DEVELOPER` / `HAS_DEV` / `LOGS` /
+    /// `SERVER`, all default TRUE (decision (a) — no default churn);
+    /// narrow via config / CLI to model a real client.
+    pub build_flags: BuildFlags,
     pub defines: HashSet<String>,
     /// Raw `defines` entries from every config layer (parent config, per-root
     /// config, user global, init options), in the order they were read. They
@@ -106,6 +119,9 @@ impl Default for LspConfig {
             game_json: None,
             game_target: "TMNEXT".to_string(),
             signature_mode: SignatureMode::default(),
+            os_target: OsTarget::default(),
+            arch_target: ArchTarget::default(),
+            build_flags: BuildFlags::default(),
             defines: Self::default_defines(),
             define_overrides: Vec::new(),
             source_paths: None,
@@ -134,6 +150,17 @@ struct ConfigFile {
     game_target: Option<String>,
     /// GH #64: `official` / `regular` / `school` / `developer` (default).
     signature_mode: Option<String>,
+    /// B028: `windows` (default) | `wine` | `linux`. Wine defines BOTH
+    /// `WINDOWS` and `WINDOWS_WINE` (verified in the live game).
+    os_target: Option<String>,
+    /// B028: `64` (default) | `32` — exactly one `MANIA*` arch is live.
+    arch_target: Option<String>,
+    /// B028 build-shape flags, all default true (decision (a)). `false`
+    /// narrows the profile toward a real client build.
+    developer_build: Option<bool>,
+    has_dev: Option<bool>,
+    logs: Option<bool>,
+    server: Option<bool>,
     defines: Option<Vec<String>>,
     /// Bare-TTY default: `"tui"` (default) or `"lsp"`.
     default_mode: Option<String>,
@@ -265,6 +292,137 @@ impl SignatureMode {
     pub const CHOICES: &'static [&'static str] = &["developer", "school", "regular", "official"];
 }
 
+/// Which host OS the analysis models (B028). A real process defines exactly
+/// one OS family. Empirically verified against the live game under Wine
+/// (RemoteBuild probe, 2026-08-29): a Wine run defines BOTH `WINDOWS` and
+/// `WINDOWS_WINE`; the probe fixtures
+/// `tests/fixtures/issue-repros/b028-os-arch-defines-probe` pin this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OsTarget {
+    #[default]
+    Windows,
+    Wine,
+    Linux,
+}
+
+impl OsTarget {
+    /// Parse a config / CLI / init-option token, case-insensitively.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "windows" => Some(Self::Windows),
+            "wine" => Some(Self::Wine),
+            "linux" => Some(Self::Linux),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Windows => "windows",
+            Self::Wine => "wine",
+            Self::Linux => "linux",
+        }
+    }
+
+    /// The OS defines live for this target. Wine keeps plain `WINDOWS` —
+    /// the game defines it alongside `WINDOWS_WINE` (probe 2026-08-29).
+    pub fn defines(self) -> &'static [&'static str] {
+        match self {
+            Self::Windows => &["WINDOWS"],
+            Self::Wine => &["WINDOWS", "WINDOWS_WINE"],
+            Self::Linux => &["LINUX"],
+        }
+    }
+
+    /// Every accepted canonical name, for help text and warnings.
+    pub const CHOICES: &'static [&'static str] = &["windows", "wine", "linux"];
+}
+
+/// Which game architecture the analysis models (B028): a real process has
+/// exactly one of `MANIA64` / `MANIA32` live, never both — defining both
+/// made both `#if` branches live and manufactured phantom duplicate
+/// declarations (the reported failure mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArchTarget {
+    #[default]
+    Arch64,
+    Arch32,
+}
+
+impl ArchTarget {
+    /// Parse a config / CLI / init-option token.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "64" => Some(Self::Arch64),
+            "32" => Some(Self::Arch32),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Arch64 => "64",
+            Self::Arch32 => "32",
+        }
+    }
+
+    /// The arch define live for this target.
+    pub fn defines(self) -> &'static [&'static str] {
+        match self {
+            Self::Arch64 => &["MANIA64"],
+            Self::Arch32 => &["MANIA32"],
+        }
+    }
+
+    /// Every accepted canonical name, for help text and warnings.
+    pub const CHOICES: &'static [&'static str] = &["64", "32"];
+}
+
+/// B028 build-shape flags: what kind of build the analysis models. All four
+/// default TRUE — coordinator decision (a) keeps today's analysis set so no
+/// user's code silently stops being checked; narrow via config / CLI toward
+/// a real client profile (verified 2026-08-29: a normal player's client has
+/// NONE of these defined — see
+/// `tests/fixtures/issue-repros/b028-build-flag-probe`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildFlags {
+    /// `DEVELOPER` — "the current Openplanet build is a debug build".
+    pub developer_build: bool,
+    /// `HAS_DEV` — "the current game is a Nadeo development build".
+    pub has_dev: bool,
+    /// `LOGS` — "a Logs-configured build".
+    pub logs: bool,
+    /// `SERVER` — "a dedicated server build".
+    pub server: bool,
+}
+
+impl Default for BuildFlags {
+    /// Decision (a): all on — exactly the always-on set the LSP used, so
+    /// the default analysis is unchanged by B028 for these four.
+    fn default() -> Self {
+        Self {
+            developer_build: true,
+            has_dev: true,
+            logs: true,
+            server: true,
+        }
+    }
+}
+
+impl BuildFlags {
+    /// The build-flag defines live with this shape.
+    pub fn defines(self) -> impl Iterator<Item = &'static str> {
+        [
+            ("DEVELOPER", self.developer_build),
+            ("HAS_DEV", self.has_dev),
+            ("LOGS", self.logs),
+            ("SERVER", self.server),
+        ]
+        .into_iter()
+        .filter_map(|(name, on)| on.then_some(name))
+    }
+}
+
 /// How `check` groups diagnostics for human (plain/pretty) output.
 ///
 /// Default is [`ErrorGroup::Last`]: warnings/info/hints (and unknown)
@@ -381,20 +539,32 @@ impl LspConfig {
     /// The `SIG_*` names come from `signature` (GH #64) on the same
     /// reasoning — they used to be unconditionally on, which is exactly
     /// [`SignatureMode::Developer`], still the default.
-    pub fn defines_for_target(target: &str, signature: SignatureMode) -> HashSet<String> {
-        // Always-on flags (OS and build caps) — independent of both the game
-        // the plugin targets and how it is signed.
-        const ALWAYS_ON: &[&str] = &[
-            "MANIA64",
-            "MANIA32",
-            "WINDOWS",
-            "WINDOWS_WINE",
-            "LINUX",
-            "SERVER",
-            "LOGS",
-            "HAS_DEV",
-            "DEVELOPER",
-        ];
+    ///
+    /// B028: the OS / arch / build-shape flags are selector keys too,
+    /// resolved through the same ladder — never hand-listed. `os` / `arch`
+    /// default to a realistic client (`windows` + `64`: the pairs are
+    /// mutually exclusive in a real process, so defining both sides made
+    /// both `#if` branches live and manufactured phantom duplicate
+    /// declarations); the `build` flags default ALL ON (decision (a) — no
+    /// default churn), see [`BuildFlags`].
+    pub fn defines_for_target(
+        target: &str,
+        signature: SignatureMode,
+        os: OsTarget,
+        arch: ArchTarget,
+        build: BuildFlags,
+    ) -> HashSet<String> {
+        // OS + arch + build-shape defines — independent of the game the
+        // plugin targets and of how it is signed.
+        let mut set: HashSet<String> = os
+            .defines()
+            .iter()
+            .chain(arch.defines().iter())
+            .copied()
+            .chain(build.defines())
+            .chain(signature.defines().iter().copied())
+            .map(String::from)
+            .collect();
         // Platform selector(s) for the requested game. The game defines
         // exactly one ManiaPlanet-generation family; the others stay off so
         // their `#if` branches are dead (matching the game). Evidence (GH #36,
@@ -403,20 +573,11 @@ impl LspConfig {
         let Some(platform) = Self::platform_family_for_target(target) else {
             // Unknown target: define the target token itself so its `#if`
             // branch is live; everything else off (conservative).
-            let mut s: HashSet<String> = ALWAYS_ON
-                .iter()
-                .chain(signature.defines().iter())
-                .map(|x| x.to_string())
-                .collect();
-            s.insert(target.to_string());
-            return s;
+            set.insert(target.to_string());
+            return set;
         };
-        ALWAYS_ON
-            .iter()
-            .chain(platform.iter())
-            .chain(signature.defines().iter())
-            .map(|s| s.to_string())
-            .collect()
+        set.extend(platform.iter().map(|s| s.to_string()));
+        set
     }
 
     /// Every accepted `game_target` token, for CLI validation, the config
@@ -461,9 +622,16 @@ impl LspConfig {
     }
 
     /// Standard defines for the default target (TMNEXT / TM2020) at the
-    /// default signature level (developer — every `SIG_*` on).
+    /// default signature level (developer — every `SIG_*` on), the default
+    /// OS/arch (windows / 64) and the default build flags (all on).
     pub fn default_defines() -> HashSet<String> {
-        Self::defines_for_target("TMNEXT", SignatureMode::default())
+        Self::defines_for_target(
+            "TMNEXT",
+            SignatureMode::default(),
+            OsTarget::default(),
+            ArchTarget::default(),
+            BuildFlags::default(),
+        )
     }
 
     /// GH #45: the Openplanet install folder name for a game target.
@@ -532,6 +700,9 @@ impl LspConfig {
             game_json: None,
             game_target: "TMNEXT".to_string(),
             signature_mode: SignatureMode::default(),
+            os_target: OsTarget::default(),
+            arch_target: ArchTarget::default(),
+            build_flags: BuildFlags::default(),
             defines: Self::default_defines(),
             define_overrides: Vec::new(),
             source_paths: None,
@@ -600,7 +771,15 @@ impl LspConfig {
         // gets matching platform defines and dead `#if <other-platform>`
         // branches stay dead. B024: custom `defines` no longer suppress this
         // step; they are layered on top further down, after the manifest.
-        config.defines = Self::defines_for_target(&config.game_target, config.signature_mode);
+        // B028: the same finality holds for the os/arch/build selectors —
+        // all resolved through the ladder above by now.
+        config.defines = Self::defines_for_target(
+            &config.game_target,
+            config.signature_mode,
+            config.os_target,
+            config.arch_target,
+            config.build_flags,
+        );
 
         // GH #45: the finalized target may expect a different install folder
         // than the Layer-1 TMNEXT default — re-probe before deriving paths.
@@ -669,6 +848,33 @@ impl LspConfig {
                  keeping `{}`",
                 SignatureMode::CHOICES.join(", "),
                 self.signature_mode.as_str()
+            ),
+        }
+    }
+
+    /// Set the OS target from a config / init-option token (B028). An
+    /// unparseable value warns and keeps the previous one — the same
+    /// warn-and-keep contract as `signature_mode`.
+    fn set_os_target(&mut self, token: &str) {
+        match OsTarget::parse(token) {
+            Some(os) => self.os_target = os,
+            None => eprintln!(
+                "warning: unknown os_target `{token}` (expected {}); keeping `{}`",
+                OsTarget::CHOICES.join(", "),
+                self.os_target.as_str()
+            ),
+        }
+    }
+
+    /// Set the arch target from a config / init-option token (B028), with
+    /// [`Self::set_os_target`]'s warn-and-keep contract.
+    fn set_arch_target(&mut self, token: &str) {
+        match ArchTarget::parse(token) {
+            Some(arch) => self.arch_target = arch,
+            None => eprintln!(
+                "warning: unknown arch_target `{token}` (expected {}); keeping `{}`",
+                ArchTarget::CHOICES.join(", "),
+                self.arch_target.as_str()
             ),
         }
     }
@@ -970,6 +1176,24 @@ impl LspConfig {
         if let Some(mode) = cfg.signature_mode {
             self.set_signature_mode(&mode);
         }
+        if let Some(os) = cfg.os_target {
+            self.set_os_target(&os);
+        }
+        if let Some(arch) = cfg.arch_target {
+            self.set_arch_target(&arch);
+        }
+        if let Some(v) = cfg.developer_build {
+            self.build_flags.developer_build = v;
+        }
+        if let Some(v) = cfg.has_dev {
+            self.build_flags.has_dev = v;
+        }
+        if let Some(v) = cfg.logs {
+            self.build_flags.logs = v;
+        }
+        if let Some(v) = cfg.server {
+            self.build_flags.server = v;
+        }
         if let Some(defines) = cfg.defines {
             self.define_overrides.extend(defines);
         }
@@ -1017,6 +1241,24 @@ impl LspConfig {
         }
         if let Some(mode) = opts.get("signature_mode").and_then(|v| v.as_str()) {
             self.set_signature_mode(mode);
+        }
+        if let Some(os) = opts.get("os_target").and_then(|v| v.as_str()) {
+            self.set_os_target(os);
+        }
+        if let Some(arch) = opts.get("arch_target").and_then(|v| v.as_str()) {
+            self.set_arch_target(arch);
+        }
+        if let Some(v) = opts.get("developer_build").and_then(|v| v.as_bool()) {
+            self.build_flags.developer_build = v;
+        }
+        if let Some(v) = opts.get("has_dev").and_then(|v| v.as_bool()) {
+            self.build_flags.has_dev = v;
+        }
+        if let Some(v) = opts.get("logs").and_then(|v| v.as_bool()) {
+            self.build_flags.logs = v;
+        }
+        if let Some(v) = opts.get("server").and_then(|v| v.as_bool()) {
+            self.build_flags.server = v;
         }
         if let Some(defines) = opts.get("defines").and_then(|v| v.as_array()) {
             self.define_overrides
@@ -1349,12 +1591,21 @@ mod tests {
 
     #[test]
     fn test_default_defines() {
-        // Default target is TMNEXT (TM2020): TMNEXT on, always-on flags on,
-        // and other ManiaPlanet generations OFF (GH #36 — dead `#if` branches).
+        // Default target is TMNEXT (TM2020): TMNEXT on, other ManiaPlanet
+        // generations OFF (GH #36 — dead `#if` branches). B028: default
+        // profile is a windows/64 client with the build flags ON (decision
+        // (a)) — so the OTHER os/arch side is now off, matching the game.
         let defs = LspConfig::default_defines();
         assert!(defs.contains("TMNEXT"));
         assert!(defs.contains("SIG_DEVELOPER"));
         assert!(defs.contains("WINDOWS"));
+        assert!(defs.contains("MANIA64"));
+        for flag in ["SERVER", "LOGS", "HAS_DEV", "DEVELOPER"] {
+            assert!(defs.contains(flag), "build flag {flag} on by default");
+        }
+        assert!(!defs.contains("MANIA32"), "arch pair is exclusive");
+        assert!(!defs.contains("LINUX"), "os pair is exclusive");
+        assert!(!defs.contains("WINDOWS_WINE"), "wine flag needs --os wine");
         assert!(!defs.contains("TURBO"));
         assert!(!defs.contains("MP4"));
         assert!(!defs.contains("MP3"));
@@ -1363,13 +1614,25 @@ mod tests {
 
     #[test]
     fn test_defines_for_target_selects_platform() {
-        let turbo = LspConfig::defines_for_target("TURBO", SignatureMode::default());
+        let turbo = LspConfig::defines_for_target(
+            "TURBO",
+            SignatureMode::default(),
+            OsTarget::default(),
+            ArchTarget::default(),
+            BuildFlags::default(),
+        );
         assert!(turbo.contains("TURBO"));
-        assert!(turbo.contains("WINDOWS")); // always-on still present
+        assert!(turbo.contains("WINDOWS")); // os/arch/build defaults still present
         assert!(!turbo.contains("TMNEXT"));
         assert!(!turbo.contains("MP4"));
 
-        let mp4 = LspConfig::defines_for_target("MP4", SignatureMode::default());
+        let mp4 = LspConfig::defines_for_target(
+            "MP4",
+            SignatureMode::default(),
+            OsTarget::default(),
+            ArchTarget::default(),
+            BuildFlags::default(),
+        );
         assert!(mp4.contains("MP4"));
         assert!(!mp4.contains("TMNEXT"));
         assert!(!mp4.contains("TURBO"));
@@ -2155,6 +2418,276 @@ shortcut_match_enums = true
         let cfg = LspConfig::load(Some(&drop), None);
         assert!(!cfg.defines.contains("SIG_DEVELOPER"), "removal ignored");
         assert!(cfg.defines.contains("SIG_SCHOOL"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- B028: OS / arch / build-flag selectors ---
+
+    /// Parse accepts canonical names case-insensitively and rejects junk,
+    /// empty, and the ambiguous `off` token (that belongs to
+    /// `errors`/`unused`, like in `SignatureMode::parse`).
+    #[test]
+    fn os_target_parses_canonical_and_rejects_unknown() {
+        for (input, want) in [
+            ("windows", OsTarget::Windows),
+            ("Windows", OsTarget::Windows),
+            (" WINDOWS ", OsTarget::Windows),
+            ("wine", OsTarget::Wine),
+            ("WINE", OsTarget::Wine),
+            ("linux", OsTarget::Linux),
+            ("Linux", OsTarget::Linux),
+        ] {
+            assert_eq!(OsTarget::parse(input), Some(want), "parse {input:?}");
+        }
+        for bad in ["banana", "", "off", "win", "mac"] {
+            assert!(OsTarget::parse(bad).is_none(), "parse {bad:?} must fail");
+        }
+    }
+
+    /// Same contract for the arch pair: canonical tokens only.
+    #[test]
+    fn arch_target_parses_canonical_and_rejects_unknown() {
+        for (input, want) in [("64", ArchTarget::Arch64), (" 32 ", ArchTarget::Arch32)] {
+            assert_eq!(ArchTarget::parse(input), Some(want), "parse {input:?}");
+        }
+        for bad in ["banana", "", "x64", "x86", "6", "3"] {
+            assert!(ArchTarget::parse(bad).is_none(), "parse {bad:?} must fail");
+        }
+    }
+
+    /// Exactly one OS family is live per target — never two, and `wine`
+    /// carries BOTH `WINDOWS` and `WINDOWS_WINE` (probe 2026-08-29: the
+    /// game under Wine defines both).
+    #[test]
+    fn os_target_defines_are_exclusive_per_target() {
+        for (os, on, off) in [
+            (
+                OsTarget::Windows,
+                &["WINDOWS"][..],
+                &["WINDOWS_WINE", "LINUX"][..],
+            ),
+            (
+                OsTarget::Wine,
+                &["WINDOWS", "WINDOWS_WINE"][..],
+                &["LINUX"][..],
+            ),
+            (
+                OsTarget::Linux,
+                &["LINUX"][..],
+                &["WINDOWS", "WINDOWS_WINE"][..],
+            ),
+        ] {
+            let defs = LspConfig::defines_for_target(
+                "TMNEXT",
+                SignatureMode::default(),
+                os,
+                ArchTarget::default(),
+                BuildFlags::default(),
+            );
+            for &d in on {
+                assert!(defs.contains(d), "{:?} must define {d}", os);
+            }
+            for &d in off {
+                assert!(!defs.contains(d), "{:?} must NOT define {d}", os);
+            }
+        }
+    }
+
+    /// Exactly one arch is live per target, in BOTH directions (the
+    /// all-on behavior was the reported bug).
+    #[test]
+    fn arch_target_defines_are_exclusive() {
+        for (arch, on, off) in [
+            (ArchTarget::Arch64, "MANIA64", "MANIA32"),
+            (ArchTarget::Arch32, "MANIA32", "MANIA64"),
+        ] {
+            let defs = LspConfig::defines_for_target(
+                "TMNEXT",
+                SignatureMode::default(),
+                OsTarget::default(),
+                arch,
+                BuildFlags::default(),
+            );
+            assert!(defs.contains(on), "{:?} must define {on}", arch);
+            assert!(!defs.contains(off), "{:?} must NOT define {off}", arch);
+        }
+    }
+
+    /// Decision (a): the four build flags default ON (the old always-on
+    /// set, so nobody's analysis moves), and narrowing one drops exactly
+    /// that define — its siblings stay live.
+    #[test]
+    fn build_flags_default_on_and_narrow_individually() {
+        assert_eq!(
+            BuildFlags::default(),
+            BuildFlags {
+                developer_build: true,
+                has_dev: true,
+                logs: true,
+                server: true,
+            }
+        );
+        for (name, narrowed) in [
+            (
+                "DEVELOPER",
+                BuildFlags {
+                    developer_build: false,
+                    ..BuildFlags::default()
+                },
+            ),
+            (
+                "HAS_DEV",
+                BuildFlags {
+                    has_dev: false,
+                    ..BuildFlags::default()
+                },
+            ),
+            (
+                "LOGS",
+                BuildFlags {
+                    logs: false,
+                    ..BuildFlags::default()
+                },
+            ),
+            (
+                "SERVER",
+                BuildFlags {
+                    server: false,
+                    ..BuildFlags::default()
+                },
+            ),
+        ] {
+            let defs = LspConfig::defines_for_target(
+                "TMNEXT",
+                SignatureMode::default(),
+                OsTarget::default(),
+                ArchTarget::default(),
+                narrowed,
+            );
+            assert!(!defs.contains(name), "narrowing must drop {name}");
+            for other in ["DEVELOPER", "HAS_DEV", "LOGS", "SERVER"] {
+                if other != name {
+                    assert!(defs.contains(other), "narrowing {name} must keep {other}");
+                }
+            }
+        }
+    }
+
+    /// The ladder derives the base set from the os/arch keys like it does
+    /// from `game_target`.
+    #[test]
+    fn config_file_os_and_arch_keys_derive_defines() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-osarch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "os_target = \"wine\"\narch_target = \"32\"\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert_eq!(cfg.os_target, OsTarget::Wine);
+        assert_eq!(cfg.arch_target, ArchTarget::Arch32);
+        assert!(cfg.defines.contains("WINDOWS"), "{:?}", cfg.defines);
+        assert!(cfg.defines.contains("WINDOWS_WINE"));
+        assert!(cfg.defines.contains("MANIA32"));
+        assert!(!cfg.defines.contains("LINUX"), "{:?}", cfg.defines);
+        assert!(!cfg.defines.contains("MANIA64"));
+        assert!(cfg.defines.contains("SERVER"), "build flags stay on");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// An unknown value warns and keeps the default (permissive direction:
+    /// manufacturing a dead live branch is worse than a stale branch), and
+    /// sibling keys still apply — same contract as `signature_mode`.
+    #[test]
+    fn invalid_os_or_arch_config_value_keeps_default_and_siblings() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-osarch-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "os_target = \"banana\"\narch_target = \"banana\"\ngame_target = \"TURBO\"\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert_eq!(cfg.os_target, OsTarget::Windows);
+        assert_eq!(cfg.arch_target, ArchTarget::Arch64);
+        assert_eq!(cfg.game_target, "TURBO", "sibling key must still apply");
+        assert!(cfg.defines.contains("TURBO"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Init options sit above the config-file layer in the ladder.
+    #[test]
+    fn init_options_os_and_arch_win_over_config_file() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-osarch-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "os_target = \"wine\"\narch_target = \"32\"\n",
+        )
+        .unwrap();
+        let opts = serde_json::json!({ "os_target": "linux", "arch_target": "64" });
+        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        assert_eq!(cfg.os_target, OsTarget::Linux);
+        assert_eq!(cfg.arch_target, ArchTarget::Arch64);
+        assert!(cfg.defines.contains("LINUX"));
+        assert!(!cfg.defines.contains("WINDOWS_WINE"));
+        assert!(cfg.defines.contains("MANIA64"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The build-flag config keys narrow the derived set without touching
+    /// the os/arch pairs.
+    #[test]
+    fn build_flag_config_keys_narrow_defines() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-bflags-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "server = false\nlogs = false\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert!(!cfg.build_flags.server);
+        assert!(!cfg.build_flags.logs);
+        assert!(!cfg.defines.contains("SERVER"), "{:?}", cfg.defines);
+        assert!(!cfg.defines.contains("LOGS"));
+        assert!(cfg.defines.contains("DEVELOPER"), "untouched flag stays on");
+        assert!(cfg.defines.contains("HAS_DEV"));
+        assert!(cfg.defines.contains("WINDOWS"), "os/arch pairs untouched");
+        assert!(cfg.defines.contains("MANIA64"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// B024 ordering is preserved: `defines` gets the last word over the
+    /// derived selector set, in both directions.
+    #[test]
+    fn define_overrides_last_word_over_os_arch_selectors() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-osarch-ovr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let drop = tmp.join("drop-wine");
+        std::fs::create_dir_all(&drop).unwrap();
+        std::fs::write(
+            drop.join(".openplanet-lsp.toml"),
+            "os_target = \"wine\"\ndefines = [\"-WINDOWS_WINE\"]\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&drop), None);
+        assert!(!cfg.defines.contains("WINDOWS_WINE"), "removal ignored");
+        assert!(cfg.defines.contains("WINDOWS"), "plain WINDOWS survives");
+
+        let add = tmp.join("add-linux");
+        std::fs::create_dir_all(&add).unwrap();
+        std::fs::write(add.join(".openplanet-lsp.toml"), "defines = [\"LINUX\"]\n").unwrap();
+        let cfg = LspConfig::load(Some(&add), None);
+        assert!(cfg.defines.contains("LINUX"), "explicit add ignored");
+        assert!(cfg.defines.contains("WINDOWS"), "default os stays live");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

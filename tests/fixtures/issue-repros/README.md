@@ -56,6 +56,9 @@ Record the game verdict in the fixture's gate-test doc comment.
 
 | Fixture | Issue | Game verdict | Status |
 |---------|-------|--------------|--------|
+| `b028-os-arch-defines-probe` | B028 | clean (2026-08-29 probe) ⇒ WINDOWS + WINDOWS_WINE + MANIA64 on, LINUX + MANIA32 off in the live Wine client | fixed — active |
+| `b028-build-flag-probe` | B028 | clean (2026-08-29 probe) ⇒ SERVER / LOGS / HAS_DEV / DEVELOPER all off on a normal client | fixed — active |
+| `b028-dup-decl-arch-os` | B028 | clean (2026-08-29 probe) — the game compiles one branch per pair; the LSP defaulted to windows/64 must match | fixed — active |
 | `63-inputtext-callback-funcdef` | #63 | clean (2026-08-29 probe, OP 1.29.5) | fixed (8e49f81) — active |
 | `b025-this-method-funcdef-ctor` | B025 | legal half clean; 3 diagnosed lines ERR (`Can't create delegate` ×2, `No matching signatures to 'CoroutineFunc(string)'`; 2026-08-29 probe) | fixed (342a10a) — active |
 | `46-mixin-consumer-member` | #46 | clean | fixed (8c13ef5) — active |

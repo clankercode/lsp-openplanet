@@ -34,6 +34,22 @@ GitHub Release body to match this section (gh release edit).
   the define set is re-derived AND the typedb variant / game JSON re-probe
   follows the target (GH #45); both reject an unknown value with a usage error
   naming the valid set, and neither can swallow a following flag (GH #62).
+- **`os_target` / `arch_target` selectors + `check --os` / `check --arch`
+  (B028)** — the OS and architecture defines are selector keys now,
+  resolved through the same ladder as `game_target` / `signature_mode`
+  instead of being hand-listed. `os_target` is `windows` (default) |
+  `wine` | `linux`: a Wine run defines BOTH `WINDOWS` and `WINDOWS_WINE`,
+  as the live game does (verified with a RemoteBuild probe, 2026-08-29);
+  `arch_target` is `64` (default) | `32`. The build-shape flags are
+  selector keys too — `developer_build`, `has_dev`, `logs`, `server`
+  (all ON by default, see the Changed entry) — with matching
+  `--developer-build` / `--no-developer-build`, `--has-dev` /
+  `--no-has-dev`, `--logs` / `--no-logs` and `--server` / `--no-server`
+  flag pairs. Every selector is honored in `.openplanet-lsp.toml`, the
+  user config, `initializationOptions` and the CLI, where the flag wins;
+  `defines` overrides still get the last word. An unknown `--os` /
+  `--arch` value is a usage error (exit 2); an unknown config value warns
+  and keeps the previous setting.
 
 ### Fixed
 - **`check` no longer undoes `defines` removals of manifest defines (B026)** —
@@ -58,6 +74,25 @@ GitHub Release body to match this section (gh release edit).
   `game_target` is the intended way to pick a game.
 
 ### Changed
+- **DEFAULT CHANGE: the analysis profile is now a windows/64 client (B028)** —
+  the LSP used to define `MANIA64`, `MANIA32`, `WINDOWS`, `WINDOWS_WINE`,
+  `LINUX`, `SERVER`, `LOGS`, `HAS_DEV` and `DEVELOPER` ALL at once, so
+  mutually exclusive `#if` branches were analyzed together: a plugin
+  declaring the same function under `#if MANIA32` and `#if MANIA64` got a
+  phantom "A function with the same name and parameters already exists"
+  error, and `#if LINUX` / `#if SERVER` code was checked on a Windows client
+  that would never compile it. The defaults now model a real client — one
+  OS (`windows`), one arch (`64`) — verified against the live game under
+  Wine (RemoteBuild probe 2026-08-29: `WINDOWS` + `WINDOWS_WINE` +
+  `MANIA64` on; `LINUX`, `MANIA32`, `SERVER`, `LOGS`, `HAS_DEV`,
+  `DEVELOPER` off). If you rely on checking code that only compiles on
+  Linux, on 32-bit, or in a server/logs/dev build, opt back in with
+  `os_target` / `arch_target` / the build-flag keys in
+  `.openplanet-lsp.toml`, pass `--os` / `--arch` to `check`, or add the
+  define back with `defines = ["LINUX"]` (B024 additive overrides). The
+  four build flags themselves stay ON by default (no default churn — only
+  the OS/arch pairs got realistic defaults, because their exclusivity is
+  the reported failure mode).
 - **Config TUI names the accepted values for every setting** — a new footer
   line under the help text says how the selected value is typed in:
   `comma-separated · e.g. DEV, DEBUG_BROWSER, -LOGS` for `defines` (nothing
