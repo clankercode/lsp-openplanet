@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-29T08:10:20Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T09:47:18Z"
 complexity: medium
 created_at: "2026-08-29T06:24:14Z"
 depends_on: []
+duration_minutes: 96.98239401568334
 estimate_hours: 2
 id: B027
 priority: medium
 started_at: "2026-08-29T08:10:20Z"
-status: in_progress
+status: done
 tags: []
 title: 'Delegate construction ignores &out/&inout parameter passing modes (game: Can''t create delegate)'
-updated_at: "2026-08-29T08:10:20Z"
+updated_at: "2026-08-29T09:47:18Z"
 ---
 ## Broken (game-verified 2026-08-29, OP 1.29.5 / OpenplanetNext, master @ bc49389)
 
