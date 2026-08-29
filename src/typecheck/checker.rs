@@ -2467,6 +2467,62 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// B023: resolve a candidate parameter whose type names a funcdef (slot
+    /// text like `UI::InputTextCallback@` / `CoroutineFunc`) to its
+    /// signature. `None` for every non-funcdef param shape.
+    fn slot_funcdef(&self, param_text: &str) -> Option<FuncdefSig> {
+        let name = match Self::peel_const_handle(&TypeRepr::parse_type_string(param_text.trim())) {
+            TypeRepr::Named(n) | TypeRepr::Funcdef(n) => n.clone(),
+            _ => return None,
+        };
+        self.scope.lookup_funcdef(&name)
+    }
+
+    /// B023: concrete evidence that `arg` cannot bind the funcdef-typed
+    /// slot `fd` — the same bind test as the ctor path. A resolvable
+    /// function matching no signature, a funcdef-typed value of an
+    /// incompatible type, or a provably non-function value all fail.
+    /// Named/unknown-shape args (workspace classes the typedb can't see)
+    /// stay neutral — the GH #47 FP guard — and `null` binds any funcdef
+    /// handle.
+    fn arg_fails_funcdef_slot(&self, fd: &FuncdefSig, arg: &Expr, arg_ty: &TypeRepr) -> bool {
+        let sigs = self.lookup_arg_function_sigs(arg, arg_ty);
+        if !sigs.is_empty() {
+            return !sigs.iter().any(|sig| self.func_matches_funcdef(sig, fd));
+        }
+        // A funcdef-typed value (variable, ctor result) with no resolvable
+        // overloads compares by its own funcdef signature.
+        if let TypeRepr::Funcdef(n) = Self::peel_const_handle(arg_ty) {
+            if let Some(arg_fd) = self.scope.lookup_funcdef(n) {
+                let arg_sig = OverloadSig {
+                    param_names: Vec::new(),
+                    param_types: arg_fd.param_types.clone(),
+                    param_out: arg_fd
+                        .param_modes
+                        .iter()
+                        .map(|m| *m == ParamMode::Out)
+                        .collect(),
+                    param_modes: arg_fd.param_modes.clone(),
+                    min_args: arg_fd.param_types.len(),
+                    return_type: arg_fd.return_type.clone(),
+                };
+                return !self.func_matches_funcdef(&arg_sig, fd);
+            }
+        }
+        !matches!(Self::peel_const_handle(arg_ty), TypeRepr::Null)
+            && self.is_clearly_not_a_function(arg_ty)
+    }
+
+    /// B023: the arg is a resolvable function (free fn, method reference,
+    /// namespace fn) or a funcdef-typed value — a shape that can only ever
+    /// bind a funcdef parameter.
+    fn arg_is_function_shaped(&self, arg: &Expr, arg_ty: &TypeRepr) -> bool {
+        if !self.lookup_arg_function_sigs(arg, arg_ty).is_empty() {
+            return true;
+        }
+        matches!(Self::peel_const_handle(arg_ty), TypeRepr::Funcdef(_))
+    }
+
     fn arg_binds_to_funcdef(&self, fd: &FuncdefSig, arg: &Expr, arg_ty: &TypeRepr) -> bool {
         let peeled = Self::peel_const_handle(arg_ty);
         match peeled {
@@ -2866,6 +2922,27 @@ impl<'a> Checker<'a> {
                     let arg_core = Self::peel_const_handle(arg_ty);
                     let param_core = Self::peel_const_handle(&param_ty);
 
+                    // B023: function-shaped args must actually bind a
+                    // funcdef-typed param (ctor-path bind test) — a bare
+                    // wrong-sig function would otherwise be whitelisted by
+                    // the CoroutineFunc decay below. A provably
+                    // non-function arg is `No matching signatures`
+                    // (GH #47 style).
+                    if let Some(fd) = self.slot_funcdef(param_text) {
+                        if self.arg_fails_funcdef_slot(&fd, &arg.value, arg_ty) {
+                            self.diagnostics.push(TypeDiagnostic {
+                                span: arg.value.span,
+                                kind: TypeDiagnosticKind::NoMatchingSignatures {
+                                    text: render_no_matching_sig(
+                                        qualified_name,
+                                        &arg_tys,
+                                        &arg_literals,
+                                    ),
+                                },
+                            });
+                            continue;
+                        }
+                    }
                     // AngelScript `?` is the any-type placeholder (`tostring`).
                     // Generic array/dictionary methods use unsubstituted `T`
                     // in typedb — do not ArgTypeMismatch against the
@@ -3047,6 +3124,31 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 if Self::is_unsubstituted_generic_or_any(&Self::peel_const_handle(&param_ty)) {
+                    continue;
+                }
+                // B023: a candidate whose parameter resolves to a funcdef
+                // must be able to bind a function-shaped arg (ctor-path
+                // bind test); a provably non-function arg rejects the
+                // candidate outright. Named/unknown shapes stay neutral
+                // (arg_fails_funcdef_slot's FP guard).
+                if let Some(fd) = self.slot_funcdef(param_text) {
+                    if self.arg_fails_funcdef_slot(&fd, &args[i].value, arg_ty) {
+                        compatible = false;
+                        evidence_span = Some(args[i].value.span);
+                    }
+                    continue;
+                }
+                // B023: a resolvable function / funcdef-typed value can
+                // never bind a KNOWN non-funcdef parameter (the game's
+                // positional binding rejects the candidate there — a bare
+                // wrong-sig fn into UI::InputText otherwise survives on the
+                // shifted 5-arg overload). Unknown param shapes stay
+                // neutral.
+                if self.arg_is_function_shaped(&args[i].value, arg_ty) && !param_ty.is_error()
+                    && !Self::is_unsubstituted_generic_or_any(&Self::peel_const_handle(&param_ty))
+                {
+                    compatible = false;
+                    evidence_span = Some(args[i].value.span);
                     continue;
                 }
                 let arg_core = Self::peel_const_handle(arg_ty);
@@ -9447,6 +9549,257 @@ void Main() {
         assert!(
             !checker.func_matches_funcdef(&engine_out_method, &fd(ParamMode::In)),
             "&out arg must not bind an &in funcdef"
+        );
+    }
+
+    // ── B023: wrong-signature / non-function args at typedb funcdef slots ──
+
+    /// Helper for the B023 tests: a `UI::InputTextCallbackData@` callback
+    /// and a same-named-shape `void(int)` incompatible function.
+    const B023_FNS: &str = r###"
+        void Good(UI::InputTextCallbackData@ data) { data.SelectAll(); }
+        void WrongSig(int x) {}
+        void Tick() {}
+    "###;
+
+    /// B023: a resolvable function with an incompatible signature must
+    /// reject every arity-compatible candidate at a typedb funcdef slot.
+    /// UI::InputText has two 4-arg-compatible overloads, so this is the
+    /// GH #47 overload-set path; emission is `NoMatchingSignatures`, like
+    /// the game (`No matching signatures to 'UI::InputText(...)'`).
+    #[test]
+    fn external_overload_set_rejects_wrong_signature_function_arg() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            void Render() {
+                string s = "test";
+                UI::InputText("##a", s, UI::InputTextFlags::None, WrongSig);
+            }
+            "###
+        ));
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. })),
+            "wrong-sig fn into the InputText callback slot must be rejected, got {:?}",
+            diags
+        );
+    }
+
+    /// B023: a provably non-function arg (string literal) into a funcdef
+    /// slot rejects every candidate — game ERR on the same line.
+    #[test]
+    fn external_overload_set_rejects_non_function_literal_arg() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            void Render() {
+                string s = "test";
+                UI::InputText("##b", s, UI::InputTextFlags::None, "nope");
+            }
+            "###
+        ));
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. })),
+            "string literal into the InputText callback slot must be rejected, got {:?}",
+            diags
+        );
+    }
+
+    /// B023: same machinery on the InputTextMultiline callback slot.
+    #[test]
+    fn external_overload_set_rejects_wrong_signature_in_multiline_slot() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            void Render() {
+                string s = "test";
+                UI::InputTextMultiline("##c", s, vec2(), UI::InputTextFlags::None, WrongSig);
+            }
+            "###
+        ));
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. })),
+            "wrong-sig fn into the Multiline callback slot must be rejected, got {:?}",
+            diags
+        );
+    }
+
+    /// B023 generalization (CLAUDE.md): a wrong-signature class METHOD
+    /// reference into the slot is rejection evidence too; the matching
+    /// method binds (CLAUDE.md both polarities).
+    #[test]
+    fn external_overload_set_method_reference_both_polarities() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            class Filter {
+                void WrongMethod(int x) {}
+                void OnFilter(UI::InputTextCallbackData@ data) { data.SelectAll(); }
+                void Wire() {
+                    string s = "test";
+                    UI::InputText("##1", s, UI::InputTextFlags::None, this.WrongMethod);
+                    UI::InputText("##2", s, UI::InputTextFlags::None, this.OnFilter);
+                }
+            }
+            void Render() {
+                Filter f;
+                f.Wire();
+            }
+            "###
+        ));
+        let rejections = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. }))
+            .count();
+        assert_eq!(
+            rejections, 1,
+            "wrong-sig method reference must reject, matching method must bind, got {:?}",
+            diags
+        );
+    }
+
+    /// B023 FP guard half (CLAUDE.md generalization): every matching shape
+    /// stays silent — free fn, ctor-wrapped fn, correct funcdef-typed local.
+    #[test]
+    fn external_overload_set_keeps_matching_function_args_silent() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            void Render() {
+                string s = "test";
+                UI::InputText("##1", s, UI::InputTextFlags::None, Good);
+                UI::InputText("##2", s, UI::InputTextFlags::None, UI::InputTextCallback(Good));
+                UI::InputTextCallback@ cb = Good;
+                UI::InputText("##3", s, UI::InputTextFlags::None, cb);
+            }
+            "###
+        ));
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "matching callbacks must stay silent, got {:?}",
+            diags
+        );
+    }
+
+    /// B023: a funcdef-typed variable of an incompatible type rejects the
+    /// candidates; one of the correct type binds (CLAUDE.md both-polarity).
+    #[test]
+    fn external_overload_set_funcdef_typed_variable_both_polarities() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            funcdef void WSig(int x);
+            void Render() {
+                string s = "test";
+                WSig@ wrong = null;
+                UI::InputTextCallback@ right = Good;
+                UI::InputText("##1", s, UI::InputTextFlags::None, wrong);
+                UI::InputText("##2", s, UI::InputTextFlags::None, right);
+            }
+            "###
+        ));
+        let rejections = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. }))
+            .count();
+        assert_eq!(
+            rejections, 1,
+            "wrong-typed funcdef var must reject, right-typed must bind, got {:?}",
+            diags
+        );
+    }
+
+    /// B023: wrong-sig fn into `startnew` (CoroutineFunc family) — a unique
+    /// arity match takes the unique-overload path, which needs the same
+    /// bind test. Game ERR; `startnew(Tick)` stays silent.
+    #[test]
+    fn external_unique_overload_rejects_wrong_signature_startnew() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            void Render() {
+                startnew(WrongSig);
+                startnew(Tick);
+            }
+            "###
+        ));
+        let rejections = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. }))
+            .count();
+        assert_eq!(
+            rejections, 1,
+            "startnew(WrongSig) must reject, startnew(Tick) must bind, got {:?}",
+            diags
+        );
+    }
+
+    /// B023: wrong-sig fn into the UI::NodTree member-callback slot
+    /// (NodTreeMemberCallback family, unique arity match).
+    #[test]
+    fn external_unique_overload_rejects_wrong_signature_nodtree_callback() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            void OnMember(CMwNod@ nod, Reflection::MwMemberInfo@ info) {}
+            void Render() {
+                CMwNod@ nod;
+                UI::NodTree(nod, WrongSig);
+                UI::NodTree(nod, OnMember);
+            }
+            "###
+        ));
+        let rejections = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. }))
+            .count();
+        assert_eq!(
+            rejections, 1,
+            "NodTree(WrongSig) must reject, NodTree(OnMember) must bind, got {:?}",
+            diags
+        );
+    }
+
+    /// B023 FP guard (must stay): Named/unknown-shape args — workspace
+    /// classes the typedb can't see — never reject a candidate on their
+    /// own. The game rejects this call, but the LSP deliberately stays
+    /// silent (same conservatism as the GH #47 guard).
+    #[test]
+    fn external_overload_set_named_unknown_shape_arg_stays_neutral() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            class Handler { int calls; }
+            void Render() {
+                string s = "test";
+                Handler h;
+                UI::InputText("##x", s, UI::InputTextFlags::None, h);
+            }
+            "###
+        ));
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "workspace-class args must stay neutral (FP guard), got {:?}",
+            diags
         );
     }
 
