@@ -1,15 +1,14 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T18:24:13Z"
 depends_on: []
 estimate_hours: 4
 id: B047
 priority: medium
+started_at: null
 status: pending
-tags:
-    - lsp
-    - code-actions
-    - refactor
+tags: []
 title: 'Code actions have two producer paths: TypeDiagnosticKind seam and client-echoed diagnostics'
 updated_at: "2026-08-29T18:24:13Z"
 ---
@@ -86,3 +85,30 @@ identically after migration (assert on the produced actions, not internals).
 ## Related
 B035 (the seam), B036 (hit the limitation), B037/B038 (concurrent users of the
 seam, which is why this was deferred).
+
+## Update from the B036 merge, 2026-08-30
+
+B036 landed a THIRD producer on the client-echoed path, confirming this seam
+split is growing rather than static. `src/server/code_actions/unused_decl.rs`
+is registered directly in `code_actions/mod.rs:145`
+(`actions.extend(unused_decl::quick_fixes(req))`) and gates on
+`is_our_diagnostic(diagnostic)` — it never appears in `fixes::FAMILIES`.
+
+This was the correct call for B036, not a shortcut: unused-declaration
+diagnostics are produced by `server::diagnostics::unused_declaration_diagnostics`,
+so they carry no `TypeDiagnosticKind` and cannot reach the registry seam as it
+stands. B036 had no way to use FAMILIES without the restructure this ticket
+describes.
+
+Consequences to carry into the fix:
+- The `fixes/mod.rs` module doc claims 'Nothing else in the server changes —
+  not the request handler, not the resolve handler, not the fix-all batcher',
+  which is now false for any family whose diagnostics originate outside the
+  type checker. Correct that doc as part of this work.
+- `select_non_overlapping` in `fix_all.rs` batches only FAMILIES fixes, so
+  the unused-declaration fixes are invisible to `source.fixAll.openplanet`.
+  Verify whether that is intended; if the two paths unify, those fixes join
+  fix-all and their overlap behaviour needs checking (removal edits and
+  prefix-rename edits on the same declarator DO overlap).
+- Ten families now exist in FAMILIES (nine plus `removed_api`, appended last
+  at the B036 merge so no existing family's offering order changed).
