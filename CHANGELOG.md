@@ -13,7 +13,20 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-29
+
 ### Added
+- **One-time first-run modal on a bare-TTY launch (#19)** — running the bare
+  binary in a real terminal with no subcommand and no saved preference used to
+  jump straight into the watch TUI, surprising anyone who expected the
+  language server. A centered modal now explains the default and asks:
+  `t`/Enter keeps the TUI and pins `default_mode = "tui"`, `l` starts the LSP
+  server on stdio and pins `default_mode = "lsp"`, `Esc`/`q` keeps the TUI
+  for this session only, Ctrl-C quits and asks again next time. Every
+  answered outcome also records `first_run_prompt_done` in the user-global
+  config (atomic, comment-preserving), so the modal is truly one-time.
+  Editors on non-TTY stdio never see it; `--lsp` / `lsp` always force the
+  server; an explicit workspace `default_mode` suppresses it.
 - **`errors` config + `--errors last|first|off`** — human `check` output
   (plain and pretty) groups diagnostics so a flood of warnings does not bury
   errors. Default `last`: warnings/info/hints first, then errors. `first`
@@ -65,6 +78,26 @@ GitHub Release body to match this section (gh release edit).
   compile-critical. `RUST_LOG=debug` logs how many files were excluded.
 
 ### Fixed
+- **Funcdef constructors from the type DB type-check (GH #63)** —
+  `UI::InputTextCallback(NameFilterCallback(function...))` — constructing a
+  funcdef value from a function reference — was a false
+  `No matching symbol 'UI::InputTextCallback'`. Core funcdefs now deserialize
+  into the type index and `Ns::FuncdefName(fn)` is checked as a constructor
+  yielding a funcdef value, matching the game.
+- **`check` value-taking flags no longer swallow a following flag (GH #62)** —
+  e.g. `check --typedb-dir --json` consumed `--json` as the directory (five
+  flags affected, some silently). A separate value starting with `--` is now
+  a usage error; the `--flag=value` form still accepts values that merely
+  look like options. The same guard covers `typedb status` / `typedb refresh`.
+- **Reserved keywords, same-frame duplicate locals, nested plugin dirs (game
+  parity)** — `in`/`out`/`inout` used as identifiers now produce the game's
+  reserved-keyword error (legal use as parameter modifiers still parses); a
+  second local of the same name in the same function frame errors
+  `'name' is already declared` (the first binding keeps its type so later
+  member accesses cascade against it; inner-block shadowing remains a
+  warning); and workspace discovery skips descendant directories that have
+  their own `info.toml`, so a nested plugin no longer leaks its sources into
+  the outer module.
 - **"Never used" no longer fires when the only caller is in a file we
   skipped** (GH #61) — a declaration whose callers all live in own-module
   files left out of the checked set (excluded by `.gitignore`, or filtered
@@ -273,6 +306,121 @@ GitHub Release body to match this section (gh release edit).
 - **Warning parity:** `Signed/Unsigned mismatch` no longer fires when a
   relational operand contains an explicit conversion (`u < int(E::LAST)` is
   silent in-game; only variable-vs-variable mixes warn).
+
+### Added
+- **Multi-root workspaces in the language server** — an opened folder that
+  contains several plugin directories (side by side or nested) is now served
+  as one isolated plugin workspace per root instead of a single
+  manifest-less merge. Roots are discovered by a bounded, deterministic
+  downward walk per workspace folder (hidden dirs, `.git`, `node_modules`
+  skipped; depth-capped), with a `plugin_roots` config override. Each shard
+  carries its own config ladder and treats sibling plugins as dependencies;
+  requests route to the owning shard by document URI; and `**/info.toml`
+  watcher events add/remove shards at runtime, so creating or deleting a
+  plugin directory updates the server without a restart. The type database
+  stays global.
+- **`openplanet-lsp tui [PATH]` subcommand and `help` alias** — `tui`
+  launches the live watch TUI directly for the plugin root at/above PATH
+  (default `.`; no plugin found is the usage-error path). `help` is a
+  byte-identical alias for `--help`. Both surfaces were implied by existing
+  help text but previously died as unknown commands.
+- **`check --define NAME[=VALUE]` / `-D` (GH #53)** — repeatable preprocessor
+  define injection on top of the manifest/config ladder. Source-tree
+  `info.toml` often leaves `DEV`/`UNIT_TEST` out (build scripts inject them
+  into the staged copy only), so `check` skipped `#if DEV` files entirely
+  and staged-build errors stayed hidden; `openplanet-lsp check -D DEV .` now
+  sees what the staged compile sees. Any `--define` also collapses a
+  `define_matrix` back to a single-combo run.
+- **`check --warnings-as-errors` / `-Werror` (GH #48)** — the CLI
+  counterpart of the `warnings_as_errors` config option (documented below):
+  any warning makes `check` exit 1.
+- **Game warning-parity diagnostics (GH #37)** — RemoteBuild-verified slices
+  matching the AngelScript compiler, all previously silent:
+  duplicate top-level free-function declarations (same namespace-qualified
+  name and parameter list) are an ERROR with the game's exact wording;
+  float/double → integer initializations warn about truncation
+  (`int ms = 3.7;`) and compile-time-known negative → unsigned conversions
+  warn about a sign change (`uint u = -1;`); locals shadowing a name from an
+  enclosing frame of the same function and unreachable code after a
+  terminating statement warn like the game.
+- **Mismatch-report ask** — a one-shot `check` that produced diagnostics
+  ends with a dim trailer pointing at the repo issues URL ("Did Openplanet
+  have different compile errors or warnings compared to openplanet-lsp
+  output? Please log an issue"), and `--help` / `--version` /
+  unknown-command surfaces print the repo URL with the same ask.
+
+### Changed
+- **Own `exports` files are consumer-only in the defining plugin** —
+  game-verified: a file listed in `info.toml` `[script] exports` compiles
+  into consumers only, so symbols it declares are not part of the defining
+  plugin's own module (the game fails such cross-file uses with
+  `No matching symbol`). The LSP's own-module symbol view now mirrors this;
+  export files remain the public API for consumers and stay exempt from
+  unused-declaration warnings.
+
+### Fixed
+- **A workspace class shadows an engine type of the same short name** — a
+  plugin-declared `Status` resolved member lookups against
+  `Discord::Status`, false-positiving ``type `Status` has no member X``; the
+  game prefers the plugin's own declaration, and now so does the checker.
+- **`@arr[i] = expr` into an indexed value-type slot is rejected (GH #44)** —
+  a handle-assign whose indexed receiver is a value type (`Json::Value@ arr;
+  @arr[0] = ...`) has no handle slot; the game rejects it and `check` now
+  reports an invalid assignment target instead of accepting it.
+- **Unresolved bare identifiers inside mixin class bodies stay silent** — a
+  mixin body compiles in the consuming class's context, so bare references
+  to consumer members (E++ `tabs` inside mixin `HasGroupMeta`) resolve
+  in-game but were flagged `undefined identifier`; the existing bare-call
+  exception now covers bare idents too.
+- **Navigation through inheritance, namespaces, and imports** — `this.x`
+  and implicit-this calls resolve through the base-class chain
+  (goto-definition, hover); bare references inside namespaces resolve for
+  goto-definition, hover, and call hierarchy; goto-definition prefers the
+  real definition over an import alias; hover on implicit-this method
+  callees shows the real return type and a `(method)` label instead of
+  `<error>`.
+- **`Ns::Fn(...)` calls that resolve nowhere diagnose with hints (GH #27,
+  #28)** — a missing function in a known engine API namespace errors with
+  near-name candidates (`UI::GetIO`); a namespace absent from the typedb but
+  listed in the removed-API table gets the replacement hint
+  (`Draw::GetWidth` → `Display::GetWidth`,
+  `Draw::MeasureString` → `UI::MeasureString`); unknown user namespaces stay
+  silent.
+- **Writes to get-only properties and const-handle rebinds are rejected
+  (game parity)** — a `get_X` without `set_X` on a typedb value type
+  synthesizes a read-only property (`iso4.tx` and friends), so writes and
+  compound writes report `The property has no set accessor`; re-binding a
+  `const` handle is likewise an error.
+- **Non-const method on a `const` receiver is an error (game parity)** —
+  invoking a non-const method through a `const T &in` receiver reports
+  `No matching signatures to 'T::M() const'` like the game compiler.
+- **Unknown members on parentless script classes are flagged; removed-API
+  calls diagnosed** — the game compiler rejects unknown fields/methods on
+  workspace classes that declare no base class; `check` was silent on both
+  paths (field reads and method calls) and also accepted
+  `awaitable.WithRunContext(...)`, which no longer exists in the game API.
+- **`game_target` drives folder and type-DB selection (GH #45)** — the
+  configured target now maps to the matching install folder
+  (`OpenplanetNext`/`OpenplanetMP4`/`OpenplanetTurbo`/United; MP3 and
+  Nations Forever warn and fall back), auto-detection re-probes the variant
+  folder after the config ladder settles the target (an explicit
+  `openplanet_dir` still wins), and the JSON report derives per-variant
+  typedb files (`OpenplanetTurbo.json` etc.).
+- **Own manifest `exports` paths resolve through search paths** — export
+  entries are module-dir relative in practice (`Exports/Callbacks.as` for
+  `src/Exports/Callbacks.as`); resolving them like dependency exports makes
+  the unused-declaration public-API exemption actually match (E++:
+  export-file warnings 98 → 2).
+- **Virtual properties are honored in member gates** — `obj.prop` is legal
+  when the class declares `T get_prop()` / `set_prop(T v)`; 16 false
+  positives across the real plugin fixtures are gone.
+- **Qualified unknown types note the likely missing plugin export (GH #26)**
+  — ``unknown type `MLFeed::PlayerCpInfo` `` now carries a note when the
+  leading segment is not a known engine namespace: ensure the dependency is
+  installed and visible and that its exports loaded. Bare names and
+  engine-namespace typos keep the plain error.
+- **Unused warnings label class members as `field`** — `Class::field`
+  symbols were labeled `global`.
 
 ## [0.5.0] - 2026-08-17
 
