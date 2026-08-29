@@ -14,6 +14,21 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **Quiet levels for unused declarations: `unused = "hint" | "info"`** — "never
+  used" is advisory, not a defect, so it no longer has to be a warning.
+  `info` keeps the findings listed in an editor's problems panel; `hint` drops
+  them out of it and leaves only the greyed-out range. Both are non-fatal:
+  `check` exits 0 even under `--warnings-as-errors`, which still promotes
+  WARNING only. Available everywhere the key already worked — `--unused
+  hint|info` on the CLI (aliases `grey`/`faded` and `note`/`information`),
+  `unused = "hint"` in `.openplanet-lsp.toml` or the user config, and
+  `initializationOptions` from an editor.
+- **Unused findings carry the LSP `Unnecessary` diagnostic tag** — at every
+  level, including `warn` and `error`. That tag, not the severity, is what
+  makes an editor fade the declaration (VS Code gates the grey-out on
+  `editor.showUnused`), and it is what keeps `unused = "hint"` visible when a
+  client omits HINT diagnostics from its problems list. Clients without
+  `publishDiagnostics.tagSupport` ignore it.
 - **`signature_mode` — choose which `SIG_*` defines are live (#64)** — the LSP
   used to define `SIG_OFFICIAL`, `SIG_REGULAR`, `SIG_SCHOOL` and
   `SIG_DEVELOPER` unconditionally, so a plugin could never be analysed the way
