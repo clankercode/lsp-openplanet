@@ -1,0 +1,70 @@
+---
+complexity: medium
+created_at: "2026-08-29T07:02:24Z"
+depends_on: []
+estimate_hours: 3
+id: B028
+priority: medium
+status: pending
+tags: []
+title: OS/arch/build defines are all on at once (MANIA64+MANIA32, WINDOWS+LINUX+WINDOWS_WINE)
+updated_at: "2026-08-29T07:02:24Z"
+---
+Found 2026-08-29 while implementing GH #64 (signature-mode selector). Same
+class as GH #36 (platform selectors) and GH #64 (signature levels): a set of
+mutually-exclusive-in-reality defines is switched on simultaneously.
+
+## What is wrong
+`LspConfig::defines_for_target` ALWAYS_ON currently holds:
+
+    MANIA64, MANIA32, WINDOWS, WINDOWS_WINE, LINUX, SERVER, LOGS, HAS_DEV, DEVELOPER
+
+No real Openplanet process has more than one of {MANIA64, MANIA32} or of
+{WINDOWS, LINUX} live, and WINDOWS_WINE only under Wine. Per the docs
+(https://openplanet.dev/docs/reference/preprocessor) the rest describe the
+running build: DEVELOPER = "the current Openplanet build is a debug build",
+HAS_DEV = "the current game is a Nadeo development build", LOGS = "a
+Logs-configured build", SERVER = "a dedicated server build" — a normal
+player's client has none of the last three.
+
+## Impact
+A plugin that declares the same symbol in separate `#if MANIA32` and
+`#if MANIA64` blocks (or `#if WINDOWS` / `#if LINUX`) gets BOTH branches
+analyzed, so the second declaration is a phantom duplicate-declaration error.
+Code inside `#if SERVER` — never compiled on a client — is analyzed too, and
+its diagnostics are noise for a plugin that only ships to clients.
+
+Lower frequency than GH #36/#64 (fewer plugins branch on arch/OS), which is
+why it is filed rather than folded into #64.
+
+## Sketch
+Follow the shape GH #64 landed for signatures — selector keys, not hand-listed
+defines, resolved through the same ladder and derived in `defines_for_target`:
+
+- `os_target = "windows" | "linux" | "wine"` (default windows; wine implies
+  WINDOWS + WINDOWS_WINE, matching the game).
+- `arch_target = "64" | "32"` (default 64).
+- Build flags as booleans with client defaults: `developer_build`,
+  `has_dev`, `logs`, `server` — all default FALSE except keeping today's
+  behavior in mind (see migration).
+- CLI `--os` / `--arch` alongside `--game-target` / `--signature`.
+
+## Migration hazard (decide before implementing)
+Unlike GH #64 — where the always-on set WAS the developer level, so the
+default changed nothing — turning these off changes the default analysis for
+everyone: code inside `#if SERVER` / `#if LOGS` / `#if HAS_DEV` / one of the
+arch branches stops being checked, and symbols declared only there become
+undefined at their use sites. Options: (a) default them all ON (status quo)
+and let users narrow — safe but leaves the duplicate-declaration bug on by
+default; (b) default to a realistic client profile and take the churn in a
+minor release with a loud CHANGELOG entry. Recommend (a) for the flags plus a
+real default for os/arch (windows + 64), since arch/OS duplicates are the
+actual reported failure mode. Needs a decision, not just an implementation.
+
+## Test plan (TDD, red first)
+Red: a fixture declaring `int x;` in both `#if MANIA32` and `#if MANIA64`
+must report 0 diagnostics (today: duplicate declaration). Variants: WINDOWS vs
+LINUX pair; `os_target = "wine"` defines WINDOWS and WINDOWS_WINE together;
+`#if SERVER` code is not analyzed under a client profile; `defines` overrides
+still get the last word (`defines = ["SERVER"]` re-enables it); CLI flags beat
+config; unknown values are a usage error / warn-and-keep like #64.

@@ -26,3 +26,4 @@ bugs:
     - file: B025-false-error-this-method-refere.todo
     - file: B026-check-re-applies-the-manifest.todo
     - file: B027-delegate-construction-ignores.todo
+    - file: B028-os-arch-build-defines-are-all.todo
