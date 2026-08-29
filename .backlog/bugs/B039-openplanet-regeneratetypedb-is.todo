@@ -1,0 +1,87 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:06:17Z"
+depends_on: []
+estimate_hours: 1
+id: B039
+priority: medium
+status: pending
+tags:
+    - lsp
+    - vscode-ext
+    - dead-code
+title: openplanet.regenerateTypeDb is advertised by the server but unreachable from any client
+updated_at: "2026-08-29T15:06:17Z"
+---
+Found by a coordinator feature-gap review, 2026-08-30. Verified on master
+@ 91a296c. Pre-existing.
+
+## Defect
+The server advertises an execute-command:
+
+    src/server/mod.rs:1043-1046
+    execute_command_provider: Some(ExecuteCommandOptions {
+        commands: vec!["openplanet.regenerateTypeDb".into()],
+        ..Default::default()
+    }),
+
+No client ever invokes it. Verified in the extension repo
+(../lsp-openplanet-ext/packages/vscode-ext): the only two `executeCommand`
+calls in `src/extension.ts` are at :60 and :142, and BOTH are
+`workbench.action.openSettings` for the `openplanetLsp.serverPath` warning
+paths. Neither touches `regenerateTypeDb`.
+
+`contributes.commands` in the extension's package.json contains exactly one
+entry, `openplanetLsp.restart` ("Restart Server"), so there is also no
+command-palette route a user could take manually.
+
+Net: a working server capability that nothing can reach.
+
+## Impact
+Regenerating the type DB is exactly the recovery action a user needs after
+updating Openplanet or the game — the case where the LSP's symbol surface goes
+stale and every diagnostic becomes suspect. Today the only route is the CLI
+(`openplanet-lsp typedb ...`), which a VS Code user has no reason to know
+about.
+
+## Work
+- Contribute `openplanetLsp.regenerateTypeDb` ("Openplanet LSP: Regenerate
+  Type Database") in the extension's `contributes.commands`, wired to
+  `client.sendRequest(ExecuteCommandRequest.type, ...)` for
+  `openplanet.regenerateTypeDb`.
+- Report progress and outcome to the user — this is a long operation. Use a
+  progress notification, and on completion report what changed (versions
+  before/after) rather than a bare "done".
+- Verify the SERVER side actually implements the handler and does something.
+  Check `execute_command` exists on the LanguageServer impl; if the command is
+  advertised but unimplemented, that is the real bug and this ticket covers
+  implementing it or removing the advertisement. DO NOT assume it works
+  because it is listed — an advertised-but-unimplemented command is exactly
+  the failure this ticket exists to find.
+- While there, audit for the inverse: any command the extension sends that the
+  server does not advertise.
+
+## Design decision (coordinator, 2026-08-30)
+If the handler turns out to be missing, IMPLEMENT it rather than dropping the
+advertisement — the capability is genuinely wanted (see Impact). Removing the
+advertisement is only correct if regeneration is unsafe to trigger from the
+editor, which should be argued explicitly, not assumed.
+
+## Test plan (TDD, red first)
+Server side:
+- `execute_command_advertised_commands_are_all_implemented`: every string in
+  `ExecuteCommandOptions.commands` is dispatched by the `execute_command`
+  handler. Generalize it — this must fail for ANY future advertised-but-
+  unimplemented command, not just this one.
+- an unknown command name -> proper JSON-RPC error, not a panic.
+
+Extension side (vitest, existing harness at ../lsp-openplanet-ext):
+- the command is registered on activation
+- invoking it sends the right `workspace/executeCommand` request
+- server failure surfaces an error notification rather than failing silently
+- the command is present in `contributes.commands` (guards the palette route,
+  which is separate from registration)
+
+## Related
+Sibling finding: B040 (manifest validation never published). Same shape —
+implemented capability wired to nothing.
