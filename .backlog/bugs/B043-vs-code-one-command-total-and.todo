@@ -1,0 +1,105 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:08:16Z"
+depends_on: []
+estimate_hours: 1
+id: B043
+priority: medium
+status: pending
+tags:
+    - vscode-ext
+    - ux
+    - dx
+title: 'VS Code: one command total and no status bar; server state is invisible'
+updated_at: "2026-08-29T15:08:16Z"
+---
+Requested via a coordinator feature-gap review, 2026-08-30. Extension repo:
+../lsp-openplanet-ext/ (packages/vscode-ext). Enhancement.
+
+## Gap
+Verified on master: `contributes.commands` has exactly ONE entry,
+`openplanetLsp.restart` ("Restart Server"). There are no `menus`, no
+`keybindings`, and no status bar item. `activationEvents` is `[]`.
+
+Consequences:
+- There is no ambient signal the LSP is running, which server binary is in
+  use, which type DB version is loaded, or which game target is active. When
+  something looks wrong the user cannot tell whether the server is dead, stale,
+  or simply disagrees with them.
+- Server capabilities have no palette route (see B039 for the concrete case:
+  `openplanet.regenerateTypeDb` is advertised and unreachable).
+- Diagnosing a user report starts with "check the output channel", which
+  requires knowing the output channel exists.
+
+## Work
+
+### Status bar item
+Show a compact indicator: server state (starting / ready / failed), and on
+hover a tooltip with the resolved server path, server version, type DB version
+and source, active game target, and workspace root. Click opens the output
+channel. Colour it as an error when the server has failed — that single
+affordance replaces most of the "is it even running" support burden.
+
+### Commands
+Contribute, at minimum:
+- `openplanetLsp.showLogs` — reveal the output channel. Trivial, and referenced
+  by every other diagnostic path.
+- `openplanetLsp.showStatus` — dump resolved config: server path/version, type
+  DB version, game target, plugin roots, active defines, workspace roots.
+  Prefer a read-only document over a notification; this is text people paste
+  into bug reports.
+- `openplanetLsp.regenerateTypeDb` — see B039, which owns the server-side
+  verification. Contribute the palette entry here only if B039 lands first, or
+  coordinate so it is not contributed twice.
+- `openplanetLsp.restartVerbose` — restart with elevated server logging, for
+  reproducing a report without editing settings.
+
+### Wiring
+- Set `activationEvents` explicitly (`onLanguage:angelscript` plus whatever the
+  commands need) rather than relying on inference, so the status bar appears
+  when it should and not on every window.
+- Add `menus` entries where they help (editor context menu for the status dump
+  is probably noise; the command palette is the main surface — do not add menu
+  clutter without a reason).
+
+## Design decision (coordinator, 2026-08-30)
+`showStatus` output must be safe to paste in public. It names filesystem paths,
+so it may include a home directory — abbreviate `$HOME` to `~` and do not
+include environment variables wholesale. This is a bug-report aid; treat its
+output as something that will end up in a GitHub issue.
+
+The status bar must NOT poll the server. Drive it from the language client's
+existing state-change events, plus the responses the extension already
+receives. A per-second refresh for a mostly-static indicator is wasted work in
+every open window.
+
+## Test plan (vitest, the extension repo's existing harness)
+Red:
+- each new command is registered on activation and present in
+  `contributes.commands` (registration and palette presence are separate
+  failures — assert both)
+- `showLogs` reveals the output channel
+- `showStatus` produces a document containing the resolved server path,
+  versions and game target
+- the status bar item is created on activation and disposed on deactivate
+
+Variants (per CLAUDE.md, generalize):
+- server states starting / ready / failed / restarting each render a distinct
+  status bar state, and the failed state is visually distinguished
+- server never starts (bad `serverPath`) -> status bar shows failure and the
+  tooltip names the reason; no unhandled rejection
+- server crashes AFTER a successful start -> status bar updates rather than
+  staying stale
+- no workspace folder open -> commands still work or degrade with a clear
+  message; no throw
+- multi-root workspace -> status reflects the root for the ACTIVE editor, and
+  switching editors updates it
+- `showStatus` with `$HOME` in every path -> output contains `~`, not the
+  literal home path
+- deactivate with the server still starting -> clean disposal, no leaked
+  listener
+- commands invoked before activation completes -> queued or refused cleanly
+
+## Related
+B039 (regenerateTypeDb server side), B042 (snippets), B034 (defines UI, which
+should share whatever status/scope surface this establishes).

@@ -41,3 +41,4 @@ bugs:
     - file: B040-manifest-validate-is-dead-code.todo
     - file: B041-no-color-provider-vec3-vec4-co.todo
     - file: B042-vs-code-no-snippets-for-openpl.todo
+    - file: B043-vs-code-one-command-total-and.todo
