@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: low
 created_at: "2026-08-29T10:01:09Z"
 depends_on: []
 estimate_hours: 1
 id: B032
 priority: low
+started_at: null
 status: pending
 tags: []
 title: 'Flaky: update tests race on OPENPLANET_LSP_PACKAGE_MANAGER env var'
@@ -12,3 +14,50 @@ updated_at: "2026-08-29T10:01:09Z"
 ---
 
 Flaky: update tests race on OPENPLANET_LSP_PACKAGE_MANAGER env var
+
+Observed 2026-08-29 during B031's full-suite run; unrelated to that work.
+
+## Symptom
+`cargo test --locked` intermittently fails:
+
+    ---- update::tests::detect_npm_local_layout stdout ----
+    panicked at src/update.rs:1722:22:
+    expected NodeLocal npm, got NodeLocal { pm: Pnpm, package_root: "/work/my-plugin" }
+
+Passes in isolation (`cargo test --lib update::tests::detect_npm_local_layout`)
+and on a re-run of the full suite, so CI will see it as a random red.
+
+## Cause
+`package_manager_env_override` (src/update.rs:1898) does
+
+    std::env::set_var("OPENPLANET_LSP_PACKAGE_MANAGER", "pnpm");
+    ...
+    std::env::remove_var("OPENPLANET_LSP_PACKAGE_MANAGER");   // :1908
+
+Env vars are process-global and cargo runs `--lib` tests as parallel THREADS
+in one process, so any test whose detection consults that variable can read
+it during the ~10 lines it is set. `detect_npm_local_layout` is one such
+test; `detect_npm_local_layout` expects the lockfile-derived `npm` and gets
+the env override's `pnpm`.
+
+`status_roundtrip_in_temp_config_dir` (:1921) does the same with
+`OPENPLANET_LSP_CONFIG_DIR`, so it is the same hazard, currently unobserved.
+
+## Fix options
+1. A test-local mutex around every test that sets or reads those vars
+   (a `static ENV_LOCK: Mutex<()>` in the test module). Smallest change,
+   keeps the env-override coverage.
+2. Thread the override through a parameter instead of reading the env inside
+   the detection fn, so tests never touch process state. Cleaner seam, more
+   churn.
+3. `#[serial]` via a dev-dependency. Rejected: a new dep for two tests.
+
+Recommend (1) now, (2) if the env-read seam grows.
+
+## Test plan (TDD, red first)
+Red is inherently racy, so make it deterministic: a test that sets the var,
+spawns a thread calling the detection fn on a lockfile fixture, and asserts
+the lockfile answer wins per-call — fails today, passes once the seam or the
+lock is in place. Variants: the config-dir var (same hazard), and a run of
+the whole `update::tests` module under `--test-threads=8` repeated to show
+the flake is gone.
