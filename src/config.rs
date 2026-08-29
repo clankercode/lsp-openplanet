@@ -241,13 +241,19 @@ impl ConfigIssue {
     }
 
     /// The file is not TOML at all; it is skipped whole, but never silently.
-    fn unparseable(file: &Path, err: &toml::de::Error) -> Self {
+    pub(crate) fn unparseable(file: &Path, err: &toml::de::Error) -> Self {
         Self::new(
             file,
             "",
             "valid TOML (the whole file was skipped)",
             err.message().to_string(),
         )
+    }
+
+    /// The file exists but could not be read, so a watcher must retain the
+    /// current config rather than interpreting the failure as a deletion.
+    pub(crate) fn unreadable(file: &Path, err: &std::io::Error) -> Self {
+        Self::new(file, "", "a readable config file", err.to_string())
     }
 }
 
@@ -423,6 +429,26 @@ impl FileReader<'_> {
         Some(token.to_string())
     }
 
+    /// A game target follows the CLI contract: trim surrounding whitespace,
+    /// compare case-insensitively, and retain the canonical uppercase token.
+    fn game_target(&mut self) -> Option<String> {
+        const KEY: &str = "game_target";
+        let value = self.table.get(KEY)?;
+        let expected = format!("one of {}", LspConfig::GAME_TARGETS.join(", "));
+        let Some(token) = value.as_str() else {
+            self.issues
+                .push(ConfigIssue::wrong_type(self.file, KEY, &expected, value));
+            return None;
+        };
+        let normalized = token.trim().to_ascii_uppercase();
+        if !LspConfig::GAME_TARGETS.contains(&normalized.as_str()) {
+            self.issues
+                .push(ConfigIssue::invalid_value(self.file, KEY, &expected, token));
+            return None;
+        }
+        Some(normalized)
+    }
+
     fn boolean(&mut self, key: &str) -> Option<bool> {
         self.typed(key, "a boolean")
     }
@@ -514,7 +540,7 @@ impl ConfigFile {
         Self {
             openplanet_dir: r.string("openplanet_dir"),
             plugins_dir: r.string("plugins_dir"),
-            game_target: r.string("game_target"),
+            game_target: r.game_target(),
             signature_mode: r.validated_string(
                 "signature_mode",
                 "one of developer, school, regular, official",
@@ -4039,6 +4065,49 @@ shortcut_match_enums = true
                 );
             }
         }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn game_target_errors_fall_through_while_valid_forms_normalize() {
+        let (tmp, user, _parent, root) = b017_layers("game-target-validation");
+        std::fs::write(
+            &user,
+            "game_target = \"MP4\"\nsource_paths = [\"user-src\"]\n",
+        )
+        .unwrap();
+
+        write_ws(
+            &root,
+            "game_target = \"unknown-game\"\nsource_paths = [\"workspace-src\"]\n",
+        );
+        let (fallback, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+        assert_eq!(
+            fallback.game_target, "MP4",
+            "an invalid workspace target must leave the valid lower layer intact"
+        );
+        assert_eq!(
+            fallback.source_paths,
+            Some(vec![PathBuf::from("workspace-src")]),
+            "a valid sibling in the same file must still apply"
+        );
+        let issue = issues
+            .iter()
+            .find(|issue| issue.key == "game_target")
+            .unwrap_or_else(|| panic!("missing game_target issue: {issues:?}"));
+        assert_eq!(issue.file, root.join(".openplanet-lsp.toml"));
+        assert!(issue.expected.contains("TMNEXT"), "{issue:?}");
+        assert!(issue.expected.contains("NATIONS_FOREVER"), "{issue:?}");
+        assert!(issue.found.contains("unknown-game"), "{issue:?}");
+
+        write_ws(&root, "game_target = \" turbo \"\n");
+        let (accepted, issues) = LspConfig::from_layers(Some(&user), None, Some(&root));
+        assert_eq!(accepted.game_target, "TURBO");
+        assert!(
+            !issues.iter().any(|issue| issue.key == "game_target"),
+            "CLI-compatible case/whitespace must be accepted: {issues:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

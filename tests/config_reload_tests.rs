@@ -69,6 +69,28 @@ async fn next_show_message(socket: &mut tower_lsp::ClientSocket) -> ShowMessageP
     }
 }
 
+fn assert_whole_file_toml_warning(warning: &ShowMessageParams, config_file: &Path) {
+    assert_eq!(warning.typ, MessageType::WARNING);
+    assert!(
+        warning.message.contains(&config_file.display().to_string()),
+        "warning must carry the structured issue file: {warning:?}"
+    );
+    assert!(
+        warning
+            .message
+            .contains("expected valid TOML (the whole file was skipped)"),
+        "warning must carry the whole-file expected field: {warning:?}"
+    );
+    assert!(
+        warning.message.contains("found: invalid array"),
+        "warning must carry the parse error in the found field: {warning:?}"
+    );
+    assert!(
+        !warning.message.contains("key ``"),
+        "whole-file issues must render without a key: {warning:?}"
+    );
+}
+
 async fn config_of(backend: &Backend) -> openplanet_lsp::config::LspConfig {
     backend
         .workspace_configs()
@@ -202,12 +224,7 @@ async fn watched_file_invalid_toml_warns_client_once_and_keeps_last_good() {
     )
     .await
     .expect("invalid watched file must warn the LSP client");
-    assert_eq!(warning.typ, MessageType::WARNING);
-    assert!(warning.message.contains("invalid TOML"), "{warning:?}");
-    assert!(
-        warning.message.contains(".openplanet-lsp.toml"),
-        "{warning:?}"
-    );
+    assert_whole_file_toml_warning(&warning, &cfg);
     let after = config_of(backend).await;
     assert_eq!(after.game_target, "TURBO");
     assert_eq!(after.honor_gitignore, Some(false));
@@ -245,12 +262,7 @@ async fn native_config_watcher_invalid_toml_warns_client_and_keeps_last_good() {
     )
     .await
     .expect("native config watcher must warn the LSP client");
-    assert_eq!(warning.typ, MessageType::WARNING);
-    assert!(warning.message.contains("invalid TOML"), "{warning:?}");
-    assert!(
-        warning.message.contains(".openplanet-lsp.toml"),
-        "{warning:?}"
-    );
+    assert_whole_file_toml_warning(&warning, &cfg);
     let after = config_of(backend).await;
     assert_eq!(after.game_target, "MP4");
     assert_eq!(after.source_paths, Some(vec![PathBuf::from("src")]));

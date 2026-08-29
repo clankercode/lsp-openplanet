@@ -14,6 +14,8 @@ use std::time::Duration;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent};
 
+use crate::config::ConfigIssue;
+
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// Filename of the per-workspace / per-plugin config file.
@@ -29,7 +31,7 @@ pub enum ConfigReloadAction {
     /// File is missing or parses; reload the config ladder.
     Reload,
     /// File exists but TOML is invalid; keep last-good config.
-    KeepLastGood { reason: String },
+    KeepLastGood { issue: ConfigIssue },
 }
 
 /// `$HOME/.config/openplanet-lsp/config.toml` when `$HOME` is set.
@@ -85,8 +87,8 @@ pub fn watch_config_files(
 ) -> Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>, String> {
     watch_config_files_with_action(home, extra_dirs, move |action| match action {
         ConfigReloadAction::Reload => on_reload(),
-        ConfigReloadAction::KeepLastGood { reason } => {
-            tracing::warn!("keeping last-good config ({reason})");
+        ConfigReloadAction::KeepLastGood { issue } => {
+            tracing::warn!("keeping last-good config ({issue})");
         }
     })
 }
@@ -162,12 +164,12 @@ pub fn config_reload_action(path: &Path) -> ConfigReloadAction {
     match std::fs::read_to_string(path) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => ConfigReloadAction::Reload,
         Err(err) => ConfigReloadAction::KeepLastGood {
-            reason: format!("unreadable {}: {err}", path.display()),
+            issue: ConfigIssue::unreadable(path, &err),
         },
         Ok(contents) => match toml::from_str::<toml::Table>(&contents) {
             Ok(_) => ConfigReloadAction::Reload,
             Err(err) => ConfigReloadAction::KeepLastGood {
-                reason: format!("invalid TOML in {}: {err}", path.display()),
+                issue: ConfigIssue::unparseable(path, &err),
             },
         },
     }
@@ -284,20 +286,33 @@ mod tests {
         // Invalid TOML on either file → keep last-good.
         fs::write(&workspace, "honor_gitignore = {\n").unwrap();
         fs::write(&user, "defines = [\n").unwrap();
-        assert!(
-            matches!(
-                config_reload_action(&workspace),
-                ConfigReloadAction::KeepLastGood { .. }
-            ),
-            "invalid workspace TOML must keep last-good"
-        );
-        assert!(
-            matches!(
-                config_reload_action(&user),
-                ConfigReloadAction::KeepLastGood { .. }
-            ),
-            "invalid user TOML must keep last-good"
-        );
+        for (path, found) in [(&workspace, "invalid inline table"), (&user, "invalid array")] {
+            let ConfigReloadAction::KeepLastGood { issue } = config_reload_action(path) else {
+                panic!("invalid TOML in {} must keep last-good", path.display());
+            };
+            assert_eq!(issue.file, *path);
+            assert_eq!(issue.key, "", "whole-file parse failures have no key");
+            assert_eq!(
+                issue.expected,
+                "valid TOML (the whole file was skipped)"
+            );
+            assert!(
+                issue.found.contains(found),
+                "{}: expected parse error containing {found:?}, got {issue:?}",
+                path.display()
+            );
+        }
+
+        // Other unusable files are structured whole-file issues too.
+        let unreadable = home.join("unreadable/.openplanet-lsp.toml");
+        fs::create_dir_all(&unreadable).unwrap();
+        let ConfigReloadAction::KeepLastGood { issue } = config_reload_action(&unreadable) else {
+            panic!("an unreadable config must keep last-good");
+        };
+        assert_eq!(issue.file, unreadable);
+        assert_eq!(issue.key, "");
+        assert_eq!(issue.expected, "a readable config file");
+        assert!(!issue.found.is_empty());
 
         // Delete after a good write → reload.
         fs::remove_file(&workspace).unwrap();

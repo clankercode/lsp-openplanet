@@ -149,8 +149,8 @@ impl Backend {
             while let Some(action) = rx.recv().await {
                 match action {
                     ConfigReloadAction::Reload => this.reload_config_from_disk().await,
-                    ConfigReloadAction::KeepLastGood { reason } => {
-                        this.report_config_warning(reason).await;
+                    ConfigReloadAction::KeepLastGood { issue } => {
+                        this.report_config_issue(&issue).await;
                     }
                 }
             }
@@ -358,8 +358,12 @@ impl Backend {
     /// to stderr from the config loader — this is the in-editor channel.
     async fn report_config_issues(&self, config: &LspConfig) {
         for issue in &config.config_issues {
-            self.report_config_warning(issue.to_string()).await;
+            self.report_config_issue(issue).await;
         }
+    }
+
+    async fn report_config_issue(&self, issue: &crate::config::ConfigIssue) {
+        self.report_config_warning(issue.to_string()).await;
     }
 
     /// Emit one distinct config warning to the editor. The dedup lock guards
@@ -1206,7 +1210,7 @@ impl LanguageServer for Backend {
     /// changed under us).
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         let mut config_reload = false;
-        let mut config_invalid_reasons = Vec::new();
+        let mut config_issues = Vec::new();
         for event in &params.changes {
             let file_path = event.uri.to_file_path().ok();
             if !is_config_watch_event(file_path.as_deref(), event.uri.path()) {
@@ -1218,14 +1222,14 @@ impl LanguageServer for Backend {
                 .unwrap_or(ConfigReloadAction::Reload)
             {
                 ConfigReloadAction::Reload => config_reload = true,
-                ConfigReloadAction::KeepLastGood { reason } => {
-                    config_invalid_reasons.push(reason);
+                ConfigReloadAction::KeepLastGood { issue } => {
+                    config_issues.push(issue);
                 }
             }
         }
-        if !config_invalid_reasons.is_empty() {
-            for reason in config_invalid_reasons {
-                self.report_config_warning(reason).await;
+        if !config_issues.is_empty() {
+            for issue in config_issues {
+                self.report_config_issue(&issue).await;
             }
             return;
         }
