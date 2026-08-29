@@ -24,3 +24,4 @@ bugs:
     - file: B023-wrong-signature-non-function-c.todo
     - file: B024-config-defines-replaces-the-ga.todo
     - file: B025-false-error-this-method-refere.todo
+    - file: B026-check-re-applies-the-manifest.todo

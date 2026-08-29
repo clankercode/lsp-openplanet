@@ -1,0 +1,48 @@
+---
+complexity: low
+created_at: "2026-08-29T05:24:34Z"
+depends_on: []
+estimate_hours: 1
+id: B026
+priority: high
+status: pending
+tags: []
+title: check re-applies the manifest after config load, undoing `defines` removals (B024 follow-up)
+updated_at: "2026-08-29T05:24:34Z"
+---
+Found 2026-08-29 while planning the signature-mode work. Regression window:
+introduced by B024 (custom defines became additive with `-NAME` removals).
+
+## Symptom
+CLI `check` and the LSP server disagree about `-NAME` removals of a
+MANIFEST-derived define. Repro:
+
+    info.toml            [script] defines = ["MANIFEST_OFF"]
+    .openplanet-lsp.toml defines = ["-MANIFEST_OFF"]
+    src/Main.as          #if MANIFEST_OFF
+                         MissingType removal_was_undone;
+                         #endif
+
+`check --no-typedb` reports 2 errors — the branch is live. `LspConfig::load`
+alone (the LSP path) drops MANIFEST_OFF correctly; the unit test
+`config_defines_apply_after_manifest_defines` passes.
+
+## Cause
+src/cli/mod.rs `run_check` calls `LspConfig::load(Some(&root), None)`, which
+already applies the plugin manifest at Layer 4 and the user's define
+overrides at Layer 5. `run_check` then loads `root/info.toml` and calls
+`config.apply_manifest(&manifest)` a SECOND time, re-inserting every
+manifest/dependency define AFTER the removals ran.
+
+The second call is redundant even without B024 — `load` covers the same root.
+
+## Fix
+Drop the duplicate `apply_manifest` block in `run_check`. Keep one seam:
+`LspConfig::load` owns the whole ladder.
+
+## Test plan (TDD, red first)
+Red: the fixture above via the `check` subprocess must report 0 diagnostics.
+Variants: `-DEPENDENCY_X` removal of a dependency-derived define; a manifest
+define NOT removed still survives (guards over-deletion); the LSP path keeps
+agreeing (existing unit test); `--define MANIFEST_OFF` on the command line
+still wins over a config `-MANIFEST_OFF` (CLI flag is the top layer).
