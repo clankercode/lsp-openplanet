@@ -1980,6 +1980,12 @@ fn dependency_define_suffix(dep: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Private protocol between [`unused_callbacks_load_wiring_end_to_end`]
+    /// and its child test. Set only on the spawned `Command`, never with
+    /// `set_var`, so no sibling test can observe them (B032).
+    const UNUSED_CALLBACKS_LOAD_CHILD: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_CHILD";
+    const UNUSED_CALLBACKS_LOAD_ROOT: &str = "OPENPLANET_LSP_UNUSED_CALLBACKS_LOAD_ROOT";
+
     #[test]
     fn unused_level_parse_accepts_canonical_and_alias_variants() {
         for (input, want) in [
@@ -2826,6 +2832,8 @@ shortcut_match_enums = true
     /// GH #56: `unused_callbacks` precedence. Tested through the pure
     /// resolver rather than `load_with_parent` so the "user global" leg
     /// is a temp file — mutating $HOME in-process races the tests above.
+    /// The public `load` / `load_with_parent` wiring is covered separately
+    /// by [`unused_callbacks_load_wiring_end_to_end`], in a subprocess.
     #[test]
     fn unused_callbacks_workspace_overrides_user_global() {
         let tmp = std::env::temp_dir().join(format!("oplsp-uc-{}", std::process::id()));
@@ -2899,6 +2907,166 @@ shortcut_match_enums = true
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Public-seam coverage for the complete config-loading ladder: the
+    /// resolver tests above call `from_layers`, which cannot reach the leg
+    /// that turns `$HOME` into the user-global path. Each case runs in a
+    /// SUBPROCESS with a fake `HOME`, so the ladder is exercised end to end
+    /// without an in-process `set_var` racing a sibling test (B032).
+    ///
+    /// The child prints `SCENARIO OK: <name>` and the parent requires it:
+    /// `libtest --exact` exits 0 when the filter matches NOTHING, so a
+    /// renamed child or an unpropagated env var would otherwise show green
+    /// while asserting nothing at all.
+    #[test]
+    fn unused_callbacks_load_wiring_end_to_end() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-uc-load-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Derived, not hardcoded: a module rename cannot silently turn this
+        // into a filter that matches no test. libtest names omit the crate
+        // segment that `module_path!` starts with, hence the split.
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_crate, rest)| rest);
+        let child_filter = format!("{module}::unused_callbacks_load_wiring_child");
+
+        for scenario in ["user-only", "workspace", "parent-root", "malformed"] {
+            let case = tmp.join(scenario);
+            let home_config = case.join("home/.config/openplanet-lsp");
+            std::fs::create_dir_all(&home_config).unwrap();
+            std::fs::write(
+                home_config.join("config.toml"),
+                "unused_callbacks = [\"FromUser\"]\n",
+            )
+            .unwrap();
+
+            match scenario {
+                "workspace" => {
+                    std::fs::create_dir_all(case.join("workspace")).unwrap();
+                    std::fs::write(
+                        case.join("workspace/.openplanet-lsp.toml"),
+                        "unused_callbacks = [\"FromWorkspace\"]\n",
+                    )
+                    .unwrap();
+                }
+                "parent-root" => {
+                    for (dir, callback) in [("parent", "FromParent"), ("root", "FromRoot")] {
+                        std::fs::create_dir_all(case.join(dir)).unwrap();
+                        std::fs::write(
+                            case.join(dir).join(".openplanet-lsp.toml"),
+                            format!("unused_callbacks = [\"{callback}\"]\n"),
+                        )
+                        .unwrap();
+                    }
+                    std::fs::create_dir_all(case.join("root-without-key")).unwrap();
+                }
+                "malformed" => {
+                    std::fs::create_dir_all(case.join("workspace")).unwrap();
+                    std::fs::write(
+                        case.join("workspace/.openplanet-lsp.toml"),
+                        "ignore_paths = [\"generated/**\"]\nunused_callbacks = 7\n",
+                    )
+                    .unwrap();
+                }
+                "user-only" => {}
+                _ => unreachable!(),
+            }
+
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(&child_filter)
+                .arg("--nocapture")
+                // One test runs; keep the child from claiming a thread per
+                // core on a machine shared with other builds.
+                .arg("--test-threads=1")
+                .env("HOME", case.join("home"))
+                .env_remove("USERPROFILE")
+                .env(UNUSED_CALLBACKS_LOAD_CHILD, scenario)
+                .env(UNUSED_CALLBACKS_LOAD_ROOT, &case)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "scenario {scenario} failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            assert!(
+                stdout.contains(&format!("SCENARIO OK: {scenario}")),
+                "scenario {scenario} exited 0 without running its assertions \
+                 (filter {child_filter:?} matched no test, or the env did not \
+                 propagate):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The child half of [`unused_callbacks_load_wiring_end_to_end`]. Inert
+    /// unless BOTH protocol variables are set, which only the parent above
+    /// does — in the ordinary run this returns before touching `$HOME`, so
+    /// it neither reads nor writes process-global state.
+    #[test]
+    fn unused_callbacks_load_wiring_child() {
+        let (Ok(scenario), Some(root)) = (
+            std::env::var(UNUSED_CALLBACKS_LOAD_CHILD),
+            std::env::var_os(UNUSED_CALLBACKS_LOAD_ROOT),
+        ) else {
+            return;
+        };
+        let case = PathBuf::from(root);
+
+        match scenario.as_str() {
+            "user-only" => {
+                assert_eq!(
+                    LspConfig::load(None, None).unused_callbacks,
+                    vec!["FromUser"],
+                    "the user-global file must reach the public `load` seam"
+                );
+            }
+            "workspace" => {
+                assert_eq!(
+                    LspConfig::load(Some(&case.join("workspace")), None).unused_callbacks,
+                    vec!["FromWorkspace"],
+                    "workspace must override user global (B017)"
+                );
+            }
+            "parent-root" => {
+                let parent = case.join("parent");
+                assert_eq!(
+                    LspConfig::load_with_parent(
+                        Some(&case.join("root-without-key")),
+                        Some(&parent),
+                        None,
+                    )
+                    .unused_callbacks,
+                    vec!["FromParent"],
+                    "parent must override user when the root omits the key"
+                );
+                assert_eq!(
+                    LspConfig::load_with_parent(Some(&case.join("root")), Some(&parent), None)
+                        .unused_callbacks,
+                    vec!["FromRoot"],
+                    "root must override parent"
+                );
+            }
+            "malformed" => {
+                let config = LspConfig::load(Some(&case.join("workspace")), None);
+                assert_eq!(
+                    config.unused_callbacks,
+                    vec!["FromUser"],
+                    "malformed workspace value must fall through to user"
+                );
+                assert_eq!(
+                    config.ignore_paths,
+                    Some(vec![PathBuf::from("generated/**")]),
+                    "malformed unused_callbacks must not discard a sibling key"
+                );
+            }
+            other => panic!("unknown child scenario: {other}"),
+        }
+        println!("SCENARIO OK: {scenario}");
     }
 
     /// Malformed values are ignored, never panic, and never poison the
@@ -3583,10 +3751,12 @@ shortcut_match_enums = true
     }
 
     // NOTE: the user-global layer ($HOME/.config/openplanet-lsp/config.toml)
-    // is deliberately NOT unit-tested here — mutating $HOME in-process races
-    // with `test_game_json_derivation_uses_variant_folder` above (lib tests
-    // share one process). It's covered end-to-end by the subprocess tests in
-    // tests/cli_check_tests.rs, which own their environment.
+    // is never exercised by mutating $HOME IN-PROCESS — that races
+    // `test_game_json_derivation_uses_variant_folder` above (lib tests share
+    // one process). It is covered end-to-end by the subprocess tests in
+    // tests/cli_check_tests.rs, which own their environment, and by
+    // `unused_callbacks_load_wiring_end_to_end` above, which spawns this
+    // same test binary with a fake HOME rather than editing its own.
 
     // ---------------------------------------------------------------------
     // B017: ONE ladder — init options > CLI flag > per-root workspace config
