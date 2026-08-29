@@ -2487,6 +2487,98 @@ impl<'a> Checker<'a> {
             .any(|sig| self.func_matches_funcdef(sig, fd))
     }
 
+    /// Pure receiver typing for a B025 method reference (`recv.Method` at a
+    /// funcdef ctor arg): resolves the receiver's type WITHOUT recording uses
+    /// or emitting diagnostics — the caller already walked the full arg once.
+    /// `None` when the receiver's class can't be determined statically.
+    fn method_ref_receiver_type(&self, expr: &Expr) -> Option<TypeRepr> {
+        match &expr.kind {
+            ExprKind::This => self.current_class().map(|cls| TypeRepr::Named(cls.name.clone())),
+            ExprKind::Ident(name) => {
+                let n = name.text(self.source);
+                // Mirror `expr_type`'s Ident precedence (B025 review):
+                // locals, then implicit-`this` class members (members shadow
+                // globals), then namespace-prefixed globals, then bare
+                // globals — the same expression must not be typed two ways
+                // within one diagnostic decision.
+                if let Some(local) = self.lookup_local(n) {
+                    return Some(local.ty.clone());
+                }
+                if let Some(ty) = self.lookup_class_member(n) {
+                    return Some(ty);
+                }
+                if let Some(cls) = self.current_class() {
+                    if let Some(ty) = self.scope.workspace_class_member(&cls.name, n) {
+                        return Some(ty);
+                    }
+                }
+                for depth in (1..=self.namespace_stack.len()).rev() {
+                    let ns = self.namespace_stack[..depth].join("::");
+                    let qualified = format!("{}::{}", ns, n);
+                    if let Some(ty) = self.scope.lookup_global_value_type(&qualified) {
+                        return Some(ty);
+                    }
+                }
+                self.scope.lookup_global_value_type(n)
+            }
+            // `box.inner.M` — the receiver of the method reference is itself
+            // a member access; its type is that member's type.
+            ExprKind::Member {
+                object,
+                member: name,
+            } => {
+                let base = Self::base_type_name(&self.method_ref_receiver_type(object)?)?;
+                self.scope
+                    .workspace_class_member(&base, name.text(self.source))
+            }
+            // `GetN().Disconnect` / `this.Make().Go` / `Make().Go` in its
+            // namespace — a factory call's receiver type is the callee's
+            // return type (workspace or typedb).
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                // The callee is itself a member access: the Member rule
+                // below resolves the method's return type.
+                ExprKind::Member { .. } => return self.method_ref_receiver_type(callee),
+                ExprKind::NamespaceAccess { path } => {
+                    return self
+                        .scope
+                        .lookup_function_return(&path.to_string(self.source));
+                }
+                ExprKind::Ident(ident) => {
+                    let name = ident.text(self.source);
+                    for depth in (1..=self.namespace_stack.len()).rev() {
+                        let ns = self.namespace_stack[..depth].join("::");
+                        if let Some(t) = self
+                            .scope
+                            .lookup_function_return(&format!("{}::{}", ns, name))
+                        {
+                            return Some(t);
+                        }
+                    }
+                    return self.scope.lookup_function_return(name);
+                }
+                _ => return None,
+            },
+            // `cast<N>(h).Disconnect` — the cast's target type.
+            ExprKind::Cast { target_type, .. } => {
+                let mut te = target_type;
+                while let TypeExprKind::Handle(inner) = &te.kind {
+                    te = inner;
+                }
+                match &te.kind {
+                    TypeExprKind::Named(qn) => Some(TypeRepr::Named(qn.to_string(self.source))),
+                    _ => None,
+                }
+            }
+            // `edges[i].Disconnect` / `box.ns[0].Go` — the element type of
+            // the indexed receiver.
+            ExprKind::Index { object, .. } => self
+                .method_ref_receiver_type(object)?
+                .array_element_type()
+                .cloned(),
+            _ => None,
+        }
+    }
+
     fn lookup_arg_function_sigs(&self, arg: &Expr, arg_ty: &TypeRepr) -> Vec<OverloadSig> {
         let mut out = Vec::new();
         match &arg.kind {
@@ -2511,6 +2603,32 @@ impl<'a> Checker<'a> {
                 let qual = path.to_string(self.source);
                 out.extend(self.scope.lookup_function_overloads(&qual));
             }
+            ExprKind::Member { object, member } => {
+                // B025: a method reference (`this.M`, `c.M`, `g.M`,
+                // `arr[i].M`) is a callable — the funcdef ctor is the
+                // required method-to-funcdef conversion (methods do not
+                // implicitly decay like free functions) — so resolve the
+                // receiver's class and collect the method's overload
+                // signatures instead of trusting `arg_ty` (the member-access
+                // type is the method's return type).
+                if let Some(cls_name) = self
+                    .method_ref_receiver_type(object)
+                    .as_ref()
+                    .and_then(Self::base_type_name)
+                {
+                    let mut sigs = self.scope.lookup_method_overloads_with_inheritance(
+                        &cls_name,
+                        member.text(self.source),
+                    );
+                    if sigs.is_empty() {
+                        // Engine-typed receivers (`r.Cancel` on
+                        // `Net::HttpRequest@`): bind the typedb's method
+                        // overloads the same way the member-access path does.
+                        sigs = self.scope.callables_method(&cls_name, member.text(self.source));
+                    }
+                    out.extend(sigs);
+                }
+            }
             _ => {}
         }
         if let TypeRepr::Funcdef(n) = Self::peel_const_handle(arg_ty) {
@@ -2534,11 +2652,21 @@ impl<'a> Checker<'a> {
         sig.param_types
             .iter()
             .zip(&fd.param_types)
-            .all(|(got, expected)| {
-                self.funcdef_types_compatible(
+            .enumerate()
+            .all(|(i, (got, expected))| {
+                if !self.funcdef_types_compatible(
                     &TypeRepr::parse_type_string(got),
                     &TypeRepr::parse_type_string(expected),
-                )
+                ) {
+                    return false;
+                }
+                // Delegate construction requires exact parameter passing
+                // modes (game ground truth 2026-08-29: a `void(int &out)`
+                // method into `funcdef void(int)` errors `Can't create
+                // delegate`).
+                let got_out = sig.param_out.get(i).copied().unwrap_or(false);
+                let expected_out = expected.contains("&out");
+                got_out == expected_out
             })
     }
 
@@ -8712,6 +8840,495 @@ void Main() {
             no_matching_symbols(&diags),
             vec![("UI::DefinitelyNotAFuncdef".to_string(), None)],
             "unknown UI member must stay No matching symbol, got {:?}",
+            diags
+        );
+    }
+
+    // === B025: `this.Method` / `obj.Method` references at funcdef ctor sites ===
+
+    /// `CoroutineFunc(this.M)` is the required method-to-funcdef conversion
+    /// (class methods do not implicitly decay the way free functions do), so
+    /// the ctor arg is a method *reference* — not the method's return type.
+    /// Game ground truth (RemoteBuild 2026-08-29, OP 1.29.5): CLEAN.
+    #[test]
+    fn typedb_funcdef_ctor_accepts_this_method_reference() {
+        let diags = check_with_typedb(
+            r#"
+            class C {
+                void M() {}
+                void T() {
+                    startnew(CoroutineFunc(this.M));
+                }
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "`CoroutineFunc(this.M)` must type-check as a method reference, got {:?}",
+            diags
+        );
+    }
+
+    /// Same reference through a local instance (`c.M`): the receiver's class
+    /// comes from the local's declared type. Game ground truth (RemoteBuild
+    /// 2026-08-29, OP 1.29.5): CLEAN.
+    #[test]
+    fn typedb_funcdef_ctor_accepts_local_instance_method_reference() {
+        let diags = check_with_typedb(
+            r#"
+            class C {
+                void M() {}
+            }
+            void Main() {
+                C c;
+                startnew(CoroutineFunc(c.M));
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "`CoroutineFunc(c.M)` must type-check as a method reference, got {:?}",
+            diags
+        );
+    }
+
+    /// Handle init and ternary arms go through the same ctor path. Game
+    /// ground truth (RemoteBuild 2026-08-29, OP 1.29.5): CLEAN.
+    #[test]
+    fn typedb_funcdef_ctor_this_method_in_handle_init_and_ternary() {
+        let diags = check_with_typedb(
+            r#"
+            class C {
+                void M() {}
+                void Pick(bool use) {
+                    auto @h = CoroutineFunc(this.M);
+                    C o;
+                    auto @h2 = use ? CoroutineFunc(o.M) : null;
+                }
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "handle init / ternary method references must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Overloaded methods bind by compatibility: `void OV()` + `bool OV(int)`
+    /// must accept `CoroutineFunc(this.OV)` because one overload matches —
+    /// the game resolves the same way. Real-world shape: tm-editor-plus-plus
+    /// Favorites.as `CoroutineFunc(this.OpenInvFolderMb)`. Game ground truth
+    /// (RemoteBuild 2026-08-29, OP 1.29.5): CLEAN.
+    #[test]
+    fn typedb_funcdef_ctor_overloaded_method_binds_compatible_overload() {
+        let diags = check_with_typedb(
+            r#"
+            class C {
+                void OV() {}
+                bool OV(int x) { return true; }
+                void T() {
+                    startnew(CoroutineFunc(this.OV));
+                }
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "an overload-compatible method reference must bind, got {:?}",
+            diags
+        );
+    }
+
+    /// `void(ref@)` method into `CoroutineFuncUserdata` (`void (ref)`):
+    /// signature-compatible via the ctor conversion. Real-world shape:
+    /// tm-editor-plus-plus Map_EditProps.as `CoroutineFuncUserdata(this.RevertDeco)`.
+    /// Game ground truth (RemoteBuild 2026-08-29, OP 1.29.5): CLEAN.
+    #[test]
+    fn typedb_funcdef_ctor_userdata_accepts_ref_method_reference() {
+        let diags = check_with_typedb(
+            r#"
+            class C {
+                void RevertDeco(ref@ data) {}
+                void T() {
+                    startnew(CoroutineFuncUserdata(this.RevertDeco), this);
+                }
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "`CoroutineFuncUserdata(this.voidRefMethod)` must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Receivers beyond `this`/locals: a workspace global (`g_cache.Update`)
+    /// and an indexed array (`edges[i].Disconnect`, `g_edges[0].Disconnect` —
+    /// field or global array). Real-world shapes: tm-editor-plus-plus
+    /// NodeGraph/Node.as + Tools/MaterialsList.as. Game ground truth
+    /// (RemoteBuild 2026-08-29, OP 1.29.5): CLEAN.
+    #[test]
+    fn typedb_funcdef_ctor_accepts_global_and_indexed_receivers() {
+        let diags = check_with_typedb(
+            r#"
+            class Noodle { void Disconnect() {} }
+            class Cache { void Update() {} }
+            Noodle@[] g_edges;
+            Cache@ g_cache;
+
+            class Node {
+                array<Noodle@> edges;
+                void Wire() {
+                    startnew(CoroutineFunc(g_cache.Update));
+                    startnew(CoroutineFunc(g_edges[0].Disconnect));
+                    startnew(CoroutineFunc(edges[0].Disconnect));
+                }
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "global/indexed method references must type-check, got {:?}",
+            diags
+        );
+    }
+
+    // Keep-flagged guards: game-verified rejections (RemoteBuild 2026-08-29,
+    // OP 1.29.5 — the game errors with `Can't create delegate`).
+
+    /// A `bool()` method does not convert to the `void()` `CoroutineFunc` —
+    /// return types must match exactly.
+    #[test]
+    fn typedb_funcdef_ctor_rejects_bool_method_for_void_funcdef() {
+        let diags = check_with_typedb(
+            r#"
+            class C {
+                bool B() { return true; }
+                void T() {
+                    startnew(CoroutineFunc(this.B));
+                }
+            }
+            "#,
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. })),
+            "`CoroutineFunc(this.boolMethod)` must stay flagged, got {:?}",
+            diags
+        );
+    }
+
+    /// A `void()` method does not convert to `CoroutineFuncUserdata`
+    /// (`void (ref)`) — parameter lists must match.
+    #[test]
+    fn typedb_funcdef_ctor_rejects_void_method_for_userdata_funcdef() {
+        let diags = check_with_typedb(
+            r#"
+            class C {
+                void M() {}
+                void T() {
+                    startnew(CoroutineFuncUserdata(this.M), this);
+                }
+            }
+            "#,
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. })),
+            "`CoroutineFuncUserdata(this.voidMethod)` must stay flagged, got {:?}",
+            diags
+        );
+    }
+
+    /// A non-method (primitive-typed property) member is still clearly not a
+    /// function.
+    #[test]
+    fn typedb_funcdef_ctor_rejects_property_member_reference() {
+        let diags = check_with_typedb(
+            r#"
+            class C {
+                string label = "x";
+                void T() {
+                    startnew(CoroutineFunc(this.label));
+                }
+            }
+            "#,
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. })),
+            "a property reference must stay flagged, got {:?}",
+            diags
+        );
+    }
+
+    /// Members shadow globals: a bare-ident receiver must resolve exactly
+    /// like `expr_type` does — class field first, then global. Both
+    /// polarities follow the FIELD's type, because that is the delegate the
+    /// game builds (B025 review finding; field `int M()` → game errors
+    /// `Can't create delegate`).
+    #[test]
+    fn method_ref_receiver_prefers_class_field_over_same_named_global() {
+        let diags = check_with_typedb(
+            r#"
+            class A { void M() {} }
+            class B { int M() { return 0; } }
+            A@ h;
+            class C {
+                B@ h;
+                void T() {
+                    startnew(CoroutineFunc(h.M));
+                }
+            }
+            "#,
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. })),
+            "field shadows global: int() field method into void() funcdef must stay flagged, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn method_ref_receiver_field_binds_when_global_type_lacks_method() {
+        let diags = check_with_typedb(
+            r#"
+            class A { void Nope() {} }
+            class B { void M() {} }
+            A@ h;
+            class C {
+                B@ h;
+                void T() {
+                    startnew(CoroutineFunc(h.M));
+                }
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "field's void() method must bind (field shadows global), got {:?}",
+            diags
+        );
+    }
+
+    /// Chained member receivers (`box.inner.Go`) and Index-over-member
+    /// (`box.ns[0].Go`) are the same method-reference idiom. Game ground
+    /// truth: the delegate conversion is the same shape as the probed
+    /// `field[i].M` / `local.field.M` forms (CLEAN).
+    #[test]
+    fn method_ref_receiver_resolves_chained_member_objects() {
+        let diags = check_with_typedb(
+            r#"
+            class Inner { void Go() {} }
+            class N { void Go() {} }
+            class Box { Inner@ inner; array<N@>@ ns; }
+            class C {
+                Box@ box;
+                void T() {
+                    startnew(CoroutineFunc(box.inner.Go));
+                    startnew(CoroutineFunc(box.ns[0].Go));
+                }
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "chained member method references must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Call-result and cast receivers (`GetN().Disconnect`,
+    /// `cast<N>(h).Disconnect`) are legal delegate sources. Game ground
+    /// truth (RemoteBuild 2026-08-29, OP 1.29.5): CLEAN.
+    #[test]
+    fn method_ref_receiver_resolves_call_and_cast_receivers() {
+        let diags = check_with_typedb(
+            r#"
+            class N { void Disconnect() {} }
+            N@ GetN() { return N(); }
+            void Main() {
+                N@ h = N();
+                startnew(CoroutineFunc(GetN().Disconnect));
+                startnew(CoroutineFunc(cast<N>(h).Disconnect));
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "call-result / cast receivers must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Engine-typed receivers bind through the typedb's method overloads.
+    /// Game ground truth (RemoteBuild 2026-08-29, OP 1.29.5): CLEAN
+    /// (`Net::HttpRequest@ r; CoroutineFunc(r.Cancel)` — game accepts the
+    /// delegate, LSP must not flag it).
+    #[test]
+    fn method_ref_receiver_binds_engine_typed_receiver_methods() {
+        let diags = check_with_typedb(
+            r#"
+            void Main() {
+                Net::HttpRequest@ r = Net::HttpGet("http://localhost/");
+                startnew(CoroutineFunc(r.Cancel));
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "engine-typed receiver methods must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Generalization variants (B025 review): inherited methods, handle-typed
+    /// local receivers, `this.M` in a ternary arm, and reversed overload
+    /// declaration order must all bind.
+    #[test]
+    fn method_ref_receiver_generalization_variants_bind() {
+        let diags = check_with_typedb(
+            r#"
+            class Base { void Inherited() {} }
+            class Derived : Base {
+                void OV(int x) {}
+                void OV() {}
+                void T(bool flag) {
+                    startnew(CoroutineFunc(this.Inherited));
+                    Derived@ d = this;
+                    startnew(CoroutineFunc(d.Inherited));
+                    startnew(CoroutineFunc(flag ? this.OV : null));
+                    startnew(CoroutineFunc(this.OV));
+                }
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "generalized receiver/overload variants must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Chained method-call receivers (`this.Make().Go`, `c.Make().Go`) and
+    /// bare factory callees inside their namespace (`Make().Go` in
+    /// `namespace Lib`) are legal delegate sources. Game ground truth
+    /// (RemoteBuild 2026-08-29, OP 1.29.5): CLEAN.
+    #[test]
+    fn method_ref_receiver_resolves_chained_method_calls() {
+        let diags = check_with_typedb(
+            r#"
+            namespace Lib {
+                class P { void Go() {} }
+                P@ Make() { return P(); }
+                void Use() {
+                    startnew(CoroutineFunc(Make().Go));
+                }
+            }
+            class N { void Go() {} }
+            class C {
+                N MakeN() { return N(); }
+                void T() {
+                    startnew(CoroutineFunc(this.MakeN().Go));
+                }
+            }
+            void Main() {
+                C c;
+                startnew(CoroutineFunc(c.MakeN().Go));
+            }
+            "#,
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "chained method-call receivers must type-check, got {:?}",
+            diags
+        );
+    }
+
+    /// Delegate construction requires exact parameter passing modes: a
+    /// `void(int &out)` method does NOT convert to `funcdef void(int)` —
+    /// game ground truth (RemoteBuild 2026-08-29, OP 1.29.5): ERR
+    /// `Can't create delegate`. Both polarities must flag.
+    /// Open — B027: the symbol table drops `Param.modifier`, so workspace
+    /// sigs carry no mode flags; desired outcome asserted, unignore as part
+    /// of the B027 fix.
+    #[test]
+    #[ignore = "B027 open — &out/&inout modes not carried through the symbol table"]
+    fn funcdef_ctor_rejects_out_param_modifier_mismatch() {
+        let diags = check_with_typedb(
+            r#"
+            funcdef void FDI(int);
+            funcdef void FDO(int &out);
+            class C {
+                void IntOut(int &out x) { x = 1; }
+                void Plain(int x) {}
+                void T() {
+                    startnew(FDI(IntOut));
+                    startnew(FDO(Plain));
+                }
+            }
+            "#,
+        );
+        let mismatches = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .count();
+        assert_eq!(
+            mismatches, 2,
+            "both &out-modifier mismatches must be flagged, got {:?}",
+            diags
+        );
+    }
+
+    /// Const cast targets keep the game's rejection: a delegate cannot be
+    /// built from a `const` receiver's method. Game ground truth
+    /// (RemoteBuild 2026-08-29, OP 1.29.5): ERR `Can't create delegate`.
+    #[test]
+    fn funcdef_ctor_keeps_flagging_const_cast_receivers() {
+        let diags = check_with_typedb(
+            r#"
+            class N { void Go() {} }
+            void Main() {
+                N@ h = N();
+                startnew(CoroutineFunc(cast<const N@>(h).Go));
+            }
+            "#,
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. })),
+            "`cast<const N@>(h).Go` must stay flagged, got {:?}",
             diags
         );
     }

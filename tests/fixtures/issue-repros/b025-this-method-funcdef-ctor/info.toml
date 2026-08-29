@@ -1,0 +1,7 @@
+[meta]
+name     = "Issue Repro B025 - this.Method Funcdef Ctor References"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]

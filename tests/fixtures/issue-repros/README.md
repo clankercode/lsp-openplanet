@@ -56,6 +56,8 @@ Record the game verdict in the fixture's gate-test doc comment.
 
 | Fixture | Issue | Game verdict | Status |
 |---------|-------|--------------|--------|
+| `63-inputtext-callback-funcdef` | #63 | clean (2026-08-29 probe, OP 1.29.5) | fixed (8e49f81) — active |
+| `b025-this-method-funcdef-ctor` | B025 | legal half clean; 3 diagnosed lines ERR (`Can't create delegate` ×2, `No matching signatures to 'CoroutineFunc(string)'`; 2026-08-29 probe) | fixed (342a10a) — active |
 | `46-mixin-consumer-member` | #46 | clean | fixed (8c13ef5) — active |
 | `44-indexed-handle-assign` | #44 | `not an l-value` (@-into-Json-index only) | fixed (70f3f97) — active |
 | `30-sibling-field-bare-ident` | #30 | `No matching symbol 'nod'` | fixed — active |

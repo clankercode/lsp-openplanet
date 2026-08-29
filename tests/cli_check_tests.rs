@@ -987,6 +987,39 @@ fn check_command_issue_repro_63_inputtext_callback_funcdef_is_clean() {
     );
 }
 
+/// B025: `this.Method` / `obj.Method` references at funcdef ctor sites are
+/// method *references* — the ctor is the required method-to-funcdef
+/// conversion (methods do not implicitly decay like free functions), so the
+/// member-access return type must not be used as the arg type. Game ground
+/// truth (RemoteBuild probe 2026-08-29, OP 1.29.5): the LEGAL half compiles
+/// clean; the three DIAGNOSE lines fail in-game (`Can't create delegate` /
+/// `No matching signatures to 'CoroutineFunc(string)'`).
+#[test]
+fn check_command_issue_repro_b025_method_references_at_funcdef_ctors() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b025-this-method-funcdef-ctor");
+    // Exactly the three game-rejected lines are flagged; every legal form
+    // (this.Tick, w.Tick, this.OV overload bind, this.Revert void(ref@),
+    // handle init, ternary) stays silent.
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains("error:")).collect();
+    assert_eq!(
+        errors.len(),
+        3,
+        "expected exactly 3 errors on the diagnosed lines; stdout={stdout:?}"
+    );
+    assert!(
+        errors.iter().any(|l| l.contains("Main.as:49")),
+        "bool() method into void() CoroutineFunc must be flagged; stdout={stdout:?}"
+    );
+    assert!(
+        errors.iter().any(|l| l.contains("Main.as:51")),
+        "void() method into CoroutineFuncUserdata must be flagged; stdout={stdout:?}"
+    );
+    assert!(
+        errors.iter().any(|l| l.contains("Main.as:53")),
+        "property reference must be flagged; stdout={stdout:?}"
+    );
+}
+
 /// GH #49: AngelScript has no implicit nat3 -> int3 conversion — the game
 /// rejects both the implicit init and the int3(nat3) constructor form.
 /// Ground truth quoted in the issue (tm-editor-plus-plus). Fixed — must flag.
