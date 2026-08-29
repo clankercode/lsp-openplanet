@@ -147,3 +147,40 @@ Verified by the coordinator against specs/draft-v1.md on master. So the
 current behaviour VIOLATES the repo's written spec; this task restores
 documented behaviour rather than changing it, and the FP baseline movement is
 a spec-conformance correction, not a judgment call. Cite this in the commit.
+
+## CORRECTION: the FP baselines quoted above are STALE (coordinator, 2026-08-30)
+
+The counts cited in this ticket (tm-editor-plus-plus 2/1428, tm-dips-plus-plus
+1/258, tm-archivist 2/28, tm-counter 4/2, tm-dashboard 4/5) are WRONG. They
+were carried forward from older tickets and never re-measured.
+
+Measured independently by the coordinator on 2026-08-30, comparing a master
+build against the B016 branch build, full check output byte-diffed:
+
+  tm-editor-plus-plus   14 errors / 1485 warnings
+  tm-dips-plus-plus      5 errors /  276 warnings
+  tm-archivist           2 errors /   35 warnings
+  tm-counter             4 errors /    2 warnings
+  tm-dashboard           4 errors /    4 warnings
+
+Only tm-counter matched the stale numbers. The error counts on the two big
+fixtures were off by 12 and 4.
+
+Independently corroborated: the B016 lane built a binary from a genuinely
+archived 91a296c tree and reached the same five pairs.
+
+### Consequence for anyone measuring a define-set change
+
+Do NOT gate against the numbers written in a ticket. Build a baseline binary
+from the archived base commit, run the fixtures with it, and compare against
+your branch's binary. Byte-diff the full check output rather than comparing
+counts — identical counts can hide a swapped diagnostic.
+
+Trap seen in practice: a review agent produced 'baseline' numbers from a
+binary that was NOT built from the base commit (it accepted an identifier the
+base rejects). Verify what tree a comparison binary came from before trusting
+its numbers.
+
+Command used:
+  ./target/debug/openplanet-lsp check --typedb-dir tests/fixtures/typedb \
+      tests/fixtures/<fixture>
