@@ -10,6 +10,7 @@
 
 use super::fix::FixFamily;
 
+pub mod conversion;
 pub mod rename_and_const;
 pub mod string_by_value;
 
@@ -18,6 +19,11 @@ pub mod string_by_value;
 /// fix-all batcher keeps (see [`super::fix_all::select_non_overlapping`]).
 pub const FAMILIES: &[FixFamily] = &[
     string_by_value::FAMILY,
+    conversion::float_truncation::FAMILY,
+    conversion::sign_change::FAMILY,
+    conversion::signed_unsigned::FAMILY,
+    conversion::unreachable_code::FAMILY,
+    conversion::missing_return::FAMILY,
     rename_and_const::shadowed_variable::FAMILY,
     rename_and_const::duplicate_function::FAMILY,
     rename_and_const::const_receiver::FAMILY,
