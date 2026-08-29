@@ -1749,8 +1749,8 @@ mod tests {
             fid,
             vec![make_symbol(
                 "Callback",
-                // Matches the extractor: workspace funcdefs store neither
-                // return type nor params today.
+                // Synthetic symbol exercising the empty-signature shape
+                // the extractor can produce for a broken parse.
                 SymbolKind::Funcdef {
                     return_type: String::new(),
                     params: vec![],
