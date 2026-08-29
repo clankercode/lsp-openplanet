@@ -83,7 +83,8 @@ default_mode = "tui"   # or "lsp"
 
 # Extra preprocessor defines. ADDED to what game_target derives (TMNEXT,
 # WINDOWS, MANIA64, SIG_*, ...) and to info.toml [script].defines — listing
-# DEV here no longer drops TMNEXT and does not blank out the always-on flags.
+# DEV here no longer drops TMNEXT and does not blank out the target-derived
+# set (game platform, OS/arch, signature level, build flags).
 # Prefix an entry with `-` or `!` to turn a define OFF (`-LOGS`); removals are
 # applied after additions, so a removal wins. Entries ACCUMULATE across layers
 # (parent config, per-root config, user global, initializationOptions), so a

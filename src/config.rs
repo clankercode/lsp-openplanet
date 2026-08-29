@@ -2640,6 +2640,29 @@ shortcut_match_enums = true
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Init options also carry the build-flag booleans, above the
+    /// config-file layer — both directions (B028 review pin: this ladder
+    /// rung had no test for the four booleans).
+    #[test]
+    fn init_options_build_flags_win_over_config_file() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-bflags-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "server = false\nlogs = true\n",
+        )
+        .unwrap();
+        let opts = serde_json::json!({ "server": true, "logs": false });
+        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        assert!(cfg.build_flags.server, "init option beats config false");
+        assert!(cfg.defines.contains("SERVER"));
+        assert!(!cfg.build_flags.logs, "init option beats config true");
+        assert!(!cfg.defines.contains("LOGS"));
+        assert!(cfg.build_flags.has_dev, "untouched flag stays on");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// The build-flag config keys narrow the derived set without touching
     /// the os/arch pairs.
     #[test]
