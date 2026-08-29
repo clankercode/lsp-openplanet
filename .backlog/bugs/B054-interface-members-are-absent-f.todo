@@ -1,0 +1,26 @@
+---
+complexity: medium
+created_at: "2026-08-29T22:46:40Z"
+depends_on: []
+estimate_hours: 1
+id: B054
+priority: high
+status: pending
+tags: []
+title: 'Interface members are absent from the symbol table: no I::method symbols, dead methods field'
+updated_at: "2026-08-29T22:46:40Z"
+---
+
+# Interface members are absent from the symbol table: no I::method symbols, dead methods field
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior
