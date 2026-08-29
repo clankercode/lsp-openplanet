@@ -504,4 +504,52 @@ mod tests {
             TypeRepr::Named("Game::CGameEditorPluginMap::ECardinalDirections".into())
         );
     }
+
+    /// B052: an accepted ancestor-walk spelling and the bare global enum
+    /// spelling denote the same type, so both must resolve to the enum's
+    /// canonical source key.
+    #[test]
+    fn resolve_ancestor_walk_enum_spellings_to_the_bare_key() {
+        use crate::typedb::TypeIndex;
+
+        let index = TypeIndex::load(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/typedb/OpenplanetCore.json")
+                .as_path(),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/typedb/OpenplanetNext.json")
+                .as_path(),
+        )
+        .expect("failed to load type index");
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for (scoped, bare) in [
+            ("UI::VirtualKey", "VirtualKey"),
+            ("UI::Font::VirtualKey", "VirtualKey"),
+            (
+                "CGameCtnApp::ESceneVehicleVisEvent",
+                "ESceneVehicleVisEvent",
+            ),
+        ] {
+            let scoped_ty = parse_type(scoped);
+            let mut scoped_resolver = TypeResolver::new(&scope, scoped);
+            let scoped_out = scoped_resolver.resolve(&scoped_ty);
+            assert!(
+                scoped_resolver.take_diagnostics().is_empty(),
+                "the game accepts `{scoped}`"
+            );
+
+            let bare_ty = parse_type(bare);
+            let mut bare_resolver = TypeResolver::new(&scope, bare);
+            let bare_out = bare_resolver.resolve(&bare_ty);
+            assert!(bare_resolver.take_diagnostics().is_empty());
+
+            assert_eq!(bare_out, TypeRepr::Named(bare.into()));
+            assert_eq!(
+                scoped_out, bare_out,
+                "`{scoped}` and `{bare}` are spellings of the same enum"
+            );
+        }
+    }
 }

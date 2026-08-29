@@ -341,10 +341,13 @@ impl<'a> GlobalScope<'a> {
         false
     }
 
-    /// The stored key for an enum that source spelled without its module
-    /// prefix (`CGameCtnBlock::ECardinalDirections` →
-    /// `Game::CGameCtnBlock::ECardinalDirections`). `None` when the spelling
-    /// already IS the key, or names no enum at all.
+    /// The stored source key for an accepted, non-canonical enum spelling.
+    /// This covers both a module-stripped nested enum
+    /// (`CGameCtnBlock::ECardinalDirections` →
+    /// `Game::CGameCtnBlock::ECardinalDirections`) and a global enum reached
+    /// through a real scope's ancestor walk (`UI::VirtualKey` →
+    /// `VirtualKey`). `None` when the spelling already IS the key, or names
+    /// no source-visible enum at all.
     ///
     /// `has_enum` accepts the module-stripped spelling because the game does
     /// (B052), but type equality is by key, so a resolver that stops at
@@ -353,9 +356,23 @@ impl<'a> GlobalScope<'a> {
         if self.is_canonical_enum_key(qualified) {
             return None;
         }
-        self.external
-            .and_then(|ext| ext.lookup_source_enum_by_suffix(qualified))
-            .map(|key| key.to_string())
+        let ext = self.external?;
+
+        // Preserve the declaring-scope suffix mapping before considering the
+        // broader ancestor walk: it is the more specific resolution path.
+        if let Some(key) = ext.lookup_source_enum_by_suffix(qualified) {
+            return Some(key.to_string());
+        }
+
+        let (head, tail) = qualified.rsplit_once("::")?;
+        if !self.scope_exists(head) {
+            return None;
+        }
+
+        // `tail` is a complete key here, so this can only select a global
+        // enum. The source-facing lookup also excludes anonymous synthetic
+        // keys; acceptance is never inferred merely from a matching tail.
+        ext.lookup_source_enum(tail).map(|_| tail.to_string())
     }
 
     /// True when `qualified` is an enum's own key, exactly as stored —
@@ -1102,6 +1119,9 @@ impl<'a> GlobalScope<'a> {
         if self.has_type(name) || self.is_canonical_enum_key(name) {
             return name.to_string();
         }
+        if let Some(key) = self.canonical_enum_key(name) {
+            return key;
+        }
         if let Some(resolved) = self.resolve_qualified_suffix(name) {
             return resolved;
         }
@@ -1684,6 +1704,7 @@ mod tests {
             !scope.has_enum(anonymous) && !scope.resolves(anonymous),
             "synthesized keys must not resolve from source"
         );
+        assert_eq!(scope.canonical_enum_key(anonymous), None);
         assert_eq!(
             scope.canonicalize_type_name(anonymous),
             anonymous,
@@ -1697,6 +1718,10 @@ mod tests {
             scope.canonicalize_type_name("CGameCtnBlock::ECardinalDirections"),
             named,
             "the anonymous filter must not hide named enums"
+        );
+        assert_eq!(
+            scope.canonical_enum_key("CGameCtnBlock::ECardinalDirections"),
+            Some(named.to_string())
         );
     }
 
@@ -2052,6 +2077,8 @@ mod tests {
                     !scope.resolves(&qualified),
                     "`{qualified}` must not resolve as a type either"
                 );
+                assert_eq!(scope.canonical_enum_key(&qualified), None);
+                assert_eq!(scope.canonicalize_type_name(&qualified), qualified);
             }
         }
     }
@@ -2090,6 +2117,8 @@ mod tests {
                     !scope.resolves(&qualified),
                     "`{qualified}` must not resolve"
                 );
+                assert_eq!(scope.canonical_enum_key(&qualified), None);
+                assert_eq!(scope.canonicalize_type_name(&qualified), qualified);
             }
         }
     }
@@ -2150,6 +2179,12 @@ mod tests {
                     "the game accepts `{qualified}` through the ancestor walk"
                 );
                 assert!(scope.resolves(&qualified), "`{qualified}` must resolve");
+                assert_eq!(
+                    scope.canonical_enum_key(&qualified),
+                    Some(tail.to_string()),
+                    "`{qualified}` canonicalizes to its global enum key"
+                );
+                assert_eq!(scope.canonicalize_type_name(&qualified), tail);
             }
         }
     }
