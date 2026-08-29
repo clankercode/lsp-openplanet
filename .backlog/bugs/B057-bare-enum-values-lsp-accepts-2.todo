@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T23:31:39Z"
 depends_on: []
 estimate_hours: 1
 id: B057
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Bare enum values: LSP accepts 2373 names the game answers ''No matching symbol'' for (non-global named enums)'
@@ -24,3 +26,66 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by the B052/B053 lane, 2026-08-30, while probing ALL 2989 bare value
+names of named enums against the live game (Trackmania + Openplanet 1.29.5).
+Deliberately kept OUT of B053, which is scoped to the 22 ambiguous names.
+
+## Defect
+`has_global_ident`'s bare-value scan walks `source_enums_iter` — EVERY named
+enum — instead of only the globally visible ones. So it accepts the values of
+roughly 570 nested and namespaced enums whose values are not reachable bare at
+all. Measured: **2373 bare names the LSP accepts and the game rejects with
+`No matching symbol`.**
+
+False negatives: the LSP stays silent on code that will not compile. This is
+100x the size of B053 and is the same defect family.
+
+B044 fixed exactly this shape for ANONYMOUS enums. This is the
+named-but-not-globally-visible remainder that B044 did not cover.
+
+## The visibility rule (probe-established, predicts 2987 of 2989)
+- An enum is globally visible iff its index key is **depth <= 1 with the
+  synthetic module prefix stripped** — 68 keys, **60 distinct names**.
+  Nested enums never are; Core namespaced enums never are.
+- A bare value resolves iff exactly ONE such enum carries it; >= 2 is the
+  ambiguity error (B053); 0 is `No matching symbol` (this ticket).
+
+The 2 residuals are `Main` and `RGBAColor`, which hit an unrelated symbol in
+the probe rather than being counterexamples.
+
+**Dedup by bare name is required.** The loader keys ONE engine enum under
+several modules — `Hms::EHmsLightMapQuality` and
+`MetaNotPersistent::EHmsLightMapQuality` are the same enum. Counting keys
+instead of names is what inflated B053's original estimate by 34x.
+
+## Why this is separable from B053, and what it inherits
+B053 must teach the index which enums are globally visible in order to
+diagnose its 22 ambiguous names. That is the SAME machinery this ticket needs,
+so whoever takes this inherits a working visibility model rather than starting
+cold. Land B053 first.
+
+## Work
+- Narrow the bare-value scan to globally-visible enums only.
+- Re-verify against the game after implementing rather than trusting the
+  model to generalise beyond the probed corpus.
+- Reuse the B052/B053 lane's probe corpus and per-name verdict table; it must
+  be committed in-repo (see B056). Do not re-probe 2989 names from scratch.
+
+## Probe hygiene (from B056, applies here)
+Other installed plugins' namespaces leak into the compile, so a game REJECT is
+solid evidence about the engine while a game ACCEPT on an unknown prefix is
+not. Apply that asymmetry or you will encode this machine's plugin set as
+engine behaviour.
+
+## Gate
+This will RAISE fixture ERROR counts substantially — that is the fix working,
+and it is why this is separate from B053. Every new error must be justified by
+name against a recorded game REJECT. An unexplained new error is a bug, not a
+baseline update. Measure two binaries on the same machine at the same time,
+and re-measure baselines first: B052 and B053 land before this.
+
+## Related
+B053 (the 22 ambiguous names; builds the visibility model this needs), B056
+(the qualified-name equivalent, 1010 names), B044 (the anonymous-enum case,
+already fixed), B046, B007.
