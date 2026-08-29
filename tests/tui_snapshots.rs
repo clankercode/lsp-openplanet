@@ -198,3 +198,23 @@ fn narrow_list_row_keeps_a_readable_message() {
     );
     assert!(msg.starts_with("no matching"), "row={row:?}");
 }
+
+/// Very short / very narrow terminals must not panic or render nonsense.
+#[test]
+fn tiny_terminals_do_not_panic() {
+    for (w, h) in [(1u16, 1u16), (4, 3), (10, 6), (20, 8), (44, 9), (200, 60)] {
+        let mut app = App::from_snapshot(narrow_snapshot());
+        for _ in 0..3 {
+            app.scroll_detail_down();
+        }
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.draw(frame))
+            .unwrap_or_else(|e| panic!("draw failed at {w}x{h}: {e}"));
+        app.toggle_density();
+        terminal
+            .draw(|frame| app.draw(frame))
+            .unwrap_or_else(|e| panic!("relaxed draw failed at {w}x{h}: {e}"));
+    }
+}

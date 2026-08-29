@@ -349,7 +349,9 @@ impl App {
         let total = lines.len() as u16;
         let max_scroll = total.saturating_sub(inner_h);
         self.detail_scroll = self.detail_scroll.min(max_scroll);
-        if max_scroll > 0 {
+        // `inner_h == 0` means the pane got squeezed to nothing on a very short
+        // terminal — there is no range to report.
+        if max_scroll > 0 && inner_h > 0 {
             let top = self.detail_scroll + 1;
             let bot = (self.detail_scroll + inner_h).min(total);
             title.push_str(&format!("· {top}-{bot}/{total} · J/K "));
