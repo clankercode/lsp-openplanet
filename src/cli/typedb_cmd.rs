@@ -640,10 +640,28 @@ fn run_refresh(args: &[String]) -> i32 {
     // Byte comparison decides what actually needs writing: an `op`-identical
     // re-dump with no symbol drift can still differ byte-wise, and a
     // byte-identical file never needs a write.
-    let files: Vec<(&Path, &Path)> = vec![
+    // B046: `Openplanet.h` travels with the pair. It is the only source for
+    // the module-level enums the dump's shape cannot express, so a refresh
+    // that left it behind would produce a destination that diffs non-empty
+    // against its own source and silently reintroduces those false
+    // positives. Included only when the source actually has one, so an
+    // install or fixture without a header still refreshes as two files.
+    let source_header = source
+        .core
+        .parent()
+        .map(|d| d.join(crate::typedb::index::HEADER_FILENAME))
+        .filter(|p| p.is_file());
+    let target_header = source_header
+        .as_ref()
+        .map(|_| into.join(crate::typedb::index::HEADER_FILENAME));
+
+    let mut files: Vec<(&Path, &Path)> = vec![
         (source.core.as_path(), target.core.as_path()),
         (source.game.as_path(), target.game.as_path()),
     ];
+    if let (Some(src), Some(dst)) = (source_header.as_ref(), target_header.as_ref()) {
+        files.push((src.as_path(), dst.as_path()));
+    }
     let differing: Vec<&(&Path, &Path)> = files
         .iter()
         .filter(|(src, dst)| differs(src, dst))

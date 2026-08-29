@@ -84,20 +84,43 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **Module-level engine enums resolve (B046)** — the engine's JSON dump maps
+  `namespace -> type name -> type`, so it can only carry an enum nested in a
+  class. It reaches most module-level enums anyway, because a class member
+  typed by one carries the enum inline, but `ESceneCharVisNotice` and
+  `ESceneVehicleVisEvent` have no such member and were invisible: 55 of their
+  value names got `No matching symbol` from the LSP on code the game compiles
+  fine. `openplanet-lsp` now also reads `Openplanet.h` from your Openplanet
+  folder, which is the only source that names them.
+
+  The header is **optional** — an install without one behaves exactly as
+  before — and the dump stays the authority for everything it can express, so
+  the 57 module-level enums it already reached are untouched. `typedb refresh`
+  now copies `Openplanet.h` alongside the two JSON files.
+
+  Checked against the live game (RemoteBuild probe, Openplanet 1.29.5): it
+  accepts the bare value names, and the enum name used as a type, exactly as
+  the LSP now does. It rejects `Scene::`- and `Enums::`-qualified spellings
+  (`Namespace 'Scene' doesn't exist.`), so no namespace is invented for these
+  enums. `check` output across the false-positive fixture corpus is
+  byte-identical.
+
 - **A bare value name of an unnamed engine enum is now an error (B044)** — the
   engine dump declares 132 enums inline on a member and gives them no name, so
   nothing in source can spell such an enum and nothing can reach its values by a
   bare name. The game answers `No matching symbol`; the LSP used to say nothing.
-  It now rejects all 261 of those names — every value of those 132 enums except
-  the 126 that also belong to a NAMED enum, where a bare reference is legitimate
-  and still resolves (`VCenter2`). Reaching the same values through the
-  declaring member's type is untouched, and a name with a real declaration of
-  its own — a type, function, virtual property, or anything you declare — still
-  resolves through that.
+  It now rejects all 258 of those names — every value of those 132 enums except
+  the ones that also belong to a NAMED enum, where a bare reference is
+  legitimate and still resolves (`VCenter2`). Reaching the same values through
+  the declaring member's type is untouched, and a name with a real declaration
+  of its own — a type, function, virtual property, or anything you declare —
+  still resolves through that.
 
   Checked against the live game (RemoteBuild probe, Openplanet 1.29.5): it
-  rejects 258 of the 261. Dogfood: byte-identical `check` output across a
-  150-plugin sweep, so no real plugin was using one of these names.
+  rejects all 258. Dogfood: byte-identical `check` output across a 150-plugin
+  sweep, so no real plugin was using one of these names. (The set was 261 when
+  B044 landed; the 3 the game accepted turned out to belong to a module-level
+  enum and left the set when B046 taught the loader to read `Openplanet.h`.)
 
   The 3-name difference is a known false positive with a separate cause.
   `DoubleJump`, `Jump` and `TechJump` belong to `Scene::ESceneCharVisNotice`,

@@ -12,8 +12,14 @@ Name list (the same computation the ticket used to reach its 261 upper bound):
   for every member of every Nadeo type that declares an inline enum whose
   member type name is absent or the `UnnamedEnum` placeholder, take the enum's
   value names; drop any name that also appears in a NAMED enum (a Nadeo nested
-  `e` block, a member enum with a real type name, or a Core `enums[]` entry),
-  because a bare reference to those resolves legitimately in-game.
+  `e` block, a member enum with a real type name, a Core `enums[]` entry, or a
+  MODULE-LEVEL enum in `Openplanet.h`), because a bare reference to those
+  resolves legitimately in-game.
+
+B046 added the last of those sources. Two module-level enums are reachable only
+through the header, and three names the game accepts (`DoubleJump`, `Jump`,
+`TechJump`) belong to one of them — they were in this list as known false
+positives until the LSP learned to read the header.
 
 Output is one statement per line so the game compiler — which reports one
 error per statement, at the first unresolved symbol — surfaces every rejected
@@ -40,18 +46,45 @@ FIXTURE = REPO / "tests/fixtures/issue-repros/b044-anon-enum-value-names/Main.as
 
 ANON_TYPE_NAMES = {None, "", "UnnamedEnum"}
 
-# The three names in the list below that the GAME accepts (RemoteBuild probe,
-# OP 1.29.5, 2026-08-30: 258 of the 261 rejected). All three are values of
-# `Scene::ESceneCharVisNotice`, a MODULE-LEVEL named engine enum. The Nadeo
-# dump's `ns` map holds types only, so it cannot represent a namespace-level
-# enum at all and the LSP never sees those 47 enums — a pre-existing gap of 55
-# value names, 52 of which already fail to resolve. These 3 were resolving by
-# accident, through the very anonymous-enum scan B044 narrows.
-GAME_ACCEPTS = {
-    "DoubleJump": "Scene::ESceneCharVisNotice",
-    "Jump": "Scene::ESceneCharVisNotice",
-    "TechJump": "Scene::ESceneCharVisNotice",
-}
+HEADER_FILE = TYPEDB / "Openplanet.h"
+
+
+def header_module_enum_values(text: str) -> set[str]:
+    """Value names of every MODULE-LEVEL enum in `Openplanet.h` (B046).
+
+    Mirrors `src/typedb/header_format.rs`: a declaration at namespace level
+    whose name is unqualified. Struct-nested and qualified declarations are
+    skipped — the dump is the authority for those.
+    """
+    values: set[str] = set()
+    struct_depth = 0
+    blocks: list[str] = []
+    lines = iter(text.splitlines())
+    for line in lines:
+        trimmed = line.strip()
+        if trimmed.startswith("enum class ") and trimmed.endswith("{"):
+            name = trimmed[len("enum class "):-1].strip()
+            body: set[str] = set()
+            for inner in lines:
+                inner = inner.strip()
+                if inner.startswith("}"):
+                    break
+                head, sep, _ = inner.partition("=")
+                head = head.strip()
+                if sep and head.isidentifier():
+                    body.add(head)
+            if struct_depth == 0 and "::" not in name:
+                values |= body
+            continue
+        if trimmed.startswith("struct ") and trimmed.endswith("{"):
+            blocks.append("struct")
+            struct_depth += 1
+        elif trimmed.startswith("namespace ") and trimmed.endswith("{"):
+            blocks.append("namespace")
+        elif trimmed.startswith("}") and blocks:
+            if blocks.pop() == "struct":
+                struct_depth = max(0, struct_depth - 1)
+    return values
 
 
 def anonymous_enum_values(nadeo: dict) -> tuple[dict[str, list[str]], set[str], int]:
@@ -89,6 +122,8 @@ def probe_names() -> list[str]:
     anon, named, _ = anonymous_enum_values(nadeo)
     for enum in core.get("enums", []):
         named.update(enum.get("values", {}).keys())
+    if HEADER_FILE.is_file():
+        named |= header_module_enum_values(HEADER_FILE.read_text(encoding="utf-8"))
     return sorted(name for name in anon if name not in named)
 
 
@@ -111,22 +146,17 @@ HEADER = '''\
 // fixture type DB, minus the {shared} that also appear in a named enum (a bare
 // reference to those resolves legitimately, e.g. `VCenter2`). {count} names.
 //
-// Game verdict (RemoteBuild probe, OP 1.29.5, 2026-08-30): 258 rejected,
-// 3 accepted. The 3 are marked `KNOWN FP` below — each is a value of the
-// MODULE-LEVEL enum `Scene::ESceneCharVisNotice`, which the Nadeo dump cannot
-// represent (its `ns` map holds types only), so the LSP has never known those
-// 47 module-level enums. 52 of their value names already fail to resolve; these
-// 3 were resolving only by accident, through the scan B044 narrows. Fixing that
-// gap is its own ticket, and when it lands these 3 lines go quiet.
+// Game verdict (RemoteBuild probe, OP 1.29.5, 2026-08-30): all {count}
+// rejected. The same probe accepted 3 more names this list used to carry —
+// `DoubleJump`, `Jump` and `TechJump`, values of the module-level enum
+// `ESceneCharVisNotice`. They were marked `KNOWN FP` here until B046 taught
+// the loader to read `Openplanet.h`, which is the only source that names that
+// enum; they now resolve legitimately and this list excludes them.
 '''
 
 
 def statement(name: str) -> str:
-    line = f'    print("" + {name});'
-    owner = GAME_ACCEPTS.get(name)
-    if owner:
-        line += f"  // KNOWN FP: the game accepts this — {owner} value"
-    return line + "\n"
+    return f'    print("" + {name});\n'
 
 
 def render(names: list[str], enums: int, shared: int) -> str:
@@ -151,6 +181,8 @@ def main() -> int:
     anon, named, enums = anonymous_enum_values(nadeo)
     for enum in core.get("enums", []):
         named.update(enum.get("values", {}).keys())
+    if HEADER_FILE.is_file():
+        named |= header_module_enum_values(HEADER_FILE.read_text(encoding="utf-8"))
     names = sorted(name for name in anon if name not in named)
     shared = len(anon) - len(names)
 

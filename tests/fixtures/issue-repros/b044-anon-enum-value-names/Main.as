@@ -13,16 +13,15 @@
 // first unresolved symbol, so every rejected name gets its own line number.
 //
 // The list is every value name of the 132 anonymous member enums in the
-// fixture type DB, minus the 126 that also appear in a named enum (a bare
-// reference to those resolves legitimately, e.g. `VCenter2`). 261 names.
+// fixture type DB, minus the 129 that also appear in a named enum (a bare
+// reference to those resolves legitimately, e.g. `VCenter2`). 258 names.
 //
-// Game verdict (RemoteBuild probe, OP 1.29.5, 2026-08-30): 258 rejected,
-// 3 accepted. The 3 are marked `KNOWN FP` below — each is a value of the
-// MODULE-LEVEL enum `Scene::ESceneCharVisNotice`, which the Nadeo dump cannot
-// represent (its `ns` map holds types only), so the LSP has never known those
-// 47 module-level enums. 52 of their value names already fail to resolve; these
-// 3 were resolving only by accident, through the scan B044 narrows. Fixing that
-// gap is its own ticket, and when it lands these 3 lines go quiet.
+// Game verdict (RemoteBuild probe, OP 1.29.5, 2026-08-30): all 258
+// rejected. The same probe accepted 3 more names this list used to carry —
+// `DoubleJump`, `Jump` and `TechJump`, values of the module-level enum
+// `ESceneCharVisNotice`. They were marked `KNOWN FP` here until B046 taught
+// the loader to read `Openplanet.h`, which is the only source that names that
+// enum; they now resolve legitimately and this list excludes them.
 
 void Probe() {
     print("" + API_Calls);
@@ -74,7 +73,6 @@ void Probe() {
     print("" + Deutranopia);
     print("" + Direct_w__attenuation);
     print("" + Directional);
-    print("" + DoubleJump);  // KNOWN FP: the game accepts this — Scene::ESceneCharVisNotice value
     print("" + Download_Done);
     print("" + Download_OnTermination);
     print("" + Download_ProcessingSources);
@@ -123,7 +121,6 @@ void Probe() {
     print("" + Intens_GDerivAt0);
     print("" + ItemFilterBackGnd);
     print("" + ItemIsBackGnd);
-    print("" + Jump);  // KNOWN FP: the game accepts this — Scene::ESceneCharVisNotice value
     print("" + Kaiser);
     print("" + Lanczos);
     print("" + LeftNRight);
@@ -212,7 +209,6 @@ void Probe() {
     print("" + T3_TreeFoliageSH);
     print("" + TargetJump);
     print("" + Tech3AutoScale01);
-    print("" + TechJump);  // KNOWN FP: the game accepts this — Scene::ESceneCharVisNotice value
     print("" + Text_Icon);
     print("" + TimeElapsed);
     print("" + TimeHhMm);

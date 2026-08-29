@@ -394,7 +394,9 @@ Unless `--no-typedb` is passed, every run states which type database it used
 ### `typedb` — type-DB freshness
 
 The checker judges your code against Openplanet's own type databases
-(`OpenplanetCore.json` + the game dump, e.g. `OpenplanetNext.json`). When the
+(`OpenplanetCore.json` + the game dump, e.g. `OpenplanetNext.json`, plus
+`Openplanet.h` where present — it is the only source for the engine's
+module-level enums, which the JSON dump's shape cannot represent). When the
 DB and the running game disagree, the LSP is *confidently wrong* rather than
 merely silent — so which DB loaded is worth being able to see.
 
