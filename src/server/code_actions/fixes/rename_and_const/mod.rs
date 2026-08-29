@@ -30,9 +30,10 @@ mod test_support;
 mod tests {
     use super::test_support::{context, Workspace};
     use super::{const_receiver, duplicate_function, shadowed_variable};
-    use crate::server::code_actions::fix::{collect_fix_descriptors, materialize_auto_descriptors};
+    use crate::server::code_actions::fix::{
+        collect_fix_descriptors, materialize_auto_descriptors, REGISTRIES,
+    };
     use crate::server::code_actions::fix_all::fix_all_action;
-    use crate::server::code_actions::fixes::FAMILIES;
 
     /// One document carrying all three B038 diagnostics.
     const ALL_THREE: &str = "class C { bool M() { return true; } }\n\
@@ -76,7 +77,7 @@ mod tests {
         let pairs = workspace.pairs();
         let ctx = context(&workspace, &pairs, 0);
         let descriptors = collect_fix_descriptors(&ctx);
-        let auto = materialize_auto_descriptors(&ctx, &descriptors, FAMILIES);
+        let auto = materialize_auto_descriptors(&ctx, &descriptors, REGISTRIES);
         assert!(auto.is_empty(), "{:?}", auto);
         assert!(fix_all_action(workspace.uri(0), &auto).is_none());
     }

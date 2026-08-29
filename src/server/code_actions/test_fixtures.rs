@@ -4,7 +4,7 @@
 //! and each fix family's tests build their world the same way — a family
 //! author writes assertions about *text*, not about `SymbolTable` wiring.
 
-use tower_lsp::lsp_types::{TextEdit, Url};
+use tower_lsp::lsp_types::{Diagnostic, TextEdit, Url};
 
 use crate::analysis::DocumentAnalysis;
 use crate::server::code_actions::fix::FixCandidate;
@@ -21,6 +21,30 @@ pub fn ctx_for(source: &str) -> (DocumentAnalysis, SymbolTable, Url) {
     workspace.set_file_symbols(fid, syms);
     let uri = Url::parse("file:///test/a.as").expect("valid test uri");
     (analysis, workspace, uri)
+}
+
+/// The unused-declaration diagnostics the server really publishes for
+/// `source`, straight through
+/// [`crate::server::diagnostics::unused_declaration_diagnostics`].
+///
+/// Code-action tests must answer the diagnostics the USER sees, not a
+/// synthetic stand-in that could drift from the published range, message or
+/// `code` — the diagnostic-keyed registry keys on exactly those fields.
+pub fn published_unused_diagnostics(source: &str) -> Vec<Diagnostic> {
+    let path = std::path::PathBuf::from("/test/a.as");
+    let snapshot = crate::analysis_snapshot::AnalysisSnapshot::from_files(
+        &[(path, source.to_string())],
+        &crate::config::LspConfig::default(),
+    );
+    let usage = crate::analysis::unused::WorkspaceUsage::collect(&snapshot, None);
+    crate::server::diagnostics::unused_declaration_diagnostics(
+        source,
+        &usage,
+        &snapshot,
+        0,
+        &std::collections::HashSet::new(),
+        crate::config::UnusedLevel::Warn,
+    )
 }
 
 /// Apply `edits` to `source` sequentially, exactly as a naive client would —

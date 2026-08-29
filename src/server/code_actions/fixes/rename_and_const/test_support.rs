@@ -14,9 +14,8 @@ use tower_lsp::lsp_types::{TextEdit, Url, WorkspaceEdit};
 use crate::analysis::DocumentAnalysis;
 use crate::server::code_actions::fix::{
     collect_fix_descriptors, materialize_descriptor, FixCandidate, FixContext,
-    WorkspaceFileResolver,
+    WorkspaceFileResolver, REGISTRIES,
 };
-use crate::server::code_actions::fixes::FAMILIES;
 use crate::server::code_actions::test_fixtures::apply_edits;
 use crate::symbols::SymbolTable;
 
@@ -84,7 +83,7 @@ pub fn fixes_in(workspace: &Workspace, index: usize) -> Vec<FixCandidate> {
     let ctx = context(workspace, &pairs, index);
     collect_fix_descriptors(&ctx)
         .iter()
-        .map(|descriptor| materialize_descriptor(&ctx, descriptor, FAMILIES))
+        .map(|descriptor| materialize_descriptor(&ctx, descriptor, REGISTRIES))
         .collect()
 }
 

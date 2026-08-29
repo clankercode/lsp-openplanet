@@ -1,11 +1,32 @@
-//! The code-action **fix seam** (B035).
+//! The code-action **fix seam** (B035, widened by B047).
 //!
-//! One dispatch point between "the checker found something" and "here is an
+//! One dispatch point between "something found a problem" and "here is an
 //! edit that fixes it", so a fix family can be added as a new file plus one
-//! row in [`super::fixes::FAMILIES`] — never by editing the request handler.
+//! row in a registry — never by editing the request handler.
+//!
+//! # Two registries, one path
+//!
+//! A fix family is keyed on whatever identifies its problem, and the server
+//! produces problems two ways:
+//!
+//! * [`FixFamily`] — keyed on a `TypeDiagnosticKind`. Its findings come from
+//!   the **type checker**, which the seam re-runs itself
+//!   ([`type_diagnostics`]), so nothing has to be echoed back to us.
+//! * [`DiagnosticFixFamily`] — keyed on the published [`Diagnostic`]. Its
+//!   findings are produced elsewhere in the server (unused declarations come
+//!   from [`crate::analysis::unused`], through inputs no [`FixContext`]
+//!   carries), so the only thing the code-action handler has to work from is
+//!   the diagnostic the **client echoed back** in `CodeActionContext`.
+//!
+//! Which registry a fix belongs in is decided by where its diagnostic is
+//! produced, and by nothing else about the fix. Everything downstream of
+//! [`collect_fix_descriptors_from`] — the offer, `codeAction/resolve`, the
+//! `source.fixAll.openplanet` batcher — is registry-agnostic and sees one
+//! stream of [`FixDescriptorCandidate`].
 //!
 //! A family author writes exactly two things (see
-//! [`super::fixes::string_by_value`] for the worked example):
+//! [`super::fixes::string_by_value`] and [`super::fixes::unused_decl`] for
+//! the worked examples of each):
 //!
 //! ```ignore
 //! pub const FAMILY: FixFamily = FixFamily {
@@ -23,21 +44,23 @@
 //! ) -> WorkspaceEdit { .. }
 //! ```
 //!
-//! Both callbacks are deliberately plain `fn` pointers: the registry stays a
-//! `const` slice, so adding a family costs no runtime setup and no shared
+//! Both callbacks are deliberately plain `fn` pointers: the registries stay
+//! `const` slices, so adding a family costs no runtime setup and no shared
 //! mutable state.
+
+use std::collections::HashMap;
 
 use tower_lsp::lsp_types::*;
 
 use crate::analysis::DocumentAnalysis;
-use crate::server::diagnostics::span_to_range;
+use crate::server::diagnostics::{span_to_range, DIAGNOSTIC_SOURCE};
 use crate::symbols::SymbolTable;
 use crate::typecheck::{
     Checker, GlobalScope, TypeDiagnostic, TypeDiagnosticKind, TypeDiagnosticSeverity,
 };
 use crate::typedb::TypeIndex;
 
-use super::fixes::FAMILIES;
+use super::fixes::{DIAGNOSTIC_FAMILIES, FAMILIES};
 
 /// Our namespaced fix-all kind. Namespaced (rather than plain
 /// `source.fixAll`) so a user can name *our* fixes in
@@ -122,12 +145,91 @@ pub struct FixFamily {
     pub materialize: fn(&TypeDiagnostic, &FixContext<'_>, &str) -> WorkspaceEdit,
 }
 
+/// A registered fix family keyed on the **published** diagnostic rather than
+/// on a checker discriminant, for findings the type checker does not produce.
+///
+/// Its input is the `Diagnostic` the client echoed back in
+/// `CodeActionContext.diagnostics`. Match on [`Diagnostic::code`] — that is
+/// the field the server stamps precisely so a fix can find its own findings
+/// again (`"unused-declaration"`, say). Matching on the message is a last
+/// resort, for a diagnostic class that carries no code.
+///
+/// The seam filters out diagnostics published by *another* server before
+/// dispatch (see [`is_our_diagnostic`]), so a family never has to.
+pub struct DiagnosticFixFamily {
+    /// Stable identifier, round-tripped through `CodeAction.data`. Unique
+    /// across BOTH registries — see `family_names_are_unique_across_registries`.
+    pub name: &'static str,
+    /// Does this family claim that published diagnostic?
+    pub matches: fn(&Diagnostic) -> bool,
+    /// Describe the menu entries for one claimed diagnostic, without edits.
+    pub describe: fn(&Diagnostic, &FixContext<'_>) -> Vec<FixDescriptor>,
+    /// Materialize exactly the selected descriptor. Total for every
+    /// descriptor [`Self::describe`] returned.
+    pub materialize: fn(&Diagnostic, &FixContext<'_>, &str) -> WorkspaceEdit,
+}
+
+/// The pair of registries one request dispatches through.
+///
+/// Carried as a value rather than reached for globally so a test can run the
+/// whole handler against a synthetic registry — which is the only way to
+/// prove the *seam* behaves, as opposed to proving the families do.
+#[derive(Clone, Copy)]
+pub struct Registries<'a> {
+    /// Keyed on `TypeDiagnosticKind`; the seam re-runs the checker.
+    pub checker: &'a [FixFamily],
+    /// Keyed on the published `Diagnostic`; the client echoes these back.
+    pub published: &'a [DiagnosticFixFamily],
+}
+
+impl<'a> Registries<'a> {
+    /// Only the checker-keyed half — what a family's own tests exercise, and
+    /// what a caller with no echoed diagnostics to offer can use.
+    pub const fn checker_only(checker: &'a [FixFamily]) -> Self {
+        Self {
+            checker,
+            published: &[],
+        }
+    }
+}
+
+/// Everything registered, which is what the server runs.
+pub const REGISTRIES: Registries<'static> = Registries {
+    checker: FAMILIES,
+    published: DIAGNOSTIC_FAMILIES,
+};
+
+/// Which registry produced a candidate, and the producer's input.
+#[derive(Debug, Clone)]
+enum Subject {
+    /// A checker finding. [`FixDescriptorCandidate::diagnostic`] is only its
+    /// published *form*, so the structured finding travels alongside.
+    Checker(TypeDiagnostic),
+    /// A published diagnostic, which IS
+    /// [`FixDescriptorCandidate::diagnostic`].
+    Published,
+}
+
 #[derive(Debug, Clone)]
 pub struct FixDescriptorCandidate {
     pub family: &'static str,
     pub diagnostic: Diagnostic,
     pub descriptor: FixDescriptor,
-    type_diagnostic: TypeDiagnostic,
+    subject: Subject,
+}
+
+impl FixDescriptorCandidate {
+    /// The published diagnostic this candidate was produced *from*, for a
+    /// candidate out of the diagnostic-keyed registry.
+    ///
+    /// `None` for a checker-keyed candidate: the seam re-derives those from
+    /// the document, so nothing about them has to be carried. The difference
+    /// matters at `codeAction/resolve`, where the client echoes no
+    /// diagnostics and a diagnostic-keyed producer would otherwise have no
+    /// input at all.
+    pub fn published_subject(&self) -> Option<&Diagnostic> {
+        matches!(self.subject, Subject::Published).then_some(&self.diagnostic)
+    }
 }
 
 /// A produced fix plus the provenance needed to (a) attach it to the right
@@ -154,28 +256,96 @@ pub fn type_diagnostics(ctx: &FixContext<'_>) -> Vec<TypeDiagnostic> {
     checker.diagnostics
 }
 
-/// Every fix every registered family offers for this document, in a stable
-/// order: checker order, then registry order, then producer order.
+/// Is this diagnostic one of ours? A diagnostic published by another server
+/// must never drive our quick fixes, even when the message happens to match.
+/// A missing `source` is treated as ours: some clients drop the field on the
+/// round trip, and refusing would silently disable the feature.
+pub fn is_our_diagnostic(diag: &Diagnostic) -> bool {
+    diag.source
+        .as_deref()
+        .is_none_or(|s| s == DIAGNOSTIC_SOURCE)
+}
+
+/// A single-document workspace edit. The common shape by far: a family that
+/// edits one file should not have to know `WorkspaceEdit`'s three fields.
+pub fn single_file_edit(uri: &Url, edits: Vec<TextEdit>) -> WorkspaceEdit {
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(uri.clone(), edits);
+    WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    }
+}
+
+/// The name a diagnostic of ours puts in backticks — every message that
+/// names one declaration does it the same way, so both diagnostic-keyed
+/// families read it through here rather than each parsing prose.
+pub fn extract_name_from_diagnostic(message: &str) -> Option<&str> {
+    let start = message.find('`')? + 1;
+    let rest = &message[start..];
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+/// Every fix every registered checker family offers for this document, in a
+/// stable order: checker order, then registry order, then producer order.
+///
+/// No echoed diagnostics, so no diagnostic-keyed family contributes — this
+/// is the family-scoped view a `FixFamily`'s own tests want.
 pub fn collect_fixes(ctx: &FixContext<'_>) -> Vec<FixCandidate> {
     collect_fix_descriptors(ctx)
         .iter()
-        .map(|descriptor| materialize_descriptor(ctx, descriptor, FAMILIES))
+        .map(|descriptor| materialize_descriptor(ctx, descriptor, REGISTRIES))
         .collect()
 }
 
 /// Cheap list-time view: checker diagnostics plus family metadata, no edits.
 pub fn collect_fix_descriptors(ctx: &FixContext<'_>) -> Vec<FixDescriptorCandidate> {
-    collect_fix_descriptors_from(ctx, FAMILIES)
+    collect_fix_descriptors_from(ctx, &[], REGISTRIES)
 }
 
+/// Every descriptor both registries offer, in the order the client sees
+/// them: diagnostic-keyed producers first (in the order the client echoed
+/// their diagnostics), then checker-keyed ones (checker order, then registry
+/// order).
+///
+/// `echoed` is `CodeActionContext.diagnostics` — the client's own copy of
+/// what we published. Foreign diagnostics are dropped here, once, so no
+/// producer has to re-check.
 pub fn collect_fix_descriptors_from(
     ctx: &FixContext<'_>,
-    families: &[FixFamily],
+    echoed: &[Diagnostic],
+    registries: Registries<'_>,
 ) -> Vec<FixDescriptorCandidate> {
-    let source = &ctx.analysis.source;
     let mut out = Vec::new();
+    for diagnostic in echoed {
+        if !is_our_diagnostic(diagnostic) {
+            continue;
+        }
+        for family in registries.published {
+            if !(family.matches)(diagnostic) {
+                continue;
+            }
+            for descriptor in (family.describe)(diagnostic, ctx) {
+                out.push(FixDescriptorCandidate {
+                    family: family.name,
+                    diagnostic: diagnostic.clone(),
+                    descriptor,
+                    subject: Subject::Published,
+                });
+            }
+        }
+    }
+    // Running the checker is the expensive half, and a caller with an empty
+    // checker registry (a diagnostic-keyed family's own tests) must not pay
+    // for it.
+    if registries.checker.is_empty() {
+        return out;
+    }
+    let source = &ctx.analysis.source;
     for diag in type_diagnostics(ctx) {
-        for family in families {
+        for family in registries.checker {
             if !(family.matches)(&diag.kind) {
                 continue;
             }
@@ -185,7 +355,7 @@ pub fn collect_fix_descriptors_from(
                     family: family.name,
                     diagnostic: published.clone(),
                     descriptor,
-                    type_diagnostic: diag.clone(),
+                    subject: Subject::Checker(diag.clone()),
                 });
             }
         }
@@ -196,22 +366,30 @@ pub fn collect_fix_descriptors_from(
 pub fn materialize_descriptor(
     ctx: &FixContext<'_>,
     candidate: &FixDescriptorCandidate,
-    families: &[FixFamily],
+    registries: Registries<'_>,
 ) -> FixCandidate {
-    // Callers pair descriptors with the registry that produced them, so a
+    // Callers pair descriptors with the registries that produced them, so a
     // miss is a programming error — loud in development, but an editor-
     // facing daemon must not die of it mid-session.
-    let family = families
-        .iter()
-        .find(|family| family.name == candidate.family);
+    let title = &candidate.descriptor.title;
+    let edit = match &candidate.subject {
+        Subject::Checker(diag) => registries
+            .checker
+            .iter()
+            .find(|family| family.name == candidate.family)
+            .map(|family| (family.materialize)(diag, ctx, title)),
+        Subject::Published => registries
+            .published
+            .iter()
+            .find(|family| family.name == candidate.family)
+            .map(|family| (family.materialize)(&candidate.diagnostic, ctx, title)),
+    };
     debug_assert!(
-        family.is_some(),
+        edit.is_some(),
         "descriptor from unregistered family `{}`",
         candidate.family
     );
-    let edit = family.map_or_else(WorkspaceEdit::default, |family| {
-        (family.materialize)(&candidate.type_diagnostic, ctx, &candidate.descriptor.title)
-    });
+    let edit = edit.unwrap_or_default();
     FixCandidate {
         family: candidate.family,
         diagnostic: candidate.diagnostic.clone(),
@@ -233,43 +411,37 @@ pub fn materialize_descriptor(
 pub fn materialize_auto_descriptors(
     ctx: &FixContext<'_>,
     descriptors: &[FixDescriptorCandidate],
-    families: &[FixFamily],
+    registries: Registries<'_>,
 ) -> Vec<FixCandidate> {
     descriptors
         .iter()
         .filter(|candidate| candidate.descriptor.auto_applicable)
-        .map(|candidate| materialize_descriptor(ctx, candidate, families))
+        .map(|candidate| materialize_descriptor(ctx, candidate, registries))
         .collect()
 }
 
 /// Re-find and materialize one descriptor against the current document.
 /// Missing means the action is stale and resolve should leave it unchanged.
-pub fn materialize_fix(
-    ctx: &FixContext<'_>,
-    family_name: &str,
-    diagnostic_range: Range,
-    title: &str,
-) -> Option<FixCandidate> {
-    materialize_fix_from(ctx, family_name, diagnostic_range, title, FAMILIES)
-}
-
-/// As [`materialize_fix`], against an explicit registry. Once a descriptor
-/// matches, its family contract guarantees materialization.
+///
+/// `echoed` supplies the input for a diagnostic-keyed family, which at
+/// `codeAction/resolve` is not the client's live diagnostic list but the one
+/// diagnostic the action carried with it (see `ResolveAction::Fix`).
 pub fn materialize_fix_from(
     ctx: &FixContext<'_>,
+    echoed: &[Diagnostic],
     family_name: &str,
     diagnostic_range: Range,
     title: &str,
-    families: &[FixFamily],
+    registries: Registries<'_>,
 ) -> Option<FixCandidate> {
-    let descriptor = collect_fix_descriptors_from(ctx, families)
+    let descriptor = collect_fix_descriptors_from(ctx, echoed, registries)
         .into_iter()
         .find(|candidate| {
             candidate.family == family_name
                 && candidate.diagnostic.range == diagnostic_range
                 && candidate.descriptor.title == title
         })?;
-    Some(materialize_descriptor(ctx, &descriptor, families))
+    Some(materialize_descriptor(ctx, &descriptor, registries))
 }
 
 /// The LSP diagnostic `publishDiagnostics` would have sent for this finding.
@@ -429,11 +601,12 @@ mod tests {
             type_index: None,
             files: WorkspaceFileResolver::empty(),
         };
-        let descriptors = collect_fix_descriptors_from(&ctx, &COUNTED_FAMILIES);
+        let registries = Registries::checker_only(&COUNTED_FAMILIES);
+        let descriptors = collect_fix_descriptors_from(&ctx, &[], registries);
         AUTO_MATERIALIZED.set(0);
         MANUAL_MATERIALIZED.set(0);
 
-        let candidates = materialize_auto_descriptors(&ctx, &descriptors, &COUNTED_FAMILIES);
+        let candidates = materialize_auto_descriptors(&ctx, &descriptors, registries);
         assert_eq!(AUTO_MATERIALIZED.get(), 1);
         assert_eq!(MANUAL_MATERIALIZED.get(), 0);
         let action = super::super::fix_all::fix_all_action(&uri, &candidates)
@@ -465,9 +638,10 @@ mod tests {
             files: WorkspaceFileResolver::new(&files),
         };
 
-        let descriptors = collect_fix_descriptors_from(&ctx, &[SYNTHETIC_FAMILY]);
+        let registries = Registries::checker_only(&[SYNTHETIC_FAMILY]);
+        let descriptors = collect_fix_descriptors_from(&ctx, &[], registries);
         assert_eq!(descriptors.len(), 1);
-        let fix = materialize_descriptor(&ctx, &descriptors[0], &[SYNTHETIC_FAMILY]);
+        let fix = materialize_descriptor(&ctx, &descriptors[0], registries);
         let changes = fix.fix.edit.changes.expect("plain workspace changes");
         assert_eq!(changes.get(&uri).unwrap()[0].new_text, "current");
         assert_eq!(changes.get(&second_uri).unwrap()[0].new_text, "second");
@@ -477,7 +651,7 @@ mod tests {
             files: WorkspaceFileResolver::new(&no_context_files),
             ..ctx
         };
-        assert!(collect_fix_descriptors_from(&no_context, &[SYNTHETIC_FAMILY]).is_empty());
+        assert!(collect_fix_descriptors_from(&no_context, &[], registries).is_empty());
     }
 
     #[test]

@@ -1,14 +1,15 @@
-//! Quick fixes for unused-declaration findings (B036, family 3).
+//! Quick fixes for unused-declaration findings (B036), keyed on the
+//! published diagnostic.
 //!
-//! **Why this is not a [`super::fix::FixFamily`].** The seam is keyed on
-//! `TypeDiagnosticKind`, and unused findings are not type diagnostics: they
-//! come from [`crate::analysis::unused`], which needs an `AnalysisSnapshot`,
-//! a `WorkspaceUsage`, the plugin's export paths and the `unused` level —
-//! none of which a `FixContext` carries. Rather than widen the seam while
-//! other lanes are building against it, this producer takes the shape the
-//! server already had for client-echoed diagnostics
-//! ([`super::quick_fix_did_you_mean`]): read the diagnostics the client
-//! echoed back, answer the ones that are ours.
+//! **Why this is a [`DiagnosticFixFamily`] and not a
+//! [`crate::server::code_actions::fix::FixFamily`].** Unused findings are
+//! not type diagnostics: they come from [`crate::analysis::unused`], which
+//! needs an `AnalysisSnapshot`, a `WorkspaceUsage`, the plugin's export
+//! paths and the `unused` level — none of which a `FixContext` carries, and
+//! all of which the code-action handler would have to re-derive (differently
+//! from the publisher, and so possibly answering findings the user cannot
+//! see). The diagnostic the client echoes back is both cheaper and more
+//! faithful: it is exactly what is squiggled.
 //!
 //! The diagnostic already names its own fix — its message ends "(suppress
 //! with a leading `_` or a trailing `// lsp: ignore unused` comment)" — so
@@ -23,6 +24,11 @@
 //! * Removing the declaration is offered only for a **local**, only when it
 //!   is provably lossless, and never as the preferred fix: a name may be
 //!   unused today and wanted tomorrow, and the `_` prefix keeps it.
+//!
+//! **Neither is `auto_applicable`** — see
+//! [`no_unused_fix_is_batched_into_fix_all`](tests::no_unused_fix_is_batched_into_fix_all)
+//! and [`the_two_fixes_overlap_and_the_batcher_would_keep_the_removal`](tests::the_two_fixes_overlap_and_the_batcher_would_keep_the_removal)
+//! for the decision and the evidence behind it.
 //!
 //! **The side-effecting initializer.** `int x = Foo();` cannot simply be
 //! deleted — that silently drops the call. The alternative of "remove the
@@ -54,115 +60,109 @@ use crate::parser::ast::{
     ClassDecl, ClassMember, Expr, ExprKind, FunctionDecl, Item, NamespaceDecl, PropertyDecl, Stmt,
     StmtKind, VarDeclStmt,
 };
+use crate::server::code_actions::fix::{
+    extract_name_from_diagnostic, single_file_edit, DiagnosticFixFamily, FixContext, FixDescriptor,
+};
 use crate::server::diagnostics::{position_to_offset, span_to_range};
-
-use super::{is_our_diagnostic, CodeActionRequest};
 
 /// The `code` [`crate::server::diagnostics::unused_to_diagnostic`] stamps on
 /// every unused finding.
 const UNUSED_CODE: &str = "unused-declaration";
 
-pub(super) fn quick_fixes(req: &CodeActionRequest<'_>) -> Vec<CodeAction> {
-    fixes_for(req.uri, req.analysis, &req.context.diagnostics)
-}
-
 /// The tail of the published message, used only as a fallback when the
 /// client dropped `code` on the round trip.
 const UNUSED_MESSAGE_MARK: &str = "is never used (suppress with a leading `_`";
 
-fn fixes_for(
-    uri: &Url,
-    analysis: &DocumentAnalysis,
-    diagnostics: &[Diagnostic],
-) -> Vec<CodeAction> {
-    let mut out = Vec::new();
-    for diagnostic in diagnostics {
-        if !is_our_diagnostic(diagnostic) || !is_unused_declaration(diagnostic) {
-            continue;
-        }
-        let source = &analysis.source;
-        let Some(span) = declared_name_span(analysis, diagnostic.range) else {
-            continue;
-        };
-        let name = span.text(source);
-        // The diagnostic names the declaration it is about, in backticks.
-        // A range that has drifted onto a DIFFERENT identifier — the client
-        // shifted it after an edit — would otherwise be answered with a fix
-        // for whatever now sits there, which for a USED variable is an
-        // actively wrong action. This is the one place the message is read,
-        // and it is read for a name the server itself wrote, through the
-        // extractor the "did you mean" producer already uses.
-        if super::extract_name_from_diagnostic(&diagnostic.message) != Some(name) {
-            continue;
-        }
-        // The `_` prefix IS the documented suppression, so a name that
-        // already carries one has nothing to gain and would become `__x`.
-        if name.starts_with('_') {
-            continue;
-        }
-        let binding = classify(&analysis.file, span);
-        out.push(action(
-            uri,
-            diagnostic,
-            format!("Prefix `{name}` with `_` to mark it unused"),
-            TextEdit {
-                range: span_to_range(source, span),
-                new_text: format!("_{name}"),
-            },
-            // Deleting a parameter changes the signature and every call
-            // site, so for a parameter the prefix is the only sane fix and
-            // leads the menu. For a local it competes with removal, and a
-            // family offering two alternatives leads with neither.
-            matches!(binding, Binding::Param),
-        ));
-        if let Binding::Local { stmt, decl } = binding {
-            if let Some((range, new_text, title)) = removal(source, name, stmt, decl) {
-                out.push(action(
-                    uri,
-                    diagnostic,
-                    title,
-                    TextEdit { range, new_text },
-                    false,
-                ));
-            }
+pub const FAMILY: DiagnosticFixFamily = DiagnosticFixFamily {
+    name: "unused-declaration",
+    matches: is_unused_declaration,
+    describe,
+    materialize,
+};
+
+/// One offered fix: the menu entry and the edit that applies it.
+struct Offer {
+    title: String,
+    is_preferred: bool,
+    edit: TextEdit,
+}
+
+fn describe(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
+    offers(diagnostic, ctx)
+        .into_iter()
+        .map(|offer| FixDescriptor {
+            title: offer.title,
+            kind: CodeActionKind::QUICKFIX,
+            is_preferred: offer.is_preferred,
+            // Never batched into `source.fixAll.openplanet`: see the module
+            // docs. Removal is lossy, and the prefix renames a binding in
+            // the one state where a declaration is legitimately unused —
+            // code the user is still writing.
+            auto_applicable: false,
+        })
+        .collect()
+}
+
+fn materialize(diagnostic: &Diagnostic, ctx: &FixContext<'_>, title: &str) -> WorkspaceEdit {
+    offers(diagnostic, ctx)
+        .into_iter()
+        .find(|offer| offer.title == title)
+        .map_or_else(WorkspaceEdit::default, |offer| {
+            single_file_edit(ctx.uri, vec![offer.edit])
+        })
+}
+
+/// Both fixes for one diagnosed declaration, or nothing where the range no
+/// longer describes one.
+///
+/// `describe` and `materialize` share this rather than splitting it: the
+/// classification walk is the only cost here, and splitting would mean
+/// walking twice for each half anyway. `describe` discards the edits.
+fn offers(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<Offer> {
+    let analysis = ctx.analysis;
+    let source = &analysis.source;
+    let Some(span) = declared_name_span(analysis, diagnostic.range) else {
+        return Vec::new();
+    };
+    let name = span.text(source);
+    // The diagnostic names the declaration it is about, in backticks.
+    // A range that has drifted onto a DIFFERENT identifier — the client
+    // shifted it after an edit — would otherwise be answered with a fix
+    // for whatever now sits there, which for a USED variable is an
+    // actively wrong action. This is the one place the message is read,
+    // and it is read for a name the server itself wrote, through the
+    // extractor the "did you mean" family also uses.
+    if extract_name_from_diagnostic(&diagnostic.message) != Some(name) {
+        return Vec::new();
+    }
+    // The `_` prefix IS the documented suppression, so a name that
+    // already carries one has nothing to gain and would become `__x`.
+    if name.starts_with('_') {
+        return Vec::new();
+    }
+    let binding = classify(&analysis.file, span);
+    let mut out = vec![Offer {
+        title: format!("Prefix `{name}` with `_` to mark it unused"),
+        // Deleting a parameter changes the signature and every call
+        // site, so for a parameter the prefix is the only sane fix and
+        // leads the menu. For a local it competes with removal, and a
+        // family offering two alternatives leads with neither.
+        is_preferred: matches!(binding, Binding::Param),
+        edit: TextEdit {
+            range: span_to_range(source, span),
+            new_text: format!("_{name}"),
+        },
+    }];
+    if let Binding::Local { stmt, decl } = binding {
+        if let Some((range, new_text, title)) = removal(source, name, stmt, decl) {
+            out.push(Offer {
+                title,
+                is_preferred: false,
+                edit: TextEdit { range, new_text },
+            });
         }
     }
     out
-}
-
-/// Build one action, edit included.
-///
-/// **Why the edit is eager here while the seam families are lazy.** A
-/// `FixFamily` defers its edit to `codeAction/resolve` because
-/// `materialize` may be the expensive half — a symbol-table walk, a
-/// cross-file search — and a menu the user never opens should not pay for
-/// it. Nothing like that applies to these two fixes: both are a single
-/// `TextEdit` over a span already in hand, cheaper to compute than the
-/// per-request `Sha256` fingerprint the handler runs anyway. Attaching the
-/// edit up front also means no `data` payload and no arm in the resolve
-/// handler, which keeps this producer's footprint in the shared
-/// `code_actions/mod.rs` to the two lines that call it. Resolving an action
-/// that already carries an edit returns it untouched (see
-/// [`super::resolve_code_action`]), so an eager action is safe to hand to a
-/// resolving client. If a future unused fix needs real work to materialize,
-/// that is the moment to give this producer a `ResolveAction` — not before.
-fn action(
-    uri: &Url,
-    diagnostic: &Diagnostic,
-    title: String,
-    edit: TextEdit,
-    is_preferred: bool,
-) -> CodeAction {
-    CodeAction {
-        title,
-        kind: Some(CodeActionKind::QUICKFIX),
-        diagnostics: Some(vec![diagnostic.clone()]),
-        edit: Some(super::single_file_edit(uri, vec![edit])),
-        command: None,
-        is_preferred: is_preferred.then_some(true),
-        disabled: None,
-        data: None,
-    }
 }
 
 /// Ours, and about an unused declaration. `code` is the reliable signal;
@@ -504,36 +504,90 @@ fn delete_span(source: &str, stmt: Span) -> Span {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::unused::WorkspaceUsage;
-    use crate::analysis_snapshot::AnalysisSnapshot;
-    use crate::config::{LspConfig, UnusedLevel};
-    use crate::server::code_actions::test_fixtures::apply_edits;
-    use std::collections::HashSet;
-    use std::path::PathBuf;
+    use crate::server::code_actions::fix::{
+        Registries, WorkspaceFileResolver, SOURCE_FIX_ALL_OPENPLANET,
+    };
+    use crate::server::code_actions::fix_all::{
+        merged_edits, ranges_overlap, select_non_overlapping, DocumentFix,
+    };
+    use crate::server::code_actions::test_fixtures::{apply_edits, published_unused_diagnostics};
+    use crate::server::code_actions::{code_actions_with, resolve_code_action, CodeActionRequest};
+    use crate::symbols::SymbolTable;
+
+    /// This family alone, so a sibling family claiming the same fixture can
+    /// never perturb these assertions.
+    const ONLY_THIS: Registries<'static> = Registries {
+        checker: &[],
+        published: &[FAMILY],
+    };
 
     fn uri() -> Url {
         Url::parse("file:///test/a.as").expect("valid test uri")
     }
 
-    /// The unused diagnostics the server really publishes for `source`,
-    /// straight through `unused_declaration_diagnostics` — so these tests
-    /// assert against the real range, message and `code`, not a synthetic
-    /// diagnostic that could drift away from what is published.
+    /// The unused diagnostics the server really publishes for `source` — so
+    /// these tests assert against the real range, message and `code`, not a
+    /// synthetic diagnostic that could drift away from what is published.
     fn published(source: &str) -> (DocumentAnalysis, Vec<Diagnostic>) {
-        let path = PathBuf::from("/test/a.as");
-        let snapshot =
-            AnalysisSnapshot::from_files(&[(path, source.to_string())], &LspConfig::default());
-        let usage = WorkspaceUsage::collect(&snapshot, None);
-        let diagnostics = crate::server::diagnostics::unused_declaration_diagnostics(
-            source,
-            &usage,
-            &snapshot,
-            0,
-            &HashSet::new(),
-            UnusedLevel::Warn,
-        );
-        let analysis = DocumentAnalysis::analyze_plain(source);
-        (analysis, diagnostics)
+        (
+            DocumentAnalysis::analyze_plain(source),
+            published_unused_diagnostics(source),
+        )
+    }
+
+    fn whole_doc(source: &str) -> Range {
+        Range::new(
+            Position::new(0, 0),
+            Position::new(source.lines().count().max(1) as u32, 0),
+        )
+    }
+
+    fn request<'a>(
+        uri: &'a Url,
+        analysis: &'a DocumentAnalysis,
+        context: &'a CodeActionContext,
+        files: &'a [(Url, &'a DocumentAnalysis)],
+        workspace: &'a SymbolTable,
+        lazy_edits: bool,
+    ) -> CodeActionRequest<'a> {
+        CodeActionRequest {
+            uri,
+            analysis,
+            range: whole_doc(&analysis.source),
+            context,
+            workspace,
+            type_index: None,
+            files: WorkspaceFileResolver::new(files),
+            lazy_edits,
+        }
+    }
+
+    /// Every quick fix this family offers for `diagnostics`, driven through
+    /// the REAL request handler scoped to this family — so the seam's own
+    /// filters (`is_our_diagnostic`, the range test) are exercised here
+    /// rather than bypassed.
+    fn fixes_for(
+        uri: &Url,
+        analysis: &DocumentAnalysis,
+        diagnostics: &[Diagnostic],
+    ) -> Vec<CodeAction> {
+        let workspace = SymbolTable::new();
+        let context = CodeActionContext {
+            diagnostics: diagnostics.to_vec(),
+            ..Default::default()
+        };
+        let files = [(uri.clone(), analysis)];
+        code_actions_with(
+            &request(uri, analysis, &context, &files, &workspace, false),
+            ONLY_THIS,
+        )
+        .into_iter()
+        .filter_map(|action| match action {
+            CodeActionOrCommand::CodeAction(action) => Some(action),
+            CodeActionOrCommand::Command(_) => None,
+        })
+        .filter(|action| action.kind == Some(CodeActionKind::QUICKFIX))
+        .collect()
     }
 
     fn actions(source: &str) -> Vec<CodeAction> {
@@ -1140,13 +1194,13 @@ mod tests {
         );
     }
 
-    // ── Wiring, and the eager-edit exception ─────────────────────────────
+    // ── Wiring ───────────────────────────────────────────────────────────
 
-    /// The two lines this producer costs in the shared
-    /// `code_actions/mod.rs` actually reach it — and the edit is attached
-    /// even when the client advertised resolve support, which is the
-    /// deliberate exception to the seam's laziness documented on
-    /// [`super::action`].
+    /// The registry row this family costs actually reaches it through the
+    /// real handler, for a resolving and a non-resolving client alike — and
+    /// the edit arrives either way, up front for the client that cannot
+    /// resolve and on resolve for the one that can. Before B047 this
+    /// producer was wired into the handler by hand and always eager.
     #[test]
     fn the_fixes_reach_the_client_through_the_code_action_handler() {
         let source = "void Main() {\n    int x = 1;\n    Print(\"hi\");\n}";
@@ -1165,7 +1219,7 @@ mod tests {
                 context: &context,
                 workspace: &workspace,
                 type_index: None,
-                files: super::super::fix::WorkspaceFileResolver::new(&files),
+                files: WorkspaceFileResolver::new(&files),
                 lazy_edits,
             })
             .into_iter()
@@ -1180,17 +1234,50 @@ mod tests {
                 2,
                 "both unused fixes must survive the handler (lazy_edits={lazy_edits})"
             );
-            assert!(
-                actions.iter().all(|action| action.edit.is_some()),
-                "these actions are eager by design (lazy_edits={lazy_edits})"
-            );
+            for action in actions {
+                let title = action.title.clone();
+                let resolved = resolve_code_action(
+                    action,
+                    &analysis,
+                    &workspace,
+                    None,
+                    WorkspaceFileResolver::new(&files),
+                );
+                let edits = resolved
+                    .edit
+                    .unwrap_or_else(|| {
+                        panic!("`{title}` produced no edit (lazy_edits={lazy_edits})")
+                    })
+                    .changes
+                    .expect("single-file edit")
+                    .remove(&uri)
+                    .expect("edits for the current document");
+                assert_ne!(
+                    apply_edits(source, &edits),
+                    source,
+                    "`{title}` resolved to an inert edit (lazy_edits={lazy_edits})"
+                );
+            }
         }
     }
 
-    /// These fixes need user judgement — removal is lossy and the prefix
-    /// competes with it — so none of them may be applied on save. They are
-    /// structurally excluded: `source.fixAll.openplanet` batches only seam
-    /// `FixCandidate`s, and this producer emits none.
+    /// **The fix-all decision (B047).** Neither fix is `auto_applicable`,
+    /// so `source.fixAll.openplanet` never applies one on save.
+    ///
+    /// Since B047 that is a decision rather than an accident of wiring: a
+    /// diagnostic-keyed family CAN be batched now. Three reasons it is not:
+    ///
+    /// 1. The two edits overlap, and the batcher would keep the LOSSY one —
+    ///    see
+    ///    [`the_two_fixes_overlap_and_the_batcher_would_keep_the_removal`].
+    /// 2. "Declared but not yet referenced" is the normal state of code
+    ///    being typed. Every other auto-applicable family fires on code
+    ///    that is finished and wrong; this one fires on code that is
+    ///    unfinished, so renaming `count` to `_count` on save turns the
+    ///    next keystroke into an undefined identifier.
+    /// 3. For a parameter the prefix is a rename of an API surface —
+    ///    AngelScript has named arguments — which is exactly the class
+    ///    `rename_and_const/*` already refuses to auto-apply.
     #[test]
     fn no_unused_fix_is_batched_into_fix_all() {
         let source = "void Main() {\n    int x = 1;\n    Print(\"hi\");\n}";
@@ -1198,7 +1285,7 @@ mod tests {
         let (_, workspace, uri) = crate::server::code_actions::test_fixtures::ctx_for(source);
         let context = CodeActionContext {
             diagnostics: diagnostics.clone(),
-            only: Some(vec![super::super::fix::SOURCE_FIX_ALL_OPENPLANET]),
+            only: Some(vec![SOURCE_FIX_ALL_OPENPLANET]),
             ..Default::default()
         };
         let files = [(uri.clone(), &analysis)];
@@ -1209,7 +1296,7 @@ mod tests {
             context: &context,
             workspace: &workspace,
             type_index: None,
-            files: super::super::fix::WorkspaceFileResolver::new(&files),
+            files: WorkspaceFileResolver::new(&files),
             lazy_edits: false,
         }) {
             let CodeActionOrCommand::CodeAction(action) = action else {
@@ -1219,6 +1306,62 @@ mod tests {
                 !action.title.contains("unused"),
                 "an unused fix must never be applied on save, got {:?}",
                 action.title
+            );
+        }
+    }
+
+    /// The evidence behind [`no_unused_fix_is_batched_into_fix_all`]: the
+    /// two fixes for one declarator do not merely compete, their edits
+    /// properly OVERLAP — the name span sits inside the statement span — so
+    /// the batcher must drop one of them. Its rule is earliest start first,
+    /// and the removal starts at the line start, so the survivor is the
+    /// LOSSY fix. Marking the `_` prefix `auto_applicable` would therefore
+    /// not add a safe fix on save; it would delete the declaration.
+    #[test]
+    fn the_two_fixes_overlap_and_the_batcher_would_keep_the_removal() {
+        for (source, deleted) in [
+            (
+                "void Main() {\n    int x = 1;\n    Print(\"hi\");\n}",
+                "void Main() {\n    Print(\"hi\");\n}",
+            ),
+            // The keep-call rung overlaps the prefix just the same, and
+            // batching it would still drop the declaration.
+            (
+                "int Foo() { return 1; }\nvoid Main() {\n    int x = Foo();\n    Print(\"hi\");\n}",
+                "int Foo() { return 1; }\nvoid Main() {\n    Foo();\n    Print(\"hi\");\n}",
+            ),
+        ] {
+            let offered = actions(source);
+            assert_eq!(offered.len(), 2, "test premise: {:?}", titles(source));
+            let fixes: Vec<DocumentFix> = offered
+                .iter()
+                .map(|action| DocumentFix {
+                    title: action.title.clone(),
+                    edits: action
+                        .edit
+                        .clone()
+                        .expect("eager edit")
+                        .changes
+                        .expect("single-file edit")
+                        .remove(&uri())
+                        .expect("edits for this document"),
+                })
+                .collect();
+            assert!(
+                ranges_overlap(&fixes[0].edits[0].range, &fixes[1].edits[0].range),
+                "the prefix and the removal must be shown to overlap, not assumed to"
+            );
+            let kept = select_non_overlapping(&fixes);
+            assert_eq!(kept.len(), 1, "the batcher can only keep one of them");
+            assert!(
+                fixes[kept[0]].title.starts_with("Remove"),
+                "the batcher keeps `{}` — the lossy fix wins on start position",
+                fixes[kept[0]].title
+            );
+            assert_eq!(
+                apply_edits(source, &merged_edits(&fixes)),
+                deleted,
+                "batching these would delete the declaration on save"
             );
         }
     }
@@ -1275,7 +1418,7 @@ mod tests {
                 context: &context,
                 workspace: &workspace,
                 type_index: None,
-                files: super::super::fix::WorkspaceFileResolver::new(&files),
+                files: WorkspaceFileResolver::new(&files),
                 lazy_edits: false,
             })
             .into_iter()
@@ -1314,7 +1457,7 @@ mod tests {
                 &analysis,
                 &workspace,
                 None,
-                super::super::fix::WorkspaceFileResolver::empty(),
+                WorkspaceFileResolver::empty(),
             );
             assert_eq!(resolved, action, "resolve must not disturb an eager action");
         }

@@ -251,6 +251,13 @@ GitHub Release body to match this section (gh release edit).
   `game_target` is the intended way to pick a game.
 
 ### Changed
+- **Quick fixes for unused declarations and misspelled names now follow the
+  same rules as every other quick fix (B047)** — they are scoped to the range
+  the editor asked about, and their edit is computed when the action is picked
+  rather than for every action in the menu. Previously these two were wired
+  into the request handler by hand, outside the fix registry, so they ignored
+  the requested range and always computed their edits up front. Same fixes,
+  same edits; only when and where they are offered has changed.
 - **DEFAULT CHANGE: the analysis profile is now a windows/64 client (B028)** —
   the LSP used to define `MANIA64`, `MANIA32`, `WINDOWS`, `WINDOWS_WINE`,
   `LINUX`, `SERVER`, `LOGS`, `HAS_DEV` and `DEVELOPER` ALL at once, so
