@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-29T05:25:41Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T05:40:10Z"
 complexity: medium
 created_at: "2026-08-29T05:24:01Z"
 depends_on: []
+duration_minutes: 14.489049797133333
 estimate_hours: 3
 id: B025
 priority: high
 started_at: "2026-08-29T05:25:41Z"
-status: in_progress
+status: done
 tags: []
 title: 'False error: this.Method references at funcdef ctor sites typed as return type (CoroutineFunc(this.M) -> expected void (), got void)'
-updated_at: "2026-08-29T05:25:41Z"
+updated_at: "2026-08-29T05:40:10Z"
 ---
 ## Broken (game-verified 2026-08-29, OP 1.29.5 / OpenplanetNext, master @ d771d92)
 
