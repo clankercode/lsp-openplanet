@@ -73,3 +73,7 @@ A method reference (`this.X`, `obj.X`, bare `X` in class scope) at a funcdef cto
 
 - B022 / GH #63 (funcdef ctor checking, closed): introduced the ctor path this bug extends to method references.
 - B023: the opposite direction — overload-set *parameter* slots silently accept bad callables. Same signature-match helpers should serve both.
+
+## PIRFL review record (2026-08-29, fix commit 8981086)
+
+3 independent critics (correctness / edge-case / goal-fit) + a delta re-review. Fixed from review: Ident-arm precedence now mirrors expr_type (members shadow globals — shadow-polarity probes), chained members, Index-of-member, call-result and method-call factory receivers, namespace-scoped bare callees, cast receivers, engine-typed receivers via callables_method. Game-probed and kept as leniency: cross-funcdef same-signature conversion (game CLEAN). Game-probed and kept as rejection: cast<const N@> receivers (game: Can't create delegate) — reviewer's Const-peel proposal rejected on this evidence. Split out: &out/&inout mode mismatch is game-rejected but needs symbol-table plumbing (Param.modifier dropped by extract_params) — filed as B027 with desired-outcome ignored test. Known limitation (deferred, no wrong verdict today): engine-typed intermediates in receiver chains don't resolve (reviewer ISSUE-5, preference).
