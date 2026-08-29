@@ -1,0 +1,92 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:05:11Z"
+depends_on:
+    - B035
+estimate_hours: 1
+id: B036
+priority: high
+status: pending
+tags:
+    - lsp
+    - code-actions
+    - ux
+title: Quick fixes for diagnostics whose replacement text is already computed
+updated_at: "2026-08-29T15:05:11Z"
+---
+Found by a coordinator feature-gap review, 2026-08-30. Depends on B035
+(code-action seam, kinds, resolve, fixAll).
+
+## Gap
+Three diagnostic families already KNOW their own fix and write it into the
+message text, then offer no edit. The analysis is done; only the edit is
+missing. These are the cheapest quick fixes in the codebase.
+
+### 1. `StringByValueParam` (src/typecheck/checker.rs)
+Message: "Sanity check: Use 'const string &in {}' to pass a string by
+reference". The replacement string is literally in the diagnostic.
+Fix: replace the parameter's type span `string` -> `const string &in`.
+
+### 2. `RemovedApiUsage { member, hint }` (src/typecheck/checker.rs:~37)
+The STRUCT CARRIES the replacement in `hint` (GH #27/#28 family, e.g.
+`awaitable.WithRunContext`). Compiles clean today, deprecated no-op at
+runtime.
+Fix: replace the member span with the hint's replacement. The hint is prose
+today, so this needs a structured replacement field OR a parse of the hint —
+prefer adding a structured `replacement: Option<String>` to the variant and
+keeping `hint` as the human sentence.
+
+### 3. Unused declarations (B030 family)
+Message ends "(prefix the parameter name with an underscore to ignore this
+warning)". Fix text, again, already in the message.
+Fixes: (a) prefix the name with `_`; (b) remove the declaration entirely where
+it is a local or an unused import-like declaration. Offer both; neither is
+`isPreferred` for locals (removal is lossy), but `_` prefixing IS preferred
+for parameters, where removal would change the signature.
+
+## Work
+- Add a structured `replacement` to `RemovedApiUsage` rather than re-parsing
+  the prose hint. Prose is for humans; the edit needs data.
+- Implement the three producers against the B035 registry.
+- All three are pure span replacements — no symbol-table lookups, no
+  cross-file edits. Keep them that way; that is why this batch is first.
+
+## Test plan (TDD, red first)
+Red, one per family: a fixture with the diagnostic -> a `quickfix` action is
+offered whose applied edit yields the expected text.
+
+Variants (per CLAUDE.md, generalize):
+
+`StringByValueParam`, over the full parameter-shape matrix:
+- `string s` -> `const string &in s`
+- already-correct forms offered NO fix: `const string &in s`, `string &in s`,
+  `string &out s`, `string &inout s`, `string@ s`, `const string@ s`,
+  `string@ &in s`
+- underscore-prefixed `string _s` (currently suppressed) -> no fix offered
+- multiple string params in one signature -> one fix each, all applicable
+  together via fixAll without corrupting offsets
+- a `string` param with a DEFAULT value (`string s = "x"`) -> type span only,
+  default untouched
+- a `string` param in a METHOD, a namespaced function, a funcdef, and a
+  lambda/anonymous context if the grammar has one
+- `array<string>` and `dictionary` params -> NOT matched (guard against a
+  naive substring match on "string")
+- a param literally named `string` (shadowing) -> no false rewrite
+
+`RemovedApiUsage`:
+- hint with a direct replacement -> applied
+- hint with NO mechanical replacement -> diagnostic still published, NO action
+  offered (must not offer a fix it cannot make)
+- member appearing twice on one line -> only the diagnosed span is edited
+
+Unused:
+- parameter -> `_` prefix preferred; removal NOT offered (signature change)
+- local variable -> both offered, neither preferred
+- name already starting with `_` -> no action (guard against `__x`)
+- removal of a local whose initializer has SIDE EFFECTS -> removal must not be
+  offered, or must be marked non-preferred with the initializer retained;
+  decide and document which, this is the one genuinely lossy case in the batch
+
+## Related
+B035 (seam), B037, B038. Fixture baselines must not move — these actions add
+no diagnostics.
