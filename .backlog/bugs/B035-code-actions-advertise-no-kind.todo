@@ -1,0 +1,108 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:04:47Z"
+depends_on: []
+estimate_hours: 1
+id: B035
+priority: high
+status: pending
+tags:
+    - lsp
+    - code-actions
+    - ux
+title: 'Code actions advertise no kinds and no fixAll: quick-fix infrastructure groundwork'
+updated_at: "2026-08-29T15:04:47Z"
+---
+Found by a coordinator feature-gap review of the LSP + extension, 2026-08-30.
+Enabler for the quick-fix family (B036/B037/B038). Not a regression.
+
+## Gap
+`src/server/code_actions.rs` is 369 lines offering exactly TWO actions:
+`quick_fix_did_you_mean` (:41) and `refactor_wrap_in_try_catch` (:88).
+Meanwhile `TypeDiagnosticKind` (src/typecheck/checker.rs:28+) has ~25 variants,
+most of them mechanically fixable.
+
+The capability declaration is the blocker for the good version:
+
+    src/server/mod.rs:1038
+    code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+
+`Simple(true)` advertises NO `codeActionKinds` and NO `resolve_provider`.
+Consequences, all client-visible:
+- VS Code cannot populate "Source Action..." (needs a `source.*` kind).
+- `editor.codeActionsOnSave` cannot run our fixes — there is no
+  `source.fixAll.*` kind to name.
+- No "Fix all of this kind in file" / "in workspace".
+- Every action's edit must be computed eagerly on every `textDocument/
+  codeAction` request, because there is no resolve step to defer it to.
+
+For a codebase like tests/fixtures/tm-editor-plus-plus (1428 warnings) the
+difference between per-squiggle right-clicking and fix-on-save is the
+difference between usable and not.
+
+## Work
+- Advertise `CodeActionProviderCapability::Options(CodeActionOptions { .. })`
+  with an explicit `code_action_kinds` list: at minimum `QUICKFIX`,
+  `SOURCE_FIX_ALL`, `REFACTOR_REWRITE`, and a namespaced
+  `source.fixAll.openplanet`.
+- Set `resolve_provider: Some(true)` and implement `codeAction/resolve` so the
+  edit is computed only for the action the user actually picked. Keep the
+  action list cheap to produce (title + kind + diagnostic only).
+- Build the dispatch seam the fix families plug into: a registry mapping a
+  `TypeDiagnosticKind` discriminant to a fix producer
+  `fn(&Diagnostic, &SourceFile, &SymbolTable) -> Vec<CodeAction>`, so
+  B036/B037/B038 add fixes without touching the request handler. Keep the
+  interface small — one function, one enum arm.
+- Implement `source.fixAll.openplanet`: collect every auto-applicable fix in
+  the document, drop the ones whose edits overlap, apply the rest in one
+  `WorkspaceEdit`. Overlap handling is the whole difficulty here; make it a
+  pure, separately tested function.
+- Implement ONE exemplar fix end-to-end through the new seam so the
+  infrastructure is proven: use `StringByValueParam` (see B036), the simplest
+  span replacement of the set.
+- Extension side: nothing required, but confirm `editor.codeActionsOnSave`
+  with `source.fixAll.openplanet` works against the built VSIX before closing.
+
+## Design decision (coordinator, 2026-08-30)
+Fixes are OFFERED but never auto-applied without the user opting in. The
+`source.fixAll` kind exists so the user can wire it into `codeActionsOnSave`
+themselves; we do not enable it by default. A checker warning is a suggestion,
+and silently rewriting a user's parameter list on save is worse than the
+warning it removes.
+
+Actions must be marked `isPreferred` only where the fix is unambiguous and
+lossless. `StringByValueParam` qualifies; anything offering two alternatives
+(see B038) does not.
+
+## Test plan (TDD, red first)
+Existing tests in `src/server/code_actions.rs` `mod tests` (:224+) build a
+`SymbolTable` fixture and assert over returned actions — follow that shape.
+
+Red:
+- `capability_advertises_quickfix_and_fixall_kinds`: the `initialize` result
+  lists `source.fixAll.openplanet` (fails today: `Simple(true)` lists none).
+- `code_action_resolve_computes_edit_lazily`: the action returned by
+  `textDocument/codeAction` has `edit: None`, and `codeAction/resolve`
+  populates it.
+- `fix_all_applies_every_nonoverlapping_fix`: a document with 3 fixable
+  diagnostics yields one `WorkspaceEdit` containing 3 edits.
+
+Variants (per CLAUDE.md, generalize):
+- zero fixable diagnostics -> `fixAll` returns no action, not an empty edit
+- two fixes whose spans OVERLAP -> exactly one applied, deterministically
+  chosen, and the other still offered individually
+- two fixes on the SAME line but disjoint spans -> both applied
+- edits applied in descending span order so earlier edits do not invalidate
+  later offsets (assert the resulting text, not just the edit count)
+- a diagnostic from a DIFFERENT source (not ours) in the same range is ignored
+- `only` filter in `CodeActionParams` honoured: requesting `quickfix` must not
+  return the refactor, and requesting `source.fixAll` must not return
+  per-diagnostic quick fixes
+- resolve called on an action with no edit available -> returns the action
+  unchanged, does not error
+- the existing "Did you mean" and "Wrap in try/catch" actions still work and
+  still carry their original kinds (regression guard)
+
+## Related
+Fix families: B036 (mechanical replacements), B037 (conversions/structural),
+B038 (rename/const). All three depend on this seam.

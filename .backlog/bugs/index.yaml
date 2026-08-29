@@ -33,3 +33,4 @@ bugs:
     - file: B032-flaky-update-tests-race-on-ope.todo
     - file: B033-hover-shows-no-function-argume.todo
     - file: B034-vs-code-no-ui-to-add-remove-to.todo
+    - file: B035-code-actions-advertise-no-kind.todo
