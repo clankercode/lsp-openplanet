@@ -1,14 +1,18 @@
 ---
+claimed_at: "2026-08-29T08:10:20Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T07:02:24Z"
 depends_on: []
 estimate_hours: 3
 id: B028
 priority: medium
-status: pending
+started_at: "2026-08-29T08:10:20Z"
+status: in_progress
 tags: []
 title: OS/arch/build defines are all on at once (MANIA64+MANIA32, WINDOWS+LINUX+WINDOWS_WINE)
-updated_at: "2026-08-29T07:02:24Z"
+updated_at: "2026-08-29T08:10:20Z"
 ---
 Found 2026-08-29 while implementing GH #64 (signature-mode selector). Same
 class as GH #36 (platform selectors) and GH #64 (signature levels): a set of
