@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use super::core_format::{CoreClass, CoreDatabase};
@@ -24,6 +24,11 @@ pub struct TypeIndex {
     /// Covers types, enums, and funcdefs — functions are keyed differently
     /// and this map is only consulted when resolving a referenced *type* name.
     short_type_index: HashMap<String, Vec<String>>,
+    /// Every scope the GAME has, spelled the way source must spell it (B052).
+    /// Built by `build_scope_index` alongside the short-name index; see
+    /// [`Self::scope_exists`] for what qualifies and why the Nadeo module
+    /// prefixes this crate keys the dump under are excluded.
+    scopes: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +239,7 @@ impl Default for TypeIndex {
             enums: HashMap::new(),
             funcdefs: HashMap::new(),
             short_type_index: HashMap::new(),
+            scopes: HashSet::new(),
         }
     }
 }
@@ -329,6 +335,112 @@ impl TypeIndex {
                 .to_string();
             self.short_type_index.entry(short).or_default().push(qname);
         }
+        self.build_scope_index();
+    }
+
+    /// Rebuild [`Self::scopes`] — every namespace-like scope the GAME has.
+    ///
+    /// Two sources, and the difference between them is the whole point:
+    ///
+    /// * **Core namespaces.** `UI`, `Meta`, `Json`, `IO`, `nvg`, `UI::Font`,
+    ///   … are declared by the Core database and registered in the engine as
+    ///   real AngelScript namespaces.
+    ///
+    /// * **Engine classes that declare an enum.** Openplanet registers a
+    ///   class's enums by setting the default namespace to the class name, so
+    ///   declaring one (named or anonymous — either is enough) is what makes
+    ///   a class a namespace. `CGameMenu` and `CGameCtnApp` are; the game
+    ///   accepts `CGameMenu::VirtualKey`. `CSceneVehicleVis`, `CTrackMania`,
+    ///   `CMwNod` and `CSystemFidFile` declare none and the game rejects the
+    ///   same spelling. The class is spelled WITHOUT the module prefix,
+    ///   because that prefix is not part of its name.
+    ///
+    /// What is deliberately NOT here: the Nadeo `ns` MODULE names this crate
+    /// keys the dump under — `Game`, `Scene`, `Plug`, `System`, `Hms`, …
+    /// The game has no such namespaces and answers `Namespace 'Game' doesn't
+    /// exist.` for every path through one. Their module-level enums are
+    /// global, so they contribute an empty scope path and drop out.
+    ///
+    /// Nor namespaces that only some *other* installed plugin declares: a
+    /// live probe sees `MLFeed::` and `MathX::` resolve purely because those
+    /// plugins are installed on that machine, which is an environment fact
+    /// and not an engine one.
+    fn build_scope_index(&mut self) {
+        self.scopes.clear();
+        for info in self.types.values().filter(|i| i.source == TypeSource::Core) {
+            if let Some(ns) = &info.namespace {
+                self.scopes.insert(ns.clone());
+            }
+        }
+        for overloads in self.functions.values() {
+            for f in overloads.iter().filter(|f| f.source == TypeSource::Core) {
+                if let Some(ns) = &f.namespace {
+                    self.scopes.insert(ns.clone());
+                }
+            }
+        }
+        for info in self
+            .funcdefs
+            .values()
+            .filter(|i| i.source == TypeSource::Core)
+        {
+            if let Some(ns) = &info.namespace {
+                self.scopes.insert(ns.clone());
+            }
+        }
+        for (qname, info) in &self.enums {
+            match info.source {
+                // A Core enum's own namespace is a real namespace.
+                TypeSource::Core => {
+                    if let Some(ns) = &info.namespace {
+                        self.scopes.insert(ns.clone());
+                    }
+                }
+                // A Nadeo enum's key is `Module::Scope…::Name`. Drop the
+                // module — an invention of this crate — and whatever is left
+                // is the class scope the game registered the enum under.
+                // A module-level enum leaves nothing, which is correct: it
+                // is global and its module is not a scope.
+                TypeSource::Nadeo => {
+                    let mut segments: Vec<&str> = qname.split("::").collect();
+                    segments.pop();
+                    if segments.len() > 1 {
+                        self.scopes.insert(segments[1..].join("::"));
+                    }
+                }
+                // Header enums are module-level and carry no namespace.
+                TypeSource::Header => {}
+            }
+        }
+        self.scopes.remove("");
+    }
+
+    /// B052: does `path` name a scope the game will resolve a qualified name
+    /// through? See [`Self::build_scope_index`] for what counts.
+    ///
+    /// This is NOT [`Self::namespace_exists`], which answers the looser "does
+    /// the index know this prefix at all" and is true for the synthetic Nadeo
+    /// module names precisely because the index keys them that way.
+    pub fn scope_exists(&self, path: &str) -> bool {
+        self.scopes.contains(path)
+    }
+
+    /// The fully qualified enum key `qualified` is a genuine trailing PATH
+    /// of, if there is one (B052). `CGameMenu::EMenuOrder` finds
+    /// `Game::CGameMenu::EMenuOrder`; `Bogus::EMenuOrder` finds nothing.
+    ///
+    /// A trailing path, not a trailing SEGMENT: the leading part still has to
+    /// be the enum's real declaring scope, which is what the game checks.
+    pub fn lookup_source_enum_by_suffix(&self, qualified: &str) -> Option<&str> {
+        if !qualified.contains("::") {
+            return None;
+        }
+        let short = qualified.rsplit("::").next()?;
+        let needle = format!("::{}", qualified);
+        self.find_by_short_name(short)
+            .iter()
+            .find(|key| key.ends_with(&needle) && self.lookup_source_enum(key).is_some())
+            .map(|key| key.as_str())
     }
 
     /// Return all fully qualified names of types/enums whose tail segment

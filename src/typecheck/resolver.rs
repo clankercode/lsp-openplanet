@@ -159,6 +159,12 @@ impl<'a> TypeResolver<'a> {
         }
 
         if self.scope.resolves(&qualified) {
+            // A nested engine enum spelled the way the game wants it — no
+            // module prefix — resolves here now (B052), but equality is by
+            // the stored key, so hand back the key rather than the spelling.
+            if let Some(key) = self.scope.canonical_enum_key(&qualified) {
+                return TypeRepr::Named(key);
+            }
             return TypeRepr::Named(qualified);
         }
 

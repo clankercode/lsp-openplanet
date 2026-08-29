@@ -311,16 +311,85 @@ impl<'a> GlobalScope<'a> {
             if ext.lookup_source_enum(qualified).is_some() {
                 return true;
             }
-            // Typedb indexes enums by short name (`ECardinalDirections`), so
-            // a qualified lookup (`CGameCtnBlock::ECardinalDirections`) must
-            // fall through to the tail segment before giving up (B007).
-            if let Some((_, tail)) = qualified.rsplit_once("::") {
-                if ext.lookup_source_enum(tail).is_some() {
+            // The typedb keys a nested engine enum under its MODULE
+            // (`Game::CGameCtnBlock::ECardinalDirections`), but source spells
+            // it without one (`CGameCtnBlock::ECardinalDirections`), so a
+            // qualified lookup must try the trailing path before giving up
+            // (B007). A trailing PATH — the leading part still has to be the
+            // enum's real declaring scope, which is what the game checks.
+            if ext.lookup_source_enum_by_suffix(qualified).is_some() {
+                return true;
+            }
+            // AngelScript's ancestor walk (B052): `P::T` looks `T` up in
+            // scope `P` and then in each of P's ancestors out to the global
+            // namespace, so a GLOBAL enum answers to any real scope's
+            // qualifier. `lookup_source_enum(tail)` only hits when `tail` is
+            // a whole key, which for an enum means it has no namespace, so
+            // this reaches exactly the global enums and nothing else.
+            //
+            // The `scope_exists` gate is the fix. Without it every prefix
+            // qualified them — including the Nadeo module names this crate
+            // invents, so `Scene::ESceneCharVisNotice` resolved while the
+            // game answered `Namespace 'Scene' doesn't exist.` Live probe,
+            // Trackmania + Openplanet 1.29.5, 2026-08-30.
+            if let Some((head, tail)) = qualified.rsplit_once("::") {
+                if ext.lookup_source_enum(tail).is_some() && self.scope_exists(head) {
                     return true;
                 }
             }
         }
         false
+    }
+
+    /// The stored key for an enum that source spelled without its module
+    /// prefix (`CGameCtnBlock::ECardinalDirections` →
+    /// `Game::CGameCtnBlock::ECardinalDirections`). `None` when the spelling
+    /// already IS the key, or names no enum at all.
+    ///
+    /// `has_enum` accepts the module-stripped spelling because the game does
+    /// (B052), but type equality is by key, so a resolver that stops at
+    /// "it resolves" would leave two spellings of one enum unequal.
+    pub fn canonical_enum_key(&self, qualified: &str) -> Option<String> {
+        if self.is_canonical_enum_key(qualified) {
+            return None;
+        }
+        self.external
+            .and_then(|ext| ext.lookup_source_enum_by_suffix(qualified))
+            .map(|key| key.to_string())
+    }
+
+    /// True when `qualified` is an enum's own key, exactly as stored —
+    /// no module-stripped spelling, no ancestor walk. Callers that need a
+    /// canonical name, rather than "does this resolve", ask this.
+    fn is_canonical_enum_key(&self, qualified: &str) -> bool {
+        if self
+            .lookup_workspace(qualified)
+            .iter()
+            .any(|s| matches!(s.kind, SymbolKind::Enum { .. }))
+        {
+            return true;
+        }
+        self.external
+            .is_some_and(|ext| ext.lookup_source_enum(qualified).is_some())
+    }
+
+    /// True when `path` names a scope a qualified name resolves through —
+    /// a Core namespace, an engine class that declares an enum, or a
+    /// namespace the workspace itself declares (B052).
+    ///
+    /// The workspace half is not a nicety: a plugin that writes `namespace
+    /// Foo { … }` can spell a global engine enum `Foo::VirtualKey`, and the
+    /// game accepts it. Probed on a plugin declaring `namespace Foo {
+    /// namespace Bar { … } }`: `Foo::VirtualKey` and `Foo::Bar::VirtualKey`
+    /// both compile.
+    pub fn scope_exists(&self, path: &str) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        if self.workspace_namespace_declared(path) {
+            return true;
+        }
+        self.external.is_some_and(|ext| ext.scope_exists(path))
     }
 
     /// True if the qualified name refers to *anything* resolvable — a type,
@@ -952,7 +1021,11 @@ impl<'a> GlobalScope<'a> {
     /// Canonical FQN for a type/enum name used in equality checks.
     /// Leaves the input unchanged when nothing in the index matches.
     pub fn canonicalize_type_name(&self, name: &str) -> String {
-        if self.has_type(name) || self.has_enum(name) {
+        // Only an EXACT key is already canonical. `has_enum` is deliberately
+        // wider than that — it also answers for the module-stripped spelling
+        // the game wants and for a global enum behind a real scope's
+        // qualifier (B052) — and neither of those is the canonical key.
+        if self.has_type(name) || self.is_canonical_enum_key(name) {
             return name.to_string();
         }
         if let Some(resolved) = self.resolve_qualified_suffix(name) {
@@ -1806,11 +1879,14 @@ mod tests {
     ///
     /// The game rejects `Scene::ESceneCharVisNotice` with `Namespace 'Scene'
     /// doesn't exist.` and `Enums::ESceneCharVisNotice` likewise, so neither
-    /// spelling may become a key. `has_enum` still answers true for them via
-    /// the generic B007 tail fallback, which is deliberately permissive for
-    /// EVERY enum and predates this ticket; what is pinned here is that the
-    /// INDEX carries no such entry, which is what a namespace-inventing fix
-    /// would have added.
+    /// spelling may become a key. What is pinned here is that the INDEX
+    /// carries no such entry, which is what a namespace-inventing fix would
+    /// have added.
+    ///
+    /// B046 left `has_enum` answering true for both anyway, through the tail
+    /// fallback it was forbidden to touch. B052 closed that; the resolution
+    /// half of the rule is pinned by
+    /// `a_nadeo_module_prefix_does_not_qualify_a_global_enum`.
     #[test]
     fn no_namespace_is_invented_for_a_module_level_enum() {
         let index = typedb_fixture_index();
@@ -1826,6 +1902,271 @@ mod tests {
             );
         }
         assert!(!index.namespace_exists("Enums"));
+    }
+
+    // ---- B052: qualified paths to a GLOBAL enum -----------------------
+    //
+    // AngelScript resolves `P::T` by looking `T` up in scope `P` and then
+    // walking P's ancestors out to the global namespace. Three things follow,
+    // all of them measured against the live game (RemoteBuild, Trackmania +
+    // Openplanet 1.29.5, 2026-08-30) rather than reasoned from the dump:
+    //
+    //   * `P` is not a scope at all  -> `Namespace 'P' doesn't exist.`
+    //   * `P` is a scope, `T` is not reachable from it
+    //                                -> `Identifier 'T' is not a data type in
+    //                                    namespace 'P' or parent`
+    //   * `P` is a scope and `T` is a GLOBAL enum -> accepted.
+    //
+    // Only three named enum keys are global (single-segment): `VirtualKey`,
+    // `ESceneVehicleVisEvent`, `ESceneCharVisNotice`. Every other key is
+    // `Module::Class::Enum` or `CoreNs::Enum`, so this rule reaches exactly
+    // those three names — the pre-B052 fallback's whole surface, because
+    // `lookup_source_enum(tail)` demands `tail` be a complete key.
+    //
+    // What IS a scope, and what is not:
+    //   * a Core namespace (`UI`, `Meta`, `Json`, `IO`, `nvg`, `UI::Font`, …)
+    //     — yes, and the walk reaches global from it;
+    //   * an engine class that declares at least one enum, named or
+    //     anonymous, spelled WITHOUT the loader's synthetic module prefix
+    //     (`CGameMenu`, `CGameCtnApp`, `CGameCtnChallenge`) — yes;
+    //   * an engine class that declares none (`CSceneVehicleVis`,
+    //     `CTrackMania`, `CMwNod`, `CSystemFidFile`, `Meta::Plugin`) — no;
+    //   * a namespace the workspace itself declares, nested included — yes;
+    //   * the loader's Nadeo MODULE prefixes (`Scene`, `Game`, `Plug`,
+    //     `System`, `Hms`, …) — no. They are this crate's invention for
+    //     keying the dump and name nothing the game has.
+
+    /// B052 red: a Nadeo module prefix is not a namespace, so a qualified
+    /// path through one names nothing. Every name below was submitted to the
+    /// live game and rejected with `Namespace '<prefix>' doesn't exist.`
+    #[test]
+    fn a_nadeo_module_prefix_does_not_qualify_a_global_enum() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // Every module the loader keys the Nadeo dump under, plus the
+        // `Openplanet.h` bucket name and a control that is nothing at all.
+        let prefixes = [
+            "Scene",
+            "Game",
+            "Plug",
+            "System",
+            "Hms",
+            "Input",
+            "Control",
+            "Function",
+            "Graphic",
+            "Script",
+            "Vision",
+            "Xml",
+            "TrackMania",
+            "ShootMania",
+            "MwFoundations",
+            "MetaNotPersistent",
+            "Enums",
+            "Bogus",
+        ];
+        for prefix in prefixes {
+            for tail in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+                let qualified = format!("{prefix}::{tail}");
+                assert!(
+                    !scope.has_enum(&qualified),
+                    "the game answers `Namespace '{prefix}' doesn't exist.` for `{qualified}`"
+                );
+                assert!(
+                    !scope.resolves(&qualified),
+                    "`{qualified}` must not resolve as a type either"
+                );
+            }
+        }
+    }
+
+    /// B052 red: a deeper path through a non-scope is no better, and neither
+    /// is an engine class that declares no enum — the game reports
+    /// `Namespace 'Game::CGameMenu' doesn't exist.` for the first and
+    /// `Identifier 'VirtualKey' is not a data type in namespace
+    /// 'CSceneVehicleVis' or parent` for the second.
+    #[test]
+    fn a_scopeless_or_enumless_prefix_does_not_qualify_a_global_enum() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for prefix in [
+            // module-prefixed class path: the module segment is synthetic.
+            "Game::CGameMenu",
+            "MetaNotPersistent::NPlugAnim",
+            // real engine classes that declare no enum, so no namespace of
+            // their name exists and the ancestor walk never starts.
+            "CSceneVehicleVis",
+            "CTrackMania",
+            "CMwNod",
+            "CSystemFidFile",
+            // a Core CLASS (not namespace) under a real Core namespace.
+            "Meta::Plugin",
+        ] {
+            for tail in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+                let qualified = format!("{prefix}::{tail}");
+                assert!(
+                    !scope.has_enum(&qualified),
+                    "the game rejects `{qualified}`"
+                );
+                assert!(
+                    !scope.resolves(&qualified),
+                    "`{qualified}` must not resolve"
+                );
+            }
+        }
+    }
+
+    /// B052 fence: the ancestor walk is real, so a REAL scope does qualify a
+    /// global enum and must keep resolving. Narrowing the fallback without
+    /// this test would trade a false negative for a false POSITIVE — the
+    /// damaging direction. Every name below the game accepted.
+    #[test]
+    fn a_real_scope_qualifies_a_global_enum() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let prefixes = [
+            // Core namespaces, flat and nested.
+            "UI",
+            "Meta",
+            "Json",
+            "Net",
+            "Audio",
+            "IO",
+            "nvg",
+            "Text",
+            "Math",
+            "Regex",
+            "Dev",
+            "Import",
+            "XML",
+            "Time",
+            "Icons",
+            "Fids",
+            "Path",
+            "Crypto",
+            "Auth",
+            "Display",
+            "Reflection",
+            "Permissions",
+            "SQLite",
+            "Settings",
+            "Tests",
+            "mat3",
+            "mat4",
+            "string",
+            "UI::Font",
+            "UI::Plot",
+            // Engine classes that declare an enum, module prefix stripped:
+            // `CGameMenu` a named one, `CGameCtnApp` only an anonymous one.
+            "CGameMenu",
+            "CGameCtnApp",
+            "CGameCtnChallenge",
+        ];
+        for prefix in prefixes {
+            for tail in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+                let qualified = format!("{prefix}::{tail}");
+                assert!(
+                    scope.has_enum(&qualified),
+                    "the game accepts `{qualified}` through the ancestor walk"
+                );
+                assert!(scope.resolves(&qualified), "`{qualified}` must resolve");
+            }
+        }
+    }
+
+    /// B052 fence: the bare spellings are untouched — they are how the game
+    /// wants these three written in the first place.
+    #[test]
+    fn a_global_enum_still_resolves_bare() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for name in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+            assert!(scope.has_enum(name), "`{name}` must resolve bare");
+            assert!(scope.resolves(name));
+            assert!(scope.has_global_ident(name));
+        }
+    }
+
+    /// B052 red: a namespace the WORKSPACE declares is a scope, so the same
+    /// ancestor walk applies inside plugin code. Probed with a plugin that
+    /// declares `namespace Foo { namespace Bar { … } }`: the game accepts
+    /// `Foo::VirtualKey` and `Foo::Bar::VirtualKey`, and answers `Identifier
+    /// 'ZZZNoSuch' is not a data type in namespace 'Foo' or parent` for a
+    /// name that is genuinely absent.
+    #[test]
+    fn a_workspace_namespace_qualifies_a_global_enum() {
+        let index = typedb_fixture_index();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![
+                make_symbol("Foo", SymbolKind::Namespace),
+                make_symbol("Foo::Bar", SymbolKind::Namespace),
+            ],
+        );
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for tail in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+            for prefix in ["Foo", "Foo::Bar"] {
+                let qualified = format!("{prefix}::{tail}");
+                assert!(
+                    scope.has_enum(&qualified),
+                    "`{qualified}` resolves through the workspace namespace"
+                );
+            }
+            // A namespace nobody declares is still nothing.
+            assert!(!scope.has_enum(&format!("Quux::{tail}")));
+        }
+    }
+
+    /// B052: the fallback the old tail match was reaching for. A nested
+    /// engine enum written the way the game wants it — class scope, no
+    /// module prefix — is an enum, and `has_enum` said no. The suffix has to
+    /// be a genuine trailing PATH of a key, not merely its last segment.
+    #[test]
+    fn a_module_stripped_nested_enum_path_is_an_enum() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // Left: what the game accepts. Right: the key the loader stores.
+        for (spelling, key) in [
+            ("CGameMenu::EMenuOrder", "Game::CGameMenu::EMenuOrder"),
+            (
+                "CGameCtnBlock::ECardinalDirections",
+                "Game::CGameCtnBlock::ECardinalDirections",
+            ),
+            ("CGameHighScore::EMedal", "Game::CGameHighScore::EMedal"),
+            (
+                "CHmsViewport::EPC3Quality",
+                "Hms::CHmsViewport::EPC3Quality",
+            ),
+        ] {
+            assert!(
+                index.lookup_source_enum(key).is_some(),
+                "fixture guard: `{key}` must be a named enum key"
+            );
+            assert!(
+                scope.has_enum(spelling),
+                "the game accepts `{spelling}`, so it is an enum"
+            );
+            assert!(scope.resolves(spelling));
+        }
+
+        // The suffix must be a whole trailing path. A real enum name behind
+        // a prefix that is not its declaring class is still nothing, and the
+        // game agrees: `Namespace 'Bogus' doesn't exist.`
+        assert!(!scope.has_enum("Bogus::EMenuOrder"));
+        assert!(!scope.has_enum("CGameHighScore::EMenuOrder"));
     }
 
     /// B046 fence: a value a module-level enum SHARES with an enum the dump

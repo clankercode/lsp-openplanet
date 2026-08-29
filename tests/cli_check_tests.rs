@@ -3846,6 +3846,89 @@ fn check_command_issue_repro_b046_module_level_enums_resolve() {
     }
 }
 
+/// B052: a qualified path to a global engine enum, both directions.
+///
+/// AngelScript looks `T` up in scope `P` and then in P's ancestors out to the
+/// global namespace, so `P::T` resolves for a global enum `T` behind ANY real
+/// scope — and for no other prefix, because a path through something that is
+/// not a scope never starts the walk.
+///
+/// Game ground truth (RemoteBuild probe, OP 1.29.5, 2026-08-30): the fixture
+/// was compiled in-game as one plugin and produced exactly the 77 errors of
+/// `Rejected()` and nothing else. `Accepted()` is silent in-game and must be
+/// silent here — deleting the fallback instead of narrowing it would have
+/// turned all 103 of those into false POSITIVES.
+///
+/// Before B052 the LSP diagnosed 2 of the 77: `EMenuOrder` is not a complete
+/// index key, so the tail fallback never fired for the two names ending in
+/// it. The other 75 were silent — the false negatives this ticket is about.
+///
+/// The 3 in `KnownParserGap()` are a PRE-EXISTING false positive the
+/// merge-base binary emits identically: the lexer treats `string` as a
+/// keyword, so `string::VirtualKey` never parses. Pinned so the gap stays
+/// visible and a future parser fix is told to update the fixture.
+#[test]
+fn check_command_issue_repro_b052_qualified_enum_paths() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b052-qualified-enum-paths");
+
+    let unknown_type: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("unknown type"))
+        .collect();
+    assert_eq!(
+        unknown_type.len(),
+        77,
+        "every path the game rejects must be diagnosed; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    // Spot-check both halves of the rejection rule by name, so a fix that
+    // merely changes the count cannot pass.
+    for rejected in [
+        "Scene::ESceneCharVisNotice",
+        "Enums::ESceneCharVisNotice",
+        "Game::VirtualKey",
+        "Game::CGameMenu::VirtualKey",
+        "CSceneVehicleVis::VirtualKey",
+        "Meta::Plugin::VirtualKey",
+        "CGameHighScore::EMenuOrder",
+    ] {
+        // Backticked: the diagnostic renders the name inside backticks, and
+        // an unanchored substring would let `Game::CGameMenu::VirtualKey`
+        // satisfy a check for `CGameMenu::VirtualKey`.
+        let quoted = format!("`{rejected}`");
+        assert!(
+            unknown_type.iter().any(|l| l.contains(&quoted)),
+            "`{rejected}` is rejected by the game and must be diagnosed; \
+             stdout={stdout:?}"
+        );
+    }
+
+    // The fence: a real scope's qualifier is not an error.
+    for accepted in [
+        "UI::VirtualKey",
+        "Meta::ESceneCharVisNotice",
+        "UI::Font::VirtualKey",
+        "CGameMenu::VirtualKey",
+        "CGameCtnApp::ESceneVehicleVisEvent",
+        "CGameMenu::EMenuOrder",
+        "CGameCtnBlock::ECardinalDirections",
+    ] {
+        let quoted = format!("`{accepted}`");
+        assert!(
+            !unknown_type.iter().any(|l| l.contains(&quoted)),
+            "the game accepts `{accepted}`; diagnosing it would be a false \
+             positive; stdout={stdout:?}"
+        );
+    }
+
+    assert!(
+        stdout.contains("80 diagnostics (80 errors)"),
+        "77 rejected paths plus the 3 pre-existing `string::` parse errors, \
+         and nothing else; stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
 /// B046: the header is OPTIONAL. An install with no `Openplanet.h` must still
 /// load its type DB and check cleanly — the module-level enums simply stay
 /// unknown, exactly as before B046. Without this, a user whose install lacks
