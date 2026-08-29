@@ -25,10 +25,9 @@
 //!   is provably lossless, and never as the preferred fix: a name may be
 //!   unused today and wanted tomorrow, and the `_` prefix keeps it.
 //!
-//! **Neither is `auto_applicable`** — see
-//! [`no_unused_fix_is_batched_into_fix_all`](tests::no_unused_fix_is_batched_into_fix_all)
-//! and [`the_two_fixes_overlap_and_the_batcher_would_keep_the_removal`](tests::the_two_fixes_overlap_and_the_batcher_would_keep_the_removal)
-//! for the decision and the evidence behind it.
+//! **Neither is `auto_applicable`.** The decision and the evidence behind it
+//! are recorded on the tests `no_unused_fix_is_batched_into_fix_all` and
+//! `the_two_fixes_overlap_and_the_batcher_would_keep_the_removal` below.
 //!
 //! **The side-effecting initializer.** `int x = Foo();` cannot simply be
 //! deleted — that silently drops the call. The alternative of "remove the
@@ -50,7 +49,7 @@
 //! declaration that is not an element of a statement LIST — a `for`
 //! initializer, where that `;` is the loop's separator, or an unbraced
 //! branch body, where the declaration IS the body — would leave
-//! `for ( c; s)` or a branch with nothing to run. See [`classify_stmts`].
+//! `for ( c; s)` or a branch with nothing to run. See `classify_stmts`.
 
 use tower_lsp::lsp_types::*;
 
@@ -1269,7 +1268,7 @@ mod tests {
     ///
     /// 1. The two edits overlap, and the batcher would keep the LOSSY one —
     ///    see
-    ///    [`the_two_fixes_overlap_and_the_batcher_would_keep_the_removal`].
+    ///    `the_two_fixes_overlap_and_the_batcher_would_keep_the_removal`.
     /// 2. "Declared but not yet referenced" is the normal state of code
     ///    being typed. Every other auto-applicable family fires on code
     ///    that is finished and wrong; this one fires on code that is
