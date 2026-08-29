@@ -28,7 +28,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
-use crate::config::LspConfig;
+use crate::config::{LspConfig, ResolvedDefine};
 use crate::config_watch::{self, ConfigReloadAction};
 use crate::typecheck::GlobalScope;
 use crate::typedb::TypeIndex;
@@ -44,6 +44,48 @@ fn refusal_error(refusal: rename::Refusal) -> tower_lsp::jsonrpc::Error {
         message: refusal.reason.into(),
         data: None,
     }
+}
+
+/// The custom LSP request method name (B050).
+///
+/// Namespaced `openplanet/...` to match the `openplanet.` command ids and
+/// LSP's own `namespace/method` convention. Exported so the extension's
+/// integration test and any other client name it from one place.
+pub const RESOLVED_DEFINES: &str = "openplanet/resolvedDefines";
+
+/// Params for `openplanet/resolvedDefines` (B050).
+///
+/// tower-lsp's typed router rejects a request with NO `params` member
+/// (`FromParams for (P,)` → "Missing params field"), so a client must always
+/// send an object; every field inside it is optional.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedDefinesParams {
+    /// A document (or directory) whose plugin workspace should answer.
+    /// Multi-root windows serve one config PER root, so a window-wide answer
+    /// would be the wrong one for every root but the first. Omitted: the
+    /// server-wide config, which is the N=1 view.
+    #[serde(default)]
+    pub uri: Option<Url>,
+}
+
+/// The `openplanet/resolvedDefines` answer (B050).
+///
+/// A query, not a mutation — hence a custom request rather than a fifth
+/// `executeCommand`, whose `Option<Value>` response is untypeable on the
+/// client side.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedDefinesResult {
+    /// The effective set, ordered by origin class then name.
+    pub defines: Vec<ResolvedDefine>,
+    /// The resolved `game_target`, so a client can name it without guessing
+    /// which config layer won.
+    pub game_target: String,
+    /// The ManiaPlanet-generation families. Travels with the answer so the
+    /// client's foreign-selector guard can ask instead of duplicating
+    /// `LspConfig::PLATFORM_FAMILIES`.
+    pub platform_families: Vec<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -1837,6 +1879,36 @@ impl LanguageServer for Backend {
 }
 
 impl Backend {
+    /// `openplanet/resolvedDefines` (B050): the effective define set with an
+    /// ORIGIN per entry, plus whether each is currently active.
+    ///
+    /// The set is computed entirely server-side by a five-layer ladder
+    /// (B017/B019/B024/B028) and until now no client could read it, so the
+    /// extension's Manage Defines list could only show the user's own array —
+    /// a partial truth with no indication it was partial. Re-deriving it
+    /// client-side was rejected: it would be a second implementation of
+    /// precedence rules that four tickets have each had to fix once.
+    ///
+    /// Read-only: nothing here mutates server state, which is why it is a
+    /// request rather than a command.
+    pub async fn resolved_defines(
+        &self,
+        params: ResolvedDefinesParams,
+    ) -> Result<ResolvedDefinesResult> {
+        let config = match &params.uri {
+            Some(uri) => self.config_for(uri).await,
+            None => self.config.read().await.clone(),
+        };
+        Ok(ResolvedDefinesResult {
+            defines: config.resolved_defines(),
+            game_target: config.game_target.clone(),
+            platform_families: LspConfig::platform_families()
+                .iter()
+                .map(|family| family.iter().map(|name| (*name).to_string()).collect())
+                .collect(),
+        })
+    }
+
     /// Non-blocking update probe: writes `~/.config/openplanet-lsp/update-status.json`
     /// at most once per 24h and surfaces an info message when a newer npm release exists.
     fn spawn_update_check(&self) {
@@ -1925,10 +1997,22 @@ impl Backend {
     }
 }
 
+/// Build the service the server actually serves, with every custom method
+/// registered.
+///
+/// The ONE registration site. `run_stdio` and the end-to-end tests both go
+/// through here, so a handler cannot be implemented on `Backend`, unit-tested
+/// green, and left off the router — the failure mode B040 was filed for.
+pub fn build_service() -> (LspService<Backend>, tower_lsp::ClientSocket) {
+    LspService::build(Backend::new)
+        .custom_method(RESOLVED_DEFINES, Backend::resolved_defines)
+        .finish()
+}
+
 pub async fn run_stdio() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = LspService::new(Backend::new);
+    let (service, socket) = build_service();
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 

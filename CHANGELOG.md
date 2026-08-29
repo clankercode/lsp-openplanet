@@ -14,6 +14,29 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **`openplanet/resolvedDefines` — config introspection** (B050) — a custom
+  LSP request returning the EFFECTIVE preprocessor define set with an origin
+  per entry (`target` / `signature` / `os` / `arch` / `build` / `manifest` /
+  `dependency` / `dependency-missing` / `user`), whether each is currently
+  active, and the state it would have without the user's `defines` overrides.
+  Until now the set was computed entirely server-side by the five-layer ladder
+  (B017/B019/B024/B028) and no client could read any of it, so the VS Code
+  Manage Defines list could only show the user's own settings array — a
+  partial truth with no indication it was partial.
+
+  Two things the flat set could not express are now reported. A define the
+  user turned off with `-NAME` comes back present-but-disabled, keeping its
+  derived origin, so "remove my override" and "disable this define" stay
+  different edits. And a dependency declared in `info.toml` that does NOT
+  resolve on this machine is reported inactive under `dependency-missing` —
+  it has no define (B019, matching the game), and that row is the whole
+  explanation for a dead `#if DEPENDENCY_X` branch.
+
+  The answer also carries the resolved `game_target` and the platform-family
+  table, so a client can stop duplicating `LspConfig::PLATFORM_FAMILIES`.
+  Read-only, and a query rather than a fifth `executeCommand`. Registered in
+  `server::build_service`, the single constructor `run_stdio` uses.
+
 - **Quick fixes for unused declarations** (B036) — an unused local or
   parameter now offers an edit, not just a squiggle. Prefixing the name with
   `_` is offered for both and is the preferred fix for a **parameter**, where
