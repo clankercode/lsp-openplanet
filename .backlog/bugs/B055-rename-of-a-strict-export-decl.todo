@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T22:47:27Z"
 depends_on: []
 estimate_hours: 1
 id: B055
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Rename of a strict-export declaration may be unsafe: red test preserved, semantics unverified'
@@ -24,3 +26,64 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Left RED and unmerged by the B049 lane when it hit its spend limit. The work
+is preserved on branch `wip/b049-strict-export` (commit `f499a9f`), which is
+NOT merged and does NOT build green.
+
+## What exists
+Test `rename_handlers_refuse_a_strict_export_symbol_from_an_own_module_file`
+in `src/server/mod.rs`. Its FIRST half passes on merged master: for a plugin
+with `module = "T"` and `exports = ["Exports_Bodies.as"]`, a call to
+`SendEvent()` from `src/Main.as` cannot see the strict export, so
+`prepare_rename` and `rename` both error and `references` is empty.
+
+Its SECOND half FAILS: renaming at the DECLARATION site inside
+`src/Exports_Bodies.as` is currently ALLOWED, and the test asserts it must be
+refused, with the message 'a strict-export declaration cannot be renamed
+safely while it is invisible to other own files'.
+
+The branch also narrows the three rename handlers from workspace-wide
+`snapshot.symbols()` to per-file
+`snapshot.table_for_own_file(FileRef::Uri(uri))`. That part compiles and the
+rest of the suite passes with it.
+
+## Why it was not merged
+The assertion encodes a claim about Openplanet's strict-module export
+semantics that has NOT been verified against the game. Two readings are
+defensible:
+
+1. REFUSE — the declaration is invisible to other own files, so a rename would
+   rewrite only the declaration and leave callers broken. It is also part of a
+   surface OTHER PLUGINS consume, so a rename breaks downstream consumers the
+   LSP cannot see at all.
+2. ALLOW — it is an ordinary declaration in the file the user has open, and
+   refusing makes the most common legitimate rename impossible.
+
+This repo settles questions of game semantics by live RemoteBuild probe rather
+than by argument — that is how B044, B046 and B052 were decided, and B046
+showed that reasoning from the data alone produced a confidently wrong
+prediction. So the decision needs a probe, not a preference.
+
+## Work
+- Probe the game: does a strict-export symbol resolve from a sibling own file?
+  What does the module system actually do with `exports` under
+  `module = "T"`? Establish the ground truth first.
+- Then either implement the refusal (making the red test green) or delete the
+  second half of the test and document why allowing it is correct.
+- Either way, decide what `references` should return for a strict-export
+  declaration. The test currently asserts empty, described as 'conservatively
+  indeterminate' — note that conflicts with the principle B049 established
+  when it rejected a reviewer change: an empty reference list is a POSITIVE
+  claim a user acts on, so empty may be the wrong conservative answer here.
+  Resolve that tension explicitly.
+- Rebase the branch onto current master; it predates the B049 merge.
+
+## Gate
+Rename and references are request handlers and add no diagnostics, so FP
+fixtures must be byte-identical (baselines 14/1485, 5/276, 2/35, 4/2, 4/4,
+showcase 9/7). Measure two binaries on the same machine at the same time.
+
+## Related
+B049 (merged; this is its one unfinished thread), B008 (manifest dependency
+exports), B026, B054.
