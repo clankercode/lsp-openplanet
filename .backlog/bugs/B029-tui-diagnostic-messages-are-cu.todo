@@ -1,15 +1,89 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T08:52:48Z"
 depends_on: []
 estimate_hours: 2
 id: B029
 priority: high
+started_at: null
 status: pending
-tags:
-    - tui
+tags: []
 title: TUI diagnostic messages are cut off at narrow widths with no way to read the full text
 updated_at: "2026-08-29T08:52:48Z"
 ---
 
 TUI diagnostic messages are cut off at narrow widths with no way to read the full text
+
+Reported 2026-08-29 by Max from TUI use on a narrow terminal.
+
+## Symptom
+Error/warning messages in the TUI are truncated when the terminal is not wide
+enough, and there is no way to see the rest of the text — no wrapping, no
+horizontal scroll, no popup/expand. The diagnostic becomes unreadable exactly
+when it matters (long "no matching signatures ..." messages are the worst).
+
+Two separate cut points:
+
+1. **List rows** — `ellipsize()` clips the message to the row budget and adds
+   `…`. Compact: `msg_budget = content_w - (3 + loc + 2)`, so a long
+   `path:line:col` steals the whole message. Relaxed: message gets its own row
+   with `content_w - 3`, better but still one line.
+2. **Detail box** — `pretty_detail_lines` pushes the message as a single
+   `Line` and the pane renders with `Paragraph::new(lines)` and **no**
+   `.wrap()` (src/tui/ui.rs:327-328 — deliberate, so the source line and the
+   caret row stay column-aligned). Ratatui therefore hard-clips the message at
+   the pane edge with no `…` at all, so the user cannot even tell text is
+   missing.
+
+## Cause
+src/tui/ui.rs:
+- `list_item_for` (~:476) — `ellipsize(&d.message, msg_budget)` for both
+  densities; single-line by construction.
+- `pretty_detail_lines` (~:775) — message emitted as one unwrapped `Line`.
+- `render_detail` (~:327) — `Paragraph` without `Wrap`, blanket-applied to
+  every line in the box, including the message line that does not need
+  column alignment.
+
+The no-wrap constraint is only real for the source-line + caret-row pair. The
+message line is free text and should wrap.
+
+## Fix (sketch)
+- Detail box: wrap the message line(s) ourselves at render time — soft-wrap
+  the message into N lines at inner width, indented to the message column, so
+  the caret alignment of the other rows is untouched (do **not** turn on
+  `Wrap` for the whole Paragraph). Feed the wrapped count into
+  `detail_box_height` so the box grows (respecting the existing 8-row cap) and
+  make the detail box scrollable when the message exceeds the cap.
+- List rows: keep the ellipsis (rows must stay one/two lines), but guarantee a
+  usable floor — the current `.max(4)` yields "abc…". Prefer shrinking the
+  location field before the message, and in Relaxed mode allow the message to
+  spill to a second row for the *selected* item.
+
+## Test plan (TDD, red first)
+Unit tests over the pure layout fns (no terminal needed) — this is how the
+existing `fragment_rhs_no_truncate_when_room` tests work:
+
+Red:
+- `detail_message_wraps_at_narrow_width`: long message + narrow inner width →
+  `pretty_detail_lines` returns >1 message line, none exceeding the width, and
+  the concatenation equals the original message.
+- `detail_box_height_grows_with_wrapped_message`: height accounts for the
+  wrapped lines, capped at 8 inner rows.
+- `caret_alignment_survives_wrapping`: the source line and caret row keep the
+  same prefix width after the message wraps (regression guard for :327).
+
+Variants (per CLAUDE.md: generalize the case):
+- severities: error / warning / info / hint all wrap identically.
+- densities: Compact and Relaxed list rows both ellipsize with a readable
+  floor; assert `…` is present iff truncation happened.
+- widths: sweep inner widths (e.g. 20, 40, 60, 100, 200) and assert no
+  produced line exceeds the width and no message content is silently dropped
+  without a `…` marker.
+- long unbroken token (a 200-char identifier with no spaces) → hard-wraps
+  instead of overflowing.
+- multi-byte / wide chars in the message → wrap by display width, not by
+  `chars().count()`, so no line overflows.
+- empty and 1-char messages → no panic, no stray `…`.
+- long `path:line:col` + short message in Compact → message still gets a
+  usable budget (the location shrinks first).
