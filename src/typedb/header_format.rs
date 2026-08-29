@@ -293,6 +293,22 @@ mod tests {
     }
 
     #[test]
+    fn skips_unqualified_enums_inside_aggregate_shapes_and_keeps_outer_enums() {
+        let db = HeaderDatabase::parse(
+            "namespace Enums\n{\n// { comments must not open a block }\nstruct Named\n{\n  enum class EInStruct { A = 0, };\n};\nclass NamedClass {\n  union {\n    enum class EInAnonymousUnion { A = 0, };\n  };\n};\nunion NamedUnion\n{\n  enum class EInUnion { A = 0, };\n};\nstruct Empty {};\nenum class EOuter {\n  Good = 7,\n}; // trailing suffix\n}\n",
+        );
+        assert_eq!(names(&db), vec!["EOuter"]);
+        assert_eq!(db.module_enums[0].values, vec![("Good".to_string(), 7)]);
+    }
+
+    #[test]
+    fn parses_an_enum_with_a_next_line_opening_brace() {
+        let db = HeaderDatabase::parse("enum class ENextLine\n{\n  A = 1,\n};\n");
+        assert_eq!(names(&db), vec!["ENextLine"]);
+        assert_eq!(db.module_enums[0].values, vec![("A".to_string(), 1)]);
+    }
+
+    #[test]
     fn unrecognised_text_yields_no_enums_rather_than_an_error() {
         let db = HeaderDatabase::parse("this is not a header at all\n{{{\n");
         assert!(db.module_enums.is_empty());

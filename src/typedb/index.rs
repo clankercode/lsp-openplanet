@@ -3369,6 +3369,139 @@ mod module_level_enum_tests {
         );
     }
 
+    #[test]
+    fn a_header_enum_does_not_change_a_type_short_name_bucket() {
+        let mut index = TypeIndex::new();
+        index.types.insert(
+            "Game::ECollision".to_string(),
+            TypeInfo {
+                name: "ECollision".to_string(),
+                namespace: Some("Game".to_string()),
+                parent: None,
+                methods: Vec::new(),
+                properties: Vec::new(),
+                ctor_conversions: Vec::new(),
+                doc: None,
+                source: TypeSource::Nadeo,
+            },
+        );
+        index.build_short_type_index();
+        let before = index.find_by_short_name("ECollision").to_vec();
+
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "ECollision".to_string(),
+                values: vec![("A".to_string(), 0)],
+            }],
+        });
+        index.build_short_type_index();
+
+        assert!(index.lookup_enum("ECollision").is_none());
+        assert_eq!(index.find_by_short_name("ECollision"), before.as_slice());
+    }
+
+    #[test]
+    fn a_header_enum_does_not_change_a_funcdef_short_name_bucket() {
+        let mut index = TypeIndex::new();
+        index.funcdefs.insert(
+            "UI::ECollision".to_string(),
+            FuncdefInfo {
+                name: "ECollision".to_string(),
+                namespace: Some("UI".to_string()),
+                return_type: "void".to_string(),
+                params: Vec::new(),
+                decl: None,
+                doc: None,
+                source: TypeSource::Core,
+            },
+        );
+        index.build_short_type_index();
+        let before = index.find_by_short_name("ECollision").to_vec();
+
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "ECollision".to_string(),
+                values: vec![("A".to_string(), 0)],
+            }],
+        });
+        index.build_short_type_index();
+
+        assert!(index.lookup_enum("ECollision").is_none());
+        assert_eq!(index.find_by_short_name("ECollision"), before.as_slice());
+    }
+
+    #[test]
+    fn a_header_enum_without_a_type_name_collision_is_inserted() {
+        let mut index = TypeIndex::new();
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "EFresh".to_string(),
+                values: vec![("A".to_string(), 0)],
+            }],
+        });
+        index.build_short_type_index();
+        assert!(index.lookup_source_enum("EFresh").is_some());
+        assert_eq!(index.find_by_short_name("EFresh"), ["EFresh"]);
+    }
+
+    /// The skip rule compares against ENUM names only, so a module-level
+    /// enum sharing a short name with a TYPE is still added. That is
+    /// deliberate: the enum genuinely exists and the game accepts it, so
+    /// `find_by_short_name` returning both is the honest answer. It does not
+    /// arise in the shipped data — `the_header_disturbs_no_existing_short_name_bucket`
+    /// proves no bucket moves — and if a future dump ever creates such a
+    /// clash that test fails loudly rather than the resolution silently
+    /// shifting. Pinned here so the behaviour is a decision, not an accident.
+    #[test]
+    fn a_header_enum_sharing_a_short_name_with_a_type_is_still_added() {
+        let core = r#"{"op":"1.0.0","functions":[],"classes":[],"enums":[]}"#;
+        let nadeo = r#"{"op":"1.0.0","ns":{"Game":{"CThing":{"i":"1"}}}}"#;
+        let dir = scratch_dir("type-name-clash");
+        std::fs::write(dir.join("OpenplanetCore.json"), core).unwrap();
+        std::fs::write(dir.join("OpenplanetNext.json"), nadeo).unwrap();
+        let mut index = TypeIndex::load_with_header(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+            None,
+        )
+        .unwrap();
+        assert!(index.lookup_type("Game::CThing").is_some(), "fixture guard");
+
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "CThing".to_string(),
+                values: vec![("A".to_string(), 0)],
+            }],
+        });
+        index.build_short_type_index();
+
+        assert!(
+            index.lookup_source_enum("CThing").is_some(),
+            "a type of the same name must not suppress a real enum"
+        );
+        assert_eq!(
+            index.find_by_short_name("CThing"),
+            ["CThing", "Game::CThing"],
+            "both are reported, and the order is deterministic"
+        );
+    }
+
+    /// A header enum the parser found no values for is still a name the game
+    /// accepts, so it is indexed; it simply contributes no bare values.
+    #[test]
+    fn a_header_enum_with_no_values_is_indexed_but_contributes_none() {
+        let mut index = TypeIndex::new();
+        index.add_header(&HeaderDatabase {
+            module_enums: vec![HeaderEnum {
+                name: "EEmpty".to_string(),
+                values: vec![],
+            }],
+        });
+        let info = index.lookup_source_enum("EEmpty").expect("indexed");
+        assert!(info.values.is_empty());
+        assert!(!info.anonymous);
+    }
+
     /// The header is optional: an install without one must load exactly as
     /// it did before B046, not fail.
     #[test]
@@ -3392,6 +3525,30 @@ mod module_level_enum_tests {
         .expect("a dump without a header must still load");
         assert!(header_sourced(&index).is_empty());
         assert_eq!(index.enum_count(), load_without_header().enum_count());
+    }
+
+    #[test]
+    fn an_invalid_utf8_adjacent_header_is_ignored_by_normal_load() {
+        let dir = scratch_dir("invalid-utf8-header");
+        let src = fixture_dir();
+        std::fs::copy(
+            src.join("OpenplanetCore.json"),
+            dir.join("OpenplanetCore.json"),
+        )
+        .unwrap();
+        std::fs::copy(
+            src.join("OpenplanetNext.json"),
+            dir.join("OpenplanetNext.json"),
+        )
+        .unwrap();
+        std::fs::write(dir.join(HEADER_FILENAME), [0xff, 0xfe]).unwrap();
+
+        let index = TypeIndex::load(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+        )
+        .expect("an optional malformed header must not break normal type-db loading");
+        assert!(header_sourced(&index).is_empty());
     }
 
     /// `load` finds the header beside the dump, so every existing caller
