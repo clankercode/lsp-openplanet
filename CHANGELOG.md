@@ -14,6 +14,21 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **Quick fix for the `WithRunContext` migration** (B048) — `awaitable.WithRunContext`
+  compiles clean but discards the run context at runtime, and the warning for
+  it now comes with an edit. The migration is a call restructure, not a
+  rename: `startnew(Worker).WithRunContext(ctx)` becomes
+  `Meta::StartWithRunContext(ctx, Worker)`, with the run context first and
+  every `startnew` argument following in its original order (signature taken
+  from the shipped Openplanet type DB, not from an example).
+
+  The fix is withheld — the warning still fires — wherever the coroutine
+  cannot be read off the source: a receiver that is not a `startnew(...)`
+  call (a stored handle, a function result), a named argument in either call,
+  an unexpected argument count, and a boolean userdata, for which
+  `Meta::StartWithRunContext` has no overload. A wrong rewrite here would
+  silently drop the coroutine, so anything unrecognised offers nothing.
+  Never applied by `source.fixAll.openplanet`.
 - **Quick fixes for unused declarations** (B036) — an unused local or
   parameter now offers an edit, not just a squiggle. Prefixing the name with
   `_` is offered for both and is the preferred fix for a **parameter**, where

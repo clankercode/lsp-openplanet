@@ -27,6 +27,7 @@ pub mod removed_api;
 pub mod rename_and_const;
 pub mod string_by_value;
 pub mod unused_decl;
+pub mod with_run_context;
 
 /// The checker-keyed registry. Order here decides the order fixes are
 /// offered in when two families claim the same diagnostic; it does not
@@ -43,6 +44,7 @@ pub const FAMILIES: &[FixFamily] = &[
     rename_and_const::duplicate_function::FAMILY,
     rename_and_const::const_receiver::FAMILY,
     removed_api::FAMILY,
+    with_run_context::FAMILY,
 ];
 
 /// The diagnostic-keyed registry, for findings the type checker does not
