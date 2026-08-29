@@ -3755,6 +3755,15 @@ fn check_command_issue_repro_b044_anon_enum_value_names_all_error() {
 /// B044: the probe fixture is generated, and it is only ground truth if it
 /// still matches the type DB it was generated from. Regenerate with
 /// `scripts/gen_b044_probe.py` after a `typedb refresh`.
+///
+/// This guards the whole file — header counts and comments included. The
+/// load-bearing half, that the fixture lists exactly the set the checker
+/// narrows, is asserted in Rust by
+/// `global_scope::tests::the_narrowing_touches_only_anonymous_only_value_names`.
+///
+/// A missing `python3` FAILS rather than skips: a guard that quietly
+/// disappears on some machines is worse than no guard, and every runner this
+/// project builds on has it (`scripts/` is Python throughout).
 #[test]
 fn b044_probe_fixture_matches_the_shipped_type_db() {
     let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -3762,11 +3771,8 @@ fn b044_probe_fixture_matches_the_shipped_type_db() {
         .arg(repo.join("scripts/gen_b044_probe.py"))
         .arg("--check")
         .current_dir(&repo)
-        .output();
-    let Ok(output) = output else {
-        eprintln!("python3 unavailable — skipping the generated-fixture check");
-        return;
-    };
+        .output()
+        .expect("python3 must be available to check the generated B044 fixture");
     assert!(
         output.status.success(),
         "tests/fixtures/issue-repros/b044-anon-enum-value-names/Main.as is stale; \

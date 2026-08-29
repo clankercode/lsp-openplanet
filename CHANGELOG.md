@@ -86,20 +86,25 @@ GitHub Release body to match this section (gh release edit).
 ### Fixed
 - **A bare value name of an unnamed engine enum is now an error (B044)** — the
   engine dump declares 132 enums inline on a member and gives them no name, so
-  nothing in source can spell them and nothing can reach their values by a bare
-  name. The game says `No matching symbol`; the LSP used to say nothing. It now
-  agrees, on all 261 such names (every value of those 132 enums except the 126
-  that also belong to a NAMED enum, where a bare reference is legitimate —
-  `VCenter2` keeps resolving). Reaching the same values through the declaring
-  member's type is untouched, and a name with a real declaration of its own — a
-  type, function, virtual property or anything you declare — still resolves
-  through it. Verified against the live game (RemoteBuild probe, Openplanet
-  1.29.5): 258 of the 261 rejected, and byte-identical output across a 150-plugin
-  dogfood sweep. The remaining 3 (`DoubleJump`, `Jump`, `TechJump`) are a known
-  false positive with its own cause: they belong to `Scene::ESceneCharVisNotice`,
-  one of 47 MODULE-LEVEL engine enums the Nadeo dump cannot represent at all, and
-  52 further value names of those enums already did not resolve. They were
-  resolving only by accident, through the scan this change narrows.
+  nothing in source can spell such an enum and nothing can reach its values by a
+  bare name. The game answers `No matching symbol`; the LSP used to say nothing.
+  It now rejects all 261 of those names — every value of those 132 enums except
+  the 126 that also belong to a NAMED enum, where a bare reference is legitimate
+  and still resolves (`VCenter2`). Reaching the same values through the
+  declaring member's type is untouched, and a name with a real declaration of
+  its own — a type, function, virtual property, or anything you declare — still
+  resolves through that.
+
+  Checked against the live game (RemoteBuild probe, Openplanet 1.29.5): it
+  rejects 258 of the 261. Dogfood: byte-identical `check` output across a
+  150-plugin sweep, so no real plugin was using one of these names.
+
+  The 3-name difference is a known false positive with a separate cause.
+  `DoubleJump`, `Jump` and `TechJump` belong to `Scene::ESceneCharVisNotice`,
+  one of 47 MODULE-LEVEL engine enums the Nadeo dump cannot represent at all —
+  52 further value names of those enums already failed to resolve, and these 3
+  were resolving only by accident, through the scan this change narrows. See
+  `todo-false-positives.txt`.
 - **TUI diagnostic messages are readable at narrow widths (B029)** — the detail
   box used to hard-clip long messages at the pane edge with no `…`, so you
   could not even tell text was missing, and a long `path:line:col` could squeeze

@@ -63,15 +63,19 @@ fn hover_does_not_describe_a_bare_anonymous_enum_value() {
     for name in NARROWED {
         let src = format!("void f() {{\n    print(\"\" + {name});\n}}\n");
         let snap = snapshot(&src);
+        let uri = snap.uri_map()[&0].0.clone();
         let scope = GlobalScope::new(snap.symbols(), Some(&index));
+        // The checked view the `Backend` hover handler always supplies — the
+        // fallback path alone would not exercise the recorded-type branch.
+        let checked = snap.checked_file(&uri, &scope);
+        assert!(checked.is_some(), "the snapshot must yield a checked view");
         let analysis = DocumentAnalysis::analyze_plain(&src);
-        let text = match hover(&analysis, None, pos_in(&src, name), &scope) {
-            None => continue,
-            Some(h) => match h.contents {
+        let text = hover(&analysis, checked.as_ref(), pos_in(&src, name), &scope)
+            .map(|h| match h.contents {
                 HoverContents::Markup(m) => m.value,
                 other => panic!("unexpected hover contents: {other:?}"),
-            },
-        };
+            })
+            .unwrap_or_default();
         assert!(
             !text.contains("enum"),
             "hover offered `{name}` as an enum: {text:?}"
@@ -79,6 +83,16 @@ fn hover_does_not_describe_a_bare_anonymous_enum_value() {
         assert!(
             !text.contains("UnnamedEnum"),
             "hover leaked a synthesized anonymous key for `{name}`: {text:?}"
+        );
+        // Whatever hover says, it must not claim the name is known: the
+        // checker flags it undefined on the very same bytes. Observed
+        // production text is "(local) <error:HyperTnL> HyperTnL" — the
+        // unresolved sentinel carries the name. (A name that DOES resolve
+        // but has no stored value type reads "(local) <error> VCenter2";
+        // improving that display is hover's own ticket, not this one.)
+        assert!(
+            text.is_empty() || text.contains("error"),
+            "hover described the undefined `{name}` as something real: {text:?}"
         );
     }
 }
