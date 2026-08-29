@@ -29,3 +29,4 @@ bugs:
     - file: B028-os-arch-build-defines-are-all.todo
     - file: B029-tui-diagnostic-messages-are-cu.todo
     - file: B030-unused-declaration-diagnostics.todo
+    - file: B031-grey-out-inactive-if-regions-l.todo

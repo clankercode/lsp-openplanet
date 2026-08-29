@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-29T09:47:38Z"
+depends_on: []
+estimate_hours: 4
+id: B031
+priority: medium
+status: pending
+tags: []
+title: 'Grey out inactive #if regions: LSP-only Unnecessary/Hint diagnostics for preprocessor-dead code'
+updated_at: "2026-08-29T09:47:38Z"
+---
+
+Grey out inactive #if regions: LSP-only Unnecessary/Hint diagnostics for preprocessor-dead code
