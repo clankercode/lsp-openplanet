@@ -1,17 +1,18 @@
 ---
+claimed_at: "2026-08-29T19:48:15Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T17:30:49Z"
 depends_on: []
 estimate_hours: 1
 id: B046
 priority: medium
-status: pending
-tags:
-    - typedb
-    - false-positive
-    - gh-59-followup
+started_at: "2026-08-29T19:48:15Z"
+status: in_progress
+tags: []
 title: Module-level engine enums are invisible to the LSP (47 enums, 52 unresolvable value names)
-updated_at: "2026-08-29T17:30:49Z"
+updated_at: "2026-08-29T19:48:15Z"
 ---
 Found by the B044 lane's game probe, 2026-08-30. Pre-existing; independent of
 B044, which merely stopped masking 3 of its symptoms.
