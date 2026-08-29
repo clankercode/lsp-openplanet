@@ -131,7 +131,11 @@ fn typedb_status_rejects_option_as_separated_from_value() {
         "the usage error must identify the missing --from value: {}",
         r.stderr
     );
-    assert!(r.stdout.is_empty(), "a malformed status command must not emit JSON: {}", r.stdout);
+    assert!(
+        r.stdout.is_empty(),
+        "a malformed status command must not emit JSON: {}",
+        r.stdout
+    );
 }
 
 /// No install anywhere: a warning, not a failure — `check` degrades the same

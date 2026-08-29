@@ -77,7 +77,7 @@ impl ConfigApp {
                 Some(v) => (v, true),
                 None => ("(unset)".into(), false),
             },
-            SettingKind::StringList => match self.file.get_string_list(spec.key) {
+            SettingKind::StringList { .. } => match self.file.get_string_list(spec.key) {
                 Some(v) if v.is_empty() => ("[]".into(), true),
                 Some(v) => (format_string_list(&v), true),
                 None => ("(unset)".into(), false),
@@ -95,18 +95,25 @@ impl ConfigApp {
     }
 
     pub fn draw(&mut self, f: &mut Frame<'_>) {
+        // Footer: help · value hint · keys. The hint line is always present
+        // (B024) and wraps when the accepted values are too wide to fit, so
+        // nothing about the value format is silently cut off.
+        let hint_lines = wrap_words(&self.value_hint(), footer_text_width(f.area().width));
+        // Safety valve for very narrow terminals: the footer must never grow
+        // until it crowds the settings list off the screen.
+        let hint_lines = &hint_lines[..hint_lines.len().min(MAX_HINT_LINES)];
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(6),
-                Constraint::Length(4),
+                Constraint::Length(4 + hint_lines.len() as u16),
             ])
             .split(f.area());
 
         self.draw_header(f, chunks[0]);
         self.draw_list(f, chunks[1]);
-        self.draw_footer(f, chunks[2]);
+        self.draw_footer(f, chunks[2], hint_lines);
     }
 
     fn draw_header(&self, f: &mut Frame<'_>, area: Rect) {
@@ -145,7 +152,31 @@ impl ConfigApp {
         f.render_stateful_widget(list, area, &mut self.list_state);
     }
 
-    fn draw_footer(&self, f: &mut Frame<'_>, area: Rect) {
+    /// How the selected setting's value is typed in. Rendered on its own
+    /// footer line for every row: the accepted values are otherwise
+    /// invisible — an enum never shows its other choices, and `defines`
+    /// gave no clue that the editor splits what you type on commas (B024).
+    pub fn value_hint(&self) -> String {
+        match self.selected_spec().kind {
+            SettingKind::Bool { default } => format!("true or false · default {default}"),
+            SettingKind::Enum { choices, default } => {
+                format!("one of: {} · default {default}", choices.join(", "))
+            }
+            SettingKind::String => "free text".to_string(),
+            SettingKind::Path => "filesystem path · e.g. ~/OpenplanetNext".to_string(),
+            SettingKind::StringList { example } => {
+                format!("comma-separated · e.g. {example}")
+            }
+            SettingKind::NestedStringList => {
+                "comma-separated groups · e.g. [A, B] | [C, D]".to_string()
+            }
+            SettingKind::Usize { default } => {
+                format!("whole number · default {default}")
+            }
+        }
+    }
+
+    fn draw_footer(&self, f: &mut Frame<'_>, area: Rect, hint_lines: &[String]) {
         let spec = self.selected_spec();
         let help = match &self.mode {
             Mode::Editing { buffer } => format!("edit {}: {buffer}_", spec.key),
@@ -160,7 +191,11 @@ impl ConfigApp {
         } else {
             format!(" · {}", self.status)
         };
-        let text = format!(" {help}\n {keys}{status} ");
+        let hint = hint_lines
+            .iter()
+            .map(|line| format!(" {line}\n"))
+            .collect::<String>();
+        let text = format!(" {help}\n{hint} {keys}{status} ");
         f.render_widget(
             Paragraph::new(text).block(Block::default().borders(Borders::ALL)),
             area,
@@ -249,7 +284,7 @@ impl ConfigApp {
                 let buffer = self.file.get_string(spec.key).unwrap_or_default();
                 self.mode = Mode::Editing { buffer };
             }
-            SettingKind::StringList => {
+            SettingKind::StringList { .. } => {
                 let buffer = self
                     .file
                     .get_string_list(spec.key)
@@ -289,7 +324,7 @@ impl ConfigApp {
                     return;
                 }
             },
-            SettingKind::StringList => {
+            SettingKind::StringList { .. } => {
                 let values = parse_string_list(&buffer);
                 if values.is_empty() && !persist_empty_array(spec.key) {
                     self.file.unset(spec.key);
@@ -313,6 +348,35 @@ impl ConfigApp {
         }
         self.mode = Mode::List;
     }
+}
+
+/// Most footer lines the value hint may occupy, however narrow the terminal.
+const MAX_HINT_LINES: usize = 3;
+
+/// Usable text width inside the footer block (two border columns plus the
+/// one-space left margin every footer line carries).
+fn footer_text_width(area_width: u16) -> usize {
+    (area_width as usize).saturating_sub(3).max(8)
+}
+
+/// Word-wrap `text` to `width`, never splitting a word that fits on a line of
+/// its own. Always returns at least one line.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    lines.push(current);
+    lines
 }
 
 fn header_title(path: &std::path::Path) -> &'static str {
@@ -830,6 +894,162 @@ mod tests {
         assert!(
             !written.contains("default_mode"),
             "unset left the key:\n{written}"
+        );
+    }
+
+    /// B024: the `defines` row must say how the editor parses what you type
+    /// (comma-separated) and show a concrete example — "DEV" alone gave no
+    /// clue whether the field wanted commas, spaces or TOML array syntax.
+    #[test]
+    fn string_list_row_shows_separator_hint_and_example() {
+        let mut app = temp_app("list-hint");
+        while app.selected_spec().key != "defines" {
+            handle_key(&mut app, press(KeyCode::Char('j')));
+        }
+        let out = frame_size(&mut app, 80, 30);
+        assert!(
+            out.contains("comma-separated"),
+            "no separator hint for defines:\n{out}"
+        );
+        assert!(out.contains("e.g. DEV"), "no example for defines:\n{out}");
+    }
+
+    /// The hint stays visible while the value is being typed.
+    #[test]
+    fn string_list_hint_visible_while_editing() {
+        let mut app = temp_app("list-hint-edit");
+        while app.selected_spec().key != "defines" {
+            handle_key(&mut app, press(KeyCode::Char('j')));
+        }
+        handle_key(&mut app, press(KeyCode::Enter));
+        for c in "DEV".chars() {
+            handle_key(&mut app, press(KeyCode::Char(c)));
+        }
+        let out = frame_size(&mut app, 80, 30);
+        assert!(
+            out.contains("comma-separated") && out.contains("e.g. DEV"),
+            "hint lost while editing:\n{out}"
+        );
+        assert!(out.contains("edit defines"), "edit prompt missing:\n{out}");
+    }
+
+    /// Nested lists get their own grouping hint (they are NOT plain commas).
+    #[test]
+    fn nested_list_row_shows_group_hint() {
+        let mut app = temp_app("nested-hint");
+        while app.selected_spec().key != "define_groups" {
+            handle_key(&mut app, press(KeyCode::Char('j')));
+        }
+        let out = frame_size(&mut app, 80, 30);
+        assert!(
+            out.contains("[A, B] | [C, D]"),
+            "no group-syntax hint:\n{out}"
+        );
+    }
+
+    /// Every row explains how its value is typed in — the choices for an
+    /// enum are otherwise invisible until you cycle through them.
+    #[test]
+    fn every_setting_row_shows_a_value_hint() {
+        let mut app = temp_app("hint-every-row");
+        for spec in SETTINGS {
+            while app.selected_spec().key != spec.key {
+                handle_key(&mut app, press(KeyCode::Char('j')));
+            }
+            let hint = app.value_hint();
+            assert!(!hint.trim().is_empty(), "{} has no value hint", spec.key);
+            let out = frame_size(&mut app, 80, 30);
+            // Long hints (the nine game targets) wrap onto a second line —
+            // every piece must still be on screen, none silently cut off.
+            for line in wrap_words(&hint, footer_text_width(80)) {
+                assert!(
+                    out.contains(&line),
+                    "hint line {line:?} not rendered for {}:\n{out}",
+                    spec.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enum_and_number_rows_name_their_accepted_values() {
+        let mut app = temp_app("hint-enum-number");
+        assert_eq!(app.selected_spec().key, "default_mode");
+        let out = frame_size(&mut app, 80, 30);
+        assert!(
+            out.contains("one of: tui, lsp"),
+            "enum choices missing:\n{out}"
+        );
+
+        while app.selected_spec().key != "define_matrix_max_combinations" {
+            handle_key(&mut app, press(KeyCode::Char('j')));
+        }
+        let out = frame_size(&mut app, 80, 30);
+        assert!(out.contains("whole number"), "number hint missing:\n{out}");
+
+        while app.selected_spec().key != "warnings_as_errors" {
+            handle_key(&mut app, press(KeyCode::Char('k')));
+        }
+        let out = frame_size(&mut app, 80, 30);
+        assert!(out.contains("true or false"), "bool hint missing:\n{out}");
+    }
+
+    /// Every list-valued setting carries an example, so no row can ship
+    /// without one.
+    #[test]
+    fn every_string_list_setting_has_an_example() {
+        for spec in SETTINGS {
+            if let SettingKind::StringList { example } = spec.kind {
+                assert!(
+                    !example.trim().is_empty(),
+                    "{} has no example value",
+                    spec.key
+                );
+            }
+        }
+    }
+
+    /// The `defines` help must describe the post-B024 additive semantics.
+    #[test]
+    fn defines_help_describes_additive_semantics() {
+        let spec = SETTINGS
+            .iter()
+            .find(|s| s.key == "defines")
+            .expect("defines setting");
+        assert!(
+            !spec.help.to_lowercase().contains("replaces"),
+            "stale replace-semantics help: {}",
+            spec.help
+        );
+        assert!(
+            spec.help.to_lowercase().contains("add"),
+            "help should say defines are added: {}",
+            spec.help
+        );
+    }
+
+    #[test]
+    fn wrap_words_splits_on_spaces_and_never_returns_nothing() {
+        assert_eq!(wrap_words("", 20), vec![String::new()]);
+        assert_eq!(wrap_words("one of: tui, lsp", 40), vec!["one of: tui, lsp"]);
+        assert_eq!(wrap_words("aaa bbb ccc ddd", 7), vec!["aaa bbb", "ccc ddd"]);
+        // A word wider than the line is kept whole rather than chopped.
+        assert_eq!(
+            wrap_words("NATIONS_FOREVER x", 4),
+            vec!["NATIONS_FOREVER", "x"]
+        );
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_the_settings_list_on_screen() {
+        let mut app = temp_app("narrow");
+        while app.selected_spec().key != "game_target" {
+            handle_key(&mut app, press(KeyCode::Char('j')));
+        }
+        let out = frame_size(&mut app, 28, 20);
+        assert!(
+            out.contains("game_target"),
+            "selected setting fell off a narrow screen:\n{out}"
         );
     }
 

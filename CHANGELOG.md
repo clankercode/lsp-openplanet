@@ -13,6 +13,32 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Fixed
+- **Custom `defines` no longer wipe the game-target defines (B024)** — a
+  `.openplanet-lsp.toml` (or `initializationOptions`) `defines = ["DEV"]` used
+  to REPLACE the whole set, so `TMNEXT`, `WINDOWS`, `MANIA64` and the `SIG_*`
+  flags vanished, every `#if TMNEXT` branch went dead and the masked-out code
+  flooded undefined-identifier errors. Custom defines are now ADDITIVE over the
+  target-derived set and over `info.toml` `[script].defines`, and they
+  accumulate across config layers instead of the last file discarding the rest.
+  To turn a define OFF, prefix it with `-` or `!` (`defines = ["-LOGS"]`);
+  removals apply after additions. Listing a platform selector for another game
+  (`MP4` under a TMNEXT target) still replaces the target's selectors — exactly
+  one `#if <platform>` family stays live (GH #36) — and now warns that
+  `game_target` is the intended way to pick a game.
+
+### Changed
+- **Config TUI names the accepted values for every setting** — a new footer
+  line under the help text says how the selected value is typed in:
+  `comma-separated · e.g. DEV, DEBUG_BROWSER, -LOGS` for `defines` (nothing
+  previously said the editor splits on commas, let alone showed an example),
+  `comma-separated groups · e.g. [A, B] | [C, D]` for the nested lists,
+  `one of: …` with every choice for enums (invisible until you cycled through
+  them), plus true/false, number and path hints with their defaults. The line
+  is shown while browsing and while editing, and wraps when the choices are
+  wider than the terminal. The `defines` help text describes the new additive
+  semantics.
+
 ## [0.6.0] - 2026-08-29
 
 ### Added
