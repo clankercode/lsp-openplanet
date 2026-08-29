@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-29T09:14:51Z"
+depends_on: []
+estimate_hours: 3
+id: B030
+priority: medium
+status: pending
+tags: []
+title: 'Unused-declaration diagnostics: add info/hint levels and the LSP Unnecessary tag (+ VS Code setting)'
+updated_at: "2026-08-29T09:14:51Z"
+---
+
+Unused-declaration diagnostics: add info/hint levels and the LSP Unnecessary tag (+ VS Code setting)

@@ -28,3 +28,4 @@ bugs:
     - file: B027-delegate-construction-ignores.todo
     - file: B028-os-arch-build-defines-are-all.todo
     - file: B029-tui-diagnostic-messages-are-cu.todo
+    - file: B030-unused-declaration-diagnostics.todo
