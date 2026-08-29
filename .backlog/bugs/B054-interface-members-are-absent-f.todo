@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T22:46:40Z"
 depends_on: []
 estimate_hours: 1
 id: B054
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Interface members are absent from the symbol table: no I::method symbols, dead methods field'
@@ -24,3 +26,73 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by the B049 lane, 2026-08-30, and verified in the code rather than
+inferred. Pre-existing; independent of B049, which only had to work around it.
+
+## Defect
+`symbols/table.rs:437` is the ONLY `Item::Interface` arm. It pushes a single
+symbol with `methods: Vec::new()` **hardcoded** and never descends into
+`iface.methods`. Compare the `Item::Class` arm immediately around it, which
+does descend and emits `C::member` symbols.
+
+Consequences:
+- No `I::method` symbol ever enters the pool.
+- The `methods` field on the interface symbol is **dead**: every consumer in
+  the codebase matches `Interface { .. }` and ignores it, and the only
+  construction with content is a test passing `vec![]`.
+
+## Evidence
+For:
+
+    interface I { void Go(); }
+    class C : I { void Go() {} }
+    void f(I@ i) { i.Go(); }
+
+the symbol pool contains `I`, `C`, `C::Go`, `f` — and **no `I::Go`**.
+`goto_definition` on `i.Go()` returns **None**.
+
+So Go to Definition is already broken on interface members today, with no
+connection to rename. Hover, completion and workspace-symbols read the same
+pool, so they are all affected to whatever degree they depend on it.
+
+## How B049 worked around it
+B049's rename guard reads `iface.methods` from the ASTs directly. That is
+appropriate for a rename guard — it must not rewrite an interface declaration
+when renaming a same-spelled free function — but it is the WRONG general fix:
+the symbols should exist in the table, and every other consumer still cannot
+see them. Do not copy the workaround; remove the need for it.
+
+## Work
+- Make the `Item::Interface` arm descend into `iface.methods` and emit
+  `I::method` symbols, mirroring the `Item::Class` arm.
+- Then either populate the `methods` field or delete it. A field that is
+  always empty and read by nobody is worse than no field — it reads as
+  supported.
+- Re-check B049's rename guard afterwards: once real `I::method` symbols
+  exist, the AST-reading workaround may be replaceable by the normal path.
+  Do not remove it without a red test proving the replacement holds.
+
+## Test plan (TDD, red first)
+Red: `goto_definition` on `i.Go()` in the snippet above returns None today
+and must resolve to the interface declaration after.
+
+Variants (per CLAUDE.md, generalize):
+- an interface method also implemented by a class -> both are findable and
+  distinguishable
+- multiple interfaces declaring the same method name
+- an interface method never implemented
+- interface inheritance, if the language allows it
+- hover and completion on an interface-typed receiver
+- workspace-symbols lists `I::method`
+- renaming a free function that shares a spelling with an interface method
+  still leaves the interface untouched (B049's guarantee must survive)
+
+## Gate
+FP fixture ERROR counts must not RISE — adding symbols can change resolution
+outcomes, so measure two binaries on the same machine at the same time
+(baselines 14/1485, 5/276, 2/35, 4/2, 4/4, showcase 9/7). A drop is plausible
+if any fixture calls an interface method; explain it rather than accepting it.
+
+## Related
+B049 (merged; found it, and works around it in the rename guard), B023, B007.
