@@ -21,6 +21,17 @@ version = "0.1.0"
     root
 }
 
+fn isolated_home(name: &str) -> std::path::PathBuf {
+    let home = std::env::temp_dir().join(format!(
+        "openplanet-lsp-home-{}-{}",
+        name,
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(home.join(".config/openplanet-lsp")).unwrap();
+    home
+}
+
 #[test]
 fn top_level_help_mentions_check_command() {
     let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
@@ -227,6 +238,157 @@ fn check_command_accepts_relative_plugin_path() {
     );
 
     let _ = fs::remove_dir_all(root);
+}
+
+/// B024: a workspace `defines` list ADDS to the game-target set. Before the
+/// fix, `defines = ["DEV"]` replaced everything, so `#if TMNEXT` (and every
+/// always-on flag) went dead and the masked-out code errored.
+#[test]
+fn check_command_adds_config_defines_without_dropping_target_defines() {
+    let root = make_temp_plugin("config-defines-additive");
+    let home = isolated_home("config-defines-additive");
+    fs::write(root.join(".openplanet-lsp.toml"), "defines = [\"DEV\"]\n").unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if !TMNEXT
+MissingType should_fail_without_platform_define;
+#endif
+
+#if !WINDOWS
+MissingType should_fail_without_always_on_define;
+#endif
+
+#if !DEV
+MissingType should_fail_without_custom_define;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "custom defines must not wipe the target set; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// B024: `-NAME` / `!NAME` still turns a define OFF — the one thing the old
+/// replace semantics were good for.
+#[test]
+fn check_command_honors_define_removal_prefixes() {
+    let root = make_temp_plugin("config-defines-removal");
+    let home = isolated_home("config-defines-removal");
+    fs::write(
+        root.join(".openplanet-lsp.toml"),
+        "defines = [\"DEV\", \"-LOGS\", \"!SIG_DEVELOPER\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if LOGS
+MissingType should_fail_when_dash_removal_ignored;
+#endif
+
+#if SIG_DEVELOPER
+MissingType should_fail_when_bang_removal_ignored;
+#endif
+
+#if !TMNEXT
+MissingType should_fail_without_platform_define;
+#endif
+
+#if !DEV
+MissingType should_fail_without_custom_define;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "removal prefixes not applied; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// B024 + GH #36: a hand-listed platform selector REPLACES the target's, so
+/// exactly one `#if <platform>` family stays live — and the run says so.
+#[test]
+fn check_command_swaps_platform_when_defines_list_another_selector() {
+    let root = make_temp_plugin("config-defines-platform");
+    let home = isolated_home("config-defines-platform");
+    fs::write(root.join(".openplanet-lsp.toml"), "defines = [\"MP4\"]\n").unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if TMNEXT
+MissingType should_fail_when_target_platform_still_live;
+#endif
+
+#if !MP4
+MissingType should_fail_without_listed_platform;
+#endif
+
+#if !WINDOWS
+MissingType should_fail_without_always_on_define;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "listed platform selector must replace the target's; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("game_target"),
+        "expected a warning pointing at game_target; stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
 }
 
 #[test]

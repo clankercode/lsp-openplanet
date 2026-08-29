@@ -49,6 +49,18 @@ default_mode = "tui"   # or "lsp"
 # support another game.
 # game_target = "TMNEXT"
 
+# Extra preprocessor defines. ADDED to what game_target derives (TMNEXT,
+# WINDOWS, MANIA64, SIG_*, ...) and to info.toml [script].defines — listing
+# DEV here no longer drops TMNEXT and does not blank out the always-on flags.
+# Prefix an entry with `-` or `!` to turn a define OFF (`-LOGS`); removals are
+# applied after additions, so a removal wins. Entries ACCUMULATE across layers
+# (parent config, per-root config, user global, initializationOptions), so a
+# plugin adds to a machine-wide list instead of replacing it. Listing a
+# platform selector of another game (`MP4` while game_target is TMNEXT)
+# replaces the target's selectors rather than stacking on them, so exactly one
+# `#if <platform>` family stays live — prefer game_target for picking a game.
+# defines = ["DEV", "DEBUG_BROWSER", "-LOGS"]
+
 # Which .as files to check, relative to the plugin root. Openplanet compiles a
 # specific set; repos often keep non-compiled scripts (asset packs, fixtures,
 # experiments) alongside src/. source_paths is an ALLOWLIST (wins if set);

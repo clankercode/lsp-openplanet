@@ -205,7 +205,11 @@ pub enum SettingKind {
     },
     String,
     Path,
-    StringList,
+    /// A comma-separated list in the TUI editor. `example` is a short,
+    /// real-looking value shown as a format hint next to the help text.
+    StringList {
+        example: &'static str,
+    },
     NestedStringList,
     Usize {
         default: usize,
@@ -280,23 +284,31 @@ pub const SETTINGS: &[SettingSpec] = &[
     },
     SettingSpec {
         key: "defines",
-        help: "Explicit preprocessor defines (replaces target-derived set)",
-        kind: SettingKind::StringList,
+        help: "Preprocessor defines added to the game-target set",
+        kind: SettingKind::StringList {
+            example: "DEV, DEBUG_BROWSER, -LOGS",
+        },
     },
     SettingSpec {
         key: "source_paths",
         help: "Allowlist of root-relative dirs to check",
-        kind: SettingKind::StringList,
+        kind: SettingKind::StringList {
+            example: "src, shared",
+        },
     },
     SettingSpec {
         key: "ignore_paths",
         help: "Blocklist of root-relative dirs to skip",
-        kind: SettingKind::StringList,
+        kind: SettingKind::StringList {
+            example: "vendor, OtherPacks",
+        },
     },
     SettingSpec {
         key: "shortcut_namespaces",
         help: "Custom completion-shortcut namespaces (replaces UX/MathX)",
-        kind: SettingKind::StringList,
+        kind: SettingKind::StringList {
+            example: "UX, MathX",
+        },
     },
     SettingSpec {
         key: "unused",
@@ -309,12 +321,16 @@ pub const SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         key: "unused_callbacks",
         help: "Extra names treated as runtime-invoked callbacks",
-        kind: SettingKind::StringList,
+        kind: SettingKind::StringList {
+            example: "OnCounterUpdate, OnBrick",
+        },
     },
     SettingSpec {
         key: "define_matrix",
         help: "CLI check matrix axes (toggled on/off on top of base defines)",
-        kind: SettingKind::StringList,
+        kind: SettingKind::StringList {
+            example: "DEV, DEPENDENCY_MLHOOK",
+        },
     },
     SettingSpec {
         key: "define_groups",

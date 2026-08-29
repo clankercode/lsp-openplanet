@@ -12,13 +12,14 @@ pub struct LspConfig {
     pub game_json: Option<PathBuf>,
     pub game_target: String,
     pub defines: HashSet<String>,
-    /// True when `defines` came from an explicit source (config file / init
-    /// options) rather than the target-derived default. When false, `load`
-    /// re-derives defines from the final `game_target` so a non-default target
-    /// (set via repo-local config or init options) gets matching platform
-    /// defines without the user also hand-listing them (GH #36).
+    /// Raw `defines` entries from every config layer (parent config, per-root
+    /// config, user global, init options), in the order they were read. They
+    /// are ADDITIVE over the target-derived set and are applied last — after
+    /// `defines_for_target` and the manifest — by
+    /// [`LspConfig::apply_define_overrides`] (B024). An entry prefixed `-` or
+    /// `!` removes that define instead of adding it.
     #[doc(hidden)]
-    pub defines_overridden: bool,
+    pub define_overrides: Vec<String>,
     /// Allowlist of root-relative dirs to check `.as` files in (from
     /// `.openplanet-lsp.toml` `source_paths`). `Some` → check only these.
     pub source_paths: Option<Vec<PathBuf>>,
@@ -101,7 +102,7 @@ impl Default for LspConfig {
             game_json: None,
             game_target: "TMNEXT".to_string(),
             defines: Self::default_defines(),
-            defines_overridden: false,
+            define_overrides: Vec::new(),
             source_paths: None,
             ignore_paths: None,
             honor_gitignore: None,
@@ -334,26 +335,44 @@ impl LspConfig {
         // their `#if` branches are dead (matching the game). Evidence (GH #36,
         // tm-skids-magician): TM2020 treats `#if MP4` and `#elif TURBO` as
         // DEAD — so TMNEXT does NOT imply MP4/TURBO.
-        let platform: &[&str] = match target {
-            "TMNEXT" => &["TMNEXT"],
-            "MP4" | "MP40" | "MP41" => &["MP4", "MP40", "MP41"],
-            "TURBO" => &["TURBO"],
-            "MP3" => &["MP3"],
-            "UNITED_FOREVER" | "UNITED" => &["UNITED_FOREVER", "UNITED"],
-            "NATIONS_FOREVER" => &["NATIONS_FOREVER"],
+        let Some(platform) = Self::platform_family_for_target(target) else {
             // Unknown target: define the target token itself so its `#if`
             // branch is live; everything else off (conservative).
-            other => {
-                let mut s: HashSet<String> = ALWAYS_ON.iter().map(|x| x.to_string()).collect();
-                s.insert(other.to_string());
-                return s;
-            }
+            let mut s: HashSet<String> = ALWAYS_ON.iter().map(|x| x.to_string()).collect();
+            s.insert(target.to_string());
+            return s;
         };
         ALWAYS_ON
             .iter()
             .chain(platform.iter())
             .map(|s| s.to_string())
             .collect()
+    }
+
+    /// The ManiaPlanet-generation families. Exactly one family may be live
+    /// at a time (GH #36) — the members of the others must stay undefined so
+    /// their `#if` branches are dead, matching the game.
+    const PLATFORM_FAMILIES: &'static [&'static [&'static str]] = &[
+        &["TMNEXT"],
+        &["MP4", "MP40", "MP41"],
+        &["TURBO"],
+        &["MP3"],
+        &["UNITED_FOREVER", "UNITED"],
+        &["NATIONS_FOREVER"],
+    ];
+
+    /// The platform selectors a game target implies, or `None` for a target
+    /// outside the known families.
+    fn platform_family_for_target(target: &str) -> Option<&'static [&'static str]> {
+        Self::PLATFORM_FAMILIES
+            .iter()
+            .copied()
+            .find(|family| family.contains(&target))
+    }
+
+    /// True for any known platform selector (`TMNEXT`, `MP41`, `TURBO`, …).
+    fn is_platform_selector(name: &str) -> bool {
+        Self::platform_family_for_target(name).is_some()
     }
 
     /// Standard defines for the default target (TMNEXT / TM2020).
@@ -427,7 +446,7 @@ impl LspConfig {
             game_json: None,
             game_target: "TMNEXT".to_string(),
             defines: Self::default_defines(),
-            defines_overridden: false,
+            define_overrides: Vec::new(),
             source_paths: None,
             ignore_paths: None,
             honor_gitignore: None,
@@ -489,13 +508,12 @@ impl LspConfig {
             config.apply_init_options(opts);
         }
 
-        // GH #36: `game_target` is now final. Unless defines were explicitly
-        // overridden, re-derive them from the target so a non-default target
-        // (repo-local config / init options) gets matching platform defines and
-        // dead `#if <other-platform>` branches stay dead.
-        if !config.defines_overridden {
-            config.defines = Self::defines_for_target(&config.game_target);
-        }
+        // GH #36: `game_target` is now final — re-derive the base define set
+        // from it so a non-default target (repo-local config / init options)
+        // gets matching platform defines and dead `#if <other-platform>`
+        // branches stay dead. B024: custom `defines` no longer suppress this
+        // step; they are layered on top further down, after the manifest.
+        config.defines = Self::defines_for_target(&config.game_target);
 
         // GH #45: the finalized target may expect a different install folder
         // than the Layer-1 TMNEXT default — re-probe before deriving paths.
@@ -520,6 +538,10 @@ impl LspConfig {
                 config.apply_manifest(&manifest);
             }
         }
+
+        // Layer 5: the user's own `defines` entries, applied LAST so an
+        // explicit `-NAME` can drop anything a lower layer turned on (B024).
+        config.apply_define_overrides();
 
         // Derive JSON paths from openplanet_dir if not set explicitly.
         // The game JSON follows the target's variant (GH #45).
@@ -546,6 +568,66 @@ impl LspConfig {
         }
 
         config
+    }
+
+    /// Apply the user's `defines` entries (B024) on top of the target-derived
+    /// and manifest defines.
+    ///
+    /// * Plain entries ADD — `defines = ["DEV"]` no longer wipes `TMNEXT` and
+    ///   the always-on flags, which killed every `#if TMNEXT` branch.
+    /// * `-NAME` / `!NAME` REMOVES, so an unwanted define can still be turned
+    ///   off (the only thing the old replace semantics were good for).
+    ///   Removals are applied after additions, so a removal wins.
+    /// * A hand-listed platform selector from another generation than
+    ///   `game_target` replaces the target's selectors instead of stacking on
+    ///   them: exactly one `#if <platform>` family stays live (GH #36).
+    fn apply_define_overrides(&mut self) {
+        if self.define_overrides.is_empty() {
+            return;
+        }
+        let mut adds: Vec<String> = Vec::new();
+        let mut removes: Vec<String> = Vec::new();
+        for entry in &self.define_overrides {
+            let entry = entry.trim();
+            let (bucket, name) = match entry.strip_prefix(['-', '!']) {
+                Some(rest) => (&mut removes, rest.trim()),
+                None => (&mut adds, entry),
+            };
+            if !name.is_empty() {
+                bucket.push(name.to_string());
+            }
+        }
+
+        // Foreign platform selector → the listed one(s) win outright.
+        let target_family = Self::platform_family_for_target(&self.game_target).unwrap_or(&[]);
+        let foreign: Vec<&String> = adds
+            .iter()
+            .filter(|d| Self::is_platform_selector(d) && !target_family.contains(&d.as_str()))
+            .collect();
+        if !foreign.is_empty() {
+            eprintln!(
+                "warning: `defines` lists platform selector(s) {}; they replace the \
+                 `game_target` ({}) selectors — set `game_target` instead to pick a game",
+                foreign
+                    .iter()
+                    .map(|d| d.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.game_target
+            );
+            for selector in Self::PLATFORM_FAMILIES.iter().flat_map(|f| f.iter()) {
+                if !adds.iter().any(|a| a == selector) {
+                    self.defines.remove(*selector);
+                }
+            }
+        }
+
+        for add in adds {
+            self.defines.insert(add);
+        }
+        for remove in removes {
+            self.defines.remove(&remove);
+        }
     }
 
     pub fn apply_manifest(&mut self, manifest: &Manifest) {
@@ -783,8 +865,7 @@ impl LspConfig {
             self.game_target = target;
         }
         if let Some(defines) = cfg.defines {
-            self.defines = defines.into_iter().collect();
-            self.defines_overridden = true;
+            self.define_overrides.extend(defines);
         }
         if let Some(source_paths) = cfg.source_paths {
             self.source_paths = Some(source_paths.into_iter().map(PathBuf::from).collect());
@@ -829,11 +910,8 @@ impl LspConfig {
             self.game_target = target.to_string();
         }
         if let Some(defines) = opts.get("defines").and_then(|v| v.as_array()) {
-            self.defines = defines
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-            self.defines_overridden = true;
+            self.define_overrides
+                .extend(defines.iter().filter_map(|v| v.as_str().map(String::from)));
         }
         // Plugin-root override (t2): non-empty string array replaces
         // server-side discovery. Empty / absent / non-string entries never
@@ -1199,24 +1277,20 @@ mod tests {
     }
 
     #[test]
-    fn test_explicit_defines_win_over_target_derivation() {
-        // Explicit defines override target derivation (init options).
-        let opts = serde_json::json!({ "game_target": "TURBO", "defines": ["CUSTOM"] });
-        let config = LspConfig::load(None, Some(&opts));
-        assert!(config.defines.contains("CUSTOM"));
-        assert!(!config.defines.contains("TURBO"));
-    }
-
-    #[test]
     fn test_init_options_override() {
+        // B024: explicit defines are additive, so the MP4 target keeps its
+        // whole platform family and the always-on flags; listing `MP4` and
+        // `WINDOWS` by hand is a no-op on top of that.
         let opts = serde_json::json!({
             "game_target": "MP4",
             "defines": ["MP4", "WINDOWS"]
         });
         let config = LspConfig::load(None, Some(&opts));
         assert_eq!(config.game_target, "MP4");
-        assert_eq!(config.defines.len(), 2);
         assert!(config.defines.contains("MP4"));
+        assert!(config.defines.contains("MP40"));
+        assert!(config.defines.contains("WINDOWS"));
+        assert!(!config.defines.contains("TMNEXT"));
     }
 
     #[test]
@@ -1649,6 +1723,172 @@ shortcut_match_enums = true
         cfg.load_config_file(&dir);
         assert_eq!(cfg.game_target, "MP4");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- B024: custom `defines` are ADDITIVE over the target-derived set ---
+
+    /// Workspace `.openplanet-lsp.toml` with `defines = ["DEV"]` must ADD DEV
+    /// to the target-derived set, not replace it (B024: replacing wiped
+    /// TMNEXT/WINDOWS and killed every `#if TMNEXT` branch).
+    #[test]
+    fn config_file_defines_add_to_target_defines() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-defines-add-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join(".openplanet-lsp.toml"), "defines = [\"DEV\"]\n").unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert!(cfg.defines.contains("DEV"), "custom define missing");
+        assert!(
+            cfg.defines.contains("TMNEXT"),
+            "target platform define wiped by custom defines: {:?}",
+            cfg.defines
+        );
+        assert!(cfg.defines.contains("WINDOWS"), "always-on define wiped");
+        assert!(
+            cfg.defines.contains("SIG_DEVELOPER"),
+            "always-on define wiped"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Same rule for `initializationOptions` (the editor-side layer).
+    #[test]
+    fn init_option_defines_add_to_target_defines() {
+        let opts = serde_json::json!({ "defines": ["DEV", "DEBUG_BROWSER"] });
+        let cfg = LspConfig::load(None, Some(&opts));
+        assert!(cfg.defines.contains("DEV"));
+        assert!(cfg.defines.contains("DEBUG_BROWSER"));
+        assert!(cfg.defines.contains("TMNEXT"), "{:?}", cfg.defines);
+        assert!(cfg.defines.contains("MANIA64"));
+    }
+
+    /// A non-default `game_target` keeps deriving its own platform defines
+    /// even when custom defines are listed (GH #36 stays satisfied).
+    #[test]
+    fn custom_defines_keep_the_selected_game_target_platform() {
+        let opts = serde_json::json!({ "game_target": "TURBO", "defines": ["CUSTOM"] });
+        let cfg = LspConfig::load(None, Some(&opts));
+        assert!(cfg.defines.contains("CUSTOM"));
+        assert!(cfg.defines.contains("TURBO"), "{:?}", cfg.defines);
+        assert!(
+            !cfg.defines.contains("TMNEXT"),
+            "other platform must stay dead"
+        );
+        assert!(!cfg.defines.contains("MP4"));
+    }
+
+    /// Opt-out syntax: `-NAME` / `!NAME` removes a define the target (or a
+    /// lower layer) turned on. Removals win over additions in the same list.
+    #[test]
+    fn define_overrides_can_remove_with_dash_or_bang() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-defines-rm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "defines = [\"DEV\", \"-SIG_DEVELOPER\", \"!LOGS\", \"DEAD\", \"-DEAD\"]\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert!(cfg.defines.contains("DEV"));
+        assert!(cfg.defines.contains("TMNEXT"));
+        assert!(!cfg.defines.contains("SIG_DEVELOPER"), "-NAME must remove");
+        assert!(!cfg.defines.contains("LOGS"), "!NAME must remove");
+        assert!(
+            !cfg.defines.contains("DEAD"),
+            "a removal must beat an addition of the same name"
+        );
+        assert!(cfg.defines.contains("SIG_REGULAR"), "siblings untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A hand-listed platform selector still leaves exactly ONE platform
+    /// family live: it replaces the target's selectors rather than stacking
+    /// on top of them (GH #36 invariant, preserved from the old replace
+    /// semantics).
+    #[test]
+    fn explicit_platform_selector_replaces_target_platform() {
+        for (listed, dead) in [("MP4", "TMNEXT"), ("TURBO", "TMNEXT"), ("UNITED", "TMNEXT")] {
+            let opts = serde_json::json!({ "defines": [listed, "DEV"] });
+            let cfg = LspConfig::load(None, Some(&opts));
+            assert!(cfg.defines.contains(listed), "listed selector missing");
+            assert!(
+                !cfg.defines.contains(dead),
+                "target selector {dead} must go dead when {listed} is listed: {:?}",
+                cfg.defines
+            );
+            assert!(cfg.defines.contains("DEV"));
+            assert!(cfg.defines.contains("WINDOWS"), "always-on flags survive");
+        }
+    }
+
+    /// Listing a selector the target already implies is a plain no-op: the
+    /// rest of that family stays defined.
+    #[test]
+    fn same_family_platform_selector_keeps_the_family() {
+        let opts = serde_json::json!({ "game_target": "MP4", "defines": ["MP4", "DEV"] });
+        let cfg = LspConfig::load(None, Some(&opts));
+        assert!(cfg.defines.contains("MP4"));
+        assert!(cfg.defines.contains("MP40"), "{:?}", cfg.defines);
+        assert!(cfg.defines.contains("MP41"));
+        assert!(cfg.defines.contains("DEV"));
+        assert!(!cfg.defines.contains("TMNEXT"));
+    }
+
+    /// Multi-root: parent and per-root `defines` accumulate instead of the
+    /// per-root file discarding the parent's list, and a per-root removal
+    /// can still drop a parent-added define.
+    #[test]
+    fn parent_and_root_defines_accumulate() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-defines-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("PluginA");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "defines = [\"PARENT_X\", \"PARENT_DROPPED\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".openplanet-lsp.toml"),
+            "defines = [\"ROOT_Y\", \"-PARENT_DROPPED\"]\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load_with_parent(Some(&root), Some(&tmp), None);
+        assert!(cfg.defines.contains("PARENT_X"), "{:?}", cfg.defines);
+        assert!(cfg.defines.contains("ROOT_Y"));
+        assert!(!cfg.defines.contains("PARENT_DROPPED"));
+        assert!(cfg.defines.contains("TMNEXT"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Manifest `[script].defines` stay additive, and a config-file removal
+    /// gets the last word over them (user overrides apply after the manifest).
+    #[test]
+    fn config_defines_apply_after_manifest_defines() {
+        let tmp =
+            std::env::temp_dir().join(format!("oplsp-defines-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("info.toml"),
+            "[meta]\nname = \"T\"\nauthor = \"A\"\n\n[script]\ndefines = [\"MANIFEST_ON\", \"MANIFEST_OFF\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "defines = [\"DEV\", \"-MANIFEST_OFF\"]\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        assert!(cfg.defines.contains("MANIFEST_ON"), "{:?}", cfg.defines);
+        assert!(
+            !cfg.defines.contains("MANIFEST_OFF"),
+            "removal must beat manifest"
+        );
+        assert!(cfg.defines.contains("DEV"));
+        assert!(cfg.defines.contains("TMNEXT"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
