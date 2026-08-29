@@ -250,13 +250,14 @@ impl<'a> GlobalScope<'a> {
             if let SymbolKind::Funcdef {
                 return_type,
                 params,
+                is_typedef,
             } = &s.kind
             {
-                // Typedefs reuse `SymbolKind::Funcdef` with the alias
-                // target in `return_type` and no params. Real extracted
-                // funcdefs either carry a parameter list or (today) have
-                // both fields empty.
-                if !return_type.is_empty() && params.is_empty() {
+                // Typedefs reuse `SymbolKind::Funcdef` (tagged at
+                // extraction): they are type aliases, not callable
+                // signatures. Real funcdefs — including parameterless
+                // ones — must resolve here.
+                if *is_typedef {
                     continue;
                 }
                 return Some(FuncdefSig {
@@ -1753,6 +1754,7 @@ mod tests {
                 SymbolKind::Funcdef {
                     return_type: String::new(),
                     params: vec![],
+                    is_typedef: false,
                 },
             )],
         );
@@ -1786,6 +1788,7 @@ mod tests {
                     SymbolKind::Funcdef {
                         return_type: "void".into(),
                         params: vec![("".into(), "int &out".into())],
+                        is_typedef: false,
                     },
                 ),
             ],
@@ -1816,6 +1819,7 @@ mod tests {
                 SymbolKind::Funcdef {
                     return_type: "int".into(),
                     params: vec![],
+                    is_typedef: true,
                 },
             )],
         );

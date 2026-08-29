@@ -463,6 +463,7 @@ impl SymbolTable {
                     kind: SymbolKind::Funcdef {
                         return_type: fd.return_type.span.text(source).to_string(),
                         params,
+                        is_typedef: false,
                     },
                     span: fd.span,
                     file_id,
@@ -477,9 +478,13 @@ impl SymbolTable {
                     // symbol surface already represents user-defined
                     // type-only aliases with `Funcdef`, so use that category
                     // rather than widening it for one declaration form.
+                    // `is_typedef` keeps it out of callable-signature
+                    // lookups (shape alone can't discriminate now that
+                    // parameterless funcdefs carry signatures).
                     kind: SymbolKind::Funcdef {
                         return_type: td.target_type.span.text(source).to_string(),
                         params: Vec::new(),
+                        is_typedef: true,
                     },
                     span: td.span,
                     file_id,
@@ -683,6 +688,7 @@ mod tests {
             SymbolKind::Funcdef {
                 return_type,
                 params,
+                is_typedef: _,
             } => {
                 assert_eq!(return_type, "void");
                 assert_eq!(params, &[("".to_string(), "int &out".to_string())]);

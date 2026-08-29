@@ -40,6 +40,11 @@ pub enum SymbolKind {
     Funcdef {
         return_type: String,
         params: Vec<(String, String)>,
+        /// True for `typedef` aliases (stored under the Funcdef kind for
+        /// the type surface). Tagged at extraction — shape is ambiguous
+        /// now that real funcdefs carry signatures, and a typedef must
+        /// never resolve as a callable signature (B027 review).
+        is_typedef: bool,
     },
     EnumValue {
         enum_name: String,

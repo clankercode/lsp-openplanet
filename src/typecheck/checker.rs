@@ -2494,23 +2494,27 @@ impl<'a> Checker<'a> {
         // overloads compares by its own funcdef signature.
         if let TypeRepr::Funcdef(n) = Self::peel_const_handle(arg_ty) {
             if let Some(arg_fd) = self.scope.lookup_funcdef(n) {
-                let arg_sig = OverloadSig {
-                    param_names: Vec::new(),
-                    param_types: arg_fd.param_types.clone(),
-                    param_out: arg_fd
-                        .param_modes
-                        .iter()
-                        .map(|m| *m == ParamMode::Out)
-                        .collect(),
-                    param_modes: arg_fd.param_modes.clone(),
-                    min_args: arg_fd.param_types.len(),
-                    return_type: arg_fd.return_type.clone(),
-                };
-                return !self.func_matches_funcdef(&arg_sig, fd);
+                return !self.func_matches_funcdef(&Self::funcdef_overload_sig(&arg_fd), fd);
             }
         }
         !matches!(Self::peel_const_handle(arg_ty), TypeRepr::Null)
             && self.is_clearly_not_a_function(arg_ty)
+    }
+
+    /// A funcdef signature as an `OverloadSig` for the shared bind test.
+    fn funcdef_overload_sig(fd: &FuncdefSig) -> OverloadSig {
+        OverloadSig {
+            param_names: Vec::new(),
+            param_types: fd.param_types.clone(),
+            param_out: fd
+                .param_modes
+                .iter()
+                .map(|m| *m == ParamMode::Out)
+                .collect(),
+            param_modes: fd.param_modes.clone(),
+            min_args: fd.param_types.len(),
+            return_type: fd.return_type.clone(),
+        }
     }
 
     /// B023: the arg is a resolvable function (free fn, method reference,
@@ -2640,6 +2644,21 @@ impl<'a> Checker<'a> {
         match &arg.kind {
             ExprKind::Ident(ident) => {
                 let name = ident.text(self.source);
+                // Locals shadow methods and global functions (expr_type's
+                // Ident precedence): a shadowing local must never resolve
+                // to the same-named function's signatures (B023 review —
+                // a local funcdef handle named like an incompatible
+                // global fn was mis-typed as the fn and falsely
+                // rejected). A local funcdef handle contributes its own
+                // signature; any other local contributes none.
+                if let Some(local) = self.lookup_local(name) {
+                    if let TypeRepr::Funcdef(n) = Self::peel_const_handle(&local.ty) {
+                        if let Some(fd) = self.scope.lookup_funcdef(n) {
+                            out.push(Self::funcdef_overload_sig(&fd));
+                        }
+                    }
+                    return out;
+                }
                 if let Some(cls) = self.current_class() {
                     out.extend(
                         self.scope
@@ -9391,6 +9410,43 @@ void Main() {
         );
     }
 
+    /// B027 review follow-up: a parameterless workspace funcdef must reach
+    /// the ctor arity check — it used to collide with the typedef shape at
+    /// `lookup_funcdef` (return_type set + params empty), which silently
+    /// dropped the diagnostic. Game: delegate construction requires the
+    /// exact signature (b025/b027 fixture ground truth), so wrong arity
+    /// rejects and exact arity binds.
+    #[test]
+    fn funcdef_ctor_parameterless_funcdef_rejects_wrong_arity() {
+        let diags = check_with_typedb(
+            r#"
+            funcdef void CB();
+            void Tick() {}
+            void Render() {
+                CB@ bad = CB(Tick, 42);
+                CB@ ok = CB(Tick);
+            }
+            "#,
+        );
+        let arity = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::ArgCountMismatch { .. }))
+            .count();
+        assert_eq!(
+            arity, 1,
+            "CB(Tick, 42) must reject on arity, CB(Tick) must bind, got {:?}",
+            diags
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error
+                    && !matches!(d.kind, TypeDiagnosticKind::ArgCountMismatch { .. })),
+            "the exact-arity ctor must stay silent, got {:?}",
+            diags
+        );
+    }
+
     /// Delegate construction requires exact parameter passing modes: a
     /// `void(int &out)` method does NOT convert to `funcdef void(int)` —
     /// game ground truth (RemoteBuild 2026-08-29, OP 1.29.5): ERR
@@ -9745,6 +9801,63 @@ void Main() {
         assert_eq!(
             rejections, 1,
             "startnew(WrongSig) must reject, startnew(Tick) must bind, got {:?}",
+            diags
+        );
+    }
+
+    /// B023 review follow-up: name resolution honors locals first
+    /// (expr_type's Ident precedence). A local funcdef handle named like an
+    /// incompatible global function binds by its own type — the shadowed
+    /// global's signature must never be consulted. (Game: a funcdef-typed
+    /// variable at a funcdef slot binds — b023 fixture legal lines.)
+    #[test]
+    fn function_arg_ident_respects_local_funcdef_shadowing() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            void Render() {
+                string s = "test";
+                UI::InputTextCallback@ WrongSig = Good;
+                UI::InputText("##1", s, UI::InputTextFlags::None, WrongSig);
+            }
+            "###
+        ));
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "local funcdef handle must shadow the same-named global fn and bind, got {:?}",
+            diags
+        );
+    }
+
+    /// B023 review follow-up (guard): a local of non-function type that
+    /// shadows a global function name stays neutral — the name resolves to
+    /// the local, and Named shapes never reject a candidate on their own
+    /// (B023's Not-clause guard). Probe note (RemoteBuild 2026-08-29): the
+    /// game REJECTS this exact shape (`No matching signatures to
+    /// 'UI::InputText(..., UI::InputTextCallbackData@&)'`); neutrality
+    /// trades that parity for FP safety across all Named shapes and is
+    /// recorded on the ticket as a known false-negative.
+    #[test]
+    fn function_arg_ident_local_class_handle_shadow_stays_neutral() {
+        let diags = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            void Render() {
+                string s = "test";
+                UI::InputTextCallbackData@ WrongSig = null;
+                UI::InputText("##1", s, UI::InputTextFlags::None, WrongSig);
+            }
+            "###
+        ));
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.severity() == TypeDiagnosticSeverity::Error),
+            "local class-handle shadow must stay neutral, got {:?}",
             diags
         );
     }
