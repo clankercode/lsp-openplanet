@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-29T08:10:20Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T09:47:39Z"
 complexity: medium
 created_at: "2026-08-29T04:33:46Z"
 depends_on: []
+duration_minutes: 97.31761898371667
 estimate_hours: 3
 id: B023
 priority: medium
 started_at: "2026-08-29T08:10:20Z"
-status: in_progress
+status: done
 tags: []
 title: Wrong-signature / non-function callback args silently accepted at typedb funcdef parameter slots
-updated_at: "2026-08-29T08:10:20Z"
+updated_at: "2026-08-29T09:47:39Z"
 ---
 ## Broken (game-verified 2026-08-29, OP 1.29.5 / OpenplanetNext, master @ 7204c86)
 
