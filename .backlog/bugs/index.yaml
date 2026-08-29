@@ -50,3 +50,4 @@ bugs:
     - file: B049-textdocument-rename-is-a-scope.todo
     - file: B050-server-exposes-no-config-intro.todo
     - file: B051-rescue-dropped-b012-test-harde.todo
+    - file: B052-has-enum-tail-fallback-resolve.todo
