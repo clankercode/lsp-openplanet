@@ -331,6 +331,23 @@ impl AnalysisSnapshot {
             .collect()
     }
 
+    /// Like [`Self::uri_map`], but only this plugin's OWN files.
+    ///
+    /// A snapshot also holds the dependency plugins' export files, so they
+    /// can resolve — `report_diagnostics` is false for those, which is the
+    /// same gate the unused-declaration analysis uses to avoid warning
+    /// about someone else's code. `textDocument/rename` needs it because a
+    /// `WorkspaceEdit` naming a dependency's file would have the editor
+    /// rewrite ANOTHER plugin's source on disk (B049).
+    pub fn own_uri_map(&self) -> HashMap<usize, (Url, &DocumentAnalysis)> {
+        self.files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.report_diagnostics)
+            .filter_map(|(fid, f)| f.uri.as_ref().map(|uri| (fid, (uri.clone(), &f.analysis))))
+            .collect()
+    }
+
     /// Analysis for one file, looked up by URI.
     pub fn analysis_of(&self, uri: &Url) -> Option<&DocumentAnalysis> {
         self.file_entry_of(uri).map(|f| &f.analysis)

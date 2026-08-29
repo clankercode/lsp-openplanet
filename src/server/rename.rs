@@ -1907,6 +1907,37 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_never_edits_a_dependency_plugins_file() {
+        // The snapshot holds dependency export files so they resolve. A
+        // WorkspaceEdit naming one would have the editor rewrite another
+        // plugin's source on disk, so the handlers hand rename only this
+        // plugin's own files -- and a symbol DECLARED in a dependency is
+        // then not ours to rename at all.
+        let tw = TestWorkspace::files_with_flags(&[
+            ("own", "void Main() { Helper(); }\n", true),
+            ("dep", "void Helper() {}\n", false),
+        ]);
+        let scope = tw.scope();
+        let map = tw.snapshot.own_uri_map();
+        assert!(
+            !map.values().any(|(uri, _)| uri == &tw.uri_of(1)),
+            "own_uri_map must not carry the dependency file"
+        );
+        let files = WorkspaceFiles { files: &map };
+        let own = "void Main() { Helper(); }\n";
+        let refusal = rename(
+            tw.analysis_of(0),
+            &tw.uri_of(0),
+            at(own, "Helper", 0),
+            "Assist",
+            &scope,
+            &files,
+        )
+        .expect_err("a dependency's symbol is not ours to rename");
+        assert!(!refusal.reason.is_empty());
+    }
+
+    #[test]
     fn references_can_exclude_a_workspace_symbols_declaration() {
         // A `Symbol`'s span covers the whole declaration, body included,
         // so the declaring identifier has to be found inside it — a
