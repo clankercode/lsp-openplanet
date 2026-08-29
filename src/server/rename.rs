@@ -42,6 +42,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::analysis::DocumentAnalysis;
 use crate::lexer::{Span, Token, TokenKind};
+use crate::parser::ast::Item;
 use crate::server::diagnostics::span_to_range;
 use crate::server::lexical_scope::{self as lexical, Binding};
 use crate::server::navigation::{ident_index_at, WorkspaceFiles};
@@ -179,7 +180,7 @@ pub fn rename(
         }
         Target::Workspace { name, shape } => {
             let found = workspace_occurrences(analysis, uri, name, *shape, files)?;
-            workspace_new_name_conflict(scope, &found, new_name)?;
+            workspace_new_name_conflict(scope, files, &found, new_name)?;
             for file in &found {
                 changes.insert(
                     file.uri.clone(),
@@ -319,7 +320,7 @@ fn classify(
     let candidates = scope.lookup_workspace(&name);
     if candidates.is_empty() {
         // Say *why* when the spelling is visibly owned by something.
-        if declares_class_member(scope, &name) {
+        if declares_class_member(scope, files, &name) {
             return approximate(
                 ApproxKind::Member,
                 "this is a class member; renaming one needs the type of every receiver, \
@@ -398,7 +399,7 @@ fn classify(
     // A bare use inside a class or namespace that owns this spelling
     // resolves *there*, not to the top-level symbol, and telling the two
     // apart needs the resolution we do not have.
-    if declares_class_member(scope, &name) {
+    if declares_class_member(scope, files, &name) {
         return approximate(
             ApproxKind::Member,
             "a class in this workspace declares a member with the same name, so a bare \
@@ -719,10 +720,11 @@ fn local_new_name_conflict(
 
 fn workspace_new_name_conflict(
     scope: &GlobalScope<'_>,
+    files: &WorkspaceFiles,
     found: &[FileOccurrences<'_>],
     new_name: &str,
 ) -> Result<(), Refusal> {
-    if scope.has_global_ident(new_name) || declares_class_member(scope, new_name) {
+    if scope.has_global_ident(new_name) || declares_class_member(scope, files, new_name) {
         return Err(Refusal::new(format!(
             "`{new_name}` is already declared in this workspace or by the engine API"
         )));
@@ -774,11 +776,39 @@ fn qualified_owners<'a>(scope: &'a GlobalScope<'_>, name: &str) -> Vec<(String, 
 /// it, and treating them as an unrelated member would make every class
 /// with a constructor unrenameable. So an owner spelled like the name
 /// itself does not count.
-fn declares_class_member(scope: &GlobalScope<'_>, name: &str) -> bool {
-    qualified_owners(scope, name).iter().any(|(owner, kind)| {
+fn declares_class_member(scope: &GlobalScope<'_>, files: &WorkspaceFiles, name: &str) -> bool {
+    let owned = qualified_owners(scope, name).iter().any(|(owner, kind)| {
         owner != name
             && !matches!(kind, SymbolKind::EnumValue { .. })
             && scope.is_workspace_class(owner)
+    });
+    owned || declares_interface_method(files, name)
+}
+
+/// True when any open file's interface declares a method spelled `name`.
+///
+/// Interface methods reach the symbol table as *nothing at all*: an
+/// interface is registered as `Interface { methods: [] }` and its methods
+/// get no `I::name` symbols of their own, so neither [`qualified_owners`]
+/// nor the symbol pool can see them. Without this, renaming a free
+/// function that shares a spelling with an interface method rewrote the
+/// interface's own declaration — a wrong rename. Read the ASTs instead.
+fn declares_interface_method(files: &WorkspaceFiles, name: &str) -> bool {
+    files.files.values().any(|(_, analysis)| {
+        interface_method_named(&analysis.file.items, analysis.masked_source(), name)
+    })
+}
+
+/// Recursive half of [`declares_interface_method`], carrying the source
+/// each `Ident` span indexes into.
+fn interface_method_named(items: &[Item], source: &str, name: &str) -> bool {
+    items.iter().any(|item| match item {
+        Item::Interface(iface) => iface
+            .methods
+            .iter()
+            .any(|method| method.name.text(source) == name),
+        Item::Namespace(ns) => interface_method_named(&ns.items, source, name),
+        _ => false,
     })
 }
 
@@ -1866,6 +1896,14 @@ mod tests {
             changes.contains_key(&tw.uri_of(0)),
             "the declaring file must be edited too"
         );
+    }
+
+    #[test]
+    fn a_free_function_rename_refuses_when_an_interface_declares_that_method() {
+        // Interfaces are a member surface too: a bare `Go()` inside an
+        // implementor is that method, not this function.
+        let src = "void Go() {}\ninterface I { void Go(); }\n";
+        assert!(!refused(src, "Go() {}", "Run").is_empty());
     }
 
     #[test]
