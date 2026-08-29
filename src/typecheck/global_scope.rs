@@ -462,9 +462,11 @@ impl<'a> GlobalScope<'a> {
         // engine dump leaves unnamed has no name in the game either, so no
         // source can reach its values except through the declaring member's
         // type; a bare value name of one is not a symbol. Game ground truth,
-        // RemoteBuild probe, OP 1.29.5, on
+        // RemoteBuild probe, OP 1.29.5, on the exhaustive fixture
         // `tests/fixtures/issue-repros/b044-anon-enum-value-names`:
-        // `No matching symbol 'HyperTnL'` and 260 siblings.
+        // `No matching symbol 'HyperTnL'` and 257 siblings, 258 of its 261
+        // names. The 3 the game accepts are a separate, documented gap —
+        // see the fixture header and `todo-false-positives.txt`.
         //
         // This is the whole seam. Two things keep it from over-rejecting:
         //   * a value name that ALSO appears in a named enum is still found
