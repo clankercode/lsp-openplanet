@@ -1,0 +1,97 @@
+---
+complexity: medium
+created_at: "2026-08-29T17:30:49Z"
+depends_on: []
+estimate_hours: 1
+id: B046
+priority: medium
+status: pending
+tags:
+    - typedb
+    - false-positive
+    - gh-59-followup
+title: Module-level engine enums are invisible to the LSP (47 enums, 52 unresolvable value names)
+updated_at: "2026-08-29T17:30:49Z"
+---
+Found by the B044 lane's game probe, 2026-08-30. Pre-existing; independent of
+B044, which merely stopped masking 3 of its symptoms.
+
+## Defect
+The Nadeo dump's `ns` map is `namespace -> type name -> type`, so it can only
+carry an enum nested inside a CLASS. Every enum declared at MODULE level is
+therefore never indexed.
+
+Counted against `~/OpenplanetNext/Openplanet.h`: **47 module-level enums**,
+carrying **306 distinct value names**. Of those:
+
+- **251** also appear in a class-nested or Core enum, so a bare reference
+  resolves anyway — invisible luck, not correctness.
+- **52** resolve NOWHERE. These are pre-existing false positives: a plugin
+  referencing one gets `No matching symbol` from the LSP while the game
+  compiles it fine. Never noticed because nothing exercised them.
+- **3** (`DoubleJump`, `Jump`, `TechJump`, all values of
+  `Scene::ESceneCharVisNotice`) were resolving only BY ACCIDENT, through the
+  permissive anonymous-enum scan that B044 narrowed. B044 turned these into
+  visible false positives; they are 3/55 of this defect, not a B044 regression.
+
+## Evidence
+Established two ways that agree exactly:
+1. A live RemoteBuild probe (Trackmania + Openplanet 1.29.5, 2026-08-30)
+   against 261 candidate names returned 258 `No matching symbol` errors — the
+   3 accepted are exactly the `ESceneCharVisNotice` values above.
+2. Static analysis of the dump's `ns` structure, independent of the probe,
+   predicted the same 3.
+
+Registered in `todo-false-positives.txt` by the B044 lane with a fix
+direction.
+
+## Why this is worth fixing
+It is the same class of defect as B016 (engine enums silently dropped from the
+index), one level up: B016 recovered enums the dump named ambiguously, this is
+enums the dump's SHAPE cannot express at all. The consequence is the more
+damaging direction — false POSITIVES, where the LSP rejects code the game
+accepts. 52 names is a small surface, but each one is a hard error on valid
+code, and the user has no way to tell it is the tool that is wrong.
+
+## Work
+- Teach the Nadeo loader to index module-level enums. The `ns` map cannot
+  carry them, so the source is elsewhere — determine where the dump exposes
+  module-level declarations (check whether `Openplanet.h` is itself parseable
+  as the authority, or whether another section of the JSON carries them)
+  before designing the key scheme.
+- Key them so they do not collide with class-nested enums of the same name.
+- Decide whether their values participate in the bare-name scan. They SHOULD:
+  unlike B044's anonymous enums, a module-level enum HAS a name the game
+  accepts, which is exactly why the game resolves `DoubleJump`.
+- Re-check the 3 known-FP names in
+  `tests/fixtures/issue-repros/b044-anon-enum-value-names/` — they are marked
+  `KNOWN FP` inline and must flip to resolving when this lands.
+
+## Test plan (TDD, red first)
+Red: a fixture referencing `DoubleJump` / `Jump` / `TechJump` reports
+`No matching symbol` today and is clean after. Same for a sample of the 52
+that resolve nowhere — pick at least 5 across different modules.
+
+Variants (per CLAUDE.md, generalize):
+- a module-level enum value that ALSO exists in a class-nested enum -> still
+  resolves, and to the right one (guard against the 251 masking a bad fix)
+- a module-level enum name used qualified (`Scene::ESceneCharVisNotice`) ->
+  resolves as a type
+- a value used qualified through its enum -> resolves
+- collision between a module-level enum name and a class-nested type name in
+  the same namespace -> deterministic, documented resolution
+- the B044 narrowing still holds: anonymous inline member enums stay
+  unspellable (this fix must not reopen the 258)
+- determinism: two loads of identical bytes yield identical indexes
+- `typedb diff` of the fixture against itself stays empty
+
+## Gate
+FP fixture ERROR counts must not RISE. A drop is the expected win if any
+fixture references one of the 52. Measure two binaries on the same machine at
+the same time against `tests/fixtures/` — B019 made output depend on the local
+plugin install, and the live plugin checkouts are NOT the repo fixtures
+(current repo baselines: 14/1485, 5/276, 2/35, 4/2, 4/4).
+
+## Related
+B044 (merged) — narrowed the scan that was accidentally masking 3 of these.
+B016 (merged) — the sibling defect for ambiguously-named engine enums.

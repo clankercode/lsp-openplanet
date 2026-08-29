@@ -44,3 +44,4 @@ bugs:
     - file: B043-vs-code-one-command-total-and.todo
     - file: B044-bare-unnamed-enum-value-names.todo
     - file: B045-no-gate-stops-a-test-depending.todo
+    - file: B046-module-level-engine-enums-are.todo
