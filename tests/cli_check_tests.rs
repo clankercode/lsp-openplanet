@@ -810,6 +810,21 @@ fn check_command_issue_repro_47_inputtext_overload_diagnoses() {
     );
 }
 
+/// GH #63 regression net: `UI::InputTextCallback` (namespaced Core funcdef)
+/// end-to-end usage must stay clean — free-function / method / funcdef-handle
+/// decay into `InputTextCallback@` parameters, the ctor form, bare-handle
+/// assignment, and calls through a funcdef handle. Game ground truth
+/// (RemoteBuild probe 2026-08-29, OP 1.29.5): the fixture compiles clean.
+/// Fixed in 8e49f81 — a checker regression here fails CI.
+#[test]
+fn check_command_issue_repro_63_inputtext_callback_funcdef_is_clean() {
+    let (ok, stdout, stderr) = run_issue_repro_typedb("63-inputtext-callback-funcdef");
+    assert!(
+        ok && stdout.contains("0 diagnostics"),
+        "expected 0 diagnostics on issue-repro 63-inputtext-callback-funcdef; stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
 /// GH #49: AngelScript has no implicit nat3 -> int3 conversion — the game
 /// rejects both the implicit init and the int3(nat3) constructor form.
 /// Ground truth quoted in the issue (tm-editor-plus-plus). Fixed — must flag.

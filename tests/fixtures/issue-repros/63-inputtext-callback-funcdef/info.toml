@@ -1,0 +1,7 @@
+[meta]
+name     = "Issue Repro 63 - UI InputTextCallback Funcdef"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]
