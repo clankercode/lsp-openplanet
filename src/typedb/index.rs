@@ -228,6 +228,16 @@ impl Default for TypeIndex {
     }
 }
 
+/// Put enum members in a stable order: by value, then by name.
+///
+/// The Core dump stores members in a `HashMap`, so sorting by value alone
+/// left aliases that share a value in whatever order the map yielded —
+/// `UI::Plot::Marker` declares both `Auto = -1` and `None = -1`, and hover
+/// could list them either way round between loads (B033).
+pub(crate) fn sort_enum_values(values: &mut [(String, i64)]) {
+    values.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+}
+
 impl TypeIndex {
     pub fn new() -> Self {
         Self::default()
@@ -409,11 +419,7 @@ impl TypeIndex {
         for en in &db.enums {
             let qname = Self::qualify(&en.ns, &en.name);
             let mut values: Vec<_> = en.values.iter().map(|(k, v)| (k.clone(), v.v)).collect();
-            // By value, then by name: the Core dump stores members in a
-            // HashMap, so aliases sharing a value (`UI::Plot::Marker` has
-            // both `Auto = -1` and `None = -1`) would otherwise come back in
-            // a different order on every load (B033).
-            values.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+            sort_enum_values(&mut values);
             self.enums.insert(
                 qname,
                 EnumInfo {
@@ -1288,6 +1294,27 @@ fn qualify_nadeo_member_type_name(
 
 #[cfg(test)]
 mod tests {
+    /// B033: aliases sharing a value must not depend on map order.
+    #[test]
+    fn sort_enum_values_breaks_value_ties_by_name() {
+        let mut values = vec![
+            ("None".to_string(), -1i64),
+            ("Circle".to_string(), 0),
+            ("Auto".to_string(), -1),
+            ("Square".to_string(), 0),
+        ];
+        super::sort_enum_values(&mut values);
+        assert_eq!(
+            values,
+            vec![
+                ("Auto".to_string(), -1),
+                ("None".to_string(), -1),
+                ("Circle".to_string(), 0),
+                ("Square".to_string(), 0),
+            ]
+        );
+    }
+
     use super::*;
     use std::path::PathBuf;
 

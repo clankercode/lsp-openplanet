@@ -88,9 +88,10 @@ GitHub Release body to match this section (gh release edit).
   function or method used to render `SomeType name()` with a hardcoded empty
   parameter list, or `(local) void name` with no signature at all, because the
   checked-view fast path returned before the formatter that builds a real
-  signature ever ran. Hover now renders `rt Name(const string &in a, int b = 3)`
+  signature ever ran. Hover now renders `rt Name(const string &in a, int b)`
   for workspace functions, methods (including ones inherited from a base class),
-  namespaced functions, funcdefs and `receiver.Method` member calls.
+  namespaced functions, funcdefs and `receiver.Method` member calls — including
+  receivers that are calls, indexing or parenthesised expressions.
 
   When a name has several overloads, **all** of them are listed — one signature
   per line under an `*N overloads*` header — for both workspace functions and
@@ -105,6 +106,12 @@ GitHub Release body to match this section (gh release edit).
   numeric values on both the workspace and the external path, and workspace
   parameter types now keep a leading `const` on a handle (`const Foo@`), which
   the parser's span dropped.
+
+  Two limits worth knowing: an optional parameter of a workspace function
+  renders as `int b = ...`, because the symbol table records *that* a
+  parameter is optional but not its default expression (type-database
+  signatures do show the real default); and workspace symbols still carry no
+  doc comment, because symbol extraction reads the comment-masked source.
 - **TUI diagnostic messages are readable at narrow widths (B029)** — the detail
   box used to hard-clip long messages at the pane edge with no `…`, so you
   could not even tell text was missing, and a long `path:line:col` could squeeze

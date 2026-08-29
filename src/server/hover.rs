@@ -429,57 +429,53 @@ fn receiver_type_name(
         let cls = class_name_at(analysis, offset);
         return (!cls.is_empty()).then_some(cls);
     }
-    let checked = checked?;
-    let (start, end) = receiver_span(tokens, last)?;
-    let ty = checked
-        .type_at_span_range(tokens[start].span.start, tokens[end].span.end)
-        .or_else(|| {
-            let one = &tokens[end];
-            checked.type_at_span_range(one.span.start, one.span.end)
-        })?;
-    base_type_name(ty)
+    base_type_name(receiver_type(tokens, checked?, last)?)
 }
 
-/// Token range of the receiver expression whose last token is `last`.
+/// Recorded type of the receiver expression whose last token is `last`.
 ///
-/// Walks left over `a.b.c` chains, `Ns::name` paths, call argument lists and
-/// index brackets, so `c.GetChild().Run`, `items[0].Run` and `(c).Run` all
-/// reach the span the checker recorded for the whole receiver instead of
-/// stopping at a closing bracket. A bare parenthesised receiver unwraps to
-/// its contents, because the parser gives such an expression the span of the
-/// expression INSIDE the parens.
-fn receiver_span(tokens: &[crate::lexer::Token], last: usize) -> Option<(usize, usize)> {
-    let mut end = last;
-    let mut i = last;
-    loop {
-        match tokens[i].kind {
-            TokenKind::RParen | TokenKind::RBracket => {
-                let open = matching_open(tokens, i)?;
-                match open.checked_sub(1).map(|p| tokens[p].kind) {
-                    // A call or index applies to the element on its left.
-                    Some(TokenKind::Ident | TokenKind::RParen | TokenKind::RBracket) => {
-                        i = open - 1;
-                    }
-                    // A bare parenthesised expression: step inside it.
-                    _ => {
-                        if tokens[i].kind != TokenKind::RParen || open + 1 >= i {
-                            return None;
-                        }
-                        end = i - 1;
-                        i = end;
-                    }
+/// Two shapes, because the parser spans them differently:
+///
+/// * A BARE parenthesised group — `(x)`, `(q ? a : b)` — is given the span of
+///   the expression INSIDE it, so no recorded span contains the closing
+///   paren. Query the inner token range directly.
+/// * Everything else — `a`, `a.b`, `Ns::a`, `f(x)`, `items[0]`,
+///   `cast<T>(x)` — is spanned through its last token, so the innermost
+///   recorded expression containing that token's final byte IS the receiver.
+///   Using containment rather than an exact range is what makes nested calls
+///   and postfix chains work without re-parsing them.
+///
+/// `None` when nothing is recorded there, and deliberately no fall-back
+/// between the two shapes: a miss on the group range would otherwise pick up
+/// the enclosing call and report the wrong type.
+fn receiver_type<'c>(
+    tokens: &[crate::lexer::Token],
+    checked: &'c CheckedFile<'_>,
+    last: usize,
+) -> Option<&'c TypeRepr> {
+    if tokens[last].kind == TokenKind::RParen {
+        if let Some(open) = matching_open(tokens, last) {
+            // `f(...)` and `cast<T>(...)` are postfix forms, not groups —
+            // their recorded span does cover the closing paren.
+            let postfix = open
+                .checked_sub(1)
+                .map(|p| tokens[p].kind)
+                .is_some_and(|k| {
+                    matches!(
+                        k,
+                        TokenKind::Ident | TokenKind::RParen | TokenKind::RBracket | TokenKind::Gt
+                    )
+                });
+            if !postfix {
+                if open + 1 >= last {
+                    return None;
                 }
+                return checked
+                    .type_at_span_range(tokens[open + 1].span.start, tokens[last - 1].span.end);
             }
-            TokenKind::Ident | TokenKind::KwThis => {
-                if i >= 2 && matches!(tokens[i - 1].kind, TokenKind::Dot | TokenKind::ColonColon) {
-                    i -= 2;
-                } else {
-                    return Some((i, end));
-                }
-            }
-            _ => return None,
         }
     }
+    checked.type_at_offset(tokens[last].span.end.checked_sub(1)?)
 }
 
 /// Index of the bracket opening the one that closes at `close`.
@@ -1651,18 +1647,87 @@ mod tests {
     #[test]
     fn hover_member_walk_does_not_panic_on_unbalanced_source() {
         // Truncated/garbage input must not index out of bounds or underflow.
+        // A checked view is required: the member branch returns at `checked?`
+        // before the bracket walk runs without one.
         for src in [
             ").Run(1);",
             "]  .Run(1);",
             "void f() { ).Run(1); }",
             "void f() { a[.Run(1); }",
             "void f() { (.Run(1); }",
+            "void f() { ().Run(1); }",
+            "void f() { (((.Run(1); }",
+            "void f() { )))).Run(1); }",
+            "void f() { a[[[.Run(1); }",
         ] {
             let tw = TestWorkspace::one_file("hover.as", src);
             let scope = tw.scope();
+            let checked = tw
+                .snapshot
+                .checked_file(&tw.uri(), &scope)
+                .expect("checked view");
             let pos = pos_of(src, "Run", 1);
-            let _ = hover(tw.analysis(), None, pos, &scope);
+            let _ = hover(tw.analysis(), Some(&checked), pos, &scope);
         }
+    }
+
+    #[test]
+    fn hover_member_method_through_a_compound_parenthesised_receiver() {
+        // A group holding a whole expression, not a single name: the parser
+        // gives such a group the span of its CONTENTS, so hover has to query
+        // the inner token range rather than the closing paren.
+        let src = concat!(
+            "class Inner {\n  void Run(int a) {}\n}\n",
+            "void main() { Inner@ x; Inner@ y; bool q; (q ? x : y).Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 2);
+        assert!(md.contains("Inner::Run(int a)"), "{:?}", md);
+    }
+
+    #[test]
+    fn hover_member_method_through_a_cast_receiver() {
+        // `cast<T>(x)` is a postfix form, NOT a group: unwrapping its parens
+        // would report the type of `x` (the base) instead of `T`.
+        let src = concat!(
+            "class Base {}\n",
+            "class Inner : Base {\n  void Run(int a) {}\n}\n",
+            "void main() { Base@ x; cast<Inner>(x).Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 2);
+        assert!(md.contains("Inner::Run(int a)"), "cast receiver: {:?}", md);
+    }
+
+    #[test]
+    fn hover_member_method_through_a_grouped_index_receiver() {
+        let src = concat!(
+            "class Inner {\n  void Run(int a) {}\n}\n",
+            "void main() { array<Inner@> items; (items)[0].Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 2);
+        assert!(md.contains("Inner::Run(int a)"), "{:?}", md);
+    }
+
+    #[test]
+    fn hover_member_method_through_a_nested_call_receiver() {
+        let src = concat!(
+            "class Inner {\n  void Run(int a) {}\n}\n",
+            "Inner@ g(int q) { return null; }\n",
+            "Inner@ f(Inner@ z) { return null; }\n",
+            "void main() { f(g(1)).Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 2);
+        assert!(md.contains("Inner::Run(int a)"), "{:?}", md);
+    }
+
+    #[test]
+    fn hover_member_method_through_a_field_chain_receiver() {
+        let src = concat!(
+            "class Inner {\n  void Run(int a) {}\n}\n",
+            "class C { Inner@ ch; }\n",
+            "void main() { C c; c.ch.Run(1); }"
+        );
+        let md = hover_checked(src, "Run", 2);
+        assert!(md.contains("Inner::Run(int a)"), "{:?}", md);
     }
 
     // --- external funcdefs ---
