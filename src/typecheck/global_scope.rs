@@ -1632,6 +1632,66 @@ mod tests {
         }
     }
 
+    /// B044: the change's effect set, pinned against the shipped type DB.
+    ///
+    /// The narrowing can only ever touch a value name that belongs to an
+    /// anonymous enum and to NO named one — every other name reaches
+    /// `has_global_ident` through a lookup that runs before the enum scan, or
+    /// through the scan's surviving named half. This asserts both halves over
+    /// the whole DB rather than over hand-picked names, so a regression
+    /// anywhere in the enum index shows up here.
+    ///
+    /// 261 is the exact size of that set, and it is the list
+    /// `scripts/gen_b044_probe.py` generates and the game was probed against.
+    /// Refreshing the type DB moves it: regenerate the fixture and re-probe.
+    #[test]
+    fn the_narrowing_touches_only_anonymous_only_value_names() {
+        use std::collections::HashSet;
+
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let mut named: HashSet<&str> = HashSet::new();
+        let mut anonymous: HashSet<&str> = HashSet::new();
+        for (_, info) in index.enums_iter() {
+            let bucket = if info.anonymous {
+                &mut anonymous
+            } else {
+                &mut named
+            };
+            for (value, _) in &info.values {
+                bucket.insert(value.as_str());
+            }
+        }
+        assert!(
+            !named.is_empty() && !anonymous.is_empty(),
+            "fixture guard: the DB must carry both kinds of enum"
+        );
+
+        for value in &named {
+            assert!(
+                scope.has_global_ident(value),
+                "`{value}` is a NAMED enum's value and must keep resolving"
+            );
+        }
+
+        let mut narrowed: Vec<&str> = anonymous.difference(&named).copied().collect();
+        narrowed.sort_unstable();
+        assert_eq!(
+            narrowed.len(),
+            261,
+            "the narrowed set changed size — regenerate the B044 probe fixture \
+             and re-probe the game"
+        );
+        for value in &narrowed {
+            assert!(
+                !scope.has_global_ident(value),
+                "`{value}` is reachable only through an anonymous enum"
+            );
+        }
+    }
+
     /// B044 fence: a value name that ALSO appears in a NAMED enum keeps
     /// resolving. `VCenter2` is a value of the anonymous
     /// `Control::CControlBase::AlignVertical` and of the named
