@@ -1644,7 +1644,7 @@ impl LanguageServer for Backend {
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
-        rename::prepare_rename(analysis, pos, &scope, &workspace_files)
+        rename::prepare_rename(analysis, uri, pos, &scope, &workspace_files)
             .map(|range| Some(PrepareRenameResponse::Range(range)))
             .map_err(refusal_error)
     }

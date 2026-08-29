@@ -121,6 +121,7 @@ impl Target {
 /// typing.
 pub fn prepare_rename(
     analysis: &DocumentAnalysis,
+    uri: &Url,
     position: Position,
     scope: &GlobalScope<'_>,
     files: &WorkspaceFiles,
@@ -136,7 +137,7 @@ pub fn prepare_rename(
             }
         }
         Target::Workspace { name, shape } => {
-            workspace_occurrences(analysis, name, *shape, files)?;
+            workspace_occurrences(analysis, uri, name, *shape, files)?;
         }
     }
     Ok(span_to_range(analysis.masked_source(), span))
@@ -175,7 +176,7 @@ pub fn rename(
             changes.insert(uri.clone(), edits_for(analysis, &spans, new_name));
         }
         Target::Workspace { name, shape } => {
-            let found = workspace_occurrences(analysis, name, *shape, files)?;
+            let found = workspace_occurrences(analysis, uri, name, *shape, files)?;
             workspace_new_name_conflict(scope, &found, new_name)?;
             for (file_uri, file_analysis, spans) in &found {
                 changes.insert(file_uri.clone(), edits_for(file_analysis, spans, new_name));
@@ -223,7 +224,7 @@ pub fn find_references(
             Err(_) => approximate_locations(name, ApproxKind::Qualified, files),
         },
         Target::Workspace { name, shape } => {
-            match workspace_occurrences(analysis, name, *shape, files) {
+            match workspace_occurrences(analysis, uri, name, *shape, files) {
                 Ok(found) => {
                     let declarations = declaration_starts(scope, name);
                     found
@@ -502,24 +503,38 @@ fn local_occurrences(
 }
 
 /// Per-file occurrence spans of a workspace symbol, over every open file.
+///
+/// The requesting document is covered even when the snapshot does not hold
+/// it — `Backend` falls back to an analysis built on the fly for a buffer
+/// the snapshot has not caught up with, and renaming every *other* file
+/// while silently skipping the one under the cursor would leave the edited
+/// buffer calling a name that no longer exists.
 #[allow(clippy::type_complexity)]
 fn workspace_occurrences<'a>(
     analysis: &'a DocumentAnalysis,
+    uri: &Url,
     name: &str,
     shape: Shape,
     files: &WorkspaceFiles<'a>,
 ) -> Result<Vec<(Url, &'a DocumentAnalysis, Vec<Span>)>, Refusal> {
     let mut out = Vec::new();
-    for (uri, file_analysis) in files.files.values() {
+    let mut saw_requesting_document = false;
+    for (file_uri, file_analysis) in files.files.values() {
+        if file_uri == uri {
+            saw_requesting_document = true;
+        }
         let spans = occurrences_in_file(file_analysis, name, shape)?;
         if !spans.is_empty() {
-            out.push((uri.clone(), *file_analysis, spans));
+            out.push((file_uri.clone(), *file_analysis, spans));
+        }
+    }
+    if !saw_requesting_document {
+        let spans = occurrences_in_file(analysis, name, shape)?;
+        if !spans.is_empty() {
+            out.push((uri.clone(), analysis, spans));
         }
     }
     if out.is_empty() {
-        // The snapshot did not include the requesting document (an
-        // unsaved buffer the analysis was built for on the fly).
-        let _ = analysis;
         return Err(Refusal::new("no references to this symbol were found"));
     }
     Ok(out)
@@ -726,9 +741,17 @@ fn qualified_owners<'a>(scope: &'a GlobalScope<'_>, name: &str) -> Vec<(String, 
 
 /// True when some workspace class or interface declares a member spelled
 /// `name` — then a bare use inside that class is the member, not a global.
+///
+/// A class's own constructor and destructor are registered as
+/// `Thing::Thing`, and those *are* the class: they have to be renamed with
+/// it, and treating them as an unrelated member would make every class
+/// with a constructor unrenameable. So an owner spelled like the name
+/// itself does not count.
 fn declares_class_member(scope: &GlobalScope<'_>, name: &str) -> bool {
     qualified_owners(scope, name).iter().any(|(owner, kind)| {
-        !matches!(kind, SymbolKind::EnumValue { .. }) && scope.is_workspace_class(owner)
+        owner != name
+            && !matches!(kind, SymbolKind::EnumValue { .. })
+            && scope.is_workspace_class(owner)
     })
 }
 
@@ -1408,7 +1431,13 @@ mod tests {
     fn prepare_rename_returns_the_identifier_range() {
         let src = "void f() { int x = 1; x++; }\n";
         let range = with(&[("a", src)], |tw, scope, files| {
-            prepare_rename(tw.analysis_of(0), at(src, "x = 1", 0), scope, files)
+            prepare_rename(
+                tw.analysis_of(0),
+                &tw.uri_of(0),
+                at(src, "x = 1", 0),
+                scope,
+                files,
+            )
         })
         .unwrap();
         let start = position_to_offset(src, range.start);
@@ -1431,7 +1460,13 @@ mod tests {
         ];
         for (src, needle) in cases {
             let prepared = with(&[("a", *src)], |tw, scope, files| {
-                prepare_rename(tw.analysis_of(0), at(src, needle, 0), scope, files)
+                prepare_rename(
+                    tw.analysis_of(0),
+                    &tw.uri_of(0),
+                    at(src, needle, 0),
+                    scope,
+                    files,
+                )
             });
             assert!(
                 prepared.is_err(),
@@ -1513,7 +1548,8 @@ mod tests {
             with(&[("a", src)], |tw, scope, files| {
                 for offset in 0..src.len() {
                     let position = offset_to_position(src, offset);
-                    let _ = prepare_rename(tw.analysis_of(0), position, scope, files);
+                    let _ =
+                        prepare_rename(tw.analysis_of(0), &tw.uri_of(0), position, scope, files);
                     let _ = rename(
                         tw.analysis_of(0),
                         &tw.uri_of(0),
@@ -1692,6 +1728,82 @@ mod tests {
         assert!(
             found.contains(&(0, src.find("c.w").unwrap() + 2)),
             "member access missing: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_class_rename_also_rewrites_its_constructor_and_destructor() {
+        // Both are spelled with the class name; missing either leaves the
+        // class uncompilable.
+        let src = "class Thing {\n    Thing() {}\n    ~Thing() {}\n}\nvoid f() { Thing t; }\n";
+        assert_eq!(
+            renamed(src, "Thing {", "Widget").unwrap(),
+            "class Widget {\n    Widget() {}\n    ~Widget() {}\n}\nvoid f() { Widget t; }\n"
+        );
+    }
+
+    #[test]
+    fn a_class_rename_rewrites_a_base_class_reference() {
+        let src = "class Base {}\nclass Derived : Base {}\nvoid f(Base@ b) {}\n";
+        assert_eq!(
+            renamed(src, "Base {}", "Root").unwrap(),
+            "class Root {}\nclass Derived : Root {}\nvoid f(Root@ b) {}\n"
+        );
+    }
+
+    #[test]
+    fn a_type_sharing_its_name_with_a_namespace_is_refused() {
+        // `Thing::F()` qualifies the NAMESPACE. A type rename rewrites a
+        // left-hand qualifier, so doing it here would repoint that call.
+        let src = "class Thing {}\nnamespace Thing { void F() {} }\nvoid g() { Thing::F(); }\n";
+        assert!(!refused(src, "Thing {}", "Widget").is_empty());
+    }
+
+    #[test]
+    fn a_namespace_itself_is_refused() {
+        let src = "namespace Ns { void F() {} }\nvoid g() { Ns::F(); }\n";
+        assert!(!refused(src, "Ns {", "Other").is_empty());
+    }
+
+    #[test]
+    fn an_overload_set_renames_together() {
+        let src = "void f(int a) {}\nvoid f(float a) {}\nvoid g() { f(1); f(2.0f); }\n";
+        assert_eq!(
+            renamed(src, "f(int", "h").unwrap(),
+            "void h(int a) {}\nvoid h(float a) {}\nvoid g() { h(1); h(2.0f); }\n"
+        );
+    }
+
+    #[test]
+    fn a_workspace_rename_covers_a_document_the_snapshot_does_not_hold() {
+        // `Backend` falls back to an on-the-fly analysis when the snapshot
+        // has not caught up with a buffer. Renaming every other file but
+        // not that one would leave it calling a name that is gone.
+        let tw = TestWorkspace::files(&[("a", "void Helper() {}\n")]);
+        let scope = tw.scope();
+        let map = tw.uri_map();
+        let files = WorkspaceFiles { files: &map };
+
+        let unsaved = "void Other() { Helper(); }\n";
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(unsaved);
+        let unsaved_uri = Url::parse("file:///test/unsaved.as").unwrap();
+        let edit = rename(
+            &analysis,
+            &unsaved_uri,
+            at(unsaved, "Helper", 0),
+            "Assist",
+            &scope,
+            &files,
+        )
+        .unwrap();
+        let changes = edit.changes.unwrap();
+        let edits = changes
+            .get(&unsaved_uri)
+            .expect("the requesting document must be edited");
+        assert_eq!(apply(unsaved, edits), "void Other() { Assist(); }\n");
+        assert!(
+            changes.contains_key(&tw.uri_of(0)),
+            "the declaring file must be edited too"
         );
     }
 
