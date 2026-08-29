@@ -1287,3 +1287,312 @@ async fn test_tower_lsp_smoke_call_hierarchy() {
     assert_eq!(incomings[0].from.name, "b");
     assert_eq!(incomings[0].from_ranges.len(), 1);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// B035: code-action capability, lazy resolve, and `source.fixAll.openplanet`
+// through the real `Backend` — the surface a VS Code client actually sees.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A client that can round-trip `CodeAction.data` and ask for a resolve.
+fn resolving_client_capabilities() -> tower_lsp::lsp_types::ClientCapabilities {
+    use tower_lsp::lsp_types::{
+        ClientCapabilities, CodeActionCapabilityResolveSupport, CodeActionClientCapabilities,
+        TextDocumentClientCapabilities,
+    };
+    ClientCapabilities {
+        text_document: Some(TextDocumentClientCapabilities {
+            code_action: Some(CodeActionClientCapabilities {
+                data_support: Some(true),
+                resolve_support: Some(CodeActionCapabilityResolveSupport {
+                    properties: vec!["edit".to_string()],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+async fn open_doc(backend: &Backend, uri: &Url, src: &str) {
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "angelscript".to_string(),
+                version: 1,
+                text: src.to_string(),
+            },
+        })
+        .await;
+}
+
+fn code_action_params(
+    uri: &Url,
+    range: Range,
+    only: Option<Vec<tower_lsp::lsp_types::CodeActionKind>>,
+) -> tower_lsp::lsp_types::CodeActionParams {
+    tower_lsp::lsp_types::CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range,
+        context: tower_lsp::lsp_types::CodeActionContext {
+            diagnostics: Vec::new(),
+            only,
+            ..Default::default()
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    }
+}
+
+fn only_code_actions(
+    response: Option<tower_lsp::lsp_types::CodeActionResponse>,
+) -> Vec<tower_lsp::lsp_types::CodeAction> {
+    use tower_lsp::lsp_types::CodeActionOrCommand;
+    response
+        .expect("code action response")
+        .into_iter()
+        .map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca,
+            CodeActionOrCommand::Command(c) => panic!("unexpected bare Command: {c:?}"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn code_action_capability_advertises_kinds_and_resolve() {
+    use tower_lsp::lsp_types::{CodeActionKind, CodeActionProviderCapability};
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+    #[allow(deprecated)]
+    let init_result = backend
+        .initialize(InitializeParams::default())
+        .await
+        .expect("initialize should succeed");
+
+    let provider = init_result
+        .capabilities
+        .code_action_provider
+        .expect("code action capability advertised");
+    let CodeActionProviderCapability::Options(opts) = provider else {
+        panic!("expected CodeActionOptions so kinds and resolve can be advertised");
+    };
+    let kinds = opts
+        .code_action_kinds
+        .expect("code_action_kinds advertised");
+    for want in [
+        CodeActionKind::QUICKFIX,
+        CodeActionKind::REFACTOR_REWRITE,
+        CodeActionKind::SOURCE_FIX_ALL,
+        CodeActionKind::new("source.fixAll.openplanet"),
+    ] {
+        assert!(kinds.contains(&want), "missing {want:?} in {kinds:?}");
+    }
+    assert_eq!(opts.resolve_provider, Some(true));
+}
+
+#[tokio::test]
+async fn code_action_is_offered_lazily_and_resolve_fills_in_the_edit() {
+    use tower_lsp::lsp_types::CodeActionKind;
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+    #[allow(deprecated)]
+    let init = InitializeParams {
+        capabilities: resolving_client_capabilities(),
+        ..Default::default()
+    };
+    backend.initialize(init).await.expect("initialize");
+
+    let uri = Url::parse("file:///smoke/actions.as").unwrap();
+    let src = "void f(string s) {}\n";
+    open_doc(backend, &uri, src).await;
+
+    let params = code_action_params(
+        &uri,
+        Range::new(Position::new(0, 0), Position::new(1, 0)),
+        None,
+    );
+    let actions = only_code_actions(backend.code_action(params).await.expect("code_action"));
+
+    let quickfix = actions
+        .iter()
+        .find(|a| a.kind == Some(CodeActionKind::QUICKFIX))
+        .unwrap_or_else(|| {
+            panic!(
+                "no quickfix in {:?}",
+                actions.iter().map(|a| &a.title).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        quickfix.edit.is_none(),
+        "resolving client must get no edit up front"
+    );
+    assert!(quickfix.data.is_some(), "action must carry resolve data");
+    assert_eq!(quickfix.is_preferred, Some(true));
+
+    let resolved = backend
+        .code_action_resolve(quickfix.clone())
+        .await
+        .expect("code_action_resolve");
+    let edits = resolved
+        .edit
+        .and_then(|e| e.changes)
+        .and_then(|mut c| c.remove(&uri))
+        .expect("resolved edit for the document");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].new_text, "const string &in");
+}
+
+#[tokio::test]
+async fn client_without_resolve_support_gets_the_edit_up_front() {
+    use tower_lsp::lsp_types::CodeActionKind;
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+    #[allow(deprecated)]
+    let init_params = InitializeParams::default();
+    backend.initialize(init_params).await.expect("initialize");
+
+    let uri = Url::parse("file:///smoke/eager.as").unwrap();
+    open_doc(backend, &uri, "void f(string s) {}\n").await;
+
+    let params = code_action_params(
+        &uri,
+        Range::new(Position::new(0, 0), Position::new(1, 0)),
+        None,
+    );
+    let actions = only_code_actions(backend.code_action(params).await.expect("code_action"));
+    let quickfix = actions
+        .iter()
+        .find(|a| a.kind == Some(CodeActionKind::QUICKFIX))
+        .expect("quickfix offered");
+    assert!(
+        quickfix.edit.is_some(),
+        "a client that cannot resolve must receive the edit immediately"
+    );
+}
+
+fn utf16_position_to_offset(source: &str, position: Position) -> usize {
+    let line_start = if position.line == 0 {
+        0
+    } else {
+        source
+            .match_indices('\n')
+            .nth(position.line as usize - 1)
+            .map_or(source.len(), |(offset, _)| offset + 1)
+    };
+    let line = &source[line_start..];
+    let mut utf16 = 0u32;
+    for (offset, ch) in line.char_indices() {
+        if utf16 >= position.character || ch == '\n' {
+            return line_start + offset;
+        }
+        utf16 += ch.len_utf16() as u32;
+    }
+    source.len()
+}
+
+fn apply_utf16_edits(source: &str, edits: &[tower_lsp::lsp_types::TextEdit]) -> String {
+    let mut result = source.to_string();
+    for edit in edits {
+        let start = utf16_position_to_offset(&result, edit.range.start);
+        let end = utf16_position_to_offset(&result, edit.range.end);
+        result.replace_range(start..end, &edit.new_text);
+    }
+    result
+}
+
+#[tokio::test]
+async fn code_action_edits_use_utf16_after_bmp_and_astral_text() {
+    use tower_lsp::lsp_types::CodeActionKind;
+
+    for (case, prefix) in [("bmp", "/* é */ "), ("astral", "/* 😀 */ ")] {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend: &Backend = service.inner();
+        #[allow(deprecated)]
+        let init = InitializeParams {
+            capabilities: resolving_client_capabilities(),
+            ..Default::default()
+        };
+        backend.initialize(init).await.expect("initialize");
+
+        let uri = Url::parse(&format!("file:///smoke/unicode-{case}.as")).unwrap();
+        let src = format!("{prefix}void f(string a, string b) {{}}\n");
+        open_doc(backend, &uri, &src).await;
+        let line_utf16 = src.trim_end_matches('\n').encode_utf16().count() as u32;
+        let params = code_action_params(
+            &uri,
+            Range::new(Position::new(0, 0), Position::new(0, line_utf16)),
+            Some(vec![CodeActionKind::QUICKFIX]),
+        );
+        let offered = only_code_actions(backend.code_action(params).await.expect("code_action"));
+        assert_eq!(offered.len(), 2, "{case}: expected both parameter fixes");
+
+        let mut edits = Vec::new();
+        for action in offered {
+            let resolved = backend
+                .code_action_resolve(action)
+                .await
+                .expect("code_action_resolve");
+            edits.extend(
+                resolved
+                    .edit
+                    .and_then(|edit| edit.changes)
+                    .and_then(|mut changes| changes.remove(&uri))
+                    .expect("resolved edits"),
+            );
+        }
+        edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start));
+        assert_eq!(
+            apply_utf16_edits(&src, &edits),
+            format!("{prefix}void f(const string &in a, const string &in b) {{}}\n"),
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn code_actions_on_save_kind_returns_one_batched_workspace_edit() {
+    use tower_lsp::lsp_types::CodeActionKind;
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+    #[allow(deprecated)]
+    let init = InitializeParams {
+        capabilities: resolving_client_capabilities(),
+        ..Default::default()
+    };
+    backend.initialize(init).await.expect("initialize");
+
+    let uri = Url::parse("file:///smoke/fixall.as").unwrap();
+    let src = "void f(string a) {}\nvoid g(string b) {}\nvoid h(string c) {}\n";
+    open_doc(backend, &uri, src).await;
+
+    // Exactly what `editor.codeActionsOnSave` sends.
+    let params = code_action_params(
+        &uri,
+        Range::new(Position::new(0, 0), Position::new(3, 0)),
+        Some(vec![CodeActionKind::new("source.fixAll.openplanet")]),
+    );
+    let actions = only_code_actions(backend.code_action(params).await.expect("code_action"));
+    assert_eq!(
+        actions.len(),
+        1,
+        "fixAll request must return only the source action, got {:?}",
+        actions.iter().map(|a| &a.title).collect::<Vec<_>>()
+    );
+    assert!(actions[0].edit.is_none(), "fixAll listing must be lazy");
+    let resolved = backend
+        .code_action_resolve(actions[0].clone())
+        .await
+        .expect("resolve fixAll");
+    let edits = resolved
+        .edit
+        .and_then(|e| e.changes)
+        .and_then(|mut c| c.remove(&uri))
+        .expect("batched workspace edit");
+    assert_eq!(edits.len(), 3);
+    assert!(edits.iter().all(|e| e.new_text == "const string &in"));
+}

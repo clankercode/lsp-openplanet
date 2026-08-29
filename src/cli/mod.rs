@@ -878,13 +878,15 @@ fn collect_pass_diagnostics(
                     &manifest_analysis.file,
                 );
                 manifest_symbols.set_file_symbols(mf_fid, mf_syms);
-                for diagnostic in diagnostics::compute_diagnostics_from_analysis(
+                for mut diagnostic in diagnostics::compute_diagnostics_from_analysis(
                     &uri,
                     &manifest_analysis,
                     config,
                     type_index,
                     &manifest_symbols,
                 ) {
+                    diagnostic.range =
+                        diagnostics::range_to_utf8_columns(&source, diagnostic.range);
                     cli_diagnostics.push(CliDiagnostic {
                         path: manifest_path.to_path_buf(),
                         combos: Vec::new(),
@@ -920,13 +922,15 @@ fn collect_pass_diagnostics(
         // own import decls must resolve within it).
         let table_for_check =
             snapshot.table_for_own_file(crate::analysis_snapshot::FileRef::Path(&item.path));
-        for diagnostic in diagnostics::compute_diagnostics_from_analysis(
+        for mut diagnostic in diagnostics::compute_diagnostics_from_analysis(
             &uri,
             analysis,
             config,
             type_index,
             &table_for_check,
         ) {
+            diagnostic.range =
+                diagnostics::range_to_utf8_columns(&analysis.source, diagnostic.range);
             cli_diagnostics.push(CliDiagnostic {
                 path: item.path.clone(),
                 combos: Vec::new(),
@@ -936,7 +940,7 @@ fn collect_pass_diagnostics(
         if let (Some(file_id), Some(usage)) =
             (snapshot.file_id_of_path(&item.path), unused_usage.as_ref())
         {
-            for diagnostic in diagnostics::unused_declaration_diagnostics(
+            for mut diagnostic in diagnostics::unused_declaration_diagnostics(
                 analysis.source.as_str(),
                 usage,
                 snapshot,
@@ -944,6 +948,8 @@ fn collect_pass_diagnostics(
                 snapshot.export_paths(),
                 config.unused,
             ) {
+                diagnostic.range =
+                    diagnostics::range_to_utf8_columns(&analysis.source, diagnostic.range);
                 cli_diagnostics.push(CliDiagnostic {
                     path: item.path.clone(),
                     combos: Vec::new(),

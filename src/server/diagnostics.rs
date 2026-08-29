@@ -7,6 +7,11 @@ use crate::symbols::SymbolTable;
 use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticSeverity};
 use crate::typedb::TypeIndex;
 
+/// The `source` field on every diagnostic this server publishes. Code
+/// actions key on it so another server's diagnostics can never drive our
+/// quick fixes.
+pub const DIAGNOSTIC_SOURCE: &str = "openplanet-lsp";
+
 /// Compute diagnostics for a single file.
 ///
 /// If `workspace_symbols` is `Some`, the supplied pooled [`SymbolTable`] is
@@ -266,7 +271,7 @@ fn line_range(source: &str, line: usize) -> Range {
     let line_text = source.lines().nth(line).unwrap_or("");
     Range::new(
         Position::new(line as u32, 0),
-        Position::new(line as u32, line_text.len() as u32),
+        Position::new(line as u32, line_text.encode_utf16().count() as u32),
     )
 }
 
@@ -277,29 +282,57 @@ pub fn span_to_range(source: &str, span: crate::lexer::Span) -> Range {
 }
 
 pub fn offset_to_position(source: &str, offset: usize) -> Position {
-    let offset = offset.min(source.len());
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
     let prefix = &source[..offset];
     let line = prefix.matches('\n').count();
-    let col = prefix.rfind('\n').map_or(offset, |nl| offset - nl - 1);
+    let line_start = prefix.rfind('\n').map_or(0, |nl| nl + 1);
+    let col = source[line_start..offset].encode_utf16().count();
     Position::new(line as u32, col as u32)
 }
 
 pub fn position_to_offset(source: &str, pos: Position) -> usize {
-    let mut line = 0u32;
-    let mut offset = 0;
-    for ch in source.chars() {
-        if line == pos.line {
-            if (offset - source[..offset].rfind('\n').map_or(0, |n| n + 1)) as u32 >= pos.character
-            {
-                return offset;
-            }
+    let line_start = if pos.line == 0 {
+        Some(0)
+    } else {
+        source
+            .match_indices('\n')
+            .nth(pos.line as usize - 1)
+            .map(|(offset, _)| offset + 1)
+    };
+    let Some(line_start) = line_start else {
+        return source.len();
+    };
+    let line_end = source[line_start..]
+        .find('\n')
+        .map_or(source.len(), |offset| line_start + offset);
+    let mut utf16 = 0u32;
+    for (relative, ch) in source[line_start..line_end].char_indices() {
+        let width = ch.len_utf16() as u32;
+        if pos.character < utf16 + width {
+            return line_start + relative;
         }
-        if ch == '\n' {
-            line += 1;
+        utf16 += width;
+        if pos.character == utf16 {
+            return line_start + relative + ch.len_utf8();
         }
-        offset += ch.len_utf8();
     }
-    offset
+    line_end
+}
+
+/// Adapt an LSP UTF-16 range to the CLI's historical UTF-8 byte columns.
+/// The checker output contract predates the LSP server and remains byte-based.
+pub fn range_to_utf8_columns(source: &str, range: Range) -> Range {
+    fn position(source: &str, lsp: Position) -> Position {
+        let offset = position_to_offset(source, lsp);
+        let prefix = &source[..offset];
+        let line_start = prefix.rfind('\n').map_or(0, |newline| newline + 1);
+        Position::new(lsp.line, (offset - line_start) as u32)
+    }
+
+    Range::new(position(source, range.start), position(source, range.end))
 }
 
 #[cfg(test)]

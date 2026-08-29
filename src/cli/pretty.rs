@@ -168,7 +168,7 @@ fn format_diagnostic_block(
 
             out.push_str(&format!("  {gutter} {pipe} {expanded}\n"));
 
-            let (start_col, end_col) = caret_cols(&expanded, range);
+            let (start_col, end_col) = caret_cols(raw_line, range);
             let pad = " ".repeat(start_col);
             let carets = if end_col > start_col {
                 "^".repeat(end_col - start_col)
@@ -214,13 +214,14 @@ fn expand_tabs(line: &str, tab_width: usize) -> String {
     out
 }
 
-/// Map LSP range onto expanded source-line columns (0-based, exclusive end).
-fn caret_cols(expanded_line: &str, range: Range) -> (usize, usize) {
+/// Map the CLI's UTF-8 byte-column range onto display columns.
+fn caret_cols(raw_line: &str, range: Range) -> (usize, usize) {
+    let expanded_line = expand_tabs(raw_line, TAB_WIDTH);
     let line_len = expanded_line.chars().count();
-    let start = (range.start.character as usize).min(line_len);
+    let start = byte_col_to_display(raw_line, range.start.character as usize).min(line_len);
     let end = if same_line(range) {
-        let e = range.end.character as usize;
-        if e <= range.start.character as usize {
+        let e = byte_col_to_display(raw_line, range.end.character as usize);
+        if e <= start {
             (start + 1).min(line_len.max(start + 1))
         } else {
             e.min(line_len.max(start + 1))
@@ -235,6 +236,24 @@ fn caret_cols(expanded_line: &str, range: Range) -> (usize, usize) {
     }
     let end = end.max(start + 1);
     (start, end)
+}
+
+fn byte_col_to_display(raw_line: &str, byte_col: usize) -> usize {
+    let mut display = 0usize;
+    for (byte_index, ch) in raw_line.char_indices() {
+        if byte_index >= byte_col {
+            break;
+        }
+        if ch == '\t' {
+            display += TAB_WIDTH - (display % TAB_WIDTH);
+        } else {
+            display += 1;
+        }
+    }
+    if byte_col > raw_line.len() {
+        display += byte_col - raw_line.len();
+    }
+    display
 }
 
 fn same_line(range: Range) -> bool {
@@ -318,6 +337,43 @@ mod tests {
             },
         };
         assert_eq!(caret_cols(expanded, range), (6, 7));
+    }
+
+    #[test]
+    fn pretty_carets_translate_utf8_byte_columns_without_changing_headers() {
+        for (name, line, start, end, header_col) in
+            [("bmp", "éfoo", 2, 5, 3), ("astral", "😀foo", 4, 7, 5)]
+        {
+            let root = temp_plugin(name);
+            let path = root.join("src/Main.as");
+            fs::write(&path, format!("{line}\n")).unwrap();
+            let report = CheckReport {
+                root: root.clone(),
+                diagnostics: vec![test_diag(
+                    &path,
+                    0,
+                    start,
+                    end,
+                    Some(DiagnosticSeverity::ERROR),
+                    "demo",
+                )],
+                type_database_loaded: false,
+                type_db: None,
+                errors: crate::config::ErrorGroup::Off,
+            };
+
+            let out = format_check_report_with(&report, false, CheckFormat::Pretty);
+            assert!(
+                out.contains(&format!("src/Main.as:1:{header_col}")),
+                "{name}: header must retain UTF-8 byte column: {out:?}"
+            );
+            let caret_line = out.lines().find(|line| line.contains('^')).unwrap();
+            assert!(
+                caret_line.contains("│  ^^^ demo"),
+                "{name}: caret must begin after one displayed Unicode character: {caret_line:?}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]

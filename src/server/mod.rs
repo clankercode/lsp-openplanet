@@ -71,6 +71,39 @@ pub struct Backend {
     /// (every watched-file event) does not repeat the same `showMessage`.
     /// Rendered issue text, not a struct — one line per distinct problem.
     reported_config_warnings: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    /// B035: the client advertised `codeAction.dataSupport` +
+    /// `resolveSupport`, so code actions may be offered without their edit
+    /// and materialised in `codeAction/resolve`. A client that did not must
+    /// receive edits up front or its actions would do nothing.
+    code_action_resolve_support: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// B035: may we hand back a code action with no `edit` and wait for
+/// `codeAction/resolve`? Both halves are required — `dataSupport` so our
+/// resolve token survives the round trip, and `resolveSupport` so the client
+/// asks at all. Without them an edit-less action is a dead menu entry.
+fn client_resolves_code_actions(caps: &ClientCapabilities) -> bool {
+    caps.text_document
+        .as_ref()
+        .and_then(|td| td.code_action.as_ref())
+        .is_some_and(|ca| {
+            ca.data_support == Some(true)
+                && ca.resolve_support.as_ref().is_some_and(|resolve| {
+                    resolve.properties.iter().any(|property| property == "edit")
+                })
+        })
+}
+
+/// A snapshot may be rebuilding while the open-document map already contains
+/// newer text. Code actions must bind their analysis and stale-action digest
+/// to that current text, not to the previous snapshot revision.
+fn analysis_for_current_source<'a>(
+    snapshot_analysis: Option<&'a crate::analysis::DocumentAnalysis>,
+    owned: &'a crate::analysis::DocumentAnalysis,
+) -> &'a crate::analysis::DocumentAnalysis {
+    snapshot_analysis
+        .filter(|analysis| analysis.source == owned.source)
+        .unwrap_or(owned)
 }
 
 /// One isolated plugin workspace (multi-root spec: "one server, N isolated
@@ -350,6 +383,7 @@ impl Backend {
             reported_config_warnings: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashSet::new(),
             )),
+            code_action_resolve_support: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -949,6 +983,13 @@ fn configs_equivalent(a: &LspConfig, b: &LspConfig) -> bool {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // B035: only defer code-action edits to `codeAction/resolve` when the
+        // client can actually round-trip `data` and ask for the resolve.
+        self.code_action_resolve_support.store(
+            client_resolves_code_actions(&params.capabilities),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         // Root intake (t2 hybrid mechanism). The opened folder (root_uri) is
         // the base; workspace folders are preferred as discovery input when
         // the client sent them.
@@ -1089,7 +1130,7 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 }),
                 rename_provider: Some(OneOf::Left(true)),
-                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                code_action_provider: Some(code_actions::code_action_provider()),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
@@ -1620,16 +1661,48 @@ impl LanguageServer for Backend {
         };
         let snapshot = self.snapshot_for(uri).await;
         let type_index_guard = self.type_index.read().await;
-        let type_index = type_index_guard.as_deref();
-        let actions = code_actions::code_actions(
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = analysis_for_current_source(snapshot.analysis_of(uri), &owned);
+        let uri_map = snapshot.uri_map();
+        let workspace_files: Vec<_> = uri_map.into_values().collect();
+        let actions = code_actions::code_actions(&code_actions::CodeActionRequest {
             uri,
-            &source,
-            params.range,
-            &params.context.diagnostics,
-            snapshot.symbols(),
-            type_index,
-        );
+            analysis,
+            range: params.range,
+            context: &params.context,
+            workspace: snapshot.symbols(),
+            type_index: type_index_guard.as_deref(),
+            files: code_actions::fix::WorkspaceFileResolver::new(&workspace_files),
+            lazy_edits: self
+                .code_action_resolve_support
+                .load(std::sync::atomic::Ordering::Relaxed),
+        });
         Ok(Some(actions))
+    }
+
+    /// `codeAction/resolve`: fill in the edit for the one action the user
+    /// picked. Unknown or already-resolved actions come back untouched — the
+    /// client may resolve anything it was handed.
+    async fn code_action_resolve(&self, params: CodeAction) -> Result<CodeAction> {
+        let Some(uri) = code_actions::resolve_target_uri(&params) else {
+            return Ok(params);
+        };
+        let Some(source) = self.documents.get(&uri).map(|d| d.value().clone()) else {
+            return Ok(params);
+        };
+        let snapshot = self.snapshot_for(&uri).await;
+        let type_index_guard = self.type_index.read().await;
+        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let analysis = analysis_for_current_source(snapshot.analysis_of(&uri), &owned);
+        let uri_map = snapshot.uri_map();
+        let workspace_files: Vec<_> = uri_map.into_values().collect();
+        Ok(code_actions::resolve_code_action(
+            params,
+            analysis,
+            snapshot.symbols(),
+            type_index_guard.as_deref(),
+            code_actions::fix::WorkspaceFileResolver::new(&workspace_files),
+        ))
     }
 
     async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
@@ -1748,6 +1821,73 @@ mod tests {
     use tower::{Service, ServiceExt};
     use tower_lsp::jsonrpc::Request;
     use tower_lsp::lsp_types::WorkspaceFolder;
+
+    fn code_action_caps(
+        data_support: Option<bool>,
+        resolve_properties: Option<Vec<&str>>,
+    ) -> ClientCapabilities {
+        ClientCapabilities {
+            text_document: Some(TextDocumentClientCapabilities {
+                code_action: Some(CodeActionClientCapabilities {
+                    data_support,
+                    resolve_support: resolve_properties.map(|properties| {
+                        CodeActionCapabilityResolveSupport {
+                            properties: properties.into_iter().map(str::to_string).collect(),
+                        }
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lazy_code_action_edits_require_data_and_explicit_edit_resolve_support() {
+        assert!(client_resolves_code_actions(&code_action_caps(
+            Some(true),
+            Some(vec!["edit"]),
+        )));
+        for (name, capabilities) in [
+            (
+                "no data support",
+                code_action_caps(None, Some(vec!["edit"])),
+            ),
+            (
+                "data explicitly false",
+                code_action_caps(Some(false), Some(vec!["edit"])),
+            ),
+            ("no resolve support", code_action_caps(Some(true), None)),
+            (
+                "empty properties",
+                code_action_caps(Some(true), Some(vec![])),
+            ),
+            (
+                "non-edit property",
+                code_action_caps(Some(true), Some(vec!["command"])),
+            ),
+        ] {
+            assert!(
+                !client_resolves_code_actions(&capabilities),
+                "{name} must receive eager edits"
+            );
+        }
+    }
+
+    #[test]
+    fn code_actions_prefer_owned_analysis_when_snapshot_source_is_stale() {
+        let stale = crate::analysis::DocumentAnalysis::analyze_plain("void f(string s) {}");
+        let current = crate::analysis::DocumentAnalysis::analyze_plain("void f(int n) {}");
+        assert!(std::ptr::eq(
+            analysis_for_current_source(Some(&stale), &current),
+            &current
+        ));
+        assert!(std::ptr::eq(
+            analysis_for_current_source(Some(&current), &current),
+            &current
+        ));
+    }
 
     fn temp_tree(name: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!(
