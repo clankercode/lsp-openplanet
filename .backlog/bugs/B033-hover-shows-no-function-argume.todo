@@ -1,0 +1,107 @@
+---
+complexity: medium
+created_at: "2026-08-29T14:04:54Z"
+depends_on: []
+estimate_hours: 1
+id: B033
+priority: high
+status: pending
+tags:
+    - lsp
+    - hover
+    - ux
+title: Hover shows no function arguments and only one overload; detail is thin overall
+updated_at: "2026-08-29T14:04:54Z"
+---
+Reported 2026-08-30 by Max from VS Code extension use (../lsp-openplanet-ext/).
+
+## Symptom
+Hovering a function/method in the editor does not show the arguments, and when
+a name has more than one overload only one signature appears. Hover should show
+as much detail as possible.
+
+## Cause — verified by reading src/server/hover.rs on master @ 91a296c
+
+Three separate defects, all in `src/server/hover.rs`:
+
+### 1. Method hover prints a literally empty parameter list
+`hover()` step 1 (the checked-view fast path, ~:56-58) does:
+
+    } else if is_method_name(analysis, offset, &bare) {
+        format!("(method) {} {}()", ty_display, bare)
+
+`{}()` — the parens are hardcoded EMPTY. Any method hover renders
+`(method) SomeType name()` with no arguments at all, ever.
+
+Worse, this path RETURNS EARLY (~:64), so it shadows step 3
+(`format_workspace_symbol`, ~:161) which does build a correct
+`rt name(ty a, ty b)` signature. The good formatter is unreachable for
+anything the checked view has a recorded type for.
+
+### 2. External function hover drops every overload but the first
+`lookup_external` (~:270):
+
+    if let Some(fns) = index.lookup_function(qualified) {
+        let func = &fns[0];
+
+`lookup_function` returns a Vec precisely because AngelScript overloads. Hover
+takes `[0]` and discards the rest, with no indication more exist. This is the
+'no overloads' half of the report.
+
+### 3. Workspace function hover is single-symbol by construction
+`navigation::lookup_workspace_symbol` returns one `Symbol`, and
+`format_workspace_symbol` formats that one. Overloaded workspace functions have
+the same defect as (2).
+
+## Also thin (same report, 'as much detail as possible')
+- `lookup_external` type hover truncates properties and methods at
+  `.take(6)` (~:246, :249) with NO '... N more' marker, so the user cannot tell
+  the list is cut.
+- Workspace symbols carry no doc comment in hover; only external functions do
+  (`func.doc`, ~:288).
+- No declaration location / source file shown for workspace symbols.
+- Enum hover prints values but `format_workspace_symbol`'s Enum arm omits the
+  values' numeric values, while `lookup_external`'s enum arm includes them —
+  inconsistent between the two paths.
+
+## Fix direction
+- Give the checked-view method branch a real signature: resolve the method
+  symbol and render its params, or fall through to the workspace/external
+  formatter instead of returning early with `()`.
+- Render the FULL overload set for both external and workspace functions: one
+  code-fenced signature per overload, in a stable (deterministic) order.
+- Replace the bare `.take(6)` truncation with a marker naming the remaining
+  count, or raise/remove the cap.
+- Unify the two formatters so external and workspace symbols present the same
+  fields (signature, doc, enum values) rather than diverging.
+
+## Test plan (TDD, red first)
+Existing hover tests live in `src/server/hover.rs` `mod tests` (~:317+) and use
+`pos_of` + a fixture source — follow that pattern.
+
+Red:
+- `hover_method_shows_parameters`: hover a method call with 2 params -> the
+  rendered hover CONTAINS the parameter types and names (fails today: `()`).
+- `hover_shows_all_overloads`: a function with 3 overloads -> all 3 signatures
+  present (fails today: 1).
+- `hover_external_overloads_listed`: same against a typedb function with
+  multiple entries in the `lookup_function` Vec.
+
+Variants (per CLAUDE.md, generalize):
+- overload counts 1 / 2 / 5 — a single overload must NOT gain list formatting
+  or a '1 overload' header
+- overload ordering is deterministic across runs (guard against HashMap order)
+- param modifiers render: `const T &in`, `T &out`, `T &inout`, `T@`,
+  `T@ &in`, `const T@`, plain `T`, and a defaulted param `int x = 3`
+- zero-param function -> `()` is CORRECT here; assert no stray comma
+- variadic / unnamed params (typedb `name: None` -> `_`) still render
+- methods vs free functions vs namespaced functions vs funcdefs
+- a method on a class with a base class (inherited method hover)
+- workspace symbol AND external symbol paths both covered for each of the above
+- type hover with >6 properties/methods shows a remaining-count marker
+- enum hover shows values consistently on both the workspace and external paths
+
+## Related
+Extension repo: ../lsp-openplanet-ext/ (packages/vscode-ext). No extension-side
+change is expected — this is server-side hover content — but confirm the
+extension does not post-process or truncate hover markdown before rendering.

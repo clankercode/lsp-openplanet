@@ -31,3 +31,4 @@ bugs:
     - file: B030-unused-declaration-diagnostics.todo
     - file: B031-grey-out-inactive-if-regions-l.todo
     - file: B032-flaky-update-tests-race-on-ope.todo
+    - file: B033-hover-shows-no-function-argume.todo
