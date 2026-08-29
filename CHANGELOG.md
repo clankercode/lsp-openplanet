@@ -14,6 +14,14 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Fixed
+- **`check` no longer undoes `defines` removals of manifest defines (B026)** —
+  `run_check` re-applied `info.toml`'s `[script].defines` and the
+  `DEPENDENCY_*` defines AFTER `LspConfig::load` had already applied them and
+  run the user's `-NAME` overrides, so `defines = ["-MANIFEST_DEF"]` worked in
+  the editor but not on the command line. The duplicate apply is gone; the
+  config ladder has one owner. `--define` still wins over a config removal.
+
+### Fixed
 - **Custom `defines` no longer wipe the game-target defines (B024)** — a
   `.openplanet-lsp.toml` (or `initializationOptions`) `defines = ["DEV"]` used
   to REPLACE the whole set, so `TMNEXT`, `WINDOWS`, `MANIA64` and the `SIG_*`

@@ -522,12 +522,11 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     }
     apply_typedb_dir(&mut config, options.typedb_dir.as_deref());
 
-    let manifest_path = root.join("info.toml");
-    if manifest_path.exists() {
-        if let Ok(manifest) = Manifest::load(&manifest_path) {
-            config.apply_manifest(&manifest);
-        }
-    }
+    // B026: the manifest is NOT re-applied here. `LspConfig::load` already
+    // applied it for this same root (Layer 4) and then ran the user's
+    // `defines` overrides (Layer 5) — re-applying it re-inserted every
+    // manifest/dependency define AFTER a `-NAME` removal had dropped it, so
+    // `check` and the LSP server disagreed. One seam owns the ladder.
 
     // GH #57: any --define flag collapses the define matrix — single-combo
     // behavior (the base set plus the CLI defines), exactly like pre-matrix

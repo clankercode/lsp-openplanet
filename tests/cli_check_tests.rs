@@ -341,6 +341,110 @@ void Main() {}
     let _ = fs::remove_dir_all(home);
 }
 
+/// B026: `check` used to re-apply the plugin manifest AFTER `LspConfig::load`
+/// had already applied it and run the user's `-NAME` removals, so a removal of
+/// a manifest- or dependency-derived define was silently undone on the CLI
+/// path while the LSP path honoured it.
+#[test]
+fn check_command_honors_removal_of_manifest_and_dependency_defines() {
+    let root = make_temp_plugin("config-defines-manifest-removal");
+    let home = isolated_home("config-defines-manifest-removal");
+    fs::write(
+        root.join("info.toml"),
+        r#"
+[meta]
+name = "CLI Check Fixture"
+version = "0.1.0"
+
+[script]
+optional_dependencies = ["Editor"]
+defines = ["MANIFEST_OFF", "MANIFEST_ON"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join(".openplanet-lsp.toml"),
+        "defines = [\"-MANIFEST_OFF\", \"-DEPENDENCY_EDITOR\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        r#"
+#if MANIFEST_OFF
+MissingType manifest_removal_was_undone;
+#endif
+
+#if DEPENDENCY_EDITOR
+MissingType dependency_removal_was_undone;
+#endif
+
+#if !MANIFEST_ON
+MissingType removal_over_deleted_a_sibling;
+#endif
+
+void Main() {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "manifest/dependency define removals must survive the CLI path; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
+/// B026 variant: the CLI flag is the top layer, so `--define X` still wins
+/// over a config-file `-X`.
+#[test]
+fn check_command_define_flag_beats_a_config_removal() {
+    let root = make_temp_plugin("config-defines-flag-beats-removal");
+    let home = isolated_home("config-defines-flag-beats-removal");
+    fs::write(
+        root.join(".openplanet-lsp.toml"),
+        "defines = [\"-FEATURE_X\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/Main.as"),
+        "#if !FEATURE_X\nMissingType flag_did_not_win;\n#endif\n\nvoid Main() {}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--define")
+        .arg("FEATURE_X")
+        .arg(&root)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("0 diagnostics"),
+        "--define must win over a config removal; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
+}
+
 /// B024 + GH #36: a hand-listed platform selector REPLACES the target's, so
 /// exactly one `#if <platform>` family stays live — and the run says so.
 #[test]
