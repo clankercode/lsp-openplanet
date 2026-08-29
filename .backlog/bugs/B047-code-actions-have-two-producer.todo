@@ -1,0 +1,88 @@
+---
+complexity: medium
+created_at: "2026-08-29T18:24:13Z"
+depends_on: []
+estimate_hours: 1
+id: B047
+priority: medium
+status: pending
+tags:
+    - lsp
+    - code-actions
+    - refactor
+title: 'Code actions have two producer paths: TypeDiagnosticKind seam and client-echoed diagnostics'
+updated_at: "2026-08-29T18:24:13Z"
+---
+Found by the B036 lane, 2026-08-30, while adding the unused-declaration fix.
+Architectural debt, deliberately deferred rather than fixed under three
+concurrent lanes.
+
+## The split
+B035 built a fix-family seam keyed on the CHECKER's diagnostics:
+
+    FixFamily.matches: fn(&TypeDiagnosticKind) -> bool
+
+That covers the 27 `TypeDiagnosticKind` variants (src/typecheck/checker.rs:28+).
+It does NOT cover diagnostics produced anywhere else, and one whole class is
+produced elsewhere: unused declarations come from
+`crate::analysis::unused::unused_declarations_for_file(...)` and are turned
+into an LSP `Diagnostic` directly by `unused_to_diagnostic`
+(src/server/diagnostics.rs:236) with `code: "unused-declaration"`. Its inputs —
+`AnalysisSnapshot`, `WorkspaceUsage`, `export_paths`, the `UnusedLevel` config —
+are not in `FixContext` at all.
+
+So there are now two ways to produce a code action:
+1. **The seam** — `fixes/<name>.rs` + two lines in `fixes/mod.rs`. Lazy
+   `materialize`, participates in `source.fixAll.openplanet`, resolve-aware.
+2. **A direct producer** — a function driven off `req.context.diagnostics`
+   with `is_our_diagnostic` (src/server/code_actions/mod.rs:447), registered
+   by a line in `code_actions/mod.rs`. This is what
+   `quick_fix_did_you_mean` (:453) already was, and what B036's
+   `unused_decl.rs` had to be.
+
+## Why it was not fixed in B036
+The clean answer is a second registry keyed on the diagnostic CODE rather than
+on `TypeDiagnosticKind`, so both classes register the same way. That is seam
+surgery, and B036/B037/B038 were running concurrently against the seam. The
+alternative hack — teaching the checker to emit an `UnusedDeclaration`
+`TypeDiagnostic` — was rejected because it would DUPLICATE published
+diagnostics and move the FP fixture baselines.
+
+## Consequences of leaving it
+- A contributor adding a fix has to work out which mechanism applies, and the
+  answer depends on where the diagnostic happens to be produced — not on
+  anything about the fix.
+- Direct producers do not go through `materialize`, so they do not get the
+  laziness discipline, and B036's `unused_decl` producer attaches its edit
+  eagerly (justified there: two string ops, cheaper than the per-request
+  Sha256 fingerprint, and documented at the site — but it is an exception).
+- Direct producers do not participate in `source.fixAll.openplanet`, so
+  "fix all unused declarations in this file" is not available even though each
+  individual fix is.
+
+## Work
+- Add a diagnostic-code-keyed registry alongside `FAMILIES`, so a producer can
+  match on `Diagnostic.code` (e.g. `"unused-declaration"`) and receive whatever
+  context it needs, with the same `describe`/`materialize` split.
+- Migrate `quick_fix_did_you_mean` and B036's `unused_decl` onto it.
+- Decide whether the unused fixes should then join `source.fixAll.openplanet`.
+  Recommend: the `_`-prefix fix YES (mechanical, reversible); **removal NO**
+  (lossy, and deleting code on save is not a tidy-up — same rule B037 follows
+  for `UnreachableCode`).
+- Keep `materialize` non-panicking. A panic in `textDocument/codeAction` kills
+  the server for every later request; that exact bug was caught and fixed
+  during B035.
+
+## Test plan (TDD, red first)
+Red: a producer registered ONLY in the new code-keyed registry is offered for
+its diagnostic, and is not offered for a diagnostic it does not claim.
+Variants: both registries active simultaneously and a diagnostic claimed by
+each → both actions offered, deterministic order; a code-keyed producer's
+action resolves lazily like a family's; `only` filter honoured for both;
+`source.fixAll` includes exactly the producers marked auto-applicable across
+BOTH registries; the existing "Did you mean" and unused fixes behave
+identically after migration (assert on the produced actions, not internals).
+
+## Related
+B035 (the seam), B036 (hit the limitation), B037/B038 (concurrent users of the
+seam, which is why this was deferred).
