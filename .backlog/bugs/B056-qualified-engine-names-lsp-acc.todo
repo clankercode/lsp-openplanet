@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T23:06:47Z"
 depends_on: []
 estimate_hours: 1
 id: B056
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Qualified engine names: LSP accepts 1010 spellings the game rejects (synthetic module prefixes, bare nested enums)'
@@ -24,3 +26,77 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by the B052 lane, 2026-08-30, via live RemoteBuild probe of 1639
+qualified spellings against Trackmania + Openplanet 1.29.5. Deliberately kept
+OUT of B052, which is scoped to the `has_enum` tail fallback.
+
+## Defect
+On the same 1639 spellings, the merge-base LSP reports **zero** errors while
+the game rejects **1010**. These are false NEGATIVES: the LSP stays silent on
+code that will not compile.
+
+Two distinct causes, neither of which is the tail fallback:
+
+**(a) Exact-key acceptance of the synthetic module prefix.** The Nadeo loader
+keys types as `Module::Class` / `Module::Class::Enum`. Those module prefixes
+are the LSP's own invention — they exist nowhere in the game. So the index
+accepts `Game::CGameCtnApp` and `Game::CGameMenu::EMenuOrder` by exact key
+match, while the game answers `Namespace 'Game' doesn't exist.`
+
+**(b) `resolve_unqualified` rescues bare nested enum names.** A bare
+`EMenuOrder` resolves in the LSP; the game rejects it. Note the rescue is
+CORRECT for classes and wrong only for nested ENUMS — do not remove it
+wholesale.
+
+## The rule the game actually follows
+Established by the same probe (1639 spellings plus 120 paired namespace
+probes). AngelScript resolves `P::T` by walking P's ancestor scopes to global:
+
+- P is not a scope -> `Namespace 'P' doesn't exist.` (REJECT)
+- P is a scope but T is not found -> `Identifier 'T' is not a data type in
+  namespace 'P' or parent`
+- P is a scope and T is a GLOBAL enum -> ACCEPT
+
+And the discriminator for engine classes, 8/8 confirmed: **an engine class is
+a namespace iff it declares at least one enum** (named or anonymous). Hence
+`CGameMenu::VirtualKey` ACCEPT but `CSceneVehicleVis::VirtualKey` REJECT.
+
+## Probe hygiene — applies to EVERY lane using the live game
+**Namespaces from other installed plugins leak into the compile.**
+`MLFeed::VirtualKey` and `VehicleState::VirtualKey` resolve on this machine
+only because MLFeedRaceData.op and vehicle-state-list-dev are installed.
+
+So the two directions are NOT symmetric:
+- a game **REJECT** is solid evidence about the engine
+- a game **ACCEPT** on an unknown prefix is NOT automatically an engine fact
+
+Two anomalies (`MathX`, `GameData`) were traced to this and excluded from the
+model. Any future probe must apply the same asymmetry, or it will encode the
+prober's local plugin set as engine behaviour.
+
+## Work
+- Take the B052 lane's saved per-name game verdict table as the starting
+  corpus rather than re-probing 1639 names. Ask that lane for it; it must be
+  committed to the repo at a durable path, not left in /tmp (which filled to
+  100% during this session and killed a command mid-write).
+- Fix (a) by refusing the synthetic module prefix as a qualifier, keeping it
+  as an internal key only.
+- Fix (b) by narrowing `resolve_unqualified` for nested enums specifically,
+  leaving the class behaviour intact.
+- Re-verify against the game after implementing; do not assume the model
+  generalises beyond the probed corpus.
+
+## Gate
+This will RAISE fixture ERROR counts substantially — that is the fix working,
+and it is exactly why this is a separate ticket from B052. Every new error
+must be justified by name against a recorded game REJECT from the verdict
+table. An unexplained new error is a bug, not a baseline update. Measure two
+binaries on the same machine at the same time (baselines at filing: 14/1485,
+5/276, 2/35, 4/2, 4/4, showcase-diags 9/7 — re-measure, since B052 lands
+first and may move them).
+
+## Related
+B052 (the tail fallback; found this while probing, kept it out of scope),
+B046, B044, B007, B053.
+Depends on B052 landing first — both touch qualified-name resolution.
