@@ -1,17 +1,18 @@
 ---
+claimed_at: "2026-08-29T15:41:31Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T15:08:16Z"
 depends_on: []
 estimate_hours: 4
 id: B043
 priority: medium
-status: pending
-tags:
-    - vscode-ext
-    - ux
-    - dx
+started_at: "2026-08-29T15:41:31Z"
+status: in_progress
+tags: []
 title: 'VS Code: one command total and no status bar; server state is invisible'
-updated_at: "2026-08-29T15:08:16Z"
+updated_at: "2026-08-29T15:41:31Z"
 ---
 Requested via a coordinator feature-gap review, 2026-08-30. Extension repo:
 ../lsp-openplanet-ext/ (packages/vscode-ext). Enhancement.
