@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-29T20:03:23Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-29T22:23:52Z"
 complexity: medium
 created_at: "2026-08-29T20:02:56Z"
 depends_on: []
+duration_minutes: 140.49975875266668
 estimate_hours: 1
 id: B051
 priority: high
 started_at: "2026-08-29T20:03:23Z"
-status: in_progress
+status: done
 tags: []
 title: 'Rescue dropped B012 test-hardening: config ladder end-to-end coverage stranded on an unmerged branch'
-updated_at: "2026-08-29T20:03:23Z"
+updated_at: "2026-08-29T22:23:52Z"
 ---
 
 # Rescue dropped B012 test-hardening: config ladder end-to-end coverage stranded on an unmerged branch
