@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T09:14:51Z"
 depends_on: []
 estimate_hours: 3
 id: B030
 priority: medium
+started_at: null
 status: pending
 tags: []
 title: 'Unused-declaration diagnostics: add info/hint levels and the LSP Unnecessary tag (+ VS Code setting)'
@@ -12,3 +14,75 @@ updated_at: "2026-08-29T09:14:51Z"
 ---
 
 Unused-declaration diagnostics: add info/hint levels and the LSP Unnecessary tag (+ VS Code setting)
+
+Requested 2026-08-29 by Max: make the uncalled/unused warning quieter, like
+an info message, and support it in the VS Code extension too.
+
+## Why / LSP background
+Two independent mechanisms exist:
+- `DiagnosticSeverity::INFORMATION` (3) / `HINT` (4) — standard.
+- `DiagnosticTag::UNNECESSARY` (1) — the idiomatic "unused" signal; clients
+  fade/grey the range regardless of severity (VS Code gates on
+  `editor.showUnused`). TypeScript uses HINT + UNNECESSARY for "declared but
+  never read", which is why unused vars grey out without filling Problems.
+
+Client behaviour that drives the choice:
+- INFORMATION → listed in the VS Code Problems panel, blue underline.
+- HINT → NOT listed in Problems; editor-only subtle underline.
+- UNNECESSARY tag → the grey-out, orthogonal to severity.
+
+## Current state
+- `UnusedLevel { Ignore, Warn, Error }` (src/config.rs:183), severity map in
+  `unused_severity` (src/server/diagnostics.rs:175).
+- `unused` already resolves through the whole ladder: TOML
+  (src/config.rs:879), user config (src/user_config.rs:314),
+  initializationOptions (src/config.rs:1045).
+- Quiet severities already render: src/cli/pretty.rs:146-147 (colour, counted
+  as `n_other`), src/cli/watch.rs:443-444 (TUI Severity::Info/Hint),
+  src/main.rs:245-247 (already excluded from the failing exit code).
+
+Gaps:
+- `grep -rn DiagnosticTag src` is empty — every diagnostic leaves
+  `tags: None` via `..Default::default()` (src/server/diagnostics.rs:203).
+  lsp-types 0.94.1 has `DiagnosticTag::UNNECESSARY`.
+- The extension has no `unused` setting; settings.ts forwards only
+  openplanet_dir, plugins_dir, game_target, signature_mode, defines,
+  plugin_roots.
+
+## Plan
+1. Add `Info` and `Hint` to `UnusedLevel`. Aliases: info/information/note →
+   Info; hint/faded/grey/gray → Hint. Default stays `Warn` (no behaviour
+   change for existing users).
+2. Attach `DiagnosticTag::UNNECESSARY` to unused diagnostics at EVERY level
+   (including warn/error) — that is what produces the grey-out and what makes
+   `hint` readable rather than invisible. No client-capability gate needed:
+   the server does not retain client capabilities and clients without
+   `publishDiagnostics.tagSupport` ignore the field.
+3. Extension: `openplanetLsp.unused` enum (ignore/hint/info/warn/error) with
+   an explicit unset default, forwarded as `unused` — honouring the existing
+   "only forward what the user set" contract (settings.ts:1-10) so a repo
+   `.openplanet-lsp.toml` keeps control.
+4. Docs: README config table, `src/user_config.rs:314` choices list, both
+   CHANGELOGs.
+
+## Test plan (TDD, red first)
+Server/config (Rust):
+- `unused_level_parse_accepts_canonical_and_alias_variants` extended: every
+  new alias parses; unknown tokens still `None`.
+- severity map: Ignore→None, Hint→HINT, Info→INFORMATION, Warn→WARNING,
+  Error→ERROR (table-driven over all five).
+- tag present at every emitting level; `Ignore` still emits nothing.
+- ladder round-trip per level: TOML key, user config, initializationOptions
+  (`{"unused": "hint"}`), and the TOML bool forms (`true`→Warn,
+  `false`→Ignore) unchanged.
+- generalise over declaration kinds (function / local / global / class /
+  enum) so the tag+severity apply uniformly, not just to functions.
+- CLI: `check` exit code stays 0 at hint/info even without
+  `--warnings-as-errors`, and `--warnings-as-errors` does NOT promote
+  hint/info (only WARNING) — guards main.rs:245-247.
+- pretty output counts hint/info as `n_other`, not as warnings.
+
+Extension (vitest, pure `buildInitializationOptions`):
+- unset / empty → no `unused` key (repo TOML keeps control).
+- each of ignore/hint/info/warn/error → forwarded verbatim.
+- invalid value → not forwarded (mirrors isValidGameTarget/SignatureMode).
