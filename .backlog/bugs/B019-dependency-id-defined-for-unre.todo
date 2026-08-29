@@ -95,3 +95,55 @@ resolved-set argument so the function stays pure and testable.
 
 Runs SERIAL after B017 in the same worktree — both edit src/config.rs.
 Expect FP fixture baselines to move; record the deltas and explain each.
+
+## Authority settled (lane research, 2026-08-29) — mapping rule + spec citation
+
+Openplanet docs (Plugin Dependencies tutorial) state the rule verbatim:
+'The definition will have a prefix of DEPENDENCY_ followed by the plugin ID in
+uppercase, with spaces, dashes, and periods replaced by underscores.'
+Same page defines plugin ID as the folder name, or the file base name of a .op.
+
+Corroborated against the real plugin corpus (~/src/openplanet/my-plugins,
+~/OpenplanetNext/Plugins): tm-control-mcp -> DEPENDENCY_TM_CONTROL_MCP,
+ghosts-pp -> DEPENDENCY_GHOSTS_PP, map-together -> DEPENDENCY_MAP_TOGETHER,
+ManiaExchange -> DEPENDENCY_MANIAEXCHANGE. No real dependency ID uses +, @, /
+or non-ASCII.
+
+### Coordinator ruling: match the docs EXACTLY, do not superset
+
+Replace ONLY space, '-' and '.'; uppercase; leave every other character
+untouched. The current implementation replaces every non-ASCII-alphanumeric
+with '_', which is NOT a safe superset:
+
+  ID 'Dips++' -> docs/game define DEPENDENCY_DIPS++ (inert: no #if can
+  reference it, the lexer ends the identifier at '+')
+  ID 'Dips++' -> current impl defines DEPENDENCY_DIPS__ (a WELL-FORMED
+  identifier the game never defines)
+
+The superset converts the game's inert names into reachable ones the game
+lacks -- exactly the B019 failure mode (LSP has a define the game does not,
+making dead code live), reintroduced inside the function B019 is fixing.
+Test must assert DEPENDENCY_DIPS++ IS produced and DEPENDENCY_DIPS__ is NOT.
+
+Collision (my_plugin / my-plugin / my.plugin all -> MY_PLUGIN) is Openplanet's
+own and must be reproduced, NOT diverged from. Warn when two declared deps of
+one manifest collapse to the same suffix: signal without divergence.
+Leading-digit IDs are a non-issue (the DEPENDENCY_ prefix means the leading
+char is 'D'). Empty/whitespace-only ID -> skip and warn, never emit a bare
+DEPENDENCY_.
+
+Comment at dependency_define_suffix must mark which part is authority (the
+docs rule) and which is inference (behaviour for chars outside {space,-,.}
+is doc-specified but unverified against the running game).
+
+## The repo's own spec already mandates this fix
+
+specs/draft-v1.md:190 -- 'For optional_dependencies, if not found, define no
+DEPENDENCY_X preprocessor symbol; if found, define it'
+specs/draft-v1.md:260 -- 'Plus DEPENDENCY_X for found optional dependencies'
+(also restated at 4.1 step 5 / 6.4)
+
+Verified by the coordinator against specs/draft-v1.md on master. So the
+current behaviour VIOLATES the repo's written spec; this task restores
+documented behaviour rather than changing it, and the FP baseline movement is
+a spec-conformance correction, not a judgment call. Cite this in the commit.
