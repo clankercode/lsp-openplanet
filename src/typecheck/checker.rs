@@ -8722,6 +8722,23 @@ void Main() {
         );
     }
 
+    /// B016: the type DB keeps an anonymous enum under declaration context
+    /// for internal queries, but source must still diagnose that synthetic
+    /// key as an unknown type.
+    #[test]
+    fn anonymous_member_enum_key_reports_unknown_type() {
+        let diags = check_with_typedb("void Main() { Control::CControlEntry::Type synthetic; }");
+        assert!(
+            diags.iter().any(|diag| matches!(
+                &diag.kind,
+                TypeDiagnosticKind::UnknownType(name)
+                    if name == "Control::CControlEntry::Type"
+            )),
+            "synthetic anonymous enum key must be rejected in source: {:?}",
+            diags
+        );
+    }
+
     // === GH #63: typedb funcdef constructors (B022) ===
 
     /// `UI::InputTextCallback(fn)` is a Core funcdef constructor. Openplanet

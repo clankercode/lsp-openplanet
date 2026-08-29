@@ -27,7 +27,7 @@ pub fn resolve_name<'a>(
     if type_index.lookup_function(name).is_some() {
         return Some(ResolvedSymbol::ApiFunction(name.to_string()));
     }
-    if type_index.lookup_enum(name).is_some() {
+    if type_index.lookup_source_enum(name).is_some() {
         return Some(ResolvedSymbol::ApiEnum(name.to_string()));
     }
 

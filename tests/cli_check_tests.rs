@@ -3588,3 +3588,39 @@ fn check_help_mentions_errors_flag() {
         "help must document --errors last|first|off: {stdout}"
     );
 }
+
+/// B016: members typed by an inline enum the engine dump leaves unnamed.
+///
+/// Those enums used to collapse onto one `<Module>::UnnamedEnum` key per
+/// module — `Control` alone lost 14 of 15 — and B016 keys them by their
+/// declaring context instead. The game exposes such a member as a plain
+/// integer (the enum has no name, so no source can spell it), so re-keying
+/// must not let the checker start rejecting reads, writes, comparisons
+/// across two formerly-collided enums, or argument passing.
+///
+/// Game ground truth (RemoteBuild probe 2026-08-30, OP 1.29.5): everything
+/// down to `Main` compiles clean — reads, writes, comparisons across two
+/// formerly-collided enums and argument passing are all legal on a member
+/// whose type is an unnamed enum. The LSP must agree, and does.
+///
+/// The same probe reports 3 ERRs (`No matching symbol`) on the three lines of
+/// `BareEnumValueNames`, where the LSP is deliberately silent — a
+/// PRE-EXISTING false negative in `GlobalScope::has_global_ident` that B016
+/// makes uniform rather than arbitrary, because the ticket forbids
+/// tightening. See the note in the fixture. Narrowing that scan to named
+/// enums is its own ticket; when it lands this assertion must change from
+/// `0 diagnostics` to those three errors.
+///
+/// Red before, green after for part of it: `MinimalReadOnly`,
+/// `TimeHhMmSsMil` and `Text_Icon` were `undefined identifier` on a build of
+/// 91a296c because their enum lost its module's collision. Everything else
+/// was clean there too and must stay that way.
+#[test]
+fn check_command_issue_repro_b016_anon_member_enums_is_clean() {
+    let (ok, stdout, stderr) = run_issue_repro_typedb("b016-anon-member-enums");
+    assert!(
+        ok && stdout.contains("0 diagnostics"),
+        "engine members typed by an anonymous inline enum must stay silent; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}

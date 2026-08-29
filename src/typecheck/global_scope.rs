@@ -308,14 +308,14 @@ impl<'a> GlobalScope<'a> {
             return true;
         }
         if let Some(ext) = self.external {
-            if ext.lookup_enum(qualified).is_some() {
+            if ext.lookup_source_enum(qualified).is_some() {
                 return true;
             }
             // Typedb indexes enums by short name (`ECardinalDirections`), so
             // a qualified lookup (`CGameCtnBlock::ECardinalDirections`) must
             // fall through to the tail segment before giving up (B007).
             if let Some((_, tail)) = qualified.rsplit_once("::") {
-                if ext.lookup_enum(tail).is_some() {
+                if ext.lookup_source_enum(tail).is_some() {
                     return true;
                 }
             }
@@ -451,6 +451,31 @@ impl<'a> GlobalScope<'a> {
         // External index: scan known enums for a matching bare value name.
         // This is linear in enum count but enums are small and this only
         // runs on identifiers that failed every earlier check.
+        //
+        // B016: deliberately `enums_iter`, NOT `source_enums_iter`. Every
+        // other external-enum call site asks "can source NAME this enum?",
+        // where a synthesized anonymous key must answer no. This one asks a
+        // different question — "is this bare identifier a value the engine
+        // knows?" — and answering true only silences an
+        // `UndefinedIdentifier`.
+        //
+        // KNOWN FALSE NEGATIVE, left as-is on purpose. The game rejects a
+        // bare unnamed-enum value: RemoteBuild probe 2026-08-30, OP 1.29.5,
+        // on `tests/fixtures/issue-repros/b016-anon-member-enums` →
+        // `No matching symbol 'HyperTnL'` (and `RenderPlaneReflect`,
+        // `MinimalReadOnly`). So filtering here would match the game.
+        //
+        // It is not B016's to fix. Pre-B016 the sorted-first anonymous enum
+        // of each module survived the collision, so `HyperTnL`,
+        // `SlideNoControl`, `NotTimed`, `RenderPlaneReflect` and
+        // `Download_WaitingSources` already resolved here — measured against
+        // a build of 91a296c, filtering turns those into 5 fresh errors,
+        // which is the tightening B016's ticket explicitly forbids. B016
+        // makes the accepted set uniform (all 132 anonymous enums) instead of
+        // an arbitrary 14, which can only ever silence a diagnostic, never
+        // add one. Narrowing this scan to named enums is a behaviour change
+        // with its own false-positive surface and belongs in its own ticket,
+        // not riding on a data-loss fix.
         if let Some(ext) = self.external {
             for (qname, en) in ext.enums_iter() {
                 let _ = qname;
@@ -1196,8 +1221,8 @@ impl<'a> GlobalScope<'a> {
     pub fn external_enum_by_short_name(&self, short: &str) -> Option<String> {
         let ext = self.external?;
         ext.find_by_short_name(short)
-            .into_iter()
-            .find(|enum_name| ext.lookup_enum(enum_name).is_some())
+            .iter()
+            .find(|enum_name| ext.lookup_source_enum(enum_name).is_some())
             .cloned()
     }
 
@@ -1464,6 +1489,106 @@ mod tests {
         assert!(!scope.has_function("foo"));
         assert!(!scope.has_enum("E"));
         assert!(!scope.resolves("Foo"));
+    }
+
+    /// B016: contextual keys preserve anonymous member-enum data in the
+    /// type DB, but those synthesized keys never name a source-level type.
+    #[test]
+    fn anonymous_member_enum_keys_stay_internal_to_source_resolution() {
+        use crate::typedb::index::TypeIndex;
+
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let index = TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let anonymous = "Control::CControlEntry::Type";
+        assert!(
+            index
+                .lookup_enum(anonymous)
+                .is_some_and(|info| info.anonymous),
+            "fixture guard: this must remain an internally queryable anonymous enum"
+        );
+        assert!(
+            index.lookup_source_enum(anonymous).is_none(),
+            "the source-facing API must hide synthetic keys"
+        );
+        assert!(
+            !scope.has_enum(anonymous) && !scope.resolves(anonymous),
+            "synthesized keys must not resolve from source"
+        );
+        assert_eq!(
+            scope.canonicalize_type_name(anonymous),
+            anonymous,
+            "an anonymous key must remain unresolved rather than canonicalized"
+        );
+
+        let named = "Game::CGameCtnBlock::ECardinalDirections";
+        assert!(index.lookup_source_enum(named).is_some());
+        assert!(scope.has_enum(named) && scope.resolves(named));
+        assert_eq!(
+            scope.canonicalize_type_name("CGameCtnBlock::ECardinalDirections"),
+            named,
+            "the anonymous filter must not hide named enums"
+        );
+    }
+
+    /// B016 (the other half of the rule above): a bare identifier that names
+    /// a VALUE of an anonymous member enum stays accepted.
+    ///
+    /// This pins a KNOWN FALSE NEGATIVE, not correct behaviour — the game
+    /// rejects these names (`No matching symbol`, RemoteBuild probe
+    /// 2026-08-30, OP 1.29.5). It exists because the five names in the first
+    /// group already resolved on 91a296c, so filtering them out would be a
+    /// fresh tightening, which B016 is required not to introduce. Delete this
+    /// test as part of the ticket that narrows the scan to named enums.
+    #[test]
+    fn anonymous_member_enum_values_are_accepted_as_bare_identifiers() {
+        use crate::typedb::index::TypeIndex;
+
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let index = TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // Accepted before B016 — their enum was the sorted-first anonymous
+        // one in its module, so it survived the collision.
+        for name in [
+            "HyperTnL",
+            "SlideNoControl",
+            "NotTimed",
+            "RenderPlaneReflect",
+            "Download_WaitingSources",
+        ] {
+            assert!(
+                scope.has_global_ident(name),
+                "`{name}` resolved before B016 and must keep resolving"
+            );
+        }
+        // Dropped before B016 — their enum lost the collision and these
+        // names appear in no other enum, so a 91a296c build reports
+        // `undefined identifier` for all three. Recovering them can only
+        // silence a diagnostic, never add one.
+        for name in ["MinimalReadOnly", "TimeHhMmSsMil", "Text_Icon"] {
+            assert!(
+                scope.has_global_ident(name),
+                "`{name}` belongs to a recovered anonymous enum"
+            );
+        }
+        assert!(
+            !scope.has_global_ident("NoSuchEngineEnumValue"),
+            "the scan must still reject genuinely unknown identifiers"
+        );
     }
 
     #[test]

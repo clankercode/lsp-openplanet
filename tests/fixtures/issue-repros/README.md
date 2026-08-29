@@ -56,6 +56,7 @@ Record the game verdict in the fixture's gate-test doc comment.
 
 | Fixture | Issue | Game verdict | Status |
 |---------|-------|--------------|--------|
+| `b016-anon-member-enums` | B016 | member access clean; 3 ERR `No matching symbol` on the bare unnamed-enum VALUE names (`HyperTnL`, `RenderPlaneReflect`, `MinimalReadOnly`; 2026-08-30 probe, OP 1.29.5) — the LSP is knowingly silent on those, see the fixture note | fixed — active (known FN on the 3 value lines) |
 | `b028-os-arch-defines-probe` | B028 | clean (2026-08-29 probe) ⇒ WINDOWS + WINDOWS_WINE + MANIA64 on, LINUX + MANIA32 off in the live Wine client | fixed — active |
 | `b028-build-flag-probe` | B028 | clean (2026-08-29 probe) ⇒ SERVER / LOGS / HAS_DEV / DEVELOPER all off on a normal client | fixed — active |
 | `b028-dup-decl-arch-os` | B028 | clean (2026-08-29 probe) — the game compiles one branch per pair; the LSP defaulted to windows/64 must match | fixed — active |

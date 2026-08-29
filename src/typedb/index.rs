@@ -92,6 +92,13 @@ pub struct EnumInfo {
     pub namespace: Option<String>,
     pub values: Vec<(String, i64)>,
     pub source: TypeSource,
+    /// B016: the engine dump declares this enum inline on a member and gives
+    /// it no name of its own, so its qualified key is *synthesized* from the
+    /// declaring context (`Module::Class::Member`) rather than read from the
+    /// DB. Such a key names nothing the game will accept in source, so it is
+    /// kept out of every source-facing lookup, completion, and namespace
+    /// query — see `lookup_source_enum` and `build_short_type_index`.
+    pub anonymous: bool,
 }
 
 /// A Core `funcdef` — a named function-pointer type that can be constructed
@@ -225,10 +232,19 @@ impl TypeIndex {
     /// `add_*` path once all insertions are done.
     fn build_short_type_index(&mut self) {
         self.short_type_index.clear();
+        // Anonymous member enums (B016) are deliberately excluded: their key
+        // is synthesized from the declaring context, so admitting it here
+        // would invent 117 new resolvable short names and hand `Type` to
+        // `Control::CControlEntry::Type` instead of `Json::Type`.
         let mut names: Vec<String> = self
             .types
             .keys()
-            .chain(self.enums.keys())
+            .chain(
+                self.enums
+                    .iter()
+                    .filter(|(_, info)| !info.anonymous)
+                    .map(|(qname, _)| qname),
+            )
             .chain(self.funcdefs.keys())
             .cloned()
             .collect();
@@ -382,6 +398,7 @@ impl TypeIndex {
                     namespace: en.ns.clone(),
                     values,
                     source: TypeSource::Core,
+                    anonymous: false,
                 },
             );
         }
@@ -414,23 +431,13 @@ impl TypeIndex {
     }
 
     fn add_nadeo(&mut self, db: &NadeoDatabase) {
-        // Deterministic registration order (GH #59): 66 inline member-enum
-        // type names collide within a module (15 different anonymous enums
-        // are all `Control::UnnamedEnum`), and the `or_insert` below keeps
-        // whichever arrives first. Iterating the `ns`/type HashMaps directly
-        // therefore made the loaded index — and anything derived from it —
-        // differ between two loads of the *same* file. Sorting both levels
-        // costs one 20-key and one per-module sort and makes `TypeIndex`
-        // a function of the file's contents again.
-        //
-        // KNOWN LIMITATION (tracked as B016, deliberately not fixed here):
-        // sorting makes the choice *stable*, not *complete*. Only one of the
-        // N enums sharing a colliding key is registered; the other 14
-        // `Control::UnnamedEnum` variants are still dropped, so their members
-        // do not resolve and `diff_indexes` cannot see them change. Splitting
-        // them onto distinct keys would change the name-resolution surface
-        // and move the false-positive fixture baselines, so it is its own
-        // task.
+        // Deterministic registration order (GH #59): iterating the `ns`/type
+        // HashMaps directly made the loaded index — and anything derived
+        // from it — differ between two loads of the *same* file wherever a
+        // key was contested. Sorting both levels costs one 20-key and one
+        // per-module sort and makes `TypeIndex` a function of the file's
+        // contents again. It also fixes the probe order in
+        // `register_anon_member_enum` below.
         let mut module_names: Vec<&String> = db.ns.keys().collect();
         module_names.sort();
         for ns_name in module_names {
@@ -443,7 +450,12 @@ impl TypeIndex {
                 let mut methods = Vec::new();
                 let mut properties = Vec::new();
 
-                for member in &nadeo_type.m {
+                // Anonymous member enums are registered *after* this type's
+                // named nested enums, so a nested `enum` block always keeps
+                // the plain `Module::Class::Name` key (B016).
+                let mut anon_member_enums: Vec<(String, Vec<(String, i64)>)> = Vec::new();
+
+                for (ordinal, member) in nadeo_type.m.iter().enumerate() {
                     match member.kind() {
                         NadeoMemberKind::Property => {
                             properties.push(PropertyInfo {
@@ -481,14 +493,29 @@ impl TypeIndex {
                             // *properties* (e.g. `CGameCtnBlock::Direction`).
                             // Register the enum for name resolution AND keep
                             // the property so member access returns the enum type.
-                            if let (Some(type_name), Some(values)) = (
-                                member.type_name(),
-                                member_inline_enum_values(member.e.as_ref()),
-                            ) {
-                                self.register_nadeo_enum(
-                                    qualify_nadeo_member_type_name(&db.ns, ns_name, type_name),
-                                    values,
-                                );
+                            //
+                            // B016: only a member that names a real enum type
+                            // can be keyed by that name. An *anonymous* inline
+                            // enum carries the placeholder `UnnamedEnum`, which
+                            // is shared by every anonymous enum in the module —
+                            // keying by it dropped 118 of the fixture's 132 to
+                            // `or_insert`. Those are keyed by their declaring
+                            // context instead.
+                            if let Some(values) = member_inline_enum_values(member.e.as_ref()) {
+                                match member.type_name() {
+                                    Some(type_name) if !is_anonymous_enum_type_name(type_name) => {
+                                        self.register_nadeo_enum(
+                                            qualify_nadeo_member_type_name(
+                                                &db.ns, ns_name, type_name,
+                                            ),
+                                            values,
+                                        );
+                                    }
+                                    _ => anon_member_enums.push((
+                                        anon_member_enum_key(&qname, &member.n, ordinal),
+                                        values,
+                                    )),
+                                }
                             }
                             if let Some(type_name) = member.type_name() {
                                 properties.push(PropertyInfo {
@@ -521,6 +548,10 @@ impl TypeIndex {
                     }
                 }
 
+                for (key, values) in anon_member_enums {
+                    self.register_anon_member_enum(key, values);
+                }
+
                 let info = TypeInfo {
                     name: type_name.clone(),
                     namespace: Some(ns_name.clone()),
@@ -541,6 +572,34 @@ impl TypeIndex {
     }
 
     fn register_nadeo_enum(&mut self, qualified_name: String, values: Vec<(String, i64)>) {
+        self.insert_nadeo_enum(qualified_name, values, false);
+    }
+
+    /// Register an inline member enum the dump left unnamed (B016).
+    ///
+    /// `preferred_key` is `Module::Class::Member`. A *named* enum already
+    /// holding that key always wins — a nested `enum` block and a member
+    /// can share a name — and so does an earlier anonymous member of the
+    /// same name, so later claimants take `<key>#2`, `<key>#3`, … `#` cannot
+    /// occur in an AngelScript identifier, which keeps the disambiguated key
+    /// unmistakably synthetic. Both the probe order and the members feeding
+    /// it are deterministic, so identical bytes yield identical keys.
+    fn register_anon_member_enum(&mut self, preferred_key: String, values: Vec<(String, i64)>) {
+        let mut key = preferred_key.clone();
+        let mut nth = 1usize;
+        while self.enums.contains_key(&key) {
+            nth += 1;
+            key = format!("{}#{}", preferred_key, nth);
+        }
+        self.insert_nadeo_enum(key, values, true);
+    }
+
+    fn insert_nadeo_enum(
+        &mut self,
+        qualified_name: String,
+        values: Vec<(String, i64)>,
+        anonymous: bool,
+    ) {
         let (namespace, name) = match qualified_name.rsplit_once("::") {
             Some((ns, tail)) => (Some(ns.to_string()), tail.to_string()),
             None => (None, qualified_name.clone()),
@@ -550,6 +609,7 @@ impl TypeIndex {
             namespace,
             values,
             source: TypeSource::Nadeo,
+            anonymous,
         });
     }
 
@@ -567,6 +627,41 @@ impl TypeIndex {
         self.enums.get(qualified_name)
     }
 
+    /// Source-facing enum lookup. Anonymous member enums are keyed by
+    /// declaration context solely for internal data queries; that synthetic
+    /// key is never a type name AngelScript accepts in user source.
+    pub fn lookup_source_enum(&self, qualified_name: &str) -> Option<&EnumInfo> {
+        self.lookup_enum(qualified_name)
+            .filter(|info| !info.anonymous)
+    }
+
+    /// The inline enum declared *by* `member` of engine class `class_qname`
+    /// (B016). The Nadeo dump gives such an enum no name of its own, so it
+    /// is keyed by its declaring context (`Module::Class::Member`) and is
+    /// deliberately absent from every source-facing lookup — the values are
+    /// reachable in-game only through the member, never by writing the
+    /// enum's name.
+    ///
+    /// Walks the same `#2`, `#3`, … chain [`Self::register_anon_member_enum`]
+    /// assigns, because the plain key can be owned by a *named* nested enum
+    /// of the same name, and only ever returns an anonymous entry — a named
+    /// enum is not "the enum this member declares". When one class declares
+    /// two anonymous enums under the same member name, this returns the
+    /// first; the rest are reachable via [`Self::enums_iter`].
+    pub fn lookup_member_enum(&self, class_qname: &str, member: &str) -> Option<&EnumInfo> {
+        let base = format!("{}::{}", class_qname, member);
+        let mut key = base.clone();
+        let mut nth = 1usize;
+        loop {
+            let info = self.enums.get(&key)?;
+            if info.anonymous {
+                return Some(info);
+            }
+            nth += 1;
+            key = format!("{}#{}", base, nth);
+        }
+    }
+
     /// Look up a Core funcdef by qualified name (`UI::InputTextCallback`,
     /// `CoroutineFunc`).
     pub fn lookup_funcdef(&self, qualified_name: &str) -> Option<&FuncdefInfo> {
@@ -576,6 +671,11 @@ impl TypeIndex {
     /// Iterate all known enums by qualified name.
     pub fn enums_iter(&self) -> impl Iterator<Item = (&String, &EnumInfo)> {
         self.enums.iter()
+    }
+
+    /// Iterate only enums that have a real, source-writable name.
+    pub fn source_enums_iter(&self) -> impl Iterator<Item = (&String, &EnumInfo)> {
+        self.enums.iter().filter(|(_, info)| !info.anonymous)
     }
 
     /// Iterate all function overload sets directly under `namespace`
@@ -593,18 +693,22 @@ impl TypeIndex {
         })
     }
 
-    /// Iterate all enums directly under `namespace` (qualified name → info).
-    /// Used by namespace-shortcut completions when enum matching is enabled.
+    /// Iterate source-visible enums directly under `namespace` (qualified
+    /// name → info). Used by namespace-shortcut completions when enum
+    /// matching is enabled; contextual anonymous enums are intentionally
+    /// excluded.
     pub fn namespace_enums(&self, namespace: &str) -> impl Iterator<Item = (&String, &EnumInfo)> {
         let prefix = format!("{}::", namespace);
-        self.enums.iter().filter(move |(qname, _)| {
-            qname
-                .strip_prefix(&prefix)
-                .is_some_and(|rest| !rest.contains("::"))
+        self.enums.iter().filter(move |(qname, info)| {
+            !info.anonymous
+                && qname
+                    .strip_prefix(&prefix)
+                    .is_some_and(|rest| !rest.contains("::"))
         })
     }
 
-    /// Get all member names for namespace completion (e.g., after "UI::")
+    /// Get source-visible member names for namespace completion (e.g., after
+    /// "UI::").
     pub fn namespace_members(&self, namespace: &str) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let prefix = format!("{}::", namespace);
@@ -622,7 +726,10 @@ impl TypeIndex {
                 }
             }
         }
-        for qname in self.enums.keys() {
+        for (qname, info) in &self.enums {
+            if info.anonymous {
+                continue;
+            }
             if let Some(name) = qname.strip_prefix(&prefix) {
                 if !name.contains("::") {
                     seen.insert(name.to_string());
@@ -641,7 +748,7 @@ impl TypeIndex {
         members
     }
 
-    /// Get all known namespaces
+    /// Get all source-visible namespaces.
     pub fn namespaces(&self) -> Vec<String> {
         let mut nss: std::collections::HashSet<String> = std::collections::HashSet::new();
         for info in self.types.values() {
@@ -656,7 +763,7 @@ impl TypeIndex {
                 }
             }
         }
-        for en in self.enums.values() {
+        for en in self.enums.values().filter(|en| !en.anonymous) {
             if let Some(ns) = &en.namespace {
                 nss.insert(ns.clone());
             }
@@ -901,17 +1008,15 @@ impl DbDiff {
 /// (docs, ids, descriptions) is deliberately not compared, so a doc-only
 /// DB refresh reports zero drift.
 ///
-/// Two limitations the caller should know about, because both mean a real
-/// change can go unreported:
+/// One limitation the caller should know about, because it means a real
+/// change can go unreported: Core's top-level `funcdefs` are loaded into
+/// [`TypeIndex`] for lookup (GH #63) but are not a [`DbSymbolKind`], so they
+/// are not diffed here. `props` remain count-only via [`TypeDbCounts`].
 ///
-/// * Core's top-level `funcdefs` are loaded into [`TypeIndex`] for lookup
-///   (GH #63) but are not a [`DbSymbolKind`], so they are not diffed here.
-///   `props` remain count-only via [`TypeDbCounts`].
-/// * Anonymous engine enums that collide on one qualified key (15 distinct
-///   enums are all `Control::UnnamedEnum`) are only represented by whichever
-///   one `add_nadeo` registered, so a change to any of the others is
-///   invisible to this diff. See the KNOWN LIMITATION note in `add_nadeo`
-///   (tracked as B016).
+/// Inline engine enums the dump leaves unnamed were a second such gap — all
+/// 15 of `Control`'s collapsed onto `Control::UnnamedEnum` and only the
+/// first was diffed — until B016 keyed them by their declaring context.
+/// Each is compared on its own now.
 pub fn diff_indexes(old: &TypeIndex, new: &TypeIndex) -> DbDiff {
     let mut diff = DbDiff::default();
     diff_entries(
@@ -1046,10 +1151,16 @@ fn class_facts(info: &TypeInfo) -> BTreeSet<String> {
 }
 
 fn enum_facts(info: &EnumInfo) -> BTreeSet<String> {
-    info.values
+    let mut facts: BTreeSet<String> = info
+        .values
         .iter()
         .map(|(name, value)| format!("value {name} = {value}"))
-        .collect()
+        .collect();
+    facts.insert(format!(
+        "source-facing {}",
+        if info.anonymous { "anonymous" } else { "named" }
+    ));
+    facts
 }
 
 /// One fact per overload, so an added or dropped overload of an existing
@@ -1106,6 +1217,30 @@ fn member_inline_enum_values(raw: Option<&serde_json::Value>) -> Option<Vec<(Str
             .map(|(i, v)| (v.clone(), i as i64))
             .collect(),
     )
+}
+
+/// Does the member's declared type name identify a real enum type, or is it
+/// the dump's placeholder for an enum declared inline with no name? (B016)
+///
+/// Every anonymous inline enum in a module carries the same `UnnamedEnum`
+/// placeholder, so it names nothing and cannot be a key.
+fn is_anonymous_enum_type_name(type_name: &str) -> bool {
+    type_name.is_empty() || type_name == "UnnamedEnum"
+}
+
+/// Key for an inline enum the dump left unnamed: its declaring context
+/// (B016). `class_qname` is `Module::Class`.
+///
+/// The member name is what makes the key both unique and meaningful, so it
+/// is used whenever the dump supplies one. A member the dump leaves unnamed
+/// cannot be identified, so it falls back to its declaration ordinal — still
+/// stable across loads, since the members of a type are a JSON array.
+fn anon_member_enum_key(class_qname: &str, member_name: &str, ordinal: usize) -> String {
+    if member_name.is_empty() {
+        format!("{}::UnnamedEnum#{}", class_qname, ordinal)
+    } else {
+        format!("{}::{}", class_qname, member_name)
+    }
 }
 
 fn qualify_nadeo_member_type_name(
@@ -2038,6 +2173,42 @@ mod diff_tests {
         );
     }
 
+    /// The enum's source-facing status changes the checker surface even
+    /// when its key and values do not; the typedb diff must report it.
+    #[test]
+    fn diff_reports_changed_enum_source_facing_status() {
+        let enum_db =
+            r#"{"op":"1.0.0","enums":[{"ns":"UI","name":"Cond","values":{"Always":{"v":0}}}]}"#;
+        let named = core_index("en-source-named", enum_db);
+        let mut anonymous = core_index("en-source-anonymous", enum_db);
+        anonymous.enums.get_mut("UI::Cond").unwrap().anonymous = true;
+
+        for (old, new, removed, added) in [
+            (&anonymous, &named, "anonymous", "named"),
+            (&named, &anonymous, "named", "anonymous"),
+        ] {
+            let diff = diff_indexes(old, new);
+            assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+            assert_eq!(diff.changed[0].kind, DbSymbolKind::Enum);
+            assert!(
+                diff.changed[0]
+                    .details
+                    .iter()
+                    .any(|detail| detail == &format!("- source-facing {removed}")),
+                "{:?}",
+                diff.changed[0].details
+            );
+            assert!(
+                diff.changed[0]
+                    .details
+                    .iter()
+                    .any(|detail| detail == &format!("+ source-facing {added}")),
+                "{:?}",
+                diff.changed[0].details
+            );
+        }
+    }
+
     #[test]
     fn diff_reports_added_enum_member() {
         let old = core_index(
@@ -2060,12 +2231,16 @@ mod diff_tests {
         );
     }
 
-    /// Regression guard for the load-order bug this diff surfaced: 66 inline
-    /// member-enum type names collide within a Nadeo module (15 distinct
-    /// anonymous enums are all `Control::UnnamedEnum`) and are resolved by
-    /// `or_insert`. Iterating the `ns`/type HashMaps directly made the loaded
-    /// index differ between two loads of the same bytes. Same file in ⇒ same
-    /// index out.
+    /// Regression guard for the load-order bug this diff surfaced: iterating
+    /// the `ns`/type HashMaps directly made the loaded index differ between
+    /// two loads of the same bytes wherever an enum key was contested. Same
+    /// file in ⇒ same index out.
+    ///
+    /// The contest that exposed it — 66 inline member-enum type names
+    /// colliding within a module, 15 distinct anonymous enums all keyed
+    /// `Control::UnnamedEnum` — is gone since B016 keys them by declaring
+    /// context, but sorted registration still decides `register_anon_member_enum`'s
+    /// `#2` probe order, so the guard stays load-bearing.
     #[test]
     fn loading_the_same_db_twice_yields_identical_enums() {
         let dir =
@@ -2098,12 +2273,23 @@ mod diff_tests {
         );
         assert_eq!(fa, fb, "two loads of the same DB must agree");
 
-        // Colliding keys still resolve to exactly one entry — the point is
-        // that it is always the *same* one.
+        // The formerly-colliding group resolves to 15 separate entries now
+        // (B016), and to the same 15 on every load.
         assert!(
-            a.lookup_enum("Control::UnnamedEnum").is_some(),
-            "the colliding key should still be registered"
+            a.lookup_enum("Control::UnnamedEnum").is_none(),
+            "the placeholder key must not come back"
         );
+        let control_anon = |index: &TypeIndex| {
+            let mut keys: Vec<String> = index
+                .enums_iter()
+                .filter(|(qname, info)| info.anonymous && qname.starts_with("Control::"))
+                .map(|(qname, _)| qname.clone())
+                .collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(control_anon(&a).len(), 15, "{:?}", control_anon(&a));
+        assert_eq!(control_anon(&a), control_anon(&b));
     }
 
     // === ordering / shape ===
@@ -2313,5 +2499,425 @@ mod shape_guard_tests {
         let missing = std::env::temp_dir().join("openplanet-lsp-no-such-db.json");
         let problems = check_typedb_shape(&missing, &fixture_game()).unwrap_err();
         assert!(!problems.is_empty(), "{problems:?}");
+    }
+}
+
+/// B016 — inline/anonymous member enums must be keyed by their declaring
+/// context, not collapsed onto `<Module>::UnnamedEnum`.
+///
+/// The Nadeo dump gives an inline member enum no name of its own: the member
+/// carries `"t": "UnnamedEnum"` plus an `e` block of values. Keying by that
+/// type name put every anonymous enum in a module on one key, and
+/// `or_insert` dropped all but the first — 132 anonymous enums in the shipped
+/// fixture collapsed to 14 (one per module), with `Control` losing 14 of 15.
+#[cfg(test)]
+mod anon_member_enum_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const CORE_MIN: &str = r#"{"op":"1.0.0","functions":[],"classes":[],"enums":[]}"#;
+
+    fn fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb")
+    }
+
+    fn load_fixture() -> TypeIndex {
+        let dir = fixture_dir();
+        TypeIndex::load(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+        )
+        .unwrap()
+    }
+
+    /// Build an index over a synthetic Nadeo dump (Core stays empty).
+    fn nadeo_index(tag: &str, nadeo: &str) -> TypeIndex {
+        let dir = std::env::temp_dir().join(format!(
+            "openplanet-lsp-anon-enum-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let core_path = dir.join("OpenplanetCore.json");
+        let nadeo_path = dir.join("OpenplanetNext.json");
+        std::fs::write(&core_path, CORE_MIN).unwrap();
+        std::fs::write(&nadeo_path, nadeo).unwrap();
+        TypeIndex::load(&core_path, &nadeo_path).unwrap()
+    }
+
+    /// Every anonymous member enum in the shipped fixture, read straight
+    /// from the JSON: `(Module::Class::Member, values)`.
+    fn expected_from_fixture() -> Vec<(String, Vec<(String, i64)>)> {
+        let db = NadeoDatabase::load_from_file(&fixture_dir().join("OpenplanetNext.json")).unwrap();
+        let mut out = Vec::new();
+        let mut modules: Vec<&String> = db.ns.keys().collect();
+        modules.sort();
+        for ns_name in modules {
+            let types = &db.ns[ns_name];
+            let mut type_names: Vec<&String> = types.keys().collect();
+            type_names.sort();
+            for type_name in type_names {
+                for member in &types[type_name].m {
+                    if member.kind() != NadeoMemberKind::Enum {
+                        continue;
+                    }
+                    if member.type_name() != Some("UnnamedEnum") {
+                        continue;
+                    }
+                    let values = member_inline_enum_values(member.e.as_ref()).unwrap();
+                    out.push((format!("{}::{}::{}", ns_name, type_name, member.n), values));
+                }
+            }
+        }
+        out
+    }
+
+    /// The headline data loss: 132 anonymous member enums in the fixture,
+    /// each independently queryable under its declaring context. Before
+    /// B016 only 14 survived (one per module).
+    #[test]
+    fn every_anonymous_member_enum_is_independently_queryable() {
+        let index = load_fixture();
+        let expected = expected_from_fixture();
+        assert_eq!(
+            expected.len(),
+            132,
+            "fixture shape guard: the shipped Next dump declares 132 anonymous \
+             member enums — update this count deliberately on a DB refresh"
+        );
+        for (key, values) in &expected {
+            let found = index.lookup_enum(key).unwrap_or_else(|| {
+                panic!("anonymous member enum `{key}` is missing from the index")
+            });
+            assert_eq!(&found.values, values, "values of `{key}`");
+        }
+    }
+
+    /// The 66 colliding inline member-enum type names are gone: no enum key
+    /// is a bare `<Module>::UnnamedEnum` any more.
+    #[test]
+    fn no_module_level_unnamed_enum_key_survives() {
+        let index = load_fixture();
+        let leftovers: Vec<&String> = index
+            .enums_iter()
+            .map(|(qname, _)| qname)
+            .filter(|qname| qname.ends_with("::UnnamedEnum"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "anonymous enums must not be keyed by the placeholder type name: {leftovers:?}"
+        );
+        assert!(index.lookup_enum("Control::UnnamedEnum").is_none());
+    }
+
+    /// The worst collision group: `Control` had 15 distinct anonymous enums
+    /// on one key, so 14 were dropped. All 15 must now resolve, each with
+    /// its own values.
+    #[test]
+    fn control_modules_fifteen_anonymous_enums_all_resolve() {
+        let index = load_fixture();
+        let control: Vec<String> = expected_from_fixture()
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k.starts_with("Control::"))
+            .collect();
+        assert_eq!(control.len(), 15, "{control:?}");
+        for key in &control {
+            assert!(
+                index.lookup_enum(key).is_some(),
+                "`{key}` must resolve independently"
+            );
+        }
+        assert_eq!(
+            index
+                .lookup_enum("Control::CControlColorChooser::StyleType")
+                .map(|e| e.values.clone()),
+            Some(vec![
+                ("HueSlider".to_string(), 0),
+                ("SLSquare".to_string(), 1),
+                ("MinimalReadOnly".to_string(), 2),
+            ])
+        );
+    }
+
+    /// Variant — two previously-collided enums that share value *names*
+    /// (`None`) stay distinct and separately queryable.
+    #[test]
+    fn collided_enums_sharing_value_names_stay_distinct() {
+        let index = load_fixture();
+        for (a, b, shared) in [
+            (
+                "Control::CControlBase::AlignHorizontal",
+                "Control::CControlBase::AlignVertical",
+                "None",
+            ),
+            (
+                "Hms::CHmsViewport::TextureRender",
+                "Hms::CHmsViewportPerfDbg::VisionSkip",
+                "All",
+            ),
+            // Same member name on two classes, differing in exactly one
+            // value (`Custom` vs `Multi` at 7) — the collapse used to serve
+            // one enum's values for the other.
+            (
+                "Game::CGameCtnChallenge::Kind",
+                "Game::CGameCtnChallengeInfo::Kind",
+                "Campaign",
+            ),
+        ] {
+            let ea = index.lookup_enum(a).unwrap_or_else(|| panic!("{a}"));
+            let eb = index.lookup_enum(b).unwrap_or_else(|| panic!("{b}"));
+            assert!(
+                ea.values.iter().any(|(n, _)| n == shared),
+                "{a} lacks {shared}"
+            );
+            assert!(
+                eb.values.iter().any(|(n, _)| n == shared),
+                "{b} lacks {shared}"
+            );
+            assert_ne!(ea.values, eb.values, "{a} and {b} must stay distinct");
+        }
+    }
+
+    /// Variant — two anonymous enums with *identical* values on different
+    /// classes are still two entries, because the key carries the class.
+    #[test]
+    fn identical_anonymous_enums_on_different_classes_are_both_kept() {
+        let index = load_fixture();
+        for (a, b) in [
+            (
+                "Control::CControlBase::AlignHorizontal",
+                "Control::CControlLayout::AlignHorizontal",
+            ),
+            (
+                "Control::CControlButton::DisplayType",
+                "Control::CControlEnum::DisplayType",
+            ),
+        ] {
+            let ea = index.lookup_enum(a).unwrap_or_else(|| panic!("{a}"));
+            let eb = index.lookup_enum(b).unwrap_or_else(|| panic!("{b}"));
+            assert_eq!(
+                ea.values, eb.values,
+                "{a} / {b} should carry the same values"
+            );
+        }
+    }
+
+    /// Variant — a module with exactly ONE anonymous member enum never
+    /// collided, but its key must still be contextual (no regression to
+    /// `Audio::UnnamedEnum`).
+    #[test]
+    fn single_anonymous_enum_module_is_also_keyed_by_context() {
+        let index = load_fixture();
+        let audio: Vec<String> = expected_from_fixture()
+            .into_iter()
+            .map(|(k, _)| k)
+            .filter(|k| k.starts_with("Audio::"))
+            .collect();
+        assert_eq!(audio, vec!["Audio::CAudioPort::SettingQuality".to_string()]);
+        assert!(index
+            .lookup_enum("Audio::CAudioPort::SettingQuality")
+            .is_some());
+        assert!(index.lookup_enum("Audio::UnnamedEnum").is_none());
+    }
+
+    /// The member → enum link is queryable directly, which is what
+    /// completion/hover need (the values are reachable in-game only through
+    /// the member).
+    #[test]
+    fn member_enum_is_reachable_from_its_declaring_member() {
+        let index = load_fixture();
+        let en = index
+            .lookup_member_enum("Control::CControlEntry", "Type")
+            .expect("Control::CControlEntry::Type");
+        assert!(en.values.iter().any(|(n, _)| n == "TimeHhMmSsMil"));
+        assert!(index
+            .lookup_member_enum("Control::CControlEntry", "Nope")
+            .is_none());
+    }
+
+    /// Fallback — an anonymous enum whose declaring member cannot be named
+    /// (empty member name) gets a stable synthesized key derived from its
+    /// declaration ordinal, and two loads agree.
+    #[test]
+    fn unidentifiable_member_falls_back_to_a_stable_synthesized_key() {
+        let nadeo = r#"{"op":"1.0.0","ns":{"X":{"C":{"i":"1","m":[
+            {"n":"","i":0,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["A","B"]}},
+            {"n":"","i":1,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["C"]}}
+        ]}}}}"#;
+        let first = nadeo_index("fallback-a", nadeo);
+        let second = nadeo_index("fallback-b", nadeo);
+        let keys = |ix: &TypeIndex| {
+            let mut k: Vec<String> = ix.enums_iter().map(|(q, _)| q.clone()).collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&first), keys(&second), "fallback keys must be stable");
+        assert_eq!(keys(&first).len(), 2, "{:?}", keys(&first));
+        assert!(
+            keys(&first).iter().all(|k| k.starts_with("X::C::")),
+            "{:?}",
+            keys(&first)
+        );
+        let values: Vec<Vec<(String, i64)>> = keys(&first)
+            .iter()
+            .map(|k| first.lookup_enum(k).unwrap().values.clone())
+            .collect();
+        assert!(values.iter().any(|v| v.len() == 2) && values.iter().any(|v| v.len() == 1));
+    }
+
+    /// Fallback — two anonymous enums declared under the SAME member name on
+    /// one class must not overwrite each other either.
+    #[test]
+    fn duplicate_member_names_on_one_class_do_not_collide() {
+        let nadeo = r#"{"op":"1.0.0","ns":{"X":{"C":{"i":"1","m":[
+            {"n":"Mode","i":0,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["A","B"]}},
+            {"n":"Mode","i":1,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["C"]}}
+        ]}}}}"#;
+        let index = nadeo_index("dup-member", nadeo);
+        let mut keys: Vec<&String> = index.enums_iter().map(|(q, _)| q).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["X::C::Mode", "X::C::Mode#2"], "{keys:?}");
+        assert_eq!(
+            index.lookup_enum("X::C::Mode").map(|e| e.values.len()),
+            Some(2),
+            "the first declaration keeps the plain key"
+        );
+        assert_eq!(
+            index.lookup_enum("X::C::Mode#2").map(|e| e.values.len()),
+            Some(1),
+            "the second takes the disambiguated key"
+        );
+        assert_eq!(
+            index
+                .lookup_member_enum("X::C", "Mode")
+                .map(|e| e.values.len()),
+            Some(2),
+            "the member lookup returns the first declaration"
+        );
+    }
+
+    /// Fallback — an anonymous member whose name matches a nested enum on
+    /// the same class must not displace the nested enum.
+    #[test]
+    fn anonymous_member_does_not_displace_a_nested_enum_of_the_same_name() {
+        let nadeo = r#"{"op":"1.0.0","ns":{"X":{"C":{"i":"1",
+            "e":[{"n":"Mode","v":["Nested0","Nested1"]}],
+            "m":[{"n":"Mode","i":0,"t":"UnnamedEnum","e":{"n":"UnnamedEnum","v":["Anon"]}}]
+        }}}}"#;
+        let index = nadeo_index("nested-clash", nadeo);
+        assert_eq!(
+            index.lookup_enum("X::C::Mode").map(|e| e
+                .values
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>()),
+            Some(vec!["Nested0".to_string(), "Nested1".to_string()]),
+            "the *named* nested enum owns the plain key"
+        );
+        let mut keys: Vec<&String> = index.enums_iter().map(|(q, _)| q).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["X::C::Mode", "X::C::Mode#2"], "{keys:?}");
+        // The member lookup must skip the named squatter and return the
+        // enum the member actually declares.
+        assert_eq!(
+            index.lookup_member_enum("X::C", "Mode").map(|e| e
+                .values
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect::<Vec<_>>()),
+            Some(vec!["Anon".to_string()]),
+            "the member declares the ANONYMOUS enum, not the nested one"
+        );
+    }
+
+    /// The name-resolution surface must not move: an anonymous enum has no
+    /// name in the game, so its synthesized key must stay out of the
+    /// short-name index that resolves unqualified user-written type names.
+    #[test]
+    fn synthesized_keys_stay_out_of_the_short_name_index() {
+        let index = load_fixture();
+        for short in [
+            "AlignHorizontal",
+            "SettingQuality",
+            "StyleType",
+            "UnnamedEnum",
+        ] {
+            assert!(
+                index.find_by_short_name(short).is_empty(),
+                "`{short}` must not become resolvable as a type name: {:?}",
+                index.find_by_short_name(short)
+            );
+        }
+        // `Type` is the one pre-existing short name an unfiltered index
+        // would have hijacked (`Control::CControlEntry::Type` sorts before
+        // `Json::Type`).
+        assert_eq!(
+            index.find_by_short_name("Type").first().map(String::as_str),
+            Some("Json::Type"),
+        );
+        assert!(!index.all_short_names().iter().any(|n| n == "UnnamedEnum"));
+    }
+
+    /// B016: the contextual key's prefix is an internal lookup context, not
+    /// a source namespace that can lend authority to qualified diagnostics.
+    #[test]
+    fn anonymous_member_enum_namespaces_stay_internal() {
+        let index = load_fixture();
+        for namespace in ["Control::CControlEntry", "Audio::CAudioPort"] {
+            assert!(
+                !index.namespace_exists(namespace),
+                "anonymous enum context `{namespace}` must not become a source namespace"
+            );
+        }
+        assert!(
+            index.namespace_exists("Game::CGameCtnBlock"),
+            "named nested enum namespace must stay source-visible"
+        );
+    }
+
+    /// The drift the collapse used to hide. `typedb diff` is the tripwire
+    /// that found B016, and it could only ever see the one anonymous enum
+    /// that won its module's collision. Change a value in one that did NOT
+    /// win, and the diff must now report it — otherwise `typedb refresh`
+    /// could ship a changed engine enum silently.
+    #[test]
+    fn a_change_to_a_formerly_dropped_anonymous_enum_is_reported() {
+        // `AA` sorts before `ZZ`, so pre-B016 both members keyed
+        // `X::UnnamedEnum` and only `AA`'s values reached the index.
+        let db = |zz_second: &str| {
+            format!(
+                r#"{{"op":"1.0.0","ns":{{"X":{{
+                    "AA":{{"i":"1","m":[{{"n":"Mode","i":0,"t":"UnnamedEnum","e":{{"n":"UnnamedEnum","v":["Keep"]}}}}]}},
+                    "ZZ":{{"i":"2","m":[{{"n":"Mode","i":0,"t":"UnnamedEnum","e":{{"n":"UnnamedEnum","v":["Same","{zz_second}"]}}}}]}}
+                }}}}}}"#
+            )
+        };
+        let old = nadeo_index("drift-old", &db("Before"));
+        let new = nadeo_index("drift-new", &db("After"));
+        let diff = diff_indexes(&old, &new);
+        assert_eq!(diff.counts(), (0, 0, 1), "{diff:?}");
+        assert_eq!(diff.changed[0].name, "X::ZZ::Mode");
+        assert_eq!(diff.changed[0].kind, DbSymbolKind::Enum);
+    }
+
+    /// Determinism, restated for the new keys: identical bytes in ⇒
+    /// identical anonymous-enum keys and values out.
+    #[test]
+    fn anonymous_enum_keys_are_identical_across_two_loads() {
+        let facts = |index: &TypeIndex| {
+            let mut all: Vec<String> = index
+                .enums_iter()
+                .flat_map(|(qname, info)| {
+                    info.values
+                        .iter()
+                        .map(move |(name, v)| format!("{qname}::{name} = {v}"))
+                })
+                .collect();
+            all.sort();
+            all
+        };
+        assert_eq!(facts(&load_fixture()), facts(&load_fixture()));
     }
 }
