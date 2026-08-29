@@ -356,16 +356,31 @@ fn unused_declarations_filtered(
             // already warns once, under its own name. An interface and its
             // methods always come from the same file's extraction, so the
             // owner set is file-local.
-            let interface_owners: HashSet<&str> = symbols
+            //
+            // Owner name AND span: `namespace I { void Dead() {} }` beside
+            // an `interface I` pools `I::Dead` under the same owner
+            // spelling, and exempting by name alone would silently drop
+            // that finding. A method's span lies inside its interface's;
+            // a namespace member's does not.
+            let interfaces: Vec<(&str, crate::lexer::Span)> = symbols
                 .file_symbols(file_id)
                 .iter()
                 .filter(|s| matches!(s.kind, SymbolKind::Interface { .. }))
-                .map(|s| s.name.as_str())
+                .map(|s| (s.name.as_str(), s.span))
                 .collect();
+            let declared_by_an_interface = |sym: &Symbol| {
+                let Some((owner, _)) = sym.name.rsplit_once("::") else {
+                    return false;
+                };
+                interfaces.iter().any(|(name, span)| {
+                    *name == owner && span.start <= sym.span.start && sym.span.end <= span.end
+                })
+            };
             for sym in symbols.file_symbols(file_id) {
-                if let Some(unused) =
-                    evaluate_symbol(sym, usage, source, &exempt, &interface_owners)
-                {
+                if declared_by_an_interface(sym) {
+                    continue;
+                }
+                if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
                     out.push(unused);
                 }
             }
@@ -395,16 +410,7 @@ fn evaluate_symbol(
     usage: &WorkspaceUsage,
     source: &str,
     exempt_callback: &dyn Fn(&str) -> bool,
-    interface_owners: &HashSet<&str>,
 ) -> Option<UnusedDeclaration> {
-    // Interface methods: a bodyless contract declaration, dispatched
-    // through implementors and never called by its own qualified name.
-    // See the owner-set construction in `unused_declarations_filtered`.
-    if let Some((owner, _)) = sym.name.rsplit_once("::") {
-        if interface_owners.contains(owner) {
-            return None;
-        }
-    }
     let (kind, simple_name) = match &sym.kind {
         SymbolKind::Class { .. } => ("class", tail_name(&sym.name)),
         SymbolKind::Interface { .. } => ("interface", tail_name(&sym.name)),
@@ -649,6 +655,22 @@ mod tests {
         assert_eq!(
             names(&unused_declarations(&snap, None, &StdHashSet::new())),
             Vec::<String>::new()
+        );
+    }
+
+    /// The exemption must key on the DECLARATION, not on the owner's
+    /// spelling: a namespace that happens to share an interface's name
+    /// must not have its members silently exempted.
+    #[test]
+    fn a_namespace_spelled_like_an_interface_is_not_exempted() {
+        let snap = snap_of(&[(
+            "a.as",
+            "interface I {}\nnamespace I { void Dead() {} }\nvoid Main() {}\n",
+        )]);
+        let report = names(&unused_declarations(&snap, None, &StdHashSet::new()));
+        assert!(
+            report.contains(&"I::Dead".to_string()),
+            "an unused namespace function must still warn; got {report:?}"
         );
     }
 

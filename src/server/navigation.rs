@@ -90,16 +90,17 @@ pub fn goto_definition(
     let (tok_idx, tok_span, qual) = ident_index_at(analysis, position)?;
     let source = analysis.masked_source();
     // 0) `receiver.member`: the member belongs to the receiver's type, so
-    //    resolve it there before the by-name ladder below can land on an
-    //    unrelated global that merely shares the spelling. A receiver whose
-    //    type is unknown (external, unresolved) falls through to that
-    //    ladder rather than refusing — the pre-B054 behaviour.
+    //    resolve it THERE and nowhere else. Once the receiver's type is
+    //    known, a miss is an answer — falling through to the by-name
+    //    ladder below would jump to an unrelated global that merely
+    //    shares the member's spelling, which is what `x.Nope()` did
+    //    before B054. A receiver whose type is NOT known (no checked
+    //    view, an unresolvable expression) still falls through, since
+    //    there is nothing better to say.
     if is_member_access(analysis, tok_idx) && !qual.contains("::") {
         if let Some(owner) = receiver_type_name(analysis, checked, tok_idx, tok_span.start) {
             let members = scope.lookup_member_symbols_with_inheritance(&owner, &qual);
-            if let Some(sym) = prefer_definition(&members) {
-                return symbol_location(sym, files);
-            }
+            return prefer_definition(&members).and_then(|sym| symbol_location(sym, files));
         }
     }
     if let Some(sym) = lookup_workspace_symbol(scope, analysis, &qual, tok_span.start) {
@@ -146,7 +147,12 @@ pub(crate) fn receiver_type_name(
     let tokens = &analysis.tokens;
     let last = tok_idx.checked_sub(2)?;
     if tokens.get(last)?.kind == TokenKind::KwThis {
-        return enclosing_class_simple_name(analysis, offset);
+        // NAMESPACE-QUALIFIED (`Ns::C`, not `C`): a bare name binds the
+        // first workspace symbol spelled that way, so an unqualified
+        // answer retargets every `this.` inside a namespaced class onto a
+        // same-named top-level class. `lookup_member_symbols_with_inheritance`
+        // normalizes either form, so qualifying costs nothing.
+        return enclosing_class_name(&analysis.file, analysis.masked_source(), offset);
     }
     base_type_name(receiver_type(tokens, checked?, last)?)
 }
@@ -241,13 +247,6 @@ pub(crate) fn base_type_name(ty: &TypeRepr) -> Option<String> {
         TypeRepr::Handle(inner) | TypeRepr::Const(inner) => base_type_name(inner),
         _ => None,
     }
-}
-
-/// Simple (unqualified) name of the class whose body contains `offset` —
-/// what a `this.` receiver resolves to. `None` outside any class.
-fn enclosing_class_simple_name(analysis: &DocumentAnalysis, offset: u32) -> Option<String> {
-    crate::server::scope_query::find_enclosing_class(&analysis.file, offset)
-        .map(|cls| cls.name.text(analysis.masked_source()).to_string())
 }
 
 /// Token index of the identifier under `position`. Hover needs the token's
@@ -806,11 +805,32 @@ mod tests {
 
     #[test]
     fn goto_definition_unknown_interface_member_resolves_nothing() {
-        let src = "interface I { void Go(); }\nvoid f(I@ i) { i.Nope(); }\n";
+        // A same-named GLOBAL exists, so `None` here is a real assertion:
+        // without it the by-name ladder would happily land on line 0 and
+        // the test would pass for the wrong reason.
+        let src = "void Nope() {}\ninterface I { void Go(); }\nvoid f(I@ i) { i.Nope(); }\n";
         let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "i.Nope", 2);
         assert!(
-            goto_at(&tw, 0, 1, "i.Nope", 2).is_none(),
-            "a member the interface does not declare must not resolve"
+            loc.is_none(),
+            "a member the interface does not declare must not fall through to the \
+             same-named free function, got {loc:?}"
+        );
+    }
+
+    /// A `this.` receiver must resolve against the LEXICAL class, namespace
+    /// and all. Step 0 resolves the receiver's type by name, and a bare
+    /// `C` binds the top-level `C` as soon as one exists — so an
+    /// unqualified answer here silently retargets every `this.` inside a
+    /// namespaced class.
+    #[test]
+    fn goto_definition_this_member_prefers_the_namespaced_enclosing_class() {
+        let src = "class C { void M() {} }\nnamespace Ns { class C { void M() {} void F() { this.M(); } } }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 1, "this.M", 5).expect("this.M() must resolve");
+        assert_eq!(
+            loc.range.start.line, 1,
+            "must land on Ns::C::M (line 1), not the top-level C::M (line 0)"
         );
     }
 

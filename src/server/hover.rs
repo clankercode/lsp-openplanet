@@ -1878,6 +1878,11 @@ mod tests {
     fn hover_class_implementation_wins_over_the_interface_it_satisfies() {
         // The receiver is the CLASS, so the implementation is the answer —
         // the interface declaration is reachable through an `I@` receiver.
+        // And it is the ONLY answer: `C::Go()` OVERRIDES `I::Go()`, so
+        // rendering both as "2 overloads" would claim the class offers a
+        // choice of signatures it does not have. The inheritance walk
+        // crosses into `I` (a class lists its interfaces among its bases),
+        // so the shadowing has to be explicit.
         let md = hover_checked(
             "interface I { void Go(); }\nclass C : I { void Go() {} }\nvoid f(C@ c) { c.Go(); }\n",
             "Go",
@@ -1886,6 +1891,42 @@ mod tests {
         assert!(
             md.contains("C::Go"),
             "expected the class implementation, got {md:?}"
+        );
+        assert!(
+            !md.contains("I::Go") && !md.contains("overloads"),
+            "an override must shadow the declaration it satisfies, got {md:?}"
+        );
+    }
+
+    /// The same rule for a plain class override, which had the same shape
+    /// before B054 ever touched interfaces.
+    #[test]
+    fn hover_a_class_override_shadows_the_parent_declaration() {
+        let md = hover_checked(
+            "class A { void Run() {} }\nclass B : A { void Run() {} }\nvoid f(B@ b) { b.Run(); }\n",
+            "Run",
+            3,
+        );
+        assert!(md.contains("B::Run"), "expected B::Run, got {md:?}");
+        assert!(
+            !md.contains("A::Run") && !md.contains("overloads"),
+            "an override must shadow the parent's declaration, got {md:?}"
+        );
+    }
+
+    /// Shadowing is by SIGNATURE, not by name: a parent overload the child
+    /// does not override is still a real choice and must still be listed.
+    #[test]
+    fn hover_a_parent_overload_with_a_different_signature_survives() {
+        let md = hover_checked(
+            "class A { void Run(int a) {} }\nclass B : A { void Run() {} }\nvoid f(B@ b) { b.Run(); }\n",
+            "Run",
+            3,
+        );
+        assert!(md.contains("B::Run"), "expected B::Run, got {md:?}");
+        assert!(
+            md.contains("A::Run") && md.contains("2 overloads"),
+            "a non-overriding parent overload must still be offered, got {md:?}"
         );
     }
 

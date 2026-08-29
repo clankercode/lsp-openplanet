@@ -2216,7 +2216,9 @@ mod tests {
     }
 
     #[test]
-    fn a_free_function_rename_refuses_for_a_method_on_a_derived_interface() {
+    fn a_free_function_rename_refuses_for_a_method_on_an_interface_with_a_base() {
+        // `Go` is declared on `B` itself; the point is that an interface
+        // carrying bases is still recognised as an owner.
         let src = "void Go() {}\ninterface A {}\ninterface B : A { void Go(); }\n";
         assert!(!refused(src, "Go() {}", "Run").is_empty());
     }

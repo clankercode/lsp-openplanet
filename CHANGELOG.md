@@ -99,6 +99,27 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **Interface members are visible to every language feature (B054)** — the
+  symbol table registered an interface as one symbol and never descended into
+  its methods, so no `I::method` symbol existed at all. Hover on an
+  interface-typed receiver reported `(local) <error> Go` instead of the
+  method, completion after `i.` offered nothing, and workspace symbols could
+  not find `I::Go`. All three now work, and interface methods never warn as
+  unused (they are contract declarations reached by virtual dispatch).
+
+- **Go to Definition on `receiver.member` (B054)** — it had no receiver step
+  at all: it tried the bare name as a global, then a `this.` / implicit-`this`
+  fallback, so `c.Go()` on a class-typed receiver resolved nothing just as
+  `i.Go()` on an interface-typed one did. Member accesses now resolve against
+  the receiver's type and its inheritance chain, and no longer jump to an
+  unrelated global that merely shares the member's spelling.
+
+- **A method override no longer renders as two overloads** — hover on a class
+  method that implements an interface method, or overrides a parent's, listed
+  both declarations as a choice of signatures. An override shadows the
+  declaration it satisfies; a parent overload with a *different* signature is
+  still offered.
+
 - **Module-level engine enums resolve (B046)** — the engine's JSON dump maps
   `namespace -> type name -> type`, so it can only carry an enum nested in a
   class. It reaches most module-level enums anyway, because a class member
