@@ -36,3 +36,4 @@ bugs:
     - file: B035-code-actions-advertise-no-kind.todo
     - file: B036-quick-fixes-for-diagnostics-wh.todo
     - file: B037-quick-fixes-for-conversion-and.todo
+    - file: B038-quick-fixes-for-rename-and-con.todo

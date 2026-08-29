@@ -1,0 +1,84 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:05:56Z"
+depends_on:
+    - B035
+estimate_hours: 1
+id: B038
+priority: medium
+status: pending
+tags:
+    - lsp
+    - code-actions
+    - ux
+title: Quick fixes for rename and const-correctness diagnostics
+updated_at: "2026-08-29T15:05:56Z"
+---
+Found by a coordinator feature-gap review, 2026-08-30. Depends on B035.
+
+## Gap
+Three diagnostic families whose fix is a rename or a const adjustment. These
+are last in the quick-fix sequence because each offers TWO valid alternatives
+and none can be auto-applied.
+
+- `VariableShadow` ("Variable 'x' hides another variable of same name in outer
+  scope") — fix: rename the inner declaration. The rename machinery already
+  exists (`rename_provider` is live, `src/server/mod.rs:1416`), so the action
+  should reuse it rather than hand-rolling an edit. Suggested name generation
+  must avoid colliding with anything else in scope.
+- `DuplicateFunction` ("A function with the same name and parameters already
+  exists", ERROR, compile aborts) — fix: rename one of the two. Which one is
+  the user's call, so offer the rename on the diagnosed declaration only.
+- `NonConstMethodOnConstReceiver { method, object_type }` — the game fails
+  with "No matching signatures to 'T::M() const'". TWO fixes, both legitimate:
+  (a) mark the METHOD `const` at its declaration (cross-file edit, correct
+  when the method genuinely does not mutate); (b) drop `const` from the
+  RECEIVER's type (local edit, correct when the caller should not have
+  promised constness). Offer both, prefer neither.
+
+## Design decision (coordinator, 2026-08-30)
+None of these are `isPreferred` and none participate in
+`source.fixAll.openplanet`. Every one of them either changes an API surface or
+picks between two intents the tool cannot distinguish. Offering them on
+right-click is right; applying them on save is not.
+
+For `NonConstMethodOnConstReceiver` fix (a): the rule is deliberately scoped to
+workspace-local classes because external typedb methods carry no const flag
+(see the variant's doc comment in checker.rs). The fix inherits that scope —
+never offer to edit a declaration outside the workspace.
+
+## Test plan (TDD, red first)
+Red, one per family.
+
+Variants (per CLAUDE.md, generalize):
+
+`VariableShadow`:
+- local shadowing a local, a parameter, a class field, and a global
+- suggested name does not collide with anything in either scope (assert
+  against a fixture that already contains the obvious candidate name)
+- rename updates ALL references to the inner variable and NONE to the outer
+  (this is the whole risk of the fix — test it hard)
+- shadow inside a nested block, inside a loop body, inside a lambda if
+  supported
+- the existing "prefix with underscore" suppression is unaffected
+
+`DuplicateFunction`:
+- two top-level functions, same name, same param types -> action on the second
+- same name, DIFFERENT param types -> no diagnostic, no action (overloads are
+  legal; regression guard)
+- namespaced duplicates in the same namespace -> diagnosed and fixable
+- same name in DIFFERENT namespaces -> no diagnostic
+- rename updates call sites of the renamed declaration only
+
+`NonConstMethodOnConstReceiver`:
+- both actions offered, distinct titles, neither preferred
+- fix (a) edits the method declaration in ANOTHER file and the edit is a
+  proper multi-file `WorkspaceEdit`
+- fix (a) NOT offered when the method is external (typedb) — scope guard
+- fix (b) edits only the receiver declaration
+- a const method called on a const receiver -> no diagnostic (guard)
+- a non-const method on a NON-const receiver -> no diagnostic (guard)
+- inherited method from a base class -> fix (a) targets the declaring class
+
+## Related
+B035 (seam), B036, B037. Reuses `rename` (src/server/mod.rs:1416).
