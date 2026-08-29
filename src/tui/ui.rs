@@ -2083,6 +2083,33 @@ mod tests {
     }
 
     #[test]
+    fn page_step_never_outruns_the_viewport() {
+        for h in 3u16..=40 {
+            let inner = h.saturating_sub(2) as usize;
+            for density in [ListDensity::Compact, ListDensity::Relaxed] {
+                let mut app = App::from_snapshot(canned_snapshot());
+                if density == ListDensity::Relaxed {
+                    app.toggle_density();
+                }
+                app.set_list_inner_h_for_test(h);
+                let step = app.page_step();
+                assert!(step >= 1, "h={h} {density:?}: a page must move");
+                // Rows a page's worth of items occupies, worst case: every item
+                // at its density height, plus the selected item's extra row in
+                // Relaxed. That must still fit the viewport.
+                let spill = usize::from(density == ListDensity::Relaxed);
+                let rows = step * density.rows_per_item() + spill;
+                if inner >= 3 {
+                    assert!(
+                        rows <= inner,
+                        "h={h} {density:?}: step {step} needs {rows} rows of {inner}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn relaxed_page_step_allows_for_the_spilled_row() {
         let mut app = App::from_snapshot(canned_snapshot());
         app.set_list_inner_h_for_test(14); // 12 inner rows
