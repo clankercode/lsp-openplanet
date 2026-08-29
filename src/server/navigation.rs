@@ -106,6 +106,12 @@ pub fn goto_definition(
     })
 }
 
+/// Token index of the identifier under `position`. Hover needs the token's
+/// neighbours to tell a `receiver.member` access from a bare name (B033).
+pub fn ident_token_index_at(analysis: &DocumentAnalysis, position: Position) -> Option<usize> {
+    ident_index_at(analysis, position).map(|(idx, _, _)| idx)
+}
+
 /// [`ident_span_at`] plus the token index — the fallback needs the token's
 /// neighbours (`this.` prefix, call `(`) to classify the use site.
 fn ident_index_at(
@@ -261,23 +267,36 @@ pub fn lookup_workspace_symbol<'a>(
     name: &str,
     use_offset: u32,
 ) -> Option<&'a Symbol> {
+    prefer_definition(&lookup_workspace_symbols(scope, analysis, name, use_offset))
+}
+
+/// Every workspace candidate for the name at a use site, walking the same
+/// ladder [`lookup_workspace_symbol`] picks its single winner from. Hover
+/// renders the whole set so overloaded functions are not reduced to one
+/// signature (B033).
+pub fn lookup_workspace_symbols<'a>(
+    scope: &'a GlobalScope<'_>,
+    analysis: &DocumentAnalysis,
+    name: &str,
+    use_offset: u32,
+) -> Vec<&'a Symbol> {
     let candidates = scope.lookup_reference(name);
-    if let Some(sym) = prefer_definition(&candidates) {
-        return Some(sym);
+    if !candidates.is_empty() {
+        return candidates;
     }
     if name.contains("::") {
-        return None;
+        return Vec::new();
     }
     let source = analysis.masked_source();
     let ns_path = enclosing_namespace_path(&analysis.file, source, use_offset);
     for depth in (1..=ns_path.len()).rev() {
         let qualified = format!("{}::{}", ns_path[..depth].join("::"), name);
         let candidates = scope.lookup_reference(&qualified);
-        if let Some(sym) = prefer_definition(&candidates) {
-            return Some(sym);
+        if !candidates.is_empty() {
+            return candidates;
         }
     }
-    None
+    Vec::new()
 }
 
 /// Pick the best candidate from a `lookup_reference` result: a real

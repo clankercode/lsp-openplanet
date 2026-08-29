@@ -47,6 +47,13 @@ pub struct FunctionInfo {
     pub namespace: Option<String>,
     pub return_type: String,
     pub params: Vec<ParamInfo>,
+    /// The database's own declaration text (`bool Button(const string&in
+    /// label)`), when the source format carries one. Kept verbatim because
+    /// it is the only place `const` on a handle parameter survives — the
+    /// `typeflags` bits do not encode it — so hover renders the game's exact
+    /// signature instead of a lossy reconstruction (B033). `None` for the
+    /// Nadeo half of the database, which stores no declaration text.
+    pub decl: Option<String>,
     pub doc: Option<String>,
     pub source: TypeSource,
 }
@@ -57,6 +64,8 @@ pub struct MethodInfo {
     pub return_type: String,
     pub params: Vec<ParamInfo>,
     pub is_const: bool,
+    /// Declaration text as stored by the database — see [`FunctionInfo::decl`].
+    pub decl: Option<String>,
     pub doc: Option<String>,
 }
 
@@ -84,6 +93,10 @@ pub struct ParamInfo {
     pub is_out: bool,
     /// `&inout` reference parameter (typedb `typeflags` bits 1|2) (B027).
     pub is_inout: bool,
+    /// `typeflags` bit 3 (value 4): the parameter is const-qualified. Kept so
+    /// the no-`decl` rendering path (the Nadeo half, and any Core entry that
+    /// omits `decl`) can still show `const T &in` rather than `T &in` (B033).
+    pub is_const: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +122,8 @@ pub struct FuncdefInfo {
     pub namespace: Option<String>,
     pub return_type: String,
     pub params: Vec<ParamInfo>,
+    /// Declaration text as stored by the database — see [`FunctionInfo::decl`].
+    pub decl: Option<String>,
     pub doc: Option<String>,
     pub source: TypeSource,
 }
@@ -213,6 +228,16 @@ impl Default for TypeIndex {
     }
 }
 
+/// Put enum members in a stable order: by value, then by name.
+///
+/// The Core dump stores members in a `HashMap`, so sorting by value alone
+/// left aliases that share a value in whatever order the map yielded —
+/// `UI::Plot::Marker` declares both `Auto = -1` and `None = -1`, and hover
+/// could list them either way round between loads (B033).
+pub(crate) fn sort_enum_values(values: &mut [(String, i64)]) {
+    values.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+}
+
 impl TypeIndex {
     pub fn new() -> Self {
         Self::default()
@@ -309,8 +334,10 @@ impl TypeIndex {
                         is_in: a.typeflags & 0b1 != 0,
                         is_out: a.typeflags & 0b10 != 0,
                         is_inout: a.typeflags & 0b11 == 0b11,
+                        is_const: a.typeflags & 0b100 != 0,
                     })
                     .collect(),
+                decl: func.decl.clone(),
                 doc: func.desc.clone(),
                 source: TypeSource::Core,
             };
@@ -339,9 +366,11 @@ impl TypeIndex {
                                 is_in: a.typeflags & 0b1 != 0,
                                 is_out: a.typeflags & 0b10 != 0,
                                 is_inout: a.typeflags & 0b11 == 0b11,
+                                is_const: a.typeflags & 0b100 != 0,
                             })
                             .collect(),
                         is_const: m.is_const,
+                        decl: m.decl.clone(),
                         doc: m.desc.clone(),
                     })
                     .collect(),
@@ -390,7 +419,7 @@ impl TypeIndex {
         for en in &db.enums {
             let qname = Self::qualify(&en.ns, &en.name);
             let mut values: Vec<_> = en.values.iter().map(|(k, v)| (k.clone(), v.v)).collect();
-            values.sort_by_key(|(_, v)| *v);
+            sort_enum_values(&mut values);
             self.enums.insert(
                 qname,
                 EnumInfo {
@@ -421,8 +450,10 @@ impl TypeIndex {
                             is_in: a.typeflags & 0b1 != 0,
                             is_out: a.typeflags & 0b10 != 0,
                             is_inout: a.typeflags & 0b11 == 0b11,
+                            is_const: a.typeflags & 0b100 != 0,
                         })
                         .collect(),
+                    decl: fd.decl.clone(),
                     doc: fd.desc.clone(),
                     source: TypeSource::Core,
                 },
@@ -482,9 +513,14 @@ impl TypeIndex {
                                         is_in: false,
                                         is_out: false,
                                         is_inout: false,
+                                        // The Nadeo dump carries `const` in
+                                        // the signature text, not in flags.
+                                        is_const: false,
                                     })
                                     .collect(),
                                 is_const: false,
+                                // The Nadeo dump stores no declaration text.
+                                decl: None,
                                 doc: None,
                             });
                         }
@@ -1258,6 +1294,27 @@ fn qualify_nadeo_member_type_name(
 
 #[cfg(test)]
 mod tests {
+    /// B033: aliases sharing a value must not depend on map order.
+    #[test]
+    fn sort_enum_values_breaks_value_ties_by_name() {
+        let mut values = vec![
+            ("None".to_string(), -1i64),
+            ("Circle".to_string(), 0),
+            ("Auto".to_string(), -1),
+            ("Square".to_string(), 0),
+        ];
+        super::sort_enum_values(&mut values);
+        assert_eq!(
+            values,
+            vec![
+                ("Auto".to_string(), -1),
+                ("None".to_string(), -1),
+                ("Circle".to_string(), 0),
+                ("Square".to_string(), 0),
+            ]
+        );
+    }
+
     use super::*;
     use std::path::PathBuf;
 

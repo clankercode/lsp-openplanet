@@ -223,9 +223,13 @@ impl<'a> Parser<'a> {
                 TokenKind::At => {
                     self.advance();
                     // If a leading `const` was seen, it binds to the pointee:
-                    // `const Foo@` → `Handle(Const(Foo))`.
+                    // `const Foo@` → `Handle(Const(Foo))`. The span starts at
+                    // the `const` keyword, not at the named type — otherwise
+                    // every consumer that reads the type back as source text
+                    // (the symbol table's stored parameter types, and so
+                    // hover) silently loses the `const` (B033).
                     if is_const {
-                        let span = self.span_from(ty.span.start);
+                        let span = self.span_from(start);
                         ty = TypeExpr {
                             span,
                             kind: TypeExprKind::Const(Box::new(ty)),

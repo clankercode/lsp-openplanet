@@ -105,6 +105,34 @@ GitHub Release body to match this section (gh release edit).
   52 further value names of those enums already failed to resolve, and these 3
   were resolving only by accident, through the scan this change narrows. See
   `todo-false-positives.txt`.
+- **Hover shows the full signature and every overload (B033)** — hovering a
+  function or method used to render `SomeType name()` with a hardcoded empty
+  parameter list, or `(local) void name` with no signature at all, because the
+  checked-view fast path returned before the formatter that builds a real
+  signature ever ran. Hover now renders `rt Name(const string &in a, int b)`
+  for workspace functions, methods (including ones inherited from a base class),
+  namespaced functions, funcdefs and `receiver.Method` member calls — including
+  receivers that are calls, indexing or parenthesised expressions.
+
+  When a name has several overloads, **all** of them are listed — one signature
+  per line under an `*N overloads*` header — for both workspace functions and
+  type-database functions and methods; a single overload is unchanged. The
+  listing is ordered by arity then text, so it does not depend on symbol-table
+  or type-database insertion order.
+
+  Type-database signatures are taken from the database's own declaration text,
+  so `const` on a handle parameter survives. External type hover lists 20
+  properties and 20 methods with their full signatures and says how many more
+  there are, instead of silently cutting the list at 6. Enum hover shows the
+  numeric values on both the workspace and the external path, and workspace
+  parameter types now keep a leading `const` on a handle (`const Foo@`), which
+  the parser's span dropped.
+
+  Two limits worth knowing: an optional parameter of a workspace function
+  renders as `int b = ...`, because the symbol table records *that* a
+  parameter is optional but not its default expression (type-database
+  signatures do show the real default); and workspace symbols still carry no
+  doc comment, because symbol extraction reads the comment-masked source.
 - **TUI diagnostic messages are readable at narrow widths (B029)** — the detail
   box used to hard-clip long messages at the pane edge with no `…`, so you
   could not even tell text was missing, and a long `path:line:col` could squeeze

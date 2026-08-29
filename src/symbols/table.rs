@@ -18,6 +18,42 @@ fn base_class_name(source: &str, ty: &ast::TypeExpr) -> Option<String> {
     }
 }
 
+/// `(name, value)` for every member of an enum declaration.
+///
+/// AngelScript allows any constant expression as an initializer, but hover
+/// only needs the shapes real plugins use: an integer literal (optionally
+/// negated or hexadecimal), or no initializer at all, in which case the value
+/// is the previous member's plus one. Anything else leaves the value unknown,
+/// and — because the implicit run is broken by it — so are the members that
+/// follow it.
+fn enum_values(source: &str, en: &ast::EnumDecl) -> Vec<(String, Option<i64>)> {
+    let mut next_implicit: Option<i64> = Some(0);
+    en.values
+        .iter()
+        .map(|v| {
+            let value = match &v.value {
+                Some(expr) => const_int_expr(expr),
+                None => next_implicit,
+            };
+            next_implicit = value.and_then(|v| v.checked_add(1));
+            (v.name.text(source).to_string(), value)
+        })
+        .collect()
+}
+
+/// Integer value of a literal initializer expression, when it is one.
+fn const_int_expr(expr: &ast::Expr) -> Option<i64> {
+    match &expr.kind {
+        ast::ExprKind::IntLit(v) => Some(*v),
+        ast::ExprKind::HexLit(v) => i64::try_from(*v).ok(),
+        ast::ExprKind::Unary {
+            op: ast::UnaryOp::Neg,
+            expr,
+        } => const_int_expr(expr).and_then(i64::checked_neg),
+        _ => None,
+    }
+}
+
 /// Extract `(params, min_args)` from an AST parameter list. `params` is a
 /// `Vec<(name, type_text)>` using source text for the type expression. `min_args`
 /// counts parameters with no default value (AngelScript, like C++, requires
@@ -412,26 +448,23 @@ impl SymbolTable {
             }
             ast::Item::Enum(en) => {
                 let enum_name = qualify(en.name.text(source));
+                let values = enum_values(source, en);
                 out.push(Symbol {
                     name: enum_name.clone(),
                     kind: SymbolKind::Enum {
-                        values: en
-                            .values
-                            .iter()
-                            .map(|v| (v.name.text(source).to_string(), None))
-                            .collect(),
+                        values: values.clone(),
                     },
                     span: en.span,
                     file_id,
                     doc: None,
                 });
                 // Also register each enum value
-                for val in &en.values {
+                for (val, (_, value)) in en.values.iter().zip(&values) {
                     out.push(Symbol {
                         name: format!("{}::{}", enum_name, val.name.text(source)),
                         kind: SymbolKind::EnumValue {
                             enum_name: enum_name.clone(),
-                            value: None,
+                            value: *value,
                         },
                         span: val.span,
                         file_id,
@@ -711,5 +744,96 @@ mod tests {
             params_of("C::MPlain"),
             vec![("z".to_string(), "int".to_string())]
         );
+    }
+
+    /// B033: the stored parameter type text must round-trip the `const`
+    /// qualifier on a handle. `const Foo@` parses to `Handle(Const(Foo))`
+    /// and the span of both nodes started at `Foo`, so everything that reads
+    /// the type back as source text saw a bare `Foo@` and hover dropped the
+    /// `const`. Every other decoration is pinned alongside it.
+    #[test]
+    fn extract_symbols_param_type_text_keeps_every_decoration() {
+        let cases = [
+            ("const C@ p", "const C@"),
+            ("const C@ &in p", "const C@ &in"),
+            ("C@ const p", "C@ const"),
+            ("C@ p", "C@"),
+            ("C@ &in p", "C@ &in"),
+            ("const string &in p", "const string &in"),
+            ("const string p", "const string"),
+            ("int &out p", "int &out"),
+            ("int &inout p", "int &inout"),
+            ("int p", "int"),
+            ("const int[] &in p", "const int[] &in"),
+            ("array<C@>@ p", "array<C@>@"),
+        ];
+        for (decl, expected) in cases {
+            let src = format!("class C {{}}\nvoid f({}) {{}}\n", decl);
+            let tokens = lexer::tokenize_filtered(&src);
+            let mut parser = Parser::new(&tokens, &src);
+            let file = parser.parse_file();
+            let symbols = SymbolTable::extract_symbols(0, &src, &file);
+            let params = symbols
+                .iter()
+                .find(|s| s.name == "f")
+                .map(|s| match &s.kind {
+                    SymbolKind::Function { params, .. } => params.clone(),
+                    other => panic!("expected Function, got {other:?}"),
+                })
+                .expect("missing f");
+            assert_eq!(
+                params,
+                vec![("p".to_string(), expected.to_string())],
+                "param {decl:?} lost its decoration"
+            );
+        }
+    }
+
+    /// B033: enum members carry their numeric value so hover can show it —
+    /// the workspace path used to render bare names while the type-database
+    /// path rendered `Name = 1`.
+    #[test]
+    fn extract_symbols_enum_values_are_evaluated() {
+        let src = "enum E { A, B, C = 10, D, E2 = 0x1F, F = -3, G = A + 1, H }\n";
+        let tokens = lexer::tokenize_filtered(src);
+        let mut parser = Parser::new(&tokens, src);
+        let file = parser.parse_file();
+        let symbols = SymbolTable::extract_symbols(0, src, &file);
+        let values = symbols
+            .iter()
+            .find(|s| s.name == "E")
+            .map(|s| match &s.kind {
+                SymbolKind::Enum { values } => values.clone(),
+                other => panic!("expected Enum, got {other:?}"),
+            })
+            .expect("missing E");
+        assert_eq!(
+            values,
+            vec![
+                ("A".to_string(), Some(0)),
+                ("B".to_string(), Some(1)),
+                ("C".to_string(), Some(10)),
+                ("D".to_string(), Some(11)),
+                ("E2".to_string(), Some(31)),
+                ("F".to_string(), Some(-3)),
+                // `A + 1` is not a literal — unknown, and it breaks the
+                // implicit run for everything after it.
+                ("G".to_string(), None),
+                ("H".to_string(), None),
+            ]
+        );
+        // The per-member `EnumValue` symbols agree with the enum's list.
+        let value_of = |name: &str| match &symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"))
+            .kind
+        {
+            SymbolKind::EnumValue { value, .. } => *value,
+            other => panic!("expected EnumValue, got {other:?}"),
+        };
+        assert_eq!(value_of("E::A"), Some(0));
+        assert_eq!(value_of("E::F"), Some(-3));
+        assert_eq!(value_of("E::G"), None);
     }
 }
