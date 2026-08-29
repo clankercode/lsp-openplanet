@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T20:44:29Z"
 depends_on: []
 estimate_hours: 1
 id: B053
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Bare enum value carried by two named enums: game rejects as ambiguous, LSP silently takes the first'
@@ -24,3 +26,54 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by the B046 lane, 2026-08-30, via live game probe. Pre-existing and
+unrelated to B046, which merely adds two enums to the pool that can collide.
+
+## Defect
+When a bare value name is carried by more than one NAMED enum, the game
+refuses to compile it:
+
+    Found multiple matching enum values
+
+Confirmed against the live game (Trackmania + Openplanet 1.29.5) on `Turbo`,
+`WallJump` and `FreeWheeling`.
+
+The LSP takes the first match and says nothing. That is a false NEGATIVE — the
+tool stays silent on code the game will reject. Less damaging than a false
+positive, but it is the LSP failing at its job, and the failure is invisible
+until the plugin is compiled in-game.
+
+## Why it matters more than the raw count suggests
+Many engine value names are already multiply defined, so the population is not
+small. It also inverts an assumption the resolver leans on elsewhere: that
+finding A match is finding THE match. Anywhere the index resolves a bare value
+by first-hit, the same silent-wrong-answer shape can appear — including hover
+and go-to-definition, which would point at an arbitrary one of the candidates.
+
+## Work
+- Probe first, as B044 and B046 both did: enumerate bare value names carried by
+  two or more named enums, submit them to the game, and confirm the rejection
+  is uniform rather than dependent on the enums involved. Do not infer this
+  from the dump.
+- Then decide the diagnostic: an ambiguity ERROR matching the game, naming the
+  candidate enums so the fix (qualify it) is obvious.
+- Check hover and go-to-definition for the same first-hit assumption and make
+  them agree with whatever the resolver decides.
+- Distinguish carefully from ANONYMOUS enum collisions, which B044 already
+  settled — the game rejects those for a different reason (the name is
+  unspellable, not ambiguous) and the message differs.
+
+## Gate
+FP fixture ERROR counts WILL rise if any fixture uses an ambiguous bare value,
+and that rise is the fix working. Every new error must be shown to be a name
+the game genuinely rejects as ambiguous — verified by probe, name by name, not
+assumed. Measure two binaries on the same machine at the same time (baselines
+14/1485, 5/276, 2/35, 4/2, 4/4).
+
+## Related
+B046 (found it; adds `ESceneCharVisNotice` and `ESceneVehicleVisEvent` to the
+collidable pool, documented inline in its new fixture and in
+`todo-false-positives.txt`), B044 (anonymous-enum value names — the adjacent
+but distinct case), B016, B052 (the other resolution-accuracy gap B046 found
+and declined to fix), B007.
