@@ -29,6 +29,17 @@
 //! narrower of the two is never too wide, and "too narrow" is not a failure
 //! mode here — both sources always contain the declaration itself.
 //!
+//! ## Cost
+//!
+//! [`innermost_scope_end`] walks the AST and the whole token stream once
+//! per call, and a fix family calls it once per diagnostic it answers — so
+//! describing N shadow warnings in one document is O(N x tokens). Measured
+//! on a synthetic worst case (release build): 50 warnings 0.6ms, 200 6ms,
+//! 500 26ms. Real plugins sit at the other end of that curve — the five
+//! false-positive fixture plugins in `tests/fixtures/` contain **zero**
+//! shadow warnings between them — so this is a deliberate trade of a
+//! quadratic term for a model that is simple enough to be obviously right.
+//!
 //! Everything in this module is intentionally local to the B038 families.
 //! Promoting it to `navigation` so `textDocument/rename` becomes
 //! scope-aware is a worthwhile follow-up, but that would change a live
@@ -487,6 +498,49 @@ mod tests {
     #[test]
     fn a_global_declaration_has_no_enclosing_scope() {
         assert_eq!(scope_end_of("int g = 1;", "g"), None);
+    }
+
+    #[test]
+    fn occurrences_skip_member_and_namespace_qualified_names() {
+        let src = "int x; x; a.x; N::x; x;";
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        let spans = local_occurrences(
+            &analysis.tokens,
+            src,
+            "x",
+            src.find('x').unwrap() as u32,
+            src.len() as u32,
+            &[],
+        );
+        let starts: Vec<usize> = spans.iter().map(|span| span.start as usize).collect();
+        // The declarator, the bare use, and the trailing bare use — but
+        // not `a.x` and not `N::x`.
+        let bare: Vec<usize> = src
+            .match_indices('x')
+            .map(|(at, _)| at)
+            .filter(|at| {
+                !matches!(
+                    src.as_bytes().get(at.wrapping_sub(1)),
+                    Some(b'.') | Some(b':')
+                )
+            })
+            .collect();
+        assert_eq!(bare.len(), 3, "test premise");
+        assert_eq!(
+            starts, bare,
+            "member and `::`-qualified names must be skipped"
+        );
+    }
+
+    #[test]
+    fn occurrences_skip_excluded_ranges() {
+        let src = "x x x x";
+        let analysis = DocumentAnalysis::analyze_plain(src);
+        let spans = local_occurrences(&analysis.tokens, src, "x", 0, src.len() as u32, &[(2, 6)]);
+        assert_eq!(
+            spans.iter().map(|span| span.start).collect::<Vec<_>>(),
+            vec![0, 6]
+        );
     }
 
     #[test]

@@ -263,7 +263,13 @@ fn locate_receiver_const_deletion(
     let analysis = ctx.analysis;
     let source = analysis.masked_source();
     let receiver = simple_receiver_name(&analysis.tokens, source, callee_span)?;
-    let type_span = receiver_type_expr_span(&analysis.file, source, &receiver, callee_span.start)?;
+    let type_span = receiver_type_expr_span(
+        &analysis.file,
+        &analysis.tokens,
+        source,
+        &receiver,
+        callee_span.start,
+    )?;
     let deletion = sole_const_qualifier(&analysis.tokens, type_span)?;
     Some((deletion, receiver))
 }
@@ -290,8 +296,17 @@ fn simple_receiver_name(
 
 /// Span of the declared type of the local or parameter named `receiver`
 /// that is in effect at `use_offset`.
+///
+/// "In effect" is load-bearing, not decorative: taking the nearest
+/// preceding declaration alone would pick a same-named local out of a
+/// sibling block that has already closed —
+/// `void f(const C &in h) { { const C h = C(); } h.M(); }` would then
+/// delete the `const` from the inner declaration, which is not the
+/// receiver of the diagnosed call at all. Locals therefore have to still
+/// be in scope at the use site; parameters always are.
 fn receiver_type_expr_span(
     file: &SourceFile,
+    tokens: &[crate::lexer::Token],
     source: &str,
     receiver: &str,
     use_offset: u32,
@@ -313,7 +328,12 @@ fn receiver_type_expr_span(
     if let Some(body) = &func.body {
         visit_var_decls(body, &mut |var| {
             for declarator in &var.declarators {
-                if declarator.name.text(source) == receiver {
+                if declarator.name.text(source) != receiver {
+                    continue;
+                }
+                let in_scope = scope::innermost_scope_end(file, tokens, declarator.name.span.start)
+                    .is_some_and(|end| use_offset < end);
+                if in_scope {
                     consider(declarator.name.span.start, var.type_expr.span);
                 }
             }
@@ -651,6 +671,63 @@ mod tests {
         assert_eq!(
             titles,
             vec!["Mark `Inner::M()` as a const method".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_closed_sibling_blocks_same_named_local_is_not_mistaken_for_the_receiver() {
+        // The nearest PRECEDING declaration of `h` is the one inside the
+        // block, but it is out of scope by the time the outer `h.M()`
+        // runs. Deleting its `const` would edit a declaration that is not
+        // the receiver at all.
+        let src = "class C { bool M() { return true; } } \
+                   void f(const C &in h) { { const C h = C(); h.M(); } h.M(); }";
+        let workspace = Workspace::single(src);
+        let candidates = const_fixes(&workspace);
+        let receiver_fixes: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.fix.title == RECEIVER_TITLE)
+            .collect();
+        assert_eq!(receiver_fixes.len(), 2, "one per diagnosed call");
+        // The inner call edits the inner declaration; the outer call edits
+        // the parameter. Two different offsets, never the same one twice.
+        let mut starts: Vec<_> = receiver_fixes
+            .iter()
+            .map(|candidate| {
+                edits_for(&candidate.fix.edit, workspace.uri(0))[0]
+                    .range
+                    .start
+            })
+            .collect();
+        starts.sort_by_key(|position| (position.line, position.character));
+        starts.dedup();
+        assert_eq!(starts.len(), 2, "both fixes edited the same declaration");
+        // The outer one must be the parameter, which is the first `const`
+        // in the function signature.
+        let param_const = src.find("const C &in h").expect("parameter") as u32;
+        assert!(
+            starts
+                .iter()
+                .any(|position| position.character as u32 == param_const),
+            "no fix edits the parameter: {starts:?}"
+        );
+    }
+
+    #[test]
+    fn a_global_receiver_offers_only_the_method_fix() {
+        // The receiver is not a local or a parameter, so there is no
+        // declaration in the enclosing function whose `const` we could
+        // drop. Documented rather than guessed at.
+        let src = "class C { bool M() { return true; } } const C g; void f() { g.M(); }";
+        let titles: Vec<_> = const_fixes(&Workspace::single(src))
+            .into_iter()
+            .map(|candidate| candidate.fix.title)
+            .collect();
+        assert!(
+            !titles
+                .iter()
+                .any(|title| title.starts_with("Remove `const`")),
+            "{titles:?}"
         );
     }
 
