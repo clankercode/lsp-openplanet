@@ -46,6 +46,28 @@ fn refusal_error(refusal: rename::Refusal) -> tower_lsp::jsonrpc::Error {
     }
 }
 
+/// A scoped `openplanet/resolvedDefines` query that cannot be answered for the
+/// URI it was given, because several plugin workspaces are live and the URI
+/// belongs to none of them.
+///
+/// Only that case errors. A URI outside the single live shard — a parent
+/// folder, an `untitled:` scratch buffer, a sibling file — is ORDINARY and
+/// unambiguous, and answering it with the one shard's config is right; the
+/// legacy `self.config` mirror already holds exactly that. Rejecting those
+/// too (the first cut of this fix) would have degraded the feature in the
+/// commonest single-plugin layout there is: opening the PARENT of a plugin
+/// directory, which server-side discovery deliberately supports.
+fn unscopable_defines_uri_error() -> tower_lsp::jsonrpc::Error {
+    tower_lsp::jsonrpc::Error {
+        code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,
+        message: "openplanet/resolvedDefines: this window serves several plugin workspaces \
+                  and the given uri is inside none of them, so there is no single define \
+                  set to report"
+            .into(),
+        data: None,
+    }
+}
+
 /// The custom LSP request method name (B050).
 ///
 /// Namespaced `openplanet/...` to match the `openplanet.` command ids and
@@ -86,6 +108,12 @@ pub struct ResolvedDefinesResult {
     /// client's foreign-selector guard can ask instead of duplicating
     /// `LspConfig::PLATFORM_FAMILIES`.
     pub platform_families: Vec<Vec<String>>,
+    /// The plugin workspace this answer is scoped to, or `None` when the
+    /// server is serving no shard at all and the answer is the window-wide
+    /// config. Naming it keeps a multi-root window from showing one plugin's
+    /// define set as if it were the window's — the same "partial truth with
+    /// no indication it is partial" this whole request exists to end.
+    pub root: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1895,10 +1923,7 @@ impl Backend {
         &self,
         params: ResolvedDefinesParams,
     ) -> Result<ResolvedDefinesResult> {
-        let config = match &params.uri {
-            Some(uri) => self.config_for(uri).await,
-            None => self.config.read().await.clone(),
-        };
+        let (config, root) = self.config_for_defines_query(params.uri.as_ref()).await?;
         Ok(ResolvedDefinesResult {
             defines: config.resolved_defines(),
             game_target: config.game_target.clone(),
@@ -1906,7 +1931,51 @@ impl Backend {
                 .iter()
                 .map(|family| family.iter().map(|name| (*name).to_string()).collect())
                 .collect(),
+            root: root.map(|root| root.to_string_lossy().into_owned()),
         })
+    }
+
+    /// Pick the config a resolved-defines query should answer from, and name
+    /// the shard it came from.
+    ///
+    /// Deliberately NOT `config_for`. That helper answers a stray document
+    /// with the legacy `self.config`, which mirrors the FIRST shard — a
+    /// sensible "best effort" for a feature handler asked about a file it
+    /// does not own, and a silent lie for this request, whose entire job is
+    /// to report the define set that actually applies. So:
+    ///
+    /// * owned URI → that shard, named;
+    /// * unowned URI with exactly ONE shard → that shard, named. There is no
+    ///   ambiguity to protect the caller from, and this is the ordinary case:
+    ///   a parent folder, an `untitled:` buffer, a file beside the plugin.
+    /// * unowned URI with SEVERAL shards → refuse. Any answer here would be
+    ///   some other plugin's define set wearing this one's name.
+    /// * no shards (pre-init, rootless) → the window-wide config, unnamed.
+    async fn config_for_defines_query(
+        &self,
+        uri: Option<&Url>,
+    ) -> Result<(LspConfig, Option<PathBuf>)> {
+        let workspaces = self.workspaces.read().await;
+        let Some((first, rest)) = workspaces.split_first() else {
+            drop(workspaces);
+            return Ok((self.config.read().await.clone(), None));
+        };
+        let owner = uri
+            .and_then(|uri| uri.to_file_path().ok())
+            .map(|path| path.canonicalize().unwrap_or(path))
+            .and_then(|path| {
+                workspaces
+                    .iter()
+                    .filter(|workspace| path.starts_with(&workspace.root))
+                    // Deepest root wins, matching `workspace_root_for`: a
+                    // nested plugin is served by itself, not by its parent.
+                    .max_by_key(|workspace| workspace.root.as_os_str().len())
+            });
+        match owner {
+            Some(workspace) => Ok((workspace.config.clone(), Some(workspace.root.clone()))),
+            None if rest.is_empty() => Ok((first.config.clone(), Some(first.root.clone()))),
+            None => Err(unscopable_defines_uri_error()),
+        }
     }
 
     /// Non-blocking update probe: writes `~/.config/openplanet-lsp/update-status.json`
