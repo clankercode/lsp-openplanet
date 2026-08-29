@@ -675,6 +675,24 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
 /// untouched.
 fn check_init_options(options: &CheckOptions) -> Option<serde_json::Value> {
     let mut map = serde_json::Map::new();
+    // B019: the config layer decides whether `DEPENDENCY_<ID>` is defined, so
+    // it has to resolve dependencies over the same dirs the workspace loader
+    // will search. `--plugins-dir` is the one search input the config ladder
+    // could not otherwise see; it rides the init-options layer like the other
+    // CLI flags. `finalize_with_config` dedups, so search ORDER is unchanged:
+    // these dirs are still passed first via `DependencySearch.plugins_dirs`.
+    if !options.plugins_dirs.is_empty() {
+        map.insert(
+            "plugins_dirs".into(),
+            serde_json::Value::from(
+                options
+                    .plugins_dirs
+                    .iter()
+                    .filter_map(|p| p.to_str().map(String::from))
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
     if let Some(target) = &options.game_target_flag {
         map.insert(
             "game_target".into(),

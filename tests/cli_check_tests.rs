@@ -959,6 +959,17 @@ void Main() {}
 #[test]
 fn check_command_applies_manifest_defines_and_dependency_defines() {
     let root = make_temp_plugin("manifest-defines");
+    let home = isolated_home("manifest-defines");
+    let plugins_dir = root.join("plugins");
+    fs::create_dir_all(plugins_dir.join("Editor")).unwrap();
+    // B019 only defines DEPENDENCY_<ID> for installed optional dependencies.
+    // Keep the dependency under this fixture's explicit search root so the
+    // assertion never relies on a developer's Openplanet plugin install.
+    fs::write(
+        plugins_dir.join("Editor/info.toml"),
+        "[meta]\nname = \"Editor\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
     fs::write(
         root.join("info.toml"),
         r#"
@@ -991,7 +1002,10 @@ void Main() {}
     let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
         .arg("check")
         .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(&plugins_dir)
         .arg(&root)
+        .env("HOME", &home)
         .output()
         .unwrap();
 
@@ -1008,6 +1022,7 @@ void Main() {}
     );
 
     let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(home);
 }
 
 #[test]
@@ -2841,14 +2856,20 @@ fn check_command_namespace_members_union_across_modules() {
     let _ = fs::remove_dir_all(base);
 }
 
-/// GH #58 authority guard, optional-dependency half: `apply_manifest`
-/// defines `DEPENDENCY_<ID>` for every DECLARED dependency, resolved or
-/// not, so code behind `#if DEPENDENCY_MISSINGOPT` stays live even when the
-/// optional dep is not installed. The game would not define that macro and
-/// would mask the block out, so firing there is a false positive — an
-/// unresolved dependency of ANY kind must silence the rule.
+/// GH #58 authority guard, optional-dependency half — REWRITTEN by B019.
+///
+/// It used to assert that an uninstalled optional dep silences the namespace
+/// rule entirely, which was correct while `apply_manifest` defined
+/// `DEPENDENCY_<ID>` regardless: the guarded block stayed live against a
+/// module we do not have, so firing anywhere in the file was unsafe.
+///
+/// B019 removed the cause instead of the symptom. The macro is no longer
+/// defined, so the block is masked out exactly as the game masks it — and the
+/// rule REGAINS authority over the rest of the file. Both halves are asserted:
+/// nothing fires inside the (now dead) guard, and a genuinely unknown member
+/// OUTSIDE it is reported again.
 #[test]
-fn check_command_unknown_namespaced_symbol_silent_when_optional_dep_missing() {
+fn check_command_unknown_namespaced_symbol_rearms_when_optional_dep_missing() {
     let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-opt-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(base.join("plugins")).unwrap();
@@ -2860,7 +2881,7 @@ fn check_command_unknown_namespaced_symbol_silent_when_optional_dep_missing() {
     .unwrap();
     fs::write(
         base.join("consumer/src/Main.as"),
-        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n#if DEPENDENCY_MISSINGOPT\n    Shared::FromTheOptionalDep();\n#endif\n}\n",
+        "namespace Shared {\n    void Own() {}\n}\n\nvoid Main() {\n    Shared::Own();\n    Shared::NotDeclaredAnywhere();\n#if DEPENDENCY_MISSINGOPT\n    Shared::FromTheOptionalDep();\n#endif\n}\n",
     )
     .unwrap();
 
@@ -2875,8 +2896,15 @@ fn check_command_unknown_namespaced_symbol_silent_when_optional_dep_missing() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains("No matching symbol"),
-        "an unresolved optional dependency must silence the rule; stdout={stdout:?}"
+        !stdout.contains("Shared::FromTheOptionalDep"),
+        "the `#if DEPENDENCY_MISSINGOPT` block must be masked out, exactly as \
+         the game masks it; stdout={stdout:?}"
+    );
+    assert!(
+        stdout.contains("No matching symbol 'Shared::NotDeclaredAnywhere'"),
+        "with the phantom define gone the pooled table IS the complete compile \
+         surface, so the rule must re-arm for the rest of the file; \
+         stdout={stdout:?}"
     );
     let _ = fs::remove_dir_all(base);
 }
@@ -3658,4 +3686,55 @@ fn check_command_issue_repro_b016_anon_member_enums_is_clean() {
         "engine members typed by an anonymous inline enum must stay silent; \
          stdout={stdout:?} stderr={stderr:?}"
     );
+}
+
+/// B019: the config layer decides whether `DEPENDENCY_<ID>` is defined, and it
+/// must resolve dependencies over the SAME search dirs the workspace loader
+/// uses — `--plugins-dir` included. If the probe saw fewer dirs than the
+/// loader it would withhold the define for a dependency whose symbols ARE
+/// pooled, masking out code the game compiles: a silent loss of coverage in
+/// the opposite direction to the bug B019 fixes.
+#[test]
+fn check_command_plugins_dir_flag_is_visible_to_the_dependency_define_probe() {
+    let base = std::env::temp_dir().join(format!(
+        "openplanet-lsp-b019-plugins-dir-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(base.join("deps/ZzzFlagOnlyDep/src")).unwrap();
+    fs::create_dir_all(base.join("consumer/src")).unwrap();
+    fs::write(
+        base.join("deps/ZzzFlagOnlyDep/info.toml"),
+        "[meta]\nname = \"ZzzFlagOnlyDep\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        base.join("consumer/info.toml"),
+        "[meta]\nname = \"FlagDepConsumer\"\nversion = \"0.1.0\"\n\n[script]\noptional_dependencies = [\"ZzzFlagOnlyDep\"]\n",
+    )
+    .unwrap();
+    // The guarded body is only CHECKED when the define is live, so the
+    // undefined identifier is the observable for "the branch is live".
+    fs::write(
+        base.join("consumer/src/Main.as"),
+        "void Main() {\n#if DEPENDENCY_ZZZFLAGONLYDEP\n    ZzzDefinitelyUndefinedIdentifier();\n#endif\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg("--no-typedb")
+        .arg("--plugins-dir")
+        .arg(base.join("deps"))
+        .arg(base.join("consumer"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ZzzDefinitelyUndefinedIdentifier"),
+        "a dependency resolvable only via --plugins-dir must still define its \
+         DEPENDENCY_ macro, keeping the guarded branch live; stdout={stdout:?}"
+    );
+    let _ = fs::remove_dir_all(base);
 }

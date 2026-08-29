@@ -116,7 +116,21 @@ impl AnalysisSnapshot {
         // enumerated on `PluginWorkspaceLoad::dependency_closure_complete` —
         // this is a pass-through, not a second place to decide. An in-memory
         // pool and the server's open-documents-only fallback never claim it.
-        if load.dependency_closure_complete {
+        // B019: an uninstalled OPTIONAL dependency no longer breaks the
+        // closure, because its `#if DEPENDENCY_X` code is masked out for us
+        // exactly as it is for the game. That equivalence holds only while
+        // nothing force-defines the macro anyway — a `define_matrix` axis or
+        // an explicit `defines` entry deliberately can (both are supported:
+        // the plugin ships to users who DO have X). When one does, the
+        // guarded code is live against a module we do not have, so the
+        // pooled table is NOT the complete compile surface and must not
+        // claim authority.
+        let forced_absent_dependency = load
+            .unresolved_optional_dependencies
+            .iter()
+            .filter_map(|dep| crate::config::dependency_define_name(dep))
+            .any(|name| config.defines.contains(&name));
+        if load.dependency_closure_complete && !forced_absent_dependency {
             table.mark_dependency_closure_complete();
         }
         // Own-module view for diagnostics: identical pool except strict
@@ -171,6 +185,7 @@ impl AnalysisSnapshot {
                 .collect(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
+            unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: Vec::new(),
             usage_only_sources_complete: true,
             usage_only_unreadable_paths: Vec::new(),
@@ -202,6 +217,7 @@ impl AnalysisSnapshot {
                 .collect(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
+            unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: usage_only.to_vec(),
             usage_only_sources_complete: true,
             usage_only_unreadable_paths: Vec::new(),
@@ -226,6 +242,7 @@ impl AnalysisSnapshot {
                 .collect(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
+            unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: Vec::new(),
             usage_only_sources_complete: true,
             usage_only_unreadable_paths: Vec::new(),
@@ -541,6 +558,7 @@ mod tests {
             files: Vec::new(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
+            unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: Vec::new(),
             usage_only_sources_complete: false,
             usage_only_unreadable_paths: vec![unreadable.clone()],
@@ -570,6 +588,7 @@ mod tests {
             files: Vec::new(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
+            unresolved_optional_dependencies: Vec::new(),
             usage_only_sources: vec![(
                 real_path.canonicalize().unwrap(),
                 "void Generated() {}\n".into(),
@@ -673,21 +692,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// An unresolved dependency of ANY kind breaks the closure — an
-    /// optional one included, because `LspConfig::apply_manifest` defines
-    /// `DEPENDENCY_<ID>` for it regardless, keeping `#if`-guarded code the
-    /// game would mask out live in our view (GH #58).
+    /// B019 INVERTED this. It used to assert that an unresolved optional
+    /// dependency breaks the closure, and it was right to, because
+    /// `apply_manifest` defined `DEPENDENCY_<ID>` regardless — so `#if`-
+    /// guarded code the game masks out stayed live in our view, referencing a
+    /// module we do not have. B019 removed that cause: the macro is no longer
+    /// defined, the guarded code is masked out for us too, and what remains
+    /// IS the plugin's complete compile surface. The namespace rule (GH #58)
+    /// therefore regains authority on plugins whose only gap is an optional
+    /// dependency they do not have installed locally.
     #[test]
-    fn unresolved_optional_dependency_breaks_closure() {
+    fn unresolved_optional_dependency_no_longer_breaks_closure() {
         let root = temp_plugin(
             "OptDep",
             "\n[script]\noptional_dependencies = [\"ZzzNoSuchOptDep99\"]\n",
             &[("src/Main.as", "void Main() {}\n")],
         );
-        let snap = AnalysisSnapshot::from_load(&load_of(&root), &LspConfig::default());
+        let load = load_of(&root);
+        assert_eq!(
+            load.unresolved_optional_dependencies,
+            vec!["ZzzNoSuchOptDep99".to_string()],
+            "the unresolved optional dep must still be RECORDED"
+        );
+        let snap = AnalysisSnapshot::from_load(&load, &LspConfig::default());
+        assert!(
+            snap.symbols().dependency_closure_complete(),
+            "an uninstalled optional dependency must NOT cost the rule its authority"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ...but the equivalence that justifies it collapses if something
+    /// force-defines the macro anyway. A `define_matrix` axis (or an explicit
+    /// `defines` entry) deliberately can — the plugin ships to users who DO
+    /// have the dependency. In that combo the guarded code is live against a
+    /// module we do not have, so the pooled table must NOT claim authority.
+    #[test]
+    fn force_defining_an_absent_optional_dependency_still_breaks_closure() {
+        let root = temp_plugin(
+            "ForcedOptDep",
+            "\n[script]\noptional_dependencies = [\"ZzzNoSuchOptDep99\"]\n",
+            &[("src/Main.as", "void Main() {}\n")],
+        );
+        let load = load_of(&root);
+        let mut config = LspConfig::default();
+        config
+            .defines
+            .insert("DEPENDENCY_ZZZNOSUCHOPTDEP99".to_string());
+        let snap = AnalysisSnapshot::from_load(&load, &config);
         assert!(
             !snap.symbols().dependency_closure_complete(),
-            "an unresolved optional dependency must break the closure"
+            "force-defining an absent dependency must cost the closure claim"
+        );
+        // Control: without the forced define the same load IS complete.
+        let clean = AnalysisSnapshot::from_load(&load, &LspConfig::default());
+        assert!(clean.symbols().dependency_closure_complete());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A missing REQUIRED dependency still breaks the closure: the game would
+    /// not load the plugin at all, and the absent module may well declare the
+    /// symbol we are about to call unknown. B019 must not relax this.
+    #[test]
+    fn unresolved_required_dependency_still_breaks_closure() {
+        let root = temp_plugin(
+            "ReqDep",
+            "\n[script]\ndependencies = [\"ZzzNoSuchReqDep99\"]\n",
+            &[("src/Main.as", "void Main() {}\n")],
+        );
+        let load = load_of(&root);
+        assert!(
+            load.unresolved_optional_dependencies.is_empty(),
+            "a required dep must not land in the optional bucket"
+        );
+        let snap = AnalysisSnapshot::from_load(&load, &LspConfig::default());
+        assert!(
+            !snap.symbols().dependency_closure_complete(),
+            "an unresolved REQUIRED dependency must still break the closure"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
