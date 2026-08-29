@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T23:39:52Z"
 depends_on: []
 estimate_hours: 1
 id: B058
 priority: high
+started_at: null
 status: pending
 tags: []
 title: WithRunContext quick fix can emit a call with no matching overload when userdata is a bool variable
@@ -24,3 +26,71 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found and documented by the B047/B048 lane, 2026-08-30, which withheld the
+fix for the syntactically-detectable cases and flagged the remainder rather
+than shipping it silently. Verified independently by the coordinator against
+the shipped type DB.
+
+## Defect
+`startnew` and `Meta::StartWithRunContext` do NOT have matching overload
+sets. From `tests/fixtures/typedb/OpenplanetCore.json`:
+
+- `startnew`: **9** overloads, including
+  `awaitable@ startnew(CoroutineFuncUserdataBool@ func, const bool userdata)`
+- `StartWithRunContext`: **8** overloads, with **no bool counterpart**
+  (ref, double, int, int64, string, uint, uint64 — no bool)
+
+So rewriting `startnew(f, <bool>).WithRunContext(ctx)` into
+`Meta::StartWithRunContext(ctx, f, <bool>)` produces a call that does not
+exist.
+
+B048 withholds the fix when the userdata is **syntactically** boolean — a
+`true`/`false` literal, `!x`, or a comparison/logical operator. A bool
+**variable** (`bool flag; startnew(f, flag).WithRunContext(ctx)`) is not
+detectable that way and still gets the fix.
+
+## Why it matters
+The repo's own rule for this family is 'never offer a fix you cannot make'.
+This is the one case that breaks it: the user applies a quick fix and the
+result does not compile. It is a LOUD failure — a compile error, not silent
+data loss — which is why B048 shipped rather than blocking, and that call was
+right. But a quick fix emitting non-compiling code is still a defect.
+
+## Work
+- Closing this properly needs **overload resolution inside a code-action
+  producer**, which is why B048 did not attempt it: the producer would have to
+  know the static type of the userdata expression, not just its syntax.
+- Check whether the type checker's existing call-site machinery
+  (`src/typecheck/call_site.rs`, the B010/B023 work) can be reached from a
+  code-action producer, or whether the diagnostic should carry the resolved
+  argument type forward so the producer does not re-derive it. The second is
+  likely cheaper and matches how B036/B037 pass `replacement` through.
+- Alternative if that is too invasive: withhold the fix whenever the userdata
+  expression is anything other than a literal of a known-good type. That
+  trades false-withholding for correctness, which is the right direction for
+  an auto-applicable fix, but it makes the fix much rarer — decide
+  deliberately rather than by default.
+- Confirm against the live game that a bool userdata really is rejected,
+  rather than being silently coerced. Probe before implementing; this repo has
+  twice had a data-derived prediction turn out wrong.
+
+## Test plan (TDD, red first)
+Red: `bool flag; startnew(F, flag).WithRunContext(ctx);` currently offers a
+fix whose result has no matching overload.
+
+Variants (per CLAUDE.md, generalize):
+- bool literal, `!x`, comparison, logical operator -> already withheld, must
+  stay withheld
+- bool variable, bool function return, bool field, bool array element
+- a `ref` userdata, which DOES have a counterpart -> must still be offered
+- each of the 7 types that do have counterparts -> still offered
+- a userdata whose type cannot be resolved at all -> withheld
+
+## Gate
+Code actions add no diagnostics, so FP fixtures must be byte-identical.
+Measure two binaries on the same machine at the same time.
+
+## Related
+B048 (shipped the fix and documented this gap at the site), B047 (the seam),
+B036 (the RemovedApiUsage family that had no live fix until B048), B023, B010.
