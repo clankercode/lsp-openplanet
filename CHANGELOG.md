@@ -93,8 +93,11 @@ GitHub Release body to match this section (gh release edit).
   **Shift+J / Shift+K** when the message runs past the box — the title shows the
   visible range. List rows shrink the location before the message, and in
   relaxed density the selected row spills its message onto a second line. All
-  widths are now measured in display columns, so wide/CJK text no longer
-  overflows.
+  widths are now measured in display columns and truncation respects grapheme
+  clusters, so wide/CJK text no longer overflows and emoji are never split
+  mid-sequence. A wide character before the underlined span no longer pushes the
+  detail box's caret row out of alignment with it, and a message containing
+  newlines now renders as separate rows instead of one run-together line.
 - **`check` no longer undoes `defines` removals of manifest defines (B026)** —
   `run_check` re-applied `info.toml`'s `[script].defines` and the
   `DEPENDENCY_*` defines AFTER `LspConfig::load` had already applied them and

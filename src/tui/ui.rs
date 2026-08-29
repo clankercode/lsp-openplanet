@@ -5,7 +5,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::types::{DiagItem, ListDensity, RunStatus, Severity, Snapshot, WatchHealth};
 
@@ -57,11 +58,9 @@ impl App {
             .clone()
             .or_else(|| self.selected_diag().map(|d| d.identity_key()));
         let prev_idx = self.list_state.selected();
-        let prev_detail_scroll = self.detail_scroll;
 
         let len = snap.diagnostics.len();
         self.snapshot = snap;
-        self.detail_scroll = 0;
         if len == 0 {
             self.list_state.select(None);
             self.selected_key = None;
@@ -76,11 +75,6 @@ impl App {
             prev_idx.unwrap_or(0).min(len - 1)
         };
         self.select_index(idx);
-        // The identity key embeds the message, so an unchanged key means the
-        // detail box shows the same text — keep the reader's place in it.
-        if self.selected_key == prev_key {
-            self.detail_scroll = prev_detail_scroll;
-        }
     }
 
     pub fn apply_status(&mut self, status: RunStatus) {
@@ -189,9 +183,16 @@ impl App {
     }
 
     fn select_index(&mut self, idx: usize) {
+        let key = self.snapshot.diagnostics.get(idx).map(|d| d.identity_key());
+        // The identity key embeds the message, so an unchanged key means the
+        // detail box still shows the same text — keep the reader's place in it.
+        // (k at the top of the list, or a watch re-check, must not scroll them
+        // back to the start of a long message.)
+        if key != self.selected_key {
+            self.detail_scroll = 0;
+        }
         self.list_state.select(Some(idx));
-        self.selected_key = self.snapshot.diagnostics.get(idx).map(|d| d.identity_key());
-        self.detail_scroll = 0;
+        self.selected_key = key;
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -218,16 +219,24 @@ impl App {
 
         // Detail height: content-driven, min 6 inner lines, +1 slack, +2 borders.
         // Caps so the list keeps the bulk of the screen (no huge empty detail).
-        // Width-aware: a message that wraps needs more rows (B029).
+        // Width-aware: a message that wraps needs more rows (B029). Built once
+        // per frame so the height and the rendered rows cannot disagree.
         let detail_inner_w = chunks[1].width.saturating_sub(2) as usize;
-        let detail_h = detail_box_height(self.selected_diag(), detail_inner_w);
+        let (detail_title, detail_lines) = match self.selected_diag() {
+            None => (" detail ".to_string(), empty_detail_lines()),
+            Some(d) => (
+                format!(" detail · {} ", d.severity.label()),
+                pretty_detail_lines(d, detail_inner_w),
+            ),
+        };
+        let detail_h = detail_box_height(detail_lines.len());
         let mid = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(4), Constraint::Length(detail_h)])
             .split(chunks[1]);
         self.list_inner_h = mid[0].height;
         self.draw_list(f, mid[0]);
-        self.draw_detail(f, mid[1]);
+        self.draw_detail(f, mid[1], detail_title, detail_lines);
 
         self.draw_footer(f, chunks[2]);
     }
@@ -334,16 +343,15 @@ impl App {
         f.render_stateful_widget(list, area, &mut self.list_state);
     }
 
-    fn draw_detail(&mut self, f: &mut Frame<'_>, area: Rect) {
+    fn draw_detail(
+        &mut self,
+        f: &mut Frame<'_>,
+        area: Rect,
+        mut title: String,
+        lines: Vec<Line<'static>>,
+    ) {
         let inner_w = area.width.saturating_sub(2) as usize;
         let inner_h = area.height.saturating_sub(2);
-        let (mut title, lines): (String, Vec<Line<'static>>) = match self.selected_diag() {
-            None => (" detail ".to_string(), empty_detail_lines()),
-            Some(d) => (
-                format!(" detail · {} ", d.severity.label()),
-                pretty_detail_lines(d, inner_w),
-            ),
-        };
 
         // The box caps at 8 inner rows; a longer wrapped message scrolls (B029).
         let total = lines.len() as u16;
@@ -354,7 +362,14 @@ impl App {
         if max_scroll > 0 && inner_h > 0 {
             let top = self.detail_scroll + 1;
             let bot = (self.detail_scroll + inner_h).min(total);
-            title.push_str(&format!("· {top}-{bot}/{total} · J/K "));
+            let suffix = format!("· {top}-{bot}/{total} · J/K ");
+            if str_w(&title) + str_w(&suffix) <= inner_w {
+                title.push_str(&suffix);
+            } else {
+                // Too narrow for the range — the key hint still has to survive,
+                // it is the only thing telling the user there is more to read.
+                title = " ↕ J/K ".to_string();
+            }
         }
 
         let block = Block::default().borders(Borders::ALL).title(title);
@@ -463,9 +478,11 @@ fn str_w(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Display columns of `ch` (control chars count as 0).
-fn char_w(ch: char) -> usize {
-    UnicodeWidthChar::width(ch).unwrap_or(0)
+/// User-perceived characters. Truncation and wrapping must never split one:
+/// `"\u{a9}\u{fe0f}"` and ZWJ emoji are several `char`s but one cell group, and
+/// summing per-`char` widths across them does not equal the cluster's width.
+fn graphemes(s: &str) -> impl DoubleEndedIterator<Item = &str> {
+    UnicodeSegmentation::graphemes(s, true)
 }
 
 /// Truncate `s` to `max_w` display columns, marking the cut with `…`.
@@ -477,18 +494,7 @@ fn ellipsize(s: &str, max_w: usize) -> String {
     if str_w(s) <= max_w {
         return s.to_string();
     }
-    let mut out = String::new();
-    let mut w = 0usize;
-    for ch in s.chars() {
-        // Reserve one column for the `…`.
-        if w + char_w(ch) + 1 > max_w {
-            break;
-        }
-        out.push(ch);
-        w += char_w(ch);
-    }
-    out.push('…');
-    out
+    truncate_with_marker(s, max_w)
 }
 
 /// Keep the *tail* of `s` within `max_w` columns, marking the cut with a
@@ -500,18 +506,18 @@ fn trim_left_to(s: &str, max_w: usize) -> String {
     if max_w == 0 {
         return String::new();
     }
-    let mut tail: Vec<char> = Vec::new();
+    let mut tail: Vec<&str> = Vec::new();
     let mut w = 1usize; // the leading `…`
-    for ch in s.chars().rev() {
-        if w + char_w(ch) > max_w {
+    for g in graphemes(s).rev() {
+        let gw = str_w(g);
+        if w + gw > max_w {
             break;
         }
-        tail.push(ch);
-        w += char_w(ch);
+        tail.push(g);
+        w += gw;
     }
     tail.reverse();
-    let tail: String = tail.into_iter().collect();
-    format!("…{tail}")
+    format!("…{}", tail.concat())
 }
 
 /// Append a `…` to `s` (already within `max_w`) to signal more content follows.
@@ -519,14 +525,21 @@ fn with_more_marker(s: &str, max_w: usize) -> String {
     if max_w == 0 {
         return String::new();
     }
+    truncate_with_marker(s, max_w)
+}
+
+/// Fill `max_w` columns from the front of `s`, always leaving room for a `…`.
+fn truncate_with_marker(s: &str, max_w: usize) -> String {
     let mut out = String::new();
     let mut w = 0usize;
-    for ch in s.chars() {
-        if w + char_w(ch) + 1 > max_w {
+    for g in graphemes(s) {
+        let gw = str_w(g);
+        // Reserve one column for the `…`.
+        if w + gw + 1 > max_w {
             break;
         }
-        out.push(ch);
-        w += char_w(ch);
+        out.push_str(g);
+        w += gw;
     }
     out.push('…');
     out
@@ -534,13 +547,34 @@ fn with_more_marker(s: &str, max_w: usize) -> String {
 
 /// Soft-wrap `s` to `width` display columns.
 ///
-/// Greedy word wrap on single spaces; tokens wider than the line are hard-broken
-/// by display width so nothing overflows. Content is never dropped: for a message
-/// of single-space-separated words, `wrap_display(msg, w).join(" ") == msg`.
+/// Line feeds are hard breaks (blank lines are preserved) and tabs become a
+/// single space, because a `Line` renders as one row and ratatui drops control
+/// characters — an unsplit `"a\nb"` would draw as `ab` and mis-size the box.
+/// Within a logical line: greedy word wrap on single spaces, with tokens wider
+/// than the line hard-broken on grapheme-cluster boundaries so nothing overflows.
+///
+/// Content is never dropped. For a single logical line of single-space-separated
+/// words no wider than `width`, `wrap_display(msg, width).join(" ") == msg`.
+///
+/// A produced row exceeds `width` only when one grapheme cluster is itself wider
+/// than `width` (a 2-column char in a 1-column box); dropping it would be worse.
 fn wrap_display(s: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![String::new()];
     }
+    let normalized = s
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', " ");
+    let mut out = Vec::new();
+    for logical in normalized.split('\n') {
+        out.extend(wrap_logical_line(logical, width));
+    }
+    out
+}
+
+/// Word-wrap one newline-free line. See [`wrap_display`].
+fn wrap_logical_line(s: &str, width: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut cur_w = 0usize;
@@ -573,15 +607,15 @@ fn wrap_display(s: &str, width: usize) -> Vec<String> {
             cur_w = word_w;
             continue;
         }
-        // Oversized token: hard-break it by display width.
-        for ch in word.chars() {
-            let cw = char_w(ch);
-            if cur_w + cw > width && cur_w > 0 {
+        // Oversized token: hard-break it on cluster boundaries by display width.
+        for g in graphemes(word) {
+            let gw = str_w(g);
+            if cur_w + gw > width && cur_w > 0 {
                 out.push(std::mem::take(&mut cur));
                 cur_w = 0;
             }
-            cur.push(ch);
-            cur_w += cw;
+            cur.push_str(g);
+            cur_w += gw;
         }
     }
     out.push(cur);
@@ -617,16 +651,12 @@ fn empty_detail_lines() -> Vec<Line<'static>> {
     ]
 }
 
-/// Total terminal rows for the detail box (borders included).
-/// Inner content height = max(6, content_lines + 1), then +2 for borders.
-/// `inner_w` is the box's inner width — the message wraps into it (B029).
-fn detail_box_height(selected: Option<&DiagItem>, inner_w: usize) -> u16 {
-    let content = match selected {
-        None => empty_detail_lines().len(),
-        Some(d) => pretty_detail_lines(d, inner_w).len(),
-    };
+/// Total terminal rows for a detail box holding `content` lines (borders
+/// included). Inner content height = max(6, content + 1), then +2 for borders.
+fn detail_box_height(content: usize) -> u16 {
     let inner = content.saturating_add(1).max(6);
-    // Hard cap: never more than 8 content rows (+2 borders = 10).
+    // Hard cap: never more than 8 content rows (+2 borders = 10). Past this the
+    // box scrolls rather than growing.
     let inner = inner.min(8);
     (inner + 2) as u16
 }
@@ -939,10 +969,11 @@ fn pretty_detail_lines(d: &DiagItem, inner_w: usize) -> Vec<Line<'static>> {
         let start = d.start_col0().min(src.chars().count());
         let end = d.end_col0().max(start + 1);
         let end = end.min(src.chars().count().max(start + 1));
-        let pad = " ".repeat(start);
-        let carets = "^".repeat((end - start).max(1));
 
-        // Source line with the underlined span emphasized.
+        // Source line with the underlined span emphasized. Columns are char
+        // offsets (that is what the diagnostic carries), but the caret row is
+        // padded in DISPLAY columns so a wide char before the span does not
+        // push the carets out of alignment with it.
         let chars: Vec<char> = src.chars().collect();
         let before: String = chars[..start.min(chars.len())].iter().collect();
         let mid: String = if start < chars.len() {
@@ -955,6 +986,8 @@ fn pretty_detail_lines(d: &DiagItem, inner_w: usize) -> Vec<Line<'static>> {
         } else {
             String::new()
         };
+        let pad = " ".repeat(str_w(&before));
+        let carets = "^".repeat(str_w(&mid).max(1));
         lines.push(Line::from(vec![
             Span::raw(format!("  {gutter} ")),
             Span::styled("│".to_string(), pipe),
@@ -1211,10 +1244,10 @@ mod tests {
     #[test]
     fn detail_box_height_min_six_inner() {
         // borders + max(6, content+1) — at least 8 total rows
-        let h = detail_box_height(Some(&canned_snapshot().diagnostics[0]), 78);
+        let h = box_height(Some(&canned_snapshot().diagnostics[0]), 78);
         assert!(h >= 8, "h={h}");
         assert!(h <= 10, "h={h}");
-        let empty = detail_box_height(None, 78);
+        let empty = box_height(None, 78);
         assert!(empty >= 8, "empty={empty}");
     }
 
@@ -1287,6 +1320,15 @@ mod tests {
             .collect()
     }
 
+    /// Rows the detail box would occupy for `d` at `inner_w` columns — the same
+    /// two steps `App::draw` takes.
+    fn box_height(d: Option<&DiagItem>, inner_w: usize) -> u16 {
+        detail_box_height(match d {
+            None => empty_detail_lines().len(),
+            Some(d) => pretty_detail_lines(d, inner_w).len(),
+        })
+    }
+
     fn squash(s: &str) -> String {
         s.chars().filter(|c| !c.is_whitespace()).collect()
     }
@@ -1311,8 +1353,8 @@ mod tests {
     #[test]
     fn detail_box_height_grows_with_wrapped_message() {
         let d = diag(Severity::Error, LONG_MSG);
-        let wide = detail_box_height(Some(&d), 200);
-        let narrow = detail_box_height(Some(&d), 34);
+        let wide = box_height(Some(&d), 200);
+        let narrow = box_height(Some(&d), 34);
         assert!(wide >= 8, "wide={wide}");
         assert!(
             narrow > wide,
@@ -1459,7 +1501,7 @@ mod tests {
             for msg in ["", "x", LONG_MSG] {
                 let _ = pretty_detail_lines(&diag(Severity::Error, msg), inner_w);
                 let _ = pretty_detail_lines(&diag_no_source(Severity::Error, msg), inner_w);
-                let _ = detail_box_height(Some(&diag(Severity::Error, msg)), inner_w);
+                let _ = box_height(Some(&diag(Severity::Error, msg)), inner_w);
             }
         }
     }
@@ -1697,6 +1739,177 @@ mod tests {
         snap.diagnostics[0].message = "a completely different message".into();
         app.apply_snapshot(snap);
         assert_eq!(app.detail_scroll(), 0);
+    }
+
+    /// Whole clusters only: `part` must be a prefix of `s` on cluster boundaries.
+    fn is_cluster_prefix(s: &str, part: &str) -> bool {
+        if part.is_empty() {
+            return true;
+        }
+        let mut acc = String::new();
+        for g in graphemes(s) {
+            acc.push_str(g);
+            if acc == part {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_cluster_suffix(s: &str, part: &str) -> bool {
+        if part.is_empty() {
+            return true;
+        }
+        let mut acc = String::new();
+        for g in graphemes(s).rev() {
+            acc.insert_str(0, g);
+            if acc == part {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn truncation_never_splits_a_grapheme_cluster() {
+        // Base + variation selector, a ZWJ sequence, and a combining mark.
+        for s in [
+            "\u{a9}\u{fe0f}x",
+            "\u{1f469}\u{200d}\u{1f4bb}!",
+            "e\u{301}xample",
+            "\u{8a3a}\u{65ad}x",
+        ] {
+            for max_w in 0..=str_w(s) + 2 {
+                let out = ellipsize(s, max_w);
+                assert!(
+                    out.width() <= max_w,
+                    "ellipsize({s:?}, {max_w}) -> {out:?} is {} wide",
+                    out.width()
+                );
+                assert!(
+                    is_cluster_prefix(s, out.trim_end_matches('\u{2026}')),
+                    "ellipsize({s:?}, {max_w}) split a cluster: {out:?}"
+                );
+
+                let out = with_more_marker(s, max_w);
+                assert!(out.width() <= max_w, "with_more_marker -> {out:?}");
+                assert!(
+                    is_cluster_prefix(s, out.trim_end_matches('\u{2026}')),
+                    "with_more_marker({s:?}, {max_w}) split a cluster: {out:?}"
+                );
+
+                let out = trim_left_to(s, max_w);
+                assert!(out.width() <= max_w, "trim_left_to -> {out:?}");
+                assert!(
+                    is_cluster_suffix(s, out.trim_start_matches('\u{2026}')),
+                    "trim_left_to({s:?}, {max_w}) split a cluster: {out:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_display_never_splits_a_grapheme_cluster() {
+        let s = "\u{1f469}\u{200d}\u{1f4bb}\u{1f469}\u{200d}\u{1f4bb}\u{1f469}\u{200d}\u{1f4bb}";
+        for width in 2..=12usize {
+            let rows = wrap_display(s, width);
+            assert_eq!(rows.concat(), s, "w={width} lost content");
+            for row in &rows {
+                assert!(row.width() <= width, "w={width} row={row:?}");
+                assert!(
+                    graphemes(row).all(|g| graphemes(s).any(|o| o == g)),
+                    "w={width} produced a partial cluster: {rows:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_display_treats_newlines_as_hard_breaks() {
+        assert_eq!(wrap_display("first\nsecond", 40), vec!["first", "second"]);
+        assert_eq!(wrap_display("first\r\nsecond", 40), vec!["first", "second"]);
+        assert_eq!(wrap_display("first\rsecond", 40), vec!["first", "second"]);
+        assert_eq!(wrap_display("a\n\nb", 40), vec!["a", "", "b"]);
+        assert_eq!(wrap_display("a\tb", 40), vec!["a b"]);
+        // A Line renders as one row and ratatui drops control characters, so
+        // none may survive into a produced row.
+        for row in wrap_display("one\ttwo\r\nthree\nfour and more words", 6) {
+            assert!(!row.chars().any(char::is_control), "{row:?}");
+            assert!(row.width() <= 6, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn detail_message_with_newlines_becomes_separate_rows() {
+        let d = diag(Severity::Error, "line one\nline two\nline three");
+        assert_eq!(
+            detail_msg_parts(&d, 200),
+            vec!["line one", "line two", "line three"]
+        );
+        // ...and the extra rows are counted, so the box is sized for them.
+        assert!(
+            box_height(Some(&d), 200) >= box_height(Some(&diag(Severity::Error, "line one")), 200)
+        );
+    }
+
+    #[test]
+    fn carets_align_and_size_by_display_columns() {
+        // A wide char BEFORE the span must not push the carets left.
+        let mut d = diag(Severity::Error, "wide char before the span");
+        d.source_line = Some("  \u{8a3a}x = 1;".into());
+        d.col = 4; // 1-based char column of `x`
+        d.end_col = 5;
+        let rows = detail_rows(&d, 200);
+        let (src_row, caret_row) = (&rows[2], &rows[3]);
+        let span_col = str_w(&src_row[..src_row.find('x').expect("span char")]);
+        let caret_col = str_w(&caret_row[..caret_row.find('^').expect("caret")]);
+        assert_eq!(
+            caret_col, span_col,
+            "caret misaligned\n  src={src_row:?}\ncaret={caret_row:?}"
+        );
+
+        // A wide char UNDER the span needs a caret per column it occupies.
+        let mut w = diag(Severity::Error, "wide span");
+        w.source_line = Some("  \u{8a3a} = 1;".into());
+        w.col = 3;
+        w.end_col = 4;
+        let rows = detail_rows(&w, 200);
+        assert_eq!(
+            rows[3].matches('^').count(),
+            2,
+            "a 2-column char needs 2 carets: {:?}",
+            rows[3]
+        );
+    }
+
+    #[test]
+    fn detail_scroll_survives_boundary_navigation() {
+        let mut app = App::from_snapshot(canned_snapshot());
+        app.scroll_detail_down();
+        app.scroll_detail_down();
+        assert_eq!(app.detail_scroll(), 2);
+
+        // Already at the top: the selection does not change, so neither does
+        // the detail box — the reader must keep their place.
+        app.scroll_up();
+        assert_eq!(app.detail_scroll(), 2, "k at the top reset the scroll");
+        app.page_up(10);
+        assert_eq!(app.detail_scroll(), 2, "PgUp at the top reset the scroll");
+        app.select_first();
+        assert_eq!(app.detail_scroll(), 2, "g at the top reset the scroll");
+
+        // A real selection change does reset it.
+        app.select_last();
+        assert_eq!(app.detail_scroll(), 0);
+
+        // Symmetric at the bottom.
+        app.scroll_detail_down();
+        app.scroll_down();
+        assert_eq!(app.detail_scroll(), 1, "j at the end reset the scroll");
+        app.page_down(10);
+        assert_eq!(app.detail_scroll(), 1, "PgDn at the end reset the scroll");
+        app.select_last();
+        assert_eq!(app.detail_scroll(), 1, "G at the end reset the scroll");
     }
 
     #[test]

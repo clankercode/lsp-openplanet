@@ -218,3 +218,20 @@ fn tiny_terminals_do_not_panic() {
             .unwrap_or_else(|e| panic!("relaxed draw failed at {w}x{h}: {e}"));
     }
 }
+
+/// The scroll affordance must survive terminals too narrow for the full title —
+/// it is the only thing telling the reader there is more message below.
+#[test]
+fn very_narrow_detail_title_keeps_the_scroll_hint() {
+    for w in [22u16, 24, 30, 36, 44] {
+        let mut app = App::from_snapshot(narrow_snapshot());
+        let backend = TestBackend::new(w, HEIGHT);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let text = rendered_text(&terminal).join("\n");
+        assert!(
+            text.contains("J/K"),
+            "no scroll affordance at width {w}:\n{text}"
+        );
+    }
+}
