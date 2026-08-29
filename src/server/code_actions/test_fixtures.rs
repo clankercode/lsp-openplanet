@@ -38,6 +38,22 @@ pub fn apply_edits(source: &str, edits: &[TextEdit]) -> String {
 
 /// The text after applying every non-conflicting fix in `candidates`.
 pub fn apply_fixes(source: &str, candidates: &[FixCandidate]) -> String {
-    let fixes: Vec<_> = candidates.iter().map(|c| &c.fix).collect();
+    let fixes: Vec<_> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let edits = candidate
+                .fix
+                .edit
+                .changes
+                .as_ref()?
+                .values()
+                .next()?
+                .clone();
+            Some(super::fix_all::DocumentFix {
+                title: candidate.fix.title.clone(),
+                edits,
+            })
+        })
+        .collect();
     apply_edits(source, &super::fix_all::merged_edits(&fixes))
 }

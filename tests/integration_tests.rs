@@ -1474,6 +1474,85 @@ async fn client_without_resolve_support_gets_the_edit_up_front() {
     );
 }
 
+fn utf16_position_to_offset(source: &str, position: Position) -> usize {
+    let line_start = if position.line == 0 {
+        0
+    } else {
+        source
+            .match_indices('\n')
+            .nth(position.line as usize - 1)
+            .map_or(source.len(), |(offset, _)| offset + 1)
+    };
+    let line = &source[line_start..];
+    let mut utf16 = 0u32;
+    for (offset, ch) in line.char_indices() {
+        if utf16 >= position.character || ch == '\n' {
+            return line_start + offset;
+        }
+        utf16 += ch.len_utf16() as u32;
+    }
+    source.len()
+}
+
+fn apply_utf16_edits(source: &str, edits: &[tower_lsp::lsp_types::TextEdit]) -> String {
+    let mut result = source.to_string();
+    for edit in edits {
+        let start = utf16_position_to_offset(&result, edit.range.start);
+        let end = utf16_position_to_offset(&result, edit.range.end);
+        result.replace_range(start..end, &edit.new_text);
+    }
+    result
+}
+
+#[tokio::test]
+async fn code_action_edits_use_utf16_after_bmp_and_astral_text() {
+    use tower_lsp::lsp_types::CodeActionKind;
+
+    for (case, prefix) in [("bmp", "/* é */ "), ("astral", "/* 😀 */ ")] {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend: &Backend = service.inner();
+        #[allow(deprecated)]
+        let init = InitializeParams {
+            capabilities: resolving_client_capabilities(),
+            ..Default::default()
+        };
+        backend.initialize(init).await.expect("initialize");
+
+        let uri = Url::parse(&format!("file:///smoke/unicode-{case}.as")).unwrap();
+        let src = format!("{prefix}void f(string a, string b) {{}}\n");
+        open_doc(backend, &uri, &src).await;
+        let line_utf16 = src.trim_end_matches('\n').encode_utf16().count() as u32;
+        let params = code_action_params(
+            &uri,
+            Range::new(Position::new(0, 0), Position::new(0, line_utf16)),
+            Some(vec![CodeActionKind::QUICKFIX]),
+        );
+        let offered = only_code_actions(backend.code_action(params).await.expect("code_action"));
+        assert_eq!(offered.len(), 2, "{case}: expected both parameter fixes");
+
+        let mut edits = Vec::new();
+        for action in offered {
+            let resolved = backend
+                .code_action_resolve(action)
+                .await
+                .expect("code_action_resolve");
+            edits.extend(
+                resolved
+                    .edit
+                    .and_then(|edit| edit.changes)
+                    .and_then(|mut changes| changes.remove(&uri))
+                    .expect("resolved edits"),
+            );
+        }
+        edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start));
+        assert_eq!(
+            apply_utf16_edits(&src, &edits),
+            format!("{prefix}void f(const string &in a, const string &in b) {{}}\n"),
+            "{case}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn code_actions_on_save_kind_returns_one_batched_workspace_edit() {
     use tower_lsp::lsp_types::CodeActionKind;
@@ -1504,11 +1583,15 @@ async fn code_actions_on_save_kind_returns_one_batched_workspace_edit() {
         "fixAll request must return only the source action, got {:?}",
         actions.iter().map(|a| &a.title).collect::<Vec<_>>()
     );
-    let edits = actions[0]
+    assert!(actions[0].edit.is_none(), "fixAll listing must be lazy");
+    let resolved = backend
+        .code_action_resolve(actions[0].clone())
+        .await
+        .expect("resolve fixAll");
+    let edits = resolved
         .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&uri))
+        .and_then(|e| e.changes)
+        .and_then(|mut c| c.remove(&uri))
         .expect("batched workspace edit");
     assert_eq!(edits.len(), 3);
     assert!(edits.iter().all(|e| e.new_text == "const string &in"));

@@ -21,6 +21,29 @@ use tower_lsp::lsp_types::*;
 
 use super::fix::{Fix, FixCandidate};
 
+/// The document-local projection admitted to source fix-all. Cross-file
+/// workspace edits are intentionally ineligible: batching only part of one
+/// would violate per-fix atomicity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentFix {
+    pub title: String,
+    pub edits: Vec<TextEdit>,
+}
+
+fn document_fix(uri: &Url, fix: &Fix) -> Option<DocumentFix> {
+    if fix.edit.document_changes.is_some() {
+        return None;
+    }
+    let changes = fix.edit.changes.as_ref()?;
+    if changes.len() != 1 {
+        return None;
+    }
+    Some(DocumentFix {
+        title: fix.title.clone(),
+        edits: changes.get(uri)?.clone(),
+    })
+}
+
 /// Do two ranges conflict?
 ///
 /// Non-empty ranges conflict when they properly intersect. Two *insertions*
@@ -38,7 +61,7 @@ pub fn ranges_overlap(a: &Range, b: &Range) -> bool {
 
 /// Does this fix's own edit set contradict itself? Such a fix can never be
 /// applied safely, individually or in a batch.
-fn is_self_consistent(fix: &Fix) -> bool {
+fn is_self_consistent(fix: &DocumentFix) -> bool {
     for (i, x) in fix.edits.iter().enumerate() {
         for y in &fix.edits[i + 1..] {
             if ranges_overlap(&x.range, &y.range) {
@@ -52,7 +75,7 @@ fn is_self_consistent(fix: &Fix) -> bool {
 /// Sort key that makes the greedy choice below deterministic regardless of
 /// the order families were registered in: earliest start, then shortest,
 /// then title. Fixes with no edits sort last and are dropped by the caller.
-fn order_key(fix: &Fix) -> (Position, Position, &str) {
+fn order_key(fix: &DocumentFix) -> (Position, Position, &str, Vec<(Position, Position, &str)>) {
     let start = fix
         .edits
         .iter()
@@ -65,18 +88,24 @@ fn order_key(fix: &Fix) -> (Position, Position, &str) {
         .map(|e| e.range.end)
         .max()
         .unwrap_or(Position::new(u32::MAX, u32::MAX));
-    (start, end, fix.title.as_str())
+    let mut payload: Vec<_> = fix
+        .edits
+        .iter()
+        .map(|edit| (edit.range.start, edit.range.end, edit.new_text.as_str()))
+        .collect();
+    payload.sort_unstable();
+    (start, end, fix.title.as_str(), payload)
 }
 
 /// Greedily choose a non-conflicting subset of `fixes`, deterministically.
 ///
 /// Returns indices into `fixes`, in the original order, so a caller can tell
 /// which fixes were *dropped* (those stay individually offerable).
-pub fn select_non_overlapping(fixes: &[&Fix]) -> Vec<usize> {
+pub fn select_non_overlapping(fixes: &[DocumentFix]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..fixes.len())
-        .filter(|&i| !fixes[i].edits.is_empty() && is_self_consistent(fixes[i]))
+        .filter(|&i| !fixes[i].edits.is_empty() && is_self_consistent(&fixes[i]))
         .collect();
-    order.sort_by(|&a, &b| order_key(fixes[a]).cmp(&order_key(fixes[b])));
+    order.sort_by(|&a, &b| order_key(&fixes[a]).cmp(&order_key(&fixes[b])));
 
     let mut accepted: Vec<usize> = Vec::new();
     let mut taken: Vec<Range> = Vec::new();
@@ -96,7 +125,7 @@ pub fn select_non_overlapping(fixes: &[&Fix]) -> Vec<usize> {
 }
 
 /// The batched edits for the accepted fixes, ordered start-descending.
-pub fn merged_edits(fixes: &[&Fix]) -> Vec<TextEdit> {
+pub fn merged_edits(fixes: &[DocumentFix]) -> Vec<TextEdit> {
     let mut edits: Vec<TextEdit> = select_non_overlapping(fixes)
         .into_iter()
         .flat_map(|i| fixes[i].edits.iter().cloned())
@@ -114,10 +143,10 @@ pub fn merged_edits(fixes: &[&Fix]) -> Vec<TextEdit> {
 /// the document is auto-applicable. An empty `WorkspaceEdit` would still show
 /// up in the client's menu and do nothing when picked, so we omit the action.
 pub fn fix_all_action(uri: &Url, candidates: &[FixCandidate]) -> Option<CodeAction> {
-    let auto: Vec<&Fix> = candidates
+    let auto: Vec<DocumentFix> = candidates
         .iter()
         .filter(|c| c.fix.auto_applicable)
-        .map(|c| &c.fix)
+        .filter_map(|candidate| document_fix(uri, &candidate.fix))
         .collect();
     let edits = merged_edits(&auto);
     if edits.is_empty() {
@@ -151,10 +180,9 @@ mod tests {
         Range::new(Position::new(l0, c0), Position::new(l1, c1))
     }
 
-    fn fix(title: &str, edits: &[(Range, &str)]) -> Fix {
-        Fix {
+    fn fix(title: &str, edits: &[(Range, &str)]) -> DocumentFix {
+        DocumentFix {
             title: title.to_string(),
-            kind: CodeActionKind::QUICKFIX,
             edits: edits
                 .iter()
                 .map(|(r, t)| TextEdit {
@@ -162,8 +190,6 @@ mod tests {
                     new_text: t.to_string(),
                 })
                 .collect(),
-            is_preferred: false,
-            auto_applicable: true,
         }
     }
 
@@ -209,7 +235,7 @@ mod tests {
         let a = fix("a", &[(rng(0, 0, 0, 3), "A")]);
         let b = fix("b", &[(rng(0, 5, 0, 8), "B")]);
         let c = fix("c", &[(rng(2, 0, 2, 1), "C")]);
-        let all = [&a, &b, &c];
+        let all = [a, b, c];
         assert_eq!(select_non_overlapping(&all), vec![0, 1, 2]);
     }
 
@@ -218,8 +244,23 @@ mod tests {
         let early = fix("early", &[(rng(0, 0, 0, 6), "E")]);
         let late = fix("late", &[(rng(0, 3, 0, 9), "L")]);
         // Registration order must not change the outcome.
-        assert_eq!(select_non_overlapping(&[&early, &late]), vec![0]);
-        assert_eq!(select_non_overlapping(&[&late, &early]), vec![1]);
+        assert_eq!(
+            select_non_overlapping(&[early.clone(), late.clone()]),
+            vec![0]
+        );
+        assert_eq!(select_non_overlapping(&[late, early]), vec![1]);
+    }
+
+    #[test]
+    fn identical_title_and_range_tie_is_broken_by_edit_payload() {
+        let alpha = fix("same", &[(rng(0, 0, 0, 3), "alpha")]);
+        let omega = fix("same", &[(rng(0, 0, 0, 3), "omega")]);
+
+        for fixes in [[alpha.clone(), omega.clone()], [omega, alpha]] {
+            let edits = merged_edits(&fixes);
+            assert_eq!(edits.len(), 1);
+            assert_eq!(edits[0].new_text, "alpha");
+        }
     }
 
     #[test]
@@ -229,7 +270,7 @@ mod tests {
         let src = "void f(string one, string two) {}";
         let a = fix("a", &[(rng(0, 7, 0, 13), "const string &in")]);
         let b = fix("b", &[(rng(0, 19, 0, 25), "const string &in")]);
-        let edits = merged_edits(&[&a, &b]);
+        let edits = merged_edits(&[a, b]);
         assert_eq!(edits.len(), 2);
         assert_eq!(
             apply(src, &edits),
@@ -242,7 +283,7 @@ mod tests {
         let a = fix("a", &[(rng(0, 0, 0, 1), "AAAA")]);
         let b = fix("b", &[(rng(0, 4, 0, 5), "B")]);
         let c = fix("c", &[(rng(0, 8, 0, 9), "CC")]);
-        let edits = merged_edits(&[&a, &b, &c]);
+        let edits = merged_edits(&[a, b, c]);
         let starts: Vec<u32> = edits.iter().map(|e| e.range.start.character).collect();
         assert_eq!(starts, vec![8, 4, 0], "expected descending start order");
         // Growing an early edit must not corrupt the later ones.
@@ -254,22 +295,22 @@ mod tests {
         let pair = fix("pair", &[(rng(0, 0, 0, 2), "P"), (rng(0, 10, 0, 12), "Q")]);
         let blocker = fix("blocker", &[(rng(0, 11, 0, 13), "X")]);
         // `pair` starts first, so it wins; `blocker` is dropped whole.
-        let sel = select_non_overlapping(&[&pair, &blocker]);
+        let sel = select_non_overlapping(&[pair.clone(), blocker.clone()]);
         assert_eq!(sel, vec![0]);
-        assert_eq!(merged_edits(&[&pair, &blocker]).len(), 2);
+        assert_eq!(merged_edits(&[pair, blocker]).len(), 2);
     }
 
     #[test]
     fn self_contradictory_fix_is_never_selected() {
         let bad = fix("bad", &[(rng(0, 0, 0, 5), "A"), (rng(0, 3, 0, 8), "B")]);
-        assert!(select_non_overlapping(&[&bad]).is_empty());
+        assert!(select_non_overlapping(&[bad]).is_empty());
     }
 
     #[test]
     fn fix_with_no_edits_is_ignored() {
         let empty = fix("empty", &[]);
         let real = fix("real", &[(rng(0, 0, 0, 1), "R")]);
-        assert_eq!(select_non_overlapping(&[&empty, &real]), vec![1]);
+        assert_eq!(select_non_overlapping(&[empty, real]), vec![1]);
     }
 
     #[test]
@@ -281,8 +322,16 @@ mod tests {
     #[test]
     fn fix_all_action_skips_non_auto_applicable_fixes() {
         let uri = Url::parse("file:///tmp/a.as").unwrap();
-        let mut manual = fix("manual", &[(rng(0, 0, 0, 1), "M")]);
-        manual.auto_applicable = false;
+        let document_fix = fix("manual", &[(rng(0, 0, 0, 1), "M")]);
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri.clone(), document_fix.edits);
+        let manual = Fix {
+            title: document_fix.title,
+            kind: CodeActionKind::QUICKFIX,
+            edit: WorkspaceEdit::new(changes),
+            is_preferred: false,
+            auto_applicable: false,
+        };
         let candidates = vec![FixCandidate {
             family: "test",
             diagnostic: Diagnostic {

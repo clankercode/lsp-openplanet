@@ -86,7 +86,12 @@ fn client_resolves_code_actions(caps: &ClientCapabilities) -> bool {
     caps.text_document
         .as_ref()
         .and_then(|td| td.code_action.as_ref())
-        .is_some_and(|ca| ca.data_support == Some(true) && ca.resolve_support.is_some())
+        .is_some_and(|ca| {
+            ca.data_support == Some(true)
+                && ca.resolve_support.as_ref().is_some_and(|resolve| {
+                    resolve.properties.iter().any(|property| property == "edit")
+                })
+        })
 }
 
 /// One isolated plugin workspace (multi-root spec: "one server, N isolated
@@ -1642,6 +1647,8 @@ impl LanguageServer for Backend {
         let type_index_guard = self.type_index.read().await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
+        let uri_map = snapshot.uri_map();
+        let workspace_files: Vec<_> = uri_map.into_values().collect();
         let actions = code_actions::code_actions(&code_actions::CodeActionRequest {
             uri,
             analysis,
@@ -1649,6 +1656,7 @@ impl LanguageServer for Backend {
             context: &params.context,
             workspace: snapshot.symbols(),
             type_index: type_index_guard.as_deref(),
+            files: code_actions::fix::WorkspaceFileResolver::new(&workspace_files),
             lazy_edits: self
                 .code_action_resolve_support
                 .load(std::sync::atomic::Ordering::Relaxed),
@@ -1670,11 +1678,14 @@ impl LanguageServer for Backend {
         let type_index_guard = self.type_index.read().await;
         let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
         let analysis = snapshot.analysis_of(&uri).unwrap_or(&owned);
+        let uri_map = snapshot.uri_map();
+        let workspace_files: Vec<_> = uri_map.into_values().collect();
         Ok(code_actions::resolve_code_action(
             params,
             analysis,
             snapshot.symbols(),
             type_index_guard.as_deref(),
+            code_actions::fix::WorkspaceFileResolver::new(&workspace_files),
         ))
     }
 
@@ -1794,6 +1805,59 @@ mod tests {
     use tower::{Service, ServiceExt};
     use tower_lsp::jsonrpc::Request;
     use tower_lsp::lsp_types::WorkspaceFolder;
+
+    fn code_action_caps(
+        data_support: Option<bool>,
+        resolve_properties: Option<Vec<&str>>,
+    ) -> ClientCapabilities {
+        ClientCapabilities {
+            text_document: Some(TextDocumentClientCapabilities {
+                code_action: Some(CodeActionClientCapabilities {
+                    data_support,
+                    resolve_support: resolve_properties.map(|properties| {
+                        CodeActionCapabilityResolveSupport {
+                            properties: properties.into_iter().map(str::to_string).collect(),
+                        }
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lazy_code_action_edits_require_data_and_explicit_edit_resolve_support() {
+        assert!(client_resolves_code_actions(&code_action_caps(
+            Some(true),
+            Some(vec!["edit"]),
+        )));
+        for (name, capabilities) in [
+            (
+                "no data support",
+                code_action_caps(None, Some(vec!["edit"])),
+            ),
+            (
+                "data explicitly false",
+                code_action_caps(Some(false), Some(vec!["edit"])),
+            ),
+            ("no resolve support", code_action_caps(Some(true), None)),
+            (
+                "empty properties",
+                code_action_caps(Some(true), Some(vec![])),
+            ),
+            (
+                "non-edit property",
+                code_action_caps(Some(true), Some(vec!["command"])),
+            ),
+        ] {
+            assert!(
+                !client_resolves_code_actions(&capabilities),
+                "{name} must receive eager edits"
+            );
+        }
+    }
 
     fn temp_tree(name: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!(

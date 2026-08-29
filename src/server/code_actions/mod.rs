@@ -37,7 +37,10 @@ use crate::symbols::SymbolTable;
 use crate::typedb::TypeIndex;
 
 pub use fix::SOURCE_FIX_ALL_OPENPLANET;
-use fix::{collect_fixes, kind_selected, FixCandidate, FixContext};
+use fix::{
+    collect_fix_descriptors, collect_fixes, kind_selected, materialize_auto_descriptors,
+    materialize_fix, FixCandidate, FixContext, FixDescriptorCandidate, WorkspaceFileResolver,
+};
 
 /// Tag stamped into `CodeAction.data` so [`resolve_code_action`] never tries
 /// to interpret another provider's payload.
@@ -47,12 +50,30 @@ const FIX_DATA_TAG: &str = "openplanet.codeAction.fix";
 /// depending on the order actions happened to be returned in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FixRef {
+struct ResolveData {
     tag: String,
     uri: Url,
-    family: String,
-    diagnostic_range: Range,
-    title: String,
+    source_fingerprint: u64,
+    #[serde(flatten)]
+    action: ResolveAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum ResolveAction {
+    Fix {
+        family: String,
+        diagnostic_range: Range,
+        title: String,
+    },
+    FixAll,
+    DidYouMean {
+        range: Range,
+        new_text: String,
+    },
+    WrapInTryCatch {
+        range: Range,
+    },
 }
 
 /// The kinds this server can produce, and the promise that it resolves
@@ -85,6 +106,7 @@ pub struct CodeActionRequest<'a> {
     pub context: &'a CodeActionContext,
     pub workspace: &'a SymbolTable,
     pub type_index: Option<&'a TypeIndex>,
+    pub files: WorkspaceFileResolver<'a>,
     /// The client advertised `codeAction.dataSupport` + `resolveSupport`, so
     /// seam actions may be returned without their `edit`. Clients that did
     /// not must get the edit up front or the action would silently do
@@ -97,36 +119,71 @@ pub fn code_actions(req: &CodeActionRequest<'_>) -> Vec<CodeActionOrCommand> {
     let only = req.context.only.as_deref();
     let mut actions: Vec<CodeAction> = Vec::new();
 
-    actions.extend(quick_fix_did_you_mean(
-        req.uri,
-        &req.context.diagnostics,
-        req.workspace,
-        req.type_index,
-    ));
-    actions.extend(refactor_wrap_in_try_catch(
-        req.uri,
-        &req.analysis.source,
-        req.range,
-    ));
-
-    let ctx = FixContext {
-        uri: req.uri,
-        analysis: req.analysis,
-        workspace: req.workspace,
-        type_index: req.type_index,
-    };
-    let candidates = collect_fixes(&ctx);
-    for candidate in &candidates {
-        // A quick fix is about the squiggle under the cursor; the fix-all
-        // source action below is the document-wide view.
-        if ranges_touch(&candidate.diagnostic.range, &req.range) {
-            actions.push(seam_action(req, candidate));
-        }
+    if kind_selected(&CodeActionKind::QUICKFIX, only) {
+        actions.extend(quick_fix_did_you_mean(
+            req.uri,
+            &req.analysis.source,
+            &req.context.diagnostics,
+            req.workspace,
+            req.type_index,
+            req.lazy_edits,
+        ));
     }
-    // `fixAll` always considers the whole document — a source action is
-    // defined over the file, not the selection.
-    if let Some(action) = fix_all::fix_all_action(req.uri, &candidates) {
-        actions.push(action);
+    if kind_selected(&CodeActionKind::REFACTOR_REWRITE, only) {
+        actions.extend(refactor_wrap_in_try_catch(
+            req.uri,
+            &req.analysis.source,
+            req.range,
+            req.lazy_edits,
+        ));
+    }
+
+    let wants_registered_quickfix = kind_selected(&CodeActionKind::QUICKFIX, only);
+    let wants_fix_all = kind_selected(&SOURCE_FIX_ALL_OPENPLANET, only);
+    if req.lazy_edits && (wants_registered_quickfix || wants_fix_all) {
+        let ctx = FixContext {
+            uri: req.uri,
+            analysis: req.analysis,
+            workspace: req.workspace,
+            type_index: req.type_index,
+            files: req.files,
+        };
+        let descriptors = collect_fix_descriptors(&ctx);
+        if wants_registered_quickfix {
+            for candidate in &descriptors {
+                if ranges_touch(&candidate.diagnostic.range, &req.range) {
+                    actions.push(descriptor_action(req, candidate));
+                }
+            }
+        }
+        if wants_fix_all
+            && descriptors
+                .iter()
+                .any(|candidate| candidate.descriptor.auto_applicable)
+        {
+            actions.push(deferred_fix_all_action(req.uri, &req.analysis.source));
+        }
+    } else if !req.lazy_edits && (wants_registered_quickfix || wants_fix_all) {
+        let ctx = FixContext {
+            uri: req.uri,
+            analysis: req.analysis,
+            workspace: req.workspace,
+            type_index: req.type_index,
+            files: req.files,
+        };
+        let candidates = collect_fixes(&ctx);
+        if wants_registered_quickfix {
+            for candidate in &candidates {
+                if ranges_touch(&candidate.diagnostic.range, &req.range) {
+                    actions.push(seam_action(req, candidate));
+                }
+            }
+        }
+        if wants_fix_all {
+            if let Some(action) = fix_all::fix_all_action(req.uri, &candidates) {
+                actions.push(action);
+            }
+        }
     }
 
     actions
@@ -145,25 +202,63 @@ pub fn resolve_code_action(
     analysis: &DocumentAnalysis,
     workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
+    files: WorkspaceFileResolver<'_>,
 ) -> CodeAction {
     if action.edit.is_some() {
         return action;
     }
-    let Some(fix_ref) = parse_fix_ref(&action) else {
+    let Some(resolve) = parse_resolve_data(&action) else {
         return action;
     };
-    let ctx = FixContext {
-        uri: &fix_ref.uri,
-        analysis,
-        workspace,
-        type_index,
-    };
-    if let Some(candidate) = collect_fixes(&ctx).into_iter().find(|c| {
-        c.family == fix_ref.family
-            && c.diagnostic.range == fix_ref.diagnostic_range
-            && c.fix.title == fix_ref.title
-    }) {
-        action.edit = Some(single_file_edit(&fix_ref.uri, candidate.fix.edits));
+    if resolve.source_fingerprint != source_fingerprint(&analysis.source) {
+        return action;
+    }
+    match resolve.action {
+        ResolveAction::Fix {
+            family,
+            diagnostic_range,
+            title,
+        } => {
+            let ctx = FixContext {
+                uri: &resolve.uri,
+                analysis,
+                workspace,
+                type_index,
+                files,
+            };
+            if let Some(candidate) = materialize_fix(&ctx, &family, diagnostic_range, &title) {
+                action.edit = Some(candidate.fix.edit);
+            }
+        }
+        ResolveAction::FixAll => {
+            let ctx = FixContext {
+                uri: &resolve.uri,
+                analysis,
+                workspace,
+                type_index,
+                files,
+            };
+            // Only the auto-applicable half is worth materializing here:
+            // the batch discards everything else anyway.
+            let descriptors = collect_fix_descriptors(&ctx);
+            let candidates = materialize_auto_descriptors(&ctx, &descriptors, fixes::FAMILIES);
+            if let Some(resolved) = fix_all::fix_all_action(&resolve.uri, &candidates) {
+                action.edit = resolved.edit;
+            }
+        }
+        ResolveAction::DidYouMean { range, new_text } => {
+            action.edit = Some(single_file_edit(
+                &resolve.uri,
+                vec![TextEdit { range, new_text }],
+            ));
+        }
+        ResolveAction::WrapInTryCatch { range } => {
+            action.edit = Some(wrap_in_try_catch_edit(
+                &resolve.uri,
+                &analysis.source,
+                range,
+            ));
+        }
     }
     action
 }
@@ -171,25 +266,42 @@ pub fn resolve_code_action(
 /// Document a `codeAction/resolve` request needs loaded, if any. `None` for
 /// an action that is not ours to resolve.
 pub fn resolve_target_uri(action: &CodeAction) -> Option<Url> {
-    parse_fix_ref(action).map(|r| r.uri)
+    parse_resolve_data(action).map(|r| r.uri)
 }
 
-fn parse_fix_ref(action: &CodeAction) -> Option<FixRef> {
+fn parse_resolve_data(action: &CodeAction) -> Option<ResolveData> {
     let data = action.data.clone()?;
-    let fix_ref: FixRef = serde_json::from_value(data).ok()?;
-    (fix_ref.tag == FIX_DATA_TAG).then_some(fix_ref)
+    let resolve: ResolveData = serde_json::from_value(data).ok()?;
+    (resolve.tag == FIX_DATA_TAG).then_some(resolve)
+}
+
+fn source_fingerprint(source: &str) -> u64 {
+    source.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+fn resolve_data(uri: &Url, source: &str, action: ResolveAction) -> Option<serde_json::Value> {
+    serde_json::to_value(ResolveData {
+        tag: FIX_DATA_TAG.to_string(),
+        uri: uri.clone(),
+        source_fingerprint: source_fingerprint(source),
+        action,
+    })
+    .ok()
 }
 
 fn seam_action(req: &CodeActionRequest<'_>, candidate: &FixCandidate) -> CodeAction {
-    let edit = single_file_edit(req.uri, candidate.fix.edits.clone());
-    let data = serde_json::to_value(FixRef {
-        tag: FIX_DATA_TAG.to_string(),
-        uri: req.uri.clone(),
-        family: candidate.family.to_string(),
-        diagnostic_range: candidate.diagnostic.range,
-        title: candidate.fix.title.clone(),
-    })
-    .ok();
+    let edit = candidate.fix.edit.clone();
+    let data = resolve_data(
+        req.uri,
+        &req.analysis.source,
+        ResolveAction::Fix {
+            family: candidate.family.to_string(),
+            diagnostic_range: candidate.diagnostic.range,
+            title: candidate.fix.title.clone(),
+        },
+    );
     CodeAction {
         title: candidate.fix.title.clone(),
         kind: Some(candidate.fix.kind.clone()),
@@ -202,10 +314,61 @@ fn seam_action(req: &CodeActionRequest<'_>, candidate: &FixCandidate) -> CodeAct
     }
 }
 
+fn descriptor_action(
+    req: &CodeActionRequest<'_>,
+    candidate: &FixDescriptorCandidate,
+) -> CodeAction {
+    CodeAction {
+        title: candidate.descriptor.title.clone(),
+        kind: Some(candidate.descriptor.kind.clone()),
+        diagnostics: Some(vec![client_descriptor_diagnostic(req, candidate)]),
+        edit: None,
+        command: None,
+        is_preferred: candidate.descriptor.is_preferred.then_some(true),
+        disabled: None,
+        data: resolve_data(
+            req.uri,
+            &req.analysis.source,
+            ResolveAction::Fix {
+                family: candidate.family.to_string(),
+                diagnostic_range: candidate.diagnostic.range,
+                title: candidate.descriptor.title.clone(),
+            },
+        ),
+    }
+}
+
+fn deferred_fix_all_action(uri: &Url, source: &str) -> CodeAction {
+    CodeAction {
+        title: "Fix all auto-fixable Openplanet problems".to_string(),
+        kind: Some(SOURCE_FIX_ALL_OPENPLANET),
+        diagnostics: None,
+        edit: None,
+        command: None,
+        is_preferred: None,
+        disabled: None,
+        data: resolve_data(uri, source, ResolveAction::FixAll),
+    }
+}
+
 /// Prefer the client's own copy of the diagnostic (it may carry fields we
 /// never sent, and matching by identity is what ties the action to the
 /// squiggle); fall back to the form we published.
 fn client_diagnostic(req: &CodeActionRequest<'_>, candidate: &FixCandidate) -> Diagnostic {
+    req.context
+        .diagnostics
+        .iter()
+        .find(|d| {
+            d.range == candidate.diagnostic.range && d.message == candidate.diagnostic.message
+        })
+        .cloned()
+        .unwrap_or_else(|| candidate.diagnostic.clone())
+}
+
+fn client_descriptor_diagnostic(
+    req: &CodeActionRequest<'_>,
+    candidate: &FixDescriptorCandidate,
+) -> Diagnostic {
     req.context
         .diagnostics
         .iter()
@@ -244,9 +407,11 @@ fn is_our_diagnostic(diag: &Diagnostic) -> bool {
 
 fn quick_fix_did_you_mean(
     uri: &Url,
+    source: &str,
     diagnostics: &[Diagnostic],
     workspace: &SymbolTable,
     type_index: Option<&TypeIndex>,
+    lazy_edits: bool,
 ) -> Vec<CodeAction> {
     let mut out = Vec::new();
     for diag in diagnostics {
@@ -268,24 +433,33 @@ fn quick_fix_did_you_mean(
                 title: format!("Did you mean '{}'?", name),
                 kind: Some(CodeActionKind::QUICKFIX),
                 diagnostics: Some(vec![diag.clone()]),
-                edit: Some(single_file_edit(
-                    uri,
-                    vec![TextEdit {
-                        range: diag.range,
-                        new_text: name.clone(),
-                    }],
-                )),
+                edit: (!lazy_edits).then(|| {
+                    single_file_edit(
+                        uri,
+                        vec![TextEdit {
+                            range: diag.range,
+                            new_text: name.clone(),
+                        }],
+                    )
+                }),
                 command: None,
                 is_preferred: Some(i == 0),
                 disabled: None,
-                data: None,
+                data: resolve_data(
+                    uri,
+                    source,
+                    ResolveAction::DidYouMean {
+                        range: diag.range,
+                        new_text: name.clone(),
+                    },
+                ),
             });
         }
     }
     out
 }
 
-fn refactor_wrap_in_try_catch(uri: &Url, source: &str, range: Range) -> Vec<CodeAction> {
+fn wrap_in_try_catch_edit(uri: &Url, source: &str, range: Range) -> WorkspaceEdit {
     let start_off = position_to_offset(source, range.start);
     let end_off = position_to_offset(source, range.end);
     let (start_off, end_off) = if start_off <= end_off {
@@ -296,15 +470,24 @@ fn refactor_wrap_in_try_catch(uri: &Url, source: &str, range: Range) -> Vec<Code
     let selected = source.get(start_off..end_off).unwrap_or("");
     let new_text = format!("try {{\n    {}\n}} catch {{ }}\n", selected);
 
+    single_file_edit(uri, vec![TextEdit { range, new_text }])
+}
+
+fn refactor_wrap_in_try_catch(
+    uri: &Url,
+    source: &str,
+    range: Range,
+    lazy_edits: bool,
+) -> Vec<CodeAction> {
     vec![CodeAction {
         title: "Wrap in try/catch".to_string(),
         kind: Some(CodeActionKind::REFACTOR_REWRITE),
         diagnostics: None,
-        edit: Some(single_file_edit(uri, vec![TextEdit { range, new_text }])),
+        edit: (!lazy_edits).then(|| wrap_in_try_catch_edit(uri, source, range)),
         command: None,
         is_preferred: None,
         disabled: None,
-        data: None,
+        data: resolve_data(uri, source, ResolveAction::WrapInTryCatch { range }),
     }]
 }
 
@@ -476,6 +659,7 @@ mod tests {
         }
 
         fn request(&self, ctx: CodeActionContext, range: Range, lazy: bool) -> Vec<CodeAction> {
+            let files = [(self.uri.clone(), &self.analysis)];
             code_actions(&CodeActionRequest {
                 uri: &self.uri,
                 analysis: &self.analysis,
@@ -483,6 +667,7 @@ mod tests {
                 context: &ctx,
                 workspace: &self.workspace,
                 type_index: None,
+                files: WorkspaceFileResolver::new(&files),
                 lazy_edits: lazy,
             })
             .into_iter()
@@ -510,7 +695,14 @@ mod tests {
         }
 
         fn resolve(&self, action: CodeAction) -> CodeAction {
-            resolve_code_action(action, &self.analysis, &self.workspace, None)
+            let files = [(self.uri.clone(), &self.analysis)];
+            resolve_code_action(
+                action,
+                &self.analysis,
+                &self.workspace,
+                None,
+                WorkspaceFileResolver::new(&files),
+            )
         }
     }
 
@@ -597,6 +789,94 @@ mod tests {
     }
 
     #[test]
+    fn resolving_client_defers_and_resolves_every_action_class() {
+        let source = "void f(string s) { Foa x; }";
+        let table = workspace_with_class("Foo");
+        let h = Harness::with_workspace(source, table);
+        let typo_start = source.find("Foa").unwrap() as u32;
+        let actions = h.with_diags(vec![mk_diag(
+            mk_range(0, typo_start, 0, typo_start + 3),
+            "unknown type `Foa`",
+        )]);
+
+        for (name, action) in [
+            (
+                "registered quick fix",
+                actions
+                    .iter()
+                    .find(|a| a.title.starts_with("Pass `s`"))
+                    .expect("registered quick fix"),
+            ),
+            (
+                "did you mean",
+                actions
+                    .iter()
+                    .find(|a| a.title == "Did you mean 'Foo'?")
+                    .expect("did-you-mean action"),
+            ),
+            (
+                "refactor",
+                actions
+                    .iter()
+                    .find(|a| a.kind == Some(CodeActionKind::REFACTOR_REWRITE))
+                    .expect("refactor action"),
+            ),
+            (
+                "fix all",
+                actions
+                    .iter()
+                    .find(|a| a.kind == Some(SOURCE_FIX_ALL_OPENPLANET))
+                    .expect("fix-all action"),
+            ),
+        ] {
+            assert!(action.edit.is_none(), "{name} must be cheap to list");
+            assert!(action.data.is_some(), "{name} must carry resolve data");
+            assert!(
+                h.resolve(action.clone()).edit.is_some(),
+                "{name} must materialize on resolve"
+            );
+        }
+
+        let eager = h.request(
+            CodeActionContext {
+                diagnostics: vec![mk_diag(
+                    mk_range(0, typo_start, 0, typo_start + 3),
+                    "unknown type `Foa`",
+                )],
+                ..Default::default()
+            },
+            whole_doc(source),
+            false,
+        );
+        assert!(
+            eager.iter().all(|action| action.edit.is_some()),
+            "non-resolving clients need eager edits for every class: {:?}",
+            titles(&eager)
+        );
+    }
+
+    #[test]
+    fn listing_does_not_materialize_registered_fixes_but_resolve_and_eager_listing_do() {
+        use super::fixes::string_by_value::{materialization_count, reset_materialization_count};
+
+        let h = Harness::new("void f(string a, string b) {}");
+        reset_materialization_count();
+        let lazy = h.all();
+        assert_eq!(materialization_count(), 0, "lazy listing computed edits");
+
+        let quickfix = of_kind(&lazy, &CodeActionKind::QUICKFIX)[0].clone();
+        assert!(h.resolve(quickfix).edit.is_some());
+        assert_eq!(materialization_count(), 1, "resolve must compute one edit");
+
+        reset_materialization_count();
+        let eager = h.request(CodeActionContext::default(), whole_doc(&h.source), false);
+        assert!(of_kind(&eager, &CodeActionKind::QUICKFIX)
+            .iter()
+            .all(|action| action.edit.is_some()));
+        assert_eq!(materialization_count(), 2, "eager listing needs both edits");
+    }
+
+    #[test]
     fn non_resolving_client_gets_the_edit_up_front() {
         let h = Harness::new("void f(string s) {}");
         let actions = h.request(
@@ -659,6 +939,39 @@ mod tests {
     }
 
     #[test]
+    fn stale_legacy_actions_do_not_edit_shifted_or_replaced_content() {
+        let original = "Foa value;";
+        let typo_range = mk_range(0, 0, 0, 3);
+        let offered = Harness::with_workspace(original, workspace_with_class("Foo"));
+        let actions = offered.with_diags(vec![mk_diag(typo_range, "unknown type `Foa`")]);
+        let did_you_mean = actions
+            .iter()
+            .find(|action| action.title == "Did you mean 'Foo'?")
+            .expect("did-you-mean action")
+            .clone();
+        let wrap = actions
+            .iter()
+            .find(|action| action.kind == Some(CodeActionKind::REFACTOR_REWRITE))
+            .expect("wrap action")
+            .clone();
+
+        for (case, changed) in [
+            ("shifted", "int prefix; Foa value;"),
+            ("same-range replacement", "Bar value;"),
+        ] {
+            let current = Harness::with_workspace(changed, workspace_with_class("Foo"));
+            assert!(
+                current.resolve(did_you_mean.clone()).edit.is_none(),
+                "stale did-you-mean edited {case} content"
+            );
+            assert!(
+                current.resolve(wrap.clone()).edit.is_none(),
+                "stale refactor edited {case} content"
+            );
+        }
+    }
+
+    #[test]
     fn resolve_target_uri_reports_the_document_to_load() {
         let h = Harness::new("void f(string s) {}");
         let action = of_kind(&h.all(), &CodeActionKind::QUICKFIX)[0].clone();
@@ -675,7 +988,8 @@ mod tests {
         let actions = h.all();
         let fix_all = of_kind(&actions, &SOURCE_FIX_ALL_OPENPLANET);
         assert_eq!(fix_all.len(), 1, "titles: {:?}", titles(&actions));
-        let edits = edits_of(fix_all[0], &h.uri);
+        let resolved = h.resolve(fix_all[0].clone());
+        let edits = edits_of(&resolved, &h.uri);
         assert_eq!(edits.len(), 3);
         assert_eq!(
             apply_edits(src, edits),
@@ -698,7 +1012,7 @@ mod tests {
     fn fix_all_handles_two_fixes_on_one_line() {
         let src = "void f(string a, string b) {}";
         let h = Harness::new(src);
-        let fix_all = of_kind(&h.all(), &SOURCE_FIX_ALL_OPENPLANET)[0].clone();
+        let fix_all = h.resolve(of_kind(&h.all(), &SOURCE_FIX_ALL_OPENPLANET)[0].clone());
         let edits = edits_of(&fix_all, &h.uri);
         assert_eq!(edits.len(), 2);
         assert_eq!(
@@ -711,7 +1025,7 @@ mod tests {
     fn fix_all_edits_are_ordered_descending() {
         let src = "void f(string a, string b, string c) {}";
         let h = Harness::new(src);
-        let fix_all = of_kind(&h.all(), &SOURCE_FIX_ALL_OPENPLANET)[0].clone();
+        let fix_all = h.resolve(of_kind(&h.all(), &SOURCE_FIX_ALL_OPENPLANET)[0].clone());
         let starts: Vec<Position> = edits_of(&fix_all, &h.uri)
             .iter()
             .map(|e| e.range.start)
@@ -809,7 +1123,7 @@ mod tests {
         assert!(quickfixes[0].title.contains('a'));
         // The source action still covers the whole file.
         let fix_all = of_kind(&actions, &SOURCE_FIX_ALL_OPENPLANET);
-        assert_eq!(edits_of(fix_all[0], &h.uri).len(), 2);
+        assert_eq!(edits_of(&h.resolve(fix_all[0].clone()), &h.uri).len(), 2);
     }
 
     // ── Diagnostic plumbing ───────────────────────────────────────────────
@@ -914,7 +1228,8 @@ mod tests {
             });
         assert_eq!(foo_action.kind, Some(CodeActionKind::QUICKFIX));
         assert_eq!(foo_action.is_preferred, Some(true));
-        let edits = edits_of(foo_action, &h.uri);
+        let resolved = h.resolve(foo_action.clone());
+        let edits = edits_of(&resolved, &h.uri);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "Foo");
         assert_eq!(edits[0].range, diag_range);
@@ -925,7 +1240,7 @@ mod tests {
         let table = workspace_with_class("Foo");
         let uri = Url::parse("file:///tmp/a.as").unwrap();
         let diag = mk_diag(mk_range(0, 0, 0, 3), "some other error");
-        assert!(quick_fix_did_you_mean(&uri, &[diag], &table, None).is_empty());
+        assert!(quick_fix_did_you_mean(&uri, "", &[diag], &table, None, true).is_empty());
     }
 
     #[test]
@@ -936,7 +1251,8 @@ mod tests {
         let refactors = of_kind(&actions, &CodeActionKind::REFACTOR_REWRITE);
         assert_eq!(refactors.len(), 1);
         assert_eq!(refactors[0].title, "Wrap in try/catch");
-        let edits = edits_of(refactors[0], &h.uri);
+        let resolved = h.resolve(refactors[0].clone());
+        let edits = edits_of(&resolved, &h.uri);
         assert_eq!(edits.len(), 1);
         assert!(edits[0].new_text.contains("try {"));
         assert!(edits[0].new_text.contains("print(x);"));

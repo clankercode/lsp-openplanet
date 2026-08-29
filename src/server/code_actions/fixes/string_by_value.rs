@@ -13,7 +13,7 @@
 
 use crate::lexer::token::TokenKind;
 use crate::lexer::Span;
-use crate::server::code_actions::fix::{Fix, FixContext, FixFamily};
+use crate::server::code_actions::fix::{Fix, FixContext, FixDescriptor, FixFamily};
 use crate::server::diagnostics::span_to_range;
 use crate::typecheck::{TypeDiagnostic, TypeDiagnosticKind};
 use tower_lsp::lsp_types::CodeActionKind;
@@ -21,41 +21,81 @@ use tower_lsp::lsp_types::CodeActionKind;
 /// What a bare `string` parameter should have been.
 const REPLACEMENT: &str = "const string &in";
 
+#[cfg(test)]
+thread_local! {
+    static MATERIALIZATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_materialization_count() {
+    MATERIALIZATION_COUNT.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn materialization_count() -> usize {
+    MATERIALIZATION_COUNT.get()
+}
+
 pub const FAMILY: FixFamily = FixFamily {
     name: "string-by-value-param",
     matches,
-    produce,
+    describe,
+    materialize,
 };
 
 fn matches(kind: &TypeDiagnosticKind) -> bool {
     matches!(kind, TypeDiagnosticKind::StringByValueParam { .. })
 }
 
-fn produce(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<Fix> {
+fn title(diag: &TypeDiagnostic) -> Option<String> {
     let TypeDiagnosticKind::StringByValueParam { param_name } = &diag.kind else {
-        return Vec::new();
+        return None;
     };
-    let Some(type_span) = param_type_span(&ctx.analysis.tokens, diag.span) else {
-        return Vec::new();
-    };
-    let title = if param_name.is_empty() {
+    Some(if param_name.is_empty() {
         format!("Pass the string by reference (`{}`)", REPLACEMENT)
     } else {
         format!("Pass `{}` by reference (`{}`)", param_name, REPLACEMENT)
-    };
-    vec![Fix {
-        title,
-        kind: CodeActionKind::QUICKFIX,
-        edits: vec![tower_lsp::lsp_types::TextEdit {
+    })
+}
+
+fn describe(diag: &TypeDiagnostic, _ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
+    title(diag)
+        .map(|title| FixDescriptor {
+            title,
+            kind: CodeActionKind::QUICKFIX,
+            is_preferred: true,
+            auto_applicable: true,
+        })
+        .into_iter()
+        .collect()
+}
+
+fn materialize(diag: &TypeDiagnostic, ctx: &FixContext<'_>, selected_title: &str) -> Option<Fix> {
+    #[cfg(test)]
+    MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
+    let title = title(diag)?;
+    if title != selected_title {
+        return None;
+    }
+    let type_span = param_type_span(&ctx.analysis.tokens, diag.span)?;
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        ctx.uri.clone(),
+        vec![tower_lsp::lsp_types::TextEdit {
             range: span_to_range(&ctx.analysis.source, type_span),
             new_text: REPLACEMENT.to_string(),
         }],
+    );
+    Some(Fix {
+        title,
+        kind: CodeActionKind::QUICKFIX,
+        edit: tower_lsp::lsp_types::WorkspaceEdit::new(changes),
         // Unambiguous and lossless: the game compiler asks for exactly this
         // spelling, and `const string &in` accepts every argument the
         // by-value form did.
         is_preferred: true,
         auto_applicable: true,
-    }]
+    })
 }
 
 /// Span of the parameter's type, given the span the diagnostic is anchored
@@ -105,6 +145,7 @@ mod tests {
             analysis: &analysis,
             workspace: &workspace,
             type_index: None,
+            files: crate::server::code_actions::fix::WorkspaceFileResolver::empty(),
         };
         let candidates = collect_fixes(&ctx);
         apply_fixes(source, &candidates)
@@ -117,6 +158,7 @@ mod tests {
             analysis: &analysis,
             workspace: &workspace,
             type_index: None,
+            files: crate::server::code_actions::fix::WorkspaceFileResolver::empty(),
         };
         collect_fixes(&ctx).len()
     }
@@ -302,6 +344,7 @@ mod tests {
             analysis: &analysis,
             workspace: &workspace,
             type_index: None,
+            files: crate::server::code_actions::fix::WorkspaceFileResolver::empty(),
         };
         let candidates = collect_fixes(&ctx);
         assert_eq!(candidates.len(), 1);

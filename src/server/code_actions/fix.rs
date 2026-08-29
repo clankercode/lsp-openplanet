@@ -8,19 +8,22 @@
 //! [`super::fixes::string_by_value`] for the worked example):
 //!
 //! ```ignore
-//! pub const FAMILY: FixFamily = FixFamily { name: "my-family", matches, produce };
+//! pub const FAMILY: FixFamily = FixFamily {
+//!     name: "my-family", matches, describe, materialize
+//! };
 //!
 //! /// The discriminant(s) this family claims. One `matches!` arm.
 //! fn matches(kind: &TypeDiagnosticKind) -> bool {
 //!     matches!(kind, TypeDiagnosticKind::MyKind { .. })
 //! }
 //!
-//! /// The fixes for one claimed diagnostic. Must be pure and cheap: it is
-//! /// called again during `codeAction/resolve` to materialise the edits.
-//! fn produce(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<Fix> { .. }
+//! fn describe(diag: &TypeDiagnostic) -> Vec<FixDescriptor> { .. }
+//! fn materialize(
+//!     diag: &TypeDiagnostic, ctx: &FixContext<'_>, title: &str
+//! ) -> Option<Fix> { .. }
 //! ```
 //!
-//! `produce` is deliberately a plain `fn` pointer: the registry stays a
+//! Both callbacks are deliberately plain `fn` pointers: the registry stays a
 //! `const` slice, so adding a family costs no runtime setup and no shared
 //! mutable state.
 
@@ -47,8 +50,9 @@ pub const SOURCE_FIX_ALL_OPENPLANET: CodeActionKind =
 pub struct Fix {
     pub title: String,
     pub kind: CodeActionKind,
-    /// Edits within the single document the diagnostic came from.
-    pub edits: Vec<TextEdit>,
+    /// The complete edit selected by the user. Families may edit multiple
+    /// files; source fix-all separately admits only document-local edits.
+    pub edit: WorkspaceEdit,
     /// Only where the fix is unambiguous *and* lossless (B035 decision).
     /// A family offering two alternatives must leave this `false` on both.
     pub is_preferred: bool,
@@ -57,12 +61,50 @@ pub struct Fix {
     pub auto_applicable: bool,
 }
 
+/// Cheap menu metadata for one fix. Describing an action must never compute
+/// its edits; those are materialized only for eager clients or on resolve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixDescriptor {
+    pub title: String,
+    pub kind: CodeActionKind,
+    pub is_preferred: bool,
+    pub auto_applicable: bool,
+}
+
+/// Read-only URI-to-analysis view of the workspace available to a family.
+#[derive(Clone, Copy)]
+pub struct WorkspaceFileResolver<'a> {
+    files: &'a [(Url, &'a DocumentAnalysis)],
+}
+
+impl<'a> WorkspaceFileResolver<'a> {
+    pub fn new(files: &'a [(Url, &'a DocumentAnalysis)]) -> Self {
+        Self { files }
+    }
+
+    pub fn empty() -> Self {
+        Self { files: &[] }
+    }
+
+    pub fn get(&self, uri: &Url) -> Option<&'a DocumentAnalysis> {
+        self.files
+            .iter()
+            .find_map(|(candidate, analysis)| (candidate == uri).then_some(*analysis))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Url, &'a DocumentAnalysis)> + '_ {
+        self.files.iter().map(|(uri, analysis)| (uri, *analysis))
+    }
+}
+
 /// Everything a fix producer is allowed to look at.
+#[derive(Clone, Copy)]
 pub struct FixContext<'a> {
     pub uri: &'a Url,
     pub analysis: &'a DocumentAnalysis,
     pub workspace: &'a SymbolTable,
     pub type_index: Option<&'a TypeIndex>,
+    pub files: WorkspaceFileResolver<'a>,
 }
 
 /// A registered fix family. See the module docs for the author's contract.
@@ -72,8 +114,18 @@ pub struct FixFamily {
     pub name: &'static str,
     /// Discriminant test: does this family claim that diagnostic kind?
     pub matches: fn(&TypeDiagnosticKind) -> bool,
-    /// Produce the fixes for one claimed diagnostic.
-    pub produce: fn(&TypeDiagnostic, &FixContext<'_>) -> Vec<Fix>,
+    /// Describe the menu entries for one claimed diagnostic, without edits.
+    pub describe: fn(&TypeDiagnostic, &FixContext<'_>) -> Vec<FixDescriptor>,
+    /// Materialize exactly the selected descriptor.
+    pub materialize: fn(&TypeDiagnostic, &FixContext<'_>, &str) -> Option<Fix>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FixDescriptorCandidate {
+    pub family: &'static str,
+    pub diagnostic: Diagnostic,
+    pub descriptor: FixDescriptor,
+    type_diagnostic: TypeDiagnostic,
 }
 
 /// A produced fix plus the provenance needed to (a) attach it to the right
@@ -100,24 +152,89 @@ pub fn type_diagnostics(ctx: &FixContext<'_>) -> Vec<TypeDiagnostic> {
 /// Every fix every registered family offers for this document, in a stable
 /// order: checker order, then registry order, then producer order.
 pub fn collect_fixes(ctx: &FixContext<'_>) -> Vec<FixCandidate> {
+    collect_fix_descriptors(ctx)
+        .iter()
+        .filter_map(|descriptor| materialize_descriptor(ctx, descriptor, FAMILIES))
+        .collect()
+}
+
+/// Cheap list-time view: checker diagnostics plus family metadata, no edits.
+pub fn collect_fix_descriptors(ctx: &FixContext<'_>) -> Vec<FixDescriptorCandidate> {
+    collect_fix_descriptors_from(ctx, FAMILIES)
+}
+
+pub fn collect_fix_descriptors_from(
+    ctx: &FixContext<'_>,
+    families: &[FixFamily],
+) -> Vec<FixDescriptorCandidate> {
     let source = &ctx.analysis.source;
     let mut out = Vec::new();
     for diag in type_diagnostics(ctx) {
-        for family in FAMILIES {
+        for family in families {
             if !(family.matches)(&diag.kind) {
                 continue;
             }
             let published = published_form(source, &diag);
-            for fix in (family.produce)(&diag, ctx) {
-                out.push(FixCandidate {
+            for descriptor in (family.describe)(&diag, ctx) {
+                out.push(FixDescriptorCandidate {
                     family: family.name,
                     diagnostic: published.clone(),
-                    fix,
+                    descriptor,
+                    type_diagnostic: diag.clone(),
                 });
             }
         }
     }
     out
+}
+
+pub fn materialize_descriptor(
+    ctx: &FixContext<'_>,
+    candidate: &FixDescriptorCandidate,
+    families: &[FixFamily],
+) -> Option<FixCandidate> {
+    let family = families
+        .iter()
+        .find(|family| family.name == candidate.family)?;
+    let fix = (family.materialize)(&candidate.type_diagnostic, ctx, &candidate.descriptor.title)?;
+    Some(FixCandidate {
+        family: family.name,
+        diagnostic: candidate.diagnostic.clone(),
+        fix,
+    })
+}
+
+/// Materialize only the descriptors eligible for `source.fixAll.openplanet`.
+///
+/// The batcher never needs the fixes a user has to choose between, and a
+/// family's `materialize` may be the expensive half — so a fix-all over a
+/// document with many offers must not pay for the ones it will discard.
+pub fn materialize_auto_descriptors(
+    ctx: &FixContext<'_>,
+    descriptors: &[FixDescriptorCandidate],
+    families: &[FixFamily],
+) -> Vec<FixCandidate> {
+    descriptors
+        .iter()
+        .filter(|candidate| candidate.descriptor.auto_applicable)
+        .filter_map(|candidate| materialize_descriptor(ctx, candidate, families))
+        .collect()
+}
+
+/// Re-find and materialize one descriptor against the current document.
+/// Missing means the action is stale and resolve should leave it unchanged.
+pub fn materialize_fix(
+    ctx: &FixContext<'_>,
+    family_name: &str,
+    diagnostic_range: Range,
+    title: &str,
+) -> Option<FixCandidate> {
+    let descriptor = collect_fix_descriptors(ctx).into_iter().find(|candidate| {
+        candidate.family == family_name
+            && candidate.diagnostic.range == diagnostic_range
+            && candidate.descriptor.title == title
+    })?;
+    materialize_descriptor(ctx, &descriptor, FAMILIES)
 }
 
 /// The LSP diagnostic `publishDiagnostics` would have sent for this finding.
@@ -157,6 +274,191 @@ pub fn kind_selected(kind: &CodeActionKind, only: Option<&[CodeActionKind]>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::code_actions::test_fixtures::ctx_for;
+
+    fn synthetic_matches(kind: &TypeDiagnosticKind) -> bool {
+        matches!(kind, TypeDiagnosticKind::StringByValueParam { .. })
+    }
+
+    fn synthetic_describe(
+        _diagnostic: &TypeDiagnostic,
+        ctx: &FixContext<'_>,
+    ) -> Vec<FixDescriptor> {
+        ctx.files
+            .iter()
+            .any(|(_, analysis)| analysis.source.contains("enable synthetic"))
+            .then(|| FixDescriptor {
+                title: "Synthetic cross-file fix".to_string(),
+                kind: CodeActionKind::QUICKFIX,
+                is_preferred: false,
+                auto_applicable: false,
+            })
+            .into_iter()
+            .collect()
+    }
+
+    fn synthetic_materialize(
+        _diagnostic: &TypeDiagnostic,
+        ctx: &FixContext<'_>,
+        title: &str,
+    ) -> Option<Fix> {
+        if title != "Synthetic cross-file fix" {
+            return None;
+        }
+        let second_uri = ctx
+            .files
+            .iter()
+            .find(|(_, analysis)| analysis.source.contains("enable synthetic"))?
+            .0
+            .clone();
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(
+            ctx.uri.clone(),
+            vec![TextEdit::new(Range::default(), "current".to_string())],
+        );
+        changes.insert(
+            second_uri,
+            vec![TextEdit::new(Range::default(), "second".to_string())],
+        );
+        Some(Fix {
+            title: title.to_string(),
+            kind: CodeActionKind::QUICKFIX,
+            edit: WorkspaceEdit::new(changes),
+            is_preferred: false,
+            auto_applicable: false,
+        })
+    }
+
+    const SYNTHETIC_FAMILY: FixFamily = FixFamily {
+        name: "test-cross-file",
+        matches: synthetic_matches,
+        describe: synthetic_describe,
+        materialize: synthetic_materialize,
+    };
+
+    thread_local! {
+        static AUTO_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static MANUAL_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn counted_descriptor(title: &str, auto_applicable: bool) -> FixDescriptor {
+        FixDescriptor {
+            title: title.to_string(),
+            kind: CodeActionKind::QUICKFIX,
+            is_preferred: false,
+            auto_applicable,
+        }
+    }
+
+    fn auto_describe(_: &TypeDiagnostic, _: &FixContext<'_>) -> Vec<FixDescriptor> {
+        vec![counted_descriptor("auto", true)]
+    }
+
+    fn manual_describe(_: &TypeDiagnostic, _: &FixContext<'_>) -> Vec<FixDescriptor> {
+        vec![counted_descriptor("manual", false)]
+    }
+
+    fn counted_fix(ctx: &FixContext<'_>, title: &str) -> Fix {
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(
+            ctx.uri.clone(),
+            vec![TextEdit::new(Range::default(), title.to_string())],
+        );
+        Fix {
+            title: title.to_string(),
+            kind: CodeActionKind::QUICKFIX,
+            edit: WorkspaceEdit::new(changes),
+            is_preferred: false,
+            auto_applicable: title == "auto",
+        }
+    }
+
+    fn auto_materialize(_: &TypeDiagnostic, ctx: &FixContext<'_>, _: &str) -> Option<Fix> {
+        AUTO_MATERIALIZED.with(|count| count.set(count.get() + 1));
+        Some(counted_fix(ctx, "auto"))
+    }
+
+    fn manual_materialize(_: &TypeDiagnostic, ctx: &FixContext<'_>, _: &str) -> Option<Fix> {
+        MANUAL_MATERIALIZED.with(|count| count.set(count.get() + 1));
+        Some(counted_fix(ctx, "manual"))
+    }
+
+    const COUNTED_FAMILIES: [FixFamily; 2] = [
+        FixFamily {
+            name: "test-auto",
+            matches: synthetic_matches,
+            describe: auto_describe,
+            materialize: auto_materialize,
+        },
+        FixFamily {
+            name: "test-manual",
+            matches: synthetic_matches,
+            describe: manual_describe,
+            materialize: manual_materialize,
+        },
+    ];
+
+    #[test]
+    fn fix_all_materializes_auto_descriptors_only() {
+        let (analysis, workspace, uri) = ctx_for("void f(string value) {}");
+        let ctx = FixContext {
+            uri: &uri,
+            analysis: &analysis,
+            workspace: &workspace,
+            type_index: None,
+            files: WorkspaceFileResolver::empty(),
+        };
+        let descriptors = collect_fix_descriptors_from(&ctx, &COUNTED_FAMILIES);
+        AUTO_MATERIALIZED.set(0);
+        MANUAL_MATERIALIZED.set(0);
+
+        let candidates = materialize_auto_descriptors(&ctx, &descriptors, &COUNTED_FAMILIES);
+        assert_eq!(AUTO_MATERIALIZED.get(), 1);
+        assert_eq!(MANUAL_MATERIALIZED.get(), 0);
+        let action = super::super::fix_all::fix_all_action(&uri, &candidates)
+            .expect("one batched workspace edit");
+        let edits = action
+            .edit
+            .and_then(|edit| edit.changes)
+            .and_then(|mut changes| changes.remove(&uri))
+            .expect("document edits");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "auto");
+    }
+
+    #[test]
+    fn registry_family_can_use_workspace_context_and_materialize_cross_file_edit() {
+        let (analysis, workspace, uri) = ctx_for("void f(string value) {}");
+        let second_uri = Url::parse("file:///test/second.as").unwrap();
+        let second = DocumentAnalysis::analyze_plain("// enable synthetic\n");
+        let files = vec![
+            (0, (uri.clone(), &analysis)),
+            (1, (second_uri.clone(), &second)),
+        ];
+        let files: Vec<_> = files.into_iter().map(|(_, file)| file).collect();
+        let ctx = FixContext {
+            uri: &uri,
+            analysis: &analysis,
+            workspace: &workspace,
+            type_index: None,
+            files: WorkspaceFileResolver::new(&files),
+        };
+
+        let descriptors = collect_fix_descriptors_from(&ctx, &[SYNTHETIC_FAMILY]);
+        assert_eq!(descriptors.len(), 1);
+        let fix = materialize_descriptor(&ctx, &descriptors[0], &[SYNTHETIC_FAMILY])
+            .expect("synthetic fix materialized");
+        let changes = fix.fix.edit.changes.expect("plain workspace changes");
+        assert_eq!(changes.get(&uri).unwrap()[0].new_text, "current");
+        assert_eq!(changes.get(&second_uri).unwrap()[0].new_text, "second");
+
+        let no_context_files = vec![(uri.clone(), &analysis)];
+        let no_context = FixContext {
+            files: WorkspaceFileResolver::new(&no_context_files),
+            ..ctx
+        };
+        assert!(collect_fix_descriptors_from(&no_context, &[SYNTHETIC_FAMILY]).is_empty());
+    }
 
     #[test]
     fn kind_selected_without_filter_accepts_everything() {

@@ -110,6 +110,30 @@ fn check_command_reports_workspace_diagnostics() {
 }
 
 #[test]
+fn check_command_keeps_utf8_byte_columns_with_unicode_prefixes() {
+    let root = make_temp_plugin("unicode-byte-columns");
+    let source = "void Main() { /* é😀 */ MissingType@ bad; }\n";
+    fs::write(root.join("src/Main.as"), source).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
+        .arg("check")
+        .arg("--no-typedb")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let byte_column = source.find("MissingType").unwrap() + 1;
+    assert!(
+        stdout.contains(&format!(
+            "src/Main.as:1:{byte_column}: error: unknown type `MissingType`"
+        )),
+        "CLI byte-column output changed: {stdout:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn check_command_exits_zero_when_clean() {
     let root = make_temp_plugin("clean");
     // `_f`, not `f`: this local is genuinely unused (GH #55 warns on that)
