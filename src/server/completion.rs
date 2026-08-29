@@ -564,6 +564,29 @@ mod tests {
         assert!(labels.contains(&"m"), "missing m in {:?}", labels);
     }
 
+    /// B054: the workspace fallback here is a `TypeName::` prefix scan of
+    /// the pool, and the pool carried no interface member — so an
+    /// interface-typed receiver offered nothing at all.
+    #[test]
+    fn completion_offers_interface_members_on_an_interface_typed_receiver() {
+        let src = "interface I { void Go(); int Count(); } void f() { I@ i; i. }";
+        let ws = ws_from(src);
+        let pos = pos_after(src, "i.");
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let items = complete(
+            &analysis,
+            None,
+            pos,
+            None,
+            Some(ws.snapshot.symbols()),
+            &[],
+            false,
+        );
+        let labels = labels(&items);
+        assert!(labels.contains(&"Go"), "missing Go in {:?}", labels);
+        assert!(labels.contains(&"Count"), "missing Count in {:?}", labels);
+    }
+
     #[test]
     fn completion_offers_in_scope_locals() {
         let src = "void f() { int abc = 5; zz }";

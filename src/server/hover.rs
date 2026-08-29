@@ -410,118 +410,8 @@ fn member_hover(
     offset: u32,
     bare: &str,
 ) -> Option<String> {
-    let owner = receiver_type_name(analysis, checked, tok_idx, offset)?;
+    let owner = navigation::receiver_type_name(analysis, checked, tok_idx, offset)?;
     method_or_member_hover(scope, &owner, bare)
-}
-
-/// Fully qualified name of the type the `.` on the left of `tok_idx` is
-/// applied to. `this` resolves to the enclosing class without consulting the
-/// checker; anything else uses the recorded type of the receiver expression.
-fn receiver_type_name(
-    analysis: &DocumentAnalysis,
-    checked: Option<&CheckedFile<'_>>,
-    tok_idx: usize,
-    offset: u32,
-) -> Option<String> {
-    let tokens = &analysis.tokens;
-    let last = tok_idx.checked_sub(2)?;
-    if tokens.get(last)?.kind == TokenKind::KwThis {
-        let cls = class_name_at(analysis, offset);
-        return (!cls.is_empty()).then_some(cls);
-    }
-    base_type_name(receiver_type(tokens, checked?, last)?)
-}
-
-/// Recorded type of the receiver expression whose last token is `last`.
-///
-/// Two shapes, because the parser spans them differently:
-///
-/// * A BARE parenthesised group — `(x)`, `(q ? a : b)` — is given the span of
-///   the expression INSIDE it, so no recorded span contains the closing
-///   paren. Query the inner token range directly.
-/// * Everything else — `a`, `a.b`, `Ns::a`, `f(x)`, `items[0]`,
-///   `cast<T>(x)` — is spanned through its last token, so the innermost
-///   recorded expression containing that token's final byte IS the receiver.
-///   Using containment rather than an exact range is what makes nested calls
-///   and postfix chains work without re-parsing them.
-///
-/// `None` when nothing is recorded there, and deliberately no fall-back
-/// between the two shapes: a miss on the group range would otherwise pick up
-/// the enclosing call and report the wrong type.
-fn receiver_type<'c>(
-    tokens: &[crate::lexer::Token],
-    checked: &'c CheckedFile<'_>,
-    last: usize,
-) -> Option<&'c TypeRepr> {
-    let mut last = last;
-    while tokens[last].kind == TokenKind::RParen {
-        let Some(open) = matching_open(tokens, last) else {
-            break;
-        };
-        // `f(...)` and `cast<T>(...)` are postfix forms, not groups — their
-        // recorded span does cover the closing paren, so leave them to the
-        // containment query below.
-        let postfix = open
-            .checked_sub(1)
-            .map(|p| tokens[p].kind)
-            .is_some_and(|k| {
-                matches!(
-                    k,
-                    TokenKind::Ident | TokenKind::RParen | TokenKind::RBracket | TokenKind::Gt
-                )
-            });
-        if postfix {
-            break;
-        }
-        if open + 1 >= last {
-            return None;
-        }
-        // `((x))`: the parser keeps only the innermost expression's span, so
-        // a group whose entire contents are another group has to be peeled
-        // again rather than queried (it would name a range nothing recorded).
-        if tokens[last - 1].kind == TokenKind::RParen
-            && matching_open(tokens, last - 1) == Some(open + 1)
-        {
-            last -= 1;
-            continue;
-        }
-        return checked.type_at_span_range(tokens[open + 1].span.start, tokens[last - 1].span.end);
-    }
-    checked.type_at_offset(tokens[last].span.end.checked_sub(1)?)
-}
-
-/// Index of the bracket opening the one that closes at `close`.
-fn matching_open(tokens: &[crate::lexer::Token], close: usize) -> Option<usize> {
-    let (open_kind, close_kind) = match tokens[close].kind {
-        TokenKind::RParen => (TokenKind::LParen, TokenKind::RParen),
-        TokenKind::RBracket => (TokenKind::LBracket, TokenKind::RBracket),
-        _ => return None,
-    };
-    let mut depth = 0usize;
-    let mut i = close;
-    loop {
-        if tokens[i].kind == close_kind {
-            depth += 1;
-        } else if tokens[i].kind == open_kind {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
-            }
-        }
-        i = i.checked_sub(1)?;
-    }
-}
-
-/// Strip handle / const / array wrappers down to the named type a member
-/// lookup can be run against.
-fn base_type_name(ty: &TypeRepr) -> Option<String> {
-    match ty {
-        TypeRepr::Named(name) | TypeRepr::Generic { base: name, .. } | TypeRepr::Funcdef(name) => {
-            Some(name.clone())
-        }
-        TypeRepr::Handle(inner) | TypeRepr::Const(inner) => base_type_name(inner),
-        _ => None,
-    }
 }
 
 /// Render `owner::member`: workspace methods first (walking the class's
@@ -1936,5 +1826,79 @@ mod tests {
         }));
         let ext = hover_external_md("void main() { E e; }", "E", 1, &idx);
         assert_eq!(ws, ext, "enum hover diverges between paths");
+    }
+
+    // === B054: interface members on the pool ==============================
+    //
+    // Hover's `receiver.member` step has worked since B033, but it reads
+    // the symbol pool — and the pool held no `I::method` symbol at all, so
+    // an interface-typed receiver fell through to the `(local) <type>
+    // <name>` last resort and reported `(local) <error> Go`.
+
+    #[test]
+    fn hover_interface_method_on_an_interface_typed_receiver() {
+        let md = hover_checked(
+            "interface I { void Go(); }\nvoid f(I@ i) { i.Go(); }\n",
+            "Go",
+            2,
+        );
+        assert!(
+            md.contains("(method) void I::Go()"),
+            "expected the interface method signature, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_interface_method_renders_its_parameters() {
+        let md = hover_checked(
+            "interface I { int Count(const string &in key, bool deep = false); }\nvoid f(I@ i) { i.Count(\"a\"); }\n",
+            "Count",
+            2,
+        );
+        assert!(
+            md.contains("I::Count") && md.contains("const string &in key"),
+            "expected the full interface signature, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_interface_method_inherited_from_a_base_interface() {
+        let md = hover_checked(
+            "interface A { void Go(); }\ninterface B : A {}\nvoid f(B@ b) { b.Go(); }\n",
+            "Go",
+            2,
+        );
+        assert!(
+            md.contains("(method) void A::Go()"),
+            "expected the base interface's method, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_class_implementation_wins_over_the_interface_it_satisfies() {
+        // The receiver is the CLASS, so the implementation is the answer —
+        // the interface declaration is reachable through an `I@` receiver.
+        let md = hover_checked(
+            "interface I { void Go(); }\nclass C : I { void Go() {} }\nvoid f(C@ c) { c.Go(); }\n",
+            "Go",
+            3,
+        );
+        assert!(
+            md.contains("C::Go"),
+            "expected the class implementation, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_namespaced_interface_method() {
+        let md = hover_checked(
+            "namespace Ns { interface I { void Go(); } }\nvoid f(Ns::I@ i) { i.Go(); }\n",
+            "Go",
+            2,
+        );
+        assert!(
+            md.contains("Ns::I::Go"),
+            "expected the namespaced interface method, got {md:?}"
+        );
     }
 }

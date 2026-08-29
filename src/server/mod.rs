@@ -1480,8 +1480,11 @@ impl LanguageServer for Backend {
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
         let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        // B054: `receiver.member` resolution needs the checker's recorded
+        // expression types, the same view hover consumes.
+        let checked = snapshot.checked_file(uri, &scope);
         Ok(
-            navigation::goto_definition(&analysis, pos, &scope, &workspace_files)
+            navigation::goto_definition(&analysis, checked.as_ref(), pos, &scope, &workspace_files)
                 .map(GotoDefinitionResponse::Scalar),
         )
     }

@@ -349,8 +349,23 @@ fn unused_declarations_filtered(
                 continue;
             }
             let source = file.analysis.masked_source();
+            // B054: `I::method` symbols entered the pool for the first
+            // time. They are contract declarations reached by virtual
+            // dispatch, never called under their own qualified name, so
+            // they can never be shown unused — and an unused interface
+            // already warns once, under its own name. An interface and its
+            // methods always come from the same file's extraction, so the
+            // owner set is file-local.
+            let interface_owners: HashSet<&str> = symbols
+                .file_symbols(file_id)
+                .iter()
+                .filter(|s| matches!(s.kind, SymbolKind::Interface { .. }))
+                .map(|s| s.name.as_str())
+                .collect();
             for sym in symbols.file_symbols(file_id) {
-                if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
+                if let Some(unused) =
+                    evaluate_symbol(sym, usage, source, &exempt, &interface_owners)
+                {
                     out.push(unused);
                 }
             }
@@ -380,7 +395,16 @@ fn evaluate_symbol(
     usage: &WorkspaceUsage,
     source: &str,
     exempt_callback: &dyn Fn(&str) -> bool,
+    interface_owners: &HashSet<&str>,
 ) -> Option<UnusedDeclaration> {
+    // Interface methods: a bodyless contract declaration, dispatched
+    // through implementors and never called by its own qualified name.
+    // See the owner-set construction in `unused_declarations_filtered`.
+    if let Some((owner, _)) = sym.name.rsplit_once("::") {
+        if interface_owners.contains(owner) {
+            return None;
+        }
+    }
     let (kind, simple_name) = match &sym.kind {
         SymbolKind::Class { .. } => ("class", tail_name(&sym.name)),
         SymbolKind::Interface { .. } => ("interface", tail_name(&sym.name)),
@@ -578,6 +602,54 @@ mod tests {
         )]);
         let report = unused_declarations(&snap, None, &StdHashSet::new());
         assert_eq!(names(&report), vec!["Dead"]);
+    }
+
+    /// B054 put `I::method` symbols into the pool for the first time. An
+    /// interface method is a CONTRACT declaration with no body: it is
+    /// reached by virtual dispatch through an implementor, never called
+    /// under its own qualified name, so it can never be shown to be
+    /// unused. This is the declaration-level twin of the rule `locals`
+    /// already applies to their parameters ("Decision 2: imports, funcdefs
+    /// and interface methods have no body"), and it keeps the unused
+    /// surface exactly where it was before the pool grew.
+    #[test]
+    fn interface_methods_never_warn_as_unused() {
+        let snap = snap_of(&[(
+            "a.as",
+            "interface I { void Go(); }\nclass C : I { void Go() {} }\nvoid Main() { C c; c.Go(); }\n",
+        )]);
+        assert_eq!(
+            names(&unused_declarations(&snap, None, &StdHashSet::new())),
+            Vec::<String>::new()
+        );
+    }
+
+    /// …including an interface nothing implements and nobody calls. The
+    /// unused INTERFACE itself is still reported — one finding, not two.
+    #[test]
+    fn an_unimplemented_interfaces_methods_do_not_warn_separately() {
+        let snap = snap_of(&[(
+            "a.as",
+            "interface I { void Go(); int Count(); }\nvoid Main() {}\n",
+        )]);
+        assert_eq!(
+            names(&unused_declarations(&snap, None, &StdHashSet::new())),
+            vec!["I"],
+            "the interface warns once; its methods are not separate findings"
+        );
+    }
+
+    /// A namespaced interface behaves the same.
+    #[test]
+    fn namespaced_interface_methods_never_warn_as_unused() {
+        let snap = snap_of(&[(
+            "a.as",
+            "namespace Ns { interface I { void Go(); } }\nclass C : Ns::I { void Go() {} }\nvoid Main() { C c; c.Go(); }\n",
+        )]);
+        assert_eq!(
+            names(&unused_declarations(&snap, None, &StdHashSet::new())),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

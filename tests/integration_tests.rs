@@ -967,6 +967,87 @@ async fn test_tower_lsp_smoke_crossfile_hover() {
 }
 
 // ---------------------------------------------------------------------------
+// B054: Go to Definition on an interface member, through the real
+// `textDocument/definition` handler.
+//
+// This is the ticket's headline symptom and it needed two independent
+// fixes, so a unit call on the symbol table would prove neither:
+//
+//   1. `symbols/table.rs` never descended into `iface.methods`, so no
+//      `I::Go` symbol existed for anything to resolve TO; and
+//   2. `navigation::goto_definition` had no `receiver.member` step at all,
+//      so `c.Go()` on a class-typed receiver — which DID have a `C::Go`
+//      symbol — resolved nothing either.
+//
+// On a merge-base binary both calls below return None.
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "current_thread")]
+async fn test_tower_lsp_goto_definition_on_an_interface_member() {
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+
+    #[allow(deprecated)]
+    backend
+        .initialize(InitializeParams::default())
+        .await
+        .expect("initialize should succeed");
+
+    let iface_uri = Url::parse("file:///b054/iface.as").unwrap();
+    let iface_src = "interface I { void Go(); }\n";
+    let main_uri = Url::parse("file:///b054/main.as").unwrap();
+    //                    0         1         2
+    //                    012345678901234567890123
+    // line 0:  "class C : I { void Go() {} }"
+    // line 1:  "void f(I@ i) { i.Go(); }"
+    // line 2:  "void g(C@ c) { c.Go(); }"
+    let main_src =
+        "class C : I { void Go() {} }\nvoid f(I@ i) { i.Go(); }\nvoid g(C@ c) { c.Go(); }\n";
+
+    for (uri, text) in [(&iface_uri, iface_src), (&main_uri, main_src)] {
+        backend
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "angelscript".to_string(),
+                    version: 1,
+                    text: text.to_string(),
+                },
+            })
+            .await;
+    }
+
+    async fn goto(
+        backend: &Backend,
+        uri: &Url,
+        line: u32,
+        character: u32,
+    ) -> Option<GotoDefinitionResponse> {
+        backend
+            .goto_definition(GotoDefinitionParams {
+                text_document_position_params: text_doc_position(uri, line, character),
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+            })
+            .await
+            .expect("goto_definition call must not error")
+    }
+
+    // `i.Go()` — an interface-typed receiver. `Go` starts at col 17.
+    let Some(GotoDefinitionResponse::Scalar(loc)) = goto(backend, &main_uri, 1, 18).await else {
+        panic!("goto_definition on `i.Go()` must resolve to the interface method");
+    };
+    assert_eq!(loc.uri, iface_uri, "must jump to the interface's file");
+    assert_eq!(loc.range.start.line, 0);
+
+    // `c.Go()` — the class-typed twin, in the requesting file.
+    let Some(GotoDefinitionResponse::Scalar(loc)) = goto(backend, &main_uri, 2, 18).await else {
+        panic!("goto_definition on `c.Go()` must resolve to the class method");
+    };
+    assert_eq!(loc.uri, main_uri, "must stay in the implementor's file");
+    assert_eq!(loc.range.start.line, 0);
+}
+
+// ---------------------------------------------------------------------------
 // AC14 smoke test: exercise `textDocument/signatureHelp` through the real
 // tower-lsp `Backend`. Proves the handler wires workspace overload resolution
 // + active-parameter tracking end-to-end, not just via unit tests.

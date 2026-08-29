@@ -28,10 +28,17 @@ pub enum SymbolKind {
     },
     Class {
         parents: Vec<String>,
-        members: Vec<String>,
     },
+    /// An interface declaration. Its methods are pooled as their own
+    /// `I::method` symbols, exactly as a class's members are (B054) — this
+    /// variant carries only what a member symbol cannot: the declared base
+    /// interfaces, so the inheritance walkers can cross an interface
+    /// boundary. It used to carry a `methods: Vec<String>` that was
+    /// hardcoded empty at the one construction site and read by nobody,
+    /// which made interface members look supported when they were absent
+    /// from the pool entirely.
     Interface {
-        methods: Vec<String>,
+        parents: Vec<String>,
     },
     Enum {
         values: Vec<(String, Option<i64>)>,

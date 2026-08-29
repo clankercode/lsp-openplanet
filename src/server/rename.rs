@@ -189,7 +189,7 @@ pub fn rename(
         }
         Target::Workspace { name, shape } => {
             let found = workspace_occurrences(analysis, uri, name, *shape, files)?;
-            workspace_new_name_conflict(scope, files, &found, new_name)?;
+            workspace_new_name_conflict(scope, &found, new_name)?;
             for file in &found {
                 changes.insert(
                     file.uri.clone(),
@@ -347,7 +347,7 @@ fn classify(
     let candidates = scope.lookup_workspace(&name);
     if candidates.is_empty() {
         // Say *why* when the spelling is visibly owned by something.
-        if declares_class_member(scope, files, &name) {
+        if declares_class_member(scope, &name) {
             return approximate(
                 ApproxKind::Member,
                 "this is a class member; renaming one needs the type of every receiver, \
@@ -462,7 +462,7 @@ fn classify(
     // A bare use inside a class or namespace that owns this spelling
     // resolves *there*, not to the top-level symbol, and telling the two
     // apart needs the resolution we do not have.
-    if declares_class_member(scope, files, &name) {
+    if declares_class_member(scope, &name) {
         return approximate(
             ApproxKind::Member,
             "a class in this workspace declares a member with the same name, so a bare \
@@ -833,11 +833,10 @@ fn enclosing_class_declares_member(items: &[Item], source: &str, offset: u32, na
 
 fn workspace_new_name_conflict(
     scope: &GlobalScope<'_>,
-    files: &WorkspaceFiles,
     found: &[FileOccurrences<'_>],
     new_name: &str,
 ) -> Result<(), Refusal> {
-    if scope.has_global_ident(new_name) || declares_class_member(scope, files, new_name) {
+    if scope.has_global_ident(new_name) || declares_class_member(scope, new_name) {
         return Err(Refusal::new(format!(
             "`{new_name}` is already declared in this workspace or by the engine API"
         )));
@@ -889,39 +888,18 @@ fn qualified_owners<'a>(scope: &'a GlobalScope<'_>, name: &str) -> Vec<(String, 
 /// it, and treating them as an unrelated member would make every class
 /// with a constructor unrenameable. So an owner spelled like the name
 /// itself does not count.
-fn declares_class_member(scope: &GlobalScope<'_>, files: &WorkspaceFiles, name: &str) -> bool {
-    let owned = qualified_owners(scope, name).iter().any(|(owner, kind)| {
+///
+/// B049 had to walk every open file's ASTs for `Item::Interface` here,
+/// because interface methods reached the symbol table as nothing at all.
+/// B054 pools them as `I::method`, so the interface half is now the same
+/// pool read as the class half — `is_workspace_interface` is the only
+/// difference, kept separate from `is_workspace_class` so callers that
+/// mean "a class, specifically" keep meaning that.
+fn declares_class_member(scope: &GlobalScope<'_>, name: &str) -> bool {
+    qualified_owners(scope, name).iter().any(|(owner, kind)| {
         owner != name
             && !matches!(kind, SymbolKind::EnumValue { .. })
-            && scope.is_workspace_class(owner)
-    });
-    owned || declares_interface_method(files, name)
-}
-
-/// True when any open file's interface declares a method spelled `name`.
-///
-/// Interface methods reach the symbol table as *nothing at all*: an
-/// interface is registered as `Interface { methods: [] }` and its methods
-/// get no `I::name` symbols of their own, so neither [`qualified_owners`]
-/// nor the symbol pool can see them. Without this, renaming a free
-/// function that shares a spelling with an interface method rewrote the
-/// interface's own declaration — a wrong rename. Read the ASTs instead.
-fn declares_interface_method(files: &WorkspaceFiles, name: &str) -> bool {
-    files.files.values().any(|(_, analysis)| {
-        interface_method_named(&analysis.file.items, analysis.masked_source(), name)
-    })
-}
-
-/// Recursive half of [`declares_interface_method`], carrying the source
-/// each `Ident` span indexes into.
-fn interface_method_named(items: &[Item], source: &str, name: &str) -> bool {
-    items.iter().any(|item| match item {
-        Item::Interface(iface) => iface
-            .methods
-            .iter()
-            .any(|method| method.name.text(source) == name),
-        Item::Namespace(ns) => interface_method_named(&ns.items, source, name),
-        _ => false,
+            && (scope.is_workspace_class(owner) || scope.is_workspace_interface(owner))
     })
 }
 
@@ -2211,6 +2189,49 @@ mod tests {
         // implementor is that method, not this function.
         let src = "void Go() {}\ninterface I { void Go(); }\n";
         assert!(!refused(src, "Go() {}", "Run").is_empty());
+    }
+
+    // B049 enforced the rule above by walking every open file's ASTs for
+    // `Item::Interface`, because interface methods reached the symbol table
+    // as nothing at all. B054 pooled them as real `I::method` symbols and
+    // the guard now reads the pool like every other member check. These
+    // variants pin the shapes the AST walk covered, so the replacement
+    // cannot quietly lose one: each goes RED if the owner predicate stops
+    // recognising interfaces.
+
+    #[test]
+    fn a_free_function_rename_refuses_for_an_interface_in_another_file() {
+        let sources = [
+            ("a", "void Go() {}\n"),
+            ("b", "interface I { void Go(); }\n"),
+        ];
+        rename_at(&sources, 0, "Go() {}", 0, "Run")
+            .expect_err("an interface in a sibling file still owns the spelling");
+    }
+
+    #[test]
+    fn a_free_function_rename_refuses_for_a_namespaced_interface() {
+        let src = "void Go() {}\nnamespace Ns { interface I { void Go(); } }\n";
+        assert!(!refused(src, "Go() {}", "Run").is_empty());
+    }
+
+    #[test]
+    fn a_free_function_rename_refuses_for_a_method_on_a_derived_interface() {
+        let src = "void Go() {}\ninterface A {}\ninterface B : A { void Go(); }\n";
+        assert!(!refused(src, "Go() {}", "Run").is_empty());
+    }
+
+    #[test]
+    fn a_free_function_rename_still_succeeds_when_no_interface_claims_it() {
+        // The guard must stay narrow: an interface that declares some OTHER
+        // method does not lock this name.
+        let src = "void Go() {}\ninterface I { void Stop(); }\nvoid Main() { Go(); }\n";
+        let out = renamed(src, "Go() {}", "Run").expect("no owner declares `Go`");
+        assert!(out.contains("void Run() {}"), "got {out:?}");
+        assert!(
+            out.contains("Run();"),
+            "the call site must move too: {out:?}"
+        );
     }
 
     #[test]

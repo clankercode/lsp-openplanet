@@ -327,10 +327,7 @@ impl SymbolTable {
                     .collect();
                 out.push(Symbol {
                     name: class_name.clone(),
-                    kind: SymbolKind::Class {
-                        parents,
-                        members: Vec::new(),
-                    },
+                    kind: SymbolKind::Class { parents },
                     span: cls.span,
                     file_id,
                     doc: None,
@@ -435,16 +432,39 @@ impl SymbolTable {
                 }
             }
             ast::Item::Interface(iface) => {
-                let name = qualify(iface.name.text(source));
+                // B054: mirror the class arm. The interface symbol carries
+                // its declared bases, and every method becomes its own
+                // `I::method` symbol — without those, hover, goto-definition,
+                // workspace symbols and rename are all blind to a whole
+                // member surface.
+                let iface_name = qualify(iface.name.text(source));
+                let parents = iface
+                    .bases
+                    .iter()
+                    .filter_map(|b| base_class_name(source, b))
+                    .collect();
                 out.push(Symbol {
-                    name,
-                    kind: SymbolKind::Interface {
-                        methods: Vec::new(),
-                    },
+                    name: iface_name.clone(),
+                    kind: SymbolKind::Interface { parents },
                     span: iface.span,
                     file_id,
                     doc: None,
                 });
+                for method in &iface.methods {
+                    let (params, min_args) = extract_params(source, &method.params);
+                    out.push(Symbol {
+                        name: format!("{}::{}", iface_name, method.name.text(source)),
+                        kind: SymbolKind::Function {
+                            return_type: method.return_type.span.text(source).to_string(),
+                            params,
+                            min_args,
+                            imported: false,
+                        },
+                        span: method.span,
+                        file_id,
+                        doc: None,
+                    });
+                }
             }
             ast::Item::Enum(en) => {
                 let enum_name = qualify(en.name.text(source));
@@ -666,6 +686,134 @@ mod tests {
             "missing Ns::Foo::x in {:?}",
             names
         );
+    }
+
+    /// B054: interface members must reach the pool the same way class
+    /// members do. The arm used to push one `Interface` symbol and never
+    /// descend, so no `I::method` symbol existed and every pool consumer
+    /// (hover, goto-definition, workspace symbols, rename) was blind to
+    /// interface members.
+    #[test]
+    fn interface_methods_enter_the_symbol_pool() {
+        let src = "interface I { void Go(); int Count(const string &in key); }";
+        let symbols = extract(src);
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"I"), "missing I in {:?}", names);
+        assert!(names.contains(&"I::Go"), "missing I::Go in {:?}", names);
+        assert!(
+            names.contains(&"I::Count"),
+            "missing I::Count in {:?}",
+            names
+        );
+    }
+
+    /// The method symbols must carry the same payload a class method does
+    /// — return type, parameter list (passing modes included) and
+    /// `min_args` — or signature help and arity checking see a skeleton.
+    #[test]
+    fn interface_method_symbols_carry_their_signature() {
+        let src = "interface I { int Count(const string &in key, bool deep = false); }";
+        let symbols = extract(src);
+        let sym = symbols
+            .iter()
+            .find(|s| s.name == "I::Count")
+            .expect("I::Count must be pooled");
+        match &sym.kind {
+            SymbolKind::Function {
+                return_type,
+                params,
+                min_args,
+                imported,
+            } => {
+                assert_eq!(return_type, "int");
+                assert_eq!(
+                    params,
+                    &vec![
+                        ("key".to_string(), "const string &in".to_string()),
+                        ("deep".to_string(), "bool".to_string()),
+                    ]
+                );
+                assert_eq!(*min_args, 1, "the defaulted parameter is optional");
+                assert!(!imported);
+            }
+            other => panic!("I::Count must be a Function symbol, got {:?}", other),
+        }
+    }
+
+    /// Parameter-mode variants, per CLAUDE.md: `&in` / `&out` / `&inout`,
+    /// a bare reference, a handle and a const handle must all survive into
+    /// the stored type text exactly as a class method's would.
+    #[test]
+    fn interface_method_parameter_modes_survive() {
+        let src = "interface I { void Go(const string &in a, int &out b, float &inout c, Thing@ d, const Thing@ e, string &f); }";
+        let symbols = extract(src);
+        let sym = symbols.iter().find(|s| s.name == "I::Go").unwrap();
+        let SymbolKind::Function { params, .. } = &sym.kind else {
+            panic!("expected a function symbol");
+        };
+        let types: Vec<&str> = params.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(
+            types,
+            vec![
+                "const string &in",
+                "int &out",
+                "float &inout",
+                "Thing@",
+                "const Thing@",
+                "string &",
+            ]
+        );
+    }
+
+    /// A namespaced interface qualifies its members the same way a
+    /// namespaced class does.
+    #[test]
+    fn interface_methods_in_a_namespace_are_qualified() {
+        let src = "namespace Ns { interface I { void Go(); } }";
+        let names: Vec<String> = extract(src).iter().map(|s| s.name.clone()).collect();
+        assert!(names.contains(&"Ns::I".to_string()), "got {:?}", names);
+        assert!(names.contains(&"Ns::I::Go".to_string()), "got {:?}", names);
+    }
+
+    /// Interface inheritance is real in AngelScript (`interface B : A`).
+    /// The interface symbol records its bases as `parents`, mirroring
+    /// `Class::parents`, so the inheritance walkers can cross an
+    /// interface boundary.
+    #[test]
+    fn interface_bases_are_recorded_as_parents() {
+        let src = "interface A { void One(); }\ninterface B : A { void Two(); }\n";
+        let symbols = extract(src);
+        let b = symbols.iter().find(|s| s.name == "B").unwrap();
+        match &b.kind {
+            SymbolKind::Interface { parents } => assert_eq!(parents, &vec!["A".to_string()]),
+            other => panic!("B must be an Interface symbol, got {:?}", other),
+        }
+        let a = symbols.iter().find(|s| s.name == "A").unwrap();
+        match &a.kind {
+            SymbolKind::Interface { parents } => assert!(parents.is_empty()),
+            other => panic!("A must be an Interface symbol, got {:?}", other),
+        }
+    }
+
+    /// Two interfaces declaring the same method name each get their own
+    /// qualified symbol — the pool must not collapse them.
+    #[test]
+    fn two_interfaces_with_the_same_method_name_stay_distinct() {
+        let src = "interface A { void Go(); }\ninterface B { void Go(); }\n";
+        let symbols = extract(src);
+        let hits: Vec<&str> = symbols
+            .iter()
+            .map(|s| s.name.as_str())
+            .filter(|n| n.ends_with("::Go"))
+            .collect();
+        assert_eq!(hits, vec!["A::Go", "B::Go"]);
+    }
+
+    fn extract(src: &str) -> Vec<Symbol> {
+        let tokens = lexer::tokenize_filtered(src);
+        let mut parser = Parser::new(&tokens, src);
+        let file = parser.parse_file();
+        SymbolTable::extract_symbols(0, src, &file)
     }
 
     #[test]

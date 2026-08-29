@@ -1147,18 +1147,34 @@ impl<'a> GlobalScope<'a> {
             .unwrap_or_default()
     }
 
-    /// Look up the declared base classes of a workspace class by
-    /// fully qualified name. Returns an empty vec if no workspace class with
-    /// that name exists, or the class has no bases. Only consults
+    /// Look up the declared base types of a workspace class or interface by
+    /// fully qualified name. Returns an empty vec if no workspace type with
+    /// that name exists, or it has no bases. Only consults
     /// the workspace symbol table — external (typedb) types use their
     /// own parent walker via `ext_lookup_member`.
+    ///
+    /// Interfaces are included (B054): `interface B : A` is real
+    /// AngelScript, and an inheritance walk that stops at an interface
+    /// cannot find a member declared on its base.
     pub fn workspace_class_parents(&self, class_name: &str) -> Vec<String> {
         for s in self.lookup_workspace(class_name) {
-            if let SymbolKind::Class { parents, .. } = &s.kind {
-                return parents.clone();
+            match &s.kind {
+                SymbolKind::Class { parents } | SymbolKind::Interface { parents } => {
+                    return parents.clone()
+                }
+                _ => {}
             }
         }
         Vec::new()
+    }
+
+    /// True when `name` names a workspace interface symbol. The interface
+    /// counterpart of [`Self::is_workspace_class`]; kept separate so
+    /// callers that mean "a class, specifically" keep meaning that.
+    pub fn is_workspace_interface(&self, name: &str) -> bool {
+        self.lookup_workspace(name)
+            .iter()
+            .any(|s| s.name == name && matches!(s.kind, SymbolKind::Interface { .. }))
     }
 
     /// True when `class_name` names a workspace class symbol (used to decide
@@ -1980,10 +1996,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "MyClass",
-                SymbolKind::Class {
-                    parents: vec![],
-                    members: vec![],
-                },
+                SymbolKind::Class { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -2001,7 +2014,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "IThing",
-                SymbolKind::Interface { methods: vec![] },
+                SymbolKind::Interface { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -2085,10 +2098,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "Deep::Ns::Thing",
-                SymbolKind::Class {
-                    parents: vec![],
-                    members: vec![],
-                },
+                SymbolKind::Class { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -2238,13 +2248,7 @@ mod tests {
         let fid = ws.allocate_file_id();
         ws.set_file_symbols(
             fid,
-            vec![make_symbol(
-                "mat3",
-                SymbolKind::Class {
-                    parents: vec![],
-                    members: vec![],
-                },
-            )],
+            vec![make_symbol("mat3", SymbolKind::Class { parents: vec![] })],
         );
         let scope = GlobalScope::new(&ws, Some(&idx));
         assert!(!scope.external_ctor_converts("mat3", "mat4"));
@@ -2367,10 +2371,7 @@ mod tests {
             vec![
                 make_symbol(
                     "Editor::NetworkSerializable",
-                    SymbolKind::Class {
-                        parents: vec![],
-                        members: vec![],
-                    },
+                    SymbolKind::Class { parents: vec![] },
                 ),
                 make_symbol(
                     "Editor::NetworkSerializable::ReadFromNetworkBuffer",
@@ -2385,7 +2386,6 @@ mod tests {
                     "Editor::Child",
                     SymbolKind::Class {
                         parents: vec!["NetworkSerializable".into()],
-                        members: vec![],
                     },
                 ),
             ],
@@ -2406,20 +2406,8 @@ mod tests {
         ws.set_file_symbols(
             fid,
             vec![
-                make_symbol(
-                    "ItemSpec",
-                    SymbolKind::Class {
-                        parents: vec![],
-                        members: vec![],
-                    },
-                ),
-                make_symbol(
-                    "Editor::ItemSpec",
-                    SymbolKind::Class {
-                        parents: vec![],
-                        members: vec![],
-                    },
-                ),
+                make_symbol("ItemSpec", SymbolKind::Class { parents: vec![] }),
+                make_symbol("Editor::ItemSpec", SymbolKind::Class { parents: vec![] }),
                 make_symbol(
                     "Editor::ItemSpec::ReadFromNetworkBuffer",
                     SymbolKind::Function {
@@ -2433,7 +2421,6 @@ mod tests {
                     "Editor::ItemSpecPriv",
                     SymbolKind::Class {
                         parents: vec!["ItemSpec".into()],
-                        members: vec![],
                     },
                 ),
             ],

@@ -20,9 +20,11 @@ use std::collections::HashMap;
 use tower_lsp::lsp_types::*;
 
 use crate::analysis::DocumentAnalysis;
+use crate::analysis_snapshot::CheckedFile;
 use crate::lexer::TokenKind;
 use crate::server::diagnostics::{position_to_offset, span_to_range};
 use crate::symbols::scope::Symbol;
+use crate::typecheck::repr::TypeRepr;
 use crate::typecheck::GlobalScope;
 
 /// Per-file view used by navigation / call hierarchy / workspace symbols:
@@ -64,6 +66,11 @@ pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Opti
 /// Resolve the definition location of the symbol at `position`.
 ///
 /// Resolution ladder:
+/// 0. `receiver.member` — resolved against the receiver's recorded type,
+///    walking its inheritance chain. Hover has had this step since B033;
+///    goto-definition had none at all, so `c.Go()` on a class-typed
+///    receiver resolved nothing and `i.Go()` on an interface-typed one
+///    resolved nothing twice over (B054).
 /// 1. Qualified / bare workspace name via `lookup_reference` (real
 ///    definitions preferred over `import ... from` aliases).
 /// 2. Class-member fallback for unqualified names inside a method body:
@@ -75,12 +82,26 @@ pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Opti
 /// exists, or the owning file is not in `files`.
 pub fn goto_definition(
     analysis: &DocumentAnalysis,
+    checked: Option<&CheckedFile<'_>>,
     position: Position,
     scope: &GlobalScope<'_>,
     files: &WorkspaceFiles,
 ) -> Option<Location> {
     let (tok_idx, tok_span, qual) = ident_index_at(analysis, position)?;
     let source = analysis.masked_source();
+    // 0) `receiver.member`: the member belongs to the receiver's type, so
+    //    resolve it there before the by-name ladder below can land on an
+    //    unrelated global that merely shares the spelling. A receiver whose
+    //    type is unknown (external, unresolved) falls through to that
+    //    ladder rather than refusing — the pre-B054 behaviour.
+    if is_member_access(analysis, tok_idx) && !qual.contains("::") {
+        if let Some(owner) = receiver_type_name(analysis, checked, tok_idx, tok_span.start) {
+            let members = scope.lookup_member_symbols_with_inheritance(&owner, &qual);
+            if let Some(sym) = prefer_definition(&members) {
+                return symbol_location(sym, files);
+            }
+        }
+    }
     if let Some(sym) = lookup_workspace_symbol(scope, analysis, &qual, tok_span.start) {
         return symbol_location(sym, files);
     }
@@ -109,6 +130,124 @@ pub fn goto_definition(
         uri: uri.clone(),
         range: span_to_range(def_analysis.masked_source(), sym.span),
     })
+}
+
+// === receiver.member support (shared with hover) ======================
+
+/// Fully qualified name of the type the `.` on the left of `tok_idx` is
+/// applied to. `this` resolves to the enclosing class without consulting the
+/// checker; anything else uses the recorded type of the receiver expression.
+pub(crate) fn receiver_type_name(
+    analysis: &DocumentAnalysis,
+    checked: Option<&CheckedFile<'_>>,
+    tok_idx: usize,
+    offset: u32,
+) -> Option<String> {
+    let tokens = &analysis.tokens;
+    let last = tok_idx.checked_sub(2)?;
+    if tokens.get(last)?.kind == TokenKind::KwThis {
+        return enclosing_class_simple_name(analysis, offset);
+    }
+    base_type_name(receiver_type(tokens, checked?, last)?)
+}
+
+/// Recorded type of the receiver expression whose last token is `last`.
+///
+/// Two shapes, because the parser spans them differently:
+///
+/// * A BARE parenthesised group — `(x)`, `(q ? a : b)` — is given the span of
+///   the expression INSIDE it, so no recorded span contains the closing
+///   paren. Query the inner token range directly.
+/// * Everything else — `a`, `a.b`, `Ns::a`, `f(x)`, `items[0]`,
+///   `cast<T>(x)` — is spanned through its last token, so the innermost
+///   recorded expression containing that token's final byte IS the receiver.
+///   Using containment rather than an exact range is what makes nested calls
+///   and postfix chains work without re-parsing them.
+///
+/// `None` when nothing is recorded there, and deliberately no fall-back
+/// between the two shapes: a miss on the group range would otherwise pick up
+/// the enclosing call and report the wrong type.
+fn receiver_type<'c>(
+    tokens: &[crate::lexer::Token],
+    checked: &'c CheckedFile<'_>,
+    last: usize,
+) -> Option<&'c TypeRepr> {
+    let mut last = last;
+    while tokens[last].kind == TokenKind::RParen {
+        let Some(open) = matching_open(tokens, last) else {
+            break;
+        };
+        // `f(...)` and `cast<T>(...)` are postfix forms, not groups — their
+        // recorded span does cover the closing paren, so leave them to the
+        // containment query below.
+        let postfix = open
+            .checked_sub(1)
+            .map(|p| tokens[p].kind)
+            .is_some_and(|k| {
+                matches!(
+                    k,
+                    TokenKind::Ident | TokenKind::RParen | TokenKind::RBracket | TokenKind::Gt
+                )
+            });
+        if postfix {
+            break;
+        }
+        if open + 1 >= last {
+            return None;
+        }
+        // `((x))`: the parser keeps only the innermost expression's span, so
+        // a group whose entire contents are another group has to be peeled
+        // again rather than queried (it would name a range nothing recorded).
+        if tokens[last - 1].kind == TokenKind::RParen
+            && matching_open(tokens, last - 1) == Some(open + 1)
+        {
+            last -= 1;
+            continue;
+        }
+        return checked.type_at_span_range(tokens[open + 1].span.start, tokens[last - 1].span.end);
+    }
+    checked.type_at_offset(tokens[last].span.end.checked_sub(1)?)
+}
+
+/// Index of the bracket opening the one that closes at `close`.
+fn matching_open(tokens: &[crate::lexer::Token], close: usize) -> Option<usize> {
+    let (open_kind, close_kind) = match tokens[close].kind {
+        TokenKind::RParen => (TokenKind::LParen, TokenKind::RParen),
+        TokenKind::RBracket => (TokenKind::LBracket, TokenKind::RBracket),
+        _ => return None,
+    };
+    let mut depth = 0usize;
+    let mut i = close;
+    loop {
+        if tokens[i].kind == close_kind {
+            depth += 1;
+        } else if tokens[i].kind == open_kind {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i = i.checked_sub(1)?;
+    }
+}
+
+/// Strip handle / const / array wrappers down to the named type a member
+/// lookup can be run against.
+pub(crate) fn base_type_name(ty: &TypeRepr) -> Option<String> {
+    match ty {
+        TypeRepr::Named(name) | TypeRepr::Generic { base: name, .. } | TypeRepr::Funcdef(name) => {
+            Some(name.clone())
+        }
+        TypeRepr::Handle(inner) | TypeRepr::Const(inner) => base_type_name(inner),
+        _ => None,
+    }
+}
+
+/// Simple (unqualified) name of the class whose body contains `offset` —
+/// what a `this.` receiver resolves to. `None` outside any class.
+fn enclosing_class_simple_name(analysis: &DocumentAnalysis, offset: u32) -> Option<String> {
+    crate::server::scope_query::find_enclosing_class(&analysis.file, offset)
+        .map(|cls| cls.name.text(analysis.masked_source()).to_string())
 }
 
 /// Token index of the identifier under `position`. Hover needs the token's
@@ -361,7 +500,7 @@ mod tests {
 
         // Cursor on `target` inside main (line 3: `    void main() { target; greet(); }`).
         let col = src.lines().nth(3).unwrap().find("target").unwrap() as u32;
-        let loc = goto_definition(analysis, pos(3, col + 2), &scope, &ws_files);
+        let loc = goto_definition(analysis, None, pos(3, col + 2), &scope, &ws_files);
         assert!(loc.is_some(), "variable in namespace did not resolve");
         let loc = loc.unwrap();
         assert_eq!(loc.uri, tw.uri());
@@ -369,7 +508,7 @@ mod tests {
 
         // Cursor on `greet` inside main.
         let col = src.lines().nth(3).unwrap().find("greet").unwrap() as u32;
-        let loc = goto_definition(analysis, pos(3, col + 2), &scope, &ws_files);
+        let loc = goto_definition(analysis, None, pos(3, col + 2), &scope, &ws_files);
         assert!(loc.is_some(), "function in namespace did not resolve");
         let loc = loc.unwrap();
         assert_eq!(loc.range.start.line, 2, "should point at `void greet` line");
@@ -383,7 +522,7 @@ mod tests {
         let files = tw.uri_map();
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
-        let loc = goto_definition(analysis, pos(1, 26), &scope, &ws_files).unwrap();
+        let loc = goto_definition(analysis, None, pos(1, 26), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, tw.uri());
         // Points at the declaration (line 0), not the use.
         assert_eq!(loc.range.start.line, 0);
@@ -415,7 +554,7 @@ mod tests {
         let scope = crate::typecheck::GlobalScope::new(snap.symbols(), None);
         let analysis = &snap.files()[0].analysis;
         // Cursor on the `DoThing` call site (line 1, char 14).
-        let loc = goto_definition(analysis, pos(1, 14), &scope, &ws_files).unwrap();
+        let loc = goto_definition(analysis, None, pos(1, 14), &scope, &ws_files).unwrap();
         assert_eq!(
             loc.uri, files[&1].0,
             "must jump to the definition file, not the importing file"
@@ -433,7 +572,7 @@ mod tests {
         let files = tw.uri_map();
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
-        let loc = goto_definition(analysis, pos(1, 14), &scope, &ws_files).unwrap();
+        let loc = goto_definition(analysis, None, pos(1, 14), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, tw.uri());
         assert_eq!(loc.range.start.line, 0);
     }
@@ -449,7 +588,7 @@ mod tests {
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
         // `Func` spans chars 32..36 on line 1.
-        let loc = goto_definition(analysis, pos(1, 33), &scope, &ws_files).unwrap();
+        let loc = goto_definition(analysis, None, pos(1, 33), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, tw.uri());
         // Line 0 is `class A { ... }` — the parent declaration.
         assert_eq!(loc.range.start.line, 0);
@@ -465,7 +604,7 @@ mod tests {
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
         // `Func` starts at char 27 on line 1.
-        let loc = goto_definition(analysis, pos(1, 29), &scope, &ws_files).unwrap();
+        let loc = goto_definition(analysis, None, pos(1, 29), &scope, &ws_files).unwrap();
         assert_eq!(loc.range.start.line, 0);
     }
 
@@ -479,7 +618,7 @@ mod tests {
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
         // `Own` (the call site) spans chars 46..49 on line 1.
-        let loc = goto_definition(analysis, pos(1, 47), &scope, &ws_files).unwrap();
+        let loc = goto_definition(analysis, None, pos(1, 47), &scope, &ws_files).unwrap();
         // `Own` is declared on B (line 1).
         assert_eq!(loc.range.start.line, 1);
     }
@@ -496,7 +635,7 @@ mod tests {
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
         // Bare `Func;` expression starts at char 41 on line 1.
-        let loc = goto_definition(analysis, pos(1, 43), &scope, &ws_files);
+        let loc = goto_definition(analysis, None, pos(1, 43), &scope, &ws_files);
         // `int Func = 1;` declares no global symbol; the member fallback must
         // not fire for a non-call, non-this use of a shadowing local name.
         // (If locals were ever indexed, this must point at the local decl.)
@@ -529,7 +668,7 @@ mod tests {
         let scope = crate::typecheck::GlobalScope::new(snap.symbols(), None);
         let analysis = &snap.files()[0].analysis;
         // `Func` spans chars 32..36 on line 0 of child.as.
-        let loc = goto_definition(analysis, pos(0, 33), &scope, &ws_files).unwrap();
+        let loc = goto_definition(analysis, None, pos(0, 33), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, files[&1].0, "must jump to parent.as");
         assert_eq!(loc.range.start.line, 0);
     }
@@ -537,21 +676,154 @@ mod tests {
     #[test]
     fn goto_definition_receiver_call_not_resolved_against_enclosing_class() {
         // `other.Func()` — a receiver call must NOT fall back to the
-        // enclosing class's inheritance chain (the receiver's own type owns
-        // resolution, which the global ladder already covers for
-        // class-typed receivers registered as globals).
-        let src =
-            "class A { void Func() {} }\nclass B : A { void Run(B other) { other.Func(); } }\n";
+        // ENCLOSING class's inheritance chain. `Other` is unrelated to the
+        // enclosing `B : A`, so the only way to reach `A::Func` from here
+        // is the illegitimate fallback. (Before B054 the receiver's own
+        // type resolved nothing either; now it does, which is why the
+        // receiver has to be an unrelated type for this to still test the
+        // fallback rather than the new step 0.)
+        let src = "class A { void Func() {} }\nclass Other {}\nclass B : A { void Run(Other other) { other.Func(); } }\n";
         let tw = build_single_file_workspace("file:///t/a.as", src);
         let analysis = tw.analysis();
         let files = tw.uri_map();
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
-        // `Func` in `other.Func()` at line 1 char 47.
-        let loc = goto_definition(analysis, pos(1, 48), &scope, &ws_files);
+        let col = src.lines().nth(2).unwrap().find("other.Func").unwrap() as u32 + 7;
+        let loc = goto_definition(analysis, None, pos(2, col), &scope, &ws_files);
         assert!(
-            loc.is_none() || loc.unwrap().range.start.line == 1,
-            "receiver call must not resolve to A::Func (line 0)"
+            loc.is_none(),
+            "receiver call must not resolve against the enclosing class, got {loc:?}"
+        );
+    }
+
+    // === B054: `receiver.member` goto-definition ==========================
+    //
+    // Before B054 goto-definition had NO receiver-type step at all: the
+    // ladder tried the bare name as a global and then only the `this.` /
+    // implicit-`this` fallback, so `c.Go()` on a class-typed receiver
+    // returned None just as `i.Go()` on an interface-typed one did. Both
+    // halves of that are fixed here — the interface half additionally
+    // needed `I::Go` to exist in the pool at all.
+
+    /// Build a workspace, run goto-definition at the character `needle`
+    /// starts on plus `offset`, with the checker's recorded types wired in
+    /// exactly as the `textDocument/definition` handler wires them.
+    fn goto_at(
+        tw: &crate::server::test_support::TestWorkspace,
+        file: usize,
+        line: usize,
+        needle: &str,
+        offset: u32,
+    ) -> Option<Location> {
+        let files = tw.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = tw.scope();
+        let analysis = tw.analysis_of(file);
+        let source = analysis.masked_source();
+        let col = source.lines().nth(line).unwrap().find(needle).unwrap() as u32 + offset;
+        let checked = tw.snapshot.checked_file(&tw.uri_of(file), &scope);
+        goto_definition(
+            analysis,
+            checked.as_ref(),
+            pos(line as u32, col),
+            &scope,
+            &ws_files,
+        )
+    }
+
+    #[test]
+    fn goto_definition_interface_method_on_an_interface_typed_receiver() {
+        let src =
+            "interface I { void Go(); }\nclass C : I { void Go() {} }\nvoid f(I@ i) { i.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "i.Go", 2).expect("i.Go() must resolve to I::Go");
+        assert_eq!(
+            loc.range.start.line, 0,
+            "must land on the interface declaration, not the class implementation"
+        );
+    }
+
+    #[test]
+    fn goto_definition_class_method_on_a_class_typed_receiver() {
+        // The class twin of the case above: the receiver step is not
+        // interface-specific.
+        let src =
+            "interface I { void Go(); }\nclass C : I { void Go() {} }\nvoid f(C@ c) { c.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "c.Go", 2).expect("c.Go() must resolve to C::Go");
+        assert_eq!(
+            loc.range.start.line, 1,
+            "must land on the class implementation, not the interface declaration"
+        );
+    }
+
+    #[test]
+    fn goto_definition_interface_method_never_implemented() {
+        // Nothing implements `I`, so the interface declaration is the only
+        // definition there is — it must still be reachable.
+        let src = "interface I { void Go(); }\nvoid f(I@ i) { i.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 1, "i.Go", 2).expect("i.Go() must resolve");
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_interface_method_across_files() {
+        let tw = crate::server::test_support::TestWorkspace::files(&[
+            ("use", "void f(I@ i) { i.Go(); }\n"),
+            ("iface", "interface I { void Go(); }\n"),
+        ]);
+        let loc = goto_at(&tw, 0, 0, "i.Go", 2).expect("cross-file interface method must resolve");
+        assert_eq!(loc.uri, tw.uri_of(1), "must jump to iface.as");
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_interface_method_inherited_from_a_base_interface() {
+        let src = "interface A { void Go(); }\ninterface B : A {}\nvoid f(B@ b) { b.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "b.Go", 2).expect("inherited interface method must resolve");
+        assert_eq!(loc.range.start.line, 0, "must land on A::Go");
+    }
+
+    #[test]
+    fn goto_definition_interface_method_in_a_namespace() {
+        let src = "namespace Ns { interface I { void Go(); } }\nvoid f(Ns::I@ i) { i.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 1, "i.Go", 2).expect("namespaced interface method must resolve");
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_two_interfaces_same_method_name_pick_the_receivers() {
+        // `A::Go` and `B::Go` share a spelling; the receiver's type decides.
+        let src =
+            "interface A { void Go(); }\ninterface B { void Go(); }\nvoid f(B@ b) { b.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "b.Go", 2).expect("must resolve");
+        assert_eq!(loc.range.start.line, 1, "must land on B::Go, not A::Go");
+    }
+
+    #[test]
+    fn goto_definition_unknown_interface_member_resolves_nothing() {
+        let src = "interface I { void Go(); }\nvoid f(I@ i) { i.Nope(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        assert!(
+            goto_at(&tw, 0, 1, "i.Nope", 2).is_none(),
+            "a member the interface does not declare must not resolve"
+        );
+    }
+
+    #[test]
+    fn goto_definition_member_access_prefers_the_receiver_over_a_same_named_global() {
+        // A free function spelled like the member must not win: the
+        // receiver's type owns `.Go`.
+        let src = "void Go() {}\ninterface I { void Go(); }\nvoid f(I@ i) { i.Go(); }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "i.Go", 2).expect("must resolve");
+        assert_eq!(
+            loc.range.start.line, 1,
+            "must land on I::Go (line 1), not the free function (line 0)"
         );
     }
 }
