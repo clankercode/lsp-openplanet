@@ -38,3 +38,4 @@ bugs:
     - file: B037-quick-fixes-for-conversion-and.todo
     - file: B038-quick-fixes-for-rename-and-con.todo
     - file: B039-openplanet-regeneratetypedb-is.todo
+    - file: B040-manifest-validate-is-dead-code.todo

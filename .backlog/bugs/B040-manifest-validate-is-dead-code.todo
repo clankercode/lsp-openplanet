@@ -1,0 +1,105 @@
+---
+complexity: medium
+created_at: "2026-08-29T15:06:44Z"
+depends_on: []
+estimate_hours: 1
+id: B040
+priority: high
+status: pending
+tags:
+    - lsp
+    - manifest
+    - dead-code
+    - diagnostics
+title: 'Manifest::validate is dead code: info.toml errors are computed by nobody and shown to nobody'
+updated_at: "2026-08-29T15:06:44Z"
+---
+Found by a coordinator feature-gap review, 2026-08-30. Verified on master
+@ 91a296c. Pre-existing.
+
+## Defect
+`Manifest::validate(&self, workspace_root)` (src/workspace/manifest.rs:87)
+is fully implemented and returns `Vec<ManifestDiagnostic>`. It checks:
+- missing required `meta.version` (:91)
+- `script.exports` files that do not exist (:101)
+- `script.shared_exports` files that do not exist (:111)
+- deprecated fields (:123+)
+
+**Its only caller in the entire repository is its own unit test** at
+src/workspace/manifest.rs:179. Verified: `grep -rn "validate(" src/ tests/`
+returns exactly that one line outside the definition, and the type
+`ManifestDiagnostic` is not mentioned in any file other than manifest.rs.
+
+So none of this ever reaches a user, through the LSP or the CLI.
+
+## Impact
+info.toml is the file that decides whether the plugin loads at all. A missing
+`version`, or an `exports` entry pointing at a file that was renamed, is a
+plugin that fails in-game — and the LSP, which has already computed exactly
+that diagnostic, says nothing. The user finds out from Openplanet's own error
+output, with no editor signal.
+
+This also makes the LSP's info.toml handling asymmetric: the manifest is
+parsed and its `defines` / dependencies are applied to the config ladder
+(`LspConfig::apply_manifest`), but its ERRORS are discarded.
+
+## Work
+- Publish manifest diagnostics to the `info.toml` document URI over
+  `textDocument/publishDiagnostics`, so they appear in the editor and in the
+  Problems panel like any other diagnostic.
+- Map `ManifestDiagnostic.key_path` (e.g. `meta.version`,
+  `script.exports`) to a RANGE in the TOML file. The struct carries only a
+  key path today, so this needs a TOML span lookup — the repo already depends
+  on `toml_edit`, which preserves spans; use it rather than adding a parser.
+  Where a key is absent entirely (missing `version`), anchor the range to the
+  containing table's header, or to the file start if the table is absent too.
+- Re-validate on `didSave`/`didChange` of info.toml and on the config-file
+  watch path that already notices manifest changes.
+- Surface the same diagnostics in the CLI `check` output, so `just
+  check-showcase` and CI see them too. Decide whether they count toward the
+  error exit code — recommend YES for the Error severity ones, since a plugin
+  that cannot load is not a passing check.
+- Clear the diagnostics when the file becomes valid (a stale published set is
+  worse than none).
+
+## Design decision (coordinator, 2026-08-30)
+Manifest diagnostics are published against info.toml itself, NOT attached to
+.as files. They are a property of the manifest, and attaching them elsewhere
+would make them unfixable from where they appear.
+
+`DiagSeverity::Error` maps to LSP Error and counts toward the CLI exit code;
+`DiagSeverity::Warning` maps to Warning and does not. If this moves any FP
+fixture baseline, the movement must be reported per fixture with the specific
+manifest problem that caused it — several tm-* fixtures are real plugins and
+may well have genuine manifest issues that were simply never surfaced.
+
+## Test plan (TDD, red first)
+Red:
+- `manifest_diagnostics_are_published_for_info_toml`: a workspace whose
+  info.toml lacks `meta.version` -> a diagnostic is published against the
+  info.toml URI (fails today: nothing is published anywhere).
+- `manifest_export_missing_file_is_reported`: `exports = ["Gone.as"]` with no
+  such file -> Error diagnostic naming the entry.
+
+Variants (per CLAUDE.md, generalize):
+- each validate() rule fires: missing version, missing export, missing shared
+  export, each deprecated field
+- ranges: key present -> range covers the key; key absent -> range anchored to
+  the table header; table absent -> range at file start; assert the range is
+  always within the document bounds
+- multiple problems in one file -> all published, not just the first
+- fixing the file republishes an EMPTY set (stale-clear guard)
+- malformed TOML in info.toml -> parse error published as a diagnostic, not a
+  silent skip and not a panic
+- a workspace with NO info.toml -> no diagnostics, no error
+- multi-root workspace: each root's info.toml gets its own diagnostics against
+  its own URI
+- CLI `check` exits non-zero for an Error-severity manifest problem and zero
+  for a Warning-only one
+- `.op` archive-sourced manifests, if they reach this path, do not publish
+  diagnostics against a path the user cannot open
+
+## Related
+Sibling finding: B039 (regenerateTypeDb unreachable). Same shape — implemented
+capability wired to nothing. Config-side manifest use: `apply_manifest`
+(src/config.rs:1014), which B019 is currently changing.
