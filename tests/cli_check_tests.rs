@@ -3143,6 +3143,55 @@ fn check_command_unused_flag_ignore_warn_error_variants() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// B030: `hint` / `info` report the same findings at a quieter severity —
+/// exit 0, labelled `hint:` / `info:`, counted as "other" rather than
+/// warnings, and NOT promoted by `--warnings-as-errors` (which only
+/// promotes WARNING).
+#[test]
+fn check_command_unused_quiet_levels_are_reported_but_never_fail() {
+    let root = unused_kinds_plugin("unused-quiet-levels");
+
+    for (flag, label) in [
+        ("--unused=hint", "hint:"),
+        ("--unused=grey", "hint:"),
+        ("--unused=info", "info:"),
+        ("--unused=note", "info:"),
+    ] {
+        let (code, stdout) = check_plugin_status(&root, &[flag]);
+        assert_eq!(code, Some(0), "{flag} must not fail the run: {stdout}");
+        assert!(
+            unused_mentions(&stdout),
+            "{flag} must still report the findings: {stdout}"
+        );
+        assert!(
+            stdout.contains(label),
+            "{flag} must label findings `{label}`: {stdout}"
+        );
+        assert!(
+            !stdout.contains("warning:"),
+            "{flag} must not emit warning-severity findings: {stdout}"
+        );
+        assert!(
+            stdout.contains("other"),
+            "quiet findings count as `other` in the summary: {stdout}"
+        );
+    }
+
+    // -Werror promotes WARNING only; the quiet levels stay non-fatal.
+    for flag in ["--unused=hint", "--unused=info"] {
+        let (code, stdout) = check_plugin_status(&root, &[flag, "--warnings-as-errors"]);
+        assert_eq!(code, Some(0), "-Werror must not promote {flag}: {stdout}");
+    }
+    let (code, stdout) = check_plugin_status(&root, &["--unused=warn", "--warnings-as-errors"]);
+    assert_eq!(
+        code,
+        Some(1),
+        "-Werror must still promote warn-level unused: {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// GH #62: `check --typedb-dir --no-typedb <path>` must be a usage error
 /// (exit 2), not a load failure for `--no-typedb/OpenplanetCore.json`.
 #[test]

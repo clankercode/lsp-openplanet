@@ -206,9 +206,22 @@ struct ConfigFile {
 /// Default is [`UnusedLevel::Warn`] (today's behavior). `ignore` drops the
 /// pass entirely (it is noisy on large plugins). `error` emits ERROR
 /// diagnostics so `check` fails without `--warnings-as-errors`.
+///
+/// The two quiet levels exist because "never used" is advisory, not a
+/// defect: `info` keeps findings listed (VS Code shows INFORMATION in the
+/// Problems panel) while `hint` drops them out of the panel entirely and
+/// leaves only the editor's grey-out. Both stay non-fatal — `check` exits 0
+/// even under `--warnings-as-errors`, which promotes WARNING only.
+///
+/// Severity is only half the story: every unused finding also carries
+/// [`tower_lsp::lsp_types::DiagnosticTag::UNNECESSARY`], which is what makes
+/// a client fade the range (see `server::diagnostics::unused_to_diagnostic`).
+/// That tag is what keeps `hint` visible at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UnusedLevel {
     Ignore,
+    Hint,
+    Info,
     #[default]
     Warn,
     Error,
@@ -216,10 +229,13 @@ pub enum UnusedLevel {
 
 impl UnusedLevel {
     /// Parse a config / CLI token. Aliases: off/false/none/disable → ignore;
-    /// on/true/warning → warn; err/errors → error.
+    /// faded/grey/gray → hint; information/note → info; on/true/warning →
+    /// warn; err/errors → error.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "ignore" | "off" | "false" | "none" | "disable" | "disabled" => Some(Self::Ignore),
+            "hint" | "faded" | "grey" | "gray" => Some(Self::Hint),
+            "info" | "information" | "note" => Some(Self::Info),
             "warn" | "warning" | "on" | "true" => Some(Self::Warn),
             "error" | "err" | "errors" => Some(Self::Error),
             _ => None,
@@ -229,6 +245,8 @@ impl UnusedLevel {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ignore => "ignore",
+            Self::Hint => "hint",
+            Self::Info => "info",
             Self::Warn => "warn",
             Self::Error => "error",
         }
@@ -1374,6 +1392,15 @@ mod tests {
             ("error", UnusedLevel::Error),
             ("err", UnusedLevel::Error),
             ("errors", UnusedLevel::Error),
+            ("info", UnusedLevel::Info),
+            ("INFO", UnusedLevel::Info),
+            ("information", UnusedLevel::Info),
+            ("note", UnusedLevel::Info),
+            ("hint", UnusedLevel::Hint),
+            ("HINT", UnusedLevel::Hint),
+            ("faded", UnusedLevel::Hint),
+            ("grey", UnusedLevel::Hint),
+            ("gray", UnusedLevel::Hint),
         ] {
             assert_eq!(UnusedLevel::parse(input), Some(want), "parse {input:?}");
         }
@@ -1438,6 +1465,80 @@ mod tests {
         let opts = serde_json::json!({ "unused": "error" });
         let cfg = LspConfig::load(Some(&tmp), Some(&opts));
         assert_eq!(cfg.unused, UnusedLevel::Error);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn unused_level_as_str_round_trips() {
+        for level in [
+            UnusedLevel::Ignore,
+            UnusedLevel::Hint,
+            UnusedLevel::Info,
+            UnusedLevel::Warn,
+            UnusedLevel::Error,
+        ] {
+            assert_eq!(
+                UnusedLevel::parse(level.as_str()),
+                Some(level),
+                "as_str/parse round-trip for {level:?}"
+            );
+        }
+    }
+
+    /// The quiet levels are ordinary ladder citizens: user global, workspace
+    /// file, and initializationOptions all resolve them, with the same
+    /// precedence as ignore/warn/error.
+    #[test]
+    fn unused_quiet_levels_resolve_through_the_whole_ladder() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-unused-quiet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let user = tmp.join("user.toml");
+        std::fs::write(&user, "unused = \"hint\"\n").unwrap();
+        assert_eq!(
+            LspConfig::resolve_unused(Some(&user), None, None),
+            UnusedLevel::Hint,
+            "user-global hint applies when nothing else sets the key"
+        );
+
+        for (toml_value, want) in [
+            ("\"info\"", UnusedLevel::Info),
+            ("\"note\"", UnusedLevel::Info),
+            ("\"hint\"", UnusedLevel::Hint),
+            ("\"grey\"", UnusedLevel::Hint),
+        ] {
+            let ws = tmp.join(format!("ws-{want:?}-{toml_value}").replace(['"', ':'], ""));
+            std::fs::create_dir_all(&ws).unwrap();
+            std::fs::write(
+                ws.join(".openplanet-lsp.toml"),
+                format!("unused = {toml_value}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                LspConfig::resolve_unused(Some(&user), None, Some(&ws)),
+                want,
+                "workspace unused = {toml_value} must beat the user global"
+            );
+        }
+
+        // initializationOptions sit above the workspace file.
+        let init_root = tmp.join("init");
+        std::fs::create_dir_all(&init_root).unwrap();
+        std::fs::write(
+            init_root.join(".openplanet-lsp.toml"),
+            "unused = \"error\"\n",
+        )
+        .unwrap();
+        for (json_value, want) in [("hint", UnusedLevel::Hint), ("info", UnusedLevel::Info)] {
+            let opts = serde_json::json!({ "unused": json_value });
+            let cfg = LspConfig::load(Some(&init_root), Some(&opts));
+            assert_eq!(
+                cfg.unused, want,
+                "initializationOptions unused = {json_value} must beat the workspace file"
+            );
+        }
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -102,12 +102,16 @@ OPTIONS:
                         .openplanet-lsp.toml) when gitignored files are still
                         compile-critical, e.g. generated sources. The flag
                         wins over both config levels.
-    --unused MODE       Unused functions/vars/etc: ignore | warn | error
-                        (aliases: off/false → ignore, on/true → warn,
-                        err → error). Default warn. Also
-                        `unused = \"ignore\"|\"warn\"|\"error\"` in
-                        .openplanet-lsp.toml or the user config; workspace
-                        wins over user. The flag wins over both.
+    --unused MODE       Unused functions/vars/etc:
+                        ignore | hint | info | warn | error (aliases:
+                        off/false → ignore, grey/faded → hint,
+                        note/information → info, on/true → warn,
+                        err → error). Default warn. `hint` and `info` report
+                        the same findings at a quieter severity and never
+                        fail the run, not even under --warnings-as-errors.
+                        Also `unused = \"ignore\"|\"hint\"|\"info\"|\"warn\"|
+                        \"error\"` in .openplanet-lsp.toml or the user config;
+                        workspace wins over user. The flag wins over both.
                         `--no-unused` is `--unused ignore`.
     --no-unused         Same as `--unused ignore`
     --errors MODE       Group errors in human check output: last | first | off
@@ -414,12 +418,12 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                     args,
                     i,
                     "--unused",
-                    "--unused requires a value (ignore, warn, or error)",
+                    "--unused requires a value (ignore, hint, info, warn, or error)",
                     true,
                 )?;
                 options.unused_flag = Some(UnusedLevel::parse(value).ok_or_else(|| {
                     CliError::Usage(format!(
-                        "unknown --unused value '{value}' (expected ignore, warn, or error)"
+                        "unknown --unused value '{value}' (expected ignore, hint, info, warn, or error)"
                     ))
                 })?);
                 i += used;
@@ -1328,10 +1332,18 @@ mod tests {
             ("--unused=error", UnusedLevel::Error),
             ("--unused=off", UnusedLevel::Ignore),
             ("--unused=err", UnusedLevel::Error),
+            ("--unused=hint", UnusedLevel::Hint),
+            ("--unused=grey", UnusedLevel::Hint),
+            ("--unused=info", UnusedLevel::Info),
+            ("--unused=note", UnusedLevel::Info),
         ] {
             let opts = parse_check_args(&[arg.into()]).unwrap();
             assert_eq!(opts.unused_flag, Some(want), "{arg}");
         }
+
+        let opts = parse_check_args(&["--unused".into(), "hint".into(), ".".into()]).unwrap();
+        assert_eq!(opts.unused_flag, Some(UnusedLevel::Hint));
+        assert_eq!(opts.path, PathBuf::from("."));
 
         let opts = parse_check_args(&["--unused".into(), "error".into(), ".".into()]).unwrap();
         assert_eq!(opts.unused_flag, Some(UnusedLevel::Error));

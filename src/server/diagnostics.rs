@@ -175,6 +175,8 @@ pub fn unused_declaration_diagnostics(
 fn unused_severity(level: UnusedLevel) -> Option<DiagnosticSeverity> {
     match level {
         UnusedLevel::Ignore => None,
+        UnusedLevel::Hint => Some(DiagnosticSeverity::HINT),
+        UnusedLevel::Info => Some(DiagnosticSeverity::INFORMATION),
         UnusedLevel::Warn => Some(DiagnosticSeverity::WARNING),
         UnusedLevel::Error => Some(DiagnosticSeverity::ERROR),
     }
@@ -198,6 +200,13 @@ fn unused_to_diagnostic(
         ),
         source: Some("openplanet-lsp".to_string()),
         code: Some(NumberOrString::String("unused-declaration".to_string())),
+        // The UNNECESSARY tag — not the severity — is what makes a client
+        // fade the range (VS Code gates the grey-out on `editor.showUnused`).
+        // Sent at every level: it is orthogonal to severity, it is what keeps
+        // `unused = "hint"` visible when the client omits HINT diagnostics
+        // from its problems list, and clients without
+        // `publishDiagnostics.tagSupport` simply ignore the field.
+        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
         ..Default::default()
     }
 }
@@ -279,21 +288,63 @@ mod tests {
 
     #[test]
     fn unused_severity_follows_level() {
-        assert_eq!(unused_severity(UnusedLevel::Ignore), None);
-        assert_eq!(
-            unused_severity(UnusedLevel::Warn),
-            Some(DiagnosticSeverity::WARNING)
-        );
-        assert_eq!(
-            unused_severity(UnusedLevel::Error),
-            Some(DiagnosticSeverity::ERROR)
-        );
+        for (level, want) in [
+            (UnusedLevel::Ignore, None),
+            (UnusedLevel::Hint, Some(DiagnosticSeverity::HINT)),
+            (UnusedLevel::Info, Some(DiagnosticSeverity::INFORMATION)),
+            (UnusedLevel::Warn, Some(DiagnosticSeverity::WARNING)),
+            (UnusedLevel::Error, Some(DiagnosticSeverity::ERROR)),
+        ] {
+            assert_eq!(unused_severity(level), want, "{level:?}");
+        }
+    }
+
+    /// Every unused finding carries `DiagnosticTag::UNNECESSARY` regardless
+    /// of severity — that tag, not the severity, is what makes a client grey
+    /// the range out (VS Code `editor.showUnused`), and it is the only thing
+    /// that keeps `unused = "hint"` visible at all.
+    #[test]
+    fn unused_to_diagnostic_tags_unnecessary_at_every_severity() {
+        for kind in [
+            "function",
+            "variable",
+            "class",
+            "parameter",
+            "enum",
+            "import",
+        ] {
+            for sev in [
+                DiagnosticSeverity::HINT,
+                DiagnosticSeverity::INFORMATION,
+                DiagnosticSeverity::WARNING,
+                DiagnosticSeverity::ERROR,
+            ] {
+                let unused = UnusedDeclaration {
+                    qualified_name: "Foo".into(),
+                    simple_name: "Foo".into(),
+                    kind,
+                    span: crate::lexer::Span::new(5, 8),
+                    file_id: 0,
+                };
+                let diag = unused_to_diagnostic("void Foo() {}", &unused, sev);
+                assert_eq!(
+                    diag.tags,
+                    Some(vec![DiagnosticTag::UNNECESSARY]),
+                    "{kind} {sev:?} must be tagged unnecessary"
+                );
+            }
+        }
     }
 
     #[test]
     fn unused_to_diagnostic_kinds_use_requested_severity() {
         for kind in ["function", "variable", "class", "parameter"] {
-            for sev in [DiagnosticSeverity::WARNING, DiagnosticSeverity::ERROR] {
+            for sev in [
+                DiagnosticSeverity::HINT,
+                DiagnosticSeverity::INFORMATION,
+                DiagnosticSeverity::WARNING,
+                DiagnosticSeverity::ERROR,
+            ] {
                 let unused = UnusedDeclaration {
                     qualified_name: "Foo".into(),
                     simple_name: "Foo".into(),

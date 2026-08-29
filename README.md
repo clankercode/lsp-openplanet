@@ -175,8 +175,14 @@ default_mode = "tui"   # or "lsp"
 # Unused functions / vars / parameters / class members. Default "warn".
 # "ignore" turns the pass off (it is noisy on large plugins). "error"
 # emits ERROR diagnostics so `check` fails without --warnings-as-errors.
-# CLI `--unused ignore|warn|error` and `--no-unused` win over this;
-# workspace .openplanet-lsp.toml wins over the user config.
+# "info" and "hint" report the same findings at a quieter severity and
+# never fail the run, not even under --warnings-as-errors: "info" stays
+# listed in an editor's problems panel, "hint" drops out of it and leaves
+# only the greyed-out range. Every finding is tagged Unnecessary at all
+# levels, so editors that honour the tag (VS Code: `editor.showUnused`)
+# fade the declaration regardless of which level you pick.
+# CLI `--unused ignore|hint|info|warn|error` and `--no-unused` win over
+# this; workspace .openplanet-lsp.toml wins over the user config.
 # unused = "warn"
 
 # Human `check` output groups diagnostics by severity. Default "last":

@@ -312,9 +312,9 @@ pub const SETTINGS: &[SettingSpec] = &[
     },
     SettingSpec {
         key: "unused",
-        help: "Unused functions/vars/etc: ignore, warn (default), or error",
+        help: "Unused functions/vars/etc: ignore, hint, info, warn (default), or error",
         kind: SettingKind::Enum {
-            choices: &["ignore", "warn", "error"],
+            choices: &["ignore", "hint", "info", "warn", "error"],
             default: "warn",
         },
     },
