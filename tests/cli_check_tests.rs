@@ -1913,6 +1913,11 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         // predicate has to consult the tail table as the resolver does.
         "Shadowing.as:100",
         "Shadowing.as:101",
+        // The other edge of the qualified-spelling rule: the written
+        // `UI::InputTextCallback` is the CORE funcdef and must beat the
+        // unrelated nested `Qz::UI::InputTextCallback`. Testing only
+        // WORKSPACE declarations for the written name invents an error here.
+        "Shadowing.as:168",
     ] {
         assert!(
             !errors.iter().any(|e| e.contains(line)),

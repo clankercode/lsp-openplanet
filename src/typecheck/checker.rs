@@ -2657,11 +2657,17 @@ impl<'a> Checker<'a> {
         // A QUALIFIED spelling resolves as written before any namespace
         // fallback — `B::X` inside `namespace A` means `B::X`, and only then
         // the relative `A::B::X`. This mirrors `resolver.rs`, and getting it
-        // backwards let a same-tail `A::B::X` funcdef stand in for the
-        // global `B::X` class and swallow a real diagnostic (review, round
-        // 5). A BARE name takes the ladder first, because there the inner
-        // scope legitimately shadows the outer one.
-        if name.contains("::") && self.scope.workspace_declares_type(name) {
+        // backwards cuts both ways: omitting it let a same-tail `A::B::X`
+        // funcdef stand in for the global `B::X` class and swallow a real
+        // diagnostic (round 5), while testing only WORKSPACE declarations
+        // let a nested `A::UI::InputTextCallback` stand in for the CORE
+        // `UI::InputTextCallback` and invent one (round 6). The written name
+        // wins if it denotes a type the checker knows AT ALL — typedb
+        // included. A BARE name still takes the ladder first, because there
+        // the inner scope legitimately shadows the outer one.
+        if name.contains("::")
+            && (self.scope.has_type(name) || self.scope.workspace_declares_type(name))
+        {
             return name.to_string();
         }
         for depth in (1..=self.namespace_stack.len()).rev() {

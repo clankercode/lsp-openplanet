@@ -147,3 +147,24 @@ namespace Unrelated {
 void OverblockUse() {
     Text::Format("%d", CoreCbP);
 }
+
+// The other edge of the qualified-spelling rule, and the mirror of the
+// `Nq::ProcIntercept` block above. There the written name had to lose to the
+// namespace ladder; here it must WIN. `Qz::UI::InputTextCallback` is an
+// unrelated nested funcdef with a colliding tail; the written
+// `UI::InputTextCallback` is the CORE one and binds the core slot, so this
+// must stay SILENT. Testing only WORKSPACE declarations for the written name
+// invents an error here — the written spelling wins whenever it denotes a
+// type the checker knows at all, typedb included.
+void QzGood(UI::InputTextCallbackData@ d) { d.SelectAll(); }
+
+namespace Qz {
+    namespace UI {
+        funcdef void InputTextCallback(int);
+    }
+    UI::InputTextCallback@ qzCallback = QzGood;
+    void QzUse() {
+        string s = "x";
+        UI::InputText("##qz", s, 0, qzCallback);
+    }
+}
