@@ -71,3 +71,34 @@ Preferred order: land B067's widening first, then gate here; or fix this by
 offering the SOURCE SPELLING rather than by gating the namespace at all, which
 is closer to the actual defect (the label is a storage key, not that the
 namespace is bogus).
+
+## Two corrections to this ticket (coordinator, from lane-b057's measurements)
+
+**1. The example in this ticket cannot occur.** `Game::CGameMenu::EMenuOrder`
+is filtered out by `namespace_enums`'s direct-children guard. The defect is
+real, but it is **one segment shorter** than written. Tests pin the form that
+actually happens, not the illustrative one - anyone reading the ticket alone
+would chase a shape the code cannot produce.
+
+**2. The appended B067 note is STALE - ignore it.** It advises landing
+"B067's widening" first. **There is no widening.** B067 closed as
+not-a-defect (`468b3a0`): `scope_exists` does not under-approximate, and the
+LSP agrees with the game 25/25 on class-position scopes. A class is a scope
+when it declares a member enum, named or anonymous - already implemented and
+already documented at `src/typedb/index.rs:456-464`. Nothing from B067 is
+required by, or available to, this ticket.
+
+## Measured scale
+
+Of **67 shortcut labels offered across the ten namespaces the loader files the
+dump under, 31 were spellings the checker rejects** - every one under a
+synthetic module. `UI::` and `Meta::` were unaffected, which is the
+discriminator working rather than a coincidence, since those are real scopes.
+
+## Why "offer the source spelling" beat "gate the namespace"
+
+Decided by measurement rather than preference, and the two are NOT equivalent:
+these enums are reachable through **no other completion path**. Gating would
+have deleted the only way to discover them; the source spelling hands the user
+something correct they cannot get today. `TypeIndex::source_spelling_of_key`
+is the exact inverse of `source_name_key` and the direction a *surface* needs.
