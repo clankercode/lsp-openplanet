@@ -1660,10 +1660,6 @@ fn epoch_to_rfc3339(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Serialize tests that touch process-global env vars.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Entry points that consult a process-global env var somewhere below
     /// them, so a test calling one races any test that sets that var.
@@ -1695,8 +1691,11 @@ mod tests {
     /// `set_var` in one test is visible to every other. Poisoning is ignored
     /// on purpose — one failing test must not cascade into a wall of
     /// `PoisonError`s that hides the real assertion.
+    /// B065/B066: the lock now lives in [`crate::testing`] so that a test in
+    /// ANOTHER module writing the same variable — `src/config.rs` writes
+    /// `HOME` — serialises against these. A second mutex here would not.
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::testing::env_lock()
     }
 
     /// Split this module's source into (name, body) per `#[test]` fn.
@@ -1720,6 +1719,34 @@ mod tests {
             out.push((name, rest.to_string()));
         }
         out
+    }
+
+    /// B066: `env_guard()` must be the SAME lock `src/config.rs` takes, or
+    /// the two modules do not serialise against each other and the race
+    /// B032 fixed here stays open across the module boundary.
+    ///
+    /// Proved by contention rather than by reading the code: hold the shared
+    /// lock, then check that a thread calling `env_guard()` cannot get in.
+    /// If the two were separate mutexes the thread would acquire instantly.
+    #[test]
+    fn env_guard_shares_the_process_wide_lock() {
+        let held = crate::testing::env_lock();
+        let contender = std::thread::spawn(|| {
+            let _g = env_guard();
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !contender.is_finished(),
+            "env_guard() acquired while the shared lock was held, so it is a \
+             different mutex and config.rs's env tests do not serialise \
+             against update.rs's"
+        );
+
+        drop(held);
+        contender
+            .join()
+            .expect("contender must proceed once released");
     }
 
     /// B032 regression guard. The mutex above only helps if the READERS take

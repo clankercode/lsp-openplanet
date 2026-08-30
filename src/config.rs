@@ -2901,13 +2901,22 @@ define_matrix_max_combinations = 32
         std::fs::create_dir_all(turbo.join("Plugins")).unwrap();
         std::fs::create_dir_all(next.join("Plugins")).unwrap();
 
-        // SAFETY for tests: scoped env mutation is fine here — cargo runs
-        // lib tests in one process, but this test owns a unique HOME value
-        // and config load is deterministic given HOME.
-        std::env::set_var("HOME", &tmp);
+        // B066: this used to `set_var("HOME", ..)` unguarded, on the
+        // reasoning that the value was unique to this test. The value being
+        // unique is not the issue — the VARIABLE is shared. `cargo test
+        // --lib` runs every module's tests as threads in one process, so a
+        // concurrent test reading or writing `HOME` raced this one, and the
+        // trailing `remove_var` was skipped entirely when an assertion below
+        // failed. `EnvVars` takes the process-wide lock and restores on drop.
+        //
+        // `USERPROFILE` is cleared because `auto_detect_for_target` consults
+        // it BEFORE `HOME`, so an inherited value routes around the fixture.
+        let env = crate::testing::EnvVars::capture(&["HOME", "USERPROFILE"]);
+        env.set("HOME", &tmp);
+        env.remove("USERPROFILE");
         let opts = serde_json::json!({ "game_target": "TURBO" });
         let config = LspConfig::load(None, Some(&opts));
-        std::env::remove_var("HOME");
+        drop(env);
 
         assert_eq!(
             config.openplanet_dir,
