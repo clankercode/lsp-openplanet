@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-30T18:28:01Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-30T23:18:36Z"
 complexity: medium
 created_at: "2026-08-30T17:08:09Z"
 depends_on: []
+duration_minutes: 290.59686302781665
 estimate_hours: 1
 id: B068
 priority: high
 started_at: "2026-08-30T18:28:01Z"
-status: in_progress
+status: done
 tags: []
 title: 'probe_enum_corpus.py batches names into one compilation unit: one parse error silently marks every other name ACCEPTED'
-updated_at: "2026-08-30T18:28:01Z"
+updated_at: "2026-08-30T23:18:36Z"
 ---
 
 # probe_enum_corpus.py batches names into one compilation unit: one parse error silently marks every other name ACCEPTED
