@@ -45,6 +45,11 @@ test-hermetic:
 test-hermetic-selftest:
     python3 scripts/test-hermetic.py --selftest
 
+# Offline checks for the game-probe harness: proves it cannot record ACCEPTED
+# on silence it has not earned (B068). Needs no game, unlike the probe itself.
+probe-selftest:
+    python3 scripts/probe_enum_corpus.py --selftest
+
 # Fast unit tests only
 test-lib:
     cargo test --lib

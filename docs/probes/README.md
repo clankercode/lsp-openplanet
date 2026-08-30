@@ -257,3 +257,41 @@ Two rules follow:
   in the same run. If your fabricated name comes back ACCEPTED, the run is
   void, not surprising. A batch that returns a distinct message for *every*
   name is sound, because an abort yields zero messages rather than some.
+
+## Fixed in the harness (B068), and what it means for the corpora
+
+The script now emits a **sentinel** on the last probed line of every unit — a
+name the game must reject semantically. Silence on a name counts as ACCEPTED
+only when the sentinel's own diagnostic came back, which proves analysis
+reached the end of the unit. Otherwise the name is `UNDETERMINED` and is
+re-probed on its own. That makes batch size a speed knob rather than a
+correctness one, and `--batch` is now settable; `just probe-selftest` checks
+the logic offline, with no game.
+
+The negative-control rule above still stands. The sentinel is a *positive*
+control and they answer different questions: the sentinel proves the compiler
+got to the end of your unit, a fabricated name proves your ACCEPTs are not
+being manufactured by the machine's installed plugins.
+
+**The shipped corpora predate this fix and have NOT been re-probed** — that
+needs a live game and is open work under B068. What is already known without
+re-probing: this defect can only invent an ACCEPTED, never a REJECTED, because
+an abort produces the *absence* of diagnostics and a REJECTED row required the
+game to name that spelling. So every "the LSP must reject this" assertion built
+on these files is sound, and B056's narrowing claim is unaffected. The exposure
+is that a spurious ACCEPTED may have let the LSP keep accepting something the
+game rejects — a missed narrowing, not a false positive.
+
+**A verdict this document does not yet contain: `UNDETERMINED`.** If a
+regenerated corpus carries one, `global_scope.rs` panics on it by design, but
+`resolver.rs` computes `verdict == "ACCEPTED"` and would silently read it as
+REJECTED — an unknown asserted as a fact.
+
+So a corpus containing one is never written to its real path. The generator
+parks it at `<name>.partial`, leaves the existing file untouched, and exits
+non-zero. Exiting alone was not enough: the file had already been written, and
+an ignored exit code would have left a complete-looking TSV that the Rust
+suite reads without complaint. Two things can make a run indeterminate — a
+value that could not be probed, and an enum whose own type probe was
+indeterminate, which silently shrinks `global_enum_owners`, the column that
+decides the B053 verdict. Both are counted.
