@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T18:22:34Z"
 depends_on: []
 estimate_hours: 1
 id: B076
 priority: high
+started_at: null
 status: pending
 tags: []
 title: A funcdef handle accepts a function whose return type differs
@@ -24,3 +26,72 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found 2026-08-31 by lane-b057 while walking a grep list of
+`named_types_equivalent` call sites for the B056 follow-up. Pre-existing:
+identical on the merge-base and branch binaries, and outside that ticket's
+scope. Filed rather than folded in.
+
+## Defect
+
+Binding a function to a funcdef handle does not check the RETURN type:
+
+```angelscript
+funcdef void Maker();
+int MakeDistinct() { return 1; }
+
+void Use() {
+    Maker@ b = MakeDistinct;   // silent — return types differ
+}
+```
+
+Zero diagnostics. Parameter lists are compared; the return type is not.
+
+## Why it matters
+
+This is a false NEGATIVE — the LSP accepts a binding the game rejects — so it
+is the milder direction, but it is squarely in the family this batch has been
+closing (B023, B060: what binds to a funcdef slot). It also sits next to code
+that was just changed: `funcdef_types_compatible` and
+`funcdef_handle_compatible` are two of the four `named_types_equivalent` call
+sites B056's follow-up probed, and both were shown reachable.
+
+## Steps to Reproduce
+
+`openplanet-lsp check` on the snippet above.
+
+## Expected Behavior
+
+An error on the assignment, naming the return-type mismatch.
+
+## Actual Behavior
+
+Silent.
+
+## Test plan (TDD, red first)
+
+Red: the snippet above.
+
+Variants, per repo CLAUDE.md — generalize rather than pinning one case:
+
+- matching return type still binds (no regression)
+- differing PRIMITIVE return (`int` vs `void`, `uint` vs `float`)
+- differing HANDLE return (`CMwNod@` vs `CGameCtnBlock@`)
+- handle vs value return of the same type (`T@` vs `T`)
+- `const` differences on the return
+- differing return WITH matching params, and matching return WITH differing
+  params — the second already errors, so it pins that this fix does not
+  disturb the existing parameter check
+- the same shapes through `startnew(...)` and through a funcdef-typed
+  parameter, not only through an assignment
+- a workspace funcdef as well as an engine one
+
+**Game probe before treating LSP silence as ground truth** — the game is down
+as of 2026-08-30, so this needs a live REJECT to confirm the expected
+behaviour. A REJECT is solid evidence; do not infer from an ACCEPT.
+
+## Related
+
+B060 (funcdef slot binding, argument position), B023 (function-shaped args),
+B073 (workspace type shadowing a typedb funcdef — same neighbourhood, different
+defect), B071 (the sibling gap in enum mismatch, found in the same sweep).
