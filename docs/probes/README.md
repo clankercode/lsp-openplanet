@@ -94,3 +94,38 @@ echo -e 'Scene::ESceneCharVisNotice\nUI::VirtualKey' | \
 `--template TYPE` submits `<name> v;` (type position); `--template VALUE`
 submits `print("" + <name>);` inside a function (value position). The
 distinction matters — see the ancestor-walk trap above.
+
+# Engine behaviour established by live probe
+
+Facts about the game's AngelScript runtime that are not written down anywhere
+else, recorded here so they are not re-derived. An engine fact in a doc goes
+stale invisibly, so each entry names the version it was measured against.
+
+## `double()` of a `Json::Type::Null` value THROWS
+
+Measured in-game 2026-08-30 on Openplanet Next by session
+`tm-tournament-station-f7`, which hit it for real:
+
+```angelscript
+Json::Value@ v = Json::Parse("this is not json");   // a Json::Type::Null VALUE
+bool threw = false;
+double got = -1;
+try { got = double(v); } catch { threw = true; }
+// threw == true; got untouched at -1
+```
+
+It does **not** degrade to `0`.
+
+This completes a two-part trap rather than sitting beside it. `Json::Parse`
+returns a Null *value* on junk input, not a null *handle*, so the obvious
+`if (v is null)` guard is **dead code** and never fires. The conversion you
+naturally reach for once that guard disappoints you then throws instead of
+yielding a usable zero. Both halves have to be known together: fix only the
+first and you walk directly into the second.
+
+**When probing this yourself, the `try`/`catch` is load-bearing, not
+defensive habit.** An uncaught throw in a check body aborts that suite *and
+every suite after it*, which a runner reports as silence — i.e. as success.
+That is the same "absence read as a pass" shape as the `grep` and
+foreign-diagnostic traps above, and it is worth recognising as a recurring
+class rather than three separate accidents.
