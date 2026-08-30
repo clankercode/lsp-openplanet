@@ -2,9 +2,10 @@
 //!
 //! Driven by the `unknown type` / `undefined identifier` diagnostics the
 //! client echoes back. Candidates come from the workspace symbol table and
-//! the external type index (short-name map). Similarity is scored with
-//! Levenshtein distance (≤ 2), plus two cheap fallbacks: case-insensitive
-//! substring containment and a common prefix of at least 3 characters.
+//! the external type index's accepted source spellings (scored by their tail
+//! segment). Similarity is scored with Levenshtein distance (≤ 2), plus two
+//! cheap fallbacks: case-insensitive substring containment and a common
+//! prefix of at least 3 characters.
 //!
 //! **Why this is a [`DiagnosticFixFamily`] and not a `FixFamily`.** It reads
 //! the name out of the diagnostic MESSAGE, not out of a
@@ -159,15 +160,19 @@ fn find_candidates(
         }
     }
 
-    // External type index short names (types + enums).
+    // External type index SOURCE spellings (types + enums + funcdefs). Score
+    // against the tail so a typo such as `EMenuOrdr` can suggest the valid
+    // `CGameMenu::EMenuOrder`, but replace with the complete spelling the
+    // resolver accepts rather than the rejected bare storage-key tail.
     if let Some(idx) = type_index {
-        for short in idx.all_short_names() {
-            if short == needle {
+        for spelling in idx.source_spellings() {
+            if spelling == needle {
                 continue;
             }
-            if let Some(dist) = is_similar(needle, &short) {
-                if seen.insert(short.clone()) {
-                    candidates.push((short, dist));
+            let tail = spelling.rsplit("::").next().unwrap_or(&spelling);
+            if let Some(dist) = is_similar(needle, tail) {
+                if seen.insert(spelling.clone()) {
+                    candidates.push((spelling, dist));
                 }
             }
         }
@@ -213,5 +218,73 @@ mod tests {
     #[test]
     fn common_prefix_matches_long_prefix() {
         assert!(is_similar("GetFoo", "GetFooBar").is_some());
+    }
+
+    #[test]
+    fn external_candidates_replace_enum_typos_with_source_spellings() {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let idx = TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load");
+        let workspace = SymbolTable::new();
+
+        let candidates = find_candidates("EMenuOrdr", &workspace, Some(&idx));
+        let spellings: Vec<&str> = candidates
+            .iter()
+            .map(|(spelling, _)| spelling.as_str())
+            .collect();
+        assert!(
+            !spellings.contains(&"EMenuOrder"),
+            "bare nested enum is rejected by the resolver: {spellings:?}"
+        );
+        assert!(
+            spellings.contains(&"CGameMenu::EMenuOrder"),
+            "valid source spelling should be suggested for the typo: {spellings:?}"
+        );
+    }
+
+    #[test]
+    fn external_candidates_keep_core_namespaces() {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let idx = TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load");
+        let candidates = find_candidates("ButtonFlag", &SymbolTable::new(), Some(&idx));
+        let spellings: Vec<&str> = candidates
+            .iter()
+            .map(|(spelling, _)| spelling.as_str())
+            .collect();
+        assert!(
+            spellings.contains(&"UI::ButtonFlags"),
+            "Core namespace is part of the source spelling: {spellings:?}"
+        );
+        assert!(!spellings.contains(&"ButtonFlags"), "{spellings:?}");
+    }
+
+    #[test]
+    fn external_candidates_keep_header_enums_bare() {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let idx = TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load");
+        let candidates = find_candidates("ESceneCharVisNotic", &SymbolTable::new(), Some(&idx));
+        let spellings: Vec<&str> = candidates
+            .iter()
+            .map(|(spelling, _)| spelling.as_str())
+            .collect();
+        assert!(
+            spellings.contains(&"ESceneCharVisNotice"),
+            "Header enum source spelling is bare: {spellings:?}"
+        );
+        assert!(!spellings.contains(&"Scene::ESceneCharVisNotice"));
     }
 }

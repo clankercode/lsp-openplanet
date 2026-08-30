@@ -661,6 +661,32 @@ impl TypeIndex {
         self.source_names.get(spelling).map(|s| s.as_str())
     }
 
+    /// Every exact source spelling accepted by [`Self::source_name_key`], in
+    /// deterministic order. Unlike [`Self::all_short_names`], these are
+    /// complete spellings: a nested Nadeo enum is
+    /// `CGameMenu::EMenuOrder`, never the rejected bare `EMenuOrder`, while a
+    /// Core name keeps its full real namespace and a header enum stays bare.
+    pub fn source_spellings(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.source_names.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Resolve a source-written type reference to its storage key.
+    ///
+    /// In addition to exact source names, this preserves B052's AngelScript
+    /// ancestor walk: `P::T` can name a globally visible enum `T` when `P` is
+    /// a real source scope. Synthetic Nadeo modules never pass that gate.
+    pub fn source_reference_key(&self, spelling: &str) -> Option<&str> {
+        if let Some(key) = self.source_name_key(spelling) {
+            return Some(key);
+        }
+        let (scope, name) = spelling.rsplit_once("::")?;
+        self.scope_exists(scope)
+            .then(|| self.global_enum_key(name))
+            .flatten()
+    }
+
     /// B053: the globally visible enums that carry the bare value name
     /// `value`, by enum name and sorted. Empty when nothing global carries
     /// it; TWO OR MORE is what the game rejects with `Found multiple
@@ -680,6 +706,55 @@ impl TypeIndex {
     /// module names precisely because the index keys them that way.
     pub fn scope_exists(&self, path: &str) -> bool {
         self.scopes.contains(path)
+    }
+
+    /// Every real source scope, in deterministic order. This is the
+    /// completion-facing counterpart to [`Self::scope_exists`]: Core
+    /// namespaces and Nadeo enum-declaring class scopes are included, while
+    /// loader-only modules such as `Game`, `Scene` and `Audio` are not.
+    pub fn source_scopes(&self) -> Vec<String> {
+        let mut scopes: Vec<String> = self.scopes.iter().cloned().collect();
+        scopes.sort();
+        scopes
+    }
+
+    /// Direct source-writable members of a real scope, in deterministic
+    /// order. Names are derived from the same origin-aware spellings used by
+    /// the resolver, so storage prefixes cannot leak into editor output.
+    pub fn source_scope_members(&self, scope: &str) -> Vec<String> {
+        if !self.scope_exists(scope) {
+            return Vec::new();
+        }
+
+        let prefix = format!("{}::", scope);
+        let mut members = BTreeSet::new();
+        for spelling in self.source_names.keys() {
+            if let Some(rest) = spelling.strip_prefix(&prefix) {
+                if !rest.contains("::") {
+                    members.insert(rest.to_string());
+                }
+            }
+        }
+        for (qname, overloads) in &self.functions {
+            for info in overloads {
+                let Some(spelling) = Self::source_name_of(qname, info.source) else {
+                    continue;
+                };
+                if let Some(rest) = spelling.strip_prefix(&prefix) {
+                    if !rest.contains("::") {
+                        members.insert(rest.to_string());
+                    }
+                }
+            }
+        }
+        for nested in &self.scopes {
+            if let Some(rest) = nested.strip_prefix(&prefix) {
+                if !rest.contains("::") {
+                    members.insert(rest.to_string());
+                }
+            }
+        }
+        members.into_iter().collect()
     }
 
     /// The fully qualified enum key `qualified` is a genuine trailing PATH
@@ -1154,6 +1229,16 @@ impl TypeIndex {
 
     pub fn lookup_function(&self, qualified_name: &str) -> Option<&[FunctionInfo]> {
         self.functions.get(qualified_name).map(|v| v.as_slice())
+    }
+
+    /// Look up a free function by its source spelling rather than its
+    /// storage key. All overloads under one key share an origin.
+    pub fn lookup_source_function(&self, spelling: &str) -> Option<&[FunctionInfo]> {
+        let overloads = self.lookup_function(spelling)?;
+        overloads
+            .iter()
+            .any(|info| Self::source_name_of(spelling, info.source).as_deref() == Some(spelling))
+            .then_some(overloads)
     }
 
     pub fn lookup_enum(&self, qualified_name: &str) -> Option<&EnumInfo> {

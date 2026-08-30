@@ -145,12 +145,6 @@ pub fn hover(
         if let Some(md) = lookup_external(&qualified, index) {
             return Some(markdown_hover(md));
         }
-        // Also try the bare name as a fallback for short-name references.
-        if qualified != bare {
-            if let Some(md) = lookup_external(&bare, index) {
-                return Some(markdown_hover(md));
-            }
-        }
     }
 
     recorded_fallback.map(markdown_hover)
@@ -666,11 +660,13 @@ fn format_external_type(qualified: &str, ty: &TypeInfo) -> String {
 }
 
 fn lookup_external(qualified: &str, index: &TypeIndex) -> Option<String> {
-    if let Some(ty) = index.lookup_type(qualified) {
+    let source_key = index.source_reference_key(qualified);
+
+    if let Some(ty) = source_key.and_then(|key| index.lookup_type(key)) {
         return Some(format_external_type(qualified, ty));
     }
 
-    if let Some(fns) = index.lookup_function(qualified) {
+    if let Some(fns) = index.lookup_source_function(qualified) {
         // Every overload, not just `fns[0]` — the type database keeps a Vec
         // precisely because AngelScript functions overload (B033).
         let sigs: Vec<HoverSig> = fns
@@ -686,7 +682,7 @@ fn lookup_external(qualified: &str, index: &TypeIndex) -> Option<String> {
         }
     }
 
-    if let Some(fd) = index.lookup_funcdef(qualified) {
+    if let Some(fd) = source_key.and_then(|key| index.lookup_funcdef(key)) {
         // Funcdefs are types, not callables, so they never overload — but
         // they do have a signature, and the workspace path already showed
         // one (B033).
@@ -697,7 +693,7 @@ fn lookup_external(qualified: &str, index: &TypeIndex) -> Option<String> {
         ));
     }
 
-    if let Some(en) = index.lookup_source_enum(qualified) {
+    if let Some(en) = source_key.and_then(|key| index.lookup_source_enum(key)) {
         let values: Vec<(String, Option<i64>)> = en
             .values
             .iter()
@@ -963,10 +959,102 @@ mod tests {
 
     /// Hover against a typedb-backed scope (no workspace symbol of that name).
     fn hover_external_md(src: &str, needle: &str, occurrence: usize, idx: &TypeIndex) -> String {
+        md_of(hover_external(src, needle, occurrence, idx).expect("hover"))
+    }
+
+    fn hover_external(
+        src: &str,
+        needle: &str,
+        occurrence: usize,
+        idx: &TypeIndex,
+    ) -> Option<Hover> {
         let tw = TestWorkspace::one_file("hover.as", src);
         let scope = GlobalScope::new(tw.snapshot.symbols(), Some(idx));
         let pos = pos_of(src, needle, occurrence);
-        md_of(hover(tw.analysis(), None, pos, &scope).expect("hover"))
+        hover(tw.analysis(), None, pos, &scope)
+    }
+
+    fn fixture_typedb() -> TypeIndex {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
+    #[test]
+    fn hover_rejects_nadeo_class_storage_key() {
+        let idx = fixture_typedb();
+        let src = "void main() { Game::CGameCtnApp@ app; }";
+        assert!(
+            hover_external(src, "CGameCtnApp", 1, &idx).is_none(),
+            "checker-rejected storage spelling must not receive authoritative hover"
+        );
+    }
+
+    #[test]
+    fn hover_accepts_nadeo_class_source_spelling() {
+        let idx = fixture_typedb();
+        let src = "void main() { CGameCtnApp@ app; }";
+        let md = md_of(
+            hover_external(src, "CGameCtnApp", 1, &idx)
+                .expect("source spelling must receive hover"),
+        );
+        assert!(md.contains("CGameCtnApp"), "{md:?}");
+    }
+
+    #[test]
+    fn hover_rejects_nadeo_enum_storage_key() {
+        let idx = fixture_typedb();
+        let src = "void main() { Game::CGameMenu::EMenuOrder value; }";
+        assert!(
+            hover_external(src, "EMenuOrder", 1, &idx).is_none(),
+            "checker-rejected enum storage spelling must not receive authoritative hover"
+        );
+    }
+
+    #[test]
+    fn hover_accepts_nadeo_enum_source_spelling() {
+        let idx = fixture_typedb();
+        let src = "void main() { CGameMenu::EMenuOrder value; }";
+        let md = md_of(
+            hover_external(src, "EMenuOrder", 1, &idx).expect("source spelling must receive hover"),
+        );
+        assert!(md.contains("EMenuOrder"), "{md:?}");
+    }
+
+    #[test]
+    fn hover_retains_global_enum_ancestor_walk_spelling() {
+        let idx = fixture_typedb();
+        let src = "void main() { CGameCtnApp::VirtualKey value; }";
+        let md = md_of(
+            hover_external(src, "VirtualKey", 1, &idx)
+                .expect("B052 ancestor-walk spelling must receive hover"),
+        );
+        assert!(md.contains("VirtualKey"), "{md:?}");
+    }
+
+    #[test]
+    fn hover_accepts_bare_header_enum_spelling() {
+        let idx = fixture_typedb();
+        let src = "void main() { ESceneCharVisNotice value; }";
+        let md = md_of(
+            hover_external(src, "ESceneCharVisNotice", 1, &idx)
+                .expect("bare header enum must receive hover"),
+        );
+        assert!(md.contains("ESceneCharVisNotice"), "{md:?}");
+    }
+
+    #[test]
+    fn hover_rejects_qualified_header_enum_spelling() {
+        let idx = fixture_typedb();
+        let src = "void main() { Scene::ESceneCharVisNotice value; }";
+        assert!(
+            hover_external(src, "ESceneCharVisNotice", 1, &idx).is_none(),
+            "header enum only exists under its bare source spelling"
+        );
     }
 
     // --- defect 1: the checked-view fast path printed `name()` ---
