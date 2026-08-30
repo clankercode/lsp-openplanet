@@ -139,3 +139,20 @@ look complete and close nothing on the single-threaded path.
 
 The original warning stands unchanged: do NOT fix (a) by ordering the two write
 locks, because readers still take one at a time.
+
+## Lane decision (coordinator, 2026-08-30)
+
+**Own lane (`lane-b064`), parallel with everything else.** Sole owner of
+`src/server/mod.rs`; no other live lane touches it. lane-b057 is in
+`completion.rs`/`hover.rs`/`index.rs`, lane-b060-b062 is in `checker.rs`/
+`unused.rs`/`manifest.rs`, lane-b039-b041 is in the colour provider.
+
+Branch from master tip including this claim.
+
+**Do both defects or neither is closed.** The two corrections above are the
+whole ticket: (a) the two locks collapse into one, (b) `TypeIndex::load`
+returns the stamps it already parsed so the probe is not a second read.
+A commit that does only (a) will look complete, pass a concurrency test, and
+leave the single-threaded TOCTOU untouched. Report which of the two each test
+you write would catch — if any test would pass with only one half applied,
+that test does not pin what it claims to.
