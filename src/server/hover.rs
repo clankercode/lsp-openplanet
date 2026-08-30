@@ -145,6 +145,52 @@ pub fn hover(
         if let Some(md) = lookup_external(&qualified, index) {
             return Some(markdown_hover(md));
         }
+        // B070: B052's ancestor walk resolves a globally visible enum through
+        // ANY real scope, including a namespace the workspace itself declares
+        // — `namespace Foo {}` makes `Foo::VirtualKey` legal, and the game
+        // agrees. `lookup_external` cannot see that: it reaches
+        // `TypeIndex::source_reference_key`, whose scope test is
+        // `TypeIndex::scope_exists`, the index-only half. The index is right
+        // not to know what a workspace declared; the resolver is the half that
+        // does, so ask it for the canonical key and look THAT up. Hover then
+        // answers for exactly the spellings the checker accepts.
+        // The gate is load-bearing, not belt-and-braces. `canonical_enum_key`
+        // is a CANONICALIZER: every other caller reaches it only after the
+        // checker has accepted the spelling, so it may be wider than
+        // acceptance and is — it still carries the trailing-suffix match that
+        // `has_enum` deliberately dropped (B007), under which `Plot::Axis` is
+        // a suffix of the real key `UI::Plot::Axis`. The game rejects that
+        // with `Namespace 'Plot' doesn't exist.` Calling it on arbitrary
+        // hovered text without this gate made hover answer for 24 corpus
+        // spellings the checker rejects — measured, see the sweep below.
+        //
+        // Why this is SECOND when it is the more correct path. The plain
+        // lookup above is the cheap common case: almost every hover is a
+        // spelling the index can key directly, and it needs no resolver
+        // round-trip. This retry is the workspace-aware completion of it, not
+        // a rival — so do not "simplify" by deleting either one. Deleting the
+        // retry restores B070; deleting the plain lookup makes every hover pay
+        // for a case that is rare.
+        //
+        // Ordering is safe because the primary cannot answer WRONGLY here,
+        // only miss. `TypeIndex` is built from the JSON dumps alone and has no
+        // workspace knowledge: `source_name_key` reads `source_names`, and the
+        // walk gates on `TypeIndex::scope_exists`, which holds only Core
+        // namespaces and Nadeo enum-declaring classes. So for a namespace only
+        // the workspace declares it must return `None`, and when the head IS
+        // also a real index scope both paths select through the same
+        // `global_enum_key(tail)` and agree. Measured over the corpus plus
+        // synthesized workspace spellings, including a workspace that declares
+        // `namespace UI {}` to collide with the real Core scope: 591 spellings
+        // where both answer, 0 disagreements, 0 cases of the primary answering
+        // for a workspace-only head.
+        if scope.has_enum(&qualified) {
+            if let Some(key) = scope.canonical_enum_key(&qualified) {
+                if let Some(md) = lookup_external(&key, index) {
+                    return Some(markdown_hover(md));
+                }
+            }
+        }
     }
 
     recorded_fallback.map(markdown_hover)
@@ -1051,6 +1097,201 @@ mod tests {
         assert!(
             hover_external(src, "ESceneCharVisNotice", 1, &idx).is_none(),
             "header enum only exists under its bare source spelling"
+        );
+    }
+
+    // --- B070: hover must answer for the spellings the checker accepts ----
+    //
+    // B052's ancestor walk makes a WORKSPACE-declared namespace a real scope,
+    // so a plugin writing `namespace Foo {}` can spell a global engine enum
+    // `Foo::VirtualKey`. Hover's `lookup_external` asks
+    // `TypeIndex::source_reference_key`, whose scope test is
+    // `TypeIndex::scope_exists` — the INDEX-ONLY half, which cannot know a
+    // workspace declared anything. `GlobalScope::scope_exists` is the half
+    // that does. That split is the defect: the checker accepted a spelling
+    // hover was silent on.
+    //
+    // Every spelling below carries a live game verdict from
+    // `docs/probes/b052-qualified-enum-spellings.tsv` (Trackmania + Openplanet
+    // 1.29.5; rows 26 and 966-970). The ACCEPTED rows survive B068's batching
+    // hazard by their neighbours rather than by assumption: a wedged batch
+    // marks every LATER name in the unit ACCEPTED, so the REJECTED controls
+    // `Foo::ZZZNoSuch` (row 970) and `Foo::Bar::ZZZNoSuch` (row 967) landing
+    // interleaved with those ACCEPTs prove the probe was still discriminating
+    // across exactly this region of the corpus.
+
+    /// The ticket's own repro: the checker accepts this and hover was silent.
+    #[test]
+    fn hover_answers_for_a_global_enum_through_a_workspace_namespace() {
+        let idx = fixture_typedb();
+        let src = "namespace Foo {}\nvoid main() { Foo::VirtualKey value; }";
+        let md = md_of(
+            hover_external(src, "VirtualKey", 1, &idx)
+                .expect("B070: a workspace namespace is a real scope for the ancestor walk"),
+        );
+        assert!(md.contains("VirtualKey"), "{md:?}");
+    }
+
+    /// The control that keeps the fix honest: an UNDECLARED namespace is not a
+    /// scope, and the game says so (`Namespace 'Bogus' doesn't exist.`). A fix
+    /// that answered for any qualifier at all would pass the test above and
+    /// fail this one.
+    #[test]
+    fn hover_is_silent_for_an_enum_behind_an_undeclared_namespace() {
+        let idx = fixture_typedb();
+        let src = "void main() { Bogus::ESceneCharVisNotice value; }";
+        assert!(
+            hover_external(src, "ESceneCharVisNotice", 1, &idx).is_none(),
+            "an undeclared namespace is not a scope; hover must not invent one"
+        );
+    }
+
+    /// The law the ticket states — "the two must not disagree about whether a
+    /// spelling names something" — pinned over every measured row, in both
+    /// directions. Asserting the checker against the GAME as well means this
+    /// cannot pass by both surfaces being wrong in the same way.
+    #[test]
+    fn hover_answers_exactly_the_enum_spellings_the_checker_accepts() {
+        let idx = fixture_typedb();
+        // (declarations, spelling, hovered tail, game verdict)
+        let rows = [
+            ("namespace Foo {}", "Foo::VirtualKey", "VirtualKey", true),
+            (
+                "namespace Foo {}",
+                "Foo::ESceneCharVisNotice",
+                "ESceneCharVisNotice",
+                true,
+            ),
+            (
+                "namespace Foo { namespace Bar {} }",
+                "Foo::Bar::VirtualKey",
+                "VirtualKey",
+                true,
+            ),
+            ("namespace Foo {}", "Foo::ZZZNoSuch", "ZZZNoSuch", false),
+            (
+                "namespace Foo { namespace Bar {} }",
+                "Foo::Bar::ZZZNoSuch",
+                "ZZZNoSuch",
+                false,
+            ),
+            (
+                "",
+                "Bogus::ESceneCharVisNotice",
+                "ESceneCharVisNotice",
+                false,
+            ),
+        ];
+        for (decls, spelling, needle, accepted) in rows {
+            let src = format!("{decls}\nvoid main() {{ {spelling} value; }}\n");
+            let tw = TestWorkspace::one_file("hover.as", &src);
+            let scope = GlobalScope::new(tw.snapshot.symbols(), Some(&idx));
+            assert_eq!(
+                scope.has_enum(spelling),
+                accepted,
+                "checker disagrees with the GAME on {spelling:?}"
+            );
+            assert_eq!(
+                hover_external(&src, needle, 1, &idx).is_some(),
+                accepted,
+                "hover disagrees with the checker on {spelling:?}"
+            );
+        }
+    }
+
+    /// The ticket's law, swept over the whole corpus: hover and the checker
+    /// must not disagree about whether a spelling names something.
+    ///
+    /// The two directions are not equally severe, and the asymmetry is why
+    /// this test exists. Hover answering where the checker REJECTS is a lie —
+    /// it tells the user an invalid spelling names something real. Hover
+    /// silent where the checker ACCEPTS is only a missing surface. This fix
+    /// introduced the severe direction and this sweep is what caught it:
+    /// `canonical_enum_key` is a CANONICALIZER, free to be wider than
+    /// acceptance because every other caller reaches it only after the checker
+    /// has accepted, and it still carries the trailing-suffix match `has_enum`
+    /// deliberately dropped (B007). Called ungated on arbitrary hovered text
+    /// it answered for 24 spellings the checker rejects, every one of the form
+    /// `Plot::X` matching the real key `UI::Plot::X` — which the game refuses
+    /// with `Namespace 'Plot' doesn't exist.`
+    ///
+    /// The `has_enum` gate now makes the severe direction impossible by
+    /// construction rather than merely unobserved: the fallback answers only
+    /// where `has_enum` holds, and `resolves` subsumes `has_enum`. This sweep
+    /// holds that closed against future edits, and asserts the mild direction
+    /// too, which currently has zero exceptions.
+    ///
+    /// It reads no game verdict — only the corpus's list of SPELLINGS — so
+    /// B068's ACCEPTED-row hazard cannot reach it. Mutation-proven: deleting
+    /// the `has_enum` gate takes it from 0 disagreements to 24.
+    #[test]
+    fn hover_and_the_checker_never_disagree_about_what_a_spelling_names() {
+        let idx = fixture_typedb();
+        let corpus = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/probes/b052-qualified-enum-spellings.tsv");
+        let text = std::fs::read_to_string(&corpus).expect("b052 corpus must be readable");
+        // Declared so the workspace-namespace arm of the walk is exercised too.
+        let decls = "namespace Foo { namespace Bar {} }";
+        let mut checked = 0usize;
+        let mut accepted = 0usize;
+        let mut answered = 0usize;
+        // The severe direction: hover answers, the checker rejects.
+        let mut lies: Vec<String> = Vec::new();
+        // The mild direction: the checker accepts, hover is silent.
+        let mut gaps: Vec<String> = Vec::new();
+        for line in text.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let spelling = line.split('\t').next().unwrap_or("");
+            if spelling.is_empty() || spelling == "spelling" || !spelling.contains("::") {
+                continue;
+            }
+            if spelling.contains('<') || spelling.contains('@') {
+                continue;
+            }
+            let needle = spelling.rsplit("::").next().unwrap_or(spelling);
+            let src = format!("{decls}\nvoid main() {{ {spelling} value; }}\n");
+            let tw = TestWorkspace::one_file("hover.as", &src);
+            let scope = GlobalScope::new(tw.snapshot.symbols(), Some(&idx));
+            let resolves = scope.resolves(spelling);
+            let hovers = hover_external(&src, needle, 1, &idx).is_some();
+            checked += 1;
+            accepted += usize::from(resolves);
+            answered += usize::from(hovers);
+            match (hovers, resolves) {
+                (true, false) => lies.push(spelling.to_string()),
+                (false, true) => gaps.push(spelling.to_string()),
+                _ => {}
+            }
+        }
+        // Anti-vacuity: a sweep covering nothing, or one on which hover never
+        // answered, or one with no rejected spellings, satisfies this
+        // trivially. Each floor is well under the current value.
+        assert!(
+            checked > 500,
+            "sweep must cover the corpus, only reached {checked}"
+        );
+        assert!(
+            answered > 100,
+            "hover answered for only {answered} of {checked}; the law would be vacuous"
+        );
+        assert!(
+            checked - accepted > 100,
+            "only {} of {checked} spellings are rejected; the severe direction would be untested",
+            checked - accepted
+        );
+        assert!(
+            lies.is_empty(),
+            "hover answers for {} spellings the checker REJECTS: {:?}",
+            lies.len(),
+            &lies[..lies.len().min(10)]
+        );
+        assert!(
+            gaps.is_empty(),
+            "checker accepts {} spellings hover is silent on: {:?}",
+            gaps.len(),
+            &gaps[..gaps.len().min(10)]
         );
     }
 
