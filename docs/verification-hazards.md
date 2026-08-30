@@ -11,8 +11,8 @@ innocent tree.
 
 Across that batch, the recurring cost was never a check that *errored* — errors
 get investigated. It was checks that returned a clean, plausible, internally
-consistent answer that happened to be false. Every one of them cost more time
-than the bug it was hiding.
+consistent answer that happened to be false. Every hidden defect cost more
+time than the bug it was hiding.
 
 They fall into three mechanisms. Learn the shapes, not the twelve stories.
 
