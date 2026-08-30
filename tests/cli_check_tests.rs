@@ -1757,13 +1757,14 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
 ///
 /// The fixture pins BOTH sides of the line, because a fix that silences more
 /// than it should is indistinguishable from a correct one until something
-/// pins the boundary. Master reports 48 errors across the fixture, 34 of
+/// pins the boundary. Master reports 51 errors across the fixture, 33 of
 /// them false; the 11 true ones must survive, and the fix adds 2 more that
 /// master misses (a funcdef handle into a `uint` slot from a plain global,
 /// and a `uint` property value into a delegate ctor), plus 2 a namespaced
 /// funcdef masked by a same-named global class, and 3 that only survive
 /// because the shadowing guard refuses to let a same-named VARIABLE stand in
-/// for a type — 18 asserted below.
+/// for a type, and 6 where a workspace class or interface handle cannot bind
+/// a funcdef slot — 24 asserted below.
 /// The neighbouring case of every silenced line must keep erroring, notably
 /// `startnew(BadHandler)`, a funcdef-handle property of the WRONG signature
 /// sitting right beside the three right-signature ones this fix silences,
@@ -1800,6 +1801,16 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         "Shadowing.as:134",
         "Shadowing.as:135",
         "Shadowing.as:148",
+        // A workspace class / interface handle can never bind a funcdef
+        // slot. Master catches only the property spelling, and only through
+        // the `get_` widening this ticket removes; the plain-global
+        // spelling it misses entirely.
+        "Main.as:145",
+        "Main.as:146",
+        "Main.as:147",
+        "Main.as:148",
+        "Main.as:149",
+        "Main.as:150",
     ];
     assert_eq!(
         errors.len(),

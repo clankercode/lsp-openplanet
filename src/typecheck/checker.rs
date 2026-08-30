@@ -2586,8 +2586,29 @@ impl<'a> Checker<'a> {
         if let Some(arg_fd) = self.arg_value_funcdef(arg_ty) {
             return !self.func_matches_funcdef(&Self::funcdef_overload_sig(&arg_fd), fd);
         }
+        // A handle to a class or interface THIS WORKSPACE declares is
+        // provably not a callable, so it cannot bind a funcdef slot.
+        // `is_clearly_not_a_function` leaves every `Named` neutral to
+        // protect GH #47's guard for shapes the checker cannot see — but a
+        // type declared right here is not one of those. Without this,
+        // `startnew(SomeClassProperty)` goes silent: master caught it only
+        // through the `get_` widening B060 removes, and never caught the
+        // plain-global spelling at all.
+        if self.arg_is_workspace_non_callable(arg_ty) {
+            return true;
+        }
         !matches!(Self::peel_const_handle(arg_ty), TypeRepr::Null)
             && self.is_clearly_not_a_function(arg_ty)
+    }
+
+    /// True when `arg_ty` is a handle to a class or interface the workspace
+    /// declares — a value that can never be a function reference.
+    fn arg_is_workspace_non_callable(&self, arg_ty: &TypeRepr) -> bool {
+        let TypeRepr::Named(n) = Self::peel_const_handle(arg_ty) else {
+            return false;
+        };
+        let candidate = self.resolve_value_type_name(n);
+        self.scope.is_workspace_class(&candidate) || self.scope.is_workspace_interface(&candidate)
     }
 
     /// The funcdef a VALUE-typed arg denotes, if any.
@@ -2633,6 +2654,16 @@ impl<'a> Checker<'a> {
     /// declarations, which is how a global `class CoroutineFunc` could mask
     /// a legitimate `Ns::CoroutineFunc` funcdef (review, round 3).
     fn resolve_value_type_name(&self, name: &str) -> String {
+        // A QUALIFIED spelling resolves as written before any namespace
+        // fallback — `B::X` inside `namespace A` means `B::X`, and only then
+        // the relative `A::B::X`. This mirrors `resolver.rs`, and getting it
+        // backwards let a same-tail `A::B::X` funcdef stand in for the
+        // global `B::X` class and swallow a real diagnostic (review, round
+        // 5). A BARE name takes the ladder first, because there the inner
+        // scope legitimately shadows the outer one.
+        if name.contains("::") && self.scope.workspace_declares_type(name) {
+            return name.to_string();
+        }
         for depth in (1..=self.namespace_stack.len()).rev() {
             let candidate = format!("{}::{}", self.namespace_stack[..depth].join("::"), name);
             if self.scope.workspace_declares_type(&candidate) {

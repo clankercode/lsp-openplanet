@@ -123,3 +123,29 @@ void Use() {
     UintFn@ bad = UintFn(Off);
     startnew(Off);
 }
+
+// A handle to a class this workspace declares can never be a function
+// reference, so it cannot bind a funcdef slot. Master catches only the
+// PROPERTY spelling here, and only by accident — through the same `get_`
+// widening B060 removes — and misses the plain-global spelling entirely.
+// Both must error, or removing the widening silently costs a true positive.
+class Plain {
+    int v;
+}
+interface PlainIface {
+    void Go();
+}
+Plain@ plainGlobal;
+PlainIface@ plainIfaceGlobal;
+Plain@ get_PlainP() { return plainGlobal; }
+PlainIface@ get_PlainIfaceP() { return plainIfaceGlobal; }
+
+void NonCallableUse() {
+    string s = "x";
+    UI::InputText("##a", s, 0, PlainP);
+    UI::InputText("##b", s, 0, plainGlobal);
+    UI::InputText("##c", s, 0, PlainIfaceP);
+    UI::InputText("##d", s, 0, plainIfaceGlobal);
+    startnew(PlainP);
+    startnew(plainGlobal);
+}
