@@ -1,0 +1,47 @@
+---
+complexity: low
+created_at: "2026-08-30T17:27:56Z"
+depends_on: []
+estimate_hours: 1
+id: B069
+priority: medium
+status: pending
+tags: []
+title: Namespace-shortcut completion offers raw storage keys for a configured Nadeo module
+updated_at: "2026-08-30T17:27:56Z"
+---
+Found 2026-08-31 while evaluating the B056 review. Not fixed by B056; the
+review's `f7d99b7` carries a candidate fix that was held back as out of scope.
+
+## Actual Behavior
+
+`add_shortcut_completions` (`src/server/completion.rs`) iterates the user's
+configured shortcut namespaces and offers `index.namespace_enums(ns)`, which
+yields INDEX KEYS. Configure a synthetic Nadeo module such as `Game` as a
+shortcut namespace and completion offers labels like:
+
+    Game::CGameMenu::EMenuOrder
+
+That is the loader's storage key, not a spelling the game accepts. Since B056
+the resolver rejects it, so the LSP suggests a name and then flags it as
+unknown - the tool contradicting itself.
+
+## Expected Behavior
+
+Offer the SOURCE spelling (`CGameMenu::EMenuOrder`), or offer nothing for a
+namespace that is not a real source scope. `Game` is not a scope: the B052
+corpus records `Game::ZZZNoSuchEnumName` -> `Namespace 'Game' doesn't exist.`
+
+## Note on the obvious fix
+
+Gating the whole loop on `index.scope_exists(ns)` also gates FUNCTION
+shortcuts, which is wider than the enum defect. That widening is harmless -
+every namespace owning free functions is necessarily a scope, because only
+Core contributes free functions and `build_scope_index` credits every Core
+function's namespace. `every_namespace_that_owns_functions_is_a_scope`
+(`src/typedb/index.rs`) pins both halves and is red-checked, so the gate can
+be placed with that fence already in place.
+
+## Related
+
+B056 (source names), B052 (scope rules), B016 (shortcut completions).
