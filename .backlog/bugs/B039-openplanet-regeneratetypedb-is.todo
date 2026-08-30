@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-30T05:12:33Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-30T06:50:46Z"
 complexity: medium
 created_at: "2026-08-29T15:06:17Z"
 depends_on: []
+duration_minutes: 98.2181959216
 estimate_hours: 2
 id: B039
 priority: medium
 started_at: "2026-08-30T05:12:33Z"
-status: in_progress
+status: done
 tags: []
 title: openplanet.regenerateTypeDb is advertised by the server but unreachable from any client
-updated_at: "2026-08-30T05:12:33Z"
+updated_at: "2026-08-30T06:50:46Z"
 ---
 Found by a coordinator feature-gap review, 2026-08-30. Verified on master
 @ 91a296c. Pre-existing.
