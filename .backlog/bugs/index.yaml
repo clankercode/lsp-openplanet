@@ -75,3 +75,4 @@ bugs:
     - file: B074-b032-env-guard-enforcement-sca.todo
     - file: B075-scratch-dir-leaks-under-target.todo
     - file: B076-a-funcdef-handle-accepts-a-fun.todo
+    - file: B077-issue-repro-game-py-leaves-sta.todo
