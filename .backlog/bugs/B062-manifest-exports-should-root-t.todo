@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T05:30:24Z"
 depends_on: []
 estimate_hours: 1
 id: B062
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Manifest exports should root the unused analysis: exported globals reported unused'
@@ -24,3 +26,76 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Requested 2026-08-30 by session tm-tournament-station-f7. Filed as an
+ENHANCEMENT, not a bug — the reporter classified it that way themselves and
+they are right: the LSP's answer is correct within the plugin and wrong about
+intent.
+
+## Gap
+
+`info.toml` names an exports file:
+
+    exports = "TournamentStation_Export.as"
+
+The globals implementing that surface are called by OTHER plugins, never from
+within the declaring plugin, so the unused analysis reports all of them as
+unused. In the reporter's tree that is 4 warnings; for a library-shaped plugin
+it would be considerably more.
+
+## Why it is worth doing
+
+The manifest already names the file, and `src/workspace/manifest.rs::validate`
+already RESOLVES `exports` and `shared_exports` through
+`crate::workspace::deps::resolve_plugin_file` (it errors when they do not
+resolve — that is one of its three checks, see B040). So the information is
+loaded, validated, and then not used for this. The wiring is short.
+
+This is the same shape as B040 and B039: a capability that is computed and then
+consumed by nobody. Worth stating plainly because it recurs.
+
+## Work
+
+Treat globals declared in a manifest-named exports file as ROOTS of the unused
+analysis — reachable by definition, and anything they reach transitively is
+reachable too.
+
+Design questions to resolve before implementing, and record the decision in
+this ticket:
+- `exports` vs `shared_exports` — both root, or only one? Check what each
+  actually means to Openplanet before deciding; do not guess from the name.
+- Does rooting apply to the whole exports FILE, or only to declarations that
+  match a signature in it? Prefer whole-file if the manifest names the file,
+  since that is what the manifest asserts.
+- Transitive reachability: a private helper called only by an exported
+  function must stop being reported. This is the part that makes the feature
+  actually useful rather than cosmetic.
+
+## Test plan (TDD, red first)
+
+Red: a fixture plugin whose `info.toml` names an exports file containing
+`void PublicThing()`, called from nowhere in-plugin -> currently reported
+unused.
+
+Variants:
+- exported global function -> not reported
+- private helper reachable ONLY from an exported function -> not reported
+- a global reachable from nothing at all, in a plugin that HAS exports ->
+  STILL reported (the gate against rooting everything)
+- plugin with no `exports` key -> behaviour completely unchanged
+- `exports` naming a file that does not exist -> existing B040 error still
+  fires, and the analysis does not panic or silently root nothing
+- `shared_exports`, per the decision above
+- exported CLASS and its methods, not just free functions
+
+## Gate
+
+FP fixture counts must not RISE; a drop in any fixture with an `exports` key is
+the expected win. Two binaries, same machine, same time, absolute paths, both
+formats.
+
+## Related
+
+B040 (manifest validation was dead code — this uses the same already-resolved
+manifest data), B061 (the other false-unused report from the same session, but
+a genuine BUG rather than an enhancement; keep them separate).
