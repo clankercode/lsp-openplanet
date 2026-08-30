@@ -74,9 +74,24 @@
 //! The diagnostic is published either way: withholding the fix never
 //! suppresses the warning.
 //!
+//! **What the rewrite does not preserve.** The call is rebuilt from its
+//! argument expressions, so anything inside its span that is not one of
+//! them — a comment between the arguments, the line breaks of a call spread
+//! over several lines — is gone. Each ARGUMENT keeps its own text
+//! verbatim, so a multi-line lambda passed to `startnew` survives intact,
+//! and nothing outside the call's span is touched. That is a visible,
+//! undoable edit rather than a silent one, which is the bar this family is
+//! held to.
+//!
 //! Never `auto_applicable` and never `is_preferred`. This rewrites a call
 //! rather than renaming a member, and `source.fixAll.openplanet` must not
-//! restructure calls on save.
+//! restructure calls on save. There is a second, structural reason: one
+//! diagnosed call can sit inside another's argument list
+//! (`startnew(F(startnew(W).WithRunContext(a))).WithRunContext(b)`), and
+//! the two edits then overlap by construction — the outer call's span
+//! contains the inner one's. Each fix is correct on its own, which is how a
+//! client applies a quick fix, but a batcher would have to drop one of
+//! them. See `nested_diagnosed_calls_are_each_correct_on_their_own`.
 
 use tower_lsp::lsp_types::{CodeActionKind, TextEdit, WorkspaceEdit};
 
@@ -403,9 +418,9 @@ mod tests {
     use super::*;
     use crate::analysis::DocumentAnalysis;
     use crate::server::code_actions::fix::{type_diagnostics, WorkspaceFileResolver};
+    use crate::server::code_actions::fix_all::{merged_edits, ranges_overlap, DocumentFix};
     use crate::server::code_actions::test_fixtures::{apply_edits, ctx_for};
     use crate::typedb::TypeIndex;
-    use tower_lsp::lsp_types::TextEdit;
 
     /// The engine typedb, loaded once: `awaitable` only resolves as an
     /// external type with it, and without that the checker never produces a
@@ -454,25 +469,45 @@ mod tests {
         })
     }
 
-    /// `source` after applying every edit this family offers.
-    fn fixed(source: &str) -> String {
+    /// Every edit this family offers for `source`, one `DocumentFix` per
+    /// offered action.
+    fn offered_edits(source: &str) -> Vec<DocumentFix> {
         with_ctx(source, |ctx| {
-            let mut edits: Vec<TextEdit> = Vec::new();
-            for diag in findings(ctx) {
-                for descriptor in describe(&diag, ctx) {
-                    edits.extend(
-                        materialize(&diag, ctx, &descriptor.title)
-                            .changes
-                            .expect("single-file edit")
-                            .remove(ctx.uri)
-                            .expect("edits for the current document"),
-                    );
-                }
-            }
-            // Later edits first, so earlier offsets stay valid.
-            edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start));
-            apply_edits(&ctx.analysis.source, &edits)
+            findings(ctx)
+                .iter()
+                .flat_map(|diag| {
+                    describe(diag, ctx)
+                        .into_iter()
+                        .map(|descriptor| DocumentFix {
+                            title: descriptor.title.clone(),
+                            edits: materialize(diag, ctx, &descriptor.title)
+                                .changes
+                                .expect("single-file edit")
+                                .remove(ctx.uri)
+                                .expect("edits for the current document"),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
         })
+    }
+
+    /// `source` after applying every edit this family offers.
+    ///
+    /// Routed through the fix-all batcher's own selection so a pair of
+    /// edits that CONFLICT cannot be stacked on top of each other and
+    /// produce nonsense that reads like a product bug. Two diagnosed calls
+    /// nested one inside the other do exactly that — see
+    /// `nested_diagnosed_calls_are_each_correct_on_their_own`. For every
+    /// other fixture here the offers are disjoint and all of them apply.
+    fn fixed(source: &str) -> String {
+        apply_edits(source, &merged_edits(&offered_edits(source)))
+    }
+
+    /// The document after applying ONE offered fix on its own, which is how
+    /// a client applies a quick fix.
+    fn applied_alone(source: &str, index: usize) -> String {
+        apply_edits(source, &offered_edits(source)[index].edits)
     }
 
     /// A fixture whose only interesting statement is `body`.
@@ -788,6 +823,22 @@ mod tests {
         );
     }
 
+    /// The call is rebuilt from its arguments, so a comment sitting between
+    /// them is inside the replaced span and does not survive. Documented as
+    /// a decision, not left as a surprise — everything OUTSIDE the call is
+    /// untouched, including a comment on the same line.
+    #[test]
+    fn a_comment_inside_the_call_does_not_survive_but_one_outside_does() {
+        let source = "void Worker() {}\nvoid Main() {\n    startnew(/* which */ Worker).WithRunContext(ctx); // kept\n}";
+        assert_eq!(
+            fixed(source),
+            "void Worker() {}\nvoid Main() {\n    Meta::StartWithRunContext(ctx, Worker); // kept\n}"
+        );
+        assert!(DocumentAnalysis::analyze_plain(&fixed(source))
+            .parse_errors
+            .is_empty());
+    }
+
     /// Two such calls on one line: each fix edits only the call it answers.
     #[test]
     fn two_calls_on_one_line_are_edited_independently() {
@@ -844,6 +895,87 @@ mod tests {
                 fixed(&source).contains("Meta::StartWithRunContext(ctx, Worker)"),
                 "no rewrite reached `{body}`:\n{}",
                 fixed(&source)
+            );
+        }
+    }
+
+    /// The diagnosed call nested inside ANOTHER call's argument list: the
+    /// edit must replace the inner call's span and leave the outer call
+    /// alone.
+    #[test]
+    fn a_call_nested_in_another_calls_arguments_is_edited_in_place() {
+        for (body, want) in [
+            (
+                "await(startnew(Worker).WithRunContext(ctx));",
+                "await(Meta::StartWithRunContext(ctx, Worker));",
+            ),
+            (
+                "Other(startnew(Worker).WithRunContext(ctx).IsRunning() ? 1 : 2);",
+                "Other(Meta::StartWithRunContext(ctx, Worker).IsRunning() ? 1 : 2);",
+            ),
+            (
+                "array<awaitable@> xs = { startnew(Worker).WithRunContext(ctx) };",
+                "array<awaitable@> xs = { Meta::StartWithRunContext(ctx, Worker) };",
+            ),
+        ] {
+            let source = program(body);
+            assert!(
+                DocumentAnalysis::analyze_plain(&source)
+                    .parse_errors
+                    .is_empty(),
+                "test premise: `{body}` must parse"
+            );
+            assert_eq!(fixed(&source), program(want), "for `{body}`");
+            assert!(DocumentAnalysis::analyze_plain(&fixed(&source))
+                .parse_errors
+                .is_empty());
+        }
+    }
+
+    /// A `startnew` whose own argument holds a second diagnosed call. Both
+    /// findings are answered, and each fix is correct ON ITS OWN — which is
+    /// how a client applies a quick fix.
+    ///
+    /// Their edits necessarily OVERLAP, because the outer call's span
+    /// contains the inner one's, so the two can never be applied together.
+    /// That costs nothing today: a client applies one action at a time, and
+    /// this family is not `auto_applicable`, so the batcher never sees the
+    /// pair. It is asserted rather than assumed because making this family
+    /// batchable would put that conflict in front of
+    /// `select_non_overlapping`, and one of the two fixes would silently
+    /// stop being applied.
+    #[test]
+    fn nested_diagnosed_calls_are_each_correct_on_their_own() {
+        let source = program("startnew(F(startnew(Worker).WithRunContext(a))).WithRunContext(b);");
+        with_ctx(&source, |ctx| {
+            assert_eq!(findings(ctx).len(), 2, "test premise: two findings");
+        });
+        let offers = offered_edits(&source);
+        assert_eq!(offers.len(), 2, "test premise: two fixes offered");
+        assert!(
+            ranges_overlap(&offers[0].edits[0].range, &offers[1].edits[0].range),
+            "the outer call's span contains the inner one's, so these conflict"
+        );
+
+        let outcomes: Vec<String> = (0..2).map(|i| applied_alone(&source, i)).collect();
+        assert!(
+            outcomes.contains(&program(
+                "Meta::StartWithRunContext(b, F(startnew(Worker).WithRunContext(a)));"
+            )),
+            "the outer fix alone must move the receiver and leave the inner call be: {outcomes:?}"
+        );
+        assert!(
+            outcomes.contains(&program(
+                "startnew(F(Meta::StartWithRunContext(a, Worker))).WithRunContext(b);"
+            )),
+            "the inner fix alone must leave the outer call be: {outcomes:?}"
+        );
+        for outcome in &outcomes {
+            assert!(
+                DocumentAnalysis::analyze_plain(outcome)
+                    .parse_errors
+                    .is_empty(),
+                "{outcome}"
             );
         }
     }
