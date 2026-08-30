@@ -284,10 +284,8 @@ mod tests {
         root
     }
 
-    fn temp_plugins(tag: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("opl-deps-{}-{}", tag, std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
+    fn temp_plugins(tag: &str) -> crate::testing::TempDir {
+        let base = crate::testing::TempDir::new(&format!("opl-deps-{}", tag));
         base
     }
 
@@ -309,7 +307,6 @@ mod tests {
             resolved.is_some(),
             "dep id `BetterRoomManager` should resolve to the plugin named \"Better Room Manager\" (module BRM)"
         );
-        let _ = fs::remove_dir_all(&plugins);
     }
 
     /// Control: the module-name path still works (no regression), and a
@@ -330,6 +327,5 @@ mod tests {
             resolve_dependency("NoSuchPlugin", &plugins, &[]).is_none(),
             "unknown id must not resolve"
         );
-        let _ = fs::remove_dir_all(&plugins);
     }
 }

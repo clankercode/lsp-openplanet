@@ -2,6 +2,7 @@
 //! bare-launch help must advertise the repository URL and ask users to file
 //! issues for Openplanet-behavior mismatches (agent-filed GH #45).
 
+use openplanet_lsp::testing::TempDir;
 use std::process::Command;
 
 /// Trailer every help/version surface must print.
@@ -123,10 +124,7 @@ fn config_subcommand_is_recognized() {
 
 #[test]
 fn config_without_plugin_or_global_is_usage_error() {
-    let tmp =
-        std::env::temp_dir().join(format!("opl-cli-surface-no-plugin-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
+    let tmp = TempDir::new("opl-cli-surface-no-plugin");
     let out = bin().arg("config").current_dir(&tmp).output().unwrap();
     assert_eq!(out.status.code(), Some(2), "expected usage exit: {out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);

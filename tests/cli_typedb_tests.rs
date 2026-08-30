@@ -9,6 +9,7 @@
 //! temp dir, so the "no install" path is deterministic on a dev box as well as
 //! in CI.
 
+use openplanet_lsp::testing::TempDir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,19 +24,13 @@ fn fixture_typedb() -> PathBuf {
 
 /// Fresh empty temp dir, unique per `tag` (the pid alone repeats across the
 /// tests in one binary).
-fn tmp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "openplanet-lsp-typedb-{}-{}",
-        tag,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+fn tmp_dir(tag: &str) -> TempDir {
+    let dir = TempDir::new(&format!("openplanet-lsp-typedb-{}", tag));
     dir
 }
 
 /// Temp dir holding a copy of both fixture DBs — stands in for an install.
-fn tmp_install(tag: &str) -> PathBuf {
+fn tmp_install(tag: &str) -> TempDir {
     let dir = tmp_dir(tag);
     // `Openplanet.h` is part of an install (B046): it is the only source for
     // the module-level enums the dump cannot express, so a copy that omits it
@@ -338,7 +333,7 @@ fn typedb_unknown_option_is_a_usage_error() {
 // === check-output / report visibility (task 3) ===
 
 /// Minimal plugin so `check` has a workspace root to resolve.
-fn tmp_plugin(tag: &str) -> PathBuf {
+fn tmp_plugin(tag: &str) -> TempDir {
     let root = tmp_dir(&format!("plugin-{tag}"));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
@@ -469,7 +464,7 @@ fn check_args_no_typedb(root: &Path, extra: &[&str]) -> Vec<String> {
 
 /// Minimal synthetic DB pair, so a diff case is a two-line edit rather than
 /// a doctored 2 MB dump.
-fn tmp_synthetic_db(tag: &str, core: &str) -> PathBuf {
+fn tmp_synthetic_db(tag: &str, core: &str) -> TempDir {
     let dir = tmp_dir(&format!("db-{tag}"));
     fs::write(dir.join("OpenplanetCore.json"), core).unwrap();
     fs::write(
@@ -773,7 +768,7 @@ fn typedb_refresh_rejects_option_as_separated_into_value_without_side_effects() 
 #[test]
 fn typedb_refresh_dry_run_reports_and_writes_nothing() {
     let install = tmp_install("refresh-dry-src");
-    let into = tmp_dir("refresh-dry-into").join("nested-out");
+    let into = tmp_dir("refresh-dry-into").into_child("nested-out");
     let r = run(
         bin_without_install("refresh-dry"),
         &[
@@ -858,7 +853,7 @@ fn typedb_refresh_rejects_each_destination_symlink_without_touching_its_target()
 #[test]
 fn typedb_refresh_yes_copies_then_is_idempotent() {
     let install = tmp_install("refresh-yes-src");
-    let into = tmp_dir("refresh-yes-into").join("out");
+    let into = tmp_dir("refresh-yes-into").into_child("out");
 
     let r = run(
         bin_without_install("refresh-yes-1"),

@@ -278,14 +278,8 @@ mod tests {
         }
     }
 
-    fn temp_tree(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "openplanet-lsp-ws-project-{}-{}",
-            name,
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
+    fn temp_tree(name: &str) -> crate::testing::TempDir {
+        let base = crate::testing::TempDir::new(&format!("openplanet-lsp-ws-project-{}", name));
         base
     }
 

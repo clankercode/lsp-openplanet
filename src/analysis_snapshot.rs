@@ -691,8 +691,7 @@ mod tests {
 
     #[test]
     fn uri_map_covers_files_with_uris() {
-        let dir = std::env::temp_dir().join("ols-snap-uri-map-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new("ols-snap-uri-map-test");
         let path = dir.join("c.as");
         std::fs::write(&path, "int x;").unwrap();
         let snap =
@@ -706,14 +705,10 @@ mod tests {
 
     #[test]
     fn usage_only_uri_includes_unreadable_omitted_paths() {
-        let dir = std::env::temp_dir().join(format!(
-            "ols-snap-usage-only-unreadable-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new("ols-snap-usage-only-unreadable");
         let unreadable = dir.join("raced-away.as");
         let load = crate::workspace::load::PluginWorkspaceLoad {
-            root: dir.clone(),
+            root: dir.to_path_buf(),
             files: Vec::new(),
             missing_required_dependencies: Vec::new(),
             dependency_closure_complete: false,
@@ -728,14 +723,12 @@ mod tests {
         let uri = Url::from_file_path(&unreadable).unwrap();
         assert!(snapshot.is_usage_only_uri(&uri));
         assert!(!snapshot.is_usage_only_uri(&Url::from_file_path(dir.join("new.as")).unwrap()));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
     fn usage_only_uri_accepts_a_symlink_alias() {
-        let dir =
-            std::env::temp_dir().join(format!("ols-snap-usage-only-alias-{}", std::process::id()));
+        let dir = crate::testing::TempDir::new("ols-snap-usage-only-alias");
         let real_dir = dir.join("real");
         std::fs::create_dir_all(&real_dir).unwrap();
         let real_path = real_dir.join("generated.as");
@@ -760,7 +753,6 @@ mod tests {
         let snapshot = AnalysisSnapshot::from_load(&load, &LspConfig::default());
         let alias_uri = Url::from_file_path(alias_dir.join("generated.as")).unwrap();
         assert!(snapshot.is_usage_only_uri(&alias_uri));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
@@ -769,7 +761,7 @@ mod tests {
         // dips++-all layout: snapshot paths come from the canonical
         // plugin root, but the client opens documents through a symlink.
         // analysis_of/file_id_of must fall back to canonical-path match.
-        let dir = std::env::temp_dir().join(format!("ols-snap-symlink-{}", std::process::id()));
+        let dir = crate::testing::TempDir::new("ols-snap-symlink");
         let real_dir = dir.join("real");
         std::fs::create_dir_all(&real_dir).unwrap();
         let real_path = real_dir.join("c.as");
@@ -787,15 +779,13 @@ mod tests {
         let symbols = snap.symbols();
         let scope = crate::typecheck::global_scope::GlobalScope::new(symbols, None);
         assert!(snap.checked_file(&alias_uri, &scope).is_some());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn checked_file_records_types_for_queries() {
         // GH #42: the checked view exposes span→type queries over the
         // snapshot's parse.
-        let dir = std::env::temp_dir().join("ols-snap-checked-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new("ols-snap-checked-test");
         let path = dir.join("d.as");
         let src = "void main() { int x = 1; int y = x; }";
         std::fs::write(&path, src).unwrap();
@@ -813,10 +803,8 @@ mod tests {
     }
     /// Helper: a throwaway plugin root on disk. `script` is appended to
     /// `info.toml` verbatim (empty = no `[script]` section).
-    fn temp_plugin(name: &str, script: &str, files: &[(&str, &str)]) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("ols-snap-closure-{}-{}", name, std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+    fn temp_plugin(name: &str, script: &str, files: &[(&str, &str)]) -> crate::testing::TempDir {
+        let root = crate::testing::TempDir::new(&format!("ols-snap-closure-{}", name));
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("info.toml"),
@@ -848,7 +836,6 @@ mod tests {
             snap.symbols().dependency_closure_complete(),
             "a dependency-free disk load is the complete closure"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// B019 INVERTED this. It used to assert that an unresolved optional
@@ -878,7 +865,6 @@ mod tests {
             snap.symbols().dependency_closure_complete(),
             "an uninstalled optional dependency must NOT cost the rule its authority"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// ...but the equivalence that justifies it collapses if something
@@ -906,7 +892,6 @@ mod tests {
         // Control: without the forced define the same load IS complete.
         let clean = AnalysisSnapshot::from_load(&load, &LspConfig::default());
         assert!(clean.symbols().dependency_closure_complete());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A missing REQUIRED dependency still breaks the closure: the game would
@@ -929,7 +914,6 @@ mod tests {
             !snap.symbols().dependency_closure_complete(),
             "an unresolved REQUIRED dependency must still break the closure"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The own-module view (and the un-hidden copy built for a strict
@@ -958,7 +942,6 @@ mod tests {
                 "{rel}: own-module view lost the closure flag"
             );
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// In-memory snapshots (the test surface, and the server's

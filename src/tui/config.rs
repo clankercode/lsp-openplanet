@@ -493,13 +493,13 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    fn temp_app(name: &str) -> ConfigApp {
-        let dir =
-            std::env::temp_dir().join(format!("opl-config-tui-{}-{}", std::process::id(), name));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    /// The guard comes back with the app: `ConfigApp` writes to the config
+    /// file, so the directory has to outlive it.
+    fn temp_app(name: &str) -> (crate::testing::TempDir, ConfigApp) {
+        let dir = crate::testing::TempDir::new(&format!("opl-config-tui-{name}"));
         let path = dir.join("config.toml");
-        ConfigApp::new(UserConfigFile::load(&path).unwrap())
+        let app = ConfigApp::new(UserConfigFile::load(&path).unwrap());
+        (dir, app)
     }
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -520,9 +520,7 @@ mod tests {
 
     #[test]
     fn header_labels_workspace_and_global_paths() {
-        let dir = std::env::temp_dir().join(format!("opl-config-tui-{}-scope", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new("opl-config-tui-scope");
 
         let ws = dir.join(".openplanet-lsp.toml");
         let mut app = ConfigApp::new(UserConfigFile::load(&ws).unwrap());
@@ -552,10 +550,7 @@ mod tests {
 
     #[test]
     fn header_custom_path_has_no_scope_label() {
-        let dir =
-            std::env::temp_dir().join(format!("opl-config-tui-{}-custom", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new("opl-config-tui-custom");
         let path = dir.join("alt.toml");
         let mut app = ConfigApp::new(UserConfigFile::load(&path).unwrap());
         let out = frame_size(&mut app, 80, 24);
@@ -571,7 +566,7 @@ mod tests {
 
     #[test]
     fn render_lists_every_persisted_setting() {
-        let mut app = temp_app("render");
+        let (_dir, mut app) = temp_app("render");
         // 17 settings + chrome needs more than 24 rows to show the full catalog.
         let out = frame_size(&mut app, 80, 30);
         let _ = std::fs::write("/tmp/opl-config-tui-frame.txt", &out);
@@ -590,7 +585,7 @@ mod tests {
 
     #[test]
     fn scrolling_to_end_reveals_clipped_settings() {
-        let mut app = temp_app("scroll-end");
+        let (_dir, mut app) = temp_app("scroll-end");
         handle_key(&mut app, press(KeyCode::Char('G')));
         let out = frame_size(&mut app, 80, 24);
         assert!(
@@ -605,7 +600,7 @@ mod tests {
 
     #[test]
     fn space_toggles_bool_and_writes_file() {
-        let mut app = temp_app("toggle");
+        let (_dir, mut app) = temp_app("toggle");
         // Navigate by key: the catalog's order changes as settings land.
         while app.selected_spec().key != "warnings_as_errors" {
             handle_key(&mut app, press(KeyCode::Char('j')));
@@ -627,7 +622,7 @@ mod tests {
 
     #[test]
     fn space_toggles_bool_default_true_variant() {
-        let mut app = temp_app("toggle-true");
+        let (_dir, mut app) = temp_app("toggle-true");
         while app.selected_spec().key != "honor_gitignore" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -641,7 +636,7 @@ mod tests {
 
     #[test]
     fn cycle_enum_writes_each_choice() {
-        let mut app = temp_app("cycle");
+        let (_dir, mut app) = temp_app("cycle");
         assert_eq!(app.selected_spec().key, "default_mode");
         handle_key(&mut app, press(KeyCode::Right));
         let written = std::fs::read_to_string(app.path()).unwrap();
@@ -659,7 +654,7 @@ mod tests {
 
     #[test]
     fn edit_path_and_string_variants_commit() {
-        let mut app = temp_app("path-string");
+        let (_dir, mut app) = temp_app("path-string");
         while app.selected_spec().key != "openplanet_dir" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -691,7 +686,7 @@ mod tests {
 
     #[test]
     fn edit_string_list_commits_on_enter() {
-        let mut app = temp_app("list-edit");
+        let (_dir, mut app) = temp_app("list-edit");
         while app.selected_spec().key != "defines" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -710,7 +705,7 @@ mod tests {
 
     #[test]
     fn edit_nested_list_and_usize_variants() {
-        let mut app = temp_app("nested-usize");
+        let (_dir, mut app) = temp_app("nested-usize");
         while app.selected_spec().key != "define_groups" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -740,7 +735,7 @@ mod tests {
 
     #[test]
     fn empty_source_paths_edit_unsets_instead_of_writing_empty_array() {
-        let mut app = temp_app("empty-source-paths");
+        let (_dir, mut app) = temp_app("empty-source-paths");
         while app.selected_spec().key != "source_paths" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -763,7 +758,7 @@ mod tests {
 
     #[test]
     fn empty_define_combinations_persists_empty_array() {
-        let mut app = temp_app("empty-combos");
+        let (_dir, mut app) = temp_app("empty-combos");
         while app.selected_spec().key != "define_combinations" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -786,7 +781,7 @@ mod tests {
 
     #[test]
     fn empty_shortcut_namespaces_persists_empty_array() {
-        let mut app = temp_app("empty-shortcuts");
+        let (_dir, mut app) = temp_app("empty-shortcuts");
         while app.selected_spec().key != "shortcut_namespaces" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -807,7 +802,7 @@ mod tests {
 
     #[test]
     fn invalid_usize_does_not_write() {
-        let mut app = temp_app("bad-usize");
+        let (_dir, mut app) = temp_app("bad-usize");
         while app.selected_spec().key != "define_matrix_max_combinations" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -834,7 +829,7 @@ mod tests {
 
     #[test]
     fn empty_list_edit_unsets_instead_of_writing_empty_array() {
-        let mut app = temp_app("empty-list");
+        let (_dir, mut app) = temp_app("empty-list");
         while app.selected_spec().key != "defines" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -859,7 +854,7 @@ mod tests {
 
     #[test]
     fn invalid_nested_list_does_not_write() {
-        let mut app = temp_app("bad-nested");
+        let (_dir, mut app) = temp_app("bad-nested");
         while app.selected_spec().key != "define_groups" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -884,7 +879,7 @@ mod tests {
 
     #[test]
     fn d_unsets_key() {
-        let mut app = temp_app("unset");
+        let (_dir, mut app) = temp_app("unset");
         handle_key(&mut app, press(KeyCode::Right));
         assert!(std::fs::read_to_string(app.path())
             .unwrap()
@@ -902,7 +897,7 @@ mod tests {
     /// clue whether the field wanted commas, spaces or TOML array syntax.
     #[test]
     fn string_list_row_shows_separator_hint_and_example() {
-        let mut app = temp_app("list-hint");
+        let (_dir, mut app) = temp_app("list-hint");
         while app.selected_spec().key != "defines" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -917,7 +912,7 @@ mod tests {
     /// The hint stays visible while the value is being typed.
     #[test]
     fn string_list_hint_visible_while_editing() {
-        let mut app = temp_app("list-hint-edit");
+        let (_dir, mut app) = temp_app("list-hint-edit");
         while app.selected_spec().key != "defines" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -936,7 +931,7 @@ mod tests {
     /// Nested lists get their own grouping hint (they are NOT plain commas).
     #[test]
     fn nested_list_row_shows_group_hint() {
-        let mut app = temp_app("nested-hint");
+        let (_dir, mut app) = temp_app("nested-hint");
         while app.selected_spec().key != "define_groups" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -951,7 +946,7 @@ mod tests {
     /// enum are otherwise invisible until you cycle through them.
     #[test]
     fn every_setting_row_shows_a_value_hint() {
-        let mut app = temp_app("hint-every-row");
+        let (_dir, mut app) = temp_app("hint-every-row");
         for spec in SETTINGS {
             while app.selected_spec().key != spec.key {
                 handle_key(&mut app, press(KeyCode::Char('j')));
@@ -973,7 +968,7 @@ mod tests {
 
     #[test]
     fn enum_and_number_rows_name_their_accepted_values() {
-        let mut app = temp_app("hint-enum-number");
+        let (_dir, mut app) = temp_app("hint-enum-number");
         assert_eq!(app.selected_spec().key, "default_mode");
         let out = frame_size(&mut app, 80, 30);
         assert!(
@@ -1042,7 +1037,7 @@ mod tests {
 
     #[test]
     fn narrow_terminal_keeps_the_settings_list_on_screen() {
-        let mut app = temp_app("narrow");
+        let (_dir, mut app) = temp_app("narrow");
         while app.selected_spec().key != "game_target" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -1057,7 +1052,7 @@ mod tests {
     /// line lists the four levels.
     #[test]
     fn signature_mode_row_cycles_and_persists() {
-        let mut app = temp_app("signature-mode");
+        let (_dir, mut app) = temp_app("signature-mode");
         while app.selected_spec().key != "signature_mode" {
             handle_key(&mut app, press(KeyCode::Char('j')));
         }
@@ -1095,7 +1090,7 @@ mod tests {
 
     #[test]
     fn q_quits() {
-        let mut app = temp_app("quit");
+        let (_dir, mut app) = temp_app("quit");
         handle_key(&mut app, press(KeyCode::Char('q')));
         assert!(app.should_quit);
     }

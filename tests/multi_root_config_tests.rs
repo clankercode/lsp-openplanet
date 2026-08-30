@@ -4,6 +4,7 @@
 //!
 //! Harness mirrors `multi_root_tests.rs` (real `LspService` + `Backend`).
 
+use openplanet_lsp::testing::TempDir;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,11 +13,8 @@ use tower_lsp::{LanguageServer, LspService};
 
 use openplanet_lsp::server::Backend;
 
-fn temp_parent(name: &str) -> PathBuf {
-    let base =
-        std::env::temp_dir().join(format!("openplanet-lsp-p3-{}-{}", name, std::process::id()));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).unwrap();
+fn temp_parent(name: &str) -> TempDir {
+    let base = TempDir::new(&format!("openplanet-lsp-p3-{}", name));
     base
 }
 
@@ -88,7 +86,7 @@ async fn per_root_config_define_applies_to_own_workspace_only() {
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend
-        .initialize(init_params(&parent, Some(vec![parent.clone()])))
+        .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
         .await
         .unwrap();
 
@@ -127,7 +125,7 @@ async fn parent_config_base_layer_per_root_overrides() {
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend
-        .initialize(init_params(&parent, Some(vec![parent.clone()])))
+        .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
         .await
         .unwrap();
 
@@ -178,7 +176,7 @@ async fn declared_sibling_dependency_resolves_and_isolation_holds() {
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend
-        .initialize(init_params(&parent, Some(vec![parent.clone()])))
+        .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
         .await
         .unwrap();
 
@@ -248,7 +246,7 @@ async fn single_root_config_unchanged() {
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend
-        .initialize(init_params(&parent, Some(vec![parent.clone()])))
+        .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
         .await
         .unwrap();
 

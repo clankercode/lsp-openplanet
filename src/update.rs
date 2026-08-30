@@ -1760,12 +1760,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
 
-        let dir = std::env::temp_dir().join(format!(
-            "oplsp-b032-{}-{}",
-            std::process::id(),
-            now_epoch_secs()
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = crate::testing::TempDir::new(&format!("oplsp-b032-{}", now_epoch_secs()));
         let bin_dir = dir.join("node_modules/openplanet-lsp-linux-x64/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let exe = bin_dir.join("openplanet-lsp");
@@ -1994,12 +1989,7 @@ mod tests {
     fn detect_local_pm_from_lockfile() {
         let _guard = env_guard();
         std::env::remove_var("OPENPLANET_LSP_PACKAGE_MANAGER");
-        let dir = std::env::temp_dir().join(format!(
-            "oplsp-pm-{}-{}",
-            std::process::id(),
-            now_epoch_secs()
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = crate::testing::TempDir::new(&format!("oplsp-pm-{}", now_epoch_secs()));
         let bin_dir = dir.join("node_modules/openplanet-lsp-linux-x64/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let exe = bin_dir.join("openplanet-lsp");
@@ -2010,7 +2000,7 @@ mod tests {
             InstallMethod::NodeLocal {
                 pm: JsPackageManager::Pnpm,
                 package_root,
-            } => assert_eq!(package_root, dir),
+            } => assert_eq!(package_root, dir.path()),
             other => panic!("expected pnpm-local, got {other:?}"),
         }
         fs::remove_file(dir.join("pnpm-lock.yaml")).unwrap();
@@ -2033,7 +2023,6 @@ mod tests {
             } => {}
             other => panic!("expected bun-local, got {other:?}"),
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2055,13 +2044,10 @@ mod tests {
     #[test]
     fn status_roundtrip_in_temp_config_dir() {
         let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-update-test-{}-{}",
-            std::process::id(),
+        let dir = crate::testing::TempDir::new(&format!(
+            "openplanet-lsp-update-test-{}",
             now_epoch_secs()
         ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
         std::env::set_var("OPENPLANET_LSP_CONFIG_DIR", &dir);
 
         let status = UpdateStatus {
@@ -2084,7 +2070,6 @@ mod tests {
         assert_eq!(loaded, status);
 
         std::env::remove_var("OPENPLANET_LSP_CONFIG_DIR");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2316,12 +2301,7 @@ mod tests {
     #[test]
     fn standalone_apply_from_local_archive_replaces_binary() {
         let _guard = env_guard();
-        let dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-standalone-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new("openplanet-lsp-standalone-test");
 
         let old_exe = dir.join("openplanet-lsp");
         fs::write(&old_exe, b"OLD_BINARY_CONTENT").unwrap();
@@ -2367,8 +2347,6 @@ mod tests {
 
         let got = fs::read(&old_exe).unwrap();
         assert_eq!(got, b"NEW_BINARY_CONTENT_V999");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

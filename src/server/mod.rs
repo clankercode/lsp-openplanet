@@ -2323,14 +2323,8 @@ mod tests {
         ));
     }
 
-    fn temp_tree(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "openplanet-lsp-server-roots-{}-{}",
-            name,
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
+    fn temp_tree(name: &str) -> crate::testing::TempDir {
+        let base = crate::testing::TempDir::new(&format!("openplanet-lsp-server-roots-{}", name));
         base
     }
 
@@ -2504,7 +2498,11 @@ mod tests {
     }
 
     /// Write a plugin tree and start a server on it. Returns the root.
-    fn strict_export_plugin(name: &str, manifest_script: &str, files: &[(&str, &str)]) -> PathBuf {
+    fn strict_export_plugin(
+        name: &str,
+        manifest_script: &str,
+        files: &[(&str, &str)],
+    ) -> crate::testing::TempDir {
         let root = temp_tree(name);
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
@@ -2538,7 +2536,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
             .await
             .expect("initialize");
         let uri = open_document(backend, &root.join("src/Main.as"), main).await;
@@ -2558,7 +2556,6 @@ mod tests {
             references_at(backend, position).await.is_empty(),
             "an unresolved strict call has no references"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2588,7 +2585,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
             .await
             .expect("initialize");
         let export_path = root.join("src/Exports_Bodies.as");
@@ -2622,7 +2619,6 @@ mod tests {
         let refs = references_at(backend, position).await;
         assert_eq!(refs.len(), 1, "the declaration itself, got {refs:?}");
         assert_eq!(refs[0].uri, export_uri);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2641,7 +2637,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
             .await
             .expect("initialize");
         let main_uri = open_document(backend, &root.join("src/Main.as"), main).await;
@@ -2683,7 +2679,6 @@ mod tests {
             2,
             "the own declaration and its own call site"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2709,7 +2704,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
             .await
             .expect("initialize");
         let a_uri = open_document(backend, &root.join("src/Exports_A.as"), a).await;
@@ -2745,7 +2740,6 @@ mod tests {
             vec![a_uri.to_string(), b_uri.to_string()],
             "the declaration and the sibling export's call"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2767,7 +2761,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
             .await
             .expect("initialize");
         let main_uri = open_document(backend, &root.join("src/Main.as"), main).await;
@@ -2781,7 +2775,6 @@ mod tests {
             refs.iter().all(|r| r.uri == main_uri),
             "no reference may name the export file, got {refs:?}"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2806,7 +2799,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
             .await
             .expect("initialize");
         let export_uri = open_document(backend, &root.join("src/Exports_Bodies.as"), export).await;
@@ -2831,7 +2824,6 @@ mod tests {
             3,
             "the declaration and both call sites"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2854,7 +2846,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
             .await
             .expect("initialize");
         let export_uri = open_document(backend, &root.join("src/Exports_Bodies.as"), export).await;
@@ -2877,7 +2869,6 @@ mod tests {
             without.is_empty(),
             "the declaration is the only occurrence, got {without:?}"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2895,7 +2886,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
             .await
             .expect("initialize");
         let uri = open_document(backend, &root.join("src/Main.as"), main).await;
@@ -2918,7 +2909,6 @@ mod tests {
             2,
             "the shared declaration plus its call"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -2934,7 +2924,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&parent, Some(vec![parent.clone()])))
+            .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
             .await
             .expect("initialize should succeed");
 
@@ -2960,7 +2950,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&parent, Some(vec![parent.clone()])))
+            .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
             .await
             .expect("initialize should succeed");
 
@@ -2988,7 +2978,7 @@ mod tests {
         fs::create_dir_all(&manual).unwrap();
         write_info_toml(&manual);
 
-        let mut params = init_params(&parent, Some(vec![parent.clone()]));
+        let mut params = init_params(&parent, Some(vec![parent.to_path_buf()]));
         params.initialization_options = Some(serde_json::json!({
             "plugin_roots": [manual.to_str().unwrap()]
         }));
@@ -3016,7 +3006,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&folder, Some(vec![folder.clone()])))
+            .initialize(init_params(&folder, Some(vec![folder.to_path_buf()])))
             .await
             .expect("initialize should succeed");
 
@@ -3061,7 +3051,7 @@ mod tests {
         let (service, _socket) = LspService::new(Backend::new);
         let backend = service.inner();
         backend
-            .initialize(init_params(&dir, Some(vec![dir.clone()])))
+            .initialize(init_params(&dir, Some(vec![dir.to_path_buf()])))
             .await
             .expect("initialize");
         let a_uri = Url::from_file_path(&a_path).unwrap();
@@ -3117,7 +3107,6 @@ mod tests {
             !symbols.lookup("ts_log").is_empty(),
             "post-save snapshot missing ts_log"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3141,7 +3130,11 @@ mod tests {
         fs::write(&omitted_path, "void GenCaller() { UsedOnlyByOmitted(); }\n").unwrap();
 
         let (mut service, mut socket) = LspService::new(Backend::new);
-        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        initialize_service(
+            &mut service,
+            init_params(&root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
         let backend = service.inner();
         let omitted_uri = Url::from_file_path(&omitted_path).unwrap();
 
@@ -3280,8 +3273,6 @@ mod tests {
             !diagnostics.diagnostics.is_empty(),
             "the legacy one-file fallback stays active for a genuine untitled buffer"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// B018's motivating case, as its own named test: a gitignored file whose
@@ -3322,7 +3313,11 @@ mod tests {
         fs::write(&omitted_path, uses_siblings).unwrap();
 
         let (mut service, mut socket) = LspService::new(Backend::new);
-        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        initialize_service(
+            &mut service,
+            init_params(&root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
         let backend = service.inner();
         let omitted_uri = Url::from_file_path(&omitted_path).unwrap();
 
@@ -3372,8 +3367,6 @@ mod tests {
             "control: a checked file must still report an unknown name; got {:?}",
             diagnostics.diagnostics
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     // ---------------------------------------------------------------
@@ -3387,7 +3380,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     /// A plugin root with the given manifest and one source file.
-    fn manifest_tree(name: &str, info_toml: &str) -> PathBuf {
+    fn manifest_tree(name: &str, info_toml: &str) -> crate::testing::TempDir {
         let root = temp_tree(name);
         fs::write(root.join("info.toml"), info_toml).unwrap();
         fs::create_dir_all(root.join("src")).unwrap();
@@ -3501,7 +3494,6 @@ mod tests {
         // The key is absent, so the anchor is the containing table's header.
         assert_eq!(selected(NO_VERSION, version.range), "meta");
         assert_ranges_within(NO_VERSION, &published);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3514,7 +3506,6 @@ mod tests {
         assert_eq!(published[0].message, "Export file not found: Gone.as");
         assert_eq!(published[0].severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(selected(source, published[0].range), "\"Gone.as\"");
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3530,7 +3521,6 @@ mod tests {
         );
         assert_eq!(published[0].severity, Some(DiagnosticSeverity::ERROR));
         assert_eq!(selected(source, published[0].range), "\"Gone.as\"");
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// An export that IS on disk — including through the loader's `src/`
@@ -3547,7 +3537,6 @@ mod tests {
 
         let published = manifest_diagnostics_on_open(&root, source).await;
         assert_eq!(published, Vec::<Diagnostic>::new(), "{published:?}");
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3564,7 +3553,6 @@ mod tests {
             "a deprecated field does not stop the plugin loading"
         );
         assert_eq!(selected(source, published[0].range), "perms = \"full\"");
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Every rule fires in one publish — the first problem must not shadow
@@ -3591,7 +3579,6 @@ mod tests {
         assert_eq!(selected(source, published[1].range), "\"A.as\"");
         assert_eq!(selected(source, published[2].range), "\"B.as\"");
         assert_ranges_within(source, &published);
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// A stale published set is worse than none: once the manifest is valid
@@ -3601,7 +3588,11 @@ mod tests {
         let root = manifest_tree("manifest-stale-clear", NO_VERSION);
         let uri = manifest_uri_of(&root);
         let (mut service, mut socket) = LspService::new(Backend::new);
-        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        initialize_service(
+            &mut service,
+            init_params(&root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
         let backend = service.inner();
 
         let broken = capture_diagnostics_for(
@@ -3625,7 +3616,6 @@ mod tests {
             Vec::<Diagnostic>::new(),
             "a fixed manifest must clear its squiggles"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Closing a manifest discards its buffer overlay. The client must then
@@ -3643,7 +3633,11 @@ mod tests {
             let root = manifest_tree(&format!("manifest-close-{label}"), disk);
             let uri = manifest_uri_of(&root);
             let (mut service, mut socket) = LspService::new(Backend::new);
-            initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+            initialize_service(
+                &mut service,
+                init_params(&root, Some(vec![root.to_path_buf()])),
+            )
+            .await;
             let backend = service.inner();
 
             let buffered = capture_diagnostics_for(
@@ -3677,7 +3671,6 @@ mod tests {
                 expects_error,
                 "{label}: closing must restore the on-disk manifest diagnostics"
             );
-            let _ = fs::remove_dir_all(&root);
         }
     }
 
@@ -3694,7 +3687,11 @@ mod tests {
         fs::write(&export, "void Exported() {}\n").unwrap();
         let export_uri = Url::from_file_path(&export).unwrap();
         let (mut service, mut socket) = LspService::new(Backend::new);
-        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        initialize_service(
+            &mut service,
+            init_params(&root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
         let backend = service.inner();
 
         let clean = capture_diagnostics_for(
@@ -3741,7 +3738,6 @@ mod tests {
             Vec::<Diagnostic>::new(),
             "a watched creation must clear the export diagnostic"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// A manifest opened through a symlink URI is the document the editor can
@@ -3762,7 +3758,11 @@ mod tests {
         let alias_uri = Url::from_file_path(&alias_path).unwrap();
         let manifest_uri = manifest_uri_of(&root);
         let (mut service, mut socket) = LspService::new(Backend::new);
-        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        initialize_service(
+            &mut service,
+            init_params(&root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
         let backend = service.inner();
 
         let buffered = capture_diagnostics_for(
@@ -3813,8 +3813,6 @@ mod tests {
             "manifest watch must keep the visible alias URI while resolving exports from the real root: {:?}",
             refreshed.diagnostics
         );
-        let _ = fs::remove_dir_all(&aliases);
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// A manifest the TOML parser rejects is the loudest failure there is —
@@ -3832,7 +3830,6 @@ mod tests {
             "{published:?}"
         );
         assert_ranges_within(source, &published);
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Generalise the parse-error case over the ways TOML can be broken:
@@ -3860,7 +3857,6 @@ mod tests {
                 "{label}: malformed or invalid TOML must publish a parse or validation diagnostic"
             );
             assert_ranges_within(source, &published);
-            let _ = fs::remove_dir_all(&root);
         }
     }
 
@@ -3875,7 +3871,11 @@ mod tests {
         let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
 
         let (mut service, mut socket) = LspService::new(Backend::new);
-        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        initialize_service(
+            &mut service,
+            init_params(&root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
         let backend = service.inner();
         let published = capture_diagnostics_for(
             &mut socket,
@@ -3898,7 +3898,6 @@ mod tests {
             "manifest diagnostics must follow a source edit; got {:?}",
             published.diagnostics
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Manifest problems belong to info.toml and nowhere else: attaching
@@ -3910,7 +3909,11 @@ mod tests {
         let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
 
         let (mut service, mut socket) = LspService::new(Backend::new);
-        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        initialize_service(
+            &mut service,
+            init_params(&root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
         let backend = service.inner();
         let published = capture_diagnostics_for(
             &mut socket,
@@ -3930,7 +3933,6 @@ mod tests {
             Vec::<Diagnostic>::new(),
             "the source file carries no manifest findings"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// No info.toml at all is not an error — plenty of folders are opened
@@ -3943,7 +3945,11 @@ mod tests {
         let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
 
         let (mut service, mut socket) = LspService::new(Backend::new);
-        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        initialize_service(
+            &mut service,
+            init_params(&root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
         let backend = service.inner();
         let published = capture_diagnostics_for(
             &mut socket,
@@ -3959,7 +3965,6 @@ mod tests {
         )
         .await;
         assert_eq!(published.diagnostics, Vec::<Diagnostic>::new());
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Multi-root: each plugin's problems go to ITS OWN info.toml URI.
@@ -3980,7 +3985,7 @@ mod tests {
         let (mut service, mut socket) = LspService::new(Backend::new);
         initialize_service(
             &mut service,
-            init_params(&parent, Some(vec![parent.clone()])),
+            init_params(&parent, Some(vec![parent.to_path_buf()])),
         )
         .await;
         let backend = service.inner();
@@ -4007,7 +4012,6 @@ mod tests {
                 .collect();
             assert_eq!(messages, vec![want], "{}", root.display());
         }
-        let _ = fs::remove_dir_all(&parent);
     }
 
     /// A dependency that lives inside a `.op` archive has a manifest too,
@@ -4068,7 +4072,6 @@ mod tests {
             "published against {}",
             published.uri
         );
-        let _ = fs::remove_dir_all(&parent);
     }
 
     /// tower-lsp suppresses every client message until the `initialize`
@@ -4081,7 +4084,11 @@ mod tests {
         let root = manifest_tree("manifest-on-initialized", NO_VERSION);
         let uri = manifest_uri_of(&root);
         let (mut service, mut socket) = LspService::new(Backend::new);
-        initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
+        initialize_service(
+            &mut service,
+            init_params(&root, Some(vec![root.to_path_buf()])),
+        )
+        .await;
         let backend = service.inner();
 
         let published =
@@ -4096,6 +4103,5 @@ mod tests {
              publish; got {:?}",
             published.diagnostics
         );
-        let _ = fs::remove_dir_all(&root);
     }
 }

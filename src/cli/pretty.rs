@@ -305,13 +305,8 @@ mod tests {
     use crate::cli::{format_check_report_with, CheckFormat, CheckReport};
     use std::fs;
 
-    fn temp_plugin(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "openplanet-lsp-pretty-{}-{}",
-            name,
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
+    fn temp_plugin(name: &str) -> crate::testing::TempDir {
+        let root = crate::testing::TempDir::new(&format!("openplanet-lsp-pretty-{}", name));
         fs::create_dir_all(root.join("src")).unwrap();
         root
     }
@@ -348,7 +343,7 @@ mod tests {
             let path = root.join("src/Main.as");
             fs::write(&path, format!("{line}\n")).unwrap();
             let report = CheckReport {
-                root: root.clone(),
+                root: root.to_path_buf(),
                 diagnostics: vec![test_diag(
                     &path,
                     0,
@@ -372,7 +367,6 @@ mod tests {
                 caret_line.contains("│  ^^^ demo"),
                 "{name}: caret must begin after one displayed Unicode character: {caret_line:?}"
             );
-            let _ = fs::remove_dir_all(root);
         }
     }
 
@@ -383,7 +377,7 @@ mod tests {
         fs::write(&path, "void Main() {\n  Missing@ x;\n}\n").unwrap();
 
         let report = CheckReport {
-            root: root.clone(),
+            root: root.to_path_buf(),
             diagnostics: vec![test_diag(
                 &path,
                 1,
@@ -407,8 +401,6 @@ mod tests {
             "plain must not use unicode gutter: {out:?}"
         );
         assert!(!out.contains('^'), "plain must not draw carets: {out:?}");
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -419,7 +411,7 @@ mod tests {
         fs::write(&path, "void Main() {\n  Missing@ x;\n}\n").unwrap();
 
         let report = CheckReport {
-            root: root.clone(),
+            root: root.to_path_buf(),
             diagnostics: vec![test_diag(
                 &path,
                 1,
@@ -461,8 +453,6 @@ mod tests {
             !out.contains('╭') && !out.contains('╰'),
             "CLI pretty must not box-frame: {out:?}"
         );
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -471,7 +461,7 @@ mod tests {
         let path = root.join("src/Main.as");
         fs::write(&path, "int x = 1;\n").unwrap();
         let report = CheckReport {
-            root: root.clone(),
+            root: root.to_path_buf(),
             diagnostics: vec![test_diag(
                 &path,
                 0,
@@ -500,15 +490,13 @@ mod tests {
             !prettyish.contains('╭') && !prettyish.contains('╰'),
             "no CLI box frame even with color: {prettyish:?}"
         );
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn pretty_clean_summary() {
         let root = temp_plugin("clean");
         let report = CheckReport {
-            root: root.clone(),
+            root: root.to_path_buf(),
             diagnostics: vec![],
             type_database_loaded: true,
             type_db: None,
@@ -519,6 +507,5 @@ mod tests {
             out.contains("✓ 0 diagnostics"),
             "clean pretty summary: {out:?}"
         );
-        let _ = fs::remove_dir_all(root);
     }
 }

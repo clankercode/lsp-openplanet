@@ -407,12 +407,10 @@ pub fn parse_nested_list(s: &str) -> Result<Vec<Vec<String>>, String> {
 mod tests {
     use super::*;
 
-    fn temp_path(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("opl-user-config-{}-{}", std::process::id(), name));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join("config.toml")
+    /// Returns the config path together with its directory's guard, so the
+    /// tree outlives the call (see `crate::testing::TempPath`).
+    fn temp_path(name: &str) -> crate::testing::TempPath {
+        crate::testing::TempDir::new(&format!("opl-user-config-{name}")).into_child("config.toml")
     }
 
     #[test]
@@ -657,11 +655,10 @@ mod tests {
 
     #[test]
     fn save_creates_missing_parent_dirs() {
-        let dir = std::env::temp_dir().join(format!(
-            "opl-user-config-{}-parents/nested/openplanet-lsp",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
+        // The guard owns the OUTERMOST directory, so dropping it takes the
+        // `nested/` levels this test exists to create with it.
+        let base = crate::testing::TempDir::new("opl-user-config-parents");
+        let dir = base.join("nested/openplanet-lsp");
         let path = dir.join("config.toml");
         let mut file = UserConfigFile::load(&path).unwrap();
         file.set_string("default_mode", "lsp");

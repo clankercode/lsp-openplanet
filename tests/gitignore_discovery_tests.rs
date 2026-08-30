@@ -7,19 +7,15 @@
 //! `HOME` is redirected into the fixture so the developer's real user-global
 //! `~/.config/openplanet-lsp/config.toml` can never change a result.
 
+use openplanet_lsp::testing::{TempDir, TempPath};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// Throwaway plugin root: `info.toml` + `src/Main.as` (the positive control,
 /// always discovered) + a `home/` dir used as `HOME` for the child process.
-fn make_temp_plugin(name: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "openplanet-lsp-gitignore-{}-{}",
-        name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
+fn make_temp_plugin(name: &str) -> TempPath {
+    let base = TempDir::new(&format!("openplanet-lsp-gitignore-{name}"));
     let root = base.join("plugin");
     fs::create_dir_all(root.join("src")).unwrap();
     fs::create_dir_all(base.join("home")).unwrap();
@@ -29,7 +25,7 @@ fn make_temp_plugin(name: &str) -> PathBuf {
     )
     .unwrap();
     write_source(&root, "src/Main.as", "MainMissing");
-    root
+    base.into_child("plugin")
 }
 
 /// The dir holding the plugin root; also holds the fake `HOME`.

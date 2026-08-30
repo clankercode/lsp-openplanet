@@ -124,13 +124,12 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_dir(name: &str) -> PathBuf {
+    fn temp_dir(name: &str) -> crate::testing::TempDir {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("op-lsp-entry-{name}-{nanos}"));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new(&format!("op-lsp-entry-{name}-{nanos}"));
         dir
     }
 
@@ -149,7 +148,6 @@ mod tests {
             decide_bare_launch(true, &dir, &prefs),
             LaunchAction::HelpNoPlugin
         );
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -163,7 +161,6 @@ mod tests {
             }
             other => panic!("expected WatchTui, got {other:?}"),
         }
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -175,6 +172,5 @@ mod tests {
             warnings_as_errors: false,
         };
         assert_eq!(decide_bare_launch(true, &dir, &prefs), LaunchAction::Lsp);
-        let _ = fs::remove_dir_all(dir);
     }
 }

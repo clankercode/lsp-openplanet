@@ -266,14 +266,8 @@ exports = ["Source/Exports.as"]
 
     /// Fixture plugin: a fresh root with the listed files created under
     /// whichever subdirectory `at` names (`""` for the root itself).
-    fn workspace_with(name: &str, files: &[&str], at: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "ols-manifest-validate-{}-{}",
-            name,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+    fn workspace_with(name: &str, files: &[&str], at: &str) -> crate::testing::TempDir {
+        let root = crate::testing::TempDir::new(&format!("ols-manifest-validate-{}", name));
         for file in files {
             let path = root.join(at).join(file);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

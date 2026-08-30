@@ -634,13 +634,8 @@ mod tests {
         assert_eq!(*phase.lock().unwrap(), 2);
     }
 
-    fn temp_plugin(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "openplanet-lsp-watch-cfg-{}-{}",
-            name,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+    fn temp_plugin(name: &str) -> crate::testing::TempDir {
+        let root = crate::testing::TempDir::new(&format!("openplanet-lsp-watch-cfg-{}", name));
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("info.toml"), "[meta]\n").unwrap();
         std::fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
@@ -678,7 +673,8 @@ mod tests {
                 calls2.fetch_add(1, AtomOrd::SeqCst);
                 run_check(opts)
             });
-        let mut src = WatchDataSource::with_checker(options_for(root.clone()), checker).unwrap();
+        let mut src =
+            WatchDataSource::with_checker(options_for(root.to_path_buf()), checker).unwrap();
         assert!(
             drain_until_checks(&mut src, 1, Duration::from_secs(10)),
             "startup check"
@@ -694,7 +690,6 @@ mod tests {
             "workspace config create must retrigger; started={}",
             src.checks_started
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -716,7 +711,7 @@ mod tests {
                 run_check(opts)
             });
         let mut src = WatchDataSource::with_checker_and_home(
-            options_for(root.clone()),
+            options_for(root.to_path_buf()),
             checker,
             Some(home.clone()),
         )
@@ -745,7 +740,8 @@ mod tests {
         let root = temp_plugin("invalid");
         let checker: Arc<dyn Fn(&CheckOptions) -> Result<CheckReport, CliError> + Send + Sync> =
             Arc::new(run_check);
-        let mut src = WatchDataSource::with_checker(options_for(root.clone()), checker).unwrap();
+        let mut src =
+            WatchDataSource::with_checker(options_for(root.to_path_buf()), checker).unwrap();
         assert!(drain_until_checks(&mut src, 1, Duration::from_secs(10)));
 
         std::fs::write(root.join(".openplanet-lsp.toml"), "honor_gitignore = {\n").unwrap();
@@ -758,6 +754,5 @@ mod tests {
             src.checks_started, 1,
             "invalid workspace TOML must keep last-good (no re-check)"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

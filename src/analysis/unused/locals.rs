@@ -700,12 +700,7 @@ mod tests {
     }
 
     fn report_with_inline_typedb(src: &str, core_json: &str) -> Vec<String> {
-        let fixture_dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-unused-contracts-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&fixture_dir);
-        std::fs::create_dir_all(&fixture_dir).expect("fixture directory must be created");
+        let fixture_dir = crate::testing::TempDir::new("openplanet-lsp-unused-contracts");
         let core = fixture_dir.join("Core.json");
         let next = fixture_dir.join("Next.json");
         std::fs::write(&core, core_json).expect("Core fixture must be written");

@@ -254,13 +254,12 @@ mod tests {
         }
     }
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
+    fn temp_dir(name: &str) -> crate::testing::TempDir {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("op-lsp-first-run-{name}-{nanos}"));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new(&format!("op-lsp-first-run-{name}-{nanos}"));
         dir
     }
 
@@ -270,7 +269,6 @@ mod tests {
     fn no_config_anywhere_means_needed() {
         let dir = temp_dir("gate-empty");
         assert!(needed(Some(&dir.join("u.toml")), Some(&dir.join("w.toml"))));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -285,7 +283,6 @@ mod tests {
         let user = dir.join("u.toml");
         fs::write(&user, "default_mode = \"lsp\"\n").unwrap();
         assert!(!needed(Some(&user), None));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -294,7 +291,6 @@ mod tests {
         let user = dir.join("u.toml");
         fs::write(&user, "first_run_prompt_done = true\n").unwrap();
         assert!(!needed(Some(&user), None));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -306,7 +302,6 @@ mod tests {
             needed(Some(&user), None),
             "only `true` marks the prompt done"
         );
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -315,7 +310,6 @@ mod tests {
         let ws = dir.join("w.toml");
         fs::write(&ws, "default_mode = \"tui\"\n").unwrap();
         assert!(!needed(None, Some(&ws)));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -327,7 +321,6 @@ mod tests {
             !needed(Some(&user), None),
             "an explicit key (even a non-mode value) means the user chose; no nag"
         );
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -338,7 +331,6 @@ mod tests {
         fs::write(&user, "default_mode = \"lsp\"\n").unwrap();
         fs::write(&ws, "default_mode = \"tui\"\n").unwrap();
         assert!(!needed(Some(&user), Some(&ws)));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -354,7 +346,6 @@ mod tests {
             record(Choice::KeepTui, Some(&user)).is_err(),
             "persisting over an unparseable file must error, not corrupt it further"
         );
-        let _ = fs::remove_dir_all(dir);
     }
 
     // ── persistence: record() ───────────────────────────────────────────
@@ -367,7 +358,6 @@ mod tests {
         let file = UserConfigFile::load(&user).unwrap();
         assert_eq!(file.get_string("default_mode").as_deref(), Some("tui"));
         assert_eq!(file.get_bool(DONE_KEY), Some(true));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -378,7 +368,6 @@ mod tests {
         let file = UserConfigFile::load(&user).unwrap();
         assert_eq!(file.get_string("default_mode").as_deref(), Some("lsp"));
         assert_eq!(file.get_bool(DONE_KEY), Some(true));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -393,7 +382,6 @@ mod tests {
             "dismiss must not pin a mode"
         );
         assert_eq!(file.get_bool(DONE_KEY), Some(true));
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -402,7 +390,6 @@ mod tests {
         let user = dir.join("u.toml");
         record(Choice::Aborted, Some(&user)).unwrap();
         assert!(!user.exists(), "abort must not create the config file");
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -426,7 +413,6 @@ mod tests {
             written.contains("default_mode = \"lsp\""),
             "not updated:\n{written}"
         );
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -435,7 +421,6 @@ mod tests {
         let user = dir.join("nested/deeper/u.toml");
         record(Choice::KeepTui, Some(&user)).unwrap();
         assert!(user.is_file(), "parent dirs + file must exist");
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
