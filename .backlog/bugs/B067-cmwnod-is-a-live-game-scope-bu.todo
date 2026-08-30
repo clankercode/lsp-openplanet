@@ -272,3 +272,43 @@ Close as **not a defect**. Do not widen `scope_exists`. If the two-predicates
 hazard is to be acted on, it wants its own ticket — naming the pairs so a
 future caller cannot pick the wrong one by accident is the fix, not a
 behavioural change.
+
+
+### Refinement to error 2 (coordinator, verified independently 2026-08-31)
+
+The coordinator ran two checks and both missed the anonymous enum for the same
+root cause, which is worth recording because the second looked like an
+independent confirmation of the first:
+
+1. Counting the class-level `e` array — lists NAMED enums only, so 0 for
+   `CGameCtnApp`.
+2. Falling back to "does the class have an enum-TYPED member?" — this *would*
+   have caught it, except the anonymous enum's type is the shared
+   `UnnamedEnum` placeholder, which never matches a set of named enum types.
+
+Two checks, one blind spot, both confidently wrong in the same direction. A
+second check that shares the first's population assumption is not an
+independent check.
+
+Independent confirmation against the live dump, members carrying an inline
+enum block:
+
+```
+CGameCtnApp        named-e=0  inline-enum members=1  ['VehicleCollectionId']
+CGameMenu          named-e=1  inline-enum members=1
+CGameCtnChallenge  named-e=3  inline-enum members=4
+CMwNod / CSceneVehicleVis / CSystemFidFile / CTrackMania   both zero
+```
+
+7/7, no outlier. The re-probe prediction that `CGameCtnApp::*` would flip to
+REJECTED was retracted before it consumed game-port time.
+
+### Closing note
+
+Closed as **not a defect**. `scope_exists` does not under-approximate;
+agreement with the game is 25/25 measured against the loaded index. Both
+investigators reached a wrong intermediate conclusion about the same fact from
+opposite directions, and in both cases the source had already recorded the
+answer at `src/typedb/index.rs:456-464`. The durable lesson is not who was
+right: it is that a derived measurement was trusted over a documented one
+twice in the same investigation.
