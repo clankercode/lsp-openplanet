@@ -46,11 +46,10 @@
 //!   does not** — 9 overloads against 8, and the one with no counterpart is
 //!   exactly `CoroutineFuncUserdataBool@ func, const bool userdata`. A
 //!   rewrite of `startnew(F, true).WithRunContext(c)` would therefore not
-//!   compile, so a boolean-shaped userdata argument withholds the fix.
-//!   This is a syntactic test, so a `bool` VARIABLE still slips through —
-//!   that produces a loud compile error, not the silent loss this family
-//!   exists to prevent, and closing it properly would mean running overload
-//!   resolution inside a code-action producer.
+//!   compile. The family asks the checker for the userdata expression's
+//!   recorded type, so boolean identifiers, calls, casts and ternaries are
+//!   withheld too. An unresolved expression is also withheld: it has not
+//!   proved that any of the seven successor userdata types accepts it.
 //! * **Both return `awaitable@`,** so a further-chained call
 //!   (`startnew(W).WithRunContext(c).IsRunning()`) rewrites correctly and IS
 //!   offered: only the inner call's span is replaced and the chain is
@@ -68,8 +67,9 @@
 //! | receiver is not a `startnew(...)` call (a stored handle, a function result) | **no** |
 //! | `WithRunContext` is not called, or called with other than one argument | **no** |
 //! | a NAMED argument anywhere in either call | **no** |
-//! | `startnew()` with no coroutine | **no** |
-//! | a boolean-shaped `startnew` userdata | **no** |
+//! | `startnew` with other than one or two arguments | **no** |
+//! | boolean or unresolved `startnew` userdata | **no** |
+//! | a preprocessor directive / inactive branch inside the replaced call | **no** |
 //!
 //! The diagnostic is published either way: withholding the fix never
 //! suppresses the warning.
@@ -79,9 +79,11 @@
 //! them — a comment between the arguments, the line breaks of a call spread
 //! over several lines — is gone. Each ARGUMENT keeps its own text
 //! verbatim, so a multi-line lambda passed to `startnew` survives intact,
-//! and nothing outside the call's span is touched. That is a visible,
-//! undoable edit rather than a silent one, which is the bar this family is
-//! held to.
+//! and nothing outside the call's span is touched. Comments and whitespace
+//! are the accepted visible, undoable loss. Preprocessor text is different:
+//! because the AST contains only the active branch, rebuilding its real-source
+//! span would silently delete directives and inactive code. A raw-vs-masked
+//! difference anywhere in the replacement span therefore withholds the fix.
 //!
 //! Never `auto_applicable` and never `is_preferred`. This rewrites a call
 //! rather than renaming a member, and `source.fixAll.openplanet` must not
@@ -97,12 +99,14 @@ use tower_lsp::lsp_types::{CodeActionKind, TextEdit, WorkspaceEdit};
 
 use crate::lexer::Span;
 use crate::parser::ast::{
-    BinOp, CallArg, ClassDecl, ClassMember, Expr, ExprKind, FunctionDecl, Item, NamespaceDecl,
-    PropertyDecl, SourceFile, Stmt, StmtKind, UnaryOp, VarDeclStmt,
+    CallArg, ClassDecl, ClassMember, Expr, ExprKind, FunctionDecl, Item, NamespaceDecl,
+    PropertyDecl, SourceFile, Stmt, StmtKind, VarDeclStmt,
 };
 use crate::server::code_actions::fix::{single_file_edit, FixContext, FixDescriptor, FixFamily};
 use crate::server::diagnostics::span_to_range;
-use crate::typecheck::{TypeDiagnostic, TypeDiagnosticKind};
+use crate::typecheck::{
+    Checker, GlobalScope, PrimitiveType, TypeDiagnostic, TypeDiagnosticKind, TypeRepr,
+};
 
 /// The deprecated member this family migrates.
 const MEMBER: &str = "WithRunContext";
@@ -147,7 +151,6 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
 
 fn materialize(diag: &TypeDiagnostic, ctx: &FixContext<'_>, _title: &str) -> WorkspaceEdit {
     let Some((span, new_text)) = rewrite(diag, ctx) else {
-        debug_assert!(false, "described a WithRunContext fix that cannot be built");
         return WorkspaceEdit::default();
     };
     single_file_edit(
@@ -201,7 +204,7 @@ fn rewrite(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<(Span, String)
     let ExprKind::Ident(name) = &receiver_callee.kind else {
         return None;
     };
-    if name.text(masked) != STARTNEW || coroutine_args.is_empty() {
+    if name.text(masked) != STARTNEW || !(1..=2).contains(&coroutine_args.len()) {
         return None;
     }
     // A named argument binds by PARAMETER name, and the two functions'
@@ -212,13 +215,22 @@ fn rewrite(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<(Span, String)
         return None;
     }
     // `startnew` has a bool-userdata overload; `Meta::StartWithRunContext`
-    // has none. See the module docs.
-    if coroutine_args.len() > 1 && coroutine_args[1..].iter().any(is_boolean_shaped) {
+    // has none. Require the checker to prove that userdata has a successor
+    // type instead of trying to enumerate boolean expression syntax here.
+    if coroutine_args
+        .get(1)
+        .is_some_and(|arg| !userdata_has_successor_type(arg, ctx))
+    {
         return None;
     }
     // Text comes from the REAL source, not the masked copy the parse ran
-    // on: the edit goes into the user's buffer.
+    // on: the edit goes into the user's buffer. A preprocessor directive or
+    // inactive branch inside the replacement span exists only in that real
+    // source. Rebuilding such a span from the active AST would delete it.
     let source = &ctx.analysis.source;
+    if call.span.text(source) != call.span.text(masked) {
+        return None;
+    }
     let mut rendered = String::from(SUCCESSOR);
     rendered.push('(');
     rendered.push_str(context.value.span.text(source));
@@ -234,28 +246,27 @@ fn is_named(arg: &CallArg) -> bool {
     arg.name.is_some()
 }
 
-/// Syntactically boolean-valued: a literal, a `!`, or a comparison or
-/// logical operator. Deliberately syntax-only — see the module docs for
-/// what this cannot catch.
-fn is_boolean_shaped(arg: &CallArg) -> bool {
-    match &arg.value.kind {
-        ExprKind::BoolLit(_) => true,
-        ExprKind::Unary {
-            op: UnaryOp::Not, ..
-        } => true,
-        ExprKind::Binary { op, .. } => matches!(
-            op,
-            BinOp::Eq
-                | BinOp::NotEq
-                | BinOp::Lt
-                | BinOp::Gt
-                | BinOp::LtEq
-                | BinOp::GtEq
-                | BinOp::And
-                | BinOp::Or
-                | BinOp::Xor
-        ),
-        _ => false,
+/// Whether the checker can prove that `arg` fits one of the successor's
+/// userdata types. This deliberately fails closed for unresolved/error
+/// expressions: offering fewer edits is preferable to emitting a call for
+/// an overload that may not exist.
+fn userdata_has_successor_type(arg: &CallArg, ctx: &FixContext<'_>) -> bool {
+    let scope = GlobalScope::new(ctx.workspace, ctx.type_index);
+    let mut checker = Checker::new(ctx.analysis.masked_source(), &scope).with_type_recording();
+    checker.check_file(&ctx.analysis.file);
+    let Some(ty) = checker.type_at_span_range(arg.value.span.start, arg.value.span.end) else {
+        return false;
+    };
+    userdata_type_has_successor(ty)
+}
+
+fn userdata_type_has_successor(ty: &TypeRepr) -> bool {
+    match ty {
+        TypeRepr::Primitive(PrimitiveType::Bool) => false,
+        TypeRepr::Primitive(_) => true,
+        TypeRepr::Named(_) | TypeRepr::Generic { .. } | TypeRepr::Array(_) => true,
+        TypeRepr::Const(inner) | TypeRepr::Handle(inner) => userdata_type_has_successor(inner),
+        TypeRepr::Void | TypeRepr::Null | TypeRepr::Funcdef(_) | TypeRepr::Error(_) => false,
     }
 }
 
@@ -589,10 +600,41 @@ mod tests {
     /// put it.
     #[test]
     fn extra_startnew_arguments_carry_through_in_order() {
-        for userdata in ["42", "\"tag\"", "1.5", "userdata", "Other(1)", "-7"] {
-            let body = format!("startnew(Worker, {userdata}).WithRunContext(ctx);");
-            let want = format!("Meta::StartWithRunContext(ctx, Worker, {userdata});");
-            assert_eq!(fixed(&program(&body)), program(&want), "for `{userdata}`");
+        for (ty, userdata) in [
+            ("int", "i"),
+            ("int64", "i"),
+            ("uint", "i"),
+            ("uint64", "i"),
+            ("double", "i"),
+            ("string", "i"),
+        ] {
+            let source = format!(
+                "void Worker() {{}}\nvoid Main() {{ {ty} {userdata}; startnew(Worker, {userdata}).WithRunContext(ctx); }}"
+            );
+            let want = format!(
+                "void Worker() {{}}\nvoid Main() {{ {ty} {userdata}; Meta::StartWithRunContext(ctx, Worker, {userdata}); }}"
+            );
+            assert_eq!(fixed(&source), want, "for `{ty}` userdata");
+        }
+
+        let source = "class Box {}\nvoid Worker() {}\nvoid Main() { Box userdata; startnew(Worker, userdata).WithRunContext(ctx); }";
+        let want = "class Box {}\nvoid Worker() {}\nvoid Main() { Box userdata; Meta::StartWithRunContext(ctx, Worker, userdata); }";
+        assert_eq!(fixed(source), want, "for `ref` userdata");
+    }
+
+    /// Semantic proof is not restricted to identifiers. The same expression
+    /// families used by bool userdata remain available when their recorded
+    /// type has a successor overload.
+    #[test]
+    fn proven_non_boolean_userdata_expression_shapes_carry_through() {
+        for userdata in ["Value()", "int64(1)", "flag ? 1 : 2"] {
+            let source = format!(
+                "void Worker() {{}}\nint Value() {{ return 1; }}\nvoid Main() {{ bool flag = true; startnew(Worker, {userdata}).WithRunContext(ctx); }}"
+            );
+            let want = format!(
+                "void Worker() {{}}\nint Value() {{ return 1; }}\nvoid Main() {{ bool flag = true; Meta::StartWithRunContext(ctx, Worker, {userdata}); }}"
+            );
+            assert_eq!(fixed(&source), want, "for `{userdata}`");
         }
     }
 
@@ -738,23 +780,132 @@ mod tests {
         }
     }
 
-    /// A shape this family was not written for — `WithRunContext` with the
-    /// wrong number of arguments, or `startnew` with none — withholds
-    /// rather than inventing an argument list.
+    /// Boolean userdata is rejected from the checker's recorded expression
+    /// type, not merely from literal syntax. Identifiers, calls, casts and
+    /// ternaries are all common ways a bool reaches `startnew`.
+    #[test]
+    fn every_semantically_boolean_userdata_shape_offers_nothing() {
+        for userdata in [
+            "flag",
+            "IsReady()",
+            "bool(1)",
+            "cast<bool>(flag)",
+            "flag ? true : false",
+        ] {
+            let source = format!(
+                "void Worker() {{}}\nbool IsReady() {{ return true; }}\nvoid Main() {{ bool flag = true; startnew(Worker, {userdata}).WithRunContext(ctx); }}"
+            );
+            with_ctx(&source, |ctx| {
+                assert_eq!(
+                    findings(ctx).len(),
+                    1,
+                    "test premise: the warning still fires for `{userdata}`"
+                );
+            });
+            assert!(
+                titles(&source).is_empty(),
+                "a bool userdata has no successor overload: `{userdata}`, got {:?}",
+                titles(&source)
+            );
+        }
+    }
+
+    /// An unresolved userdata type cannot prove that one of the successor's
+    /// seven userdata overloads accepts it, so the safe result is no edit.
+    #[test]
+    fn an_unproved_userdata_type_offers_nothing() {
+        let source = program("startnew(Worker, unknown).WithRunContext(ctx);");
+        with_ctx(&source, |ctx| {
+            assert_eq!(findings(ctx).len(), 1, "test premise: the warning fires");
+        });
+        assert!(titles(&source).is_empty(), "got {:?}", titles(&source));
+    }
+
+    /// A shape with no matching source overload — `WithRunContext` with the
+    /// wrong number of arguments, or `startnew` with other than one or two
+    /// arguments — withholds rather than inventing an argument list.
     #[test]
     fn an_unexpected_argument_count_offers_nothing() {
         for body in [
             "startnew(Worker).WithRunContext();",
             "startnew(Worker).WithRunContext(a, b);",
             "startnew().WithRunContext(ctx);",
+            "startnew(Worker, 1, 2).WithRunContext(ctx);",
+            "startnew(Worker, 1, 2, 3).WithRunContext(ctx);",
         ] {
             let source = program(body);
+            with_ctx(&source, |ctx| {
+                assert_eq!(
+                    findings(ctx).len(),
+                    1,
+                    "test premise: the warning still fires for `{body}`"
+                );
+            });
             assert!(
                 titles(&source).is_empty(),
                 "got {:?} for `{body}`",
                 titles(&source)
             );
         }
+    }
+
+    /// The AST is parsed from a length-preserving masked source. Rebuilding
+    /// a real-source span containing directives from only the active AST
+    /// arguments would delete the directive and inactive branch, regardless
+    /// of which branch is active or which call owns the conditional.
+    #[test]
+    fn a_conditional_inside_the_replacement_span_offers_nothing() {
+        for (condition, conditional_call) in [
+            (
+                "ACTIVE",
+                "startnew(\n#if ACTIVE\n    WorkerA\n#else\n    WorkerB\n#endif\n).WithRunContext(ctx);",
+            ),
+            (
+                "!ACTIVE",
+                "startnew(\n#if !ACTIVE\n    WorkerA\n#else\n    WorkerB\n#endif\n).WithRunContext(ctx);",
+            ),
+            (
+                "ACTIVE",
+                "startnew(WorkerA).WithRunContext(\n#if ACTIVE\n    ctx_a\n#else\n    ctx_b\n#endif\n);",
+            ),
+            (
+                "!ACTIVE",
+                "startnew(WorkerA).WithRunContext(\n#if !ACTIVE\n    ctx_a\n#else\n    ctx_b\n#endif\n);",
+            ),
+        ] {
+            let source = format!(
+                "void WorkerA() {{}}\nvoid WorkerB() {{}}\nvoid Main() {{\n{conditional_call}\n}}"
+            );
+            with_ctx(&source, |ctx| {
+                assert_eq!(
+                    findings(ctx).len(),
+                    1,
+                    "test premise: the warning still fires for `#if {condition}`"
+                );
+            });
+            assert!(
+                titles(&source).is_empty(),
+                "a conditional replacement must withhold for `#if {condition}`, got {:?}",
+                titles(&source)
+            );
+            assert_eq!(fixed(&source), source);
+        }
+    }
+
+    /// Materialization is a public function pointer in the family. Even if
+    /// a stale or malformed request bypasses `describe`, it must fail closed
+    /// without panicking or manufacturing an edit.
+    #[test]
+    fn materialize_fails_closed_for_a_withheld_shape() {
+        let source = program("startnew(Worker, true).WithRunContext(ctx);");
+        with_ctx(&source, |ctx| {
+            let diag = findings(ctx).pop().expect("one finding");
+            let edit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                materialize(&diag, ctx, TITLE)
+            }))
+            .expect("withheld materialization must not panic");
+            assert!(edit.changes.is_none(), "no edit may be manufactured");
+        });
     }
 
     // ── Layout and neighbours ─────────────────────────────────────────────
