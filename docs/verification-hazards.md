@@ -188,6 +188,34 @@ indistinguishable from "I am structurally incapable of seeing it".
   **the switch needs its own test per call site** — a knob wired to nothing is
   indistinguishable from a knob that works, from the outside.
 
+**Countermeasure — and the way it fails.** A corroborating check is only worth
+running if it can fail independently. **A second check that inherits the
+first's population assumption is not an independent check.**
+
+Worked example, from the coordinator, in one sitting. Question: does engine
+class `CGameCtnApp` declare a member enum? Check one counted the class-level
+`e` array: **0**. Check two asked a structurally different question — does the
+class have a member whose *type* is an enum? — and also said **no**. Two
+methods, two agreeing answers, one wrong conclusion.
+
+They were not independent. Check two built its set of enum names from the same
+`e` arrays check one counted, and the enum in question is **anonymous**, typed
+with a shared `UnnamedEnum` placeholder that appears in no named-enum set. One
+blind spot, inherited, wearing the costume of corroboration. The agreement felt
+like confirmation and was a single measurement counted twice.
+
+Two rules follow:
+
+- **State the population each check reads, not just its method.** Two checks
+  over the same population are one check. The differing *question* is what
+  makes methods independent only if the *data* also differs.
+- **Read the source before measuring it.** The rule under investigation was
+  already documented in the code — `src/typedb/index.rs`, "named or anonymous
+  — either is enough" — naming the exact class in dispute. Two people spent an
+  hour deriving, from live-game probes and dump arithmetic, a fact a doc
+  comment stated outright. Grep the codebase for the answer before building an
+  instrument to discover it.
+
 **Countermeasure — positive control.** Before trusting a probe that reports
 absence, confirm it can see a thing you *know* is present. A staleness check
 that cannot find a file you just touched is not reporting staleness. A counter
