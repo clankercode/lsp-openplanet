@@ -2604,18 +2604,36 @@ impl<'a> Checker<'a> {
             TypeRepr::Funcdef(n) => self.scope.lookup_funcdef(n),
             // GH #38 shadowing: `lookup_funcdef` falls through to the typedb
             // when the workspace symbol of that name is not a funcdef, so a
-            // plugin class named after a Core funcdef (`class
-            // CoroutineFunc`) would resolve to the ENGINE funcdef and its
-            // instances would be rejected as function-shaped at a value
+            // plugin class / interface / enum / `typedef` named after a Core
+            // funcdef would resolve to the ENGINE funcdef and its values
+            // would be rejected as function-shaped at an ordinary value
             // slot. The plugin's own declaration wins.
-            TypeRepr::Named(n) if !self.scope.is_workspace_class(n) => {
-                if self.scope.is_workspace_interface(n) {
+            //
+            // The ladder matters as much as the predicate: a value's type
+            // text is stored as WRITTEN, so a class declared
+            // `Nz::CoroutineFunc` reaches here as a bare `CoroutineFunc`
+            // from inside `namespace Nz` and an exact-name guard misses it.
+            TypeRepr::Named(n) => {
+                if self.workspace_shadows_funcdef_in_scope(n) {
                     return None;
                 }
                 self.scope.lookup_funcdef(n)
             }
             _ => None,
         }
+    }
+
+    /// [`GlobalScope::workspace_shadows_funcdef`] over the enclosing
+    /// namespaces, innermost first, then the name as written.
+    fn workspace_shadows_funcdef_in_scope(&self, name: &str) -> bool {
+        if self.scope.workspace_shadows_funcdef(name) {
+            return true;
+        }
+        (1..=self.namespace_stack.len()).rev().any(|depth| {
+            let ns = self.namespace_stack[..depth].join("::");
+            self.scope
+                .workspace_shadows_funcdef(&format!("{ns}::{name}"))
+        })
     }
 
     /// A funcdef signature as an `OverloadSig` for the shared bind test.

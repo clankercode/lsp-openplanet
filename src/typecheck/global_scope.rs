@@ -1499,6 +1499,25 @@ impl<'a> GlobalScope<'a> {
         Vec::new()
     }
 
+    /// GH #38 shadowing, funcdef edition: true when the workspace declares
+    /// `name` as something that is NOT a real funcdef.
+    ///
+    /// [`Self::lookup_funcdef`] walks workspace symbols but only *returns*
+    /// on a real funcdef, then falls through to the typedb — so a plugin
+    /// class, interface, enum or `typedef` named after a Core funcdef
+    /// (`CoroutineFunc`, `CoroutineFuncUserdataBool`, ...) silently resolves
+    /// to the ENGINE funcdef. Callers deciding "is this value a callable?"
+    /// must ask this first: the plugin's own declaration wins, and a
+    /// `typedef` counts as shadowing even though it reuses
+    /// `SymbolKind::Funcdef`, because it is a type alias rather than a
+    /// callable signature.
+    pub fn workspace_shadows_funcdef(&self, name: &str) -> bool {
+        self.lookup_workspace(name).iter().any(|s| match &s.kind {
+            SymbolKind::Funcdef { is_typedef, .. } => *is_typedef,
+            _ => true,
+        })
+    }
+
     /// True when `name` names a workspace interface symbol. The interface
     /// counterpart of [`Self::is_workspace_class`]; kept separate so
     /// callers that mean "a class, specifically" keep meaning that.

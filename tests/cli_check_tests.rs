@@ -1757,7 +1757,7 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
 ///
 /// The fixture pins BOTH sides of the line, because a fix that silences more
 /// than it should is indistinguishable from a correct one until something
-/// pins the boundary. Master reports 37 errors across the three files, 26 of
+/// pins the boundary. Master reports 44 errors across the three files, 31 of
 /// them false; the 11 true ones must survive, and the fix adds 2 more that
 /// master misses (a funcdef handle into a `uint` slot from a plain global,
 /// and a `uint` property value into a delegate ctor) — 13 asserted below.
@@ -1839,14 +1839,30 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         "Variants.as:69",
         "Variants.as:70",
         "Variants.as:71",
-        // Shadowing.as: a plugin class named after a Core funcdef, read as a
-        // property (29) and as a plain global (30), plus the non-colliding
-        // control (32-33) that must behave identically. Master errors on 29
-        // and 32.
-        "Shadowing.as:29",
-        "Shadowing.as:30",
-        "Shadowing.as:32",
-        "Shadowing.as:33",
+        // Shadowing.as: plugin declarations named after Core funcdefs —
+        // class, interface, enum, typedef, and a namespaced class written
+        // bare (66-67) — each read as a property and as a plain global, and
+        // each paired with a non-colliding control of the same shape so the
+        // gate distinguishes "shadowing works" from "this shape is never
+        // function-shaped". Master errors on 9 of these 18.
+        "Shadowing.as:66",
+        "Shadowing.as:67",
+        "Shadowing.as:73",
+        "Shadowing.as:74",
+        "Shadowing.as:75",
+        "Shadowing.as:76",
+        "Shadowing.as:78",
+        "Shadowing.as:79",
+        "Shadowing.as:80",
+        "Shadowing.as:81",
+        "Shadowing.as:83",
+        "Shadowing.as:84",
+        "Shadowing.as:85",
+        "Shadowing.as:86",
+        "Shadowing.as:88",
+        "Shadowing.as:89",
+        "Shadowing.as:90",
+        "Shadowing.as:91",
     ] {
         assert!(
             !errors.iter().any(|e| e.contains(line)),
