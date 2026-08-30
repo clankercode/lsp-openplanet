@@ -168,6 +168,34 @@ GitHub Release body to match this section (gh release edit).
   against the live game compiler — see
   `docs/probes/openplanet-injected-methods.md`.
 
+||||||| parent of 3ec242b (fix B056: a type answers to its SOURCE NAME, not to the loader's index key)
+- **Qualified engine names are checked against the spelling the game actually
+  accepts (B056)** — `Game::CGameCtnApp` used to resolve, and the game answers
+  `Namespace 'Game' doesn't exist.` So did `Plot::Marker` (the enum is
+  `UI::Plot::Marker`) and a bare `EMenuOrder`. 1012 spellings the game rejects
+  were accepted in silence.
+
+  The `Game`, `Scene`, `Audio`, … prefixes are how `openplanet-lsp` keys the
+  Nadeo dump, not namespaces the game has, and the index accepted its own key.
+  Every type and enum now answers to its SOURCE NAME instead — and that name
+  depends on where the entry came from, which is the part worth knowing:
+
+  - a Nadeo entry DROPS the module prefix: write
+    `CGameMenu::EMenuOrder`, `CAudioScriptManager::ELibSound`;
+  - a Core entry keeps its namespace IN FULL: write `UI::Plot::Marker`,
+    `UI::ButtonFlags`, `nvg::Align`;
+  - an `Openplanet.h` enum is bare: `ESceneCharVisNotice`.
+
+  A global enum still resolves behind any real scope, so `UI::VirtualKey`,
+  `CGameMenu::VirtualKey` and `Meta::ESceneCharVisNotice` are unaffected, and
+  so is referring to an engine class by its short name (`CGameCtnApp`). Your
+  own declarations still win: a plugin's `enum Axis` keeps shadowing
+  `UI::Plot::Axis`.
+
+  All 1901 spellings were compiled in the live game to establish the rule, and
+  the verdicts are committed at
+  `docs/probes/b052-qualified-enum-spellings.tsv`.
+
 - **A bare enum value only a nested or namespaced enum defines is now an error
   (B057)** — the game answers `No matching symbol 'North'`; `openplanet-lsp`
   accepted it and said nothing, so the problem only appeared when you compiled

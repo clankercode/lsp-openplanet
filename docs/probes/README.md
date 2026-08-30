@@ -19,10 +19,25 @@ compiler's own text, unedited.
 
 ## Who depends on these
 
-- **B056** — 1010 qualified spellings the LSP accepts and the game rejects.
-  Filter `b052-qualified-enum-spellings.tsv` for `REJECTED`; most are the
-  synthetic Nadeo module prefix (`Game::CGameCtnApp`) or a bare nested-enum
-  name (`EMenuOrder`).
+- **B056** (landed) — the qualified and bare spellings the LSP used to accept
+  and the game rejects. Filter `b052-qualified-enum-spellings.tsv` for
+  `REJECTED`. Re-measured after B052 landed: **1012**, in three families —
+  the synthetic Nadeo module prefix (`Game::CGameCtnApp`), a Core namespace
+  with a segment dropped (`Plot::Marker` for `UI::Plot::Marker`), and a
+  non-global enum written bare (`EMenuOrder`, `ButtonFlags`).
+
+  **`b052-qualified-enum-spellings.tsv` is now read by the test suite**, like
+  its B053 sibling. `resolver::tests::every_probed_type_spelling_matches_the_games_verdict`
+  parses every row and drives the real `TypeResolver` over it, so editing a
+  verdict or a spelling changes what the suite demands. Re-probe before you
+  edit, and say so in the commit.
+
+  Two groups of rows are deliberately NOT expected to resolve here, and both
+  are named in that test rather than silently skipped: the 13 spellings that
+  compiled only because of the probing machine's installed plugins (see the
+  asymmetry below — `GameData::EGameInventoryItemClass` is the subtle one,
+  since `GameData` is *also* a Nadeo module name), and the 4 `string::` rows,
+  which are a lexer gap rather than a resolution one.
 - **B057** (landed) — the 2373 bare value names the LSP used to accept and the
   game answers `No matching symbol` for. Filter `b053-bare-enum-values.tsv`
   for `verdict == NO_SYMBOL`.
