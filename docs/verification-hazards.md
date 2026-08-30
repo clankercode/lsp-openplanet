@@ -13,6 +13,18 @@ than the bug it was hiding.
 
 They fall into three mechanisms. Learn the shapes, not the stories.
 
+One lane, closing out, put the whole thing better than this introduction does:
+
+> Every claim of mine that mattered and was wrong was wrong **in the direction
+> of looking clean**, and each was caught by a check that could **observe
+> failure** — never by re-reading the reasoning.
+
+Both halves earn their keep. The errors are not randomly distributed: a broken
+probe reports "nothing found", a crashed binary reports a lower total, a
+suppressed stderr reports silence. They fail toward the answer you were hoping
+for. And re-reading your own reasoning cannot catch them, because the reasoning
+is usually correct — it is the instrument that is lying.
+
 ---
 
 ## Mechanism 1: the probe cannot see what it was asked about
