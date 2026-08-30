@@ -1,0 +1,26 @@
+---
+complexity: medium
+created_at: "2026-08-30T05:30:24Z"
+depends_on: []
+estimate_hours: 1
+id: B062
+priority: high
+status: pending
+tags: []
+title: 'Manifest exports should root the unused analysis: exported globals reported unused'
+updated_at: "2026-08-30T05:30:24Z"
+---
+
+# Manifest exports should root the unused analysis: exported globals reported unused
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior
