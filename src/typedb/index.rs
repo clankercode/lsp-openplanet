@@ -2134,6 +2134,48 @@ mod tests {
             "every differing name must be accounted for as excluded or \
              single-candidate, not merely most of them"
         );
+
+        // WHICH ARM does the excluding. Forcing `enum_is_global` true fails
+        // the assertions above, which proves the filter matters in aggregate
+        // but not which of its three arms carries the weight. The arms are
+        // asymmetric and only two of them test qualification at all:
+        //
+        //     Header => true                              (no test)
+        //     Nadeo  => qname.matches("::").count() <= 1  (module-level only)
+        //     Core   => info.namespace.is_none()          (un-namespaced only)
+        //
+        // Every ambiguous collision measured here is Nadeo, excluded by the
+        // `::` count - the two single-candidate survivors included.
+        //
+        // The Header arm having NO test looks like the dangerous one, and it
+        // is not, for a reason worth asserting rather than reasoning about:
+        // header enums are keyed BARE, with `namespace: None`, so there is
+        // nothing for a qualification test to exclude. Adding
+        // `!qname.contains("::")` to that arm today is a NO-OP, which is why
+        // asserting the arm is "unfiltered" cannot fail and would be a test
+        // in name only. This asserts the fact that makes the missing test
+        // harmless, and that fact does have a witness.
+        let header_keys: Vec<&String> = index
+            .enums
+            .iter()
+            .filter(|(_, info)| info.source == TypeSource::Header && !info.anonymous)
+            .map(|(qname, _)| qname)
+            .collect();
+        assert!(
+            !header_keys.is_empty(),
+            "fixture guard: the header must contribute enums, or the assertion \
+             below is vacuous"
+        );
+        let qualified: Vec<&&String> = header_keys
+            .iter()
+            .filter(|qname| qname.contains("::"))
+            .collect();
+        assert!(
+            qualified.is_empty(),
+            "header enum keys must stay BARE - the Header arm of \
+             `enum_is_global` applies no qualification test, so a qualified \
+             header key would be globally visible at any depth: {qualified:?}"
+        );
     }
 
     #[test]
