@@ -1503,11 +1503,20 @@ impl LanguageServer for Backend {
         // dependency plugin is a SEPARATE module, so a symbol there that
         // merely shares a spelling is a different symbol, and reporting
         // its occurrences as references to this one is the very
-        // false-positive class B049 exists to remove.
-        let files = snapshot.own_uri_map();
+        // false-positive class B049 exists to remove. B055: a strict
+        // `[script] exports` file is a separate module by the same
+        // argument, inside this plugin.
+        let files = snapshot.own_uri_map_for_module_of(crate::analysis_snapshot::FileRef::Uri(uri));
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
-        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        // B055: the requesting file's MODULE, not the whole plugin. A
+        // plugin with strict `[script] exports` compiles as two units that
+        // cannot see each other, and the same spelling may legally be
+        // declared on both sides — so a rename or a reference set that
+        // crossed the boundary would report one symbol's occurrences as
+        // another's. See `own_uri_map_for_module_of` for the probe.
+        let symbols = snapshot.table_for_module_of(crate::analysis_snapshot::FileRef::Uri(uri));
+        let scope = GlobalScope::new(symbols.as_ref(), type_index.as_deref());
         let refs = rename::find_references(
             analysis,
             uri,
@@ -1621,10 +1630,13 @@ impl LanguageServer for Backend {
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         // Own files only: a WorkspaceEdit naming a dependency plugin's
         // export file would have the editor rewrite someone else's source.
-        let files = snapshot.own_uri_map();
+        // B055: narrowed further to the requesting file's own module.
+        let files = snapshot.own_uri_map_for_module_of(crate::analysis_snapshot::FileRef::Uri(uri));
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
-        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        // B055 — see the note on `references`.
+        let symbols = snapshot.table_for_module_of(crate::analysis_snapshot::FileRef::Uri(uri));
+        let scope = GlobalScope::new(symbols.as_ref(), type_index.as_deref());
         rename::rename(
             analysis,
             uri,
@@ -1652,10 +1664,13 @@ impl LanguageServer for Backend {
         let analysis = snapshot.analysis_of(uri).unwrap_or(&owned);
         // Own files only: a WorkspaceEdit naming a dependency plugin's
         // export file would have the editor rewrite someone else's source.
-        let files = snapshot.own_uri_map();
+        // B055: narrowed further to the requesting file's own module.
+        let files = snapshot.own_uri_map_for_module_of(crate::analysis_snapshot::FileRef::Uri(uri));
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
-        let scope = GlobalScope::new(snapshot.symbols(), type_index.as_deref());
+        // B055 — see the note on `references`.
+        let symbols = snapshot.table_for_module_of(crate::analysis_snapshot::FileRef::Uri(uri));
+        let scope = GlobalScope::new(symbols.as_ref(), type_index.as_deref());
         rename::prepare_rename(analysis, uri, pos, &scope, &workspace_files)
             .map(|range| Some(PrepareRenameResponse::Range(range)))
             .map_err(refusal_error)
@@ -2114,6 +2129,401 @@ mod tests {
         })
         .await
         .expect("server publishes diagnostics before timeout")
+    }
+
+    // === B055: rename / references around a STRICT export file ==========
+    //
+    // Ground truth, live RemoteBuild probe 2026-08-30 (a strict module
+    // `module = "T"` with `exports = ["Exports_Bodies.as"]`):
+    //
+    //   Main.as calling the exported `SendEvent()`     -> ERROR
+    //                                        "No matching symbol 'SendEvent'"
+    //   the export file's body calling a name that
+    //   exists NOWHERE                                 -> clean
+    //   the export file containing a SYNTAX ERROR      -> clean, plugin runs
+    //   `SendEvent` declared in BOTH Main.as and the
+    //   export file                                    -> clean, no collision
+    //   the same with `shared_exports` instead         -> clean, resolves
+    //
+    // So the export file is not merely invisible to its own plugin's other
+    // files — it is not compiled into the defining plugin at all, and its
+    // declarations inhabit a separate namespace that may legally reuse a
+    // spelling the own module also uses.
+
+    async fn open_document(backend: &Backend, path: &Path, source: &str) -> Url {
+        let uri = Url::from_file_path(path).unwrap();
+        backend
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "angelscript".into(),
+                    version: 1,
+                    text: source.to_string(),
+                },
+            })
+            .await;
+        uri
+    }
+
+    fn text_position_params(uri: Url, source: &str, needle: &str) -> TextDocumentPositionParams {
+        TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: diagnostics::offset_to_position(
+                source,
+                source.find(needle).expect("needle in source"),
+            ),
+        }
+    }
+
+    async fn references_at(
+        backend: &Backend,
+        position: TextDocumentPositionParams,
+    ) -> Vec<Location> {
+        backend
+            .references(ReferenceParams {
+                text_document_position: position,
+                context: ReferenceContext {
+                    include_declaration: true,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn rename_at(
+        backend: &Backend,
+        position: TextDocumentPositionParams,
+        new_name: &str,
+    ) -> Result<Option<WorkspaceEdit>> {
+        backend
+            .rename(RenameParams {
+                text_document_position: position,
+                new_name: new_name.into(),
+                work_done_progress_params: Default::default(),
+            })
+            .await
+    }
+
+    /// Write a plugin tree and start a server on it. Returns the root.
+    fn strict_export_plugin(name: &str, manifest_script: &str, files: &[(&str, &str)]) -> PathBuf {
+        let root = temp_tree(name);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("info.toml"),
+            format!(
+                "[meta]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[script]\n{manifest_script}"
+            ),
+        )
+        .unwrap();
+        for (rel, source) in files {
+            fs::write(root.join("src").join(rel), source).unwrap();
+        }
+        root
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rename_handlers_refuse_a_strict_export_symbol_from_an_own_module_file() {
+        // From Main.as the exported name resolves to NOTHING — the game
+        // rejects the call outright — so there is no symbol to rename and
+        // no reference to report.
+        let main = "void Main() { SendEvent(); }\n";
+        let root = strict_export_plugin(
+            "rename-strict-export",
+            "module = \"T\"\nexports = [\"Exports_Bodies.as\"]\n",
+            &[
+                ("Main.as", main),
+                ("Exports_Bodies.as", "void SendEvent() {}\n"),
+            ],
+        );
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .await
+            .expect("initialize");
+        let uri = open_document(backend, &root.join("src/Main.as"), main).await;
+        let position = text_position_params(uri, main, "SendEvent");
+
+        assert!(
+            backend.prepare_rename(position.clone()).await.is_err(),
+            "a strict export is invisible from Main.as"
+        );
+        assert!(
+            rename_at(backend, position.clone(), "RenamedEvent")
+                .await
+                .is_err(),
+            "rename must agree with prepareRename"
+        );
+        assert!(
+            references_at(backend, position).await.is_empty(),
+            "an unresolved strict call has no references"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_strict_export_declaration_renames_within_its_own_file() {
+        // ALLOWED, and the probe is why. The refusal this test replaces was
+        // justified as "the rename would rewrite only the declaration and
+        // leave callers broken" — but there can BE no own-file caller: the
+        // game rejects one, and the export file is not compiled into the
+        // defining plugin at all. Inside the plugin the rename is complete.
+        //
+        // The remaining objection is that other plugins consume the
+        // surface. That is equally true of `shared_exports`, which the
+        // test below requires to stay renameable, and the server cannot
+        // see any consumer of either. Refusing here would make the most
+        // common legitimate rename impossible while claiming a safety
+        // property the server has never had.
+        let export = "void SendEvent() {}\n";
+        let root = strict_export_plugin(
+            "rename-strict-export-decl",
+            "module = \"T\"\nexports = [\"Exports_Bodies.as\"]\n",
+            &[
+                ("Main.as", "void Main() {}\n"),
+                ("Exports_Bodies.as", export),
+            ],
+        );
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .await
+            .expect("initialize");
+        let export_path = root.join("src/Exports_Bodies.as");
+        let export_uri = open_document(backend, &export_path, export).await;
+        let position = text_position_params(export_uri.clone(), export, "SendEvent");
+
+        assert!(
+            backend.prepare_rename(position.clone()).await.is_ok(),
+            "a file always sees its own declarations"
+        );
+        let edit = rename_at(backend, position.clone(), "RenamedEvent")
+            .await
+            .expect("the declaration is renameable")
+            .expect("a rename carries an edit");
+        let changes = edit.changes.expect("a rename must carry changes");
+        assert_eq!(
+            changes.keys().collect::<Vec<_>>(),
+            vec![&export_uri],
+            "the edit must be confined to the export file"
+        );
+
+        // NOT empty. An empty reference list is a positive claim the user
+        // acts on by deleting the declaration, and it would be false even
+        // about the declaration itself. What the server can honestly
+        // report is what it can see: this plugin's occurrences. It cannot
+        // express "a consumer plugin I cannot see may call this" — no
+        // list can, and returning nothing does not say it either.
+        let refs = references_at(backend, position).await;
+        assert_eq!(refs.len(), 1, "the declaration itself, got {refs:?}");
+        assert_eq!(refs[0].uri, export_uri);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_strict_export_rename_leaves_a_same_named_own_module_symbol_alone() {
+        // The game accepts `SendEvent` declared in BOTH the own module and
+        // a strict export file (probe, 2026-08-30) — they are separate
+        // modules. So each rename must stay inside its own module's view.
+        let main = "void SendEvent() {}\nvoid Main() { SendEvent(); }\n";
+        let export = "void SendEvent() {}\n";
+        let root = strict_export_plugin(
+            "rename-strict-export-collision",
+            "module = \"T\"\nexports = [\"Exports_Bodies.as\"]\n",
+            &[("Main.as", main), ("Exports_Bodies.as", export)],
+        );
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .await
+            .expect("initialize");
+        let main_uri = open_document(backend, &root.join("src/Main.as"), main).await;
+        let export_uri = open_document(backend, &root.join("src/Exports_Bodies.as"), export).await;
+
+        let export_edit = rename_at(
+            backend,
+            text_position_params(export_uri.clone(), export, "SendEvent"),
+            "RenamedExport",
+        )
+        .await
+        .expect("export declaration is renameable")
+        .expect("edit")
+        .changes
+        .expect("changes");
+        assert_eq!(
+            export_edit.keys().collect::<Vec<_>>(),
+            vec![&export_uri],
+            "renaming the export must not touch the own module's own SendEvent"
+        );
+
+        let main_edit = rename_at(
+            backend,
+            text_position_params(main_uri.clone(), main, "SendEvent"),
+            "RenamedOwn",
+        )
+        .await
+        .expect("own declaration is renameable")
+        .expect("edit")
+        .changes
+        .expect("changes");
+        assert_eq!(
+            main_edit.keys().collect::<Vec<_>>(),
+            vec![&main_uri],
+            "renaming the own-module symbol must not touch the export file"
+        );
+        assert_eq!(
+            main_edit[&main_uri].len(),
+            2,
+            "the own declaration and its own call site"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_strict_export_rename_reaches_a_sibling_export_file() {
+        // Export files compile TOGETHER into a consumer: in the
+        // two-plugin probe a consumer called `AFn` and `BFn` from two
+        // different export files unqualified, and `Exports_B.as`'s call to
+        // `Exports_A.as`'s `AFn` ran. So the export surface is one module
+        // and a rename inside it must reach the whole of it — while still
+        // leaving the own module's homonym alone.
+        let a = "void AFn() {}\n";
+        let b = "void BFn() { AFn(); }\n";
+        let root = strict_export_plugin(
+            "rename-strict-export-siblings",
+            "module = \"T\"\nexports = [\"Exports_A.as\", \"Exports_B.as\"]\n",
+            &[
+                ("Main.as", "void AFn() {}\nvoid Main() { AFn(); }\n"),
+                ("Exports_A.as", a),
+                ("Exports_B.as", b),
+            ],
+        );
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .await
+            .expect("initialize");
+        let a_uri = open_document(backend, &root.join("src/Exports_A.as"), a).await;
+        let b_uri = open_document(backend, &root.join("src/Exports_B.as"), b).await;
+        let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
+        let position = text_position_params(a_uri.clone(), a, "AFn");
+
+        let changes = rename_at(backend, position.clone(), "RenamedA")
+            .await
+            .expect("renameable")
+            .expect("edit")
+            .changes
+            .expect("changes");
+        let mut touched: Vec<&Url> = changes.keys().collect();
+        touched.sort_by_key(|u| u.as_str().to_string());
+        let mut want = vec![&a_uri, &b_uri];
+        want.sort_by_key(|u| u.as_str().to_string());
+        assert_eq!(touched, want, "both export files, and only those");
+        assert!(
+            !changes.contains_key(&main_uri),
+            "the own module's own AFn is a different symbol"
+        );
+
+        let mut ref_uris: Vec<String> = references_at(backend, position)
+            .await
+            .into_iter()
+            .map(|l| l.uri.to_string())
+            .collect();
+        ref_uris.sort();
+        ref_uris.dedup();
+        assert_eq!(
+            ref_uris,
+            vec![a_uri.to_string(), b_uri.to_string()],
+            "the declaration and the sibling export's call"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn own_module_references_stop_at_the_strict_export_boundary() {
+        // The read-only twin of the collision case: a homonym across the
+        // boundary must not be reported as a reference to this symbol.
+        // Reporting it would be the false positive B049 exists to remove,
+        // pointed inward instead of at a dependency plugin.
+        let main = "void SendEvent() {}\nvoid Main() { SendEvent(); }\n";
+        let root = strict_export_plugin(
+            "references-strict-export-boundary",
+            "module = \"T\"\nexports = [\"Exports_Bodies.as\"]\n",
+            &[
+                ("Main.as", main),
+                ("Exports_Bodies.as", "void SendEvent() {}\n"),
+            ],
+        );
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .await
+            .expect("initialize");
+        let main_uri = open_document(backend, &root.join("src/Main.as"), main).await;
+        let refs = references_at(
+            backend,
+            text_position_params(main_uri.clone(), main, "SendEvent"),
+        )
+        .await;
+        assert_eq!(refs.len(), 2, "the declaration and its call, got {refs:?}");
+        assert!(
+            refs.iter().all(|r| r.uri == main_uri),
+            "no reference may name the export file, got {refs:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rename_handlers_keep_shared_export_symbols_visible() {
+        // `shared_exports` are compiled into the defining plugin too
+        // (probe: a call from Main.as is clean), so the whole workspace
+        // edit is the normal one.
+        let main = "void Main() { SharedFn(); }\n";
+        let root = strict_export_plugin(
+            "rename-shared-export",
+            "module = \"T\"\nshared_exports = [\"Shared.as\"]\n",
+            &[("Main.as", main), ("Shared.as", "void SharedFn() {}\n")],
+        );
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .await
+            .expect("initialize");
+        let uri = open_document(backend, &root.join("src/Main.as"), main).await;
+        let position = text_position_params(uri.clone(), main, "SharedFn");
+
+        assert!(backend.prepare_rename(position.clone()).await.is_ok());
+        let changes = rename_at(backend, position.clone(), "VisibleFn")
+            .await
+            .unwrap()
+            .unwrap()
+            .changes
+            .unwrap();
+        assert!(changes.contains_key(&uri), "the call site must be edited");
+        assert!(
+            changes.contains_key(&Url::from_file_path(root.join("src/Shared.as")).unwrap()),
+            "the shared-export declaration must be edited"
+        );
+        assert_eq!(
+            references_at(backend, position).await.len(),
+            2,
+            "the shared declaration plus its call"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

@@ -348,6 +348,83 @@ impl AnalysisSnapshot {
             .collect()
     }
 
+    /// True when `fid` is one of this plugin's strict `[script] exports`
+    /// files — compiled into CONSUMERS only.
+    fn is_strict_export_file(&self, fid: usize) -> bool {
+        let Some(f) = self.files.get(fid) else {
+            return false;
+        };
+        let canonical = f.path.canonicalize().unwrap_or_else(|_| f.path.clone());
+        self.strict_export_paths.contains(&canonical)
+    }
+
+    /// The own files a rename / find-references request originating in
+    /// `from` may look at — its MODULE, not the whole plugin.
+    ///
+    /// A plugin with strict `[script] exports` compiles as two separate
+    /// units, and the live probe (2026-08-30) pins both halves:
+    ///
+    /// * The own module cannot see an export file's declarations at all —
+    ///   a call to one is `No matching symbol`, an unresolved name or even
+    ///   a syntax error inside an export file leaves the plugin compiling
+    ///   and running, and the same spelling may be declared on BOTH sides
+    ///   with no collision. So the two sides' same-named symbols are
+    ///   DIFFERENT symbols and a rename must never cross between them.
+    /// * The export files compile together into a consumer, unqualified: a
+    ///   consumer plugin called `AFn` and `BFn` from two different export
+    ///   files, and `Exports_B.as`'s call to `Exports_A.as`'s `AFn` ran.
+    ///   So a rename from inside one export file must reach its siblings.
+    ///
+    /// With no strict exports there is one module, and this is
+    /// [`Self::own_uri_map`].
+    pub fn own_uri_map_for_module_of(
+        &self,
+        from: FileRef<'_>,
+    ) -> HashMap<usize, (Url, &DocumentAnalysis)> {
+        let map = self.own_uri_map();
+        if self.strict_export_paths.is_empty() {
+            return map;
+        }
+        let from_export = match from {
+            FileRef::Path(p) => self.file_id_of_path(p),
+            FileRef::Uri(u) => self.file_id_of(u),
+        }
+        .is_some_and(|fid| self.is_strict_export_file(fid));
+        map.into_iter()
+            .filter(|(fid, _)| self.is_strict_export_file(*fid) == from_export)
+            .collect()
+    }
+
+    /// The symbol view for the same request: the module `from` belongs to.
+    /// Everything outside it is hidden, so a same-named symbol on the
+    /// other side of the export boundary cannot be mistaken for this one.
+    /// See [`Self::own_uri_map_for_module_of`] for the game evidence.
+    pub fn table_for_module_of(&self, from: FileRef<'_>) -> std::borrow::Cow<'_, SymbolTable> {
+        if self.strict_export_paths.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.symbols);
+        }
+        let from_export = match from {
+            FileRef::Path(p) => self.file_id_of_path(p),
+            FileRef::Uri(u) => self.file_id_of(u),
+        }
+        .is_some_and(|fid| self.is_strict_export_file(fid));
+        if !from_export {
+            // The own-module view already hides every strict export.
+            return match self.own_module_symbols.as_ref() {
+                Some(own) => std::borrow::Cow::Borrowed(own),
+                None => std::borrow::Cow::Borrowed(&self.symbols),
+            };
+        }
+        // The export module: hide everything that is NOT a strict export.
+        let mut export_only = self.symbols.clone();
+        for fid in 0..self.files.len() {
+            if !self.is_strict_export_file(fid) {
+                export_only.hide_file(fid);
+            }
+        }
+        std::borrow::Cow::Owned(export_only)
+    }
+
     /// Analysis for one file, looked up by URI.
     pub fn analysis_of(&self, uri: &Url) -> Option<&DocumentAnalysis> {
         self.file_entry_of(uri).map(|f| &f.analysis)

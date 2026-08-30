@@ -1,0 +1,9 @@
+[meta]
+name     = "Issue Repro B055 - Strict Export Invisible To Own Module"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]
+module  = "T"
+exports = ["Exports_Bodies.as"]

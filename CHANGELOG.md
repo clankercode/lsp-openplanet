@@ -99,6 +99,24 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **Rename and find-references stop at the strict-export boundary (B055)** —
+  a plugin with strict `[script] exports` compiles as two units that cannot
+  see each other, and the same name may legally be declared on both sides.
+  Rename and find-references used the whole plugin, so a rename of the
+  own-module `SendEvent` also rewrote the unrelated `SendEvent` in the export
+  file, and each was reported as a reference to the other. Each request now
+  stays inside the module the requesting file belongs to — and a rename from
+  inside one export file does reach its siblings, because export files
+  compile together into a consumer. Verified by live game probe, not by
+  argument; the fixtures under `tests/fixtures/issue-repros/b055-*` record
+  what the game does.
+
+  Renaming a strict-export declaration at its declaration site is ALLOWED.
+  There can be no own-file caller to leave broken — the game rejects one —
+  and refusing would have made the most common legitimate rename of a
+  plugin's public API impossible while claiming a cross-plugin safety
+  property the server has never had for `shared_exports` either.
+
 - **Interface members are visible to every language feature (B054)** — the
   symbol table registered an interface as one symbol and never descended into
   its methods, so no `I::method` symbol existed at all. Hover on an
