@@ -8487,23 +8487,46 @@ void Main() {
         );
     }
 
-    /// B059 regression fence for GH #21: `MwAddRef`/`MwRelease` moved onto
-    /// the shared injected-method table, so re-assert the arity rule the
-    /// table now applies to them too. (Silence for the 0-arg form is
-    /// covered by `mw_addref_release_on_mwnod_stays_silent`.)
+    /// B059, DELIBERATE behaviour change beyond the ticket's scope: moving
+    /// `MwAddRef`/`MwRelease` onto the shared table means the table's arity
+    /// now applies to them. `nod.MwAddRef(1)` used to be `UndefinedMember`
+    /// and, once the name was accepted, would have gone silent — a false
+    /// NEGATIVE, since the DLL declares both as `void M()` with no
+    /// parameters and the game rejects the call. Pinned here on BOTH
+    /// universal methods and on a subclass receiver so it is inherited on
+    /// purpose rather than by accident.
+    ///
+    /// Silence for the legal 0-arg form stays covered by
+    /// `mw_addref_release_on_mwnod_stays_silent`.
     #[test]
-    fn injected_mw_addref_wrong_arity_still_errors() {
+    fn injected_universal_methods_wrong_arity_still_errors() {
         let diags = check_with_typedb(
             r#"
-            void Use(CMwNod@ nod) {
+            void Use(CMwNod@ nod, CGameCtnBlockInfo@ bi) {
                 nod.MwAddRef(1);
+                nod.MwRelease(1);
+                bi.MwAddRef(1, 2);
             }
             "#,
         );
         assert_eq!(
             arg_count_mismatches(&diags, "MwAddRef").len(),
+            2,
+            "1-arg and 2-arg MwAddRef must fire ArgCountMismatch, got {:?}",
+            diags
+        );
+        assert_eq!(
+            arg_count_mismatches(&diags, "MwRelease").len(),
             1,
-            "1-arg MwAddRef must fire ArgCountMismatch, got {:?}",
+            "1-arg MwRelease must fire ArgCountMismatch, got {:?}",
+            diags
+        );
+        // The name is still accepted — this is an arity error, not a
+        // reversal of GH #21.
+        assert!(
+            undefined_members_named(&diags, "MwAddRef").is_empty()
+                && undefined_members_named(&diags, "MwRelease").is_empty(),
+            "arity checking must not re-introduce UndefinedMember, got {:?}",
             diags
         );
     }

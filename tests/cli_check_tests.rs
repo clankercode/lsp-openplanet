@@ -4532,10 +4532,43 @@ fn check_manifest_export_rules_follow_the_search_path_flag() {
 /// from becoming a B006 widening. On the merge-base binary all 8 lines
 /// errored; only the 4 fences may error now.
 ///
-/// Runtime-registration ground truth — static analysis of Openplanet.dll
-/// 1.29.5 (next, Public, 1234ad9e), documented in the probe above. This
-/// fixture asserts the corresponding checker diagnostics; it is not a
-/// separately recorded RemoteBuild probe.
+/// Ground truth from BOTH directions, which is the point — the registration
+/// surface came from static analysis of `Openplanet.dll` 1.29.5 (next,
+/// Public, 1234ad9e), and the live compiler was then asked independently so
+/// the binary reading is not the only witness.
+///
+/// RemoteBuild probe, Trackmania + Openplanet 1.29.5, 2026-08-30, this
+/// fixture: game answers 4 ERR, exactly the four fences, with the legal half
+/// silent —
+///   (41,19) No matching symbol 'GetCurrentEntityID'          [wrong receiver]
+///   (43,22) No matching symbol 'GetManialinkPages'           [wrong receiver]
+///   (45,22) No matching signatures to
+///           'CSmPlayer::GetCurrentEntityID(const int)'       [arity]
+///   (47,22) No matching symbol 'GetCurrentEntityIdd'         [typo]
+///
+/// The arity line is why `MwAddRef`/`MwRelease` joining the shared table and
+/// gaining arity checking is correct rather than scope creep: the game
+/// rejects a wrong-arity call on an injected method, and we used to be
+/// silent.
+///
+/// Return types were established in the REJECT direction rather than assumed
+/// from silence — a companion probe compiled `string s = <call>;` so the
+/// compiler had to NAME the type it refused to convert:
+///   'uint' to 'string'                        => GetCurrentEntityID -> uint
+///   'CGameManialinkPage@[]@&' to 'string'     => GetManialinkPages
+/// `CGameManialinkPage@[]@` IS `array<CGameManialinkPage@>@` in the other
+/// spelling; the trailing `&` is AngelScript rendering the expression in an
+/// error, not part of the registered declaration, which is byte-exactly
+/// `array<CGameManialinkPage@>@ GetManialinkPages()` in `.rdata`. The old
+/// `convert_nadeo.ts` said `CGameManialinkPage@[]&` — a REFERENCE to an
+/// array rather than a HANDLE to one, which is the part that was wrong.
+///
+/// All six receivers were confirmed by a paired discriminator: each of
+/// `CGameNetwork`, `CGameCtnNetwork`, `CGameManiaPlanetNetwork`,
+/// `CTrackManiaNetwork`, `CGamePlayer`, `CSmPlayer` accepted its real call
+/// while rejecting `ZZZNoSuchMember` with `No matching symbol`. The rejection
+/// is what makes the acceptance mean something — it proves member lookup
+/// actually runs on that receiver.
 #[test]
 fn check_command_issue_repro_b059_injected_methods_silences_only_the_legal_half() {
     let (_, stdout, stderr) = run_issue_repro_typedb("b059-injected-methods");
