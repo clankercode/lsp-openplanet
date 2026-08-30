@@ -37,6 +37,21 @@ GitHub Release body to match this section (gh release edit).
   Read-only, and a query rather than a fifth `executeCommand`. Registered in
   `server::build_service`, the single constructor `run_stdio` uses.
 
+- **Quick fix for the `WithRunContext` migration** (B048) — `awaitable.WithRunContext`
+  compiles clean but discards the run context at runtime, and the warning for
+  it now comes with an edit. The migration is a call restructure, not a
+  rename: `startnew(Worker).WithRunContext(ctx)` becomes
+  `Meta::StartWithRunContext(ctx, Worker)`, with the run context first and
+  every `startnew` argument following in its original order (signature taken
+  from the shipped Openplanet type DB, not from an example).
+
+  The fix is withheld — the warning still fires — wherever the coroutine
+  cannot be read off the source: a receiver that is not a `startnew(...)`
+  call (a stored handle, a function result), a named argument in either call,
+  an unexpected argument count, and a boolean userdata, for which
+  `Meta::StartWithRunContext` has no overload. A wrong rewrite here would
+  silently drop the coroutine, so anything unrecognised offers nothing.
+  Never applied by `source.fixAll.openplanet`.
 - **Quick fixes for unused declarations** (B036) — an unused local or
   parameter now offers an edit, not just a squiggle. Prefixing the name with
   `_` is offered for both and is the preferred fix for a **parameter**, where
@@ -351,6 +366,23 @@ GitHub Release body to match this section (gh release edit).
   `game_target` is the intended way to pick a game.
 
 ### Changed
+- **`source.fixAll.openplanet` now prefixes unused LOCALS with `_` (B047)** —
+  previously no unused-declaration fix could be applied on save at all,
+  because that producer sat outside the fix registry. Now that it is a
+  registry family it can be batched, and the `_` prefix for a local is:
+  mechanical, reversible, and changes no API surface. Two things are still
+  never applied on save — **removing** a declaration, which is lossy, and
+  prefixing a **parameter**, which renames part of the callable API since
+  AngelScript has named arguments. Both remain available as ordinary quick
+  fixes. Only affects users who opted into `source.fixAll.openplanet` in
+  `editor.codeActionsOnSave`; it is never applied by default.
+- **Quick fixes for unused declarations and misspelled names now follow the
+  same rules as every other quick fix (B047)** — they are scoped to the range
+  the editor asked about, and their edit is computed when the action is picked
+  rather than for every action in the menu. Previously these two were wired
+  into the request handler by hand, outside the fix registry, so they ignored
+  the requested range and always computed their edits up front. Same fixes,
+  same edits; only when and where they are offered has changed.
 - **DEFAULT CHANGE: the analysis profile is now a windows/64 client (B028)** —
   the LSP used to define `MANIA64`, `MANIA32`, `WINDOWS`, `WINDOWS_WINE`,
   `LINUX`, `SERVER`, `LOGS`, `HAS_DEV` and `DEVELOPER` ALL at once, so

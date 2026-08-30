@@ -14,9 +14,14 @@
 //! coroutine as an argument, so the receiver has to move into the call.
 //! Swapping the member span there would emit
 //! `Meta::StartWithRunContext(ctx)` and silently drop the coroutine, so this
-//! family offers nothing for it — the diagnostic is still published, it just
-//! carries no action. Offering a fix we cannot make is worse than offering
-//! none.
+//! family offers nothing for it. Offering a fix we cannot make is worse than
+//! offering none.
+//!
+//! That migration is not unfixable, only un-renameable: since B048 it is
+//! offered as a call restructure by [`super::with_run_context`], a separate
+//! family claiming the same diagnostic. The division is by SHAPE of edit —
+//! this family writes member renames and nothing else, which is what keeps
+//! it a span swap plus a validity check.
 //!
 //! The edited span is recovered from the token stream rather than by
 //! scanning text: both producers anchor the diagnostic on the whole member
@@ -529,13 +534,18 @@ mod tests {
 
     /// End-to-end, the way the editor drives it: ask
     /// `textDocument/codeAction` at the DIAGNOSTIC'S OWN RANGE for the real
-    /// `awaitable.WithRunContext` finding, and assert that NO action comes
-    /// back. That is this family's actual behaviour today — every producer
-    /// in the tree sets `replacement: None` — and asserting it through the
-    /// handler is what proves the "never offer a fix you cannot make" rule
-    /// holds where the user meets it, not just inside `describe`.
+    /// `awaitable.WithRunContext` finding, and assert that no RENAME comes
+    /// back. Every producer in the tree sets `replacement: None`, and
+    /// asserting it through the handler is what proves the "never offer a
+    /// fix you cannot make" rule holds where the user meets it, not just
+    /// inside `describe`.
+    ///
+    /// Since B048 the client is not left with nothing here — the migration
+    /// is offered as a call restructure by `super::with_run_context`, whose
+    /// own `the_rename_family_offers_nothing_for_this_diagnostic` asserts
+    /// the same division from the other side.
     #[test]
-    fn requesting_at_the_diagnostic_range_offers_no_action_for_the_real_finding() {
+    fn requesting_at_the_diagnostic_range_offers_no_rename_for_the_real_finding() {
         use crate::server::code_actions::{code_actions, CodeActionRequest};
         use crate::server::diagnostics::span_to_range;
         use tower_lsp::lsp_types::{CodeActionContext, CodeActionOrCommand};
@@ -568,11 +578,17 @@ mod tests {
             CodeActionOrCommand::CodeAction(action) => Some(action.title),
             CodeActionOrCommand::Command(_) => None,
         })
-        .filter(|title| title.contains("WithRunContext"))
         .collect();
         assert!(
-            titles.is_empty(),
-            "the migration is not a span swap, so nothing may be offered; got {titles:?}"
+            !titles.iter().any(|title| title.starts_with("Replace `")),
+            "the migration is not a span swap, so no rename may be offered; got {titles:?}"
+        );
+        // Not vacuous: the handler really did reach this diagnostic.
+        assert!(
+            titles
+                .iter()
+                .any(|title| title.contains("Meta::StartWithRunContext")),
+            "test premise: the restructure family answers this finding; got {titles:?}"
         );
     }
 

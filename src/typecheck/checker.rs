@@ -2142,7 +2142,11 @@ impl<'a> Checker<'a> {
                     // argument, so migrating `startnew(W).WithRunContext(c)`
                     // moves the receiver into the call. Swapping the member
                     // span would emit `Meta::StartWithRunContext(c)` and
-                    // silently drop the coroutine, so no fix is offered.
+                    // silently drop the coroutine. The migration is offered
+                    // as a CALL RESTRUCTURE instead, by the
+                    // `with_run_context` fix family (B048), which reads the
+                    // shape off the AST — this field stays `None` because
+                    // it means "a span swap is correct", and here it is not.
                     replacement: None,
                 },
             });
@@ -3457,7 +3461,11 @@ impl<'a> Checker<'a> {
                             hint: "Meta::StartWithRunContext".to_string(),
                             // Same reasoning as the member-access site: the
                             // migration moves the receiver into the call, so
-                            // there is no correct span swap.
+                            // there is no correct span swap. The
+                            // `with_run_context` family (B048) restructures
+                            // the call instead; this is the site it reads,
+                            // and `span` is the member EXPRESSION it anchors
+                            // its search on.
                             replacement: None,
                         },
                     });
