@@ -1757,10 +1757,11 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
 ///
 /// The fixture pins BOTH sides of the line, because a fix that silences more
 /// than it should is indistinguishable from a correct one until something
-/// pins the boundary. Master reports 44 errors across the three files, 31 of
+/// pins the boundary. Master reports 45 errors across the fixture, 32 of
 /// them false; the 11 true ones must survive, and the fix adds 2 more that
 /// master misses (a funcdef handle into a `uint` slot from a plain global,
-/// and a `uint` property value into a delegate ctor) — 13 asserted below.
+/// and a `uint` property value into a delegate ctor), plus 2 a namespaced
+/// funcdef masked by a same-named global class — 15 asserted below.
 /// The neighbouring case of every silenced line must keep erroring, notably
 /// `startnew(BadHandler)`, a funcdef-handle property of the WRONG signature
 /// sitting right beside the three right-signature ones this fix silences,
@@ -1784,6 +1785,12 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         "Variants.as:75", // reads above sweep — uint64, const string&in,
         "Variants.as:76", // a 2-overload set, and a bool-carrying set
         "Variants.as:77",
+        // A global class shadows the bare name, but inside `Nq` the name
+        // means that namespace's own `void(int)` funcdef — which binds
+        // neither a `uint` slot nor `startnew`'s `void()`. Master misses
+        // both: it tested one name for shadowing and looked up another.
+        "Shadowing.as:116",
+        "Shadowing.as:117",
     ];
     assert_eq!(
         errors.len(),
@@ -1863,6 +1870,11 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         "Shadowing.as:89",
         "Shadowing.as:90",
         "Shadowing.as:91",
+        // Tail-visible shadowing: `Dep::CoroutineFuncUserdataString` is
+        // declared in ShadowingDep.as and written here unqualified, so the
+        // predicate has to consult the tail table as the resolver does.
+        "Shadowing.as:100",
+        "Shadowing.as:101",
     ] {
         assert!(
             !errors.iter().any(|e| e.contains(line)),

@@ -90,3 +90,30 @@ void SUse() {
     Text::Format("%d", ControlAliasP);
     Text::Format("%d", controlAlias);
 }
+
+// Tail-visible shadowing: `Dep::CoroutineFuncUserdataString` lives in
+// ShadowingDep.as and is written here unqualified.
+CoroutineFuncUserdataString@ tailShadow;
+CoroutineFuncUserdataString@ get_TailShadowP() { return tailShadow; }
+
+void TailUse() {
+    Text::Format("%d", TailShadowP);
+    Text::Format("%d", tailShadow);
+}
+
+// The other direction, and the reason the ladder must resolve ONE candidate
+// rather than test one name and look up another: a global class shadows the
+// bare name, but inside `Nq` the name means the namespace's own funcdef.
+// Both lines below are REAL errors — a `void(int)` handle binds neither a
+// `uint` slot nor `startnew`'s `void()` — and master misses both.
+class ProcIntercept {
+    int v;
+}
+namespace Nq {
+    funcdef void ProcIntercept(int);
+    ProcIntercept@ nqCb;
+    void NqUse() {
+        Text::Format("%d", nqCb);
+        startnew(nqCb);
+    }
+}

@@ -2614,26 +2614,32 @@ impl<'a> Checker<'a> {
             // `Nz::CoroutineFunc` reaches here as a bare `CoroutineFunc`
             // from inside `namespace Nz` and an exact-name guard misses it.
             TypeRepr::Named(n) => {
-                if self.workspace_shadows_funcdef_in_scope(n) {
+                let candidate = self.resolve_value_type_name(n);
+                if self.scope.workspace_shadows_funcdef(&candidate) {
                     return None;
                 }
-                self.scope.lookup_funcdef(n)
+                self.scope.lookup_funcdef(&candidate)
             }
             _ => None,
         }
     }
 
-    /// [`GlobalScope::workspace_shadows_funcdef`] over the enclosing
-    /// namespaces, innermost first, then the name as written.
-    fn workspace_shadows_funcdef_in_scope(&self, name: &str) -> bool {
-        if self.scope.workspace_shadows_funcdef(name) {
-            return true;
+    /// Resolve a value's written type name in lexical order — innermost
+    /// enclosing namespace outwards, then the name as written — and return
+    /// the ONE candidate the rest of the decision uses.
+    ///
+    /// Resolving once matters: testing `Ns::X` for shadowing and then
+    /// looking `X` up as a funcdef answers two questions about two different
+    /// declarations, which is how a global `class CoroutineFunc` could mask
+    /// a legitimate `Ns::CoroutineFunc` funcdef (review, round 3).
+    fn resolve_value_type_name(&self, name: &str) -> String {
+        for depth in (1..=self.namespace_stack.len()).rev() {
+            let candidate = format!("{}::{}", self.namespace_stack[..depth].join("::"), name);
+            if !self.scope.lookup_workspace(&candidate).is_empty() {
+                return candidate;
+            }
         }
-        (1..=self.namespace_stack.len()).rev().any(|depth| {
-            let ns = self.namespace_stack[..depth].join("::");
-            self.scope
-                .workspace_shadows_funcdef(&format!("{ns}::{name}"))
-        })
+        name.to_string()
     }
 
     /// A funcdef signature as an `OverloadSig` for the shared bind test.

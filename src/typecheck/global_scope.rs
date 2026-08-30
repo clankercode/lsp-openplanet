@@ -1511,11 +1511,25 @@ impl<'a> GlobalScope<'a> {
     /// `typedef` counts as shadowing even though it reuses
     /// `SymbolKind::Funcdef`, because it is a type alias rather than a
     /// callable signature.
+    /// The tail half matters as much as the exact one: the resolver already
+    /// finds an unqualified name through [`Self::lookup_workspace_tail`]
+    /// (see `resolve_unqualified`), so `namespace Dep { class CoroutineFunc }`
+    /// declared in another file shadows a bare `CoroutineFunc` too. Tail hits
+    /// that are really CLASS MEMBERS are skipped, exactly as
+    /// [`Self::has_global_ident`] skips them (GH #30).
     pub fn workspace_shadows_funcdef(&self, name: &str) -> bool {
-        self.lookup_workspace(name).iter().any(|s| match &s.kind {
+        let shadows = |s: &&Symbol| match &s.kind {
             SymbolKind::Funcdef { is_typedef, .. } => *is_typedef,
             _ => true,
-        })
+        };
+        if self.lookup_workspace(name).iter().any(shadows) {
+            return true;
+        }
+        let suffix = format!("::{}", name);
+        self.lookup_workspace_tail(name)
+            .iter()
+            .filter(|s| !self.tail_prefix_is_class_member(&s.name, &suffix))
+            .any(shadows)
     }
 
     /// True when `name` names a workspace interface symbol. The interface
