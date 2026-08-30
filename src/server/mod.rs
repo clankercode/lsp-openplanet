@@ -2111,6 +2111,28 @@ impl Backend {
         match TypeIndex::load(&core, &game) {
             Ok(index) => {
                 let count = index.type_count() + index.function_count() + index.enum_count();
+                // KNOWN RACE, deliberate, tracked as B064.
+                //
+                // The index and its stamps live behind two separate locks and
+                // are written non-atomically, and `after` re-reads the files
+                // that `TypeIndex::load` just parsed. So two regenerations
+                // fired at once — or a dump rewritten in the microseconds
+                // between the load and the probe — can report stamps that do
+                // not describe the index actually loaded.
+                //
+                // Left alone because the blast radius is a wrong REPORT, not
+                // wrong analysis: diagnostics always come from whatever index
+                // is in `type_index`, whatever this says about it. Reaching it
+                // needs deliberately double-fired palette invocations.
+                //
+                // DO NOT "fix" this by taking the two write locks in a fixed
+                // order. That serialises writers and reads like a fix, but
+                // every reader still takes one lock at a time, so a torn read
+                // survives untouched. The only real fix is collapsing both
+                // into one lock (`RwLock<Option<LoadedTypeDb>>`), which is a
+                // mechanical change across ~10 read sites — B064's job, not
+                // B039's. `TypeIndex` does not retain the stamps it parsed,
+                // which is why `after` has to be a second read at all.
                 *self.type_index.write().await = Some(Arc::new(index));
                 let after = TypeDbVersions::probe(&core, &game);
                 *self.type_db_versions.write().await = Some(after.clone());

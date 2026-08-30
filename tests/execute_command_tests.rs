@@ -41,16 +41,51 @@ use openplanet_lsp::server::{build_service, Backend};
 
 const METHOD: &str = "workspace/executeCommand";
 
+/// The fixture directory for one test, removed when the test ends.
+///
+/// The `Drop` is the point. Keying the directory on the pid and clearing it
+/// only at START — which is what this did first — leaves a full set behind on
+/// every single run: 135 stray `/tmp/oplsp-b039-*` directories had piled up on
+/// one machine before anyone looked. On a shared /tmp that a whole batch of
+/// lanes builds into, a suite that litters per invocation is not merely untidy.
+///
+/// Dropping also runs while a failing test unwinds, so a red run cleans up
+/// too. Nothing here needs post-mortem inspection of the tree: every assertion
+/// carries the server's own payload in its message.
+struct Fixture {
+    base: PathBuf,
+    root: PathBuf,
+}
+
+impl Fixture {
+    fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
 /// A plugin root, plus the `OpenplanetNext` dir its config points at.
 ///
 /// Every fixture pins `openplanet_dir` — an EMPTY one when `with_typedb` is
 /// false. Left unset, `LspConfig` auto-detects `$HOME/OpenplanetNext`, so on
 /// a developer machine with the game installed these tests would silently
-/// load that person's real 4000-symbol type database: slow, and a different
-/// answer per machine. The directory is named `OpenplanetNext` so the
-/// variant re-probe (GH #45) sees a matching folder and never reaches for
-/// `$HOME` at all.
-fn fixture(name: &str, with_typedb: bool) -> PathBuf {
+/// load that person's real type database: slow, and a different answer per
+/// machine. The directory is named `OpenplanetNext` so the variant re-probe
+/// (GH #45) sees a matching folder and never reaches for `$HOME` at all.
+///
+/// Worth knowing before trusting any assertion here to prove WHICH database
+/// loaded: it cannot. The fixtures are refreshed from a real install
+/// (`just typedb-refresh`), so the two agree on every stamp AND on the symbol
+/// count — measured, 4276 either way. Nothing in the payload distinguishes
+/// them. The pin above is what keeps the real install out of these tests, and
+/// `just test-hermetic` is what proves the pin is working; no in-test
+/// assertion can substitute for it.
+fn fixture(name: &str, with_typedb: bool) -> Fixture {
     let base = std::env::temp_dir().join(format!("oplsp-b039-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("plugin");
@@ -58,9 +93,12 @@ fn fixture(name: &str, with_typedb: bool) -> PathBuf {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(&op_dir).unwrap();
     if with_typedb {
-        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
-        for file in ["OpenplanetCore.json", "OpenplanetNext.json"] {
-            std::fs::copy(fixtures.join(file), op_dir.join(file)).unwrap();
+        // `Openplanet.h` is NOT optional decoration. `TypeIndex::load` looks
+        // for a header beside the game database and folds it in, so a copy of
+        // just the two .json files is a DIFFERENT database — 4274 symbols
+        // against 4276 — and silently so. Copy the fixture whole.
+        for file in ["OpenplanetCore.json", "OpenplanetNext.json", "Openplanet.h"] {
+            std::fs::copy(typedb_fixture_dir().join(file), op_dir.join(file)).unwrap();
         }
     }
     std::fs::write(
@@ -74,7 +112,32 @@ fn fixture(name: &str, with_typedb: bool) -> PathBuf {
         format!("openplanet_dir = {:?}\n", op_dir.to_str().unwrap()),
     )
     .unwrap();
-    root
+    Fixture { base, root }
+}
+
+fn typedb_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb")
+}
+
+/// How many symbols the SHIPPED fixture database holds, computed by loading
+/// it here rather than hardcoded.
+///
+/// This does NOT prove the server avoided a real install — the fixture is a
+/// refresh of one and matches it symbol for symbol. What it does prove is
+/// that the server loaded the fixture WHOLE, which is not free: the first
+/// version of this fixture copied the two .json files and not the
+/// `Openplanet.h` beside them, and the server then loaded a quietly smaller
+/// database that a `> 0` assertion was perfectly happy with. Derived rather
+/// than pinned to a literal so `just typedb-refresh-apply` cannot red the
+/// suite for doing its job.
+fn fixture_symbol_count() -> usize {
+    let dir = typedb_fixture_dir();
+    let index = openplanet_lsp::typedb::TypeIndex::load(
+        &dir.join("OpenplanetCore.json"),
+        &dir.join("OpenplanetNext.json"),
+    )
+    .expect("the shipped fixture type db loads");
+    index.type_count() + index.function_count() + index.enum_count()
 }
 
 fn init_params(root: &Path) -> InitializeParams {
@@ -160,8 +223,9 @@ async fn execute(service: &mut LspService<Backend>, command: &str) -> Result<Val
 /// any future advertised-but-undispatched command, not just today's.
 #[tokio::test]
 async fn every_advertised_command_is_dispatched() {
-    let root = fixture("gate", false);
-    let (mut service, commands) = boot(&root).await;
+    let fixture = fixture("gate", false);
+    let root = fixture.root();
+    let (mut service, commands) = boot(root).await;
 
     assert!(
         !commands.is_empty(),
@@ -187,13 +251,26 @@ async fn every_advertised_command_is_dispatched() {
 /// pass on a server that answered `Ok(null)` to literally every name.
 #[tokio::test]
 async fn an_unknown_command_is_a_json_rpc_error_not_a_silent_null() {
-    let root = fixture("unknown", false);
-    let (mut service, _commands) = boot(&root).await;
+    let fixture = fixture("unknown", false);
+    let root = fixture.root();
+    let (mut service, _commands) = boot(root).await;
 
     let outcome = execute(&mut service, "openplanet.thisCommandDoesNotExist").await;
     let error = outcome.expect_err(
         "an unadvertised command must be a JSON-RPC error; answering it successfully \
          makes the advertised-command gate meaningless",
+    );
+    // The CODE, not just "some error". A client distinguishes a bad request
+    // from a dead method by the code, and the gate above discriminates
+    // dispatched-from-not on exactly this answer. Asserted through the router
+    // rather than only on `commands::unknown_command_error` in isolation,
+    // because a handler could construct the right error and the router still
+    // rewrite it.
+    assert_eq!(
+        error.code,
+        tower_lsp::jsonrpc::ErrorCode::InvalidParams,
+        "unknown command should be InvalidParams — the method exists, the \
+         `command` parameter names nothing: {error:?}"
     );
     assert!(
         error.message.contains("openplanet.thisCommandDoesNotExist"),
@@ -204,8 +281,9 @@ async fn an_unknown_command_is_a_json_rpc_error_not_a_silent_null() {
 /// A bad command name must not take the server down with it.
 #[tokio::test]
 async fn an_unknown_command_does_not_kill_the_server() {
-    let root = fixture("survives", false);
-    let (mut service, commands) = boot(&root).await;
+    let fixture = fixture("survives", false);
+    let root = fixture.root();
+    let (mut service, commands) = boot(root).await;
 
     let _ = execute(&mut service, "openplanet.nonsense").await;
 
@@ -221,8 +299,9 @@ async fn an_unknown_command_does_not_kill_the_server() {
 /// is the B039 defect happening again.
 #[tokio::test]
 async fn the_advertised_surface_is_exactly_the_documented_one() {
-    let root = fixture("surface", false);
-    let (_service, commands) = boot(&root).await;
+    let fixture = fixture("surface", false);
+    let root = fixture.root();
+    let (_service, commands) = boot(root).await;
     assert_eq!(commands, vec!["openplanet.regenerateTypeDb".to_string()]);
 }
 
@@ -232,8 +311,9 @@ async fn the_advertised_surface_is_exactly_the_documented_one() {
 /// updating Openplanet.
 #[tokio::test]
 async fn regenerate_type_db_reports_the_versions_before_and_after() {
-    let root = fixture("versions", true);
-    let (mut service, _commands) = boot(&root).await;
+    let fixture = fixture("versions", true);
+    let root = fixture.root();
+    let (mut service, _commands) = boot(root).await;
 
     let payload = execute(&mut service, "openplanet.regenerateTypeDb")
         .await
@@ -244,9 +324,13 @@ async fn regenerate_type_db_reports_the_versions_before_and_after() {
         json!(true),
         "regeneration failed against the fixture type db: {payload}"
     );
-    assert!(
-        payload["regenerated"].as_u64().unwrap_or(0) > 0,
-        "no symbols were loaded: {payload}"
+    // Pins that the WHOLE fixture loaded, header included. Not which
+    // database: the fixture and a real install agree on the count as well as
+    // the stamps. See `fixture_symbol_count`.
+    assert_eq!(
+        payload["regenerated"].as_u64().unwrap_or(0),
+        fixture_symbol_count() as u64,
+        "the server loaded a DIFFERENT database than tests/fixtures/typedb: {payload}"
     );
 
     // The fixture stamps, straight out of tests/fixtures/typedb.
@@ -279,8 +363,9 @@ async fn regenerate_type_db_reports_the_versions_before_and_after() {
 /// shown "regenerated".
 #[tokio::test]
 async fn regenerate_type_db_without_configured_paths_reports_why() {
-    let root = fixture("unconfigured", false);
-    let (mut service, _commands) = boot(&root).await;
+    let fixture = fixture("unconfigured", false);
+    let root = fixture.root();
+    let (mut service, _commands) = boot(root).await;
 
     let payload = execute(&mut service, "openplanet.regenerateTypeDb")
         .await
@@ -305,8 +390,9 @@ async fn regenerate_type_db_without_configured_paths_reports_why() {
 /// produces today is a `CodeAction` with `command: None`; this pins that.
 #[tokio::test]
 async fn no_code_action_hands_the_client_a_command_to_send_back() {
-    let root = fixture("codeactions", false);
-    let (mut service, _commands) = boot(&root).await;
+    let fixture = fixture("codeactions", false);
+    let root = fixture.root();
+    let (mut service, _commands) = boot(root).await;
 
     // An unused local: a diagnostic this server offers quick fixes for.
     let file = root.join("src/Main.as");
