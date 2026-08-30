@@ -94,3 +94,40 @@ Measure two binaries on the same machine at the same time.
 ## Related
 B048 (shipped the fix and documented this gap at the site), B047 (the seam),
 B036 (the RemovedApiUsage family that had no live fix until B048), B023, B010.
+
+## Closed by B048, 2026-08-30 — verified, not assumed
+
+Fixed in the same lane, in commit `5d3ad34` ("withhold unsafe run-context
+rewrites"), landed via the B047/B048 merge `281f859`.
+
+The first B048 implementation tested the userdata SYNTACTICALLY (literal,
+`!x`, comparison, logical operator), which is what left a bool VARIABLE
+slipping through — the gap this ticket recorded. The final guard inverts the
+question: `userdata_has_successor_type()` asks the CHECKER to prove the
+expression's recorded type is one of the seven `StartWithRunContext` actually
+accepts, rather than trying to enumerate boolean syntax.
+
+That is STRICTER than this ticket asked for. It withholds:
+- a bool variable (`flag`) — the exact case filed here
+- a bool-returning call (`IsReady()`)
+- a constructor-style cast (`bool(1)`) and `cast<bool>(flag)`
+- a ternary (`flag ? true : false`)
+- **any expression whose type cannot be resolved at all** — it has not proved
+  that any successor overload accepts it, so the safe answer is no edit
+
+Verified in the merged tree rather than taken on report:
+`every_semantically_boolean_userdata_shape_offers_nothing` iterates all five
+shapes above, and `an_unproved_userdata_type_offers_nothing` covers the
+unresolved case. Both assert the DIAGNOSTIC still fires while no fix is
+offered — withholding the fix never hides the finding.
+
+The route this ticket predicted would be cheaper (carry the resolved argument
+type forward on the diagnostic) was not needed; the family reaches the checker
+through `FixContext` directly.
+
+No probe was required after all: the overload asymmetry is readable from the
+shipped type DB (`OpenplanetCore.json`, ns `Meta`) — `startnew` has 9
+overloads including `CoroutineFuncUserdataBool@ func, const bool userdata`
+and `StartWithRunContext` has 8 with no bool counterpart — and the fix is to
+withhold rather than to emit, so no claim about game acceptance is being
+made.
