@@ -4563,6 +4563,15 @@ fn check_manifest_export_rules_follow_the_search_path_flag() {
 /// `convert_nadeo.ts` said `CGameManialinkPage@[]&` — a REFERENCE to an
 /// array rather than a HANDLE to one, which is the part that was wrong.
 ///
+/// That last paragraph decodes a spelling, and a decoding is an inference, so
+/// the `@` was checked directly rather than argued: a fifth probe compiled
+/// `if (net.GetManialinkPages() is null)`, which AngelScript permits only on
+/// a handle. CLEAN. The handle is real, not a reading of an error message.
+/// (It changes no behaviour either way — `parse_type_string` strips a
+/// trailing `&` as a calling-convention decoration, so both spellings give
+/// the same `Handle(Array(Handle(Named)))` — but "it wouldn't have mattered"
+/// is a thing you can only say once you know.)
+///
 /// All six receivers were confirmed by a paired discriminator: each of
 /// `CGameNetwork`, `CGameCtnNetwork`, `CGameManiaPlanetNetwork`,
 /// `CTrackManiaNetwork`, `CGamePlayer`, `CSmPlayer` accepted its real call

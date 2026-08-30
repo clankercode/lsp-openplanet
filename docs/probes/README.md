@@ -90,6 +90,63 @@ Two more traps found the same day:
   (`No matching symbol`), even though `GlassSmash` compiles bare. Do not
   generalise a type-position result to value position, or the reverse.
 
+## Pattern: make the compiler state the fact you need
+
+The hygiene rule above says a REJECT is evidence and an ACCEPT may not be. That
+reads as a constraint on what you can learn. It isn't — it's a constraint on how
+you have to ask.
+
+**If the fact you need sits in the weak direction, find a wrong program whose
+rejection has to state it.**
+
+B059 needed the return type of an Openplanet-injected method. The obvious probe
+is to compile a legal call and see it accepted — but an ACCEPT only says the
+call is legal, and says nothing at all about what it returns. Silence cannot
+name a type. So instead, submit a program that is wrong *because* of the type
+you're asking about:
+
+```angelscript
+string s = player.GetCurrentEntityID();
+```
+
+```
+ERR: Can't implicitly convert from 'uint' to 'string'.
+```
+
+The compiler has to name the source type in order to explain the refusal. The
+answer arrives in the REJECT direction, where the evidence is solid, and it is
+the compiler's own type name rather than your reading of a header, a dump, or a
+disassembly.
+
+The same probe shape settles other invisible facts:
+
+| Fact you want | Wrong program that makes the compiler say it |
+|---|---|
+| return type of `f()` | `string s = f();` — names the real type in the conversion error |
+| whether `T` is a handle | `if (expr is null)` — legal only on a handle; CLEAN answers yes |
+| arity of `f()` | `f(1)` — `No matching signatures to 'C::f(const int)'` prints the signature |
+| whether a receiver resolves at all | `recv.ZZZNoSuchMember()` — a `No matching symbol` proves lookup ran |
+
+That last row is the **paired discriminator** already described above, and it
+generalises: an ACCEPT is only meaningful once you have shown that the same
+receiver, in the same position, *can* produce a rejection. Otherwise you cannot
+distinguish "the compiler checked and approved" from "the compiler never
+looked".
+
+Two limits worth stating, so the pattern isn't over-trusted:
+
+- The compiler prints **expression** types, not declaration text. B059's
+  `GetManialinkPages` came back as `CGameManialinkPage@[]@&` where the
+  registered declaration is `array<CGameManialinkPage@>@` — same type, and the
+  trailing `&` is a by-reference return being rendered, not part of the
+  declaration. If the distinction matters, confirm it with a second probe
+  (the `is null` row above) rather than by decoding the spelling.
+- A rejection tells you what the compiler believes *today*, on *this* install.
+  It bounds behaviour, not intent. For "what is registered, and is that the
+  whole set", static analysis of the binary is the stronger tool — see
+  `openplanet-injected-methods.md`. The two are complements: the binary says
+  what exists, a probe says what the compiler does with it.
+
 ## Reproducing one name by hand
 
 ```
