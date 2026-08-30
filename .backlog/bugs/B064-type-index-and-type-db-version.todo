@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T06:15:27Z"
 depends_on: []
 estimate_hours: 1
 id: B064
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'type_index and type_db_versions are separate locks: a regeneration can report stamps that do not describe the loaded index'
@@ -24,3 +26,62 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Disclosed by the B039 lane 2026-08-30 as a deliberate decision, not found in
+review. Filed so the decision is tracked rather than rediscovered.
+
+## Defect
+
+`Backend` holds two independent locks:
+
+    src/server/mod.rs:124   type_index:       Arc<RwLock<Option<Arc<TypeIndex>>>>
+    src/server/mod.rs:133   type_db_versions: Arc<RwLock<Option<TypeDbVersions>>>
+
+They are written non-atomically (`src/server/mod.rs:1236` and `:1247`), and
+every reader takes one lock at a time. So a reader can observe a NEW index
+paired with STALE stamps, and two concurrent regenerations can interleave to
+leave the pair permanently describing different loads.
+
+## Severity: low, and be honest about why
+
+The consequence is a wrong REPORT, not wrong analysis — diagnostics still come
+from whatever index is loaded. It needs concurrent `openplanet.regenerateTypeDb`
+invocations, which are user-triggered from the palette, so it takes deliberate
+double-firing to hit.
+
+But it is worth fixing eventually because the report is the entire user-visible
+point of B039's change. `before`/`after`/`changed` exists so a user can tell
+whether regenerating actually did anything. A field that can silently describe
+a different load than the one in memory undermines the one thing it is for.
+
+## Work
+
+Hold the stamps and the index under a SINGLE lock so they cannot disagree —
+e.g. one `RwLock<Option<LoadedTypeDb>>` where `LoadedTypeDb { index, versions }`.
+
+Note the cost honestly: `type_index` is read in roughly ten places
+(`mod.rs` :770, :837, :956, :1518 and others), so this is a mechanical refactor
+of every read site, not a two-line change. That is why the B039 lane correctly
+declined to do it inline.
+
+Do NOT 'fix' this by acquiring both write locks in a fixed order. That
+serialises writers but readers still take one lock at a time, so a reader can
+still observe a torn pair. Only a single lock actually closes it.
+
+## Test plan (TDD, red first)
+
+Red: drive two concurrent `regenerateTypeDb` executions against a server whose
+DB changes between them, and assert the reported `after` stamps equal the
+stamps of the index actually loaded. Deterministic reproduction will likely
+need an injected pause between the two writes.
+
+Variants:
+- concurrent regenerations -> reported stamps always describe the loaded index
+- a reader mid-regeneration never sees index and stamps from different loads
+- single-threaded behaviour completely unchanged (the B039 tests still pass)
+- a FAILED regeneration leaves index and stamps consistent with each other
+
+## Related
+
+B039 (introduced `type_db_versions`; the lane disclosed this rather than
+shipping it silently), GH #59 (naming the loaded build in the log).
