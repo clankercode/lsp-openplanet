@@ -379,10 +379,15 @@ fn candidate_action(
     edit: Option<WorkspaceEdit>,
     source_fingerprint: SourceFingerprint,
 ) -> CodeAction {
+    let diagnostic = if candidate.is_published() {
+        candidate.diagnostic.clone()
+    } else {
+        client_diagnostic(req, &candidate.diagnostic)
+    };
     CodeAction {
         title: candidate.descriptor.title.clone(),
         kind: Some(candidate.descriptor.kind.clone()),
-        diagnostics: Some(vec![client_diagnostic(req, &candidate.diagnostic)]),
+        diagnostics: Some(vec![diagnostic]),
         edit,
         command: None,
         is_preferred: candidate.descriptor.is_preferred,
@@ -1436,6 +1441,7 @@ mod tests {
     // rather than whichever families happen to be registered.
 
     const SYNTH_CODE: &str = "synthetic-published";
+    const SYNTH_ALT_CODE: &str = "synthetic-published-alt";
     const SYNTH_AUTO_CODE: &str = "synthetic-published-auto";
 
     fn synth_diag(range: Range, code: &str) -> Diagnostic {
@@ -1446,7 +1452,10 @@ mod tests {
     }
 
     fn synth_matches(diagnostic: &Diagnostic) -> bool {
-        matches!(&diagnostic.code, Some(NumberOrString::String(c)) if c == SYNTH_CODE)
+        matches!(
+            &diagnostic.code,
+            Some(NumberOrString::String(c)) if c == SYNTH_CODE || c == SYNTH_ALT_CODE
+        )
     }
 
     fn synth_auto_matches(diagnostic: &Diagnostic) -> bool {
@@ -1503,6 +1512,47 @@ mod tests {
         describe: synth_auto_describe,
         materialize: synth_materialize,
     };
+
+    #[test]
+    fn published_actions_attach_each_exact_originating_duplicate_diagnostic() {
+        let registries = Registries {
+            checker: &[],
+            published: &[SYNTH_FAMILY],
+        };
+        let h = Harness::new("void Main() { }");
+        let range = mk_range(0, 0, 0, 4);
+        let mut first = synth_diag(range, SYNTH_CODE);
+        first.tags = Some(vec![DiagnosticTag::UNNECESSARY]);
+        first.data = Some(serde_json::json!({ "origin": "first" }));
+        let mut second = synth_diag(range, SYNTH_ALT_CODE);
+        second.tags = Some(vec![DiagnosticTag::DEPRECATED]);
+        second.data = Some(serde_json::json!({ "origin": "second" }));
+
+        // Same range, source and message: only code/tags/data distinguish
+        // these two client diagnostics.
+        let actions = h.request_with(
+            CodeActionContext {
+                diagnostics: vec![first.clone(), second.clone()],
+                ..Default::default()
+            },
+            range,
+            true,
+            registries,
+        );
+        let attached: Vec<Diagnostic> = actions
+            .iter()
+            .filter(|action| action.kind == Some(CodeActionKind::QUICKFIX))
+            .map(|action| {
+                action
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.first())
+                    .expect("one attached diagnostic")
+                    .clone()
+            })
+            .collect();
+        assert_eq!(attached, vec![first, second]);
+    }
 
     /// A producer registered ONLY in the diagnostic-keyed registry is
     /// offered for the diagnostic it claims — and only for that one.
