@@ -1,5 +1,6 @@
 pub mod call_hierarchy;
 pub mod code_actions;
+pub mod commands;
 pub mod completion;
 pub mod diagnostics;
 pub mod folding;
@@ -28,6 +29,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
+use crate::cli::TypeDbVersions;
 use crate::config::{LspConfig, ResolvedDefine};
 use crate::config_watch::{self, ConfigReloadAction};
 use crate::typecheck::GlobalScope;
@@ -121,6 +123,14 @@ pub struct Backend {
     client: Client,
     config: Arc<tokio::sync::RwLock<LspConfig>>,
     type_index: Arc<tokio::sync::RwLock<Option<Arc<TypeIndex>>>>,
+    /// B039: the build stamps of the type DB currently held in `type_index`,
+    /// recorded when it was loaded.
+    ///
+    /// Not re-probed on read, and that is the point: re-probing would report
+    /// what is on DISK, and the whole question `openplanet.regenerateTypeDb`
+    /// answers is whether what is loaded still matches it. `None` means no
+    /// database is loaded.
+    type_db_versions: Arc<tokio::sync::RwLock<Option<TypeDbVersions>>>,
     /// Open document contents: URI → source text
     documents: Arc<DashMap<Url, String>>,
     /// Cached analysis snapshot: rebuilt on every document lifecycle event
@@ -509,6 +519,7 @@ impl Backend {
             client,
             config: Arc::new(tokio::sync::RwLock::new(LspConfig::load(None, None))),
             type_index: Arc::new(tokio::sync::RwLock::new(None)),
+            type_db_versions: Arc::new(tokio::sync::RwLock::new(None)),
             documents: Arc::new(DashMap::new()),
             snapshot: Arc::new(tokio::sync::RwLock::new(Arc::new(
                 AnalysisSnapshot::from_files(&[], &LspConfig::default()),
@@ -1226,10 +1237,14 @@ impl LanguageServer for Backend {
                     // GH #59: name the build, not just the success — a
                     // "confidently wrong" diagnostic is traceable to a DB
                     // version only if the log says which one loaded.
+                    let versions = TypeDbVersions::probe(core, game);
                     tracing::info!(
                         "Type database loaded successfully; {}",
-                        crate::cli::TypeDbVersions::probe(core, game).summary_line()
+                        versions.summary_line()
                     );
+                    // B039: remembered so a later regeneration can say what
+                    // CHANGED rather than just that it ran.
+                    *self.type_db_versions.write().await = Some(versions);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load type database: {}", e);
@@ -1278,8 +1293,11 @@ impl LanguageServer for Backend {
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                // B039: from the one list `execute_command` dispatches on,
+                // never a literal here — an advertised name with no handler
+                // behind it is invisible to every client.
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["openplanet.regenerateTypeDb".into()],
+                    commands: commands::advertised(),
                     ..Default::default()
                 }),
                 semantic_tokens_provider: Some(
@@ -1925,13 +1943,20 @@ impl LanguageServer for Backend {
         ))
     }
 
+    /// `workspace/executeCommand` (B039).
+    ///
+    /// The match on [`ServerCommand`](commands::ServerCommand) is exhaustive
+    /// on purpose: a command added to that enum without an arm here does not
+    /// compile. Unknown names are an ERROR, not `Ok(None)` — a client cannot
+    /// tell a null answer apart from a command that ran and had nothing to
+    /// say, which is exactly how B039's command stayed unreachable.
     async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<Value>> {
-        match params.command.as_str() {
-            "openplanet.regenerateTypeDb" => Ok(Some(self.regenerate_type_db().await)),
-            other => {
-                tracing::warn!("unknown executeCommand: {}", other);
-                Ok(None)
-            }
+        let Some(command) = commands::ServerCommand::parse(&params.command) else {
+            tracing::warn!("unknown executeCommand: {}", params.command);
+            return Err(commands::unknown_command_error(&params.command));
+        };
+        match command {
+            commands::ServerCommand::RegenerateTypeDb => Ok(Some(self.regenerate_type_db().await)),
         }
     }
 }
@@ -2056,6 +2081,17 @@ impl Backend {
         });
     }
 
+    /// `openplanet.regenerateTypeDb` (B039): re-read the type database off
+    /// disk and swap it in.
+    ///
+    /// The answer reports the stamps BEFORE and AFTER, not just success.
+    /// This command exists for one situation — the user updated Openplanet
+    /// or the game and the symbol surface went stale — and in that situation
+    /// "done" does not answer the question they asked. `before` is what the
+    /// server had loaded; `after` is what is on disk now. Equal stamps mean
+    /// the reload picked up nothing new, which is a real and common outcome
+    /// (the dump has not been regenerated by the game yet) and one a user
+    /// otherwise mistakes for success.
     async fn regenerate_type_db(&self) -> Value {
         let start = std::time::Instant::now();
         let (core, game) = {
@@ -2071,26 +2107,35 @@ impl Backend {
                 });
             }
         };
+        let before = self.type_db_versions.read().await.clone();
         match TypeIndex::load(&core, &game) {
             Ok(index) => {
                 let count = index.type_count() + index.function_count() + index.enum_count();
                 *self.type_index.write().await = Some(Arc::new(index));
+                let after = TypeDbVersions::probe(&core, &game);
+                *self.type_db_versions.write().await = Some(after.clone());
                 let duration_ms = start.elapsed().as_millis() as u64;
+                let changed = before.as_ref() != Some(&after);
                 tracing::info!(
-                    "type database regenerated: {} entries in {}ms",
+                    "type database regenerated: {} entries in {}ms; {}",
                     count,
-                    duration_ms
+                    duration_ms,
+                    after.summary_line()
                 );
                 serde_json::json!({
                     "ok": true,
                     "message": format!("Type database reloaded ({} entries)", count),
                     "regenerated": count,
                     "durationMs": duration_ms,
+                    "before": before.as_ref().map(TypeDbVersions::to_json),
+                    "after": after.to_json(),
+                    "changed": changed,
                 })
             }
             Err(e) => serde_json::json!({
                 "ok": false,
                 "message": format!("failed to load type database: {}", e),
+                "before": before.as_ref().map(TypeDbVersions::to_json),
             }),
         }
     }

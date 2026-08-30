@@ -14,6 +14,15 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **`openplanet.regenerateTypeDb` reports what changed** (B039) — the command
+  now answers with the type-database build stamps BEFORE and AFTER the
+  reload (`before` / `after` / `changed`, using the same `op` / `mp` /
+  `game_op` shape the `check --json` report already uses), not just an entry
+  count. `before` is what the server had LOADED, not a re-probe of disk, so an
+  unchanged pair means the reload picked up nothing new — the ordinary case
+  when the game has not written a fresh dump yet, and one a bare "done" hides.
+  Reachable from VS Code since the extension's B039 change; before that it was
+  advertised and no client could invoke it.
 - **`openplanet/resolvedDefines` — config introspection** (B050) — a custom
   LSP request returning the EFFECTIVE preprocessor define set with an origin
   per entry (`target` / `signature` / `os` / `arch` / `build` / `manifest` /
@@ -154,6 +163,15 @@ GitHub Release body to match this section (gh release edit).
   shipped type DB was compiled in the live game to establish the rule, and the
   verdicts are committed at `docs/probes/b053-bare-enum-values.tsv`.
 
+- **An unknown `workspace/executeCommand` is now a JSON-RPC error** (B039) —
+  it used to answer `Ok(null)`, which a client cannot tell apart from a
+  command that ran and had nothing to report. That is precisely how an
+  advertised-but-undispatched command stays invisible, so the advertised list
+  and the handler's dispatch now come from one place
+  (`server::commands::ADVERTISED`) and `tests/execute_command_tests.rs` boots
+  a real service, reads the advertised list back off its own `initialize`
+  response, and executes every entry — a gate that fails for ANY future
+  advertised-but-unimplemented command, not only this one.
 - **A bare enum value two enums define is now an error, as in the game
   (B053)** — the game refuses to choose between them (`Found multiple matching
   enum values`); `openplanet-lsp` took the first match and said nothing, so the
