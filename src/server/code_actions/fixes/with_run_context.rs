@@ -46,10 +46,11 @@
 //!   does not** — 9 overloads against 8, and the one with no counterpart is
 //!   exactly `CoroutineFuncUserdataBool@ func, const bool userdata`. A
 //!   rewrite of `startnew(F, true).WithRunContext(c)` would therefore not
-//!   compile. The family asks the checker for the userdata expression's
-//!   recorded type, so boolean identifiers, calls, casts and ternaries are
-//!   withheld too. An unresolved expression is also withheld: it has not
-//!   proved that any of the seven successor userdata types accepts it.
+//!   compile. A literal answers for itself; for anything else the family
+//!   asks the checker for the expression's recorded type, so a boolean
+//!   identifier, call, cast or ternary is withheld too. An unresolved
+//!   expression is also withheld: it has not proved that any of the seven
+//!   successor userdata types accepts it.
 //! * **Both return `awaitable@`,** so a further-chained call
 //!   (`startnew(W).WithRunContext(c).IsRunning()`) rewrites correctly and IS
 //!   offered: only the inner call's span is replaced and the chain is
@@ -214,21 +215,25 @@ fn rewrite(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<(Span, String)
     if context_args.iter().chain(coroutine_args).any(is_named) {
         return None;
     }
+    // Text comes from the REAL source, not the masked copy the parse ran
+    // on: the edit goes into the user's buffer. A preprocessor directive or
+    // inactive branch inside the replacement span exists only in that real
+    // source, and rebuilding such a span from the active AST would delete
+    // it. Checked here, before the type query below, because it is a string
+    // comparison and that is a checker pass.
+    let source = &ctx.analysis.source;
+    if call.span.text(source) != call.span.text(masked) {
+        return None;
+    }
     // `startnew` has a bool-userdata overload; `Meta::StartWithRunContext`
-    // has none. Require the checker to prove that userdata has a successor
-    // type instead of trying to enumerate boolean expression syntax here.
+    // has none. Ask the checker to prove the userdata has a successor type
+    // rather than trying to enumerate boolean expression syntax here — a
+    // `bool` variable, a call returning one, a cast and a ternary all look
+    // like anything else on the page.
     if coroutine_args
         .get(1)
         .is_some_and(|arg| !userdata_has_successor_type(arg, ctx))
     {
-        return None;
-    }
-    // Text comes from the REAL source, not the masked copy the parse ran
-    // on: the edit goes into the user's buffer. A preprocessor directive or
-    // inactive branch inside the replacement span exists only in that real
-    // source. Rebuilding such a span from the active AST would delete it.
-    let source = &ctx.analysis.source;
-    if call.span.text(source) != call.span.text(masked) {
         return None;
     }
     let mut rendered = String::from(SUCCESSOR);
@@ -250,7 +255,27 @@ fn is_named(arg: &CallArg) -> bool {
 /// userdata types. This deliberately fails closed for unresolved/error
 /// expressions: offering fewer edits is preferable to emitting a call for
 /// an overload that may not exist.
+/// Does the `startnew` userdata argument have a type some
+/// `Meta::StartWithRunContext` overload accepts?
+///
+/// The answer is free for a literal, which is what most userdata arguments
+/// are, and everything else costs one type-recording checker pass over this
+/// document (~4 ms on the largest file in `tests/fixtures`). That pass is
+/// deliberately not cached: this runs only for a `startnew(F, u)` receiver
+/// that has already passed every other gate — a deprecated call in its
+/// two-argument form — and a cache keyed on anything cheaper than the
+/// document's content would risk answering from stale types, which here
+/// means offering a rewrite that should have been withheld.
 fn userdata_has_successor_type(arg: &CallArg, ctx: &FixContext<'_>) -> bool {
+    match &arg.value.kind {
+        // A bool literal has no successor overload; every other literal
+        // does. No checker needed to know either.
+        ExprKind::BoolLit(_) | ExprKind::Null => return false,
+        ExprKind::IntLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit | ExprKind::HexLit(_) => {
+            return true
+        }
+        _ => {}
+    }
     let scope = GlobalScope::new(ctx.workspace, ctx.type_index);
     let mut checker = Checker::new(ctx.analysis.masked_source(), &scope).with_type_recording();
     checker.check_file(&ctx.analysis.file);
