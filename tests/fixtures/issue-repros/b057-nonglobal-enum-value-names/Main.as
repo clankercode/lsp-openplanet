@@ -127,26 +127,6 @@ void GloballyVisible()
     print("" + Border);
 }
 
-// --- Fence: the plugin's own declaration wins ------------------------------
-//
-// The narrowing runs last, after every other way a bare name can be global.
-// A plugin that declares one of these names for itself keeps it, and must not
-// inherit an error from an engine enum it never referred to.
-int North2 = 0;
-
-enum LocalDirections // lsp: ignore unused
-{
-    Northward,
-    Southward,
-}
-
-void WorkspaceDeclarationsWin()
-{
-    print("" + North2);
-    print("" + Northward);
-    print("" + Southward);
-}
-
 void Main()
 {
     NestedEnumValues();
@@ -155,5 +135,4 @@ void Main()
     SharedWithANestedEnum();
     ManyNonGlobalCarriers();
     GloballyVisible();
-    WorkspaceDeclarationsWin();
 }

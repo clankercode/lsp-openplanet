@@ -4070,10 +4070,14 @@ fn check_command_issue_repro_b053_workspace_and_ambiguity() {
 /// `every_probed_bare_value_matches_the_games_verdict` checks the rule against
 /// every one of those rows.
 ///
-/// This fixture then went to the game as ONE plugin (RemoteBuild, OP 1.29.5,
+/// This fixture went to the game as ONE plugin (RemoteBuild, OP 1.29.5,
 /// 2026-08-30) and produced exactly 14 errors, on exactly the lines and
-/// columns asserted below, with `No matching symbol` each time. The fence
-/// functions compiled clean.
+/// columns the LSP reports, with `No matching symbol` each time. The
+/// `GloballyVisible()` fence compiled clean.
+///
+/// How a plugin's OWN declaration of one of these names beats the engine is
+/// the companion fixture `b057-nonglobal-enum-values-workspace`, not this
+/// one: declaring `North` here would make the statement above it resolve.
 ///
 /// B044 is the same narrowing one level less general: an ANONYMOUS enum has no
 /// name for the visibility rule to place, so it was already excluded. B044
@@ -4144,10 +4148,6 @@ fn check_command_issue_repro_b057_nonglobal_enum_value_names() {
         // Carried by a global enum AND by nested/anonymous ones.
         "Left",
         "Border",
-        // Declared by the plugin itself.
-        "North2",
-        "Northward",
-        "Southward",
     ] {
         let quoted = format!("`{accepted}`");
         assert!(
