@@ -1938,6 +1938,55 @@ mod tests {
     fn next_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/OpenplanetNext.json")
     }
+    /// A namespace that owns FREE FUNCTIONS is always a scope, so gating
+    /// namespace-shortcut completions on `scope_exists` can never cost a
+    /// function shortcut.
+    ///
+    /// This is a fence for a gate that lives above the functions loop in
+    /// `add_shortcut_completions` and so is wider than B056's own blast
+    /// radius. It holds by construction rather than by luck, in two steps:
+    /// the Nadeo loader inserts only types and enums and the header loader
+    /// only enums, so every entry in `functions` is Core-sourced; and
+    /// `build_scope_index` inserts the namespace of every Core function.
+    /// Either half breaking makes this red — add a Nadeo free function, or
+    /// stop crediting Core function namespaces, and a shortcut namespace
+    /// silently stops offering its functions.
+    #[test]
+    fn every_namespace_that_owns_functions_is_a_scope() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+
+        let mut checked = 0usize;
+        for qname in index.functions.keys() {
+            // `namespace_functions` matches a key by stripping `ns::` and
+            // requiring no `::` remains, so the namespace it would serve
+            // this function under is everything before the LAST separator.
+            let Some((ns, _)) = qname.rsplit_once("::") else {
+                continue;
+            };
+            assert!(
+                index.scope_exists(ns),
+                "`{qname}` is offered under namespace `{ns}`, which is not a scope"
+            );
+            checked += 1;
+        }
+
+        // Anti-vacuity: the loop must actually have contended something.
+        assert!(
+            checked > 100,
+            "fixture guard: the databases must carry namespaced free functions, saw {checked}"
+        );
+
+        // And the invariant the argument rests on: nothing but Core ever
+        // puts a function in the index.
+        assert!(
+            index
+                .functions
+                .values()
+                .flat_map(|o| o.iter())
+                .all(|f| f.source == TypeSource::Core),
+            "a non-Core free function would break the scope guarantee above"
+        );
+    }
 
     /// B056: the invariant `global_enum_names` is named for, checked both
     /// ways over the whole shipped DB.
