@@ -103,6 +103,14 @@ The test passes, and would have passed either way.
   database, accepted by a `> 0` assertion.
 - **A comparison harness diffed against files it never wrote**, comparing two
   copies of the same thing.
+- **A warning count counted a different population than its name claimed.** A
+  clippy gate summed every output line matching `^(warning|error)`, which also
+  matches cargo's own per-target epilogue — ``warning: `openplanet-lsp` (lib)
+  generated 53 warnings``. With six build targets that is a silent, stable `+6`
+  on every measurement. It is self-consistent, so it never looks wrong; it only
+  surfaces when one number is compared against another taken a different way,
+  and then it reads as a regression that does not exist. Two measurements of
+  the same tree disagreed (75 vs 81) and the tree was innocent.
 
 **Countermeasures.**
 
@@ -116,6 +124,11 @@ The test passes, and would have passed either way.
   would otherwise be vacuous (see `tests/execute_command_tests.rs`).
 - **Ask of every new test: would this still pass if only half the fix were
   applied?** If yes, it does not pin what it claims to.
+- **A count is a claim about a population — state which one.** Prefer a
+  categorised diff of two runs over comparing two totals, and exclude the
+  tool's own summary lines from any count of what the tool found. Totals taken
+  by different methods are not comparable, and a stable offset between them
+  looks exactly like a real delta.
 
 ---
 
