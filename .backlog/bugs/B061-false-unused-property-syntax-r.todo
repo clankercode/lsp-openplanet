@@ -142,3 +142,15 @@ Note `Transport::get_IsSecure` appears in BOTH lists: read as `c.IsSecure` from
 production (must disappear) while a different `Transport` accessor is test-only
 (must survive). Confirm which is which against the tree before asserting
 either — do not assume the name alone decides it.
+
+## Lane decision (coordinator, 2026-08-30)
+
+Serialised behind B060 in lane `b060-b062-property-semantics`; B062 follows.
+Shared files: `src/typecheck/checker.rs` with B060, `src/analysis/unused.rs`
+with B062. **Blocked until B059 merges** — lane-b059 is live in `checker.rs`.
+
+See B060 for the framing: it and this ticket are the same missing concept from
+opposite sides. B060 applies the `X` <-> `get_X` mapping where it must not (a
+property read classified as function-shaped, killing overload resolution);
+this ticket fails to apply it where it must (a property read not crediting its
+accessor as used). Solving B060 first may hand you the predicate this needs.
