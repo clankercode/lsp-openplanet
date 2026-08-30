@@ -71,12 +71,25 @@ impl Drop for Fixture {
 
 /// A plugin root, plus the `OpenplanetNext` dir its config points at.
 ///
-/// Every fixture pins `openplanet_dir` — an EMPTY one when `with_typedb` is
-/// false. Left unset, `LspConfig` auto-detects `$HOME/OpenplanetNext`, so on
-/// a developer machine with the game installed these tests would silently
-/// load that person's real type database: slow, and a different answer per
-/// machine. The directory is named `OpenplanetNext` so the variant re-probe
-/// (GH #45) sees a matching folder and never reaches for `$HOME` at all.
+/// Every fixture pins BOTH `openplanet_dir` — an EMPTY one when `with_typedb`
+/// is false — and `game_target`. Left unset, `LspConfig` auto-detects
+/// `$HOME/OpenplanetNext`, so on a developer machine with the game installed
+/// these tests would silently load that person's real type database: slow, and
+/// a different answer per machine.
+///
+/// `game_target` has to be pinned too, and the reason is B066 rather than
+/// tidiness. The directory is named `OpenplanetNext` so the variant re-probe
+/// (GH #45) sees a matching folder and returns before touching `$HOME` — but
+/// that match is against the RESOLVED target, and the user-global
+/// `~/.config/openplanet-lsp/config.toml` gets a say in that. A developer
+/// whose global config sets `game_target = "MP4"` makes the re-probe look for
+/// `OpenplanetMP4`, miss, and reach for `$HOME/OpenplanetMP4` — and B066 is
+/// that the guard meant to protect an explicit `openplanet_dir` there is
+/// always true, so the pin above is silently replaced. Observed, not
+/// theorised: with a synthetic HOME carrying that config, the EMPTY-fixture
+/// test loaded a full 4276-symbol database. Pinning the target keeps the
+/// folder name matching so the re-probe returns early. When B066 is fixed
+/// this pin should stop being load-bearing; do not remove it before then.
 ///
 /// Worth knowing before trusting any assertion here to prove WHICH database
 /// loaded: it cannot. The fixtures are refreshed from a real install
@@ -109,7 +122,10 @@ fn fixture(name: &str, with_typedb: bool) -> Fixture {
     std::fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
     std::fs::write(
         root.join(".openplanet-lsp.toml"),
-        format!("openplanet_dir = {:?}\n", op_dir.to_str().unwrap()),
+        format!(
+            "openplanet_dir = {:?}\ngame_target = \"TMNEXT\"\n",
+            op_dir.to_str().unwrap()
+        ),
     )
     .unwrap();
     Fixture { base, root }
