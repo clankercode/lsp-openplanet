@@ -426,12 +426,32 @@ fn add_shortcut_completions(
                 let Some(short) = qname.strip_prefix(&format!("{}::", ns)) else {
                     continue;
                 };
+                // B069: OFFER THE SOURCE SPELLING, NEVER THE INDEX KEY.
+                //
+                // `namespace_enums` yields keys, and for a synthetic Nadeo
+                // module — `Game`, `Scene`, `Plug`, `System`, names this crate
+                // invents to file the dump under — the key is not a spelling
+                // the game accepts. The b052 corpus records
+                // `Game::ZZZNoSuchEnumName` -> `Namespace 'Game' doesn't
+                // exist.` Offering the key made the LSP suggest a name and
+                // then flag it as unknown: the tool contradicting itself, in
+                // the direction that actively misleads.
+                //
+                // NOT fixed by gating the namespace instead. These enums are
+                // reachable through NO other completion path — measured — so a
+                // gate would remove the only way to discover them, while the
+                // source spelling gives the user something correct they cannot
+                // get today. A Core scope such as `UI::` or `Meta::` is
+                // unaffected either way: its source name is the key in full.
+                let Some(spelling) = index.source_spelling_of_key(qname) else {
+                    continue;
+                };
                 if short.to_lowercase().starts_with(typed_prefix)
-                    && !existing.contains(qname)
-                    && seen.insert(qname.clone())
+                    && !existing.contains(&spelling)
+                    && seen.insert(spelling.clone())
                 {
                     items.push(CompletionItem {
-                        label: qname.clone(),
+                        label: spelling.clone(),
                         kind: Some(CompletionItemKind::ENUM),
                         filter_text: Some(short.to_string()),
                         sort_text: Some(SHORTCUT_SORT_TEXT.to_string()),
@@ -443,7 +463,7 @@ fn add_shortcut_completions(
                     if !value.to_lowercase().starts_with(typed_prefix) {
                         continue;
                     }
-                    let label = format!("{}::{}", qname, value);
+                    let label = format!("{}::{}", spelling, value);
                     if existing.contains(&label) || !seen.insert(label.clone()) {
                         continue;
                     }
@@ -452,7 +472,7 @@ fn add_shortcut_completions(
                         kind: Some(CompletionItemKind::ENUM_MEMBER),
                         filter_text: Some(value.clone()),
                         sort_text: Some(SHORTCUT_SORT_TEXT.to_string()),
-                        detail: Some(format!("{} = {}", qname, int_value)),
+                        detail: Some(format!("{} = {}", spelling, int_value)),
                         ..Default::default()
                     });
                 }
@@ -804,6 +824,78 @@ mod tests {
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
         let ns: Vec<String> = namespaces.iter().map(|s| s.to_string()).collect();
         complete(&analysis, None, pos, Some(idx), None, &ns, match_enums)
+    }
+
+    /// B069: the invariant all of B063/B069/B070 exist to protect —
+    /// **what a feature OFFERS and what the checker ACCEPTS must not diverge.**
+    ///
+    /// Shortcut completion iterated `namespace_enums(ns)`, which yields INDEX
+    /// KEYS. For a synthetic Nadeo module — `Game`, `Scene`, `Plug`, `System`,
+    /// names this crate invents to file the dump under — the key is not a
+    /// spelling the game accepts: `Game::ZZZNoSuchEnumName` answers `Namespace
+    /// 'Game' doesn't exist.` in the b052 corpus. So the LSP suggested a name
+    /// and then flagged it as unknown, contradicting itself.
+    ///
+    /// This is the OVER-reporting direction, and it is the severe one: a
+    /// missing suggestion is a gap, a wrong suggestion is the tool telling the
+    /// user something false and then punishing them for believing it.
+    ///
+    /// Asserted over every namespace the loader files the dump under, both the
+    /// synthetic modules and the real Core scopes, so it also pins that the fix
+    /// does NOT silence `UI::` and `Meta::`, which are genuine scopes.
+    #[test]
+    fn every_shortcut_label_is_a_spelling_the_checker_accepts() {
+        use crate::typecheck::global_scope::GlobalScope;
+        let idx = index_with_anonymous_member_enums();
+        let src = "void f() { E }";
+        let tw = ws_from(src);
+        let scope = GlobalScope::new(tw.snapshot.symbols(), Some(&idx));
+        let mut offered = 0usize;
+        let mut rejected: Vec<String> = Vec::new();
+        for ns in [
+            "Game",
+            "Scene",
+            "Meta",
+            "UI",
+            "System",
+            "Plug",
+            "Hms",
+            "Audio",
+            "Net",
+            "Trackmania",
+        ] {
+            let items = complete_with_shortcuts(src, "E", &idx, &[ns], true);
+            for item in items
+                .iter()
+                .filter(|i| i.sort_text.as_deref() == Some(SHORTCUT_SORT_TEXT))
+            {
+                offered += 1;
+                // An enum MEMBER label is `<enum spelling>::<value>`; the
+                // checker's type-level predicate answers for the enum part.
+                let subject = if item.kind == Some(CompletionItemKind::ENUM_MEMBER) {
+                    match item.label.rsplit_once("::") {
+                        Some((enum_spelling, _)) => enum_spelling.to_string(),
+                        None => item.label.clone(),
+                    }
+                } else {
+                    item.label.clone()
+                };
+                if !scope.resolves(&subject) {
+                    rejected.push(item.label.clone());
+                }
+            }
+        }
+        // Anti-vacuity: a run that offered nothing would satisfy this trivially.
+        assert!(
+            offered > 40,
+            "only {offered} shortcut labels offered; the law would be vacuous"
+        );
+        assert!(
+            rejected.is_empty(),
+            "{} of {offered} shortcut labels are spellings the checker rejects: {:?}",
+            rejected.len(),
+            &rejected[..rejected.len().min(10)]
+        );
     }
 
     #[test]

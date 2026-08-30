@@ -951,6 +951,37 @@ impl TypeIndex {
         self.source_names.get(spelling).map(|s| s.as_str())
     }
 
+    /// B069: the spelling SOURCE must write for the entry keyed `qname`, or
+    /// `None` when the index holds no such entry.
+    ///
+    /// The exact inverse of [`Self::source_name_key`], and the direction a
+    /// SURFACE needs: completion, which holds a key and must render something
+    /// the user can type. Without it a feature has only the key, and offering
+    /// that is how shortcut completion came to suggest `Game::EFoo` — the
+    /// loader's storage spelling, which the game answers with `Namespace
+    /// 'Game' doesn't exist.`
+    ///
+    /// Asking the index rather than string-munging the key is the point: the
+    /// rule is asymmetric by origin (a Nadeo key loses exactly its synthetic
+    /// module, a Core key loses nothing, a header key is already bare) and
+    /// only the entry knows which origin it has. See [`Self::source_name_of`].
+    ///
+    /// Anonymous enums answer `None`: their key is synthesized from the
+    /// declaring context and names nothing source can write.
+    pub fn source_spelling_of_key(&self, qname: &str) -> Option<String> {
+        let source = if let Some(info) = self.types.get(qname) {
+            info.source
+        } else if let Some(info) = self.enums.get(qname) {
+            if info.anonymous {
+                return None;
+            }
+            info.source
+        } else {
+            self.funcdefs.get(qname)?.source
+        };
+        Self::source_name_of(qname, source)
+    }
+
     /// Every exact source spelling accepted by [`Self::source_name_key`], in
     /// deterministic order. Unlike [`Self::all_short_names`], these are
     /// complete spellings: a nested Nadeo enum is
