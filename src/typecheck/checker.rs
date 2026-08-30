@@ -10570,6 +10570,29 @@ mod query_tests {
         );
     }
 
+    /// B059, the downstream consequence of returning a REAL type: member
+    /// completion reads `type_at_offset` at the byte before the `.`
+    /// (`src/server/completion.rs`), so indexing the injected call has to
+    /// resolve there too. With a silence sentinel this query returns an
+    /// error type and `net.GetManialinkPages()[0].` offers nothing.
+    #[test]
+    fn injected_manialink_pages_element_resolves_for_member_queries() {
+        let src =
+            "void Use(CGameCtnNetwork@ n) { auto p = n.GetManialinkPages(); auto q = p[0]; }\n";
+        let c = check_with_recording_typedb(src);
+        // The byte completion would query: the `]` closing the index.
+        let bracket = src.rfind("p[0]").unwrap() + 3;
+        let ty = c
+            .type_at_offset(bracket as u32)
+            .expect("indexed element recorded");
+        assert_eq!(
+            ty,
+            &TypeRepr::Handle(Box::new(TypeRepr::Named("CGameManialinkPage".into()))),
+            "indexing the injected array must yield CGameManialinkPage@, got {:?}",
+            ty
+        );
+    }
+
     #[test]
     fn recording_off_by_default() {
         let src: &'static str =
