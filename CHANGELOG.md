@@ -105,10 +105,11 @@ GitHub Release body to match this section (gh release edit).
   Rename and find-references used the whole plugin, so a rename of the
   own-module `SendEvent` also rewrote the unrelated `SendEvent` in the export
   file, and each was reported as a reference to the other. Each request now
-  stays inside the module the requesting file belongs to — and a rename from
-  inside one export file does reach its siblings, because export files
-  compile together into a consumer. Verified by live game probe, not by
-  argument; the fixtures under `tests/fixtures/issue-repros/b055-*` record
+  classifies against the module the requesting file belongs to, and narrows
+  the files it may rewrite only when the name really is declared on both
+  sides — so an ordinary rename stays complete. `shared_exports` are in both
+  modules and stay visible from either side. Verified by live game probe, not
+  by argument; the fixtures under `tests/fixtures/issue-repros/b055-*` record
   what the game does.
 
   Renaming a strict-export declaration at its declaration site is ALLOWED.

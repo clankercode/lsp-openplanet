@@ -1506,7 +1506,11 @@ impl LanguageServer for Backend {
         // false-positive class B049 exists to remove. B055: a strict
         // `[script] exports` file is a separate module by the same
         // argument, inside this plugin.
-        let files = snapshot.own_uri_map_for_module_of(crate::analysis_snapshot::FileRef::Uri(uri));
+        let boundary_name = navigation::name_at_position(analysis, pos);
+        let files = snapshot.own_uri_map_for_module_of(
+            crate::analysis_snapshot::FileRef::Uri(uri),
+            boundary_name.as_deref(),
+        );
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
         // B055: the requesting file's MODULE, not the whole plugin. A
@@ -1631,7 +1635,11 @@ impl LanguageServer for Backend {
         // Own files only: a WorkspaceEdit naming a dependency plugin's
         // export file would have the editor rewrite someone else's source.
         // B055: narrowed further to the requesting file's own module.
-        let files = snapshot.own_uri_map_for_module_of(crate::analysis_snapshot::FileRef::Uri(uri));
+        let boundary_name = navigation::name_at_position(analysis, pos);
+        let files = snapshot.own_uri_map_for_module_of(
+            crate::analysis_snapshot::FileRef::Uri(uri),
+            boundary_name.as_deref(),
+        );
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
         // B055 — see the note on `references`.
@@ -1665,7 +1673,11 @@ impl LanguageServer for Backend {
         // Own files only: a WorkspaceEdit naming a dependency plugin's
         // export file would have the editor rewrite someone else's source.
         // B055: narrowed further to the requesting file's own module.
-        let files = snapshot.own_uri_map_for_module_of(crate::analysis_snapshot::FileRef::Uri(uri));
+        let boundary_name = navigation::name_at_position(analysis, pos);
+        let files = snapshot.own_uri_map_for_module_of(
+            crate::analysis_snapshot::FileRef::Uri(uri),
+            boundary_name.as_deref(),
+        );
         let workspace_files = navigation::WorkspaceFiles { files: &files };
         let type_index = self.type_index.read().await;
         // B055 — see the note on `references`.
@@ -2314,12 +2326,15 @@ mod tests {
             "the edit must be confined to the export file"
         );
 
-        // NOT empty. An empty reference list is a positive claim the user
-        // acts on by deleting the declaration, and it would be false even
-        // about the declaration itself. What the server can honestly
-        // report is what it can see: this plugin's occurrences. It cannot
-        // express "a consumer plugin I cannot see may call this" — no
-        // list can, and returning nothing does not say it either.
+        // NOT empty, for `include_declaration: true`. An empty reference
+        // list is a positive claim the user acts on by deleting the
+        // declaration, and it would be false even about the declaration
+        // itself. What the server can honestly report is what it can see:
+        // this module's occurrences. It cannot express "a consumer plugin
+        // I cannot see may call this" — no list can, and returning nothing
+        // does not say it either. With `include_declaration: false` the
+        // declaration is excluded as everywhere else; see
+        // `references_honour_include_declaration_at_a_strict_export`.
         let refs = references_at(backend, position).await;
         assert_eq!(refs.len(), 1, "the declaration itself, got {refs:?}");
         assert_eq!(refs[0].uri, export_uri);
@@ -2481,6 +2496,102 @@ mod tests {
         assert!(
             refs.iter().all(|r| r.uri == main_uri),
             "no reference may name the export file, got {refs:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_strict_export_file_can_rename_a_shared_export_symbol_everywhere() {
+        // `shared_exports` ship to consumers AND compile into the defining
+        // plugin, so a shared symbol lives in BOTH modules. Narrowing the
+        // export side to strict files alone would have made it unresolvable
+        // from inside an export file — and, worse, renameable there without
+        // reaching the own module's use of it. Nothing is narrowed unless
+        // the name is declared on both sides, so this rename stays whole.
+        let export = "void SendEvent() { SharedFn(); }\n";
+        let root = strict_export_plugin(
+            "rename-strict-plus-shared",
+            "module = \"T\"\nexports = [\"Exports_Bodies.as\"]\nshared_exports = [\"Shared.as\"]\n",
+            &[
+                ("Main.as", "void Main() { SharedFn(); }\n"),
+                ("Shared.as", "void SharedFn() {}\n"),
+                ("Exports_Bodies.as", export),
+            ],
+        );
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .await
+            .expect("initialize");
+        let export_uri = open_document(backend, &root.join("src/Exports_Bodies.as"), export).await;
+        let position = text_position_params(export_uri.clone(), export, "SharedFn");
+
+        let changes = rename_at(backend, position.clone(), "RenamedShared")
+            .await
+            .expect("a shared-export symbol is renameable from an export file")
+            .expect("edit")
+            .changes
+            .expect("changes");
+        for expected in ["Main.as", "Shared.as", "Exports_Bodies.as"] {
+            let uri = Url::from_file_path(root.join("src").join(expected)).unwrap();
+            assert!(
+                changes.contains_key(&uri),
+                "{expected} must be edited, got {:?}",
+                changes.keys().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            references_at(backend, position).await.len(),
+            3,
+            "the declaration and both call sites"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn references_honour_include_declaration_at_a_strict_export() {
+        // The "not empty" decision is about `include_declaration: true`,
+        // which is what a client sends for "find all references". With it
+        // false the declaration is excluded like anywhere else, and here it
+        // is the only occurrence — so empty is the correct answer, not a
+        // claim that the symbol is unused.
+        let export = "void SendEvent() {}\n";
+        let root = strict_export_plugin(
+            "references-strict-export-decl-flag",
+            "module = \"T\"\nexports = [\"Exports_Bodies.as\"]\n",
+            &[
+                ("Main.as", "void Main() {}\n"),
+                ("Exports_Bodies.as", export),
+            ],
+        );
+
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend
+            .initialize(init_params(&root, Some(vec![root.clone()])))
+            .await
+            .expect("initialize");
+        let export_uri = open_document(backend, &root.join("src/Exports_Bodies.as"), export).await;
+        let position = text_position_params(export_uri, export, "SendEvent");
+
+        assert_eq!(references_at(backend, position.clone()).await.len(), 1);
+        let without = backend
+            .references(ReferenceParams {
+                text_document_position: position,
+                context: ReferenceContext {
+                    include_declaration: false,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            without.is_empty(),
+            "the declaration is the only occurrence, got {without:?}"
         );
         let _ = fs::remove_dir_all(&root);
     }
