@@ -2122,17 +2122,22 @@ impl Backend {
                 //
                 // Left alone because the blast radius is a wrong REPORT, not
                 // wrong analysis: diagnostics always come from whatever index
-                // is in `type_index`, whatever this says about it. Reaching it
-                // needs deliberately double-fired palette invocations.
+                // is in `type_index`, whatever this says about it. It is
+                // reachable through concurrent palette invocations or, on one
+                // thread, when the dump changes after load but before probe.
                 //
                 // DO NOT "fix" this by taking the two write locks in a fixed
                 // order. That serialises writers and reads like a fix, but
                 // every reader still takes one lock at a time, so a torn read
-                // survives untouched. The only real fix is collapsing both
-                // into one lock (`RwLock<Option<LoadedTypeDb>>`), which is a
-                // mechanical change across ~10 read sites — B064's job, not
-                // B039's. `TypeIndex` does not retain the stamps it parsed,
-                // which is why `after` has to be a second read at all.
+                // survives untouched. And note there are TWO defects here,
+                // not one: collapsing both into a single lock
+                // (`RwLock<Option<LoadedTypeDb>>`) closes the shared-state
+                // interleaving, but NOT the load-then-probe window, which is
+                // a filesystem TOCTOU — `TypeIndex::load` parses the files and
+                // `TypeDbVersions::probe` reads them again, because
+                // `TypeIndex` does not retain the stamps it parsed. That half
+                // needs the stamps carried out of the load, and no lock
+                // touches it. Both are B064's job, not B039's.
                 *self.type_index.write().await = Some(Arc::new(index));
                 let after = TypeDbVersions::probe(&core, &game);
                 *self.type_db_versions.write().await = Some(after.clone());
