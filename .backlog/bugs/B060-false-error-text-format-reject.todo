@@ -192,3 +192,42 @@ is enough here, but it is the part a reviewer should read hardest.
 
 `Dev::Write(1, VecP)` (`const vec3&in`) is accepted as-is: silencing a `vec3`
 property read is the safe direction and the overload-table reasoning is sound.
+
+## Game probe of the two scope additions (coordinator, 2026-08-31) — SUPERSEDES the 'not game-probed' caveat
+
+The game came back up (RemoteBuild LISTEN on 127.0.0.1:30000). The two new
+true positives I accepted on argument-plus-fixture-silence are now
+**engine-verified**. Four fixtures, each probed as its OWN compilation unit
+(never batched — see B068: a batched parse abort marks every other name in the
+unit ACCEPTED).
+
+| fixture | game verdict |
+|---|---|
+| `funcdef uint UintFn(); uint get_Off(); UintFn@ bad = UintFn(Off);` | ERR `No matching signatures to 'UintFn(uint)'` |
+| `funcdef void Cb(); Cb@ handlerVar = Handler; Text::Format("%d", handlerVar);` | ERR `No matching signatures to 'Text::Format(const string, Cb@&)'` |
+| `uint get_Off(); Text::Format("0x%04x", Off);` | CLEAN |
+| `uint get_Off(); startnew(Off);` (control) | ERR `No matching signatures to 'startnew(uint)'` |
+
+**Three of the four are REJECT-direction**, which is the trustworthy direction
+on this machine — a game ACCEPT can leak from another installed plugin, a
+REJECT cannot. The one ACCEPT (row 3) is still sound because nothing in that
+fixture resolves through a foreign namespace: `get_Off` is declared in the
+fixture and `Text::Format` is core Openplanet. State that limit rather than
+implying all four carry equal weight.
+
+**The engine types the property read as `uint` in all three error messages.**
+That is not incidental — it is exactly the semantics this ticket implements
+(a property READ is a value of the getter's return type), confirmed from the
+other side. The control (row 4) also shows master's existing `startnew(Off)`
+error was correct, so the consistency argument I used to accept the two
+additions is now backed by the engine instead of by my reasoning.
+
+**Consequence for the tests.** My earlier instruction was to label these as
+deliberate scope additions AND to say in the comment that they are not
+game-probed. The second half is now obsolete: cite these verdicts, verbatim,
+including the exact engine message. Keep the 'deliberate scope addition'
+labelling — the reason for it was to stop a later change silently reverting
+them as false positives, and that reason is unchanged and now stronger.
+
+Probe fixtures were staged outside the repo and the script unloads and removes
+them (leave-as-found); nothing was added to tests/fixtures/issue-repros/.
