@@ -231,3 +231,20 @@ carries no residual risk.
 
 Probe fixtures were staged outside the repo; `issue_repro_game.py` unloads and
 removes each one (leave-as-found). Nothing was added to tests/fixtures/.
+
+## Corpus committed
+
+The verdicts above, plus the invalid row and both anti-vacuity controls, are
+committed as `docs/probes/b071-enum-conversion.tsv` (master @ 58416a4).
+
+The `lsp_today` column there is measured, not inherited: a release binary
+built from a586825 (a verified ancestor of master), run as
+`openplanet-lsp check` in each fixture directory. Every mismatch row exits
+rc=0 with no error. Two signals in the same run show that is real silence and
+not an unanalysed file — the negative control returned rc=1
+`unknown type \`ZZZNoSuchType\``, and the two workspace-enum rows emitted
+`an enum value ... is never used` warnings.
+
+So the implementer starts from: five confirmed missing diagnostics, one row
+closed as correct-silence, the engine's exact wording for each message, and a
+fixture set that is already known to be non-vacuous.
