@@ -199,6 +199,27 @@ The test passes, and would have passed either way.
 - **Count reconciliation.** After adding tests, check the suite total moved by
   the number of tests you added. A green suite whose total did not move means
   your tests are not running. This is cheap and it has caught real problems.
+
+  **But know how it fails.** A test binary that **SIGSEGVs** takes its whole
+  suite with it, and the reported total silently *drops* rather than reporting
+  a failure — 2190 and 2218 were observed against a true 2223. So a total that
+  does not reconcile has two causes, not one: your tests are not running, or a
+  binary crashed. Chasing the first when it was the second wastes the
+  investigation. Check for a crashed binary before concluding anything about
+  your tests. (Observed: `multi_root_tests`, stack `Backend::new` →
+  `LspConfig::load` → `read_config_file` → toml_edit's recursive parser, under
+  load with ~2G free RAM — a stack overflow in a recursive parser, not a defect
+  in any branch.)
+
+- **An intermittent failure will let you bisect it to any answer you like.**
+  The same lane saw that crash three times in a row on its branch, once green
+  on merge-base, and began bisecting its own change: disable half — passes;
+  re-enable partially — passes; restore in full — **passes**. Each step was a
+  single run of a flaky test, and single observations were being read as
+  causality. Re-measured properly: 10/10 green, then 25 interleaved runs of
+  both binaries, 0 failures each. **Before bisecting, establish the failure is
+  deterministic.** A bisect over noise terminates and hands you a confident
+  culprit.
 - **Mutation proof.** Break the thing on purpose and confirm the gate goes red.
   A gate never observed failing is not known to be a gate.
 - **Anti-vacuity guards.** A loop over an empty collection passes. Assert the
