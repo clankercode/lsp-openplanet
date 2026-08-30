@@ -1,4 +1,6 @@
 ---
+claimed_at: "2026-08-30T07:31:21Z"
+claimed_by: cli-user
 completed_at: null
 complexity: medium
 created_at: "2026-08-30T05:30:24Z"
@@ -6,11 +8,11 @@ depends_on: []
 estimate_hours: 1
 id: B062
 priority: high
-started_at: null
-status: pending
+started_at: "2026-08-30T07:31:21Z"
+status: in_progress
 tags: []
 title: 'Manifest exports should root the unused analysis: exported globals reported unused'
-updated_at: "2026-08-30T05:30:24Z"
+updated_at: "2026-08-30T07:31:21Z"
 ---
 
 # Manifest exports should root the unused analysis: exported globals reported unused
