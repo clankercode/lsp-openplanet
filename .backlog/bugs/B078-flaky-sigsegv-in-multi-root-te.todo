@@ -108,3 +108,45 @@ passes), because each step was a single run of a flaky test.
 (3.6MB). NOTE: the matching binary has since been rebuilt, so gdb can no
 longer read the core against it; the systemd-stored trace
 (`coredumpctl info 109671`, while the boot lasts) is the durable artefact.
+
+## A load correlate, observed 2026-08-31 09:00-09:20 (coordinator)
+
+lane-b064 reported **load average 87** during its B072 gate — tests that
+normally finish in 0.1s took 54s. I confirmed the tail of it: 15-minute
+average 27.77 while the 1-minute had already fallen to 8.70, so the spike was
+real and transient.
+
+**Cause: aggregate oversubscription, not a violated limit.** Every lane runs
+`cargo test -j2 -- --test-threads=2` as instructed. With five lanes plus their
+codex reviewers each building concurrently, the machine sees 20+ compile and
+test threads. Each lane is individually compliant; the sum is not.
+
+**Why this belongs on THIS ticket.** The crash is a stack overflow on a tokio
+worker whose stack was already exhausted before `toml_edit` was entered (see
+the coredump analysis above). Scheduling pressure is a far better fit for the
+observed intermittency - three crashes in a row at 04:07-04:09, then 10/10
+green immediately after with identical code - than either of the two refuted
+explanations:
+
+- **memory pressure**: refuted, `available` was 21-22G throughout.
+- **disk**: refuted, `/tmp` was cleared to 18% and the flake predates and
+  postdates that.
+
+Both refuted causes were *environmental* guesses that happened to be the wrong
+environment. Load is the environmental variable that was actually moving, and
+nobody was watching it. **This is not a confirmed cause** - it is a correlate
+with a plausible mechanism (a deeper async state machine at the stack boundary
+tips over more readily when the worker is descheduled mid-frame), and it is
+recorded so the next investigator checks it rather than re-deriving the two
+dead ends.
+
+**Cheap discriminating test, before any fix:** try to reproduce under
+deliberate load (`stress-ng` or several concurrent suite runs) versus on an
+idle machine. If the crash rate moves with load, that is the strongest signal
+available and it costs one afternoon of nobody else using the box. If it does
+not move, load joins memory and disk on the refuted list and the remaining
+hypothesis is purely the frame size.
+
+**Operational note for whoever tests this:** a timing-sensitive result taken on
+this machine today is untrustworthy. Check `uptime` before believing any
+measurement whose meaning depends on duration.
