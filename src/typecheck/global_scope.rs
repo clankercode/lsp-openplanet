@@ -2445,11 +2445,23 @@ mod tests {
     ///
     /// The law is the general fence — every accepted spelling canonicalizes
     /// to a real key — and the pinned rows below are the ones that were
-    /// wrong. Both halves are game-grounded: `Meta::EGmSurfType` and
-    /// `Meta::EPlugSurfaceMaterialId` are ACCEPTED in the B052 corpus, so a
-    /// Core namespace does qualify a global enum, and `EDummyCollectionIdent`
-    /// is ACCEPTED bare there, so it is globally visible. The pairing of the
-    /// two is derived from those rules rather than probed directly.
+    /// wrong.
+    ///
+    /// This test deliberately does NOT rest on a game verdict, and that is
+    /// worth stating because the obvious supporting rows are no longer safe
+    /// to lean on: `Meta::EGmSurfType`, `Meta::EPlugSurfaceMaterialId` and a
+    /// bare `EDummyCollectionIdent` are all ACCEPTED in the B052 corpus, but
+    /// B068 found that `probe_enum_corpus.py` batches names into one
+    /// compilation unit, so one parse error marks the whole rest of a batch
+    /// ACCEPTED. REJECTED rows there are solid; ACCEPTED rows are provisional.
+    ///
+    /// What is asserted instead is INTERNAL CONSISTENCY: whatever the game's
+    /// answer turns out to be, `has_enum` and `canonicalize_type_name` must
+    /// give the same one. This holds either way. If the ACCEPTED rows are
+    /// sound, the fix is also the game-correct behaviour; if B068 shows they
+    /// are corrupt and these spellings are really rejected, the defect moves
+    /// to `has_enum` accepting them — B056's merged ancestor arm — and this
+    /// test still holds, because it pins agreement rather than acceptance.
     #[test]
     fn an_accepted_enum_spelling_always_canonicalizes_to_a_real_key() {
         let index = typedb_fixture_index();
