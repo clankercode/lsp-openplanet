@@ -1,4 +1,6 @@
 ---
+claimed_at: "2026-08-30T08:24:06Z"
+claimed_by: cli-user
 completed_at: null
 complexity: medium
 created_at: "2026-08-30T06:42:21Z"
@@ -6,11 +8,11 @@ depends_on: []
 estimate_hours: 1
 id: B065
 priority: high
-started_at: null
-status: pending
+started_at: "2026-08-30T08:24:06Z"
+status: in_progress
 tags: []
 title: 'Test helpers leak temp dirs: b017, b019 and defines suites never clean up'
-updated_at: "2026-08-30T06:42:21Z"
+updated_at: "2026-08-30T08:24:06Z"
 ---
 
 # Test helpers leak temp dirs: b017, b019 and defines suites never clean up
