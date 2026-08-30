@@ -2993,6 +2993,108 @@ mod tests {
         );
     }
 
+    /// B057 fence: the narrowing must not hide a plugin's OWN declaration of
+    /// a name the engine rejects. The false-POSITIVE direction, and the
+    /// damaging one for this tool.
+    ///
+    /// The scan runs LAST in `has_global_ident`, after the type, function,
+    /// virtual-property, workspace-variable and workspace-enum-value lookups.
+    /// This pins that ordering at the seam, on names the committed corpus
+    /// records as `NO_SYMBOL` — so it cannot pass by picking a name nothing
+    /// carries, which is exactly how the first version of this fence went
+    /// wrong (it used `North2`, `Northward`, `Southward`, names no engine enum
+    /// has, and so would have passed on the merge-base too).
+    ///
+    /// The same four shapes are checked end to end, against the live game, by
+    /// the fixture `b057-nonglobal-enum-values-workspace`.
+    #[test]
+    fn a_workspace_declaration_outranks_a_non_global_engine_enum_value() {
+        let index = typedb_fixture_index();
+
+        // Guard first: with an empty workspace every one of these is rejected,
+        // and rejected because NO globally visible enum carries it. Without
+        // this the test could pass on a name the engine never had.
+        let empty = SymbolTable::new();
+        let empty_scope = GlobalScope::new(&empty, Some(&index));
+        for (name, owner) in [
+            ("North", "Game::CGameCtnBlock::ECardinalDirections"),
+            ("VCenter2", "Game::CGameManialinkControl::EAlignVertical"),
+            ("Once", "UI::Cond"),
+            ("Appearing", "UI::Cond"),
+        ] {
+            assert!(
+                index
+                    .lookup_source_enum(owner)
+                    .is_some_and(|i| i.values.iter().any(|(v, _)| v == name)),
+                "fixture guard: `{owner}` must carry `{name}`"
+            );
+            assert!(
+                index.global_enum_value_owners(name).is_empty(),
+                "fixture guard: no globally visible enum may carry `{name}`"
+            );
+            assert!(
+                !empty_scope.has_global_ident(name),
+                "fixture guard: `{name}` is `NO_SYMBOL` in the corpus with \
+                 nothing declaring it"
+            );
+        }
+
+        // Each of the four lookups that run before the scan, one at a time, so
+        // a regression names the shape that broke rather than just failing.
+        let variable = SymbolKind::Variable {
+            type_name: "int".into(),
+        };
+        let function = SymbolKind::Function {
+            return_type: "void".into(),
+            params: Vec::new(),
+            min_args: 0,
+            imported: false,
+        };
+        for (name, symbols) in [
+            // A global variable.
+            ("North", vec![make_symbol("North", variable.clone())]),
+            // The plugin's own enum carrying it as a value.
+            (
+                "VCenter2",
+                vec![
+                    make_symbol("LocalAlignment", SymbolKind::Enum { values: Vec::new() }),
+                    make_symbol(
+                        "LocalAlignment::VCenter2",
+                        SymbolKind::EnumValue {
+                            enum_name: "LocalAlignment".into(),
+                            value: Some(0),
+                        },
+                    ),
+                ],
+            ),
+            // A global function.
+            ("Once", vec![make_symbol("Once", function.clone())]),
+            // A virtual property, reached through its `get_` accessor.
+            (
+                "Appearing",
+                vec![make_symbol(
+                    "get_Appearing",
+                    SymbolKind::Function {
+                        return_type: "int".into(),
+                        params: Vec::new(),
+                        min_args: 0,
+                        imported: false,
+                    },
+                )],
+            ),
+        ] {
+            let mut ws = SymbolTable::new();
+            let fid = ws.allocate_file_id();
+            ws.set_file_symbols(fid, symbols);
+            let scope = GlobalScope::new(&ws, Some(&index));
+            assert!(
+                scope.has_global_ident(name),
+                "a workspace declaration of `{name}` must outrank the \
+                 narrowing — the game compiles this"
+            );
+        }
+    }
+
     /// B057: the whole rule, checked against the live game's own verdict on
     /// every bare value name in the shipped type DB.
     ///
