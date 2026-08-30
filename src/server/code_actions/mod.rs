@@ -176,7 +176,14 @@ pub(crate) fn code_actions_with(
 
     let wants_quickfix = kind_selected(&CodeActionKind::QUICKFIX, only);
     let wants_fix_all = kind_selected(&SOURCE_FIX_ALL_OPENPLANET, only);
-    let fix_state = if wants_quickfix || wants_fix_all {
+
+    // Both registries go through one collection and one action builder; the
+    // two buckets exist only to place the refactor between them at the end,
+    // which is where the client saw it before B047 unified production.
+    let mut published_quickfixes: Vec<CodeAction> = Vec::new();
+    let mut checker_quickfixes: Vec<CodeAction> = Vec::new();
+    let mut source_action: Option<CodeAction> = None;
+    if wants_quickfix || wants_fix_all {
         let ctx = FixContext {
             uri: req.uri,
             analysis: req.analysis,
@@ -186,10 +193,7 @@ pub(crate) fn code_actions_with(
         };
         let descriptors = collect_fix_descriptors_from(&ctx, &req.context.diagnostics, registries);
         if wants_quickfix {
-            for candidate in descriptors
-                .iter()
-                .filter(|candidate| candidate.is_published())
-            {
+            for candidate in &descriptors {
                 if !ranges_touch(&candidate.diagnostic.range, &req.range) {
                     continue;
                 }
@@ -197,41 +201,19 @@ pub(crate) fn code_actions_with(
                 // materialized for the one action it picks.
                 let edit = (!req.lazy_edits)
                     .then(|| materialize_descriptor(&ctx, candidate, registries).fix.edit);
-                actions.push(candidate_action(req, candidate, edit, source_fingerprint));
-            }
-        }
-        Some((ctx, descriptors))
-    } else {
-        None
-    };
-    if kind_selected(&CodeActionKind::REFACTOR_REWRITE, only) {
-        actions.extend(refactor_wrap_in_try_catch(
-            req.uri,
-            &req.analysis.source,
-            source_fingerprint,
-            req.range,
-            req.lazy_edits,
-        ));
-    }
-    if let Some((ctx, descriptors)) = fix_state {
-        if wants_quickfix {
-            for candidate in descriptors
-                .iter()
-                .filter(|candidate| !candidate.is_published())
-            {
-                if !ranges_touch(&candidate.diagnostic.range, &req.range) {
-                    continue;
+                let action = candidate_action(req, candidate, edit, source_fingerprint);
+                if candidate.is_published() {
+                    published_quickfixes.push(action);
+                } else {
+                    checker_quickfixes.push(action);
                 }
-                let edit = (!req.lazy_edits)
-                    .then(|| materialize_descriptor(&ctx, candidate, registries).fix.edit);
-                actions.push(candidate_action(req, candidate, edit, source_fingerprint));
             }
         }
         if wants_fix_all {
             // Only the auto-applicable half is worth materializing: the
             // batch discards everything else anyway.
             let candidates = materialize_auto_descriptors(&ctx, &descriptors, registries);
-            if let Some(mut action) = fix_all::fix_all_action(req.uri, &candidates) {
+            source_action = fix_all::fix_all_action(req.uri, &candidates).map(|mut action| {
                 action.data = resolve_data(
                     req.uri,
                     source_fingerprint,
@@ -242,10 +224,25 @@ pub(crate) fn code_actions_with(
                 if req.lazy_edits {
                     action.edit = None;
                 }
-                actions.push(action);
-            }
+                action
+            });
         }
     }
+
+    // The response order, stated once: diagnostic-keyed quick fixes, the
+    // refactor, checker-keyed quick fixes, then the source action.
+    actions.extend(published_quickfixes);
+    if kind_selected(&CodeActionKind::REFACTOR_REWRITE, only) {
+        actions.extend(refactor_wrap_in_try_catch(
+            req.uri,
+            &req.analysis.source,
+            source_fingerprint,
+            req.range,
+            req.lazy_edits,
+        ));
+    }
+    actions.extend(checker_quickfixes);
+    actions.extend(source_action);
 
     actions
         .into_iter()
