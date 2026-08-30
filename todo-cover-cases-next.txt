@@ -397,3 +397,21 @@ Workaround / fix:
     concat via opAdd(string, int) inside an expression is fine.
 
 The LSP today does not flag this.
+
+## 2026-08-30, tm-map-together
+
+### Case: ambiguous imported-function overloads not flagged
+Plugin source:
+    // dependency's export files both declare (one stale):
+    import nat3 PosToCoord(vec3 pos) from "Editor";
+    import nat3 PosToCoord(vec3 pos, vec2 xySize = vec2(32, 8), float baseHeightOffset = 64) from "Editor";
+    // call site:
+    PosToCoord(item.pos);
+
+Compiler reports (game-side):
+    EditorFeed.as (291, 34) : ERR : Multiple matching signatures to 'PosToCoord(vec3)'
+
+Workaround / fix:
+    Remove the stale 1-arg import (or pass the optional args explicitly to disambiguate).
+
+The LSP today does not flag this (it resolved the call without complaint).

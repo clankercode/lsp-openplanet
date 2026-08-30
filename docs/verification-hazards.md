@@ -2,7 +2,7 @@
 
 Agent-facing. Not user documentation.
 
-This is the transferable finding from the B029-B067 bug batch (2026-08-29/30).
+This is the transferable finding from the B029-B068 bug batch (2026-08-29 to 08-31).
 This is the eleven-incident version; the eleventh (B068) is in Mechanism 1 and
 is the reason the negative-control rule is stated twice.
 
@@ -11,7 +11,7 @@ get investigated. It was checks that returned a clean, plausible, internally
 consistent answer that happened to be false. Every one of them cost more time
 than the bug it was hiding.
 
-They fall into three mechanisms. Learn the shapes, not the ten stories.
+They fall into three mechanisms. Learn the shapes, not the eleven stories.
 
 ---
 
