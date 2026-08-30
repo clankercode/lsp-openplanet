@@ -137,6 +137,23 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **A bare enum value only a nested or namespaced enum defines is now an error
+  (B057)** — the game answers `No matching symbol 'North'`; `openplanet-lsp`
+  accepted it and said nothing, so the problem only appeared when you compiled
+  the plugin. 2373 engine value names are affected.
+
+  Being *named* is what lets you write an enum's own name; it is not what puts
+  the enum's values in scope for a bare reference. Only enums the engine puts
+  in the global namespace do that. So `North` (from
+  `CGameCtnBlock::ECardinalDirections`) and `Appearing` (from `UI::Cond`) are
+  now flagged, while `Jump`, `GlassSmash`, `Space` and the other 592 the game
+  accepts are untouched — as is any name your own plugin declares.
+
+  This is B044 one level more general: an anonymous enum was already excluded
+  for having no name at all. Every one of the 2989 bare value names in the
+  shipped type DB was compiled in the live game to establish the rule, and the
+  verdicts are committed at `docs/probes/b053-bare-enum-values.tsv`.
+
 - **A bare enum value two enums define is now an error, as in the game
   (B053)** — the game refuses to choose between them (`Found multiple matching
   enum values`); `openplanet-lsp` took the first match and said nothing, so the

@@ -4054,6 +4054,156 @@ fn check_command_issue_repro_b053_workspace_and_ambiguity() {
     }
 }
 
+/// B057: a bare enum-value name is a symbol only if a GLOBALLY VISIBLE enum
+/// carries it.
+///
+/// The game resolves a bare value name against the enums it puts in the global
+/// namespace. openplanet-lsp scanned EVERY named enum, so it stayed silent on
+/// 2373 names the compiler answers `No matching symbol` for — a false negative
+/// 100x the size of B053's ambiguity set, and the same defect family.
+///
+/// Ground truth is exhaustive, not sampled: all 2989 bare value names of the
+/// shipped DB's named enums were submitted to the live game individually
+/// (RemoteBuild, OP 1.29.5, 2026-08-30) and the verdicts are committed at
+/// `docs/probes/b053-bare-enum-values.tsv` — 2373 `No matching symbol`, 592
+/// accepted, 22 ambiguous, 2 resolving to a non-enum symbol.
+/// `every_probed_bare_value_matches_the_games_verdict` checks the rule against
+/// every one of those rows.
+///
+/// This fixture went to the game as ONE plugin (RemoteBuild, OP 1.29.5,
+/// 2026-08-30) and produced exactly 14 errors, on exactly the lines and
+/// columns the LSP reports, with `No matching symbol` each time. The
+/// `GloballyVisible()` fence compiled clean.
+///
+/// How a plugin's OWN declaration of one of these names beats the engine is
+/// the companion fixture `b057-nonglobal-enum-values-workspace`, not this
+/// one: declaring `North` here would make the statement above it resolve.
+///
+/// B044 is the same narrowing one level less general: an ANONYMOUS enum has no
+/// name for the visibility rule to place, so it was already excluded. B044
+/// then generalised from the only evidence it had and concluded a named enum's
+/// values always resolve, which the probe refuted — `VCenter2` below is the
+/// name B044 pinned as resolving and the game rejects.
+#[test]
+fn check_command_issue_repro_b057_nonglobal_enum_value_names() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b057-nonglobal-enum-value-names");
+
+    let undefined: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("undefined identifier"))
+        .collect();
+    assert_eq!(
+        undefined.len(),
+        14,
+        "every name the game answers `No matching symbol` for must be \
+         diagnosed; stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    // Every arm of the rejection rule, by name, so a fix that merely changes
+    // the count cannot pass.
+    for rejected in [
+        // Nested engine enum.
+        "North",
+        "East",
+        "South",
+        "West",
+        "Achievements",
+        // Carried by two or more nested enums — still zero global ones.
+        "Party",
+        "Aborted",
+        "Action1",
+        // Namespaced Core enum (`UI::Cond`).
+        "FirstUseEver",
+        "Appearing",
+        // Namespaced Nadeo enum (`Meta::NPlugAnim::EExtractMotionMode`).
+        "Absolute",
+        // Anonymous enum AND a nested named one — the case B044 got wrong.
+        "VCenter2",
+        // A namespaced Core enum plus several nested ones.
+        "Always",
+        "Once",
+    ] {
+        let quoted = format!("`{rejected}`");
+        assert!(
+            undefined.iter().any(|l| l.contains(&quoted)),
+            "the game answers `No matching symbol '{rejected}'`; it must be \
+             diagnosed; stdout={stdout:?}"
+        );
+    }
+
+    // The fence, and the direction that matters: these 592-set names compile
+    // in-game, so diagnosing one would be a false POSITIVE.
+    for accepted in [
+        // `Openplanet.h` module-level enums (B046).
+        "Jump",
+        "DoubleJump",
+        "TechJump",
+        "GlassSmash",
+        // Core enum with no namespace.
+        "Space",
+        "Accept",
+        "A",
+        // Nadeo module-level enum, under the loader's synthetic `Meta::` key.
+        "Action1IsEvent",
+        // Carried by a global enum AND by nested/anonymous ones.
+        "Left",
+        "Border",
+    ] {
+        let quoted = format!("`{accepted}`");
+        assert!(
+            !undefined.iter().any(|l| l.contains(&quoted)),
+            "the game accepts `{accepted}`; diagnosing it would be a false \
+             positive; stdout={stdout:?}"
+        );
+    }
+
+    assert!(
+        stdout.contains("14 diagnostics (14 errors)"),
+        "the 14 rejects and nothing else — no warning, no second diagnostic \
+         on the same name; stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+/// B057, second half: a plugin's OWN declaration of a rejected name wins.
+///
+/// The false-POSITIVE direction, which is the damaging one for this tool. The
+/// narrowing runs LAST in `has_global_ident`, after the type, function,
+/// virtual-property, workspace-variable and workspace-enum-value lookups, so a
+/// plugin that declares one of the 2373 names for itself must keep it.
+///
+/// This needs its own plugin: declaring `North` inside
+/// `b057-nonglobal-enum-value-names` would make the statement that fixture
+/// asserts an error on resolve. Same split as B053's `-workspace` companion.
+///
+/// All four names are real collisions from
+/// `docs/probes/b053-bare-enum-values.tsv` and the game rejects all four bare
+/// when nothing declares them, so a merge-base binary cannot pass this by
+/// accident — it passes for the wrong reason there, and this fixture is the
+/// one that would go red if the narrowing were placed before the workspace
+/// lookups instead of after.
+///
+/// Game ground truth (RemoteBuild, OP 1.29.5, 2026-08-30): compiled with zero
+/// diagnostics.
+#[test]
+fn check_command_issue_repro_b057_workspace_declarations_win() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b057-nonglobal-enum-values-workspace");
+
+    for name in ["North", "VCenter2", "Once", "Appearing"] {
+        let quoted = format!("`{name}`");
+        assert!(
+            !stdout.contains(&quoted),
+            "the plugin declares `{name}` itself and the game compiles it; \
+             any diagnostic naming it is a false positive; \
+             stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+    assert!(
+        stdout.contains("0 diagnostics"),
+        "the game compiled this clean, so the LSP must too; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
 /// B046: the header is OPTIONAL. An install with no `Openplanet.h` must still
 /// load its type DB and check cleanly — the module-level enums simply stay
 /// unknown, exactly as before B046. Without this, a user whose install lacks
