@@ -75,6 +75,30 @@ fn typedb_param_mode(p: &ParamInfo) -> ParamMode {
     }
 }
 
+/// Shadowing key for one member declaration in an inheritance walk.
+///
+/// A declaration on a nearer ancestor OVERRIDES a same-signature one
+/// further away — `class C : I { void Go() {} }` implementing
+/// `interface I { void Go(); }` is one method, not a choice of two, and
+/// the same holds for a plain `class B : A` override. Both inheritance
+/// walkers hand the first declaration they meet the key and drop later
+/// claimants.
+///
+/// The key is the parameter TYPE list, not the name: a parent overload the
+/// child does not override (`A::Run(int)` beside `B::Run()`) is a genuine
+/// second choice and must survive. Whitespace is stripped so `const
+/// string &in` and `const string&in` — the same declaration written two
+/// ways — still match.
+fn override_key(param_types: &[String]) -> String {
+    let mut key = String::from("(");
+    for ty in param_types {
+        key.extend(ty.chars().filter(|c| !c.is_whitespace()));
+        key.push(',');
+    }
+    key.push(')');
+    key
+}
+
 impl<'a> GlobalScope<'a> {
     pub fn new(workspace: &'a SymbolTable, external: Option<&'a TypeIndex>) -> Self {
         Self {
@@ -1314,18 +1338,34 @@ impl<'a> GlobalScope<'a> {
             .unwrap_or_default()
     }
 
-    /// Look up the declared base classes of a workspace class by
-    /// fully qualified name. Returns an empty vec if no workspace class with
-    /// that name exists, or the class has no bases. Only consults
+    /// Look up the declared base types of a workspace class or interface by
+    /// fully qualified name. Returns an empty vec if no workspace type with
+    /// that name exists, or it has no bases. Only consults
     /// the workspace symbol table — external (typedb) types use their
     /// own parent walker via `ext_lookup_member`.
+    ///
+    /// Interfaces are included (B054): `interface B : A` is real
+    /// AngelScript, and an inheritance walk that stops at an interface
+    /// cannot find a member declared on its base.
     pub fn workspace_class_parents(&self, class_name: &str) -> Vec<String> {
         for s in self.lookup_workspace(class_name) {
-            if let SymbolKind::Class { parents, .. } = &s.kind {
-                return parents.clone();
+            match &s.kind {
+                SymbolKind::Class { parents } | SymbolKind::Interface { parents } => {
+                    return parents.clone()
+                }
+                _ => {}
             }
         }
         Vec::new()
+    }
+
+    /// True when `name` names a workspace interface symbol. The interface
+    /// counterpart of [`Self::is_workspace_class`]; kept separate so
+    /// callers that mean "a class, specifically" keep meaning that.
+    pub fn is_workspace_interface(&self, name: &str) -> bool {
+        self.lookup_workspace(name)
+            .iter()
+            .any(|s| s.name == name && matches!(s.kind, SymbolKind::Interface { .. }))
     }
 
     /// True when `class_name` names a workspace class symbol (used to decide
@@ -1347,7 +1387,8 @@ impl<'a> GlobalScope<'a> {
         class_name: &str,
         method: &str,
     ) -> Vec<OverloadSig> {
-        let mut out = Vec::new();
+        let mut out: Vec<OverloadSig> = Vec::new();
+        let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut queue =
             std::collections::VecDeque::from([self.normalize_workspace_class_name(class_name)]);
@@ -1356,7 +1397,11 @@ impl<'a> GlobalScope<'a> {
                 continue;
             }
             let qualified = format!("{}::{}", name, method);
-            out.extend(self.lookup_function_overloads(&qualified));
+            for sig in self.lookup_function_overloads(&qualified) {
+                if claimed.insert(override_key(&sig.param_types)) {
+                    out.push(sig);
+                }
+            }
             for parent in self.workspace_class_parents(&name) {
                 queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &name));
             }
@@ -1375,7 +1420,8 @@ impl<'a> GlobalScope<'a> {
         class_name: &str,
         member: &str,
     ) -> Vec<&Symbol> {
-        let mut out = Vec::new();
+        let mut out: Vec<&Symbol> = Vec::new();
+        let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut queue =
             std::collections::VecDeque::from([self.normalize_workspace_class_name(class_name)]);
@@ -1384,7 +1430,20 @@ impl<'a> GlobalScope<'a> {
                 continue;
             }
             let qualified = format!("{}::{}", name, member);
-            out.extend(self.lookup_workspace(&qualified));
+            for sym in self.lookup_workspace(&qualified) {
+                let key = match &sym.kind {
+                    SymbolKind::Function { params, .. } => {
+                        let types: Vec<String> = params.iter().map(|(_, ty)| ty.clone()).collect();
+                        override_key(&types)
+                    }
+                    // A field hides a same-named ancestor field outright —
+                    // there is no signature to distinguish them by.
+                    _ => String::new(),
+                };
+                if claimed.insert(key) {
+                    out.push(sym);
+                }
+            }
             for parent in self.workspace_class_parents(&name) {
                 queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &name));
             }
@@ -2677,7 +2736,6 @@ mod tests {
                     "Holder",
                     SymbolKind::Class {
                         parents: Vec::new(),
-                        members: vec!["JumpChain1".into()],
                     },
                 ),
                 make_symbol(
@@ -2893,10 +2951,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "MyClass",
-                SymbolKind::Class {
-                    parents: vec![],
-                    members: vec![],
-                },
+                SymbolKind::Class { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -2914,7 +2969,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "IThing",
-                SymbolKind::Interface { methods: vec![] },
+                SymbolKind::Interface { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -2998,10 +3053,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "Deep::Ns::Thing",
-                SymbolKind::Class {
-                    parents: vec![],
-                    members: vec![],
-                },
+                SymbolKind::Class { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -3151,13 +3203,7 @@ mod tests {
         let fid = ws.allocate_file_id();
         ws.set_file_symbols(
             fid,
-            vec![make_symbol(
-                "mat3",
-                SymbolKind::Class {
-                    parents: vec![],
-                    members: vec![],
-                },
-            )],
+            vec![make_symbol("mat3", SymbolKind::Class { parents: vec![] })],
         );
         let scope = GlobalScope::new(&ws, Some(&idx));
         assert!(!scope.external_ctor_converts("mat3", "mat4"));
@@ -3280,10 +3326,7 @@ mod tests {
             vec![
                 make_symbol(
                     "Editor::NetworkSerializable",
-                    SymbolKind::Class {
-                        parents: vec![],
-                        members: vec![],
-                    },
+                    SymbolKind::Class { parents: vec![] },
                 ),
                 make_symbol(
                     "Editor::NetworkSerializable::ReadFromNetworkBuffer",
@@ -3298,7 +3341,6 @@ mod tests {
                     "Editor::Child",
                     SymbolKind::Class {
                         parents: vec!["NetworkSerializable".into()],
-                        members: vec![],
                     },
                 ),
             ],
@@ -3319,20 +3361,8 @@ mod tests {
         ws.set_file_symbols(
             fid,
             vec![
-                make_symbol(
-                    "ItemSpec",
-                    SymbolKind::Class {
-                        parents: vec![],
-                        members: vec![],
-                    },
-                ),
-                make_symbol(
-                    "Editor::ItemSpec",
-                    SymbolKind::Class {
-                        parents: vec![],
-                        members: vec![],
-                    },
-                ),
+                make_symbol("ItemSpec", SymbolKind::Class { parents: vec![] }),
+                make_symbol("Editor::ItemSpec", SymbolKind::Class { parents: vec![] }),
                 make_symbol(
                     "Editor::ItemSpec::ReadFromNetworkBuffer",
                     SymbolKind::Function {
@@ -3346,7 +3376,6 @@ mod tests {
                     "Editor::ItemSpecPriv",
                     SymbolKind::Class {
                         parents: vec!["ItemSpec".into()],
-                        members: vec![],
                     },
                 ),
             ],

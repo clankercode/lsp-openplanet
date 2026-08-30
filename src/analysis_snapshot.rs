@@ -64,6 +64,10 @@ pub struct AnalysisSnapshot {
     /// Cached own-module view (see `own_module_symbols`). Built eagerly
     /// in `from_load` when strict exports exist.
     own_module_symbols: Option<SymbolTable>,
+    /// file_ids of `strict_export_paths`, resolved once in `from_load`.
+    /// Empty for in-memory snapshots and for plugins with no strict
+    /// exports; also empty when an `exports` entry names no file we have.
+    strict_export_ids: std::collections::HashSet<usize>,
     /// GH #61: own-module `.as` files the checked set omitted (gitignored,
     /// or filtered by `source_paths`/`ignore_paths`), as raw
     /// `(path, source)` — the game compiles them, so the
@@ -149,8 +153,8 @@ impl AnalysisSnapshot {
             None
         } else {
             let mut own = table.clone();
-            for fid in strict_ids {
-                own.hide_file(fid);
+            for fid in &strict_ids {
+                own.hide_file(*fid);
             }
             Some(own)
         };
@@ -161,6 +165,7 @@ impl AnalysisSnapshot {
             export_paths: load.export_paths.clone(),
             strict_export_paths: load.strict_export_paths.clone(),
             own_module_symbols,
+            strict_export_ids: strict_ids,
             usage_only_sources: load.usage_only_sources.clone(),
             usage_only_unreadable_paths: load.usage_only_unreadable_paths.clone(),
             usage_only_sources_complete: load.usage_only_sources_complete,
@@ -348,6 +353,135 @@ impl AnalysisSnapshot {
             .collect()
     }
 
+    /// True when `fid` is one of this plugin's strict `[script] exports`
+    /// files — compiled into CONSUMERS only.
+    fn is_strict_export_file(&self, fid: usize) -> bool {
+        self.strict_export_ids.contains(&fid)
+    }
+
+    /// True when `fid` is any of this plugin's own export files, strict or
+    /// `shared_exports`. Both ship to consumers and compile together there.
+    fn is_own_export_file(&self, fid: usize) -> bool {
+        self.files
+            .get(fid)
+            .map(|f| {
+                let canonical = f.path.canonicalize().unwrap_or_else(|_| f.path.clone());
+                self.export_paths.contains(&canonical)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Which side of the strict-export boundary a request from `from` is on.
+    fn request_is_from_a_strict_export(&self, from: &FileRef<'_>) -> bool {
+        match from {
+            FileRef::Path(p) => self.file_id_of_path(p),
+            FileRef::Uri(u) => self.file_id_of(u),
+        }
+        .is_some_and(|fid| self.is_strict_export_file(fid))
+    }
+
+    /// The symbol view for a rename / find-references request originating
+    /// in `from`: the MODULE that file belongs to.
+    ///
+    /// A plugin with strict `[script] exports` compiles as two units. The
+    /// live probe (2026-08-30) pins both halves:
+    ///
+    /// * The own module cannot see a strict export's declarations at all —
+    ///   a call to one is `No matching symbol`, and an unresolved name or
+    ///   even a syntax error inside an export file leaves the plugin
+    ///   compiling and running. So from an own file the own-module view
+    ///   (which the diagnostics path already builds) is the right one.
+    /// * The export files compile together INTO A CONSUMER, unqualified: a
+    ///   consumer called `AFn` and `BFn` from two different export files,
+    ///   and `Exports_B.as`'s call to `Exports_A.as`'s `AFn` ran.
+    ///
+    /// From an export file, therefore, hide only this plugin's own files
+    /// that ship to nobody. `shared_exports` stay visible — they ship to
+    /// consumers too, so they are in the same compiled unit — and so do
+    /// dependency plugins' files, which the new-name conflict check reads
+    /// and which no rename can edit anyway (`own_uri_map` drops them).
+    pub fn table_for_module_of(&self, from: FileRef<'_>) -> std::borrow::Cow<'_, SymbolTable> {
+        if self.strict_export_ids.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.symbols);
+        }
+        if !self.request_is_from_a_strict_export(&from) {
+            return match self.own_module_symbols.as_ref() {
+                Some(own) => std::borrow::Cow::Borrowed(own),
+                None => std::borrow::Cow::Borrowed(&self.symbols),
+            };
+        }
+        let mut export_view = self.symbols.clone();
+        for (fid, f) in self.files.iter().enumerate() {
+            if f.report_diagnostics && !self.is_own_export_file(fid) {
+                export_view.hide_file(fid);
+            }
+        }
+        std::borrow::Cow::Owned(export_view)
+    }
+
+    /// The own files that request may rewrite or report.
+    ///
+    /// Normally every own file, exactly as before — narrowing it costs
+    /// completeness, and a rename that misses a use is worse than one that
+    /// rewrites a stranger. The one thing the boundary makes possible is a
+    /// COLLISION: the probe found the same spelling declared on both sides
+    /// with the game accepting it, because they are different symbols in
+    /// different modules. Only then is this side's half the answer.
+    ///
+    /// `name` is the identifier under the cursor, or `None` when the cursor
+    /// is not on one (nothing to collide).
+    pub fn own_uri_map_for_module_of(
+        &self,
+        from: FileRef<'_>,
+        name: Option<&str>,
+    ) -> HashMap<usize, (Url, &DocumentAnalysis)> {
+        let map = self.own_uri_map();
+        if self.strict_export_ids.is_empty() {
+            return map;
+        }
+        let Some(name) = name else {
+            return map;
+        };
+        if !self.name_is_declared_on_both_sides(name) {
+            return map;
+        }
+        let from_export = self.request_is_from_a_strict_export(&from);
+        map.into_iter()
+            .filter(|(fid, _)| {
+                if from_export {
+                    // The consumer-facing unit: strict exports and the
+                    // shared exports that ship beside them.
+                    self.is_own_export_file(*fid)
+                } else {
+                    !self.is_strict_export_file(*fid)
+                }
+            })
+            .collect()
+    }
+
+    /// True when `name` is declared BOTH in a strict-export file and in one
+    /// of this plugin's own non-strict-export files — the collision the
+    /// game accepts and the two modules keep apart. A homonym in a
+    /// DEPENDENCY plugin is a different question, already handled by the
+    /// own-files-only rule, so it does not count here.
+    fn name_is_declared_on_both_sides(&self, name: &str) -> bool {
+        let hits = self.symbols.lookup_reference(name);
+        let mut strict = false;
+        let mut own = false;
+        for symbol in hits {
+            if self.is_strict_export_file(symbol.file_id) {
+                strict = true;
+            } else if self
+                .files
+                .get(symbol.file_id)
+                .is_some_and(|f| f.report_diagnostics)
+            {
+                own = true;
+            }
+        }
+        strict && own
+    }
+
     /// Analysis for one file, looked up by URI.
     pub fn analysis_of(&self, uri: &Url) -> Option<&DocumentAnalysis> {
         self.file_entry_of(uri).map(|f| &f.analysis)
@@ -422,9 +556,17 @@ impl AnalysisSnapshot {
             })
     }
 
-    /// file_id of the file with this path, when present.
+    /// file_id of the file with this path, when present: exact match
+    /// first, then a canonical-path fallback so a path reached through a
+    /// symlink resolves to the same file the load found — the same ladder
+    /// [`Self::file_id_of`] walks for URIs, so the two agree.
     pub fn file_id_of_path(&self, path: &std::path::Path) -> Option<usize> {
-        self.files.iter().position(|f| f.path == path)
+        self.files.iter().position(|f| f.path == path).or_else(|| {
+            let canon = path.canonicalize().ok()?;
+            self.files
+                .iter()
+                .position(|f| f.path.canonicalize().map(|p| p == canon).unwrap_or(false))
+        })
     }
 
     /// Snapshot file entry for `uri`: exact URI match first, then a

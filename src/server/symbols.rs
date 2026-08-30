@@ -353,4 +353,31 @@ mod tests {
         assert!(!names.contains(&"E::A"));
         assert!(!names.contains(&"E::B"));
     }
+
+    /// B054: workspace symbols reads the pool, which held no interface
+    /// member at all — `I::Go` could not be searched for, while the
+    /// class's `C::Go` could.
+    #[test]
+    fn workspace_symbols_lists_interface_methods() {
+        let tws = build_workspace(&[(
+            "a.as",
+            "interface I { void Go(); }\nclass C : I { void Go() {} }\n",
+        )]);
+        let files = tws[0].uri_map();
+        let results = workspace_symbols("Go", tws[0].snapshot.symbols(), &files);
+        let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"I::Go"), "missing I::Go in {names:?}");
+        assert!(names.contains(&"C::Go"), "missing C::Go in {names:?}");
+    }
+
+    #[test]
+    fn workspace_symbols_lists_namespaced_interface_methods() {
+        let tws = build_workspace(&[("a.as", "namespace Ns { interface I { void Go(); } }")]);
+        let files = tws[0].uri_map();
+        let names: Vec<String> = workspace_symbols("Go", tws[0].snapshot.symbols(), &files)
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert!(names.contains(&"Ns::I::Go".to_string()), "got {names:?}");
+    }
 }

@@ -254,10 +254,7 @@ mod tests {
             fid,
             vec![Symbol {
                 name: name.to_string(),
-                kind: SymbolKind::Class {
-                    parents: vec![],
-                    members: vec![],
-                },
+                kind: SymbolKind::Class { parents: vec![] },
                 span: Span::new(0, 0),
                 file_id: fid,
                 doc: None,
@@ -435,10 +432,7 @@ mod tests {
             fid,
             vec![Symbol {
                 name: "Ns::Foo".to_string(),
-                kind: SymbolKind::Class {
-                    parents: vec![],
-                    members: vec![],
-                },
+                kind: SymbolKind::Class { parents: vec![] },
                 span: Span::new(0, 0),
                 file_id: fid,
                 doc: None,

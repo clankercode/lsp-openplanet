@@ -159,6 +159,46 @@ GitHub Release body to match this section (gh release edit).
   spelled the way the game wants it — `CGameMenu::EMenuOrder`, class scope and
   no module prefix — is recognised as an enum instead of falling through.
 
+- **Rename and find-references stop at the strict-export boundary (B055)** —
+  a plugin with strict `[script] exports` compiles as two units that cannot
+  see each other, and the same name may legally be declared on both sides.
+  Rename and find-references used the whole plugin, so a rename of the
+  own-module `SendEvent` also rewrote the unrelated `SendEvent` in the export
+  file, and each was reported as a reference to the other. Each request now
+  classifies against the module the requesting file belongs to, and narrows
+  the files it may rewrite only when the name really is declared on both
+  sides — so an ordinary rename stays complete. `shared_exports` are in both
+  modules and stay visible from either side. Verified by live game probe, not
+  by argument; the fixtures under `tests/fixtures/issue-repros/b055-*` record
+  what the game does.
+
+  Renaming a strict-export declaration at its declaration site is ALLOWED.
+  There can be no own-file caller to leave broken — the game rejects one —
+  and refusing would have made the most common legitimate rename of a
+  plugin's public API impossible while claiming a cross-plugin safety
+  property the server has never had for `shared_exports` either.
+
+- **Interface members are visible to every language feature (B054)** — the
+  symbol table registered an interface as one symbol and never descended into
+  its methods, so no `I::method` symbol existed at all. Hover on an
+  interface-typed receiver reported `(local) <error> Go` instead of the
+  method, completion after `i.` offered nothing, and workspace symbols could
+  not find `I::Go`. All three now work, and interface methods never warn as
+  unused (they are contract declarations reached by virtual dispatch).
+
+- **Go to Definition on `receiver.member` (B054)** — it had no receiver step
+  at all: it tried the bare name as a global, then a `this.` / implicit-`this`
+  fallback, so `c.Go()` on a class-typed receiver resolved nothing just as
+  `i.Go()` on an interface-typed one did. Member accesses now resolve against
+  the receiver's type and its inheritance chain, and no longer jump to an
+  unrelated global that merely shares the member's spelling.
+
+- **A method override no longer renders as two overloads** — hover on a class
+  method that implements an interface method, or overrides a parent's, listed
+  both declarations as a choice of signatures. An override shadows the
+  declaration it satisfies; a parent overload with a *different* signature is
+  still offered.
+
 - **Module-level engine enums resolve (B046)** — the engine's JSON dump maps
   `namespace -> type name -> type`, so it can only carry an enum nested in a
   class. It reaches most module-level enums anyway, because a class member
