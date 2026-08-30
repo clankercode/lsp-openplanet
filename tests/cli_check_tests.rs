@@ -4532,8 +4532,10 @@ fn check_manifest_export_rules_follow_the_search_path_flag() {
 /// from becoming a B006 widening. On the merge-base binary all 8 lines
 /// errored; only the 4 fences may error now.
 ///
-/// Game ground truth — RemoteBuild probe, Trackmania + Openplanet 1.29.5
-/// (next, Public, 1234ad9e), 2026-08-30: GAME_VERDICT_PLACEHOLDER
+/// Runtime-registration ground truth — static analysis of Openplanet.dll
+/// 1.29.5 (next, Public, 1234ad9e), documented in the probe above. This
+/// fixture asserts the corresponding checker diagnostics; it is not a
+/// separately recorded RemoteBuild probe.
 #[test]
 fn check_command_issue_repro_b059_injected_methods_silences_only_the_legal_half() {
     let (_, stdout, stderr) = run_issue_repro_typedb("b059-injected-methods");

@@ -8247,9 +8247,9 @@ void Main() {
         );
     }
 
-    /// B059 (the reported case): `ShootMania::CSmPlayer` inherits
-    /// `CGamePlayer`, so the injection reaches it through the parent chain.
-    /// This is the call shape in tm-dips-plus-plus `src/PlayerState.as:121`.
+    /// B059 (the reported case): `CSmPlayer` is separately named in the
+    /// binary's explicit registration list. This is the call shape in
+    /// tm-dips-plus-plus `src/PlayerState.as:121`.
     #[test]
     fn injected_entity_id_on_subclass_stays_silent() {
         let diags = check_with_typedb(
