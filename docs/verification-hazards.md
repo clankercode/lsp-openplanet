@@ -40,9 +40,17 @@ indistinguishable from "I am structurally incapable of seeing it".
   impossible row invalidated a run that otherwise looked complete and would
   have "disproved" an established rule (B056).
 
+- **A grep pattern that could never match.** A gate counted errors with
+  `grep '"severity":"error"'` against a **pretty-printed** report, which writes
+  `"severity": "error"` with a space. It matched zero on both sides and printed
+  a confident `errors 0 -> 0` for every row — a perfect score produced by a
+  pattern structurally incapable of matching anything. Fixed by parsing the
+  JSON instead of pattern-matching its serialisation.
+
 **Countermeasure — positive control.** Before trusting a probe that reports
 absence, confirm it can see a thing you *know* is present. A staleness check
-that cannot find a file you just touched is not reporting staleness.
+that cannot find a file you just touched is not reporting staleness. A counter
+that reports zero should be shown a case it must count.
 
 **And a negative control.** Include an input whose answer you are certain of
 and which should come back negative. If your fabricated, impossible input comes
@@ -72,6 +80,14 @@ suspicious signal that had a ready innocent explanation available.
   artifacts; cargo's `Finished in 0.15s` was reuse, not a build.
 - **A build racing a rebase**, so the artifact under test was not the tree
   under review.
+- **Cargo replayed cached diagnostics in a stale format.** A clippy comparison
+  reused a base target dir from an earlier run that had used a *different*
+  `--message-format`, so cargo replayed the cached diagnostics rather than
+  re-emitting them, giving `81 vs 6`. Rebuilt in empty dirs with identical
+  flags: **75 on both sides**, the only diff being line-number shifts of
+  pre-existing lints. Note this is the stale-target-dir hazard wearing a new
+  coat — it is not only *staleness* that poisons a reused dir, it is any flag
+  that changes what cargo caches. Two lanes hit variants of this within hours.
 
 **Countermeasures.** Echo `pwd` immediately before any gate, and bind
 `cd <abs-path> && <cmd>` into a single invocation. Build comparison baselines
