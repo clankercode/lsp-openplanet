@@ -512,7 +512,7 @@ impl TypeIndex {
         let ordered: Vec<String> = keys.into_iter().cloned().collect();
         for qname in &ordered {
             let info = &self.enums[qname];
-            if !Self::enum_is_global(qname, info) {
+            if !TypeIndex::enum_is_global(qname, info) {
                 continue;
             }
             let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
@@ -1997,6 +1997,169 @@ mod tests {
     /// computed by separate code that could drift apart. If it ever does, the
     /// ancestor walk starts answering for enums that need a qualifier, or
     /// stops answering for ones that do not.
+    /// `global_enum_key` picks ONE key per bare name, and the pick must not
+    /// matter. It is deterministic by construction — the keys are sorted and
+    /// the first wins — but determinism alone would only make a wrong answer
+    /// reproducible. What makes the pick SAFE is that every colliding name is
+    /// one engine enum the loader filed under several modules, so the
+    /// candidates are interchangeable.
+    ///
+    /// This became load-bearing when `canonical_enum_key` switched to
+    /// `global_enum_key`: a canonical name is an identity, so an ambiguous
+    /// pick there would silently make two spellings of DIFFERENT enums equal
+    /// rather than fail visibly.
+    ///
+    /// Value sets are the discriminator, compared as `name=number` pairs
+    /// rather than names alone. Two enums carrying the same member names under
+    /// different numeric values are genuinely different enums, and a
+    /// names-only comparison calls them identical. Same members and same
+    /// numbers under a different module is one enum; anything else would be
+    /// two, and there are none. If the databases ever gain a real collision
+    /// this goes red, which is the point: the selection rule would then need
+    /// to encode which one the game means, and nothing in either database
+    /// says.
+    ///
+    /// Numbers are POSITIONAL in the Nadeo dump — members are a flat list and
+    /// the `_00`/`_04` placeholders exist to keep position equal to value — so
+    /// comparing pairs also compares ORDER, and no separate order check is
+    /// needed. The equivalence survives a future dump carrying explicit
+    /// values; it would need revisiting only if one carried DUPLICATE member
+    /// names.
+    ///
+    /// Honest limit, recorded rather than glossed: **no enum in the shipped
+    /// databases differs only by number.** Every differing collision also
+    /// differs by member name, so names-only and `name=number` give the same
+    /// answer on today's data and no standing assertion can tell them apart.
+    /// The pair comparison is the correct equivalence rather than a
+    /// demonstrably better-performing one, and its extra strength is proven
+    /// only by mutation — injecting a second `VirtualKey` whose members carry
+    /// identical names and shifted numbers, which names-only accepts and this
+    /// rejects.
+    /// The companion to `no_two_global_enums_share_a_bare_name_with_different_values`:
+    /// that test asserts an ABSENCE, and an absence can start holding for the
+    /// wrong reason. This pins WHY it holds.
+    ///
+    /// Ambiguous collisions are not rare in the databases — over every enum
+    /// the index carries, 90 bare names collide and 39 of those have
+    /// genuinely different member sets. What keeps them away from
+    /// `global_enum_key` is `enum_is_global`, which excludes 37 of the 39
+    /// outright. So the global filter is doing all the work, and if it ever
+    /// loosened, a differing pair would become a real ambiguity and two
+    /// spellings of different enums would silently compare equal.
+    ///
+    /// Asserting only "no global collision differs" would go on passing
+    /// quietly if the filter widened and the population changed underneath
+    /// it. This asserts the filter is actively excluding ambiguity, so the
+    /// pair of tests fails on both sides of that transition.
+    #[test]
+    fn the_global_filter_is_what_excludes_ambiguous_collisions() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+
+        // Every enum key, global or not, grouped by bare name.
+        let mut by_name: HashMap<String, Vec<(Vec<String>, bool)>> = HashMap::new();
+        for (qname, info) in &index.enums {
+            let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
+            let mut values: Vec<String> = info
+                .values
+                .iter()
+                .map(|(value, number)| format!("{value}={number}"))
+                .collect();
+            values.sort();
+            by_name
+                .entry(name)
+                .or_default()
+                .push((values, TypeIndex::enum_is_global(qname, info)));
+        }
+
+        let mut differing = 0usize;
+        let mut excluded_by_the_filter = 0usize;
+        for owners in by_name.values() {
+            if owners.len() < 2 {
+                continue;
+            }
+            let first = &owners[0].0;
+            if owners.iter().all(|(values, _)| values == first) {
+                continue;
+            }
+            differing += 1;
+            // No global owner at all: the filter is the only thing keeping
+            // this ambiguity out of `global_enum_key`.
+            if !owners.iter().any(|(_, global)| *global) {
+                excluded_by_the_filter += 1;
+            }
+        }
+
+        assert!(
+            differing > 0,
+            "fixture guard: the databases must carry ambiguous collisions, \
+             or the companion test proves nothing"
+        );
+        assert!(
+            excluded_by_the_filter > 0,
+            "`enum_is_global` excludes no ambiguous collision, so the companion \
+             test now holds for an unknown reason rather than because the filter \
+             works ({differing} differing names, none excluded)"
+        );
+    }
+
+    #[test]
+    fn no_two_global_enums_share_a_bare_name_with_different_values() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+
+        let mut by_name: HashMap<String, Vec<(String, Vec<String>)>> = HashMap::new();
+        for (qname, info) in &index.enums {
+            if !TypeIndex::enum_is_global(qname, info) {
+                continue;
+            }
+            let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
+            let mut values: Vec<String> = info
+                .values
+                .iter()
+                .map(|(v, n)| format!("{v}={n}"))
+                .collect();
+            values.sort();
+            by_name
+                .entry(name)
+                .or_default()
+                .push((qname.clone(), values));
+        }
+
+        let mut collisions = 0usize;
+        let mut ambiguous: Vec<String> = Vec::new();
+        for (name, owners) in &by_name {
+            if owners.len() < 2 {
+                continue;
+            }
+            collisions += 1;
+            let first = &owners[0].1;
+            if owners.iter().any(|(_, values)| values != first) {
+                let keys: Vec<&str> = owners.iter().map(|(k, _)| k.as_str()).collect();
+                ambiguous.push(format!("{name} keyed at {keys:?} with differing values"));
+            }
+        }
+        ambiguous.sort();
+
+        // Anti-vacuity: if nothing collides, this test proves nothing.
+        assert!(
+            collisions > 0,
+            "fixture guard: the dump must key some enum under several modules"
+        );
+        assert!(
+            ambiguous.is_empty(),
+            "`global_enum_key` would have to choose between genuinely different enums: {ambiguous:#?}"
+        );
+
+        // And the pick itself is stable across rebuilds of the same DB.
+        let again = TypeIndex::load(&core_path(), &next_path()).unwrap();
+        for name in by_name.keys() {
+            assert_eq!(
+                index.global_enum_key(name),
+                again.global_enum_key(name),
+                "`global_enum_key({name})` must not vary between loads"
+            );
+        }
+    }
+
     #[test]
     fn a_globally_visible_enum_is_exactly_one_with_a_bare_source_name() {
         let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
