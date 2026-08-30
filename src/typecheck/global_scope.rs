@@ -2235,6 +2235,103 @@ mod tests {
         assert!(!scope.has_enum("SPrestige::VirtualKey"));
     }
 
+    /// B052/B053 determinism: both new indexes are order-stable, so two loads
+    /// of identical bytes answer identically.
+    ///
+    /// Worth pinning rather than assuming: both are built by iterating
+    /// `HashMap`s, whose order is not stable across runs. The scope index is a
+    /// set, so order cannot leak; the global-enum-value index builds a `Vec`
+    /// of owner names and must therefore SORT, because that vector is printed
+    /// verbatim in the B053 diagnostic and an unsorted one would give the same
+    /// file different messages on different runs.
+    #[test]
+    fn the_scope_and_global_enum_indexes_are_deterministic() {
+        let a = typedb_fixture_index();
+        let b = typedb_fixture_index();
+
+        for path in [
+            "UI",
+            "Internal",
+            "Internal::NadeoServices",
+            "CGameMenu",
+            "NSysCfgVision::SDeferred",
+            "Scene",
+            "Bogus",
+        ] {
+            assert_eq!(
+                a.scope_exists(path),
+                b.scope_exists(path),
+                "`{path}` must answer the same on both loads"
+            );
+        }
+
+        for value in ["Turbo", "None", "WallJump", "GlassSmash", "Ordered"] {
+            assert_eq!(
+                a.global_enum_value_owners(value),
+                b.global_enum_value_owners(value),
+                "`{value}`'s candidate list must be identical, and in the same \
+                 order — it is printed verbatim in the diagnostic"
+            );
+            let owners = a.global_enum_value_owners(value);
+            let mut sorted = owners.to_vec();
+            sorted.sort();
+            assert_eq!(
+                owners,
+                sorted.as_slice(),
+                "`{value}`'s owners must be sorted"
+            );
+        }
+    }
+
+    /// B052: the workspace half of `scope_exists` cannot act at a distance.
+    ///
+    /// A plugin's `namespace Foo` makes `Foo::VirtualKey` resolve, which is
+    /// correct — the game compiles a plugin as ONE module, so a namespace
+    /// declared in any of its files is in scope in all of them, and that was
+    /// probed. The risk is the other direction: that declaring or deleting a
+    /// namespace silently changes a file that never mentions it.
+    ///
+    /// It cannot, and this pins why. `scope_exists` is only ever reached
+    /// through a qualified name the source itself wrote, so a file that spells
+    /// no `Foo::` path never asks about `Foo`.
+    #[test]
+    fn a_workspace_namespace_only_affects_names_that_spell_it() {
+        let index = typedb_fixture_index();
+
+        let without = SymbolTable::new();
+        let mut with = SymbolTable::new();
+        let fid = with.allocate_file_id();
+        with.set_file_symbols(fid, vec![make_symbol("Foo", SymbolKind::Namespace)]);
+
+        let a = GlobalScope::new(&without, Some(&index));
+        let b = GlobalScope::new(&with, Some(&index));
+
+        // The ONE name whose answer may differ is the one that spells `Foo`.
+        assert!(!a.has_enum("Foo::VirtualKey"));
+        assert!(b.has_enum("Foo::VirtualKey"));
+
+        // Everything else is unmoved by the namespace's presence.
+        for name in [
+            "VirtualKey",
+            "ESceneCharVisNotice",
+            "UI::VirtualKey",
+            "CGameMenu::VirtualKey",
+            "CGameMenu::EMenuOrder",
+            "Scene::ESceneCharVisNotice",
+            "Game::CGameMenu::VirtualKey",
+            "Bogus::VirtualKey",
+            "Quux::VirtualKey",
+        ] {
+            assert_eq!(
+                a.has_enum(name),
+                b.has_enum(name),
+                "`{name}` does not spell `Foo`, so declaring `namespace Foo` \
+                 must not change it"
+            );
+            assert_eq!(a.resolves(name), b.resolves(name), "`{name}` likewise");
+        }
+    }
+
     /// B052 fence: the bare spellings are untouched — they are how the game
     /// wants these three written in the first place.
     #[test]

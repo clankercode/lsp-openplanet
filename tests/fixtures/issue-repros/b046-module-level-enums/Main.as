@@ -22,6 +22,25 @@
 //
 // One statement per line: AngelScript reports one error per statement, at the
 // first unresolved symbol, so every rejected name gets its own line.
+//
+// ===========================================================================
+// THIS FIXTURE EXPECTS 4 DIAGNOSTICS, NOT 0. DO NOT "FIX" IT BACK TO 0.
+// ===========================================================================
+// It was 0 when B046 merged, and B046's own comments (in the `SharedValues_*`
+// blocks below) predicted it would become 4 as soon as somebody modelled
+// in-game enum-value ambiguity. B053 did that, so 4 is correct and 0 is now
+// the regression.
+//
+// What B046 guarantees is that these names RESOLVE. What the four get is an
+// `ambiguous enum value` error that NAMES `ESceneCharVisNotice` and
+// `ESceneVehicleVisEvent` among the candidates -- which is positive proof the
+// two module-level enums B046 added are still in the pool. If you ever see
+// `No matching symbol` or `undefined identifier` here instead, THAT is a real
+// B046 regression: the module-level enums have been lost again. The gate test
+// `check_command_issue_repro_b046_module_level_enums_resolve` asserts exactly
+// that distinction, so the two failures cannot be confused.
+//
+// The other 63 value statements in this file must stay silent.
 
 // ESceneCharVisNotice: 33 values, 30 of which no other enum carries.
 void BareValues_ESceneCharVisNotice() {

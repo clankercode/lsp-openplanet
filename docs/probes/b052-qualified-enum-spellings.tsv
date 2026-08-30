@@ -1,0 +1,1905 @@
+# B052 probe corpus - qualified enum/type spellings, live game verdicts.
+# Trackmania + Openplanet 1.29.5, RemoteBuild, 2026-08-30. See README.md.
+# Columns: spelling <TAB> verdict <TAB> the game's verbatim message ('' when accepted)
+spelling	verdict	game_message
+Align	REJECTED	Identifier 'Align' is not a data type in global namespace
+Audio::CAudioScriptManager::ELibSound	REJECTED	Namespace 'Audio::CAudioScriptManager' doesn't exist.
+Audio::CAudioScriptMusic::EUpdateMode	REJECTED	Namespace 'Audio::CAudioScriptMusic' doesn't exist.
+Audio::CAudioSource::EAudioBalanceGroup	REJECTED	Namespace 'Audio::CAudioSource' doesn't exist.
+Audio::CAudioSourceSurface::ESurfId	REJECTED	Namespace 'Audio::CAudioSourceSurface' doesn't exist.
+Audio::CAudioZoneSource::EAudioBalanceGroup	REJECTED	Namespace 'Audio::CAudioZoneSource' doesn't exist.
+Audio::ESceneCharVisNotice	ACCEPTED	
+Audio::ESceneVehicleVisEvent	ACCEPTED	
+Audio::VirtualKey	ACCEPTED	
+Audio::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Audio' or parent
+Auth::ESceneCharVisNotice	ACCEPTED	
+Auth::ESceneVehicleVisEvent	ACCEPTED	
+Auth::VirtualKey	ACCEPTED	
+Auth::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Auth' or parent
+Axis	REJECTED	Identifier 'Axis' is not a data type in global namespace
+AxisFlags	REJECTED	Identifier 'AxisFlags' is not a data type in global namespace
+BarGroupsFlags	REJECTED	Identifier 'BarGroupsFlags' is not a data type in global namespace
+BarsFlags	REJECTED	Identifier 'BarsFlags' is not a data type in global namespace
+Bin	REJECTED	Identifier 'Bin' is not a data type in global namespace
+Bogus::Cond	REJECTED	Namespace 'Bogus' doesn't exist.
+Bogus::EMenuOrder	REJECTED	Namespace 'Bogus' doesn't exist.
+Bogus::ESceneCharVisNotice	REJECTED	Namespace 'Bogus' doesn't exist.
+Bogus::ESceneVehicleVisEvent	REJECTED	Namespace 'Bogus' doesn't exist.
+Bogus::VirtualKey	REJECTED	Namespace 'Bogus' doesn't exist.
+Bogus::ZZZNoSuchEnumName	REJECTED	Namespace 'Bogus' doesn't exist.
+ButtonFlags	REJECTED	Identifier 'ButtonFlags' is not a data type in global namespace
+CAdvertisingManager::ELiveAdSystem	ACCEPTED	
+CAudioScriptManager::ELibSound	ACCEPTED	
+CAudioScriptMusic::EUpdateMode	ACCEPTED	
+CAudioSource::EAudioBalanceGroup	ACCEPTED	
+CAudioSourceSurface::ESurfId	ACCEPTED	
+CAudioZoneSource::EAudioBalanceGroup	ACCEPTED	
+CControlSlider::EAxis	ACCEPTED	
+CFuncLight::EFctType	ACCEPTED	
+CFuncShaderLayerUV::ESignalType	ACCEPTED	
+CGameActionModel::EBehavior	ACCEPTED	
+CGameActionModel::EExternalActions	ACCEPTED	
+CGameActionModel::EInventoryItemClass	ACCEPTED	
+CGameClientTrackingScript::EEventColorLevel	ACCEPTED	
+CGameClientTrackingScript::EEventMedalLevel	ACCEPTED	
+CGameClientTrackingScript::EEventSeason	ACCEPTED	
+CGameClientTrackingScript::EPlayTimeContext	ACCEPTED	
+CGameCommonItemEntityModelEdition::EnumInventoryItemClass	ACCEPTED	
+CGameCommonItemEntityModelEdition::EnumItemType	ACCEPTED	
+CGameCtnAnchoredObject::ECardinalDirections	ACCEPTED	
+CGameCtnAnchoredObject::EMapElemColor	ACCEPTED	
+CGameCtnAnchoredObject::EMapElemLightmapQuality	ACCEPTED	
+CGameCtnAnchoredObject::EPhaseOffset	ACCEPTED	
+CGameCtnApp	ACCEPTED	
+CGameCtnApp::ESceneCharVisNotice	ACCEPTED	
+CGameCtnApp::ESceneVehicleVisEvent	ACCEPTED	
+CGameCtnApp::VirtualKey	ACCEPTED	
+CGameCtnApp::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'CGameCtnApp' or parent
+CGameCtnBlock::ECardinalDirections	ACCEPTED	
+CGameCtnBlock::EMapElemColor	ACCEPTED	
+CGameCtnBlock::EMapElemLightmapQuality	ACCEPTED	
+CGameCtnBlockInfo::EBaseType	ACCEPTED	
+CGameCtnBlockInfo::EMultiDirEnum	ACCEPTED	
+CGameCtnBlockInfo::EWayPointType	ACCEPTED	
+CGameCtnBlockInfoClip::EMultiDirEnum	ACCEPTED	
+CGameCtnBlockInfoClip::EnumClipType	ACCEPTED	
+CGameCtnBlockInfoVariant::ECardinalDirEnum	ACCEPTED	
+CGameCtnBlockInfoVariant::EMultiDirEnum	ACCEPTED	
+CGameCtnBlockInfoVariant::EVariantBaseTypeEnum	ACCEPTED	
+CGameCtnBlockInfoVariantGround::EnumAutoTerrainPlaceType	ACCEPTED	
+CGameCtnBlockUnitInfo::ECardinalDirEnum	ACCEPTED	
+CGameCtnCampaign::EMedal	ACCEPTED	
+CGameCtnCampaign::ERequiredPlayersCount	ACCEPTED	
+CGameCtnCampaign::EType	ACCEPTED	
+CGameCtnCampaign::EUnlockType	ACCEPTED	
+CGameCtnChallenge::EBotPathTypeEnum	ACCEPTED	
+CGameCtnChallenge::ENPlugMaterial_EMapElemColorPalette	ACCEPTED	
+CGameCtnChallenge::ESceneCharVisNotice	ACCEPTED	
+CGameCtnChallenge::ESceneVehicleVisEvent	ACCEPTED	
+CGameCtnChallenge::ETrafficDensity	ACCEPTED	
+CGameCtnChallenge::VirtualKey	ACCEPTED	
+CGameCtnChallenge::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'CGameCtnChallenge' or parent
+CGameCtnCollector::EProdState	ACCEPTED	
+CGameCtnEditorCommon::ETrafficDensityEnum	ACCEPTED	
+CGameCtnEditorScriptAnchoredObject::ECardinalDirections	ACCEPTED	
+CGameCtnEditorScriptSpecialProperty::EMapElemColor	ACCEPTED	
+CGameCtnEditorScriptSpecialProperty::EWaypointType	ACCEPTED	
+CGameCtnMacroBlockJunction::ECardDir	ACCEPTED	
+CGameCtnMediaBlockCameraCustom::ECamInterp	ACCEPTED	
+CGameCtnMediaBlockCameraGame::EGameCam	ACCEPTED	
+CGameCtnMediaBlockEditorTriangles::EEditMode	ACCEPTED	
+CGameCtnMediaBlockGhostTM_SuperSKeyVal::EForceLight	ACCEPTED	
+CGameCtnMediaBlockOpponentVisibility_SuperSKeyVal::EOpponentVisibility	ACCEPTED	
+CGameCtnMediaClipViewer::EStatus	ACCEPTED	
+CGameCtnNetServerInfo::EVehicleNetQuality	ACCEPTED	
+CGameCtnZoneTransition::EZoneTransitionType	ACCEPTED	
+CGameCursorBlock::EAdditionalDirEnum	ACCEPTED	
+CGameCursorBlock::ECardinalDirEnum	ACCEPTED	
+CGameDataFileManagerScript::EMediaType	ACCEPTED	
+CGameDialogs::EDialog	ACCEPTED	
+CGameDialogsScript::EFileType	ACCEPTED	
+CGameDialogsScript::EResult	ACCEPTED	
+CGameDialogsScript::EType	ACCEPTED	
+CGameDialogsScriptEvent::EType	ACCEPTED	
+CGameDisplaySettingsWrapper::EConsoleResolution	ACCEPTED	
+CGameDisplaySettingsWrapper::EDeferredAA	ACCEPTED	
+CGameDisplaySettingsWrapper::EDisplayMode	ACCEPTED	
+CGameDisplaySettingsWrapper::EDisplaySync	ACCEPTED	
+CGameDisplaySettingsWrapper::EEverywhereReflect	ACCEPTED	
+CGameDisplaySettingsWrapper::EForwardAA	ACCEPTED	
+CGameDisplaySettingsWrapper::EFxBloomHdr	ACCEPTED	
+CGameDisplaySettingsWrapper::EFxBlur	ACCEPTED	
+CGameDisplaySettingsWrapper::EFxMotionBlur	ACCEPTED	
+CGameDisplaySettingsWrapper::EGpuSync	ACCEPTED	
+CGameDisplaySettingsWrapper::EPreset	ACCEPTED	
+CGameDisplaySettingsWrapper::ERealtimeSSAA	ACCEPTED	
+CGameDisplaySettingsWrapper::ERealtimeSSAA_Motion	ACCEPTED	
+CGameDisplaySettingsWrapper::EScreenshotExt	ACCEPTED	
+CGameDisplaySettingsWrapper::EShaderQuality	ACCEPTED	
+CGameDisplaySettingsWrapper::EShadows	ACCEPTED	
+CGameDisplaySettingsWrapper::EShowPerformance	ACCEPTED	
+CGameDisplaySettingsWrapper::ETextureFilter	ACCEPTED	
+CGameDisplaySettingsWrapper::ETripleBuffer	ACCEPTED	
+CGameDisplaySettingsWrapper::EVehicleReflect	ACCEPTED	
+CGameDisplaySettingsWrapper::EWaterReflect	ACCEPTED	
+CGameEditorEvent::EType	ACCEPTED	
+CGameEditorMainPlugin::EMeshEditorAPI	ACCEPTED	
+CGameEditorMediaTrackerPluginAPI::EMediaTrackerBlockType	ACCEPTED	
+CGameEditorMediaTrackerPluginAPI::EMediaTrackerCopyType	ACCEPTED	
+CGameEditorMediaTrackerPluginAPI::EMediaTrackerGhostRef	ACCEPTED	
+CGameEditorMediaTrackerPluginAPI::EMediaTrackerPasteType	ACCEPTED	
+CGameEditorMesh::EEdgesConstraint	ACCEPTED	
+CGameEditorMesh::EEdgesDisplay	ACCEPTED	
+CGameEditorMesh::EElemType	ACCEPTED	
+CGameEditorMesh::EFilterKind	ACCEPTED	
+CGameEditorMesh::EInteraction	ACCEPTED	
+CGameEditorMesh::ELayerType	ACCEPTED	
+CGameEditorMesh::EMaterialFilterCriterion	ACCEPTED	
+CGameEditorMesh::ETexCoordLayer	ACCEPTED	
+CGameEditorMesh::ETitleCoreType	ACCEPTED	
+CGameEditorMesh::EUVEditorMode	ACCEPTED	
+CGameEditorMesh::EUVEditorProjectionType	ACCEPTED	
+CGameEditorModel::EEditorType	ACCEPTED	
+CGameEditorModule::EModuleType	ACCEPTED	
+CGameEditorPlugin::EInteractionStatus	ACCEPTED	
+CGameEditorPluginAPI::EEditorFileToolBar_QuadType	ACCEPTED	
+CGameEditorPluginCameraAPI::ECameraVStep	ACCEPTED	
+CGameEditorPluginCameraAPI::EZoomLevel	ACCEPTED	
+CGameEditorPluginMap::ECardinalDirections	ACCEPTED	
+CGameEditorPluginMap::ECardinalDirections8	ACCEPTED	
+CGameEditorPluginMap::EMapElemColor	ACCEPTED	
+CGameEditorPluginMap::EMapElemColorPalette	ACCEPTED	
+CGameEditorPluginMap::EMapElemLightmapQuality	ACCEPTED	
+CGameEditorPluginMap::EPhaseOffset	ACCEPTED	
+CGameEditorPluginMap::EPlaceMode	ACCEPTED	
+CGameEditorPluginMap::ERelativeDirections	ACCEPTED	
+CGameEditorPluginMap::EShadowsQuality	ACCEPTED	
+CGameEditorPluginMap::EValidationStatus	ACCEPTED	
+CGameEditorPluginMap::EditMode	ACCEPTED	
+CGameEditorPluginMapMapType::EValidationStatus	ACCEPTED	
+CGameEditorPluginMapScriptEvent::EInput	ACCEPTED	
+CGameEditorPluginMapScriptEvent::EType	ACCEPTED	
+CGameEditorPluginModuleScriptEvent::EType	ACCEPTED	
+CGameEditorSkinPluginAPI::EEditorSkin_IconType	ACCEPTED	
+CGameEditorSkinPluginAPI::EPainterMode	ACCEPTED	
+CGameEditorSkinPluginAPI::EPainterSolidType	ACCEPTED	
+CGameGhostMgrScript::EGhostPhyMode	ACCEPTED	
+CGameHighScore::EMedal	ACCEPTED	
+CGameHighScore::EMenuOrder	REJECTED	Identifier 'EMenuOrder' is not a data type in namespace 'CGameHighScore' or parent
+CGameHud3dMarkerConfig::EAnchorType	ACCEPTED	
+CGameHud3dMarkerConfig::EHudVisibility	ACCEPTED	
+CGameHud3dMarkerConfig::EMiniMapVisibility	ACCEPTED	
+CGameItemModel::EnumDefaultCam	ACCEPTED	
+CGameItemModel::EnumInventoryItemClass	ACCEPTED	
+CGameItemModel::EnumItemType	ACCEPTED	
+CGameItemModel::EnumWaypointType	ACCEPTED	
+CGameManiaApp::ELinkType	ACCEPTED	
+CGameManiaApp::ESystemPlatform	ACCEPTED	
+CGameManiaApp::ESystemSkuIdentifier	ACCEPTED	
+CGameManiaAppPlaygroundScriptEvent::EGameplaySpecialType	ACCEPTED	
+CGameManiaAppPlaygroundScriptEvent::EGameplayTurboRoulette	ACCEPTED	
+CGameManiaAppPlaygroundScriptEvent::EType	ACCEPTED	
+CGameManiaAppScriptEvent::EMenuNavAction	ACCEPTED	
+CGameManiaAppScriptEvent::EType	ACCEPTED	
+CGameManiaPlanetScriptAPI::EBuyTitleMode	ACCEPTED	
+CGameManiaPlanetScriptAPI::EContext	ACCEPTED	
+CGameManiaPlanetScriptAPI::EHmdTrackingState	ACCEPTED	
+CGameManiaPlanetScriptAPI::EHmdWearingState	ACCEPTED	
+CGameManiaPlanetScriptAPI::EInputsListFilter	ACCEPTED	
+CGameManiaPlanetScriptAPI::ELinkType	ACCEPTED	
+CGameManiaPlanetScriptAPI::EMenuStationsPage	ACCEPTED	
+CGameManiaPlanetScriptAPI::ENetworkSpeed	ACCEPTED	
+CGameManiaPlanetScriptAPI::EPlayerInfoDisplayType	ACCEPTED	
+CGameManiaPlanetScriptAPI::ESystemPlatform	ACCEPTED	
+CGameManiaPlanetScriptAPI::ESystemSkuIdentifier	ACCEPTED	
+CGameManiaTitleControlScriptAPI::EEditorType	ACCEPTED	
+CGameManiaTitleControlScriptAPI::EReplayEditType	ACCEPTED	
+CGameManiaTitleControlScriptAPI::EResult	ACCEPTED	
+CGameManiaTitleControlScriptAPI::ESplitScreenLayout	ACCEPTED	
+CGameManiaTitleEditionScriptAPI::EDrive	ACCEPTED	
+CGameManialinkAnimManager::EAnimManagerEasing	ACCEPTED	
+CGameManialinkControl::EAlignHorizontal	ACCEPTED	
+CGameManialinkControl::EAlignVertical	ACCEPTED	
+CGameManialinkEntry::ETextFormat	ACCEPTED	
+CGameManialinkEntry::EValueType	ACCEPTED	
+CGameManialinkFrame::EScrollWheel	ACCEPTED	
+CGameManialinkLabel::EBlendMode	ACCEPTED	
+CGameManialinkLabel::EFilterProfanities	ACCEPTED	
+CGameManialinkQuad::EBlendMode	ACCEPTED	
+CGameManialinkQuad::EKeepRatioMode	ACCEPTED	
+CGameManialinkScriptEvent::EMenuNavAction	ACCEPTED	
+CGameManialinkScriptEvent::EType	ACCEPTED	
+CGameManialinkScriptHandler::ELinkType	ACCEPTED	
+CGameManialinkScriptHandler::ESystemPlatform	ACCEPTED	
+CGameManialinkScriptHandler::ESystemSkuIdentifier	ACCEPTED	
+CGameManialinkScriptHandler_ReadOnly::ESystemPlatform	ACCEPTED	
+CGameManialinkScriptHandler_ReadOnly::ESystemSkuIdentifier	ACCEPTED	
+CGameManialinkTextEdit::EControlScriptEditorTextFormat	ACCEPTED	
+CGameManiaplanetPlugin::EBuyTitleMode	ACCEPTED	
+CGameManiaplanetPlugin::EContext	ACCEPTED	
+CGameManiaplanetPlugin::EUISound	ACCEPTED	
+CGameManiaplanetPluginInterfaceEvent::EType	ACCEPTED	
+CGameMasterServerRichPresenceManagerScript::ERichPresence	ACCEPTED	
+CGameMenu	ACCEPTED	
+CGameMenu::EMenuOrder	ACCEPTED	
+CGameMenu::ESceneCharVisNotice	ACCEPTED	
+CGameMenu::ESceneVehicleVisEvent	ACCEPTED	
+CGameMenu::VirtualKey	ACCEPTED	
+CGameMenu::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'CGameMenu' or parent
+CGameMgrAction::EActionSlot	ACCEPTED	
+CGameModuleMenuBrowser::EFileAction	ACCEPTED	
+CGameModuleMenuBrowser::EFileType	ACCEPTED	
+CGameModulePlaygroundPlayerStateComponentModel::EModel	ACCEPTED	
+CGameModulePlaygroundPlayerStateComponentModel::EType	ACCEPTED	
+CGameModulePlaygroundPlayerStateGaugeModel::EActionInput	ACCEPTED	
+CGameModulePlaygroundPlayerStateGaugeModel::EDirection	ACCEPTED	
+CGameModulePlaygroundPlayerStateGaugeModel::EDistanceUnit	ACCEPTED	
+CGameModulePlaygroundPlayerStateGaugeModel::ESource	ACCEPTED	
+CGameModulePlaygroundPlayerStateGaugeModel::ESpeedUnit	ACCEPTED	
+CGameModulePlaygroundPlayerStateListModel::EDistanceUnit	ACCEPTED	
+CGameModulePlaygroundPlayerStateListModel::ESource	ACCEPTED	
+CGameModulePlaygroundPlayerStateListModel::ESpeedUnit	ACCEPTED	
+CGameModulePlaygroundSpeedMeterModel::ESpeedUnit	ACCEPTED	
+CGameModulePlaygroundTeamStateModel::ECardAlign	ACCEPTED	
+CGameNetPlayerInfo::EPlayerType	ACCEPTED	
+CGameNetPlayerInfo::ESpectatorMode	ACCEPTED	
+CGameNetServerInfo::EPingEnum	ACCEPTED	
+CGameObjectPhyModel::EGameObjectPhyModelPersistence	ACCEPTED	
+CGameObjectPhyModel::EGameObjectPhyModelProgam	ACCEPTED	
+CGamePlayerInfo::EEchelon	ACCEPTED	
+CGamePlayerInfo::EStereoDisplayMode	ACCEPTED	
+CGamePlayerInfo::ETagType	ACCEPTED	
+CGamePlayerProfileChunk_GameSettings::EPlayerVisibility	ACCEPTED	
+CGamePlayerProfileChunk_GameSettings::ERoadsideSpectatorVisibility	ACCEPTED	
+CGamePlaygroundClientScriptAPI::ESpectatorCameraType	ACCEPTED	
+CGamePlaygroundClientScriptAPI::ESpectatorTargetType	ACCEPTED	
+CGamePlaygroundModuleServerScoresTable::EColumnType	ACCEPTED	
+CGamePlaygroundModuleServerScoresTable::EScoreSortOrder	ACCEPTED	
+CGamePlaygroundScript::EMedal	ACCEPTED	
+CGamePlaygroundScript::ESystemPlatform	ACCEPTED	
+CGamePlaygroundScript::ESystemSkuIdentifier	ACCEPTED	
+CGamePlaygroundUIConfig::EAvatarVariant	ACCEPTED	
+CGamePlaygroundUIConfig::ECutSceneStyle	ACCEPTED	
+CGamePlaygroundUIConfig::EHudVisibility	ACCEPTED	
+CGamePlaygroundUIConfig::ELabelsVisibility	ACCEPTED	
+CGamePlaygroundUIConfig::EMediaClipStyle	ACCEPTED	
+CGamePlaygroundUIConfig::EMessageDisplay	ACCEPTED	
+CGamePlaygroundUIConfig::ENoticeLevel	ACCEPTED	
+CGamePlaygroundUIConfig::EObserverMode	ACCEPTED	
+CGamePlaygroundUIConfig::EUISequence	ACCEPTED	
+CGamePlaygroundUIConfig::EUISound	ACCEPTED	
+CGamePlaygroundUIConfig::EUIStatus	ACCEPTED	
+CGamePlaygroundUIConfig::EVisibility	ACCEPTED	
+CGamePlaygroundUIConfigEvent::EModuleType	ACCEPTED	
+CGamePlaygroundUIConfigEvent::EType	ACCEPTED	
+CGameRemoteBuffer::EMode	ACCEPTED	
+CGameScoreAndLeaderBoardManagerScript::ELocalScoreStatus	ACCEPTED	
+CGameScoreAndLeaderBoardManagerScript::EMasterServerScoreStatus	ACCEPTED	
+CGameScriptChatContact::EPresenceShow	ACCEPTED	
+CGameScriptChatContact::ESubscription	ACCEPTED	
+CGameScriptChatContact::ESubscriptionStatus	ACCEPTED	
+CGameScriptChatEvent::EAddBuddySlotStatus	ACCEPTED	
+CGameScriptChatEvent::EPresenceShow	ACCEPTED	
+CGameScriptChatEvent::ESubscription	ACCEPTED	
+CGameScriptChatEvent::ESubscriptionStatus	ACCEPTED	
+CGameScriptChatEvent::EType	ACCEPTED	
+CGameScriptChatHistoryEntry::EDirection	ACCEPTED	
+CGameScriptChatManager::EConnectionStatus	ACCEPTED	
+CGameScriptChatManager::EDesiredConnectionStatus	ACCEPTED	
+CGameScriptChatManager::EPresenceShow	ACCEPTED	
+CGameScriptDebugger::EVisibility	ACCEPTED	
+CGameScriptHandlerPlaygroundInterface::EInGameMenuResult	ACCEPTED	
+CGameScriptHandlerPlaygroundInterface::EUISound	ACCEPTED	
+CGameScriptMgrVehicle::EArmorUse	ACCEPTED	
+CGameScriptMgrVehicle::ESlotType	ACCEPTED	
+CGameScriptNotificationsConsumer::EFilterPriority	ACCEPTED	
+CGameScriptNotificationsConsumerEvent::EType	ACCEPTED	
+CGameScriptNotificationsConsumerNotification::ENotificationPriority	ACCEPTED	
+CGameScriptNotificationsProducer::ENotificationLifeSpan	ACCEPTED	
+CGameScriptNotificationsProducer::ENotificationPriority	ACCEPTED	
+CGameScriptNotificationsProducerEvent::EType	ACCEPTED	
+CGameScriptServerAdmin::ESpecMode	ACCEPTED	
+CGameScriptVehicle::ESlotType	ACCEPTED	
+CGameServerPluginEvent::EChatOption	ACCEPTED	
+CGameServerPluginEvent::EType	ACCEPTED	
+CGameServerScriptXmlRpcEvent::EType	ACCEPTED	
+CGameStation::EEchelon	ACCEPTED	
+CGameUILayer::EUILayerAnimation	ACCEPTED	
+CGameUILayer::EUILayerType	ACCEPTED	
+CGameUserManagerScript::ECrossPlayState	ACCEPTED	
+CGameUserManagerScript::EPrestigeMode	ACCEPTED	
+CGameUserManagerScript::EUbisoftClubFlow	ACCEPTED	
+CGameUserManagerScript::EUplayOverlaySection	ACCEPTED	
+CGameUserManagerScript::EVoiceChatMuteSetting	ACCEPTED	
+CGameUserPrivilegesManagerScript::ECommunicationRestrictionLevel	ACCEPTED	
+CGameUserPrivilegesManagerScript::EPrivilege	ACCEPTED	
+CGameUserProfileWrapper::ECustomPlayerModels	ACCEPTED	
+CGameUserProfileWrapper::EDisplayRecords	ACCEPTED	
+CGameUserProfileWrapper::EIngameChatBackground	ACCEPTED	
+CGameUserProfileWrapper::EIngameChatTextSize	ACCEPTED	
+CGameUserProfileWrapper::EInputMouseReleaseKey	ACCEPTED	
+CGameUserProfileWrapper::EMapEditorDifficulty	ACCEPTED	
+CGameUserProfileWrapper::EMapEditorEnviro	ACCEPTED	
+CGameUserProfileWrapper::EMapEditorMode	ACCEPTED	
+CGameUserProfileWrapper::EMapEditorMood	ACCEPTED	
+CGameUserProfileWrapper::EPlayerVisibility	ACCEPTED	
+CGameUserProfileWrapper::ERoadsideSpectatorVisibility	ACCEPTED	
+CGameUserVoiceChat::EMuteSetting	ACCEPTED	
+CGameVideoScriptVideo::ETextureFilter	ACCEPTED	
+CGameVoiceChatConfigScript::ESyncMode	ACCEPTED	
+CGxLightBall::EStaticShadow	ACCEPTED	
+CGxLightFrustum::EApply	ACCEPTED	
+CGxLightFrustum::ETechnique	ACCEPTED	
+CHmsCamera::EViewportRatio	ACCEPTED	
+CHmsLightMapCache::EAllocMode	ACCEPTED	
+CHmsLightMapCache::EQualityVer	ACCEPTED	
+CHmsLightMapCache::ESortMode	ACCEPTED	
+CHmsLightMapCache::EVersion	ACCEPTED	
+CHmsPrecalcRender::EBitmapDepth	ACCEPTED	
+CHmsSolidVisCst_TmCar::SPrestige::EMedal	ACCEPTED	
+CHmsSolidVisCst_TmCar::SPrestige::ESeasonOrType	ACCEPTED	
+CHmsViewport::EBitmapQuality	ACCEPTED	
+CHmsViewport::EPC3Quality	ACCEPTED	
+CHmsViewport::ERenderDevice	ACCEPTED	
+CHmsZone::EGxFogFormula	ACCEPTED	
+CHmsZone::EGxFogSpace	ACCEPTED	
+CHmsZoneOverlay::EPickEnableMode	ACCEPTED	
+CInputScriptEvent::EButton	ACCEPTED	
+CInputScriptEvent::EType	ACCEPTED	
+CInputScriptManager::EButton	ACCEPTED	
+CInputScriptManager::EPadType	ACCEPTED	
+CInputScriptPad::EButton	ACCEPTED	
+CInputScriptPad::EPadType	ACCEPTED	
+CMwNod::ESceneCharVisNotice	REJECTED	Identifier 'ESceneCharVisNotice' is not a data type in namespace 'CMwNod' or parent
+CMwNod::ESceneVehicleVisEvent	REJECTED	Identifier 'ESceneVehicleVisEvent' is not a data type in namespace 'CMwNod' or parent
+CMwNod::VirtualKey	REJECTED	Identifier 'VirtualKey' is not a data type in namespace 'CMwNod' or parent
+CMwNod::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'CMwNod' or parent
+CNetHttpResult::EKind	ACCEPTED	
+CNetHttpResult::EStatus	ACCEPTED	
+CNetMasterServerDownload::EContext	ACCEPTED	
+CNetMasterServerDownload::EUploadMethod	ACCEPTED	
+CNetMasterServerUserInfo::EFirstPartySignInState	ACCEPTED	
+CNetMasterServerUserInfo::EMasterServerConnectionDetailedStatus	ACCEPTED	
+CNetMasterServerUserInfo::EMasterServerConnectionError	ACCEPTED	
+CNetMasterServerUserInfo::EMasterServerConnectionStatus	ACCEPTED	
+CNetScriptHttpEvent::EType	ACCEPTED	
+CNod::VirtualKey	REJECTED	Namespace 'CNod' doesn't exist.
+CNod::ZZZNoSuchEnumName	REJECTED	Namespace 'CNod' doesn't exist.
+CPlugBeamEmitterSubModel::EDisplayType	ACCEPTED	
+CPlugBitmap::EColorDepth	ACCEPTED	
+CPlugBitmap::EColorSpace	ACCEPTED	
+CPlugBitmap::ECompressFile	ACCEPTED	
+CPlugBitmap::ECompressor	ACCEPTED	
+CPlugBitmap::ECube2d	ACCEPTED	
+CPlugBitmap::ECubeMapFace	ACCEPTED	
+CPlugBitmap::EDynamic	ACCEPTED	
+CPlugBitmap::EEdCustomSaveOp	ACCEPTED	
+CPlugBitmap::EForceBorderSize	ACCEPTED	
+CPlugBitmap::EGenerateUV	ACCEPTED	
+CPlugBitmap::EMipMapAlpha01	ACCEPTED	
+CPlugBitmap::ENormalRotate	ACCEPTED	
+CPlugBitmap::EPixelUpdate	ACCEPTED	
+CPlugBitmap::ERenderTech	ACCEPTED	
+CPlugBitmap::ETexAddress	ACCEPTED	
+CPlugBitmap::ETexFilter	ACCEPTED	
+CPlugBitmap::EUsage	ACCEPTED	
+CPlugBitmap::EVideoTimer	ACCEPTED	
+CPlugBitmap::E__	ACCEPTED	
+CPlugBitmapAddress::EGxUVGenerate	ACCEPTED	
+CPlugBitmapPack::EGxTexAddress	ACCEPTED	
+CPlugBitmapRender::ERenderPathFails	ACCEPTED	
+CPlugBitmapRender::ETrigger	ACCEPTED	
+CPlugBitmapSampler::EAlphaReq	ACCEPTED	
+CPlugBitmapSampler::EGxTexAddress	ACCEPTED	
+CPlugBitmapSampler::EGxTexFilter	ACCEPTED	
+CPlugBulletPhyModel::EBulletType	ACCEPTED	
+CPlugBulletPhyModel::EExplosionOccultationTest	ACCEPTED	
+CPlugBulletPhyModel::EFireBulletPatternMode	ACCEPTED	
+CPlugCustomBeamModel::ECustomBeamType	ACCEPTED	
+CPlugDecoratorTree::EBoolCond	ACCEPTED	
+CPlugFileGen::EGenKind	ACCEPTED	
+CPlugFileImg::EDimension	ACCEPTED	
+CPlugFileImg::EPlugChannelType	ACCEPTED	
+CPlugFileImg::EPlugImageFormat	ACCEPTED	
+CPlugMaterialUserInst::EMaterialModelChar	ACCEPTED	
+CPlugMaterialUserInst::EMaterialModelDyna0	ACCEPTED	
+CPlugMaterialUserInst::EMaterialModelStatic	ACCEPTED	
+CPlugMaterialUserInst::EMaterialModelVehicle	ACCEPTED	
+CPlugMaterialUserInst::ETexAddress	ACCEPTED	
+CPlugShaderPass::ECullMode	ACCEPTED	
+CPlugShaderPass::EGxBlendFactor	ACCEPTED	
+CPlugSound::EAudioBalanceGroup	ACCEPTED	
+CPlugSound::EAudioIgnoreSourceProperties	ACCEPTED	
+CPlugSound::EAudioPitchFromDistMode	ACCEPTED	
+CPlugSound::EAudioRoomFx	ACCEPTED	
+CPlugSoundMulti::ESoundInputMapping	ACCEPTED	
+CPlugTurret::EOnArmorEmtpy	ACCEPTED	
+CPlugTurret::ETurretFixedAngleSignal	ACCEPTED	
+CPlugVisualSprite::ERenderMode	ACCEPTED	
+CPlugWeather::EGxFogFormula	ACCEPTED	
+CPlugWeather::EGxFogSpace	ACCEPTED	
+CSceneVehicleVis::ESceneCharVisNotice	REJECTED	Identifier 'ESceneCharVisNotice' is not a data type in namespace 'CSceneVehicleVis' or parent
+CSceneVehicleVis::ESceneVehicleVisEvent	REJECTED	Identifier 'ESceneVehicleVisEvent' is not a data type in namespace 'CSceneVehicleVis' or parent
+CSceneVehicleVis::VirtualKey	REJECTED	Identifier 'VirtualKey' is not a data type in namespace 'CSceneVehicleVis' or parent
+CSceneVehicleVis::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'CSceneVehicleVis' or parent
+CSmActionInstanceEvent::EInputChange	ACCEPTED	
+CSmActionInstanceEvent::EType	ACCEPTED	
+CSmArenaRules::EGameplay	ACCEPTED	
+CSmArenaRulesEvent::EActionInput	ACCEPTED	
+CSmArenaRulesEvent::EActionSlot	ACCEPTED	
+CSmArenaRulesEvent::EType	ACCEPTED	
+CSmArenaRulesMode::EActionInput	ACCEPTED	
+CSmArenaRulesMode::EActionSlot	ACCEPTED	
+CSmArenaRulesMode::EBrowseActionWheel	ACCEPTED	
+CSmArenaRulesMode::ECheckpointBehaviour	ACCEPTED	
+CSmArenaRulesMode::EGameplay	ACCEPTED	
+CSmArenaRulesMode::EGiveUpBehaviour	ACCEPTED	
+CSmArenaRulesMode::ERespawnBehaviour	ACCEPTED	
+CSmArenaRulesMode::ESmScoreSortOrder	ACCEPTED	
+CSmArenaRulesMode::EVehicleTransformType	ACCEPTED	
+CSmArenaRulesMode::EWeapon	ACCEPTED	
+CSmObject::EStatus	ACCEPTED	
+CSmPlayerDriver::ESmAttackFilter	ACCEPTED	
+CSmPlayerDriver::ESmDriverBehaviour	ACCEPTED	
+CSmPlayerDriver::ESmDriverPathState	ACCEPTED	
+CSmPlayerDriver::ESmDriverPatrolMode	ACCEPTED	
+CSmScriptPlayer::EPost	ACCEPTED	
+CSmScriptPlayer::ESpawnStatus	ACCEPTED	
+CSystemConfig::EAdvertising	ACCEPTED	
+CSystemConfig::EAudioQuality	ACCEPTED	
+CSystemConfig::ENetworkSpeed	ACCEPTED	
+CSystemConfig::EPlayerInfoDisplayType	ACCEPTED	
+CSystemConfig::EPlayerOcclusion	ACCEPTED	
+CSystemConfig::EPlayerShadow	ACCEPTED	
+CSystemConfig::ETmBackgroundQuality	ACCEPTED	
+CSystemConfig::ETmCarParticlesQuality	ACCEPTED	
+CSystemConfig::ETmCarQuality	ACCEPTED	
+CSystemConfig::ETmOpponents	ACCEPTED	
+CSystemConfigDisplay::EAntialias	ACCEPTED	
+CSystemConfigDisplay::EDeferredAA	ACCEPTED	
+CSystemConfigDisplay::EDisplayMode	ACCEPTED	
+CSystemConfigDisplay::EDisplaySync	ACCEPTED	
+CSystemConfigDisplay::EEverywhereReflect	ACCEPTED	
+CSystemConfigDisplay::EFilterAnisoQ	ACCEPTED	
+CSystemConfigDisplay::EFxBloomHdr	ACCEPTED	
+CSystemConfigDisplay::EFxBlur	ACCEPTED	
+CSystemConfigDisplay::EFxMotionBlur	ACCEPTED	
+CSystemConfigDisplay::EGeometryQ	ACCEPTED	
+CSystemConfigDisplay::EGpuSync	ACCEPTED	
+CSystemConfigDisplay::ELightFromMap	ACCEPTED	
+CSystemConfigDisplay::ELightMapQuality	ACCEPTED	
+CSystemConfigDisplay::ELightMapSizeMax	ACCEPTED	
+CSystemConfigDisplay::EPreset	ACCEPTED	
+CSystemConfigDisplay::ERenderingApi	ACCEPTED	
+CSystemConfigDisplay::EScreenShotExt	ACCEPTED	
+CSystemConfigDisplay::EShaderQ	ACCEPTED	
+CSystemConfigDisplay::EShadows	ACCEPTED	
+CSystemConfigDisplay::EShowPerformance	ACCEPTED	
+CSystemConfigDisplay::ETripleBuffer	ACCEPTED	
+CSystemConfigDisplay::EVehicleReflect	ACCEPTED	
+CSystemConfigDisplay::EWaterReflect	ACCEPTED	
+CSystemConfigDisplay::EWindowSize	ACCEPTED	
+CSystemConfigDisplay::EZClip	ACCEPTED	
+CSystemConfigDisplay::EZClipAuto	ACCEPTED	
+CSystemFidFile::ESceneCharVisNotice	REJECTED	Identifier 'ESceneCharVisNotice' is not a data type in namespace 'CSystemFidFile' or parent
+CSystemFidFile::ESceneVehicleVisEvent	REJECTED	Identifier 'ESceneVehicleVisEvent' is not a data type in namespace 'CSystemFidFile' or parent
+CSystemFidFile::VirtualKey	REJECTED	Identifier 'VirtualKey' is not a data type in namespace 'CSystemFidFile' or parent
+CSystemFidFile::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'CSystemFidFile' or parent
+CSystemPlatformScript::ESystemPlatform	ACCEPTED	
+CSystemPlatformScript::ESystemSkuIdentifier	ACCEPTED	
+CTmRaceResultNod::ETmRaceResultCriteria	ACCEPTED	
+CTrackMania::ESceneCharVisNotice	REJECTED	Identifier 'ESceneCharVisNotice' is not a data type in namespace 'CTrackMania' or parent
+CTrackMania::ESceneVehicleVisEvent	REJECTED	Identifier 'ESceneVehicleVisEvent' is not a data type in namespace 'CTrackMania' or parent
+CTrackMania::VirtualKey	REJECTED	Identifier 'VirtualKey' is not a data type in namespace 'CTrackMania' or parent
+CTrackMania::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'CTrackMania' or parent
+CTrackManiaNetworkServerInfo::EGameMode	ACCEPTED	
+CTrackManiaNetworkServerInfo::EGameMode_Script	ACCEPTED	
+CWebServicesTaskResult_PlanetsTransaction_Bill::EState	ACCEPTED	
+CXmlScriptParsingNodeJson::ENodeType	ACCEPTED	
+CallConvention	REJECTED	Identifier 'CallConvention' is not a data type in global namespace
+ChildFlags	REJECTED	Identifier 'ChildFlags' is not a data type in global namespace
+Col	REJECTED	Identifier 'Col' is not a data type in global namespace
+ColorEditFlags	REJECTED	Identifier 'ColorEditFlags' is not a data type in global namespace
+Colormap	REJECTED	Identifier 'Colormap' is not a data type in global namespace
+ColormapScaleFlags	REJECTED	Identifier 'ColormapScaleFlags' is not a data type in global namespace
+ComboFlags	REJECTED	Identifier 'ComboFlags' is not a data type in global namespace
+Cond	REJECTED	Identifier 'Cond' is not a data type in global namespace
+Control::CControlSlider::EAxis	REJECTED	Namespace 'Control::CControlSlider' doesn't exist.
+Control::ESceneCharVisNotice	REJECTED	Namespace 'Control' doesn't exist.
+Control::ESceneVehicleVisEvent	REJECTED	Namespace 'Control' doesn't exist.
+Control::VirtualKey	REJECTED	Namespace 'Control' doesn't exist.
+Control::ZZZNoSuchEnumName	REJECTED	Namespace 'Control' doesn't exist.
+Crypto::ESceneCharVisNotice	ACCEPTED	
+Crypto::ESceneVehicleVisEvent	ACCEPTED	
+Crypto::VirtualKey	ACCEPTED	
+Crypto::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Crypto' or parent
+Dev::ESceneCharVisNotice	ACCEPTED	
+Dev::ESceneVehicleVisEvent	ACCEPTED	
+Dev::FreeRegister	ACCEPTED	
+Dev::PushRegisters	ACCEPTED	
+Dev::VirtualKey	ACCEPTED	
+Dev::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Dev' or parent
+Dips::VirtualKey	REJECTED	Namespace 'Dips' doesn't exist.
+Discord::Response	ACCEPTED	
+Display::ESceneCharVisNotice	ACCEPTED	
+Display::ESceneVehicleVisEvent	ACCEPTED	
+Display::VirtualKey	ACCEPTED	
+Display::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Display' or parent
+EActionInput	REJECTED	Identifier 'EActionInput' is not a data type in global namespace
+EActionSlot	REJECTED	Identifier 'EActionSlot' is not a data type in global namespace
+EAddBuddySlotStatus	REJECTED	Identifier 'EAddBuddySlotStatus' is not a data type in global namespace
+EAdditionalDirEnum	REJECTED	Identifier 'EAdditionalDirEnum' is not a data type in global namespace
+EAdvertising	REJECTED	Identifier 'EAdvertising' is not a data type in global namespace
+EAlign	REJECTED	Identifier 'EAlign' is not a data type in global namespace
+EAlignHorizontal	REJECTED	Identifier 'EAlignHorizontal' is not a data type in global namespace
+EAlignVertical	REJECTED	Identifier 'EAlignVertical' is not a data type in global namespace
+EAllocMode	REJECTED	Identifier 'EAllocMode' is not a data type in global namespace
+EAllocType	REJECTED	Identifier 'EAllocType' is not a data type in global namespace
+EAlphaReq	REJECTED	Identifier 'EAlphaReq' is not a data type in global namespace
+EAnchorType	REJECTED	Identifier 'EAnchorType' is not a data type in global namespace
+EAnimFuncBase	REJECTED	Identifier 'EAnimFuncBase' is not a data type in global namespace
+EAnimManagerEasing	REJECTED	Identifier 'EAnimManagerEasing' is not a data type in global namespace
+EAntialias	REJECTED	Identifier 'EAntialias' is not a data type in global namespace
+EApply	REJECTED	Identifier 'EApply' is not a data type in global namespace
+EArmorUse	REJECTED	Identifier 'EArmorUse' is not a data type in global namespace
+EAudioBalanceGroup	ACCEPTED	
+EAudioFilterType	ACCEPTED	
+EAudioIgnoreSourceProperties	REJECTED	Identifier 'EAudioIgnoreSourceProperties' is not a data type in global namespace
+EAudioPitchFromDistMode	REJECTED	Identifier 'EAudioPitchFromDistMode' is not a data type in global namespace
+EAudioQuality	REJECTED	Identifier 'EAudioQuality' is not a data type in global namespace
+EAudioRoomFx	REJECTED	Identifier 'EAudioRoomFx' is not a data type in global namespace
+EAvatarVariant	REJECTED	Identifier 'EAvatarVariant' is not a data type in global namespace
+EAxis	REJECTED	Identifier 'EAxis' is not a data type in global namespace
+EBaseType	REJECTED	Identifier 'EBaseType' is not a data type in global namespace
+EBehavior	REJECTED	Identifier 'EBehavior' is not a data type in global namespace
+EBitmapDepth	REJECTED	Identifier 'EBitmapDepth' is not a data type in global namespace
+EBitmapQuality	REJECTED	Identifier 'EBitmapQuality' is not a data type in global namespace
+EBlendMode	REJECTED	Identifier 'EBlendMode' is not a data type in global namespace
+EBoolCond	REJECTED	Identifier 'EBoolCond' is not a data type in global namespace
+EBotPathTypeEnum	REJECTED	Identifier 'EBotPathTypeEnum' is not a data type in global namespace
+EBrowseActionWheel	REJECTED	Identifier 'EBrowseActionWheel' is not a data type in global namespace
+EBulletType	REJECTED	Identifier 'EBulletType' is not a data type in global namespace
+EButton	REJECTED	Identifier 'EButton' is not a data type in global namespace
+EBuyTitleMode	REJECTED	Identifier 'EBuyTitleMode' is not a data type in global namespace
+ECamInterp	REJECTED	Identifier 'ECamInterp' is not a data type in global namespace
+ECameraVStep	REJECTED	Identifier 'ECameraVStep' is not a data type in global namespace
+ECardAlign	REJECTED	Identifier 'ECardAlign' is not a data type in global namespace
+ECardDir	REJECTED	Identifier 'ECardDir' is not a data type in global namespace
+ECardinalDirEnum	REJECTED	Identifier 'ECardinalDirEnum' is not a data type in global namespace
+ECardinalDirections	REJECTED	Identifier 'ECardinalDirections' is not a data type in global namespace
+ECardinalDirections8	REJECTED	Identifier 'ECardinalDirections8' is not a data type in global namespace
+EChatOption	REJECTED	Identifier 'EChatOption' is not a data type in global namespace
+EChatScope	ACCEPTED	
+ECheckpointBehaviour	REJECTED	Identifier 'ECheckpointBehaviour' is not a data type in global namespace
+EClearMode	REJECTED	Identifier 'EClearMode' is not a data type in global namespace
+EClipPlayAdditiveType	REJECTED	Identifier 'EClipPlayAdditiveType' is not a data type in global namespace
+EColorDepth	REJECTED	Identifier 'EColorDepth' is not a data type in global namespace
+EColorSpace	REJECTED	Identifier 'EColorSpace' is not a data type in global namespace
+EColumnType	REJECTED	Identifier 'EColumnType' is not a data type in global namespace
+ECommunicationRestrictionLevel	REJECTED	Identifier 'ECommunicationRestrictionLevel' is not a data type in global namespace
+ECompressFile	REJECTED	Identifier 'ECompressFile' is not a data type in global namespace
+ECompressor	REJECTED	Identifier 'ECompressor' is not a data type in global namespace
+EConnectionStatus	REJECTED	Identifier 'EConnectionStatus' is not a data type in global namespace
+EConsoleResolution	REJECTED	Identifier 'EConsoleResolution' is not a data type in global namespace
+EContext	REJECTED	Identifier 'EContext' is not a data type in global namespace
+EControlScriptEditorTextFormat	REJECTED	Identifier 'EControlScriptEditorTextFormat' is not a data type in global namespace
+EConvertMethod	REJECTED	Identifier 'EConvertMethod' is not a data type in global namespace
+ECrossPlayState	REJECTED	Identifier 'ECrossPlayState' is not a data type in global namespace
+ECube2d	REJECTED	Identifier 'ECube2d' is not a data type in global namespace
+ECubeMapFace	REJECTED	Identifier 'ECubeMapFace' is not a data type in global namespace
+ECullMode	REJECTED	Identifier 'ECullMode' is not a data type in global namespace
+ECustomBeamType	REJECTED	Identifier 'ECustomBeamType' is not a data type in global namespace
+ECustomPlayerModels	REJECTED	Identifier 'ECustomPlayerModels' is not a data type in global namespace
+ECutSceneStyle	REJECTED	Identifier 'ECutSceneStyle' is not a data type in global namespace
+EDecalDbg	REJECTED	Identifier 'EDecalDbg' is not a data type in global namespace
+EDecalZFunc	REJECTED	Identifier 'EDecalZFunc' is not a data type in global namespace
+EDeferredAA	REJECTED	Identifier 'EDeferredAA' is not a data type in global namespace
+EDesiredConnectionStatus	REJECTED	Identifier 'EDesiredConnectionStatus' is not a data type in global namespace
+EDialog	REJECTED	Identifier 'EDialog' is not a data type in global namespace
+EDimension	REJECTED	Identifier 'EDimension' is not a data type in global namespace
+EDirectLinkType	REJECTED	Identifier 'EDirectLinkType' is not a data type in global namespace
+EDirectLink_Join_Role	REJECTED	Identifier 'EDirectLink_Join_Role' is not a data type in global namespace
+EDirection	REJECTED	Identifier 'EDirection' is not a data type in global namespace
+EDisplayMode	REJECTED	Identifier 'EDisplayMode' is not a data type in global namespace
+EDisplayRecords	REJECTED	Identifier 'EDisplayRecords' is not a data type in global namespace
+EDisplaySync	REJECTED	Identifier 'EDisplaySync' is not a data type in global namespace
+EDisplayType	REJECTED	Identifier 'EDisplayType' is not a data type in global namespace
+EDistanceUnit	REJECTED	Identifier 'EDistanceUnit' is not a data type in global namespace
+EDrive	REJECTED	Identifier 'EDrive' is not a data type in global namespace
+EDummyCollectionIdent	ACCEPTED	
+EDynaConstraintType	REJECTED	Identifier 'EDynaConstraintType' is not a data type in global namespace
+EDynamic	REJECTED	Identifier 'EDynamic' is not a data type in global namespace
+EEchelon	REJECTED	Identifier 'EEchelon' is not a data type in global namespace
+EEdCustomSaveOp	REJECTED	Identifier 'EEdCustomSaveOp' is not a data type in global namespace
+EEdgesConstraint	REJECTED	Identifier 'EEdgesConstraint' is not a data type in global namespace
+EEdgesDisplay	REJECTED	Identifier 'EEdgesDisplay' is not a data type in global namespace
+EEditMode	REJECTED	Identifier 'EEditMode' is not a data type in global namespace
+EEditorFileToolBar_QuadType	REJECTED	Identifier 'EEditorFileToolBar_QuadType' is not a data type in global namespace
+EEditorSkin_IconType	REJECTED	Identifier 'EEditorSkin_IconType' is not a data type in global namespace
+EEditorType	REJECTED	Identifier 'EEditorType' is not a data type in global namespace
+EElemType	REJECTED	Identifier 'EElemType' is not a data type in global namespace
+EEventColorLevel	REJECTED	Identifier 'EEventColorLevel' is not a data type in global namespace
+EEventMedalLevel	REJECTED	Identifier 'EEventMedalLevel' is not a data type in global namespace
+EEventSeason	REJECTED	Identifier 'EEventSeason' is not a data type in global namespace
+EEverywhereReflect	REJECTED	Identifier 'EEverywhereReflect' is not a data type in global namespace
+EExplosionOccultationTest	REJECTED	Identifier 'EExplosionOccultationTest' is not a data type in global namespace
+EExternalActions	REJECTED	Identifier 'EExternalActions' is not a data type in global namespace
+EExtractMotionMode	REJECTED	Identifier 'EExtractMotionMode' is not a data type in global namespace
+EExtractUnitAxis	REJECTED	Identifier 'EExtractUnitAxis' is not a data type in global namespace
+EExtractUnitTarget	REJECTED	Identifier 'EExtractUnitTarget' is not a data type in global namespace
+EFctType	REJECTED	Identifier 'EFctType' is not a data type in global namespace
+EFileAction	REJECTED	Identifier 'EFileAction' is not a data type in global namespace
+EFileType	REJECTED	Identifier 'EFileType' is not a data type in global namespace
+EFillDir	REJECTED	Identifier 'EFillDir' is not a data type in global namespace
+EFillMode	REJECTED	Identifier 'EFillMode' is not a data type in global namespace
+EFilterAnisoQ	REJECTED	Identifier 'EFilterAnisoQ' is not a data type in global namespace
+EFilterKind	REJECTED	Identifier 'EFilterKind' is not a data type in global namespace
+EFilterPriority	REJECTED	Identifier 'EFilterPriority' is not a data type in global namespace
+EFilterProfanities	REJECTED	Identifier 'EFilterProfanities' is not a data type in global namespace
+EFireBulletPatternMode	REJECTED	Identifier 'EFireBulletPatternMode' is not a data type in global namespace
+EFirstPartySignInState	REJECTED	Identifier 'EFirstPartySignInState' is not a data type in global namespace
+EForceBorderSize	REJECTED	Identifier 'EForceBorderSize' is not a data type in global namespace
+EForceFieldType	REJECTED	Identifier 'EForceFieldType' is not a data type in global namespace
+EForceLight	REJECTED	Identifier 'EForceLight' is not a data type in global namespace
+EForwardAA	REJECTED	Identifier 'EForwardAA' is not a data type in global namespace
+EFunnelType	REJECTED	Identifier 'EFunnelType' is not a data type in global namespace
+EFxBloomHdr	REJECTED	Identifier 'EFxBloomHdr' is not a data type in global namespace
+EFxBlur	REJECTED	Identifier 'EFxBlur' is not a data type in global namespace
+EFxMotionBlur	REJECTED	Identifier 'EFxMotionBlur' is not a data type in global namespace
+EGameCam	REJECTED	Identifier 'EGameCam' is not a data type in global namespace
+EGameCollectorSearchScope	ACCEPTED	
+EGameInventoryItemClass	ACCEPTED	
+EGameItemWaypointType	ACCEPTED	
+EGameMode	REJECTED	Identifier 'EGameMode' is not a data type in global namespace
+EGameMode_Script	REJECTED	Identifier 'EGameMode_Script' is not a data type in global namespace
+EGameObjectPhyModelPersistence	REJECTED	Identifier 'EGameObjectPhyModelPersistence' is not a data type in global namespace
+EGameObjectPhyModelProgam	REJECTED	Identifier 'EGameObjectPhyModelProgam' is not a data type in global namespace
+EGamePackQuality	REJECTED	Identifier 'EGamePackQuality' is not a data type in global namespace
+EGameplay	REJECTED	Identifier 'EGameplay' is not a data type in global namespace
+EGameplaySpecialType	REJECTED	Identifier 'EGameplaySpecialType' is not a data type in global namespace
+EGameplayTurboRoulette	REJECTED	Identifier 'EGameplayTurboRoulette' is not a data type in global namespace
+EGenKind	REJECTED	Identifier 'EGenKind' is not a data type in global namespace
+EGenerateUV	REJECTED	Identifier 'EGenerateUV' is not a data type in global namespace
+EGeometryQ	REJECTED	Identifier 'EGeometryQ' is not a data type in global namespace
+EGhostNameLogoType	ACCEPTED	
+EGhostPhyMode	REJECTED	Identifier 'EGhostPhyMode' is not a data type in global namespace
+EGiveUpBehaviour	REJECTED	Identifier 'EGiveUpBehaviour' is not a data type in global namespace
+EGmSurfType	ACCEPTED	
+EGpuSync	REJECTED	Identifier 'EGpuSync' is not a data type in global namespace
+EGraphNodeAssertVarType	REJECTED	Identifier 'EGraphNodeAssertVarType' is not a data type in global namespace
+EGraphNodeAxisWorkspace	REJECTED	Identifier 'EGraphNodeAxisWorkspace' is not a data type in global namespace
+EGraphNodeIK2SolverMode	REJECTED	Identifier 'EGraphNodeIK2SolverMode' is not a data type in global namespace
+EGraphNodeLockType	REJECTED	Identifier 'EGraphNodeLockType' is not a data type in global namespace
+EGraphNodeLockWorkspace	REJECTED	Identifier 'EGraphNodeLockWorkspace' is not a data type in global namespace
+EGraphNodeOperationType	REJECTED	Identifier 'EGraphNodeOperationType' is not a data type in global namespace
+EGxBlendFactor	REJECTED	Identifier 'EGxBlendFactor' is not a data type in global namespace
+EGxFogFormula	REJECTED	Identifier 'EGxFogFormula' is not a data type in global namespace
+EGxFogSpace	REJECTED	Identifier 'EGxFogSpace' is not a data type in global namespace
+EGxTexAddress	ACCEPTED	
+EGxTexFilter	REJECTED	Identifier 'EGxTexFilter' is not a data type in global namespace
+EGxUVGenerate	REJECTED	Identifier 'EGxUVGenerate' is not a data type in global namespace
+EHmdTrackingState	REJECTED	Identifier 'EHmdTrackingState' is not a data type in global namespace
+EHmdWearingState	REJECTED	Identifier 'EHmdWearingState' is not a data type in global namespace
+EHmsLightMapBump	ACCEPTED	
+EHmsLightMapCacheSize	ACCEPTED	
+EHmsLightMapCompress	ACCEPTED	
+EHmsLightMapQuality	ACCEPTED	
+EHmsOverlayAdaptRatio	ACCEPTED	
+EHudVisibility	REJECTED	Identifier 'EHudVisibility' is not a data type in global namespace
+EImportMeshType	ACCEPTED	
+EInGameMenuResult	REJECTED	Identifier 'EInGameMenuResult' is not a data type in global namespace
+EIngameChatBackground	REJECTED	Identifier 'EIngameChatBackground' is not a data type in global namespace
+EIngameChatTextSize	REJECTED	Identifier 'EIngameChatTextSize' is not a data type in global namespace
+EInput	REJECTED	Identifier 'EInput' is not a data type in global namespace
+EInputChange	REJECTED	Identifier 'EInputChange' is not a data type in global namespace
+EInputMouseReleaseKey	REJECTED	Identifier 'EInputMouseReleaseKey' is not a data type in global namespace
+EInputsListFilter	REJECTED	Identifier 'EInputsListFilter' is not a data type in global namespace
+EInteraction	REJECTED	Identifier 'EInteraction' is not a data type in global namespace
+EInteractionStatus	REJECTED	Identifier 'EInteractionStatus' is not a data type in global namespace
+EInterpMode	REJECTED	Identifier 'EInterpMode' is not a data type in global namespace
+EInventoryItemClass	REJECTED	Identifier 'EInventoryItemClass' is not a data type in global namespace
+EJointChannel	REJECTED	Identifier 'EJointChannel' is not a data type in global namespace
+EKeepRatioMode	REJECTED	Identifier 'EKeepRatioMode' is not a data type in global namespace
+EKind	REJECTED	Identifier 'EKind' is not a data type in global namespace
+ELabelsVisibility	REJECTED	Identifier 'ELabelsVisibility' is not a data type in global namespace
+ELayerType	REJECTED	Identifier 'ELayerType' is not a data type in global namespace
+ELayeredBlendContext	REJECTED	Identifier 'ELayeredBlendContext' is not a data type in global namespace
+ELayeredBlendType	REJECTED	Identifier 'ELayeredBlendType' is not a data type in global namespace
+ELibSound	REJECTED	Identifier 'ELibSound' is not a data type in global namespace
+ELightFromMap	REJECTED	Identifier 'ELightFromMap' is not a data type in global namespace
+ELightMapQuality	REJECTED	Identifier 'ELightMapQuality' is not a data type in global namespace
+ELightMapSizeMax	REJECTED	Identifier 'ELightMapSizeMax' is not a data type in global namespace
+ELinkType	REJECTED	Identifier 'ELinkType' is not a data type in global namespace
+ELiveAdSystem	REJECTED	Identifier 'ELiveAdSystem' is not a data type in global namespace
+ELocalLight_Storage	REJECTED	Identifier 'ELocalLight_Storage' is not a data type in global namespace
+ELocalLight_Switch	REJECTED	Identifier 'ELocalLight_Switch' is not a data type in global namespace
+ELocalScoreStatus	REJECTED	Identifier 'ELocalScoreStatus' is not a data type in global namespace
+EMapEditorDifficulty	REJECTED	Identifier 'EMapEditorDifficulty' is not a data type in global namespace
+EMapEditorEnviro	REJECTED	Identifier 'EMapEditorEnviro' is not a data type in global namespace
+EMapEditorMode	REJECTED	Identifier 'EMapEditorMode' is not a data type in global namespace
+EMapEditorMood	REJECTED	Identifier 'EMapEditorMood' is not a data type in global namespace
+EMapElemColor	REJECTED	Identifier 'EMapElemColor' is not a data type in global namespace
+EMapElemColorPalette	REJECTED	Identifier 'EMapElemColorPalette' is not a data type in global namespace
+EMapElemLightmapQuality	REJECTED	Identifier 'EMapElemLightmapQuality' is not a data type in global namespace
+EMasterServerConnectionDetailedStatus	REJECTED	Identifier 'EMasterServerConnectionDetailedStatus' is not a data type in global namespace
+EMasterServerConnectionError	REJECTED	Identifier 'EMasterServerConnectionError' is not a data type in global namespace
+EMasterServerConnectionStatus	REJECTED	Identifier 'EMasterServerConnectionStatus' is not a data type in global namespace
+EMasterServerScoreStatus	REJECTED	Identifier 'EMasterServerScoreStatus' is not a data type in global namespace
+EMaterialFilterCriterion	REJECTED	Identifier 'EMaterialFilterCriterion' is not a data type in global namespace
+EMaterialModelChar	REJECTED	Identifier 'EMaterialModelChar' is not a data type in global namespace
+EMaterialModelDyna0	REJECTED	Identifier 'EMaterialModelDyna0' is not a data type in global namespace
+EMaterialModelStatic	REJECTED	Identifier 'EMaterialModelStatic' is not a data type in global namespace
+EMaterialModelVehicle	REJECTED	Identifier 'EMaterialModelVehicle' is not a data type in global namespace
+EMedal	REJECTED	Identifier 'EMedal' is not a data type in global namespace
+EMediaClipStyle	REJECTED	Identifier 'EMediaClipStyle' is not a data type in global namespace
+EMediaTrackerBlockType	REJECTED	Identifier 'EMediaTrackerBlockType' is not a data type in global namespace
+EMediaTrackerCopyType	REJECTED	Identifier 'EMediaTrackerCopyType' is not a data type in global namespace
+EMediaTrackerGhostRef	REJECTED	Identifier 'EMediaTrackerGhostRef' is not a data type in global namespace
+EMediaTrackerPasteType	REJECTED	Identifier 'EMediaTrackerPasteType' is not a data type in global namespace
+EMediaType	REJECTED	Identifier 'EMediaType' is not a data type in global namespace
+EMeleeHitType	ACCEPTED	
+EMeleeState	ACCEPTED	
+EMenuNavAction	REJECTED	Identifier 'EMenuNavAction' is not a data type in global namespace
+EMenuOrder	REJECTED	Identifier 'EMenuOrder' is not a data type in global namespace
+EMenuStationsPage	REJECTED	Identifier 'EMenuStationsPage' is not a data type in global namespace
+EMeshEditorAPI	REJECTED	Identifier 'EMeshEditorAPI' is not a data type in global namespace
+EMessageDisplay	REJECTED	Identifier 'EMessageDisplay' is not a data type in global namespace
+EMiniMapVisibility	REJECTED	Identifier 'EMiniMapVisibility' is not a data type in global namespace
+EMipMapAlpha01	REJECTED	Identifier 'EMipMapAlpha01' is not a data type in global namespace
+EMode	REJECTED	Identifier 'EMode' is not a data type in global namespace
+EModel	REJECTED	Identifier 'EModel' is not a data type in global namespace
+EModuleType	REJECTED	Identifier 'EModuleType' is not a data type in global namespace
+EMultiDirEnum	REJECTED	Identifier 'EMultiDirEnum' is not a data type in global namespace
+EMuteSetting	REJECTED	Identifier 'EMuteSetting' is not a data type in global namespace
+ENPlugMaterial_EMapElemColorPalette	REJECTED	Identifier 'ENPlugMaterial_EMapElemColorPalette' is not a data type in global namespace
+ENetworkSpeed	REJECTED	Identifier 'ENetworkSpeed' is not a data type in global namespace
+ENodeType	REJECTED	Identifier 'ENodeType' is not a data type in global namespace
+ENormalRotate	REJECTED	Identifier 'ENormalRotate' is not a data type in global namespace
+ENoticeLevel	REJECTED	Identifier 'ENoticeLevel' is not a data type in global namespace
+ENotificationLifeSpan	REJECTED	Identifier 'ENotificationLifeSpan' is not a data type in global namespace
+ENotificationPriority	REJECTED	Identifier 'ENotificationPriority' is not a data type in global namespace
+EObserverMode	REJECTED	Identifier 'EObserverMode' is not a data type in global namespace
+EOnArmorEmtpy	REJECTED	Identifier 'EOnArmorEmtpy' is not a data type in global namespace
+EOpponentVisibility	REJECTED	Identifier 'EOpponentVisibility' is not a data type in global namespace
+EOptionAutoFill	REJECTED	Identifier 'EOptionAutoFill' is not a data type in global namespace
+EOrientationMode	REJECTED	Identifier 'EOrientationMode' is not a data type in global namespace
+EPC3Quality	REJECTED	Identifier 'EPC3Quality' is not a data type in global namespace
+EPadType	REJECTED	Identifier 'EPadType' is not a data type in global namespace
+EPainterMode	REJECTED	Identifier 'EPainterMode' is not a data type in global namespace
+EPainterSolidType	REJECTED	Identifier 'EPainterSolidType' is not a data type in global namespace
+EParryType	ACCEPTED	
+EPathRequestStatus	REJECTED	Identifier 'EPathRequestStatus' is not a data type in global namespace
+EPhaseOffset	REJECTED	Identifier 'EPhaseOffset' is not a data type in global namespace
+EPickEnableMode	REJECTED	Identifier 'EPickEnableMode' is not a data type in global namespace
+EPingEnum	REJECTED	Identifier 'EPingEnum' is not a data type in global namespace
+EPixelUpdate	REJECTED	Identifier 'EPixelUpdate' is not a data type in global namespace
+EPlaceMode	REJECTED	Identifier 'EPlaceMode' is not a data type in global namespace
+EPlaneComputeMode	REJECTED	Identifier 'EPlaneComputeMode' is not a data type in global namespace
+EPlayTimeContext	REJECTED	Identifier 'EPlayTimeContext' is not a data type in global namespace
+EPlayerInfoDisplayType	REJECTED	Identifier 'EPlayerInfoDisplayType' is not a data type in global namespace
+EPlayerOcclusion	REJECTED	Identifier 'EPlayerOcclusion' is not a data type in global namespace
+EPlayerShadow	REJECTED	Identifier 'EPlayerShadow' is not a data type in global namespace
+EPlayerType	REJECTED	Identifier 'EPlayerType' is not a data type in global namespace
+EPlayerVisibility	REJECTED	Identifier 'EPlayerVisibility' is not a data type in global namespace
+EPlugAnimClipAlignOffset	ACCEPTED	
+EPlugAnimGraphBlending	ACCEPTED	
+EPlugAnimGraphNodeType	ACCEPTED	
+EPlugAnimGraphStateSelectCond	ACCEPTED	
+EPlugAnimLocoNodeType	ACCEPTED	
+EPlugAnimRootYawType	ACCEPTED	
+EPlugAnimSimpleFunc	ACCEPTED	
+EPlugAnimSpotType	ACCEPTED	
+EPlugChannelType	REJECTED	Identifier 'EPlugChannelType' is not a data type in global namespace
+EPlugCustomBulletModelType	ACCEPTED	
+EPlugDynaSleepingMethod	ACCEPTED	
+EPlugFlockType	ACCEPTED	
+EPlugGpuPlatform	ACCEPTED	
+EPlugImageFormat	REJECTED	Identifier 'EPlugImageFormat' is not a data type in global namespace
+EPlugMeshInstanceType	ACCEPTED	
+EPlugModelShadingType	ACCEPTED	
+EPlugMoodFxTMFilmCurve	ACCEPTED	
+EPlugPainterLayer_Type	REJECTED	Identifier 'EPlugPainterLayer_Type' is not a data type in global namespace
+EPlugParticleColorGradient	ACCEPTED	
+EPlugParticleEmitterSubModel	ACCEPTED	
+EPlugParticleMultiStateRenderMode	ACCEPTED	
+EPlugParticleRenderColor	ACCEPTED	
+EPlugParticleSpawnCond	ACCEPTED	
+EPlugParticleStandardRenderMode	ACCEPTED	
+EPlugParticleTextureAtlas	ACCEPTED	
+EPlugRoadChunkType	ACCEPTED	
+EPlugRoadDensity	ACCEPTED	
+EPlugRoadType	ACCEPTED	
+EPlugRoadWayType	ACCEPTED	
+EPlugSeatType	ACCEPTED	
+EPlugStateMachineTransitionCurve	ACCEPTED	
+EPlugStateMachineTransitionType	ACCEPTED	
+EPlugSurfaceGameplayId	ACCEPTED	
+EPlugSurfaceMaterialId	ACCEPTED	
+EPoseType	REJECTED	Identifier 'EPoseType' is not a data type in global namespace
+EPost	REJECTED	Identifier 'EPost' is not a data type in global namespace
+EPresenceShow	REJECTED	Identifier 'EPresenceShow' is not a data type in global namespace
+EPreset	REJECTED	Identifier 'EPreset' is not a data type in global namespace
+EPrestigeMode	ACCEPTED	
+EPrestigeSeason	ACCEPTED	
+EPrivilege	REJECTED	Identifier 'EPrivilege' is not a data type in global namespace
+EProdState	REJECTED	Identifier 'EProdState' is not a data type in global namespace
+EPropType	REJECTED	Identifier 'EPropType' is not a data type in global namespace
+EQualityVer	REJECTED	Identifier 'EQualityVer' is not a data type in global namespace
+ERealtimeSSAA	REJECTED	Identifier 'ERealtimeSSAA' is not a data type in global namespace
+ERealtimeSSAA_Motion	REJECTED	Identifier 'ERealtimeSSAA_Motion' is not a data type in global namespace
+ERelativeDirections	REJECTED	Identifier 'ERelativeDirections' is not a data type in global namespace
+ERenderDevice	REJECTED	Identifier 'ERenderDevice' is not a data type in global namespace
+ERenderMode	REJECTED	Identifier 'ERenderMode' is not a data type in global namespace
+ERenderPathFails	REJECTED	Identifier 'ERenderPathFails' is not a data type in global namespace
+ERenderTech	REJECTED	Identifier 'ERenderTech' is not a data type in global namespace
+ERenderingApi	REJECTED	Identifier 'ERenderingApi' is not a data type in global namespace
+EReplayEditType	REJECTED	Identifier 'EReplayEditType' is not a data type in global namespace
+ERequiredPlayersCount	REJECTED	Identifier 'ERequiredPlayersCount' is not a data type in global namespace
+ERespawnBehaviour	REJECTED	Identifier 'ERespawnBehaviour' is not a data type in global namespace
+EResult	REJECTED	Identifier 'EResult' is not a data type in global namespace
+ERichPresence	REJECTED	Identifier 'ERichPresence' is not a data type in global namespace
+ERoadsideSpectatorVisibility	REJECTED	Identifier 'ERoadsideSpectatorVisibility' is not a data type in global namespace
+ERotationOrder	REJECTED	Identifier 'ERotationOrder' is not a data type in global namespace
+ESceneCharVisNotice	ACCEPTED	
+ESceneVehicleVisEvent	ACCEPTED	
+ESceneVehicleVisReactorBoostLvl	ACCEPTED	
+ESceneVehicleVisReactorBoostType	ACCEPTED	
+EScoreSortOrder	REJECTED	Identifier 'EScoreSortOrder' is not a data type in global namespace
+EScreenShotExt	REJECTED	Identifier 'EScreenShotExt' is not a data type in global namespace
+EScreenshotExt	REJECTED	Identifier 'EScreenshotExt' is not a data type in global namespace
+EScrollWheel	REJECTED	Identifier 'EScrollWheel' is not a data type in global namespace
+ESeasonOrType	REJECTED	Identifier 'ESeasonOrType' is not a data type in global namespace
+EShaderQ	REJECTED	Identifier 'EShaderQ' is not a data type in global namespace
+EShaderQuality	REJECTED	Identifier 'EShaderQuality' is not a data type in global namespace
+EShaderTcType	REJECTED	Identifier 'EShaderTcType' is not a data type in global namespace
+EShadows	REJECTED	Identifier 'EShadows' is not a data type in global namespace
+EShadowsQuality	REJECTED	Identifier 'EShadowsQuality' is not a data type in global namespace
+EShowPerformance	REJECTED	Identifier 'EShowPerformance' is not a data type in global namespace
+ESiblingDistribution	REJECTED	Identifier 'ESiblingDistribution' is not a data type in global namespace
+ESignalType	REJECTED	Identifier 'ESignalType' is not a data type in global namespace
+ESlotType	REJECTED	Identifier 'ESlotType' is not a data type in global namespace
+ESmAttackFilter	REJECTED	Identifier 'ESmAttackFilter' is not a data type in global namespace
+ESmDriverBehaviour	REJECTED	Identifier 'ESmDriverBehaviour' is not a data type in global namespace
+ESmDriverPathState	REJECTED	Identifier 'ESmDriverPathState' is not a data type in global namespace
+ESmDriverPatrolMode	REJECTED	Identifier 'ESmDriverPatrolMode' is not a data type in global namespace
+ESmScoreSortOrder	REJECTED	Identifier 'ESmScoreSortOrder' is not a data type in global namespace
+ESortMode	REJECTED	Identifier 'ESortMode' is not a data type in global namespace
+ESoundInputMapping	REJECTED	Identifier 'ESoundInputMapping' is not a data type in global namespace
+ESource	REJECTED	Identifier 'ESource' is not a data type in global namespace
+ESpawnStatus	REJECTED	Identifier 'ESpawnStatus' is not a data type in global namespace
+ESpecMode	REJECTED	Identifier 'ESpecMode' is not a data type in global namespace
+ESpectatorCameraType	ACCEPTED	
+ESpectatorMode	REJECTED	Identifier 'ESpectatorMode' is not a data type in global namespace
+ESpectatorTargetMode	ACCEPTED	
+ESpectatorTargetType	REJECTED	Identifier 'ESpectatorTargetType' is not a data type in global namespace
+ESpeedUnit	REJECTED	Identifier 'ESpeedUnit' is not a data type in global namespace
+ESplitScreenLayout	REJECTED	Identifier 'ESplitScreenLayout' is not a data type in global namespace
+EStartPos	REJECTED	Identifier 'EStartPos' is not a data type in global namespace
+EState	REJECTED	Identifier 'EState' is not a data type in global namespace
+EStaticShadow	REJECTED	Identifier 'EStaticShadow' is not a data type in global namespace
+EStatus	REJECTED	Identifier 'EStatus' is not a data type in global namespace
+EStereoDisplayMode	REJECTED	Identifier 'EStereoDisplayMode' is not a data type in global namespace
+EStuntName	REJECTED	Identifier 'EStuntName' is not a data type in global namespace
+ESubscription	REJECTED	Identifier 'ESubscription' is not a data type in global namespace
+ESubscriptionStatus	REJECTED	Identifier 'ESubscriptionStatus' is not a data type in global namespace
+ESurfId	REJECTED	Identifier 'ESurfId' is not a data type in global namespace
+ESyncMode	REJECTED	Identifier 'ESyncMode' is not a data type in global namespace
+ESystemPlatform	REJECTED	Identifier 'ESystemPlatform' is not a data type in global namespace
+ESystemSkuIdentifier	REJECTED	Identifier 'ESystemSkuIdentifier' is not a data type in global namespace
+ETagCat	REJECTED	Identifier 'ETagCat' is not a data type in global namespace
+ETagType	REJECTED	Identifier 'ETagType' is not a data type in global namespace
+ETangentMode	REJECTED	Identifier 'ETangentMode' is not a data type in global namespace
+ETechnique	REJECTED	Identifier 'ETechnique' is not a data type in global namespace
+ETexAddress	REJECTED	Identifier 'ETexAddress' is not a data type in global namespace
+ETexCoordLayer	REJECTED	Identifier 'ETexCoordLayer' is not a data type in global namespace
+ETexFilter	REJECTED	Identifier 'ETexFilter' is not a data type in global namespace
+ETextFormat	REJECTED	Identifier 'ETextFormat' is not a data type in global namespace
+ETextureFilter	REJECTED	Identifier 'ETextureFilter' is not a data type in global namespace
+ETextureQuality	ACCEPTED	
+ETitleCoreType	REJECTED	Identifier 'ETitleCoreType' is not a data type in global namespace
+ETmBackgroundQuality	REJECTED	Identifier 'ETmBackgroundQuality' is not a data type in global namespace
+ETmCarParticlesQuality	REJECTED	Identifier 'ETmCarParticlesQuality' is not a data type in global namespace
+ETmCarQuality	REJECTED	Identifier 'ETmCarQuality' is not a data type in global namespace
+ETmOpponents	REJECTED	Identifier 'ETmOpponents' is not a data type in global namespace
+ETmRaceResultCriteria	REJECTED	Identifier 'ETmRaceResultCriteria' is not a data type in global namespace
+ETrafficDensity	REJECTED	Identifier 'ETrafficDensity' is not a data type in global namespace
+ETrafficDensityEnum	REJECTED	Identifier 'ETrafficDensityEnum' is not a data type in global namespace
+ETrigger	REJECTED	Identifier 'ETrigger' is not a data type in global namespace
+ETripleBuffer	REJECTED	Identifier 'ETripleBuffer' is not a data type in global namespace
+ETurretFixedAngleSignal	REJECTED	Identifier 'ETurretFixedAngleSignal' is not a data type in global namespace
+EType	REJECTED	Identifier 'EType' is not a data type in global namespace
+EUILayerAnimation	REJECTED	Identifier 'EUILayerAnimation' is not a data type in global namespace
+EUILayerType	REJECTED	Identifier 'EUILayerType' is not a data type in global namespace
+EUISequence	REJECTED	Identifier 'EUISequence' is not a data type in global namespace
+EUISound	REJECTED	Identifier 'EUISound' is not a data type in global namespace
+EUIStatus	REJECTED	Identifier 'EUIStatus' is not a data type in global namespace
+EUVEditorMode	REJECTED	Identifier 'EUVEditorMode' is not a data type in global namespace
+EUVEditorProjectionType	REJECTED	Identifier 'EUVEditorProjectionType' is not a data type in global namespace
+EUbisoftClubFlow	REJECTED	Identifier 'EUbisoftClubFlow' is not a data type in global namespace
+EUnlockType	REJECTED	Identifier 'EUnlockType' is not a data type in global namespace
+EUpdateMode	REJECTED	Identifier 'EUpdateMode' is not a data type in global namespace
+EUplayOverlaySection	REJECTED	Identifier 'EUplayOverlaySection' is not a data type in global namespace
+EUploadMethod	REJECTED	Identifier 'EUploadMethod' is not a data type in global namespace
+EUsage	REJECTED	Identifier 'EUsage' is not a data type in global namespace
+EValidationStatus	REJECTED	Identifier 'EValidationStatus' is not a data type in global namespace
+EValueType	REJECTED	Identifier 'EValueType' is not a data type in global namespace
+EVariantBaseTypeEnum	REJECTED	Identifier 'EVariantBaseTypeEnum' is not a data type in global namespace
+EVehicleNetQuality	REJECTED	Identifier 'EVehicleNetQuality' is not a data type in global namespace
+EVehicleReflect	REJECTED	Identifier 'EVehicleReflect' is not a data type in global namespace
+EVehicleTransformType	REJECTED	Identifier 'EVehicleTransformType' is not a data type in global namespace
+EVersion	REJECTED	Identifier 'EVersion' is not a data type in global namespace
+EVideoTimer	REJECTED	Identifier 'EVideoTimer' is not a data type in global namespace
+EViewportRatio	REJECTED	Identifier 'EViewportRatio' is not a data type in global namespace
+EVisibility	REJECTED	Identifier 'EVisibility' is not a data type in global namespace
+EVisible	REJECTED	Identifier 'EVisible' is not a data type in global namespace
+EVoiceChatMuteSetting	REJECTED	Identifier 'EVoiceChatMuteSetting' is not a data type in global namespace
+EVoiceDetectionMode	REJECTED	Identifier 'EVoiceDetectionMode' is not a data type in global namespace
+EWaterReflect	REJECTED	Identifier 'EWaterReflect' is not a data type in global namespace
+EWayPointType	REJECTED	Identifier 'EWayPointType' is not a data type in global namespace
+EWaypointType	REJECTED	Identifier 'EWaypointType' is not a data type in global namespace
+EWeapon	REJECTED	Identifier 'EWeapon' is not a data type in global namespace
+EWindowSize	REJECTED	Identifier 'EWindowSize' is not a data type in global namespace
+EZClip	REJECTED	Identifier 'EZClip' is not a data type in global namespace
+EZClipAuto	REJECTED	Identifier 'EZClipAuto' is not a data type in global namespace
+EZoneTransitionType	REJECTED	Identifier 'EZoneTransitionType' is not a data type in global namespace
+EZoomLevel	REJECTED	Identifier 'EZoomLevel' is not a data type in global namespace
+E__	REJECTED	Identifier 'E__' is not a data type in global namespace
+EditMode	REJECTED	Identifier 'EditMode' is not a data type in global namespace
+EnumAutoTerrainPlaceType	REJECTED	Identifier 'EnumAutoTerrainPlaceType' is not a data type in global namespace
+EnumClipType	REJECTED	Identifier 'EnumClipType' is not a data type in global namespace
+EnumDefaultCam	REJECTED	Identifier 'EnumDefaultCam' is not a data type in global namespace
+EnumInventoryItemClass	REJECTED	Identifier 'EnumInventoryItemClass' is not a data type in global namespace
+EnumItemType	REJECTED	Identifier 'EnumItemType' is not a data type in global namespace
+EnumWaypointType	REJECTED	Identifier 'EnumWaypointType' is not a data type in global namespace
+Enums::ESceneCharVisNotice	REJECTED	Namespace 'Enums' doesn't exist.
+Enums::ESceneVehicleVisEvent	REJECTED	Namespace 'Enums' doesn't exist.
+Enums::VirtualKey	REJECTED	Namespace 'Enums' doesn't exist.
+Enums::ZZZNoSuchEnumName	REJECTED	Namespace 'Enums' doesn't exist.
+ErrorBarsFlags	REJECTED	Identifier 'ErrorBarsFlags' is not a data type in global namespace
+Fids::ESceneCharVisNotice	ACCEPTED	
+Fids::ESceneVehicleVisEvent	ACCEPTED	
+Fids::VirtualKey	ACCEPTED	
+Fids::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Fids' or parent
+FileMode	REJECTED	Identifier 'FileMode' is not a data type in global namespace
+Flags	REJECTED	Identifier 'Flags' is not a data type in global namespace
+FocusedFlags	REJECTED	Identifier 'FocusedFlags' is not a data type in global namespace
+Foo::Bar::VirtualKey	ACCEPTED	
+Foo::Bar::ZZZNoSuch	REJECTED	Identifier 'ZZZNoSuch' is not a data type in namespace 'Foo::Bar' or parent
+Foo::ESceneCharVisNotice	ACCEPTED	
+Foo::VirtualKey	ACCEPTED	
+Foo::ZZZNoSuch	REJECTED	Identifier 'ZZZNoSuch' is not a data type in namespace 'Foo' or parent
+FreeRegister	REJECTED	Identifier 'FreeRegister' is not a data type in global namespace
+Function::CFuncLight::EFctType	REJECTED	Namespace 'Function::CFuncLight' doesn't exist.
+Function::CFuncShaderLayerUV::ESignalType	REJECTED	Namespace 'Function::CFuncShaderLayerUV' doesn't exist.
+Function::ESceneCharVisNotice	REJECTED	Namespace 'Function' doesn't exist.
+Function::ESceneVehicleVisEvent	REJECTED	Namespace 'Function' doesn't exist.
+Function::VirtualKey	REJECTED	Namespace 'Function' doesn't exist.
+Function::ZZZNoSuchEnumName	REJECTED	Namespace 'Function' doesn't exist.
+Game::CGameClientTrackingScript::EEventColorLevel	REJECTED	Namespace 'Game::CGameClientTrackingScript' doesn't exist.
+Game::CGameClientTrackingScript::EEventMedalLevel	REJECTED	Namespace 'Game::CGameClientTrackingScript' doesn't exist.
+Game::CGameClientTrackingScript::EEventSeason	REJECTED	Namespace 'Game::CGameClientTrackingScript' doesn't exist.
+Game::CGameClientTrackingScript::EPlayTimeContext	REJECTED	Namespace 'Game::CGameClientTrackingScript' doesn't exist.
+Game::CGameCtnAnchoredObject::ECardinalDirections	REJECTED	Namespace 'Game::CGameCtnAnchoredObject' doesn't exist.
+Game::CGameCtnAnchoredObject::EMapElemColor	REJECTED	Namespace 'Game::CGameCtnAnchoredObject' doesn't exist.
+Game::CGameCtnAnchoredObject::EMapElemLightmapQuality	REJECTED	Namespace 'Game::CGameCtnAnchoredObject' doesn't exist.
+Game::CGameCtnAnchoredObject::EPhaseOffset	REJECTED	Namespace 'Game::CGameCtnAnchoredObject' doesn't exist.
+Game::CGameCtnApp	REJECTED	Namespace 'Game' doesn't exist.
+Game::CGameCtnBlock::ECardinalDirections	REJECTED	Namespace 'Game::CGameCtnBlock' doesn't exist.
+Game::CGameCtnBlock::EMapElemColor	REJECTED	Namespace 'Game::CGameCtnBlock' doesn't exist.
+Game::CGameCtnBlock::EMapElemLightmapQuality	REJECTED	Namespace 'Game::CGameCtnBlock' doesn't exist.
+Game::CGameCtnBlockInfo::EBaseType	REJECTED	Namespace 'Game::CGameCtnBlockInfo' doesn't exist.
+Game::CGameCtnBlockInfo::EMultiDirEnum	REJECTED	Namespace 'Game::CGameCtnBlockInfo' doesn't exist.
+Game::CGameCtnBlockInfo::EWayPointType	REJECTED	Namespace 'Game::CGameCtnBlockInfo' doesn't exist.
+Game::CGameCtnBlockInfoClip::EMultiDirEnum	REJECTED	Namespace 'Game::CGameCtnBlockInfoClip' doesn't exist.
+Game::CGameCtnBlockInfoClip::EnumClipType	REJECTED	Namespace 'Game::CGameCtnBlockInfoClip' doesn't exist.
+Game::CGameCtnBlockInfoVariant::ECardinalDirEnum	REJECTED	Namespace 'Game::CGameCtnBlockInfoVariant' doesn't exist.
+Game::CGameCtnBlockInfoVariant::EMultiDirEnum	REJECTED	Namespace 'Game::CGameCtnBlockInfoVariant' doesn't exist.
+Game::CGameCtnBlockInfoVariant::EVariantBaseTypeEnum	REJECTED	Namespace 'Game::CGameCtnBlockInfoVariant' doesn't exist.
+Game::CGameCtnBlockInfoVariantGround::EnumAutoTerrainPlaceType	REJECTED	Namespace 'Game::CGameCtnBlockInfoVariantGround' doesn't exist.
+Game::CGameCtnBlockUnitInfo::ECardinalDirEnum	REJECTED	Namespace 'Game::CGameCtnBlockUnitInfo' doesn't exist.
+Game::CGameCtnCampaign::EMedal	REJECTED	Namespace 'Game::CGameCtnCampaign' doesn't exist.
+Game::CGameCtnCampaign::ERequiredPlayersCount	REJECTED	Namespace 'Game::CGameCtnCampaign' doesn't exist.
+Game::CGameCtnCampaign::EType	REJECTED	Namespace 'Game::CGameCtnCampaign' doesn't exist.
+Game::CGameCtnCampaign::EUnlockType	REJECTED	Namespace 'Game::CGameCtnCampaign' doesn't exist.
+Game::CGameCtnChallenge::EBotPathTypeEnum	REJECTED	Namespace 'Game::CGameCtnChallenge' doesn't exist.
+Game::CGameCtnChallenge::ENPlugMaterial_EMapElemColorPalette	REJECTED	Namespace 'Game::CGameCtnChallenge' doesn't exist.
+Game::CGameCtnChallenge::ETrafficDensity	REJECTED	Namespace 'Game::CGameCtnChallenge' doesn't exist.
+Game::CGameCtnEditorCommon::ETrafficDensityEnum	REJECTED	Namespace 'Game::CGameCtnEditorCommon' doesn't exist.
+Game::CGameCtnEditorScriptAnchoredObject::ECardinalDirections	REJECTED	Namespace 'Game::CGameCtnEditorScriptAnchoredObject' doesn't exist.
+Game::CGameCtnEditorScriptSpecialProperty::EMapElemColor	REJECTED	Namespace 'Game::CGameCtnEditorScriptSpecialProperty' doesn't exist.
+Game::CGameCtnEditorScriptSpecialProperty::EWaypointType	REJECTED	Namespace 'Game::CGameCtnEditorScriptSpecialProperty' doesn't exist.
+Game::CGameCtnMacroBlockJunction::ECardDir	REJECTED	Namespace 'Game::CGameCtnMacroBlockJunction' doesn't exist.
+Game::CGameCtnMediaBlockCameraGame::EGameCam	REJECTED	Namespace 'Game::CGameCtnMediaBlockCameraGame' doesn't exist.
+Game::CGameCtnMediaBlockEditorTriangles::EEditMode	REJECTED	Namespace 'Game::CGameCtnMediaBlockEditorTriangles' doesn't exist.
+Game::CGameCtnMediaClipViewer::EStatus	REJECTED	Namespace 'Game::CGameCtnMediaClipViewer' doesn't exist.
+Game::CGameCtnNetServerInfo::EVehicleNetQuality	REJECTED	Namespace 'Game::CGameCtnNetServerInfo' doesn't exist.
+Game::CGameCtnZoneTransition::EZoneTransitionType	REJECTED	Namespace 'Game::CGameCtnZoneTransition' doesn't exist.
+Game::CGameCursorBlock::EAdditionalDirEnum	REJECTED	Namespace 'Game::CGameCursorBlock' doesn't exist.
+Game::CGameCursorBlock::ECardinalDirEnum	REJECTED	Namespace 'Game::CGameCursorBlock' doesn't exist.
+Game::CGameDataFileManagerScript::EMediaType	REJECTED	Namespace 'Game::CGameDataFileManagerScript' doesn't exist.
+Game::CGameDialogs::EDialog	REJECTED	Namespace 'Game::CGameDialogs' doesn't exist.
+Game::CGameDialogsScript::EFileType	REJECTED	Namespace 'Game::CGameDialogsScript' doesn't exist.
+Game::CGameDialogsScript::EResult	REJECTED	Namespace 'Game::CGameDialogsScript' doesn't exist.
+Game::CGameDialogsScript::EType	REJECTED	Namespace 'Game::CGameDialogsScript' doesn't exist.
+Game::CGameDialogsScriptEvent::EType	REJECTED	Namespace 'Game::CGameDialogsScriptEvent' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EConsoleResolution	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EDeferredAA	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EDisplayMode	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EDisplaySync	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EEverywhereReflect	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EForwardAA	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EFxBloomHdr	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EFxBlur	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EFxMotionBlur	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EGpuSync	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EPreset	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::ERealtimeSSAA	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::ERealtimeSSAA_Motion	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EScreenshotExt	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EShaderQuality	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EShadows	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EShowPerformance	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::ETextureFilter	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::ETripleBuffer	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EVehicleReflect	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameDisplaySettingsWrapper::EWaterReflect	REJECTED	Namespace 'Game::CGameDisplaySettingsWrapper' doesn't exist.
+Game::CGameEditorEvent::EType	REJECTED	Namespace 'Game::CGameEditorEvent' doesn't exist.
+Game::CGameEditorMainPlugin::EMeshEditorAPI	REJECTED	Namespace 'Game::CGameEditorMainPlugin' doesn't exist.
+Game::CGameEditorMediaTrackerPluginAPI::EMediaTrackerBlockType	REJECTED	Namespace 'Game::CGameEditorMediaTrackerPluginAPI' doesn't exist.
+Game::CGameEditorMediaTrackerPluginAPI::EMediaTrackerCopyType	REJECTED	Namespace 'Game::CGameEditorMediaTrackerPluginAPI' doesn't exist.
+Game::CGameEditorMediaTrackerPluginAPI::EMediaTrackerGhostRef	REJECTED	Namespace 'Game::CGameEditorMediaTrackerPluginAPI' doesn't exist.
+Game::CGameEditorMediaTrackerPluginAPI::EMediaTrackerPasteType	REJECTED	Namespace 'Game::CGameEditorMediaTrackerPluginAPI' doesn't exist.
+Game::CGameEditorMesh::EEdgesConstraint	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::EEdgesDisplay	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::EElemType	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::EFilterKind	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::EInteraction	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::ELayerType	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::EMaterialFilterCriterion	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::ETexCoordLayer	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::ETitleCoreType	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::EUVEditorMode	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorMesh::EUVEditorProjectionType	REJECTED	Namespace 'Game::CGameEditorMesh' doesn't exist.
+Game::CGameEditorModule::EModuleType	REJECTED	Namespace 'Game::CGameEditorModule' doesn't exist.
+Game::CGameEditorPlugin::EInteractionStatus	REJECTED	Namespace 'Game::CGameEditorPlugin' doesn't exist.
+Game::CGameEditorPluginAPI::EEditorFileToolBar_QuadType	REJECTED	Namespace 'Game::CGameEditorPluginAPI' doesn't exist.
+Game::CGameEditorPluginCameraAPI::ECameraVStep	REJECTED	Namespace 'Game::CGameEditorPluginCameraAPI' doesn't exist.
+Game::CGameEditorPluginCameraAPI::EZoomLevel	REJECTED	Namespace 'Game::CGameEditorPluginCameraAPI' doesn't exist.
+Game::CGameEditorPluginMap::ECardinalDirections	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::ECardinalDirections8	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::EMapElemColor	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::EMapElemColorPalette	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::EMapElemLightmapQuality	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::EPhaseOffset	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::EPlaceMode	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::ERelativeDirections	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::EShadowsQuality	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::EValidationStatus	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMap::EditMode	REJECTED	Namespace 'Game::CGameEditorPluginMap' doesn't exist.
+Game::CGameEditorPluginMapMapType::EValidationStatus	REJECTED	Namespace 'Game::CGameEditorPluginMapMapType' doesn't exist.
+Game::CGameEditorPluginMapScriptEvent::EInput	REJECTED	Namespace 'Game::CGameEditorPluginMapScriptEvent' doesn't exist.
+Game::CGameEditorPluginMapScriptEvent::EType	REJECTED	Namespace 'Game::CGameEditorPluginMapScriptEvent' doesn't exist.
+Game::CGameEditorPluginModuleScriptEvent::EType	REJECTED	Namespace 'Game::CGameEditorPluginModuleScriptEvent' doesn't exist.
+Game::CGameEditorSkinPluginAPI::EEditorSkin_IconType	REJECTED	Namespace 'Game::CGameEditorSkinPluginAPI' doesn't exist.
+Game::CGameEditorSkinPluginAPI::EPainterMode	REJECTED	Namespace 'Game::CGameEditorSkinPluginAPI' doesn't exist.
+Game::CGameEditorSkinPluginAPI::EPainterSolidType	REJECTED	Namespace 'Game::CGameEditorSkinPluginAPI' doesn't exist.
+Game::CGameGhostMgrScript::EGhostPhyMode	REJECTED	Namespace 'Game::CGameGhostMgrScript' doesn't exist.
+Game::CGameHighScore::EMedal	REJECTED	Namespace 'Game::CGameHighScore' doesn't exist.
+Game::CGameHud3dMarkerConfig::EAnchorType	REJECTED	Namespace 'Game::CGameHud3dMarkerConfig' doesn't exist.
+Game::CGameHud3dMarkerConfig::EHudVisibility	REJECTED	Namespace 'Game::CGameHud3dMarkerConfig' doesn't exist.
+Game::CGameHud3dMarkerConfig::EMiniMapVisibility	REJECTED	Namespace 'Game::CGameHud3dMarkerConfig' doesn't exist.
+Game::CGameManiaApp::ELinkType	REJECTED	Namespace 'Game::CGameManiaApp' doesn't exist.
+Game::CGameManiaApp::ESystemPlatform	REJECTED	Namespace 'Game::CGameManiaApp' doesn't exist.
+Game::CGameManiaApp::ESystemSkuIdentifier	REJECTED	Namespace 'Game::CGameManiaApp' doesn't exist.
+Game::CGameManiaAppPlaygroundScriptEvent::EGameplaySpecialType	REJECTED	Namespace 'Game::CGameManiaAppPlaygroundScriptEvent' doesn't exist.
+Game::CGameManiaAppPlaygroundScriptEvent::EGameplayTurboRoulette	REJECTED	Namespace 'Game::CGameManiaAppPlaygroundScriptEvent' doesn't exist.
+Game::CGameManiaAppPlaygroundScriptEvent::EType	REJECTED	Namespace 'Game::CGameManiaAppPlaygroundScriptEvent' doesn't exist.
+Game::CGameManiaAppScriptEvent::EMenuNavAction	REJECTED	Namespace 'Game::CGameManiaAppScriptEvent' doesn't exist.
+Game::CGameManiaAppScriptEvent::EType	REJECTED	Namespace 'Game::CGameManiaAppScriptEvent' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::EBuyTitleMode	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::EContext	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::EHmdTrackingState	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::EHmdWearingState	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::EInputsListFilter	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::ELinkType	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::EMenuStationsPage	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::ENetworkSpeed	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::EPlayerInfoDisplayType	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::ESystemPlatform	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaPlanetScriptAPI::ESystemSkuIdentifier	REJECTED	Namespace 'Game::CGameManiaPlanetScriptAPI' doesn't exist.
+Game::CGameManiaTitleControlScriptAPI::EEditorType	REJECTED	Namespace 'Game::CGameManiaTitleControlScriptAPI' doesn't exist.
+Game::CGameManiaTitleControlScriptAPI::EReplayEditType	REJECTED	Namespace 'Game::CGameManiaTitleControlScriptAPI' doesn't exist.
+Game::CGameManiaTitleControlScriptAPI::EResult	REJECTED	Namespace 'Game::CGameManiaTitleControlScriptAPI' doesn't exist.
+Game::CGameManiaTitleControlScriptAPI::ESplitScreenLayout	REJECTED	Namespace 'Game::CGameManiaTitleControlScriptAPI' doesn't exist.
+Game::CGameManiaTitleEditionScriptAPI::EDrive	REJECTED	Namespace 'Game::CGameManiaTitleEditionScriptAPI' doesn't exist.
+Game::CGameManialinkAnimManager::EAnimManagerEasing	REJECTED	Namespace 'Game::CGameManialinkAnimManager' doesn't exist.
+Game::CGameManialinkControl::EAlignHorizontal	REJECTED	Namespace 'Game::CGameManialinkControl' doesn't exist.
+Game::CGameManialinkControl::EAlignVertical	REJECTED	Namespace 'Game::CGameManialinkControl' doesn't exist.
+Game::CGameManialinkEntry::ETextFormat	REJECTED	Namespace 'Game::CGameManialinkEntry' doesn't exist.
+Game::CGameManialinkEntry::EValueType	REJECTED	Namespace 'Game::CGameManialinkEntry' doesn't exist.
+Game::CGameManialinkFrame::EScrollWheel	REJECTED	Namespace 'Game::CGameManialinkFrame' doesn't exist.
+Game::CGameManialinkLabel::EBlendMode	REJECTED	Namespace 'Game::CGameManialinkLabel' doesn't exist.
+Game::CGameManialinkLabel::EFilterProfanities	REJECTED	Namespace 'Game::CGameManialinkLabel' doesn't exist.
+Game::CGameManialinkQuad::EBlendMode	REJECTED	Namespace 'Game::CGameManialinkQuad' doesn't exist.
+Game::CGameManialinkQuad::EKeepRatioMode	REJECTED	Namespace 'Game::CGameManialinkQuad' doesn't exist.
+Game::CGameManialinkScriptEvent::EMenuNavAction	REJECTED	Namespace 'Game::CGameManialinkScriptEvent' doesn't exist.
+Game::CGameManialinkScriptEvent::EType	REJECTED	Namespace 'Game::CGameManialinkScriptEvent' doesn't exist.
+Game::CGameManialinkScriptHandler::ELinkType	REJECTED	Namespace 'Game::CGameManialinkScriptHandler' doesn't exist.
+Game::CGameManialinkScriptHandler::ESystemPlatform	REJECTED	Namespace 'Game::CGameManialinkScriptHandler' doesn't exist.
+Game::CGameManialinkScriptHandler::ESystemSkuIdentifier	REJECTED	Namespace 'Game::CGameManialinkScriptHandler' doesn't exist.
+Game::CGameManialinkScriptHandler_ReadOnly::ESystemPlatform	REJECTED	Namespace 'Game::CGameManialinkScriptHandler_ReadOnly' doesn't exist.
+Game::CGameManialinkScriptHandler_ReadOnly::ESystemSkuIdentifier	REJECTED	Namespace 'Game::CGameManialinkScriptHandler_ReadOnly' doesn't exist.
+Game::CGameManialinkTextEdit::EControlScriptEditorTextFormat	REJECTED	Namespace 'Game::CGameManialinkTextEdit' doesn't exist.
+Game::CGameManiaplanetPlugin::EBuyTitleMode	REJECTED	Namespace 'Game::CGameManiaplanetPlugin' doesn't exist.
+Game::CGameManiaplanetPlugin::EContext	REJECTED	Namespace 'Game::CGameManiaplanetPlugin' doesn't exist.
+Game::CGameManiaplanetPlugin::EUISound	REJECTED	Namespace 'Game::CGameManiaplanetPlugin' doesn't exist.
+Game::CGameManiaplanetPluginInterfaceEvent::EType	REJECTED	Namespace 'Game::CGameManiaplanetPluginInterfaceEvent' doesn't exist.
+Game::CGameMasterServerRichPresenceManagerScript::ERichPresence	REJECTED	Namespace 'Game::CGameMasterServerRichPresenceManagerScript' doesn't exist.
+Game::CGameMenu	REJECTED	Namespace 'Game' doesn't exist.
+Game::CGameMenu::EMenuOrder	REJECTED	Namespace 'Game::CGameMenu' doesn't exist.
+Game::CGameMenu::ESceneCharVisNotice	REJECTED	Namespace 'Game::CGameMenu' doesn't exist.
+Game::CGameMenu::ESceneVehicleVisEvent	REJECTED	Namespace 'Game::CGameMenu' doesn't exist.
+Game::CGameMenu::VirtualKey	REJECTED	Namespace 'Game::CGameMenu' doesn't exist.
+Game::CGameMgrAction::EActionSlot	REJECTED	Namespace 'Game::CGameMgrAction' doesn't exist.
+Game::CGameModuleMenuBrowser::EFileAction	REJECTED	Namespace 'Game::CGameModuleMenuBrowser' doesn't exist.
+Game::CGameModuleMenuBrowser::EFileType	REJECTED	Namespace 'Game::CGameModuleMenuBrowser' doesn't exist.
+Game::CGameNetPlayerInfo::EPlayerType	REJECTED	Namespace 'Game::CGameNetPlayerInfo' doesn't exist.
+Game::CGameNetPlayerInfo::ESpectatorMode	REJECTED	Namespace 'Game::CGameNetPlayerInfo' doesn't exist.
+Game::CGameNetServerInfo::EPingEnum	REJECTED	Namespace 'Game::CGameNetServerInfo' doesn't exist.
+Game::CGamePlayerInfo::EEchelon	REJECTED	Namespace 'Game::CGamePlayerInfo' doesn't exist.
+Game::CGamePlayerInfo::EStereoDisplayMode	REJECTED	Namespace 'Game::CGamePlayerInfo' doesn't exist.
+Game::CGamePlayerInfo::ETagType	REJECTED	Namespace 'Game::CGamePlayerInfo' doesn't exist.
+Game::CGamePlayerProfileChunk_GameSettings::EPlayerVisibility	REJECTED	Namespace 'Game::CGamePlayerProfileChunk_GameSettings' doesn't exist.
+Game::CGamePlayerProfileChunk_GameSettings::ERoadsideSpectatorVisibility	REJECTED	Namespace 'Game::CGamePlayerProfileChunk_GameSettings' doesn't exist.
+Game::CGamePlaygroundClientScriptAPI::ESpectatorCameraType	REJECTED	Namespace 'Game::CGamePlaygroundClientScriptAPI' doesn't exist.
+Game::CGamePlaygroundClientScriptAPI::ESpectatorTargetType	REJECTED	Namespace 'Game::CGamePlaygroundClientScriptAPI' doesn't exist.
+Game::CGamePlaygroundModuleServerScoresTable::EColumnType	REJECTED	Namespace 'Game::CGamePlaygroundModuleServerScoresTable' doesn't exist.
+Game::CGamePlaygroundModuleServerScoresTable::EScoreSortOrder	REJECTED	Namespace 'Game::CGamePlaygroundModuleServerScoresTable' doesn't exist.
+Game::CGamePlaygroundScript::EMedal	REJECTED	Namespace 'Game::CGamePlaygroundScript' doesn't exist.
+Game::CGamePlaygroundScript::ESystemPlatform	REJECTED	Namespace 'Game::CGamePlaygroundScript' doesn't exist.
+Game::CGamePlaygroundScript::ESystemSkuIdentifier	REJECTED	Namespace 'Game::CGamePlaygroundScript' doesn't exist.
+Game::CGamePlaygroundUIConfig::EAvatarVariant	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::ECutSceneStyle	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::EHudVisibility	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::ELabelsVisibility	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::EMediaClipStyle	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::EMessageDisplay	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::ENoticeLevel	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::EObserverMode	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::EUISequence	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::EUISound	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::EUIStatus	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfig::EVisibility	REJECTED	Namespace 'Game::CGamePlaygroundUIConfig' doesn't exist.
+Game::CGamePlaygroundUIConfigEvent::EModuleType	REJECTED	Namespace 'Game::CGamePlaygroundUIConfigEvent' doesn't exist.
+Game::CGamePlaygroundUIConfigEvent::EType	REJECTED	Namespace 'Game::CGamePlaygroundUIConfigEvent' doesn't exist.
+Game::CGameRemoteBuffer::EMode	REJECTED	Namespace 'Game::CGameRemoteBuffer' doesn't exist.
+Game::CGameScoreAndLeaderBoardManagerScript::ELocalScoreStatus	REJECTED	Namespace 'Game::CGameScoreAndLeaderBoardManagerScript' doesn't exist.
+Game::CGameScoreAndLeaderBoardManagerScript::EMasterServerScoreStatus	REJECTED	Namespace 'Game::CGameScoreAndLeaderBoardManagerScript' doesn't exist.
+Game::CGameScriptChatContact::EPresenceShow	REJECTED	Namespace 'Game::CGameScriptChatContact' doesn't exist.
+Game::CGameScriptChatContact::ESubscription	REJECTED	Namespace 'Game::CGameScriptChatContact' doesn't exist.
+Game::CGameScriptChatContact::ESubscriptionStatus	REJECTED	Namespace 'Game::CGameScriptChatContact' doesn't exist.
+Game::CGameScriptChatEvent::EAddBuddySlotStatus	REJECTED	Namespace 'Game::CGameScriptChatEvent' doesn't exist.
+Game::CGameScriptChatEvent::EPresenceShow	REJECTED	Namespace 'Game::CGameScriptChatEvent' doesn't exist.
+Game::CGameScriptChatEvent::ESubscription	REJECTED	Namespace 'Game::CGameScriptChatEvent' doesn't exist.
+Game::CGameScriptChatEvent::ESubscriptionStatus	REJECTED	Namespace 'Game::CGameScriptChatEvent' doesn't exist.
+Game::CGameScriptChatEvent::EType	REJECTED	Namespace 'Game::CGameScriptChatEvent' doesn't exist.
+Game::CGameScriptChatHistoryEntry::EDirection	REJECTED	Namespace 'Game::CGameScriptChatHistoryEntry' doesn't exist.
+Game::CGameScriptChatManager::EConnectionStatus	REJECTED	Namespace 'Game::CGameScriptChatManager' doesn't exist.
+Game::CGameScriptChatManager::EDesiredConnectionStatus	REJECTED	Namespace 'Game::CGameScriptChatManager' doesn't exist.
+Game::CGameScriptChatManager::EPresenceShow	REJECTED	Namespace 'Game::CGameScriptChatManager' doesn't exist.
+Game::CGameScriptDebugger::EVisibility	REJECTED	Namespace 'Game::CGameScriptDebugger' doesn't exist.
+Game::CGameScriptHandlerPlaygroundInterface::EInGameMenuResult	REJECTED	Namespace 'Game::CGameScriptHandlerPlaygroundInterface' doesn't exist.
+Game::CGameScriptHandlerPlaygroundInterface::EUISound	REJECTED	Namespace 'Game::CGameScriptHandlerPlaygroundInterface' doesn't exist.
+Game::CGameScriptMgrVehicle::EArmorUse	REJECTED	Namespace 'Game::CGameScriptMgrVehicle' doesn't exist.
+Game::CGameScriptMgrVehicle::ESlotType	REJECTED	Namespace 'Game::CGameScriptMgrVehicle' doesn't exist.
+Game::CGameScriptNotificationsConsumer::EFilterPriority	REJECTED	Namespace 'Game::CGameScriptNotificationsConsumer' doesn't exist.
+Game::CGameScriptNotificationsConsumerEvent::EType	REJECTED	Namespace 'Game::CGameScriptNotificationsConsumerEvent' doesn't exist.
+Game::CGameScriptNotificationsConsumerNotification::ENotificationPriority	REJECTED	Namespace 'Game::CGameScriptNotificationsConsumerNotification' doesn't exist.
+Game::CGameScriptNotificationsProducer::ENotificationLifeSpan	REJECTED	Namespace 'Game::CGameScriptNotificationsProducer' doesn't exist.
+Game::CGameScriptNotificationsProducer::ENotificationPriority	REJECTED	Namespace 'Game::CGameScriptNotificationsProducer' doesn't exist.
+Game::CGameScriptNotificationsProducerEvent::EType	REJECTED	Namespace 'Game::CGameScriptNotificationsProducerEvent' doesn't exist.
+Game::CGameScriptServerAdmin::ESpecMode	REJECTED	Namespace 'Game::CGameScriptServerAdmin' doesn't exist.
+Game::CGameScriptVehicle::ESlotType	REJECTED	Namespace 'Game::CGameScriptVehicle' doesn't exist.
+Game::CGameServerPluginEvent::EChatOption	REJECTED	Namespace 'Game::CGameServerPluginEvent' doesn't exist.
+Game::CGameServerPluginEvent::EType	REJECTED	Namespace 'Game::CGameServerPluginEvent' doesn't exist.
+Game::CGameServerScriptXmlRpcEvent::EType	REJECTED	Namespace 'Game::CGameServerScriptXmlRpcEvent' doesn't exist.
+Game::CGameStation::EEchelon	REJECTED	Namespace 'Game::CGameStation' doesn't exist.
+Game::CGameUILayer::EUILayerAnimation	REJECTED	Namespace 'Game::CGameUILayer' doesn't exist.
+Game::CGameUILayer::EUILayerType	REJECTED	Namespace 'Game::CGameUILayer' doesn't exist.
+Game::CGameUserManagerScript::ECrossPlayState	REJECTED	Namespace 'Game::CGameUserManagerScript' doesn't exist.
+Game::CGameUserManagerScript::EPrestigeMode	REJECTED	Namespace 'Game::CGameUserManagerScript' doesn't exist.
+Game::CGameUserManagerScript::EUbisoftClubFlow	REJECTED	Namespace 'Game::CGameUserManagerScript' doesn't exist.
+Game::CGameUserManagerScript::EUplayOverlaySection	REJECTED	Namespace 'Game::CGameUserManagerScript' doesn't exist.
+Game::CGameUserManagerScript::EVoiceChatMuteSetting	REJECTED	Namespace 'Game::CGameUserManagerScript' doesn't exist.
+Game::CGameUserPrivilegesManagerScript::ECommunicationRestrictionLevel	REJECTED	Namespace 'Game::CGameUserPrivilegesManagerScript' doesn't exist.
+Game::CGameUserPrivilegesManagerScript::EPrivilege	REJECTED	Namespace 'Game::CGameUserPrivilegesManagerScript' doesn't exist.
+Game::CGameUserProfileWrapper::ECustomPlayerModels	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::EDisplayRecords	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::EIngameChatBackground	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::EIngameChatTextSize	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::EInputMouseReleaseKey	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::EMapEditorDifficulty	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::EMapEditorEnviro	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::EMapEditorMode	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::EMapEditorMood	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::EPlayerVisibility	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserProfileWrapper::ERoadsideSpectatorVisibility	REJECTED	Namespace 'Game::CGameUserProfileWrapper' doesn't exist.
+Game::CGameUserVoiceChat::EMuteSetting	REJECTED	Namespace 'Game::CGameUserVoiceChat' doesn't exist.
+Game::CGameVideoScriptVideo::ETextureFilter	REJECTED	Namespace 'Game::CGameVideoScriptVideo' doesn't exist.
+Game::CTmRaceResultNod::ETmRaceResultCriteria	REJECTED	Namespace 'Game::CTmRaceResultNod' doesn't exist.
+Game::CWebServicesTaskResult_PlanetsTransaction_Bill::EState	REJECTED	Namespace 'Game::CWebServicesTaskResult_PlanetsTransaction_Bill' doesn't exist.
+Game::EDummyCollectionIdent	REJECTED	Namespace 'Game' doesn't exist.
+Game::EGameCollectorSearchScope	REJECTED	Namespace 'Game' doesn't exist.
+Game::EGhostNameLogoType	REJECTED	Namespace 'Game' doesn't exist.
+Game::ESceneCharVisNotice	REJECTED	Namespace 'Game' doesn't exist.
+Game::ESceneVehicleVisEvent	REJECTED	Namespace 'Game' doesn't exist.
+Game::ESpectatorCameraType	REJECTED	Namespace 'Game' doesn't exist.
+Game::ESpectatorTargetMode	REJECTED	Namespace 'Game' doesn't exist.
+Game::NSystemConfig::EVoiceDetectionMode	REJECTED	Namespace 'Game::NSystemConfig' doesn't exist.
+Game::SGamePlaygroundUIConfig::EUISequence	REJECTED	Namespace 'Game::SGamePlaygroundUIConfig' doesn't exist.
+Game::VirtualKey	REJECTED	Namespace 'Game' doesn't exist.
+Game::ZZZNoSuchEnumName	REJECTED	Namespace 'Game' doesn't exist.
+GameData::CGameActionModel::EBehavior	REJECTED	Namespace 'GameData::CGameActionModel' doesn't exist.
+GameData::CGameActionModel::EExternalActions	REJECTED	Namespace 'GameData::CGameActionModel' doesn't exist.
+GameData::CGameActionModel::EInventoryItemClass	REJECTED	Namespace 'GameData::CGameActionModel' doesn't exist.
+GameData::CGameCommonItemEntityModelEdition::EnumInventoryItemClass	REJECTED	Namespace 'GameData::CGameCommonItemEntityModelEdition' doesn't exist.
+GameData::CGameCommonItemEntityModelEdition::EnumItemType	REJECTED	Namespace 'GameData::CGameCommonItemEntityModelEdition' doesn't exist.
+GameData::CGameCtnCollector::EProdState	REJECTED	Namespace 'GameData::CGameCtnCollector' doesn't exist.
+GameData::CGameEditorModel::EEditorType	REJECTED	Namespace 'GameData::CGameEditorModel' doesn't exist.
+GameData::CGameItemModel::EnumDefaultCam	REJECTED	Namespace 'GameData::CGameItemModel' doesn't exist.
+GameData::CGameItemModel::EnumInventoryItemClass	REJECTED	Namespace 'GameData::CGameItemModel' doesn't exist.
+GameData::CGameItemModel::EnumItemType	REJECTED	Namespace 'GameData::CGameItemModel' doesn't exist.
+GameData::CGameItemModel::EnumWaypointType	REJECTED	Namespace 'GameData::CGameItemModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateComponentModel::EModel	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateComponentModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateComponentModel::EType	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateComponentModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateGaugeModel::EActionInput	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateGaugeModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateGaugeModel::EDirection	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateGaugeModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateGaugeModel::EDistanceUnit	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateGaugeModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateGaugeModel::ESource	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateGaugeModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateGaugeModel::ESpeedUnit	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateGaugeModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateListModel::EDistanceUnit	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateListModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateListModel::ESource	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateListModel' doesn't exist.
+GameData::CGameModulePlaygroundPlayerStateListModel::ESpeedUnit	REJECTED	Namespace 'GameData::CGameModulePlaygroundPlayerStateListModel' doesn't exist.
+GameData::CGameModulePlaygroundSpeedMeterModel::ESpeedUnit	REJECTED	Namespace 'GameData::CGameModulePlaygroundSpeedMeterModel' doesn't exist.
+GameData::CGameModulePlaygroundTeamStateModel::ECardAlign	REJECTED	Namespace 'GameData::CGameModulePlaygroundTeamStateModel' doesn't exist.
+GameData::CGameObjectPhyModel::EGameObjectPhyModelPersistence	REJECTED	Namespace 'GameData::CGameObjectPhyModel' doesn't exist.
+GameData::CGameObjectPhyModel::EGameObjectPhyModelProgam	REJECTED	Namespace 'GameData::CGameObjectPhyModel' doesn't exist.
+GameData::EGameInventoryItemClass	ACCEPTED	
+GameData::ESceneCharVisNotice	ACCEPTED	
+GameData::ESceneVehicleVisEvent	ACCEPTED	
+GameData::VirtualKey	ACCEPTED	
+GameData::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'GameData' or parent
+GmFunc::ERotationOrder	ACCEPTED	
+Graphic::CGxLightBall::EStaticShadow	REJECTED	Namespace 'Graphic::CGxLightBall' doesn't exist.
+Graphic::CGxLightFrustum::EApply	REJECTED	Namespace 'Graphic::CGxLightFrustum' doesn't exist.
+Graphic::CGxLightFrustum::ETechnique	REJECTED	Namespace 'Graphic::CGxLightFrustum' doesn't exist.
+Graphic::ESceneCharVisNotice	REJECTED	Namespace 'Graphic' doesn't exist.
+Graphic::ESceneVehicleVisEvent	REJECTED	Namespace 'Graphic' doesn't exist.
+Graphic::VirtualKey	REJECTED	Namespace 'Graphic' doesn't exist.
+Graphic::ZZZNoSuchEnumName	REJECTED	Namespace 'Graphic' doesn't exist.
+HeatmapFlags	REJECTED	Identifier 'HeatmapFlags' is not a data type in global namespace
+HistogramFlags	REJECTED	Identifier 'HistogramFlags' is not a data type in global namespace
+Hms::CHmsCamera::EViewportRatio	REJECTED	Namespace 'Hms::CHmsCamera' doesn't exist.
+Hms::CHmsLightMapCache::EAllocMode	REJECTED	Namespace 'Hms::CHmsLightMapCache' doesn't exist.
+Hms::CHmsLightMapCache::EQualityVer	REJECTED	Namespace 'Hms::CHmsLightMapCache' doesn't exist.
+Hms::CHmsLightMapCache::ESortMode	REJECTED	Namespace 'Hms::CHmsLightMapCache' doesn't exist.
+Hms::CHmsLightMapCache::EVersion	REJECTED	Namespace 'Hms::CHmsLightMapCache' doesn't exist.
+Hms::CHmsPrecalcRender::EBitmapDepth	REJECTED	Namespace 'Hms::CHmsPrecalcRender' doesn't exist.
+Hms::CHmsViewport::EBitmapQuality	REJECTED	Namespace 'Hms::CHmsViewport' doesn't exist.
+Hms::CHmsViewport::EPC3Quality	REJECTED	Namespace 'Hms::CHmsViewport' doesn't exist.
+Hms::CHmsViewport::ERenderDevice	REJECTED	Namespace 'Hms::CHmsViewport' doesn't exist.
+Hms::CHmsZone::EGxFogFormula	REJECTED	Namespace 'Hms::CHmsZone' doesn't exist.
+Hms::CHmsZone::EGxFogSpace	REJECTED	Namespace 'Hms::CHmsZone' doesn't exist.
+Hms::CHmsZoneOverlay::EPickEnableMode	REJECTED	Namespace 'Hms::CHmsZoneOverlay' doesn't exist.
+Hms::EHmsLightMapBump	REJECTED	Namespace 'Hms' doesn't exist.
+Hms::EHmsLightMapCompress	REJECTED	Namespace 'Hms' doesn't exist.
+Hms::EHmsLightMapQuality	REJECTED	Namespace 'Hms' doesn't exist.
+Hms::EHmsOverlayAdaptRatio	REJECTED	Namespace 'Hms' doesn't exist.
+Hms::EPlugGpuPlatform	REJECTED	Namespace 'Hms' doesn't exist.
+Hms::ESceneCharVisNotice	REJECTED	Namespace 'Hms' doesn't exist.
+Hms::ESceneVehicleVisEvent	REJECTED	Namespace 'Hms' doesn't exist.
+Hms::VirtualKey	REJECTED	Namespace 'Hms' doesn't exist.
+Hms::ZZZNoSuchEnumName	REJECTED	Namespace 'Hms' doesn't exist.
+HoveredFlags	REJECTED	Identifier 'HoveredFlags' is not a data type in global namespace
+HttpMethod	REJECTED	Identifier 'HttpMethod' is not a data type in global namespace
+IO::ESceneCharVisNotice	ACCEPTED	
+IO::ESceneVehicleVisEvent	ACCEPTED	
+IO::FileMode	ACCEPTED	
+IO::ShareMode	ACCEPTED	
+IO::VirtualKey	ACCEPTED	
+IO::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'IO' or parent
+Icons::ESceneCharVisNotice	ACCEPTED	
+Icons::ESceneVehicleVisEvent	ACCEPTED	
+Icons::VirtualKey	ACCEPTED	
+Icons::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Icons' or parent
+Import::CallConvention	ACCEPTED	
+Import::ESceneCharVisNotice	ACCEPTED	
+Import::ESceneVehicleVisEvent	ACCEPTED	
+Import::VirtualKey	ACCEPTED	
+Import::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Import' or parent
+Input::CInputScriptEvent::EButton	REJECTED	Namespace 'Input::CInputScriptEvent' doesn't exist.
+Input::CInputScriptEvent::EType	REJECTED	Namespace 'Input::CInputScriptEvent' doesn't exist.
+Input::CInputScriptManager::EButton	REJECTED	Namespace 'Input::CInputScriptManager' doesn't exist.
+Input::CInputScriptManager::EPadType	REJECTED	Namespace 'Input::CInputScriptManager' doesn't exist.
+Input::CInputScriptPad::EButton	REJECTED	Namespace 'Input::CInputScriptPad' doesn't exist.
+Input::CInputScriptPad::EPadType	REJECTED	Namespace 'Input::CInputScriptPad' doesn't exist.
+Input::ESceneCharVisNotice	REJECTED	Namespace 'Input' doesn't exist.
+Input::ESceneVehicleVisEvent	REJECTED	Namespace 'Input' doesn't exist.
+Input::VirtualKey	REJECTED	Namespace 'Input' doesn't exist.
+Input::ZZZNoSuchEnumName	REJECTED	Namespace 'Input' doesn't exist.
+InputBlocking	REJECTED	Identifier 'InputBlocking' is not a data type in global namespace
+InputFlags	REJECTED	Identifier 'InputFlags' is not a data type in global namespace
+InputTextFlags	REJECTED	Identifier 'InputTextFlags' is not a data type in global namespace
+ItemFlags	REJECTED	Identifier 'ItemFlags' is not a data type in global namespace
+Json::ESceneCharVisNotice	ACCEPTED	
+Json::ESceneVehicleVisEvent	ACCEPTED	
+Json::Type	ACCEPTED	
+Json::VirtualKey	ACCEPTED	
+Json::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Json' or parent
+Key	REJECTED	Identifier 'Key' is not a data type in global namespace
+LegendFlags	REJECTED	Identifier 'LegendFlags' is not a data type in global namespace
+LineCapType	REJECTED	Identifier 'LineCapType' is not a data type in global namespace
+LineFlags	REJECTED	Identifier 'LineFlags' is not a data type in global namespace
+Location	REJECTED	Identifier 'Location' is not a data type in global namespace
+MLFeed::VirtualKey	ACCEPTED	
+MLFeed::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'MLFeed' or parent
+MLHook::VirtualKey	ACCEPTED	
+Marker	REJECTED	Identifier 'Marker' is not a data type in global namespace
+Math::ESceneCharVisNotice	ACCEPTED	
+Math::ESceneVehicleVisEvent	ACCEPTED	
+Math::VirtualKey	ACCEPTED	
+Math::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Math' or parent
+MathX::ESceneCharVisNotice	ACCEPTED	
+MathX::ESceneVehicleVisEvent	ACCEPTED	
+MathX::Lerp	REJECTED	Identifier 'Lerp' is not a data type in namespace 'MathX' or parent
+MathX::VirtualKey	ACCEPTED	
+MathX::ZZZNoSuch	REJECTED	Identifier 'ZZZNoSuch' is not a data type in namespace 'MathX' or parent
+MathX::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'MathX' or parent
+Meta::CGameManialinkScriptEvent::EMenuNavAction	REJECTED	Namespace 'Meta::CGameManialinkScriptEvent' doesn't exist.
+Meta::EAudioBalanceGroup	ACCEPTED	
+Meta::EGmSurfType	ACCEPTED	
+Meta::EPlugAnimClipAlignOffset	ACCEPTED	
+Meta::EPlugAnimGraphStateSelectCond	ACCEPTED	
+Meta::EPlugAnimLocoNodeType	ACCEPTED	
+Meta::EPlugAnimRootYawType	ACCEPTED	
+Meta::EPlugStateMachineTransitionCurve	ACCEPTED	
+Meta::EPlugStateMachineTransitionType	ACCEPTED	
+Meta::EPlugSurfaceGameplayId	ACCEPTED	
+Meta::EPlugSurfaceMaterialId	ACCEPTED	
+Meta::ESceneCharVisNotice	ACCEPTED	
+Meta::ESceneVehicleVisEvent	ACCEPTED	
+Meta::GmFunc::ERotationOrder	REJECTED	Namespace 'Meta::GmFunc' doesn't exist.
+Meta::NPlugAdn::ETagCat	REJECTED	Namespace 'Meta::NPlugAdn' doesn't exist.
+Meta::NPlugAnim::EClipPlayAdditiveType	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EExtractMotionMode	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EExtractUnitAxis	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EExtractUnitTarget	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EFunnelType	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EGraphNodeAssertVarType	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EGraphNodeAxisWorkspace	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EGraphNodeIK2SolverMode	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EGraphNodeLockType	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EGraphNodeLockWorkspace	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::EGraphNodeOperationType	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::ELayeredBlendContext	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugAnim::ELayeredBlendType	REJECTED	Namespace 'Meta::NPlugAnim' doesn't exist.
+Meta::NPlugDyna::EAxis	REJECTED	Namespace 'Meta::NPlugDyna' doesn't exist.
+Meta::NPlugDyna::EDynaConstraintType	REJECTED	Namespace 'Meta::NPlugDyna' doesn't exist.
+Meta::NPlugDyna::EForceFieldType	REJECTED	Namespace 'Meta::NPlugDyna' doesn't exist.
+Meta::NPlugDyna::EShaderTcType	REJECTED	Namespace 'Meta::NPlugDyna' doesn't exist.
+Meta::Plugin::ESceneCharVisNotice	REJECTED	Identifier 'ESceneCharVisNotice' is not a data type in namespace 'Plugin' or parent
+Meta::Plugin::ESceneVehicleVisEvent	REJECTED	Identifier 'ESceneVehicleVisEvent' is not a data type in namespace 'Plugin' or parent
+Meta::Plugin::VirtualKey	REJECTED	Identifier 'VirtualKey' is not a data type in namespace 'Plugin' or parent
+Meta::Plugin::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Plugin' or parent
+Meta::PluginSettingType	ACCEPTED	
+Meta::PluginSource	ACCEPTED	
+Meta::PluginType	ACCEPTED	
+Meta::RunContext	ACCEPTED	
+Meta::SGamePlaygroundUIConfig::EUISequence	REJECTED	Namespace 'Meta::SGamePlaygroundUIConfig' doesn't exist.
+Meta::TextEditorType	ACCEPTED	
+Meta::VirtualKey	ACCEPTED	
+Meta::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Meta' or parent
+MetaNotPersistent::CAdvertisingManager::ELiveAdSystem	REJECTED	Namespace 'MetaNotPersistent::CAdvertisingManager' doesn't exist.
+MetaNotPersistent::CGameCtnMediaBlockCameraCustom::ECamInterp	REJECTED	Namespace 'MetaNotPersistent::CGameCtnMediaBlockCameraCustom' doesn't exist.
+MetaNotPersistent::CGameCtnMediaBlockGhostTM_SuperSKeyVal::EForceLight	REJECTED	Namespace 'MetaNotPersistent::CGameCtnMediaBlockGhostTM_SuperSKeyVal' doesn't exist.
+MetaNotPersistent::CGameCtnMediaBlockOpponentVisibility_SuperSKeyVal::EOpponentVisibility	REJECTED	Namespace 'MetaNotPersistent::CGameCtnMediaBlockOpponentVisibility_SuperSKeyVal' doesn't exist.
+MetaNotPersistent::CGameUserVoiceChat::EMuteSetting	REJECTED	Namespace 'MetaNotPersistent::CGameUserVoiceChat' doesn't exist.
+MetaNotPersistent::CGameVoiceChatConfigScript::ESyncMode	REJECTED	Namespace 'MetaNotPersistent::CGameVoiceChatConfigScript' doesn't exist.
+MetaNotPersistent::CHmsSolidVisCst_TmCar::SPrestige::EMedal	REJECTED	Namespace 'MetaNotPersistent::CHmsSolidVisCst_TmCar::SPrestige' doesn't exist.
+MetaNotPersistent::CHmsSolidVisCst_TmCar::SPrestige::ESeasonOrType	REJECTED	Namespace 'MetaNotPersistent::CHmsSolidVisCst_TmCar::SPrestige' doesn't exist.
+MetaNotPersistent::EChatScope	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EGameCollectorSearchScope	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EGxTexAddress	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EHmsLightMapBump	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EHmsLightMapCacheSize	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EHmsLightMapQuality	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugAnimGraphNodeType	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugMeshInstanceType	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugMoodFxTMFilmCurve	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugParticleColorGradient	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugParticleMultiStateRenderMode	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugParticleRenderColor	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugParticleSpawnCond	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugParticleStandardRenderMode	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugParticleTextureAtlas	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugRoadChunkType	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugRoadDensity	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugRoadType	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugRoadWayType	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugStateMachineTransitionCurve	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugStateMachineTransitionType	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugSurfaceGameplayId	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPlugSurfaceMaterialId	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPrestigeMode	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::EPrestigeSeason	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::ESceneCharVisNotice	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::ESceneVehicleVisEvent	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::NGameLoadProgress::EState	REJECTED	Namespace 'MetaNotPersistent::NGameLoadProgress' doesn't exist.
+MetaNotPersistent::NGameMediaBlockEntity_SuperSKeyVal::EForceLight	REJECTED	Namespace 'MetaNotPersistent::NGameMediaBlockEntity_SuperSKeyVal' doesn't exist.
+MetaNotPersistent::NGmUnit::EConvertMethod	REJECTED	Namespace 'MetaNotPersistent::NGmUnit' doesn't exist.
+MetaNotPersistent::NHmsLightMapCache::ELocalLight_Storage	REJECTED	Namespace 'MetaNotPersistent::NHmsLightMapCache' doesn't exist.
+MetaNotPersistent::NHmsLightMapCache::ELocalLight_Switch	REJECTED	Namespace 'MetaNotPersistent::NHmsLightMapCache' doesn't exist.
+MetaNotPersistent::NPlugAnim::EJointChannel	REJECTED	Namespace 'MetaNotPersistent::NPlugAnim' doesn't exist.
+MetaNotPersistent::NPlugAnim::EPoseType	REJECTED	Namespace 'MetaNotPersistent::NPlugAnim' doesn't exist.
+MetaNotPersistent::NPlugAnim::EPropType	REJECTED	Namespace 'MetaNotPersistent::NPlugAnim' doesn't exist.
+MetaNotPersistent::NPlugAnim::ESceneCharVisNotice	REJECTED	Namespace 'MetaNotPersistent::NPlugAnim' doesn't exist.
+MetaNotPersistent::NPlugAnim::ESceneVehicleVisEvent	REJECTED	Namespace 'MetaNotPersistent::NPlugAnim' doesn't exist.
+MetaNotPersistent::NPlugAnim::VirtualKey	REJECTED	Namespace 'MetaNotPersistent::NPlugAnim' doesn't exist.
+MetaNotPersistent::NPlugCurve::EInterpMode	REJECTED	Namespace 'MetaNotPersistent::NPlugCurve' doesn't exist.
+MetaNotPersistent::NPlugCurve::ETangentMode	REJECTED	Namespace 'MetaNotPersistent::NPlugCurve' doesn't exist.
+MetaNotPersistent::NPlugDyna::EAnimFuncBase	REJECTED	Namespace 'MetaNotPersistent::NPlugDyna' doesn't exist.
+MetaNotPersistent::NPlugExpr::EType	REJECTED	Namespace 'MetaNotPersistent::NPlugExpr' doesn't exist.
+MetaNotPersistent::NPlugFilePreloader::EAllocType	REJECTED	Namespace 'MetaNotPersistent::NPlugFilePreloader' doesn't exist.
+MetaNotPersistent::NPlugImpostor::EPlaneComputeMode	REJECTED	Namespace 'MetaNotPersistent::NPlugImpostor' doesn't exist.
+MetaNotPersistent::NPlugItemPlacement::EAlign	REJECTED	Namespace 'MetaNotPersistent::NPlugItemPlacement' doesn't exist.
+MetaNotPersistent::NPlugItemPlacement::EFillDir	REJECTED	Namespace 'MetaNotPersistent::NPlugItemPlacement' doesn't exist.
+MetaNotPersistent::NPlugItemPlacement::EFillMode	REJECTED	Namespace 'MetaNotPersistent::NPlugItemPlacement' doesn't exist.
+MetaNotPersistent::NPlugItemPlacement::ESiblingDistribution	REJECTED	Namespace 'MetaNotPersistent::NPlugItemPlacement' doesn't exist.
+MetaNotPersistent::NPlugItemPlacement::EStartPos	REJECTED	Namespace 'MetaNotPersistent::NPlugItemPlacement' doesn't exist.
+MetaNotPersistent::NPlugModelKit::EOptionAutoFill	REJECTED	Namespace 'MetaNotPersistent::NPlugModelKit' doesn't exist.
+MetaNotPersistent::NPlugPainterLayer::EPlugPainterLayer_Type	REJECTED	Namespace 'MetaNotPersistent::NPlugPainterLayer' doesn't exist.
+MetaNotPersistent::NScenePathFinding::EPathRequestStatus	REJECTED	Namespace 'MetaNotPersistent::NScenePathFinding' doesn't exist.
+MetaNotPersistent::NSceneSpectatorVis::EOrientationMode	REJECTED	Namespace 'MetaNotPersistent::NSceneSpectatorVis' doesn't exist.
+MetaNotPersistent::NSceneVehiclePhy_SStuntFigure::EStuntName	REJECTED	Namespace 'MetaNotPersistent::NSceneVehiclePhy_SStuntFigure' doesn't exist.
+MetaNotPersistent::NSceneVisEntFx::EVisible	REJECTED	Namespace 'MetaNotPersistent::NSceneVisEntFx' doesn't exist.
+MetaNotPersistent::NSceneWeather::EClearMode	REJECTED	Namespace 'MetaNotPersistent::NSceneWeather' doesn't exist.
+MetaNotPersistent::NSysCfgVision::SDeferred::EDecalDbg	REJECTED	Namespace 'MetaNotPersistent::NSysCfgVision::SDeferred' doesn't exist.
+MetaNotPersistent::NSysCfgVision::SDeferred::EDecalZFunc	REJECTED	Namespace 'MetaNotPersistent::NSysCfgVision::SDeferred' doesn't exist.
+MetaNotPersistent::NSysPlatform::EDirectLinkType	REJECTED	Namespace 'MetaNotPersistent::NSysPlatform' doesn't exist.
+MetaNotPersistent::NSysPlatform::EDirectLink_Join_Role	REJECTED	Namespace 'MetaNotPersistent::NSysPlatform' doesn't exist.
+MetaNotPersistent::NWebServicesPrestige::EPrestigeMode	REJECTED	Namespace 'MetaNotPersistent::NWebServicesPrestige' doesn't exist.
+MetaNotPersistent::VirtualKey	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MetaNotPersistent::ZZZNoSuchEnumName	REJECTED	Namespace 'MetaNotPersistent' doesn't exist.
+MouseButton	REJECTED	Identifier 'MouseButton' is not a data type in global namespace
+MouseCursor	REJECTED	Identifier 'MouseCursor' is not a data type in global namespace
+MouseTextFlags	REJECTED	Identifier 'MouseTextFlags' is not a data type in global namespace
+MwFoundations::ESceneCharVisNotice	REJECTED	Namespace 'MwFoundations' doesn't exist.
+MwFoundations::ESceneVehicleVisEvent	REJECTED	Namespace 'MwFoundations' doesn't exist.
+MwFoundations::VirtualKey	REJECTED	Namespace 'MwFoundations' doesn't exist.
+MwFoundations::ZZZNoSuchEnumName	REJECTED	Namespace 'MwFoundations' doesn't exist.
+NGameLoadProgress::EState	ACCEPTED	
+NGameMediaBlockEntity_SuperSKeyVal::EForceLight	ACCEPTED	
+NGmUnit::EConvertMethod	ACCEPTED	
+NHmsLightMapCache::ELocalLight_Storage	ACCEPTED	
+NHmsLightMapCache::ELocalLight_Switch	ACCEPTED	
+NPlugAdn::ETagCat	ACCEPTED	
+NPlugAnim::EClipPlayAdditiveType	ACCEPTED	
+NPlugAnim::EExtractMotionMode	ACCEPTED	
+NPlugAnim::EExtractUnitAxis	ACCEPTED	
+NPlugAnim::EExtractUnitTarget	ACCEPTED	
+NPlugAnim::EFunnelType	ACCEPTED	
+NPlugAnim::EGraphNodeAssertVarType	ACCEPTED	
+NPlugAnim::EGraphNodeAxisWorkspace	ACCEPTED	
+NPlugAnim::EGraphNodeIK2SolverMode	ACCEPTED	
+NPlugAnim::EGraphNodeLockType	ACCEPTED	
+NPlugAnim::EGraphNodeLockWorkspace	ACCEPTED	
+NPlugAnim::EGraphNodeOperationType	ACCEPTED	
+NPlugAnim::EJointChannel	ACCEPTED	
+NPlugAnim::ELayeredBlendContext	ACCEPTED	
+NPlugAnim::ELayeredBlendType	ACCEPTED	
+NPlugAnim::EPoseType	ACCEPTED	
+NPlugAnim::EPropType	ACCEPTED	
+NPlugCurve::EInterpMode	ACCEPTED	
+NPlugCurve::ETangentMode	ACCEPTED	
+NPlugDyna::EAnimFuncBase	ACCEPTED	
+NPlugDyna::EAxis	ACCEPTED	
+NPlugDyna::EDynaConstraintType	ACCEPTED	
+NPlugDyna::EForceFieldType	ACCEPTED	
+NPlugDyna::EShaderTcType	ACCEPTED	
+NPlugExpr::EType	ACCEPTED	
+NPlugFilePreloader::EAllocType	ACCEPTED	
+NPlugImpostor::EPlaneComputeMode	ACCEPTED	
+NPlugItemPlacement::EAlign	ACCEPTED	
+NPlugItemPlacement::EFillDir	ACCEPTED	
+NPlugItemPlacement::EFillMode	ACCEPTED	
+NPlugItemPlacement::ESiblingDistribution	ACCEPTED	
+NPlugItemPlacement::EStartPos	ACCEPTED	
+NPlugModelKit::EOptionAutoFill	ACCEPTED	
+NPlugPainterLayer::EPlugPainterLayer_Type	ACCEPTED	
+NScenePathFinding::EPathRequestStatus	ACCEPTED	
+NSceneSpectatorVis::EOrientationMode	ACCEPTED	
+NSceneVehiclePhy_SStuntFigure::EStuntName	ACCEPTED	
+NSceneVisEntFx::EVisible	ACCEPTED	
+NSceneWeather::EClearMode	ACCEPTED	
+NSysCfgVision::SDeferred::EDecalDbg	ACCEPTED	
+NSysCfgVision::SDeferred::EDecalZFunc	ACCEPTED	
+NSysPlatform::EDirectLinkType	ACCEPTED	
+NSysPlatform::EDirectLink_Join_Role	ACCEPTED	
+NSystemConfig::EGamePackQuality	ACCEPTED	
+NSystemConfig::EVoiceDetectionMode	ACCEPTED	
+NWebServicesPrestige::EPrestigeMode	ACCEPTED	
+Net::CNetHttpResult::EKind	REJECTED	Namespace 'Net::CNetHttpResult' doesn't exist.
+Net::CNetHttpResult::EStatus	REJECTED	Namespace 'Net::CNetHttpResult' doesn't exist.
+Net::CNetMasterServerDownload::EContext	REJECTED	Namespace 'Net::CNetMasterServerDownload' doesn't exist.
+Net::CNetMasterServerDownload::EUploadMethod	REJECTED	Namespace 'Net::CNetMasterServerDownload' doesn't exist.
+Net::CNetMasterServerUserInfo::EFirstPartySignInState	REJECTED	Namespace 'Net::CNetMasterServerUserInfo' doesn't exist.
+Net::CNetMasterServerUserInfo::EMasterServerConnectionDetailedStatus	REJECTED	Namespace 'Net::CNetMasterServerUserInfo' doesn't exist.
+Net::CNetMasterServerUserInfo::EMasterServerConnectionError	REJECTED	Namespace 'Net::CNetMasterServerUserInfo' doesn't exist.
+Net::CNetMasterServerUserInfo::EMasterServerConnectionStatus	REJECTED	Namespace 'Net::CNetMasterServerUserInfo' doesn't exist.
+Net::CNetScriptHttpEvent::EType	REJECTED	Namespace 'Net::CNetScriptHttpEvent' doesn't exist.
+Net::ESceneCharVisNotice	ACCEPTED	
+Net::ESceneVehicleVisEvent	ACCEPTED	
+Net::HttpMethod	ACCEPTED	
+Net::VirtualKey	ACCEPTED	
+Net::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Net' or parent
+Path::ESceneCharVisNotice	ACCEPTED	
+Path::ESceneVehicleVisEvent	ACCEPTED	
+Path::VirtualKey	ACCEPTED	
+Path::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Path' or parent
+Permissions::ESceneCharVisNotice	ACCEPTED	
+Permissions::ESceneVehicleVisEvent	ACCEPTED	
+Permissions::VirtualKey	ACCEPTED	
+Permissions::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Permissions' or parent
+PieChartFlags	REJECTED	Identifier 'PieChartFlags' is not a data type in global namespace
+Plot::Axis	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::AxisFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::BarGroupsFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::BarsFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::Bin	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::Colormap	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::ColormapScaleFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::Cond	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::ErrorBarsFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::HeatmapFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::HistogramFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::LegendFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::LineFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::Location	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::Marker	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::MouseTextFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::PieChartFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::PlotFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::Scale	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::ScatterFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::ShadedFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::StairsFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::StemsFlags	REJECTED	Namespace 'Plot' doesn't exist.
+Plot::SubplotFlags	REJECTED	Namespace 'Plot' doesn't exist.
+PlotFlags	REJECTED	Identifier 'PlotFlags' is not a data type in global namespace
+Plug::CPlugBeamEmitterSubModel::EDisplayType	REJECTED	Namespace 'Plug::CPlugBeamEmitterSubModel' doesn't exist.
+Plug::CPlugBitmap::EColorDepth	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::EColorSpace	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::ECompressFile	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::ECompressor	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::ECube2d	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::ECubeMapFace	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::EDynamic	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::EEdCustomSaveOp	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::EForceBorderSize	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::EGenerateUV	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::EMipMapAlpha01	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::ENormalRotate	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::EPixelUpdate	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::ERenderTech	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::ETexAddress	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::ETexFilter	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::EUsage	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::EVideoTimer	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmap::E__	REJECTED	Namespace 'Plug::CPlugBitmap' doesn't exist.
+Plug::CPlugBitmapAddress::EGxUVGenerate	REJECTED	Namespace 'Plug::CPlugBitmapAddress' doesn't exist.
+Plug::CPlugBitmapPack::EGxTexAddress	REJECTED	Namespace 'Plug::CPlugBitmapPack' doesn't exist.
+Plug::CPlugBitmapRender::ERenderPathFails	REJECTED	Namespace 'Plug::CPlugBitmapRender' doesn't exist.
+Plug::CPlugBitmapRender::ETrigger	REJECTED	Namespace 'Plug::CPlugBitmapRender' doesn't exist.
+Plug::CPlugBitmapSampler::EAlphaReq	REJECTED	Namespace 'Plug::CPlugBitmapSampler' doesn't exist.
+Plug::CPlugBitmapSampler::EGxTexAddress	REJECTED	Namespace 'Plug::CPlugBitmapSampler' doesn't exist.
+Plug::CPlugBitmapSampler::EGxTexFilter	REJECTED	Namespace 'Plug::CPlugBitmapSampler' doesn't exist.
+Plug::CPlugBulletPhyModel::EBulletType	REJECTED	Namespace 'Plug::CPlugBulletPhyModel' doesn't exist.
+Plug::CPlugBulletPhyModel::EExplosionOccultationTest	REJECTED	Namespace 'Plug::CPlugBulletPhyModel' doesn't exist.
+Plug::CPlugBulletPhyModel::EFireBulletPatternMode	REJECTED	Namespace 'Plug::CPlugBulletPhyModel' doesn't exist.
+Plug::CPlugCustomBeamModel::ECustomBeamType	REJECTED	Namespace 'Plug::CPlugCustomBeamModel' doesn't exist.
+Plug::CPlugDecoratorTree::EBoolCond	REJECTED	Namespace 'Plug::CPlugDecoratorTree' doesn't exist.
+Plug::CPlugFileGen::EGenKind	REJECTED	Namespace 'Plug::CPlugFileGen' doesn't exist.
+Plug::CPlugFileImg::EDimension	REJECTED	Namespace 'Plug::CPlugFileImg' doesn't exist.
+Plug::CPlugFileImg::EPlugChannelType	REJECTED	Namespace 'Plug::CPlugFileImg' doesn't exist.
+Plug::CPlugFileImg::EPlugImageFormat	REJECTED	Namespace 'Plug::CPlugFileImg' doesn't exist.
+Plug::CPlugMaterialUserInst::EMaterialModelChar	REJECTED	Namespace 'Plug::CPlugMaterialUserInst' doesn't exist.
+Plug::CPlugMaterialUserInst::EMaterialModelDyna0	REJECTED	Namespace 'Plug::CPlugMaterialUserInst' doesn't exist.
+Plug::CPlugMaterialUserInst::EMaterialModelStatic	REJECTED	Namespace 'Plug::CPlugMaterialUserInst' doesn't exist.
+Plug::CPlugMaterialUserInst::EMaterialModelVehicle	REJECTED	Namespace 'Plug::CPlugMaterialUserInst' doesn't exist.
+Plug::CPlugMaterialUserInst::ETexAddress	REJECTED	Namespace 'Plug::CPlugMaterialUserInst' doesn't exist.
+Plug::CPlugShaderPass::ECullMode	REJECTED	Namespace 'Plug::CPlugShaderPass' doesn't exist.
+Plug::CPlugShaderPass::EGxBlendFactor	REJECTED	Namespace 'Plug::CPlugShaderPass' doesn't exist.
+Plug::CPlugSound::EAudioBalanceGroup	REJECTED	Namespace 'Plug::CPlugSound' doesn't exist.
+Plug::CPlugSound::EAudioIgnoreSourceProperties	REJECTED	Namespace 'Plug::CPlugSound' doesn't exist.
+Plug::CPlugSound::EAudioPitchFromDistMode	REJECTED	Namespace 'Plug::CPlugSound' doesn't exist.
+Plug::CPlugSound::EAudioRoomFx	REJECTED	Namespace 'Plug::CPlugSound' doesn't exist.
+Plug::CPlugSoundMulti::ESoundInputMapping	REJECTED	Namespace 'Plug::CPlugSoundMulti' doesn't exist.
+Plug::CPlugTurret::EOnArmorEmtpy	REJECTED	Namespace 'Plug::CPlugTurret' doesn't exist.
+Plug::CPlugTurret::ETurretFixedAngleSignal	REJECTED	Namespace 'Plug::CPlugTurret' doesn't exist.
+Plug::CPlugVisualSprite::ERenderMode	REJECTED	Namespace 'Plug::CPlugVisualSprite' doesn't exist.
+Plug::CPlugWeather::EGxFogFormula	REJECTED	Namespace 'Plug::CPlugWeather' doesn't exist.
+Plug::CPlugWeather::EGxFogSpace	REJECTED	Namespace 'Plug::CPlugWeather' doesn't exist.
+Plug::EAudioFilterType	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EGameItemWaypointType	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EImportMeshType	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EPlugAnimGraphBlending	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EPlugAnimSimpleFunc	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EPlugAnimSpotType	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EPlugCustomBulletModelType	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EPlugDynaSleepingMethod	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EPlugFlockType	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EPlugModelShadingType	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::EPlugParticleEmitterSubModel	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::ESceneCharVisNotice	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::ESceneVehicleVisEvent	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::VirtualKey	REJECTED	Namespace 'Plug' doesn't exist.
+Plug::ZZZNoSuchEnumName	REJECTED	Namespace 'Plug' doesn't exist.
+PluginSettingType	REJECTED	Identifier 'PluginSettingType' is not a data type in global namespace
+PluginSource	REJECTED	Identifier 'PluginSource' is not a data type in global namespace
+PluginType	REJECTED	Identifier 'PluginType' is not a data type in global namespace
+PushRegisters	REJECTED	Identifier 'PushRegisters' is not a data type in global namespace
+Quux::VirtualKey	REJECTED	Namespace 'Quux' doesn't exist.
+Reflection::ESceneCharVisNotice	ACCEPTED	
+Reflection::ESceneVehicleVisEvent	ACCEPTED	
+Reflection::VirtualKey	ACCEPTED	
+Reflection::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Reflection' or parent
+Regex::ESceneCharVisNotice	ACCEPTED	
+Regex::ESceneVehicleVisEvent	ACCEPTED	
+Regex::Flags	ACCEPTED	
+Regex::VirtualKey	ACCEPTED	
+Regex::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Regex' or parent
+Response	REJECTED	Identifier 'Response' is not a data type in global namespace
+RunContext	REJECTED	Identifier 'RunContext' is not a data type in global namespace
+SDeferred::EDecalDbg	REJECTED	Namespace 'SDeferred' doesn't exist.
+SDeferred::EDecalZFunc	REJECTED	Namespace 'SDeferred' doesn't exist.
+SGamePlaygroundUIConfig::EUISequence	ACCEPTED	
+SPrestige::EMedal	REJECTED	Namespace 'SPrestige' doesn't exist.
+SPrestige::ESeasonOrType	REJECTED	Namespace 'SPrestige' doesn't exist.
+SQLite::ESceneCharVisNotice	ACCEPTED	
+SQLite::ESceneVehicleVisEvent	ACCEPTED	
+SQLite::VirtualKey	ACCEPTED	
+SQLite::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'SQLite' or parent
+Scale	REJECTED	Identifier 'Scale' is not a data type in global namespace
+ScatterFlags	REJECTED	Identifier 'ScatterFlags' is not a data type in global namespace
+Scene::EMeleeHitType	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::EMeleeState	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::EParryType	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::EPlugSeatType	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::EPlugSurfaceMaterialId	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::ESceneCharVisNotice	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::ESceneVehicleVisEvent	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::ESceneVehicleVisReactorBoostLvl	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::ESceneVehicleVisReactorBoostType	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::VirtualKey	REJECTED	Namespace 'Scene' doesn't exist.
+Scene::ZZZNoSuchEnumName	REJECTED	Namespace 'Scene' doesn't exist.
+Script::ESceneCharVisNotice	REJECTED	Namespace 'Script' doesn't exist.
+Script::ESceneVehicleVisEvent	REJECTED	Namespace 'Script' doesn't exist.
+Script::VirtualKey	REJECTED	Namespace 'Script' doesn't exist.
+Script::ZZZNoSuchEnumName	REJECTED	Namespace 'Script' doesn't exist.
+SelectableFlags	REJECTED	Identifier 'SelectableFlags' is not a data type in global namespace
+SeparatorFlags	REJECTED	Identifier 'SeparatorFlags' is not a data type in global namespace
+Setting::VirtualKey	REJECTED	Namespace 'Setting' doesn't exist.
+Setting::ZZZNoSuchEnumName	REJECTED	Namespace 'Setting' doesn't exist.
+Settings::ESceneCharVisNotice	ACCEPTED	
+Settings::ESceneVehicleVisEvent	ACCEPTED	
+Settings::VirtualKey	ACCEPTED	
+Settings::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Settings' or parent
+ShadedFlags	REJECTED	Identifier 'ShadedFlags' is not a data type in global namespace
+ShareMode	REJECTED	Identifier 'ShareMode' is not a data type in global namespace
+ShootMania::CSmActionInstanceEvent::EInputChange	REJECTED	Namespace 'ShootMania::CSmActionInstanceEvent' doesn't exist.
+ShootMania::CSmActionInstanceEvent::EType	REJECTED	Namespace 'ShootMania::CSmActionInstanceEvent' doesn't exist.
+ShootMania::CSmArenaRules::EGameplay	REJECTED	Namespace 'ShootMania::CSmArenaRules' doesn't exist.
+ShootMania::CSmArenaRulesEvent::EActionInput	REJECTED	Namespace 'ShootMania::CSmArenaRulesEvent' doesn't exist.
+ShootMania::CSmArenaRulesEvent::EActionSlot	REJECTED	Namespace 'ShootMania::CSmArenaRulesEvent' doesn't exist.
+ShootMania::CSmArenaRulesEvent::EType	REJECTED	Namespace 'ShootMania::CSmArenaRulesEvent' doesn't exist.
+ShootMania::CSmArenaRulesMode::EActionInput	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmArenaRulesMode::EActionSlot	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmArenaRulesMode::EBrowseActionWheel	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmArenaRulesMode::ECheckpointBehaviour	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmArenaRulesMode::EGameplay	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmArenaRulesMode::EGiveUpBehaviour	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmArenaRulesMode::ERespawnBehaviour	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmArenaRulesMode::ESmScoreSortOrder	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmArenaRulesMode::EVehicleTransformType	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmArenaRulesMode::EWeapon	REJECTED	Namespace 'ShootMania::CSmArenaRulesMode' doesn't exist.
+ShootMania::CSmObject::EStatus	REJECTED	Namespace 'ShootMania::CSmObject' doesn't exist.
+ShootMania::CSmPlayerDriver::ESmAttackFilter	REJECTED	Namespace 'ShootMania::CSmPlayerDriver' doesn't exist.
+ShootMania::CSmPlayerDriver::ESmDriverBehaviour	REJECTED	Namespace 'ShootMania::CSmPlayerDriver' doesn't exist.
+ShootMania::CSmPlayerDriver::ESmDriverPathState	REJECTED	Namespace 'ShootMania::CSmPlayerDriver' doesn't exist.
+ShootMania::CSmPlayerDriver::ESmDriverPatrolMode	REJECTED	Namespace 'ShootMania::CSmPlayerDriver' doesn't exist.
+ShootMania::CSmScriptPlayer::EPost	REJECTED	Namespace 'ShootMania::CSmScriptPlayer' doesn't exist.
+ShootMania::CSmScriptPlayer::ESpawnStatus	REJECTED	Namespace 'ShootMania::CSmScriptPlayer' doesn't exist.
+ShootMania::ESceneCharVisNotice	REJECTED	Namespace 'ShootMania' doesn't exist.
+ShootMania::ESceneVehicleVisEvent	REJECTED	Namespace 'ShootMania' doesn't exist.
+ShootMania::VirtualKey	REJECTED	Namespace 'ShootMania' doesn't exist.
+ShootMania::ZZZNoSuchEnumName	REJECTED	Namespace 'ShootMania' doesn't exist.
+SliderFlags	REJECTED	Identifier 'SliderFlags' is not a data type in global namespace
+SortDirection	REJECTED	Identifier 'SortDirection' is not a data type in global namespace
+StairsFlags	REJECTED	Identifier 'StairsFlags' is not a data type in global namespace
+StemsFlags	REJECTED	Identifier 'StemsFlags' is not a data type in global namespace
+StyleVar	REJECTED	Identifier 'StyleVar' is not a data type in global namespace
+SubplotFlags	REJECTED	Identifier 'SubplotFlags' is not a data type in global namespace
+System::CSystemConfig::EAdvertising	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfig::EAudioQuality	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfig::ENetworkSpeed	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfig::EPlayerInfoDisplayType	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfig::EPlayerOcclusion	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfig::EPlayerShadow	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfig::ETmBackgroundQuality	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfig::ETmCarParticlesQuality	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfig::ETmCarQuality	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfig::ETmOpponents	REJECTED	Namespace 'System::CSystemConfig' doesn't exist.
+System::CSystemConfigDisplay::EAntialias	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EDeferredAA	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EDisplayMode	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EDisplaySync	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EEverywhereReflect	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EFilterAnisoQ	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EFxBloomHdr	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EFxBlur	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EFxMotionBlur	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EGeometryQ	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EGpuSync	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::ELightFromMap	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::ELightMapQuality	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::ELightMapSizeMax	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EPreset	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::ERenderingApi	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EScreenShotExt	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EShaderQ	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EShadows	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EShowPerformance	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::ETripleBuffer	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EVehicleReflect	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EWaterReflect	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EWindowSize	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EZClip	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemConfigDisplay::EZClipAuto	REJECTED	Namespace 'System::CSystemConfigDisplay' doesn't exist.
+System::CSystemPlatformScript::ESystemPlatform	REJECTED	Namespace 'System::CSystemPlatformScript' doesn't exist.
+System::CSystemPlatformScript::ESystemSkuIdentifier	REJECTED	Namespace 'System::CSystemPlatformScript' doesn't exist.
+System::ESceneCharVisNotice	REJECTED	Namespace 'System' doesn't exist.
+System::ESceneVehicleVisEvent	REJECTED	Namespace 'System' doesn't exist.
+System::ETextureQuality	REJECTED	Namespace 'System' doesn't exist.
+System::NSystemConfig::EGamePackQuality	REJECTED	Namespace 'System::NSystemConfig' doesn't exist.
+System::NSystemConfig::EVoiceDetectionMode	REJECTED	Namespace 'System::NSystemConfig' doesn't exist.
+System::VirtualKey	REJECTED	Namespace 'System' doesn't exist.
+System::ZZZNoSuchEnumName	REJECTED	Namespace 'System' doesn't exist.
+TabBarFlags	REJECTED	Identifier 'TabBarFlags' is not a data type in global namespace
+TabItemFlags	REJECTED	Identifier 'TabItemFlags' is not a data type in global namespace
+TableBgTarget	REJECTED	Identifier 'TableBgTarget' is not a data type in global namespace
+TableColumnFlags	REJECTED	Identifier 'TableColumnFlags' is not a data type in global namespace
+TableFlags	REJECTED	Identifier 'TableFlags' is not a data type in global namespace
+TableRowFlags	REJECTED	Identifier 'TableRowFlags' is not a data type in global namespace
+Tests::ESceneCharVisNotice	ACCEPTED	
+Tests::ESceneVehicleVisEvent	ACCEPTED	
+Tests::VirtualKey	ACCEPTED	
+Tests::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Tests' or parent
+Text::ESceneCharVisNotice	ACCEPTED	
+Text::ESceneVehicleVisEvent	ACCEPTED	
+Text::VirtualKey	ACCEPTED	
+Text::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Text' or parent
+TextEditorType	REJECTED	Identifier 'TextEditorType' is not a data type in global namespace
+TextureFlags	REJECTED	Identifier 'TextureFlags' is not a data type in global namespace
+Time::ESceneCharVisNotice	ACCEPTED	
+Time::ESceneVehicleVisEvent	ACCEPTED	
+Time::VirtualKey	ACCEPTED	
+Time::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Time' or parent
+TrackMania::CTrackManiaNetworkServerInfo::EGameMode	REJECTED	Namespace 'TrackMania::CTrackManiaNetworkServerInfo' doesn't exist.
+TrackMania::CTrackManiaNetworkServerInfo::EGameMode_Script	REJECTED	Namespace 'TrackMania::CTrackManiaNetworkServerInfo' doesn't exist.
+TrackMania::ESceneCharVisNotice	REJECTED	Namespace 'TrackMania' doesn't exist.
+TrackMania::ESceneVehicleVisEvent	REJECTED	Namespace 'TrackMania' doesn't exist.
+TrackMania::VirtualKey	REJECTED	Namespace 'TrackMania' doesn't exist.
+TrackMania::ZZZNoSuchEnumName	REJECTED	Namespace 'TrackMania' doesn't exist.
+TreeNodeFlags	REJECTED	Identifier 'TreeNodeFlags' is not a data type in global namespace
+Type	REJECTED	Identifier 'Type' is not a data type in global namespace
+UI::ButtonFlags	ACCEPTED	
+UI::ChildFlags	ACCEPTED	
+UI::Col	ACCEPTED	
+UI::ColorEditFlags	ACCEPTED	
+UI::ComboFlags	ACCEPTED	
+UI::Cond	ACCEPTED	
+UI::ESceneCharVisNotice	ACCEPTED	
+UI::ESceneVehicleVisEvent	ACCEPTED	
+UI::FocusedFlags	ACCEPTED	
+UI::Font::ESceneCharVisNotice	ACCEPTED	
+UI::Font::ESceneVehicleVisEvent	ACCEPTED	
+UI::Font::VirtualKey	ACCEPTED	
+UI::Font::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'UI::Font' or parent
+UI::HoveredFlags	ACCEPTED	
+UI::InputBlocking	ACCEPTED	
+UI::InputFlags	ACCEPTED	
+UI::InputTextFlags	ACCEPTED	
+UI::ItemFlags	ACCEPTED	
+UI::Key	ACCEPTED	
+UI::MouseButton	ACCEPTED	
+UI::MouseCursor	ACCEPTED	
+UI::Plot::Axis	ACCEPTED	
+UI::Plot::AxisFlags	ACCEPTED	
+UI::Plot::BarGroupsFlags	ACCEPTED	
+UI::Plot::BarsFlags	ACCEPTED	
+UI::Plot::Bin	ACCEPTED	
+UI::Plot::Colormap	ACCEPTED	
+UI::Plot::ColormapScaleFlags	ACCEPTED	
+UI::Plot::Cond	ACCEPTED	
+UI::Plot::ESceneCharVisNotice	ACCEPTED	
+UI::Plot::ESceneVehicleVisEvent	ACCEPTED	
+UI::Plot::ErrorBarsFlags	ACCEPTED	
+UI::Plot::HeatmapFlags	ACCEPTED	
+UI::Plot::HistogramFlags	ACCEPTED	
+UI::Plot::LegendFlags	ACCEPTED	
+UI::Plot::LineFlags	ACCEPTED	
+UI::Plot::Location	ACCEPTED	
+UI::Plot::Marker	ACCEPTED	
+UI::Plot::MouseTextFlags	ACCEPTED	
+UI::Plot::PieChartFlags	ACCEPTED	
+UI::Plot::PlotFlags	ACCEPTED	
+UI::Plot::Scale	ACCEPTED	
+UI::Plot::ScatterFlags	ACCEPTED	
+UI::Plot::ShadedFlags	ACCEPTED	
+UI::Plot::StairsFlags	ACCEPTED	
+UI::Plot::StemsFlags	ACCEPTED	
+UI::Plot::SubplotFlags	ACCEPTED	
+UI::Plot::VirtualKey	ACCEPTED	
+UI::Plot::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'UI::Plot' or parent
+UI::SelectableFlags	ACCEPTED	
+UI::SeparatorFlags	ACCEPTED	
+UI::SliderFlags	ACCEPTED	
+UI::SortDirection	ACCEPTED	
+UI::StyleVar	ACCEPTED	
+UI::TabBarFlags	ACCEPTED	
+UI::TabItemFlags	ACCEPTED	
+UI::TableBgTarget	ACCEPTED	
+UI::TableColumnFlags	ACCEPTED	
+UI::TableFlags	ACCEPTED	
+UI::TableRowFlags	ACCEPTED	
+UI::TreeNodeFlags	ACCEPTED	
+UI::VirtualKey	ACCEPTED	
+UI::WindowFlags	ACCEPTED	
+UI::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'UI' or parent
+VehicleState::VirtualKey	ACCEPTED	
+VirtualKey	ACCEPTED	
+Vision::ESceneCharVisNotice	REJECTED	Namespace 'Vision' doesn't exist.
+Vision::ESceneVehicleVisEvent	REJECTED	Namespace 'Vision' doesn't exist.
+Vision::VirtualKey	REJECTED	Namespace 'Vision' doesn't exist.
+Vision::ZZZNoSuchEnumName	REJECTED	Namespace 'Vision' doesn't exist.
+Winding	REJECTED	Identifier 'Winding' is not a data type in global namespace
+WindowFlags	REJECTED	Identifier 'WindowFlags' is not a data type in global namespace
+XML::ESceneCharVisNotice	ACCEPTED	
+XML::ESceneVehicleVisEvent	ACCEPTED	
+XML::VirtualKey	ACCEPTED	
+XML::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'XML' or parent
+Xml::CXmlScriptParsingNodeJson::ENodeType	REJECTED	Namespace 'Xml::CXmlScriptParsingNodeJson' doesn't exist.
+Xml::ESceneCharVisNotice	REJECTED	Namespace 'Xml' doesn't exist.
+Xml::ESceneVehicleVisEvent	REJECTED	Namespace 'Xml' doesn't exist.
+Xml::VirtualKey	REJECTED	Namespace 'Xml' doesn't exist.
+Xml::ZZZNoSuchEnumName	REJECTED	Namespace 'Xml' doesn't exist.
+mat3::ESceneCharVisNotice	ACCEPTED	
+mat3::ESceneVehicleVisEvent	ACCEPTED	
+mat3::VirtualKey	ACCEPTED	
+mat3::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'mat3' or parent
+mat4::ESceneCharVisNotice	ACCEPTED	
+mat4::ESceneVehicleVisEvent	ACCEPTED	
+mat4::VirtualKey	ACCEPTED	
+mat4::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'mat4' or parent
+nvg::Align	ACCEPTED	
+nvg::ESceneCharVisNotice	ACCEPTED	
+nvg::ESceneVehicleVisEvent	ACCEPTED	
+nvg::LineCapType	ACCEPTED	
+nvg::TextureFlags	ACCEPTED	
+nvg::VirtualKey	ACCEPTED	
+nvg::Winding	ACCEPTED	
+nvg::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'nvg' or parent
+string::ESceneCharVisNotice	ACCEPTED	
+string::ESceneVehicleVisEvent	ACCEPTED	
+string::VirtualKey	ACCEPTED	
+string::ZZZNoSuchEnumName	REJECTED	Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'string' or parent
