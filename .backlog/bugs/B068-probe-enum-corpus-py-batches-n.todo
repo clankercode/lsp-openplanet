@@ -118,3 +118,20 @@ isolation for this reason), B052/B056/B057 (cite the possibly-affected
 corpora), B046/B053 (the repo's earlier confidently-wrong counts — same family:
 a measurement harness trusted without a control), `docs/verification-hazards.md`
 Mechanism 1.
+
+## Status: BLOCKED on the game, not on capacity (coordinator, 2026-08-31)
+
+The FIX (one name per compilation unit, or detect a parse-class diagnostic and
+re-run the batch name-by-name) needs no game. **The gate does.** Both the
+regression test and step 2 of the Work section — re-probing the shipped
+`b052`/`b053` ACCEPTED rows to find out whether any are corrupted — require a
+live RemoteBuild on 127.0.0.1:30000.
+
+Trackmania exited on 2026-08-30 during the B067 campaign and has not been
+restarted; doing so puts a window on the user's desktop, so it waits for them.
+
+Do not start this ticket expecting to finish it. When the game is back:
+re-probe the 742 ACCEPTED rows of `b052-qualified-enum-spellings.tsv` in
+isolation, diff, and report the flip count before touching anything else — that
+number decides whether this is a tooling fix or a corpus regeneration that
+B052/B056/B057 all need to hear about.
