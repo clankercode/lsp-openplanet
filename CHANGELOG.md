@@ -146,6 +146,20 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **`openplanet.regenerateTypeDb` can no longer report a database it did not
+  load (B064)** — the `after` stamps described whatever was on disk when the
+  answer was written, not the database that had just been parsed into memory.
+  Two separate defects produced that: the stamps were a SECOND read of the two
+  files the loader had already parsed (so a dump the game rewrote in between
+  described a database that was never loaded — on one thread, no concurrency
+  needed), and the loaded index and its stamps lived behind two separate locks
+  written one after the other (so a reader could see a new index carrying the
+  previous load's stamps, and two regenerations fired at once could leave that
+  crossing permanent). The stamps now travel inside `TypeIndex`, taken from the
+  values the load parsed, and the second lock is gone rather than merged — the
+  index and its stamps are one value published in one step. `check --json`'s
+  `typedb` block and the server's startup log are fixed by the same change.
+
 - **Openplanet-injected engine methods no longer report as missing (B059)** —
   `player.GetCurrentEntityID()` on a `CSmPlayer@`, and
   `net.GetManialinkPages()` on the network types, compile in the game but were

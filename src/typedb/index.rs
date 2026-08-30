@@ -52,6 +52,14 @@ pub struct TypeIndex {
     /// `EHmsLightMapQuality`. The lexicographically first key wins, matching
     /// `build_short_type_index`, so the mapping is deterministic.
     source_names: HashMap<String, String>,
+    /// B064: the build stamps of the bytes THIS index was parsed from.
+    ///
+    /// Carried out of the load rather than read back off disk, and that is the
+    /// entire point: an index and a file are different things, and the moment
+    /// the stamps come from the file they stop describing the index. Empty for
+    /// an index assembled by hand (see [`Self::new`]), which no loader path
+    /// produces.
+    versions: TypeDbVersions,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +262,71 @@ impl TypeDbMeta {
     }
 }
 
+/// GH #59: the build stamps of a type database that was actually loaded.
+/// Surfaced in check output, the JSON report, the server init log and the
+/// `openplanet.regenerateTypeDb` answer, so "the DB says X" is never an
+/// invisible premise.
+///
+/// The two DBs carry different stamps: Core's `op` is the full Openplanet
+/// build string (with the build hash), the game dump's `op` is the bare game
+/// version and its `mp` is the dump timestamp.
+///
+/// **B064: there is deliberately no way to build one of these from a PATH.**
+/// It used to have a `probe(core, game)` constructor that read the two files,
+/// and every caller reached it immediately after `TypeIndex::load` had parsed
+/// those same files — so the stamps were a second read of something that had
+/// already been read, and a dump rewritten in between (the game regenerates
+/// it; that is the whole reason the reload command exists) produced stamps
+/// describing a database that was never loaded. Single threaded, no lock
+/// involved. The only constructor is [`Self::of_parsed`], which takes the
+/// PARSED databases, so the stamps and the index are products of one read by
+/// construction and the defect has nowhere to live.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypeDbVersions {
+    pub core_op: Option<String>,
+    pub game_op: Option<String>,
+    pub game_mp: Option<String>,
+}
+
+impl TypeDbVersions {
+    /// The stamps of two databases already in memory.
+    ///
+    /// `op` is a required field of both formats, so a file missing it fails to
+    /// deserialize and never reaches here — which is why these are `Some` on
+    /// every path that loads. `Option` is kept because the type is also the
+    /// "nothing loaded" answer ([`Default`]), and because the game dump's `mp`
+    /// really is optional.
+    fn of_parsed(core: &CoreDatabase, nadeo: &NadeoDatabase) -> Self {
+        Self {
+            core_op: Some(core.op.clone()),
+            game_op: Some(nadeo.op.clone()),
+            game_mp: nadeo.mp.clone(),
+        }
+    }
+
+    /// One line for check stderr and the server init log.
+    pub fn summary_line(&self) -> String {
+        let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "<none>".to_string());
+        format!(
+            "type db: op={}  game op={}  mp={}",
+            show(&self.core_op),
+            show(&self.game_op),
+            show(&self.game_mp)
+        )
+    }
+
+    /// Additive `typedb` object for the JSON report. `op`/`mp` are the
+    /// headline stamps (Core build, game dump time); `game_op` is the game
+    /// DB's own version string.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "op": self.core_op,
+            "mp": self.game_mp,
+            "game_op": self.game_op,
+        })
+    }
+}
+
 impl Default for TypeIndex {
     fn default() -> Self {
         Self {
@@ -266,6 +339,7 @@ impl Default for TypeIndex {
             global_enum_values: HashMap::new(),
             global_enum_names: HashMap::new(),
             source_names: HashMap::new(),
+            versions: TypeDbVersions::default(),
         }
     }
 }
@@ -324,6 +398,10 @@ impl TypeIndex {
         index.add_core(&core);
         let nadeo = NadeoDatabase::load_from_file(nadeo_path)?;
         index.add_nadeo(&nadeo);
+        // B064: taken from the values just parsed, not from a second read of
+        // the same two files. Both entry points come through here, so there is
+        // one place this can be got wrong.
+        index.versions = TypeDbVersions::of_parsed(&core, &nadeo);
         if let Some(path) = header_path {
             let header = HeaderDatabase::load_from_file(path)?;
             index.add_header(&header);
@@ -1452,6 +1530,16 @@ impl TypeIndex {
 
     pub fn enum_count(&self) -> usize {
         self.enums.len()
+    }
+
+    /// B064: the build stamps of the database this index WAS PARSED FROM.
+    ///
+    /// Not what is on disk now. A caller asking "which database am I serving?"
+    /// must get an answer about the index in its hand, and the file underneath
+    /// it can have been regenerated since — by the game, which is exactly the
+    /// situation `openplanet.regenerateTypeDb` exists to report on.
+    pub fn versions(&self) -> &TypeDbVersions {
+        &self.versions
     }
 }
 

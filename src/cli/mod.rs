@@ -11,7 +11,7 @@ use crate::config::{
     ArchTarget, ErrorGroup, LspConfig, OsTarget, SignatureMode, UnusedLevel, UserPrefs,
 };
 use crate::server::diagnostics;
-use crate::typedb::{TypeDbMeta, TypeIndex};
+use crate::typedb::TypeIndex;
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
 use crate::workspace::manifest::ManifestWorkspace;
 use crate::workspace::project;
@@ -270,58 +270,13 @@ impl CheckOptions {
     }
 }
 
-/// GH #59: the build stamps of the type database a check run actually
-/// loaded. Surfaced in check output, the JSON report, and the server init
-/// log so "the DB says X" is never an invisible premise.
+/// GH #59 / B064: the build stamps of a loaded type database.
 ///
-/// The two DBs carry different stamps: Core's `op` is the full Openplanet
-/// build string (with the build hash), the game dump's `op` is the bare
-/// game version and its `mp` is the dump timestamp.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TypeDbVersions {
-    pub core_op: Option<String>,
-    pub game_op: Option<String>,
-    pub game_mp: Option<String>,
-}
-
-impl TypeDbVersions {
-    /// Best-effort read of both stamps.
-    ///
-    /// Only called after `TypeIndex::load` already succeeded on these paths,
-    /// so a probe failure means the file changed underfoot — report the
-    /// stamps we have rather than failing an otherwise-complete run.
-    pub fn probe(core: &Path, game: &Path) -> Self {
-        let core_meta = TypeDbMeta::probe(core).unwrap_or_default();
-        let game_meta = TypeDbMeta::probe(game).unwrap_or_default();
-        Self {
-            core_op: core_meta.op,
-            game_op: game_meta.op,
-            game_mp: game_meta.mp,
-        }
-    }
-
-    /// One line for check stderr and the server init log.
-    pub fn summary_line(&self) -> String {
-        let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "<none>".to_string());
-        format!(
-            "type db: op={}  game op={}  mp={}",
-            show(&self.core_op),
-            show(&self.game_op),
-            show(&self.game_mp)
-        )
-    }
-
-    /// Additive `typedb` object for the JSON report. `op`/`mp` are the
-    /// headline stamps (Core build, game dump time); `game_op` is the game
-    /// DB's own version string.
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "op": self.core_op,
-            "mp": self.game_mp,
-            "game_op": self.game_op,
-        })
-    }
-}
+/// Re-exported from [`crate::typedb`], where it lives beside the loader that
+/// produces it. Moved there by B064: the stamps have to come out of the SAME
+/// read that produced the index, so they belong to the index rather than to
+/// the reporting layer that displays them.
+pub use crate::typedb::TypeDbVersions;
 
 #[derive(Debug)]
 pub struct CheckReport {
@@ -777,10 +732,10 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
 
     let type_index = load_type_index(&config, options.no_typedb)?;
     // GH #59: stamp the run with the DB build it judged the code against.
-    let type_db = match (type_index.as_ref(), &config.core_json, &config.game_json) {
-        (Some(_), Some(core), Some(game)) => Some(TypeDbVersions::probe(core, game)),
-        _ => None,
-    };
+    // B064: out of the index, not out of a second read of the files — the
+    // report has to name the database the diagnostics came from, and a re-read
+    // names whatever is on disk when the run finishes instead.
+    let type_db = type_index.as_ref().map(|index| index.versions().clone());
 
     let mut search = DependencySearch {
         plugins_dirs: options.plugins_dirs.clone(),
