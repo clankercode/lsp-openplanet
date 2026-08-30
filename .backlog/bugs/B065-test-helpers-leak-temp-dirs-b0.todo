@@ -80,3 +80,16 @@ Variants:
 
 B039 (fixed the same defect in `tests/execute_command_tests.rs`; copy that
 `Drop` guard), B045 (hermeticity gate — these helpers run under it too).
+
+## Lane decision (coordinator, 2026-08-30)
+
+**Serialised with B066 into one lane (`lane-b065-b066`), B065 FIRST.**
+File overlap: both work in `tests/` (`config_reload_tests.rs`,
+`resolved_defines_tests.rs`, `cli_check_tests.rs`, `hermeticity_canary.rs`),
+and B066 adds tests under a synthetic HOME that want exactly the non-leaking
+`Fixture`/`Drop` helper B065 builds. Landing B065 first shrinks B066.
+
+Measure, do not inspect. The ticket's own test plan is the gate: count
+`/tmp/oplsp-*` before and after two consecutive full runs. A `Drop` impl that
+reads correctly and never fires is the failure mode here, so a review of the
+code is not evidence — only the count is.
