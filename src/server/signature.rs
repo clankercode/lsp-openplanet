@@ -659,6 +659,53 @@ mod tests {
         (joined, Position::new(line, col))
     }
 
+    /// B063 boundary: signature help does NOT resolve members through the
+    /// path that ticket wired, so it is out of scope by the ticket's own
+    /// condition ("in scope IF it resolves members through the same path").
+    /// `signature_help` goes through `resolve_callee`, not
+    /// `completion::add_type_members`.
+    ///
+    /// Pinned rather than left implicit, because "out of scope" is a claim
+    /// about behaviour and should be checked like one. What matters is that
+    /// the gap is SILENT: returning `None` is a missing feature, whereas
+    /// claiming the member does not exist would make signature help the third
+    /// feature contradicting the other two. If this ever starts returning
+    /// signatures, that is a feature and this test should be updated — but it
+    /// must never start erroring.
+    #[test]
+    fn signature_help_on_an_injected_method_is_silent_not_wrong() {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let idx = crate::typedb::TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load");
+        for src in [
+            "void f(CSmPlayer@ p) { p.GetCurrentEntityID(| }",
+            "void f(CMwNod@ n) { n.MwAddRef(| }",
+            "void f(CGameNetwork@ n) { n.GetManialinkPages(| }",
+        ] {
+            let (source, position) = split_cursor(src);
+            let ws = ws_from(&source);
+            let scope =
+                crate::typecheck::global_scope::GlobalScope::new(ws.snapshot.symbols(), Some(&idx));
+            // Must not panic. No signature is acceptable; a wrong one is not.
+            let help = signature_help(
+                &DocumentAnalysis::analyze_plain(&source),
+                None,
+                position,
+                &scope,
+            );
+            if let Some(h) = help {
+                assert!(
+                    !h.signatures.is_empty(),
+                    "signature help must not return an empty signature set: {source}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_single_overload_basic_param_zero() {
         let src = "void f(int a, string b) {}\nvoid main() { f(| }";
