@@ -3,6 +3,9 @@
 Agent-facing. Not user documentation.
 
 This is the transferable finding from the B029-B067 bug batch (2026-08-29/30).
+This is the eleven-incident version; the eleventh (B068) is in Mechanism 1 and
+is the reason the negative-control rule is stated twice.
+
 Across that batch, the recurring cost was never a check that *errored* — errors
 get investigated. It was checks that returned a clean, plausible, internally
 consistent answer that happened to be false. Every one of them cost more time
@@ -27,9 +30,26 @@ indistinguishable from "I am structurally incapable of seeing it".
   ACCEPT could leak from code that was not under test. (See
   `probes/README.md` — a game REJECT is evidence, an ACCEPT may not be.)
 
+- **A batched probe reported a name the coordinator had invented as ACCEPTED
+  by the game.** `probe_enum_corpus.py` compiles a whole batch as one unit and
+  records ACCEPTED for any line that drew no diagnostic; a parse error anywhere
+  aborts the unit before semantic analysis, so *every other name* comes back
+  ACCEPTED. Filed as **B068**. This one is worth singling out: it happened
+  about an hour after this document was written, to its author, and it was
+  caught **only** because a negative control was run — the fabricated name
+  `ZZZNoSuchClass::` came back accepted, which is impossible, and that single
+  impossible row invalidated a run that otherwise looked complete and would
+  have "disproved" an established rule (B056).
+
 **Countermeasure — positive control.** Before trusting a probe that reports
 absence, confirm it can see a thing you *know* is present. A staleness check
 that cannot find a file you just touched is not reporting staleness.
+
+**And a negative control.** Include an input whose answer you are certain of
+and which should come back negative. If your fabricated, impossible input comes
+back positive, the run is void — that is not a surprising result to reason
+about, it is a broken instrument. Writing this rule down did not stop its author
+from needing it; running it is what worked.
 
 **Second countermeasure — implausibility is a signal.** 4 GB that nobody has
 touched in six hours should read as implausible. Implausible is a reason to
