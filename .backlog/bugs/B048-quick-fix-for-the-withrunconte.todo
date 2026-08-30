@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-30T04:06:16Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-30T04:06:16Z"
 complexity: medium
 created_at: "2026-08-29T18:24:36Z"
 depends_on: []
+duration_minutes: 0.0011333274666666666
 estimate_hours: 3
 id: B048
 priority: low
 started_at: "2026-08-30T04:06:16Z"
-status: in_progress
+status: done
 tags: []
 title: Quick fix for the WithRunContext migration needs a call restructure, not a span swap
 updated_at: "2026-08-30T04:06:16Z"
