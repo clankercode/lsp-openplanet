@@ -77,3 +77,4 @@ bugs:
     - file: B076-a-funcdef-handle-accepts-a-fun.todo
     - file: B077-issue-repro-game-py-leaves-sta.todo
     - file: B078-flaky-sigsegv-in-multi-root-te.todo
+    - file: B079-two-scope-predicates-and-two-e.todo
