@@ -329,6 +329,156 @@ impl TypeDbVersions {
     }
 }
 
+/// Whether a header that cannot be read is an error or simply absent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HeaderMode {
+    /// The `Openplanet.h` sitting beside the game dump, which [`TypeIndex::load`]
+    /// picks up for free. An install without one loads exactly as it did
+    /// before the header existed (B046), so a read failure is not an error.
+    Optional,
+    /// A header the caller named explicitly. It asked for that file, so it
+    /// gets told when the file cannot be read.
+    Required,
+}
+
+/// The raw text of one type database: the two dumps, and the header if there
+/// is one.
+struct DbFiles {
+    core: String,
+    nadeo: String,
+    header: Option<String>,
+}
+
+/// What a file looks like to a reader, in exactly the ways that change when
+/// it is replaced.
+///
+/// `dev`/`ino` are the strong signal and are unix-only: replacing a file the
+/// safe way is `rename`, which always lands a different inode, so on unix this
+/// catches a swap even between two builds of identical length written in the
+/// same timestamp tick. Elsewhere length and mtime carry it — weaker, but a
+/// regenerated dump is a freshly written file with its own write time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileIdentity {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    /// `None` off unix, where the platform does not offer one.
+    dev_ino: Option<(u64, u64)>,
+}
+
+impl FileIdentity {
+    /// `None` means the file is absent — which is itself an identity worth
+    /// comparing, because a header that appears or vanishes mid-read is a
+    /// change like any other.
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let dev_ino = {
+            use std::os::unix::fs::MetadataExt;
+            Some((meta.dev(), meta.ino()))
+        };
+        #[cfg(not(unix))]
+        let dev_ino = None;
+        Some(FileIdentity {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            dev_ino,
+        })
+    }
+}
+
+/// How many times to re-read a database that moved underneath us.
+///
+/// Bounded, and small, because the two failure modes are asymmetric. Retrying
+/// costs one more pass over a few megabytes and the writer is a game writing
+/// its dump once, so a second attempt essentially always lands on a settled
+/// set. An UNBOUNDED retry, by contrast, turns "something is rewriting this
+/// file continuously" into a hang inside `initialize` — the server would never
+/// finish starting, and the user would have no idea why. Three attempts, then
+/// an error that says what happened.
+const READ_ATTEMPTS: usize = 3;
+
+/// Read the files that make up one type database, as ONE generation.
+///
+/// B072: the files are read separately — three `read_to_string` calls, and no
+/// filesystem offers an atomic multi-file read — so the set is stamped before
+/// and after, and a set that moved while it was being read is re-read rather
+/// than assembled. The writer is the GAME regenerating its dump, an unrelated
+/// process, so this needs no concurrency in the LSP at all.
+///
+/// The point is what the caller can no longer receive: an index built from two
+/// different generations of the dump is not a value this function can return.
+/// It yields a set that provably did not move while it was being read, or an
+/// error saying so.
+///
+/// `between` is called after each read; see [`TypeIndex::load_instrumented`].
+fn read_db_files(
+    core_path: &Path,
+    nadeo_path: &Path,
+    header: Option<(&Path, HeaderMode)>,
+    between: &mut dyn FnMut(),
+) -> Result<DbFiles, String> {
+    let mut paths: Vec<&Path> = vec![core_path, nadeo_path];
+    if let Some((path, _)) = header {
+        paths.push(path);
+    }
+    let stamp = |paths: &[&Path]| -> Vec<Option<FileIdentity>> {
+        paths.iter().map(|p| FileIdentity::of(p)).collect()
+    };
+
+    let mut moved: Option<String> = None;
+    for _ in 0..READ_ATTEMPTS {
+        let before = stamp(&paths);
+
+        let core = std::fs::read_to_string(core_path)
+            .map_err(|e| format!("Failed to read {}: {}", core_path.display(), e))?;
+        between();
+        let nadeo = std::fs::read_to_string(nadeo_path)
+            .map_err(|e| format!("Failed to read {}: {}", nadeo_path.display(), e))?;
+        between();
+        let header_text = read_header(header)?;
+        between();
+
+        let after = stamp(&paths);
+        if before == after {
+            return Ok(DbFiles {
+                core,
+                nadeo,
+                header: header_text,
+            });
+        }
+        // Name the file that moved, not just that one did: "the game
+        // regenerated the dump" and "something is rewriting Core" want
+        // different responses from whoever reads the log.
+        moved = before
+            .iter()
+            .zip(&after)
+            .zip(&paths)
+            .find(|((b, a), _)| b != a)
+            .map(|((_, _), path)| path.display().to_string());
+    }
+
+    Err(format!(
+        "the type database changed on disk while it was being read ({} attempts,          last change: {}); it was not loaded, because an index assembled from two          different dumps describes a type surface that never shipped",
+        READ_ATTEMPTS,
+        moved.as_deref().unwrap_or("unknown file"),
+    ))
+}
+
+fn read_header(header: Option<(&Path, HeaderMode)>) -> Result<Option<String>, String> {
+    match header {
+        None => Ok(None),
+        Some((path, HeaderMode::Required)) => std::fs::read_to_string(path)
+            .map(Some)
+            .map_err(|e| format!("failed to read {}: {}", path.display(), e)),
+        Some((path, HeaderMode::Optional)) => {
+            if !path.is_file() {
+                return Ok(None);
+            }
+            Ok(std::fs::read_to_string(path).ok())
+        }
+    }
+}
+
 impl Default for TypeIndex {
     fn default() -> Self {
         Self {
@@ -372,15 +522,12 @@ impl TypeIndex {
     /// all of them already point at a directory holding both JSONs.
     pub fn load(core_path: &Path, nadeo_path: &Path) -> Result<Self, String> {
         let header_path = nadeo_path.parent().map(|d| d.join(HEADER_FILENAME));
-        let header = header_path
-            .filter(|p| p.is_file())
-            .and_then(|path| HeaderDatabase::load_from_file(&path).ok());
-        let mut index = Self::load_with_header(core_path, nadeo_path, None)?;
-        if let Some(header) = header {
-            index.add_header(&header);
-            index.build_short_type_index();
-        }
-        Ok(index)
+        Self::load_instrumented(
+            core_path,
+            nadeo_path,
+            header_path.as_deref().map(|p| (p, HeaderMode::Optional)),
+            &mut || {},
+        )
     }
 
     /// [`Self::load`] with the header named explicitly. `None` skips it.
@@ -395,18 +542,45 @@ impl TypeIndex {
         nadeo_path: &Path,
         header_path: Option<&Path>,
     ) -> Result<Self, String> {
+        Self::load_instrumented(
+            core_path,
+            nadeo_path,
+            header_path.map(|p| (p, HeaderMode::Required)),
+            &mut || {},
+        )
+    }
+
+    /// The one place a type database is read off disk. Both public entry
+    /// points come through here, so there is one implementation of "what is a
+    /// consistent set of files" rather than two that can drift.
+    ///
+    /// B072: `between` is called after each individual read, and exists so a
+    /// test can rewrite the dump at an exact point in the sequence rather than
+    /// racing it with a sleep. Production passes `&mut || {}`. It is a
+    /// PARAMETER on a PRIVATE function on purpose — the alternative, a
+    /// process-global arm/disarm rendezvous like B064's `regen_barrier`, buys
+    /// nothing here and costs a public surface, a lifecycle that leaks when a
+    /// test panics, and a locking rule every future caller has to know.
+    fn load_instrumented(
+        core_path: &Path,
+        nadeo_path: &Path,
+        header: Option<(&Path, HeaderMode)>,
+        between: &mut dyn FnMut(),
+    ) -> Result<Self, String> {
+        let bytes = read_db_files(core_path, nadeo_path, header, between)?;
+
         let mut index = Self::new();
-        let core = CoreDatabase::load_from_file(core_path)?;
+        let core: CoreDatabase = serde_json::from_str(&bytes.core)
+            .map_err(|e| format!("Failed to parse {}: {}", core_path.display(), e))?;
         index.add_core(&core);
-        let nadeo = NadeoDatabase::load_from_file(nadeo_path)?;
+        let nadeo: NadeoDatabase = serde_json::from_str(&bytes.nadeo)
+            .map_err(|e| format!("Failed to parse {}: {}", nadeo_path.display(), e))?;
         index.add_nadeo(&nadeo);
         // B064: taken from the values just parsed, not from a second read of
-        // the same two files. Both entry points come through here, so there is
-        // one place this can be got wrong.
+        // the same two files.
         index.versions = TypeDbVersions::of_parsed(&core, &nadeo);
-        if let Some(path) = header_path {
-            let header = HeaderDatabase::load_from_file(path)?;
-            index.add_header(&header);
+        if let Some(text) = &bytes.header {
+            index.add_header(&HeaderDatabase::parse(text));
         }
         index.build_short_type_index();
         Ok(index)
@@ -4568,5 +4742,313 @@ mod module_level_enum_tests {
     fn diff_of_the_fixture_against_itself_is_empty_with_the_header_loaded() {
         let diff = diff_indexes(&load_fixture(), &load_fixture());
         assert!(diff.is_empty(), "{diff:?}");
+    }
+}
+
+/// B072: a type database must be read as ONE generation.
+///
+/// `TypeIndex::load` reads three files — `Openplanet.h`, `OpenplanetCore.json`
+/// and the game dump — with real work between them. The writer is the GAME, an
+/// unrelated process that regenerates the dump set, which is the very event
+/// `openplanet.regenerateTypeDb` exists to react to. A regeneration landing
+/// between two of those reads used to produce an index assembled from
+/// different generations: a type surface that never shipped.
+///
+/// The seam these tests use is the `between` parameter of
+/// [`TypeIndex::load_instrumented`], called after each read. That makes the
+/// window a POSITION rather than a duration, so every test here is
+/// deterministic — no sleeps, no stress loops, and nothing to bisect against a
+/// flaky signal.
+#[cfg(test)]
+mod single_read_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// The three fixture files, written whole so a reader sees one generation
+    /// or the other and never a half-written file (a torn READ is a different
+    /// defect and must not be able to masquerade as this one).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Gen {
+        A,
+        B,
+    }
+
+    impl Gen {
+        fn tag(self) -> &'static str {
+            match self {
+                Gen::A => "A",
+                Gen::B => "B",
+            }
+        }
+
+        /// Deliberately different per generation, so "which generation is this
+        /// part of the index from?" is answerable from the index alone.
+        fn core_json(self) -> String {
+            let t = self.tag();
+            format!(
+                "{{\"op\":\"core-gen-{t}\",\"classes\":[],\"enums\":[],\"funcdefs\":[],\
+                 \"functions\":[{{\"ns\":\"Gen{t}\",\"name\":\"Fn\",\"returntypedecl\":\"void\",\
+                 \"args\":[],\"decl\":\"void Fn()\"}}]}}"
+            )
+        }
+
+        fn nadeo_json(self) -> String {
+            let t = self.tag();
+            format!(
+                "{{\"op\":\"game-gen-{t}\",\"mp\":\"2026-08-31 0{}:00:00\",\
+                 \"ns\":{{\"Mod{t}\":{{\"CGen{t}\":{{\"m\":[]}}}}}}}}",
+                match self {
+                    Gen::A => 1,
+                    Gen::B => 2,
+                }
+            )
+        }
+
+        /// `enum class`, unqualified, at module level — the only shape
+        /// `HeaderDatabase::parse` contributes to the index. A qualified name
+        /// or one nested in an aggregate is deliberately ignored by the
+        /// parser, so a fixture using either would make every header
+        /// assertion here vacuously `None`.
+        fn header_source(self) -> String {
+            format!("enum class EGen{} {{\n  X = 1,\n}};\n", self.tag())
+        }
+    }
+
+    struct Scratch {
+        dir: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("oplsp-b072-{name}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch { dir }
+        }
+
+        fn core(&self) -> PathBuf {
+            self.dir.join("OpenplanetCore.json")
+        }
+
+        fn nadeo(&self) -> PathBuf {
+            self.dir.join("OpenplanetNext.json")
+        }
+
+        fn header(&self) -> PathBuf {
+            self.dir.join(HEADER_FILENAME)
+        }
+
+        /// Replace all three files in one step each. `rename` rather than
+        /// truncate-and-write so no reader can observe a partial file.
+        fn write(&self, gen: Gen) {
+            for (path, contents) in [
+                (self.core(), gen.core_json()),
+                (self.nadeo(), gen.nadeo_json()),
+                (self.header(), gen.header_source()),
+            ] {
+                let tmp = path.with_extension("tmp-write");
+                std::fs::write(&tmp, contents).unwrap();
+                std::fs::rename(&tmp, &path).unwrap();
+            }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Which generation each PART of a loaded index came from.
+    ///
+    /// Every field is read through a public accessor, and each is cross-checked
+    /// against a symbol only that generation carries — so this cannot report
+    /// agreement merely because the stamps agree.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Parts {
+        core: Option<Gen>,
+        game: Option<Gen>,
+        header: Option<Gen>,
+    }
+
+    fn parts_of(index: &TypeIndex) -> Parts {
+        let by_stamp = |stamp: &Option<String>, prefix: &str| match stamp.as_deref() {
+            Some(s) if s == format!("{prefix}-gen-A") => Some(Gen::A),
+            Some(s) if s == format!("{prefix}-gen-B") => Some(Gen::B),
+            _ => None,
+        };
+        let core_stamp = by_stamp(&index.versions().core_op, "core");
+        let game_stamp = by_stamp(&index.versions().game_op, "game");
+
+        // The stamps say what the bytes claimed; these say what actually got
+        // indexed. They must agree, or the index is not what its stamps say.
+        let core_symbol = [Gen::A, Gen::B]
+            .into_iter()
+            .find(|g| index.namespace_has_functions(&format!("Gen{}", g.tag())));
+        let game_symbol = [Gen::A, Gen::B].into_iter().find(|g| {
+            index
+                .nadeo_module_names()
+                .iter()
+                .any(|m| m == &format!("Mod{}", g.tag()))
+        });
+        assert_eq!(
+            core_stamp, core_symbol,
+            "the Core stamp and the Core symbols disagree; the discriminator is broken"
+        );
+        assert_eq!(
+            game_stamp, game_symbol,
+            "the game stamp and the game symbols disagree; the discriminator is broken"
+        );
+
+        Parts {
+            core: core_stamp,
+            game: game_stamp,
+            header: [Gen::A, Gen::B]
+                .into_iter()
+                .find(|g| index.lookup_enum(&format!("EGen{}", g.tag())).is_some()),
+        }
+    }
+
+    /// THE invariant: whatever a load returns, every part of it came from the
+    /// same generation. An error is an acceptable answer — "the database
+    /// changed while I was reading it" is true and useful. A chimera is not.
+    fn assert_one_generation(loaded: &Result<TypeIndex, String>, when: &str) {
+        let index = match loaded {
+            Ok(index) => index,
+            // An honest refusal is a pass: the loader declined to build an
+            // index it could not vouch for.
+            Err(_) => return,
+        };
+        let parts = parts_of(index);
+        let generations: Vec<Gen> = [parts.core, parts.game, parts.header]
+            .into_iter()
+            .flatten()
+            .collect();
+        assert!(
+            !generations.is_empty(),
+            "{when}: the index names no generation at all, so this proves nothing: {parts:?}"
+        );
+        assert!(
+            generations.iter().all(|g| *g == generations[0]),
+            "{when}: the index was assembled from more than one generation of the \
+             dump — {parts:?}"
+        );
+    }
+
+    /// Rewrite the dump set immediately after read number `after_read`.
+    fn load_with_rewrite_after(scratch: &Scratch, after_read: usize) -> Result<TypeIndex, String> {
+        let mut reads = 0usize;
+        let header = scratch.header();
+        TypeIndex::load_instrumented(
+            &scratch.core(),
+            &scratch.nadeo(),
+            Some((header.as_path(), HeaderMode::Optional)),
+            &mut || {
+                reads += 1;
+                if reads == after_read {
+                    scratch.write(Gen::B);
+                }
+            },
+        )
+    }
+
+    /// The ticket's case: the game regenerates the dump between the Core read
+    /// and the game-dump read. Deterministic — the rewrite is at a position in
+    /// the sequence, not at a moment on the clock.
+    #[test]
+    fn a_rewrite_between_the_core_and_game_reads_yields_one_generation() {
+        let scratch = Scratch::new("core-game");
+        scratch.write(Gen::A);
+        let loaded = load_with_rewrite_after(&scratch, 1);
+        assert_one_generation(&loaded, "rewritten after the Core read");
+    }
+
+    /// The read the ticket missed. `Openplanet.h` is a third file, and it is
+    /// read in the same sequence, so it can be from a different generation
+    /// than the dumps it is meant to complete.
+    #[test]
+    fn a_rewrite_between_the_game_and_header_reads_yields_one_generation() {
+        let scratch = Scratch::new("game-header");
+        scratch.write(Gen::A);
+        let loaded = load_with_rewrite_after(&scratch, 2);
+        assert_one_generation(&loaded, "rewritten after the game-dump read");
+    }
+
+    /// Generalised over every position in the sequence, so a future change to
+    /// the number or order of reads cannot quietly open a window this file
+    /// does not look at.
+    #[test]
+    fn a_rewrite_after_any_read_yields_one_generation() {
+        for after_read in 1..=3 {
+            let scratch = Scratch::new(&format!("any-{after_read}"));
+            scratch.write(Gen::A);
+            let loaded = load_with_rewrite_after(&scratch, after_read);
+            assert_one_generation(&loaded, &format!("rewritten after read {after_read}"));
+        }
+    }
+
+    /// The undisturbed case must be untouched: a quiet load returns generation
+    /// A, whole, and does NOT error. Without this, a "fix" that refused every
+    /// load would pass every test above.
+    #[test]
+    fn an_undisturbed_load_returns_the_generation_on_disk() {
+        let scratch = Scratch::new("quiet");
+        scratch.write(Gen::A);
+        let index = TypeIndex::load(&scratch.core(), &scratch.nadeo())
+            .expect("an undisturbed load must succeed");
+        assert_eq!(
+            parts_of(&index),
+            Parts {
+                core: Some(Gen::A),
+                game: Some(Gen::A),
+                header: Some(Gen::A),
+            }
+        );
+    }
+
+    /// And the other generation, so the fixture is not accidentally
+    /// single-valued.
+    #[test]
+    fn an_undisturbed_load_of_the_other_generation_reads_it_whole() {
+        let scratch = Scratch::new("quiet-b");
+        scratch.write(Gen::B);
+        let index = TypeIndex::load(&scratch.core(), &scratch.nadeo())
+            .expect("an undisturbed load must succeed");
+        assert_eq!(
+            parts_of(&index),
+            Parts {
+                core: Some(Gen::B),
+                game: Some(Gen::B),
+                header: Some(Gen::B),
+            }
+        );
+    }
+
+    /// Keeps the discriminator honest: the two generations must actually be
+    /// distinguishable in all three files, or every assertion above is
+    /// unanchored.
+    #[test]
+    fn the_two_generations_are_distinguishable_in_every_file() {
+        assert_ne!(Gen::A.core_json(), Gen::B.core_json());
+        assert_ne!(Gen::A.nadeo_json(), Gen::B.nadeo_json());
+        assert_ne!(Gen::A.header_source(), Gen::B.header_source());
+
+        for gen in [Gen::A, Gen::B] {
+            let scratch = Scratch::new(&format!("distinct-{}", gen.tag()));
+            scratch.write(gen);
+            let index = TypeIndex::load(&scratch.core(), &scratch.nadeo()).expect("loads");
+            assert_eq!(
+                parts_of(&index),
+                Parts {
+                    core: Some(gen),
+                    game: Some(gen),
+                    header: Some(gen),
+                },
+                "generation {gen:?} is not identifiable from a loaded index"
+            );
+        }
     }
 }
