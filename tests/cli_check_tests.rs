@@ -4518,3 +4518,50 @@ fn check_manifest_export_rules_follow_the_search_path_flag() {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&home);
 }
+
+/// B059: Openplanet-injected engine methods. `uint GetCurrentEntityID()` and
+/// `array<CGameManialinkPage@>@ GetManialinkPages()` are registered by the
+/// Openplanet runtime on six engine types and appear in no Nadeo dump, so
+/// B006's trusted-member-list rule fired `UndefinedMember` on calls the game
+/// compiles. The complete injected surface — recovered from Openplanet.dll
+/// 1.29.5, md5 c179218b3b24582130ef42b92a3585f6 — is documented in
+/// `docs/probes/openplanet-injected-methods.md`.
+///
+/// The fixture is deliberately half legal, half fence: silencing the legal
+/// half is the fix, and keeping the fence half loud is what stops the fix
+/// from becoming a B006 widening. On the merge-base binary all 8 lines
+/// errored; only the 4 fences may error now.
+///
+/// Game ground truth — RemoteBuild probe, Trackmania + Openplanet 1.29.5
+/// (next, Public, 1234ad9e), 2026-08-30: GAME_VERDICT_PLACEHOLDER
+#[test]
+fn check_command_issue_repro_b059_injected_methods_silences_only_the_legal_half() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b059-injected-methods");
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains(": error: ")).collect();
+    assert_eq!(
+        errors.len(),
+        4,
+        "only the 4 fence lines may error; stdout={stdout:?} stderr={stderr:?}"
+    );
+    // Legal half (lines 25, 27, 31, 32) — the false positives B059 removes.
+    for line in ["Main.as:25", "Main.as:27", "Main.as:31", "Main.as:32"] {
+        assert!(
+            !errors.iter().any(|l| l.contains(line)),
+            "`{line}` is a legal injected call and must be silent; stdout={stdout:?}"
+        );
+    }
+    // Fence half. Wrong receiver, wrong receiver, wrong arity, real typo.
+    for (line, needle) in [
+        ("Main.as:41", "has no member `GetCurrentEntityID`"),
+        ("Main.as:43", "has no member `GetManialinkPages`"),
+        ("Main.as:45", "expects 0 args, got 1"),
+        ("Main.as:47", "has no member `GetCurrentEntityIdd`"),
+    ] {
+        assert!(
+            errors
+                .iter()
+                .any(|l| l.contains(line) && l.contains(needle)),
+            "`{line}` must still report `{needle}`; stdout={stdout:?}"
+        );
+    }
+}

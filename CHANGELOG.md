@@ -137,6 +137,28 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **Openplanet-injected engine methods no longer report as missing (B059)** —
+  `player.GetCurrentEntityID()` on a `CSmPlayer@`, and
+  `net.GetManialinkPages()` on the network types, compile in the game but were
+  reported as `type ... has no member ...`. Openplanet registers a small set of
+  methods on engine classes at runtime, and the Nadeo type dump — which is what
+  `openplanet-lsp` reads — does not list them. `MwAddRef` / `MwRelease` were
+  already special-cased; these two were not, so plugins calling them had to
+  whitelist the message to keep their own LSP gate useful (tm-dips-plus-plus
+  did exactly that).
+
+  Both now carry their real return type rather than being merely silenced, so
+  `auto entId = player.GetCurrentEntityID()` is a `uint` and
+  `net.GetManialinkPages()` is an `array<CGameManialinkPage@>@` you can index
+  and take `.Length` of. Genuinely missing members stay reported: the six
+  registrations are matched exactly, so a typo, a wrong receiver type, or a
+  call with arguments is still an error.
+
+  The registration list is taken from `Openplanet.dll` itself rather than from
+  API docs, and every receiver and both return types were then confirmed
+  against the live game compiler — see
+  `docs/probes/openplanet-injected-methods.md`.
+
 - **A bare enum value only a nested or namespaced enum defines is now an error
   (B057)** — the game answers `No matching symbol 'North'`; `openplanet-lsp`
   accepted it and said nothing, so the problem only appeared when you compiled
@@ -153,7 +175,6 @@ GitHub Release body to match this section (gh release edit).
   for having no name at all. Every one of the 2989 bare value names in the
   shipped type DB was compiled in the live game to establish the rule, and the
   verdicts are committed at `docs/probes/b053-bare-enum-values.tsv`.
-
 - **A bare enum value two enums define is now an error, as in the game
   (B053)** — the game refuses to choose between them (`Found multiple matching
   enum values`); `openplanet-lsp` took the first match and said nothing, so the
