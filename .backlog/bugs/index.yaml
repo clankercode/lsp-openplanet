@@ -73,3 +73,4 @@ bugs:
     - file: B072-typeindex-load-reads-its-two-j.todo
     - file: B073-gh-38-shadowing-is-not-applied.todo
     - file: B074-b032-env-guard-enforcement-sca.todo
+    - file: B075-scratch-dir-leaks-under-target.todo

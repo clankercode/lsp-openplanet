@@ -1,0 +1,82 @@
+---
+complexity: low
+created_at: "2026-08-30T17:54:14Z"
+depends_on: []
+estimate_hours: 0.5
+id: B075
+priority: medium
+status: pending
+tags: []
+title: 'scratch_dir leaks under target/: the same start-only cleanup B065 fixed, outside /tmp'
+updated_at: "2026-08-30T17:54:14Z"
+---
+Found 2026-08-31 by the B065 lane while auditing mid-test directory removals.
+NOT fixed there: it is outside B065's scope and the location looks deliberate,
+so it is filed rather than folded in.
+
+## Defect
+
+`src/typedb/index.rs` (`mod b046_tests`, ~line 3717):
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("test-typedb-b046-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+Exactly the defect B065 fixed - `remove_dir_all` on the way IN and never on the
+way out, with a fresh pid every run - but it builds under the repo's `target/`
+rather than `std::env::temp_dir()`.
+
+## Why B065 missed it
+
+B065 found its population by grepping `temp_dir()`. This helper never calls it,
+so it was invisible both to that sweep and to the `/tmp` measurement, and the
+coordinator scoped B065 to `/tmp` prefixes explicitly.
+
+## Measured 2026-08-31
+
+    36  <b065-b066 worktree>/target/test-typedb-b046-*
+    56  /home/xertrov/src/lsp-openplanet/target/test-typedb-b046-*
+
+Small, and `target/` is gitignored and periodically blown away, which is why
+nobody has noticed. It is still one accumulating directory per test per run,
+and it survives every run that does not `cargo clean`.
+
+## Work
+
+The docstring says the location is deliberate: "Keeping it below the repository
+makes these tests independent of a home or `/tmp`." Do NOT move it to `/tmp`
+merely to reuse `crate::testing::TempDir` - that reverses a considered
+decision. Either:
+
+- give `TempDir` a constructor taking an explicit parent
+  (`TempDir::in_dir(parent, label)`), keeping `Drop` and the uniqueness
+  suffix, and use it here; or
+- decide the under-`target/` placement no longer earns its keep - the whole
+  suite now runs under an isolated `TMPDIR` in B065's gate - and convert it to
+  a plain `TempDir`.
+
+The first preserves the stated intent and is the smaller change.
+
+## Test plan
+
+Same shape as B065's, and the same warning applies: measure, do not inspect.
+Count `<repo>/target/test-typedb-b046-*` before and after two consecutive runs
+of `cargo test --lib b046` and assert it does not grow. Include the unwind-path
+variant - a panicking test must clean up too - since that is the case a
+trailing `remove_dir_all` cannot cover.
+
+## Note for whoever picks this up
+
+`bl` mutating commands refuse to run from a git worktree AND exit 0 while doing
+so, printing an ERROR to stdout. The first attempt to file this bug looked like
+it succeeded and created nothing. Verify the ID exists after filing.
+
+## Related
+
+B065 (same defect in `/tmp`; `crate::testing::TempDir` is the guard to reuse),
+B046 (the tests this helper serves).
