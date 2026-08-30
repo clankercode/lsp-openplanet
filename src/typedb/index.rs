@@ -421,6 +421,31 @@ const READ_ATTEMPTS: usize = 3;
 /// return. It yields a set whose observed file identities stayed stable while
 /// it was being read, or an error saying so.
 ///
+/// # Which half of this is the fix
+///
+/// Two things happen here and only ONE of them closes the defect. Stated
+/// because the next person to read this will otherwise be unable to tell them
+/// apart, and may delete the wrong one.
+///
+/// * **The identity check is the fix.** Nothing else here rejects a mixed set.
+/// * **Reading all bytes up front is defence in depth.** It narrows the window
+///   from parse-time to read-time, which makes a retry rare, and it is what
+///   lets a file caught mid-write be spotted before anything is parsed. It
+///   closes nothing on its own.
+///
+/// Measured against the tests in `single_read_tests`, not argued:
+///
+/// | variant                                        | tests red |
+/// |------------------------------------------------|-----------|
+/// | narrow only — bytes up front, no identity check |   6 of 9  |
+/// | reject only — identity check, read span left wide |   0 of 9  |
+/// | both, as shipped                                |   0 of 9  |
+///
+/// Narrowing a race window feels like progress because it lowers the odds
+/// under self-induced load. Against an independent writer it does nothing: the
+/// window is a POSITION IN A SEQUENCE, not a duration, and the game can land
+/// anywhere in it. The ticket's own suggested fix was the narrowing half.
+///
 /// `between` is called after each read; see [`TypeIndex::load_instrumented`].
 fn read_db_files(
     core_path: &Path,
