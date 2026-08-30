@@ -122,3 +122,39 @@ Game probe the fixture before treating LSP silence as ground truth.
 ## Related
 
 B023 (function-shaped args vs funcdef slots — this is that rule over-firing on virtual properties), GH #47 (`No matching signatures` render), tm-dips-plus-plus `src/DebugWindow.as` / `src/MainUI/Donations.as` / `src/Dev.as`.
+
+## Lane decision + framing (coordinator, 2026-08-30)
+
+**Serialised with B061 and B062 into one lane (`b060-b062-property-semantics`),
+B060 first.** File overlap, not size: B060 touches `src/typecheck/checker.rs`
+(`arg_is_function_shaped` / `lookup_arg_function_sigs`), B061 touches
+`checker.rs` record-use paths AND `src/analysis/unused.rs`, B062 touches
+`unused.rs` and `src/workspace/manifest.rs`. B060-B061 collide in `checker.rs`;
+B061-B062 collide in `unused.rs`. Run in parallel they would conflict at merge
+and each would review against a base the other invalidated.
+
+**BLOCKED until B059 merges.** lane-b059 is live in `checker.rs` right now
+(injected-method table, unifying both GH #21 sites). Do not open this lane
+until I have merged it and told you to branch from that tip.
+
+**Framing worth having before you start.** B060 and B061 are the same missing
+concept seen from opposite sides. The codebase has no single answer to *is this
+identifier a property read or a function reference?*, so each site decides for
+itself and they disagree:
+
+- **B060 applies the `X` <-> `get_X` mapping where it must not.** A property
+  READ (`Off`, `c.Amt`) is classified function-SHAPED because `get_Off`
+  exists, so it cannot bind to a `uint`/`float` parameter and every overload
+  dies.
+- **B061 fails to apply it where it must.** The same property read does not
+  credit `get_Off` as used, so the accessor is reported unused.
+
+One read, two sites, opposite wrong answers. Consider whether a single shared
+predicate ("this expression is a property read, and its value type is the
+getter's return type") fixes both, rather than patching each site. If it does,
+say so and do it once. If it does not, say why — that is a real finding either
+way and belongs in the ledger.
+
+Do NOT let that framing widen the tickets. Each keeps its own red test and its
+own gate; the shared predicate is an implementation option, not a licence to
+refactor property handling wholesale.
