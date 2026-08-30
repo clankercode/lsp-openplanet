@@ -273,14 +273,48 @@ control and they answer different questions: the sentinel proves the compiler
 got to the end of your unit, a fabricated name proves your ACCEPTs are not
 being manufactured by the machine's installed plugins.
 
-**The shipped corpora predate this fix and have NOT been re-probed** — that
-needs a live game and is open work under B068. What is already known without
-re-probing: this defect can only invent an ACCEPTED, never a REJECTED, because
-an abort produces the *absence* of diagnostics and a REJECTED row required the
-game to name that spelling. So every "the LSP must reject this" assertion built
-on these files is sound, and B056's narrowing claim is unaffected. The exposure
-is that a spurious ACCEPTED may have let the LSP keep accepting something the
-game rejects — a missed narrowing, not a false positive.
+### b052 has been re-probed. The batching defect never fired on it.
+
+All **742 ACCEPTED rows** of `b052-qualified-enum-spellings.tsv` were
+re-measured at `batch=1` against the live game on 2026-08-31, with the three
+known-answer controls re-run every 100 names. Result:
+
+| | |
+|---|---|
+| re-probed | 742 |
+| unchanged (still ACCEPTED) | 739 |
+| flipped to REJECTED | 3 |
+| UNDETERMINED | 0 |
+
+**None of the three flips is a B068 artefact**, and no conclusion moves. They
+are `Foo::Bar::VirtualKey`, `Foo::ESceneCharVisNotice` and `Foo::VirtualKey`,
+all now `Namespace 'Foo' doesn't exist.` — the plugin-namespace effect this
+document already warns about, not a fabricated verdict. All three are already
+the first three entries of `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which
+forces them to "must not resolve" regardless of the corpus verdict, so the Rust
+suite's expectations are unchanged.
+
+The full artefact list splits cleanly along the same line, which is what
+identifies the mechanism: the three `Foo::*` spellings flipped, while all nine
+`GameData::*`, `MLFeed::*`, `MLHook::*`, `MathX::*` and `VehicleState::*`
+spellings still accept. The plugin declaring `namespace Foo` is no longer
+installed; the others still are. That is environmental drift between two
+machines-in-time, and it independently CONFIRMS the exclusion list a previous
+lane had reasoned out rather than measured.
+
+The shape of the result is itself the argument that B068 never fired here: an
+aborted batch fabricates ACCEPTED for *every* surviving name in the unit, so a
+200-name batch would show ~199 spurious rows. Three isolated spellings sharing
+one namespace family, each with a stated environmental cause, is not that shape.
+
+REJECTED rows were never at risk and were not re-probed: an abort produces the
+*absence* of diagnostics, and a REJECTED row required the game to name that
+spelling, so the defect can only invent an ACCEPTED. Every "the LSP must reject
+this" assertion built on these files was always sound, and B056's narrowing
+claim is unaffected.
+
+**`b053-bare-enum-values.tsv` has NOT been re-probed** — its 592 ACCEPTED rows
+remain open work under B068.
 
 **A verdict this document does not yet contain: `UNDETERMINED`.** If a
 regenerated corpus carries one, `global_scope.rs` panics on it by design, but
