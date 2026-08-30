@@ -2041,11 +2041,23 @@ mod tests {
     ///
     /// Ambiguous collisions are not rare in the databases — over every enum
     /// the index carries, 90 bare names collide and 39 of those have
-    /// genuinely different member sets. What keeps them away from
-    /// `global_enum_key` is `enum_is_global`, which excludes 37 of the 39
-    /// outright. So the global filter is doing all the work, and if it ever
-    /// loosened, a differing pair would become a real ambiguity and two
-    /// spellings of different enums would silently compare equal.
+    /// genuinely different member sets. They stay harmless in two ways, and
+    /// the split is worth naming because "the filter excludes them" is only
+    /// true of most:
+    ///
+    /// * 37 have NO globally visible owner at all — `enum_is_global` keeps
+    ///   the whole collision out of the index.
+    /// * 2 have exactly ONE globally visible owner, so there is a single
+    ///   candidate and nothing to choose between. Those are
+    ///   `ESpectatorCameraType` (global `Game::ESpectatorCameraType`, 3
+    ///   members, against a 16-member enum nested in
+    ///   `CGamePlaygroundClientScriptAPI`) and `EPrestigeMode` (global
+    ///   `MetaNotPersistent::EPrestigeMode`, 3 members, against two 4-member
+    ///   enums nested in classes).
+    ///
+    /// So the assertion that matters is not "the filter excludes ambiguity"
+    /// but the weaker and exactly true one: no differing name reaches
+    /// `global_enum_key` with more than one candidate. That covers all 39.
     ///
     /// Asserting only "no global collision differs" would go on passing
     /// quietly if the filter widened and the population changed underneath
@@ -2072,8 +2084,10 @@ mod tests {
         }
 
         let mut differing = 0usize;
-        let mut excluded_by_the_filter = 0usize;
-        for owners in by_name.values() {
+        let mut no_global_owner = 0usize;
+        let mut exactly_one_global_owner = 0usize;
+        let mut choosable: Vec<String> = Vec::new();
+        for (name, owners) in &by_name {
             if owners.len() < 2 {
                 continue;
             }
@@ -2082,10 +2096,14 @@ mod tests {
                 continue;
             }
             differing += 1;
-            // No global owner at all: the filter is the only thing keeping
-            // this ambiguity out of `global_enum_key`.
-            if !owners.iter().any(|(_, global)| *global) {
-                excluded_by_the_filter += 1;
+            match owners.iter().filter(|(_, global)| *global).count() {
+                // The filter keeps this ambiguity out of the index entirely.
+                0 => no_global_owner += 1,
+                // Visible, but with a single candidate — nothing to choose.
+                1 => exactly_one_global_owner += 1,
+                // Two visible candidates that disagree: `global_enum_key`
+                // would have to pick, and either pick is wrong for someone.
+                _ => choosable.push(name.clone()),
             }
         }
 
@@ -2095,10 +2113,26 @@ mod tests {
              or the companion test proves nothing"
         );
         assert!(
-            excluded_by_the_filter > 0,
-            "`enum_is_global` excludes no ambiguous collision, so the companion \
-             test now holds for an unknown reason rather than because the filter \
-             works ({differing} differing names, none excluded)"
+            no_global_owner > 0,
+            "`enum_is_global` excludes no ambiguous collision at all, so the \
+             companion test now holds for an unknown reason rather than because \
+             the filter works ({differing} differing names)"
+        );
+        // The actual safety property, and it accounts for every differing
+        // name rather than most of them: whatever the split between the two
+        // benign cases, NO differing name may reach `global_enum_key` with
+        // more than one candidate.
+        assert!(
+            choosable.is_empty(),
+            "`global_enum_key` must choose between genuinely different enums \
+             for {choosable:?} — canonicalization would make two spellings of \
+             different enums compare equal"
+        );
+        assert_eq!(
+            no_global_owner + exactly_one_global_owner,
+            differing,
+            "every differing name must be accounted for as excluded or \
+             single-candidate, not merely most of them"
         );
     }
 
