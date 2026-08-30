@@ -357,6 +357,17 @@ struct DbFiles {
 /// catches a swap even between two builds of identical length written in the
 /// same timestamp tick. Elsewhere length and mtime carry it — weaker, but a
 /// regenerated dump is a freshly written file with its own write time.
+///
+/// **What this does not catch, named rather than left for someone to discover.**
+/// A writer that rewrites a file IN PLACE, keeping its length and leaving mtime
+/// indistinguishable — a coarse-granularity or network filesystem, or a writer
+/// that restores the timestamp — produces an identity that compares equal
+/// across a real change. On Windows, where `dev_ino` is `None`, that is the
+/// only signal there is. This is accepted rather than solved: the dump is
+/// replaced, not edited in place, so the case is not one the Openplanet writer
+/// produces, and closing it would mean hashing several megabytes on every load.
+/// It is the reason the loader's contract is stated as "observed identities
+/// stayed stable", not "the bytes provably did not change".
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileIdentity {
     len: u64,
