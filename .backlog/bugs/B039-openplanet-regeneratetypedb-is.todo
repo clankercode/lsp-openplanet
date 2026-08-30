@@ -86,3 +86,20 @@ Extension side (vitest, existing harness at ../lsp-openplanet-ext):
 ## Related
 Sibling finding: B040 (manifest validation never published). Same shape —
 implemented capability wired to nothing.
+
+## Lane decision (coordinator, 2026-08-30)
+
+B039 and B041 are SERIALISED into one lane/worktree (`b039-b041-server-caps`),
+B039 first. Reason is file overlap, not size: both add a field to the same
+`ServerCapabilities` literal (`src/server/mod.rs:1241`) and both add a handler
+to the same `LanguageServer` impl. Run in parallel they would conflict at
+merge and each would review against a base the other invalidated.
+
+B039 first because it is the smaller change and its generalised gate — every
+string in `ExecuteCommandOptions.commands` is dispatched by `execute_command` —
+is worth having on master before another capability is advertised.
+
+Pre-dispatch finding: `async fn execute_command` DOES exist at
+`src/server/mod.rs:1928`, so the server side is probably live and the defect is
+client-side only. Do not take my word for it — the ticket's own instruction
+stands: prove dispatch by test, do not infer it from the handler existing.
