@@ -118,3 +118,37 @@ Game probe the fixture before treating the LSP silence as ground truth. A game A
 ## Related
 
 GH #21 (`MwAddRef`/`MwRelease`), B006 (trusted Nadeo member lists), tm-dips-plus-plus `tools/lsp-known-errors.txt`.
+
+## Binary-derived correction (coordinator, 2026-08-30) — SUPERSEDES the Work section
+
+Recovered the real injection surface from Openplanet.dll rather than from the
+stale `convert_nadeo.ts`. Full method, provenance and completeness argument:
+`docs/probes/openplanet-injected-methods.md` (master @ 7b5e933), tooling in
+`scripts/re/`. Openplanet 1.29.5 (next, Public, 1234ad9e), md5
+c179218b3b24582130ef42b92a3585f6.
+
+**Two facts in this ticket were wrong.**
+
+1. `GetManialinkPages` returns `array<CGameManialinkPage@>@`, NOT
+   `CGameManialinkPage@[]&`. Handle, not reference.
+2. It is registered on FOUR types — `CGameNetwork`, `CGameCtnNetwork`,
+   `CGameManiaPlanetNetwork`, `CTrackManiaNetwork`. The ticket named
+   `CGameCtnNetwork` and descendants, which MISSES `CGameNetwork` (the parent)
+   and so leaves a live false positive on a `CGameNetwork@` receiver.
+
+**DECISION: use the explicit six-entry list, not "base type and descendants".**
+The registered set is exactly the descendant subtree today (CGamePlayer->CSmPlayer
+2/2; CGameNetwork subtree 4/4), so the two rules are indistinguishable on this
+dump. That is a coincidence of the current hierarchy, not a rule — Openplanet
+hard-codes a list, so a future Nadeo type deriving from CGamePlayer would be
+accepted by a descendants rule and rejected by the game. Mirror the binary.
+
+**Complete surface (bounded, not best-effort).** Universal per engine class:
+`MwAddRef`, `MwRelease`, `opCast(?&out)`, `opImplCast()`. Explicit per-class:
+only the two methods above, over six registrations. `.text` holds exactly 20
+code refs to a dump-known type name and the doc accounts for all 20; an
+injection must name its target as a C string at its registration site, so no
+others can exist. Adding the two cast operators is a scope decision, not a
+requirement of this ticket.
+
+Consequence: `is_external_derived_from` is probably NOT the right helper here.
