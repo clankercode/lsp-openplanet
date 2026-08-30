@@ -429,10 +429,16 @@ impl<'a> GlobalScope<'a> {
             return None;
         }
 
-        // `tail` is a complete key here, so this can only select a global
-        // enum. The source-facing lookup also excludes anonymous synthetic
-        // keys; acceptance is never inferred merely from a matching tail.
-        ext.lookup_source_enum(tail).map(|_| tail.to_string())
+        // `tail` is a complete SOURCE NAME here, so this can only select a
+        // global enum — and it must be asked the same question `has_enum`'s
+        // walk asks. `lookup_source_enum` answers only when the key is
+        // already bare, so it silently missed every global enum the loader
+        // filed under a synthetic module (`Game::EDummyCollectionIdent`),
+        // leaving `has_enum` accepting a spelling this hands back unchanged.
+        // `global_enum_key` is that same index, and it returns the KEY.
+        // The global-enum index excludes anonymous synthetic keys, so
+        // acceptance is still never inferred from a matching tail alone.
+        ext.global_enum_key(tail).map(|key| key.to_string())
     }
 
     /// True when `qualified` is a type's own key, exactly as stored — no
@@ -2424,6 +2430,87 @@ mod tests {
                     "`{qualified}` canonicalizes to its global enum key"
                 );
                 assert_eq!(scope.canonicalize_type_name(&qualified), tail);
+            }
+        }
+    }
+
+    /// B056 fence: `has_enum` and `canonicalize_type_name` must agree, and
+    /// they did not. The ancestor walk in `has_enum` was widened to
+    /// `global_enum_key` so it would answer for a global enum whose KEY
+    /// carries a synthetic module (`Game::EDummyCollectionIdent`), but the
+    /// canonicalizer's matching arm was left on `lookup_source_enum`, which
+    /// is true only when the key is already bare. The result: 57 enums that
+    /// `has_enum` accepts behind a scope and the canonicalizer hands back
+    /// unchanged, so two spellings of one enum stay unequal.
+    ///
+    /// The law is the general fence — every accepted spelling canonicalizes
+    /// to a real key — and the pinned rows below are the ones that were
+    /// wrong. Both halves are game-grounded: `Meta::EGmSurfType` and
+    /// `Meta::EPlugSurfaceMaterialId` are ACCEPTED in the B052 corpus, so a
+    /// Core namespace does qualify a global enum, and `EDummyCollectionIdent`
+    /// is ACCEPTED bare there, so it is globally visible. The pairing of the
+    /// two is derived from those rules rather than probed directly.
+    #[test]
+    fn an_accepted_enum_spelling_always_canonicalizes_to_a_real_key() {
+        let index = typedb_fixture_index();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(fid, vec![make_symbol("Foo", SymbolKind::Namespace)]);
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // Left: the enum's stored key. Right: whether the key is bare. The
+        // module-prefixed rows are the ones the old arm could not reach.
+        let cases = [
+            ("EDummyCollectionIdent", "Game::EDummyCollectionIdent"),
+            ("EGhostNameLogoType", "Game::EGhostNameLogoType"),
+            ("EPlugSurfaceMaterialId", "Meta::EPlugSurfaceMaterialId"),
+            ("EGmSurfType", "Meta::EGmSurfType"),
+            // A bare-key global, to hold the pre-existing behaviour still.
+            ("VirtualKey", "VirtualKey"),
+        ];
+
+        // Scopes the game accepts as qualifiers: a Core namespace, an engine
+        // class scope, and a workspace-declared namespace.
+        let prefixes = ["Meta", "UI", "CGameMenu", "Foo"];
+
+        for (name, key) in cases {
+            assert_eq!(
+                index.global_enum_key(name),
+                Some(key),
+                "fixture guard: `{name}` must be a globally visible enum keyed at `{key}`"
+            );
+
+            for prefix in prefixes {
+                let qualified = format!("{prefix}::{name}");
+                assert!(
+                    scope.has_enum(&qualified),
+                    "`{qualified}` is a global enum behind a real scope"
+                );
+                let canonical = scope.canonicalize_type_name(&qualified);
+                assert_eq!(
+                    canonical, key,
+                    "`{qualified}` must canonicalize to the stored key, not to its spelling"
+                );
+                assert!(
+                    index.lookup_source_enum(&canonical).is_some(),
+                    "`{canonical}` must be a real enum key"
+                );
+            }
+        }
+
+        // The law, over every real scope the fixture knows: an accepted
+        // spelling never canonicalizes to something that is not a key.
+        for prefix in index.source_scopes() {
+            for (name, key) in cases {
+                let qualified = format!("{prefix}::{name}");
+                if !scope.has_enum(&qualified) {
+                    continue;
+                }
+                assert_eq!(
+                    scope.canonicalize_type_name(&qualified),
+                    key,
+                    "`{qualified}` resolves, so it must canonicalize to `{key}`"
+                );
             }
         }
     }
