@@ -117,9 +117,12 @@ void Use() {
     Text::Format("%d", c.Handler);
     Text::Format("%d", handlerVar);
     // REJECT (B060 mirror): a property VALUE cannot construct a delegate.
-    // Not game-probed directly, but the LSP already asserted exactly this
-    // via `is_clearly_not_a_function` on the `startnew(Off)` line below,
-    // which errors on master too.
+    // GAME-VERIFIED (OP 1.29.5, own compilation unit): `UintFn(Off)` is
+    // `No matching signatures to 'UintFn(uint)'` and `startnew(Off)` is
+    // `No matching signatures to 'startnew(uint)'`. Note the engine types
+    // the property read as `uint`, not as a function — which is exactly
+    // what this ticket implements. Deliberate scope addition: do not
+    // silence these as false positives.
     UintFn@ bad = UintFn(Off);
     startnew(Off);
 }

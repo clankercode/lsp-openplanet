@@ -1765,6 +1765,23 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
 /// because the shadowing guard refuses to let a same-named VARIABLE stand in
 /// for a type, and 6 where a workspace class or interface handle cannot bind
 /// a funcdef slot — 24 asserted below.
+///
+/// DELIBERATE SCOPE ADDITION, engine-verified — do not "fix" the two
+/// `Main.as:126`/`127` lines by silencing them. Game probe (OP 1.29.5, each
+/// fixture compiled as its own unit, never batched — see B068):
+///   `UintFn@ bad = UintFn(Off);`      ERR `No matching signatures to
+///                                          'UintFn(uint)'`
+///   `Text::Format("%d", handlerVar);` ERR `No matching signatures to
+///                                          'Text::Format(const string, Cb@&)'`
+///   `Text::Format("0x%04x", Off);`    CLEAN  (the FP this ticket removes)
+///   `startnew(Off);`                  ERR `No matching signatures to
+///                                          'startnew(uint)'`
+/// The engine types the property read as `uint` in every message —
+/// `UintFn(uint)`, `startnew(uint)`, never a function type. That IS this
+/// fix's semantics, reached from the other direction. Three of the four are
+/// REJECT-direction, the trustworthy direction on that machine; the lone
+/// ACCEPT is sound because nothing in it resolves through a foreign
+/// namespace (`get_Off` is declared in the fixture, `Text::Format` is core).
 /// The neighbouring case of every silenced line must keep erroring, notably
 /// `startnew(BadHandler)`, a funcdef-handle property of the WRONG signature
 /// sitting right beside the three right-signature ones this fix silences,
@@ -1775,15 +1792,16 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
     let (_, stdout, stderr) = run_issue_repro_typedb("b060-property-getter-value-arg");
     let errors: Vec<&str> = stdout.lines().filter(|l| l.contains("error:")).collect();
     let expected = [
-        "Main.as:106",    // B023: free fn into Text::Format's value slot
-        "Main.as:108",    // B023: wrong-signature fn into a funcdef slot
-        "Main.as:112",    // boundary: WRONG-sig funcdef property into startnew
-        "Main.as:113",    // ... and its member form
-        "Main.as:116",    // boundary: funcdef handle cannot bind a uint slot
-        "Main.as:117",    // ... member form
-        "Main.as:118",    // ... plain global form
-        "Main.as:123",    // B060 mirror: a uint property VALUE is not a delegate
-        "Main.as:124",    // ... same through startnew's CoroutineFunc slot
+        "Main.as:106", // B023: free fn into Text::Format's value slot
+        "Main.as:108", // B023: wrong-signature fn into a funcdef slot
+        "Main.as:112", // boundary: WRONG-sig funcdef property into startnew
+        "Main.as:113", // ... and its member form
+        "Main.as:116", // boundary: funcdef handle cannot bind a uint slot
+        "Main.as:117", // ... member form
+        "Main.as:118", // ... plain global form
+        // Scope additions, engine-verified — see the doc comment above.
+        "Main.as:126",    // B060 mirror: a uint property VALUE is not a delegate
+        "Main.as:127",    // ... same through startnew's CoroutineFunc slot
         "Variants.as:74", // a real function in each slot shape the property
         "Variants.as:75", // reads above sweep — uint64, const string&in,
         "Variants.as:76", // a 2-overload set, and a bool-carrying set
@@ -1805,12 +1823,12 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         // slot. Master catches only the property spelling, and only through
         // the `get_` widening this ticket removes; the plain-global
         // spelling it misses entirely.
-        "Main.as:145",
-        "Main.as:146",
-        "Main.as:147",
         "Main.as:148",
         "Main.as:149",
         "Main.as:150",
+        "Main.as:151",
+        "Main.as:152",
+        "Main.as:153",
     ];
     assert_eq!(
         errors.len(),
