@@ -40,6 +40,18 @@ indistinguishable from "I am structurally incapable of seeing it".
   impossible row invalidated a run that otherwise looked complete and would
   have "disproved" an established rule (B056).
 
+- **A shell pipeline hid a command's failure.** `bl` refuses to mutate the
+  backlog from a git worktree, exiting 1 with a clear `ERROR:` line. Invoked as
+  `bl bug --title "…" 2>&1 | tail -3` it appears to succeed, because a pipeline
+  reports the exit status of its **last** command — `tail`'s. A lane filed a
+  ticket that was never created and the command looked like it worked. Note the
+  near-miss: the coordinator had been using that exact pattern all batch, and
+  was saved only by running in the main checkout where the command succeeded
+  anyway. Countermeasure: run mutating commands bare; if you must pipe, test
+  `${PIPESTATUS[0]}` (bash) or `$pipestatus[1]` (zsh), never `$?`; and verify
+  the artifact exists rather than trusting either. **Diagnose before filing:**
+  the first read of this was "the tool exits 0 when it refuses", which would
+  have been a defect in `bl`. `bl` was blameless.
 - **A grep pattern that could never match.** A gate counted errors with
   `grep '"severity":"error"'` against a **pretty-printed** report, which writes
   `"severity": "error"` with a space. It matched zero on both sides and printed
