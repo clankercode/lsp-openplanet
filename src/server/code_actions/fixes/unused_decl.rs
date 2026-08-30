@@ -528,6 +528,9 @@ mod tests {
     use crate::server::code_actions::fix::{
         Registries, WorkspaceFileResolver, SOURCE_FIX_ALL_OPENPLANET,
     };
+    use crate::server::code_actions::fix_all::{
+        ranges_overlap, select_non_overlapping, DocumentFix,
+    };
     use crate::server::code_actions::test_fixtures::{apply_edits, published_unused_diagnostics};
     use crate::server::code_actions::{code_actions_with, resolve_code_action, CodeActionRequest};
     use crate::symbols::SymbolTable;
@@ -1362,6 +1365,92 @@ mod tests {
             ONLY_THIS,
         );
         assert!(actions.is_empty(), "parameter prefix leaked into fix-all");
+    }
+
+    /// The module doc makes two claims about the same pair of edits, and
+    /// both are pinned here.
+    ///
+    /// One: the prefix edit and the removal edit for a single local really
+    /// do overlap — the name span sits inside the statement span. That is a
+    /// claim about spans, and spans move.
+    ///
+    /// Two, and the reason the first is worth stating at all: the overlap is
+    /// NOT what keeps removal out of `source.fixAll.openplanet`. An earlier
+    /// draft of this family argued that admitting the prefix would let the
+    /// batcher pick the removal instead, and that argument was simply wrong —
+    /// [`fix_all_action`] filters on `auto_applicable` BEFORE
+    /// [`select_non_overlapping`] ever runs, so removal never reaches the
+    /// batcher to compete. The batcher's behaviour on the pair is asserted
+    /// below as a counterfactual: given both, it does drop one, which is
+    /// exactly why the filter and not the batcher must be doing the work.
+    #[test]
+    fn the_two_fixes_for_one_local_overlap_but_that_is_not_why_removal_is_excluded() {
+        let source = "void Main() {\n    int x = 1;\n    Print(\"hi\");\n}";
+        let edits_titled = |needle: &str| -> Vec<TextEdit> {
+            actions(source)
+                .into_iter()
+                .find(|action| action.title.contains(needle))
+                .unwrap_or_else(|| panic!("no `{needle}` action for `{source}`"))
+                .edit
+                .expect("the action must carry its edit")
+                .changes
+                .expect("single-file edit")
+                .remove(&uri())
+                .expect("edits for the current document")
+        };
+        let prefix = DocumentFix {
+            title: "prefix".to_string(),
+            edits: edits_titled("Prefix"),
+        };
+        let removal = DocumentFix {
+            title: "removal".to_string(),
+            edits: edits_titled("Remove"),
+        };
+        assert_eq!(prefix.edits.len(), 1, "test premise: one prefix edit");
+        assert_eq!(removal.edits.len(), 1, "test premise: one removal edit");
+
+        assert!(
+            ranges_overlap(&prefix.edits[0].range, &removal.edits[0].range),
+            "the module doc says these overlap: prefix {:?} vs removal {:?}",
+            prefix.edits[0].range,
+            removal.edits[0].range,
+        );
+
+        // The counterfactual: handed both, the batcher keeps exactly one.
+        assert_eq!(
+            select_non_overlapping(&[prefix, removal]).len(),
+            1,
+            "overlapping fixes must not both be batched",
+        );
+
+        // The real mechanism: removal is not auto-applicable, so it never
+        // becomes a candidate the batcher could choose between.
+        let (analysis, diagnostics) = published(source);
+        let workspace = SymbolTable::new();
+        let files = [(uri(), &analysis)];
+        let ctx = FixContext {
+            uri: &uri(),
+            analysis: &analysis,
+            workspace: &workspace,
+            type_index: None,
+            files: WorkspaceFileResolver::new(&files),
+        };
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.message.contains('`'))
+            .expect("test premise: a finding was published");
+        let auto: Vec<(String, bool)> = describe(diagnostic, &ctx)
+            .into_iter()
+            .map(|d| (d.descriptor.title, d.descriptor.auto_applicable))
+            .collect();
+        assert_eq!(auto.len(), 2, "test premise: both fixes described");
+        for (title, auto_applicable) in auto {
+            let expected = title.starts_with("Prefix");
+            assert_eq!(
+                auto_applicable, expected,
+                "`{title}` has the wrong fix-all participation",
+            );
+        }
     }
 
     /// End-to-end, the way the editor drives it: ask
