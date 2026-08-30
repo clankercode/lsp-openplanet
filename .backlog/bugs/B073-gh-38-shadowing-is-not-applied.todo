@@ -85,3 +85,51 @@ them rather than pinning one:
 GH #38 (class-vs-class shadowing, the rule this path does not honour), B060
 (fixed the argument-position half; `workspace_shadows_funcdef` is the predicate
 to reuse or generalize).
+
+## Three reproductions from lane-b060-b062 (2026-08-31)
+
+All three share one cause: **GH #38 shadowing is not applied when a workspace
+type collides with a typedb funcdef**, resolved upstream in type resolution
+before B060's code runs. Each was verified identical on the merge-base and the
+B060 branch binaries, so all three are **pre-existing on master** and none is
+a B060 regression.
+
+1. **Local variable.** `class CoroutineFunc { int v; }` then
+   `CoroutineFunc@ c = CoroutineFunc();` - `Text::Format("%d", c)` errors on
+   both binaries, and the constructor call reports
+   `function CoroutineFunc expects 1 args, got 0`. The declared type resolves
+   to the engine funcdef, so the CTOR resolves to the funcdef ctor too.
+2. **Funcdef constructor path.** `try_funcdef_ctor` (`checker.rs`) calls
+   `lookup_funcdef` directly, and `call_type` tries it BEFORE the workspace
+   type constructor, so
+   `class CoroutineFunc {}; CoroutineFunc@ v; auto x = CoroutineFunc(v);`
+   is classified as Core funcdef construction rather than the local class.
+   Silent on both binaries - a MISSED diagnostic rather than a false one.
+3. **Ctor-call spelling** as in (1) - same root, different surface.
+
+## Reuse the predicate B060 already built
+
+The argument-position half of this is already fixed on the B060 branch by
+`GlobalScope::workspace_shadows_funcdef`, and whoever takes B073 should reuse
+it rather than reinvent it. The rule, stated once:
+
+> **Only a TYPE declaration shadows a TYPE name.**
+
+- Types: class / interface / enum / typedef. **Typedef is included
+  deliberately** because it reuses `SymbolKind::Funcdef` and `lookup_funcdef`
+  skips it.
+- A variable or function sharing the name is a VALUE and shadows nothing.
+- Applied over the enclosing-namespace ladder and the tail table, resolving
+  **exactly one** candidate in lexical order.
+
+That predicate cost four review rounds to get right on B060, in both
+directions: an early version UNDER-blocked (a list of shapes that missed enum,
+typedef and namespace-relative names) and a later one OVER-blocked (accepting
+any workspace symbol, so an unrelated namespace-level variable stood in for a
+type and suppressed real errors). Both edges are now pinned by tests. Do not
+re-derive it from scratch.
+
+## Sequencing
+
+B073 should be taken AFTER B060 merges, so the predicate is available in
+master rather than needing to be copied off a branch.
