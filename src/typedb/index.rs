@@ -512,7 +512,7 @@ impl TypeIndex {
         let ordered: Vec<String> = keys.into_iter().cloned().collect();
         for qname in &ordered {
             let info = &self.enums[qname];
-            if !TypeIndex::enum_is_global(qname, info) {
+            if !Self::enum_is_global(qname, info) {
                 continue;
             }
             let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
