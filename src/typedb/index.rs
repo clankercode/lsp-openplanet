@@ -1823,6 +1823,117 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/OpenplanetNext.json")
     }
 
+    /// B056: the invariant `global_enum_names` is named for, checked both
+    /// ways over the whole shipped DB.
+    ///
+    /// A globally visible enum is EXACTLY one whose source name is bare. That
+    /// is not a coincidence — it is the same fact stated twice, once by
+    /// `enum_is_global` and once by `source_name_of` — and the two are
+    /// computed by separate code that could drift apart. If it ever does, the
+    /// ancestor walk starts answering for enums that need a qualifier, or
+    /// stops answering for ones that do not.
+    #[test]
+    fn a_globally_visible_enum_is_exactly_one_with_a_bare_source_name() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+        let mut global = 0usize;
+        let mut bare = 0usize;
+        for (qname, info) in index.enums_iter() {
+            if info.anonymous {
+                continue;
+            }
+            let is_global = TypeIndex::enum_is_global(qname, info);
+            let source_is_bare =
+                TypeIndex::source_name_of(qname, info.source).is_some_and(|n| !n.contains("::"));
+            assert_eq!(
+                is_global,
+                source_is_bare,
+                "`{qname}` ({:?}): globally visible = {is_global}, but its \
+                 source name is {}bare",
+                info.source,
+                if source_is_bare { "" } else { "not " }
+            );
+            if is_global {
+                global += 1;
+                assert!(
+                    index.global_enum_key(&info.name).is_some(),
+                    "`{qname}` is globally visible, so its bare name must be \
+                     reachable through `global_enum_key`"
+                );
+            }
+            if source_is_bare {
+                bare += 1;
+            }
+        }
+        assert_eq!(global, bare);
+        assert!(
+            global > 50,
+            "fixture guard: the shipped DB must carry a real global set, got {global}"
+        );
+    }
+
+    /// B056: the source name follows the entry's ORIGIN, not the shape of its
+    /// key. Both are pinned at every depth the shipped DB actually has,
+    /// because segment arithmetic alone cannot tell these apart — a Core key
+    /// and a Nadeo key of the same length want opposite treatment.
+    ///
+    /// Every pair below is a recorded game verdict in
+    /// `docs/probes/b052-qualified-enum-spellings.tsv`, both directions.
+    #[test]
+    fn a_source_name_follows_the_origin_not_the_key_shape() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+
+        for (key, source_name) in [
+            // Nadeo: the module is dropped, at every depth it occurs.
+            ("Game::CGameCtnApp", "CGameCtnApp"),
+            ("Game::CGameMenu::EMenuOrder", "CGameMenu::EMenuOrder"),
+            (
+                "Meta::NPlugAnim::EExtractMotionMode",
+                "NPlugAnim::EExtractMotionMode",
+            ),
+            (
+                "Meta::EPlugAnimGraphStateSelectCond",
+                "EPlugAnimGraphStateSelectCond",
+            ),
+            // Core: the namespace is real and survives whole. Note
+            // `UI::Plot::Marker` is three segments, exactly like the Nadeo
+            // nested case above, and wants the opposite answer.
+            ("UI::ButtonFlags", "UI::ButtonFlags"),
+            ("nvg::Align", "nvg::Align"),
+            ("UI::Plot::Marker", "UI::Plot::Marker"),
+            // Header: bare, and it must not travel through the Nadeo arm,
+            // where a single-segment key would reduce to the empty string.
+            ("ESceneCharVisNotice", "ESceneCharVisNotice"),
+            ("ESceneVehicleVisEvent", "ESceneVehicleVisEvent"),
+        ] {
+            assert!(
+                index.lookup_source_enum(key).is_some() || index.lookup_type(key).is_some(),
+                "fixture guard: `{key}` must be indexed"
+            );
+            assert_eq!(
+                index.source_name_key(source_name),
+                Some(key),
+                "`{source_name}` must be the source spelling of `{key}`"
+            );
+            if key != source_name {
+                assert!(
+                    !index.spelling_is_source_name(key),
+                    "`{key}` is the loader's key, not a spelling the game takes"
+                );
+            }
+        }
+
+        // The empty-name trap, stated directly: no source name is empty, and
+        // none of them still carries a leading module.
+        for (qname, info) in index.enums_iter() {
+            if info.anonymous {
+                continue;
+            }
+            let name = TypeIndex::source_name_of(qname, info.source)
+                .unwrap_or_else(|| panic!("`{qname}` must have a source name"));
+            assert!(!name.is_empty(), "`{qname}` reduced to an empty name");
+        }
+    }
+
     #[test]
     fn test_merged_index() {
         let cp = core_path();
