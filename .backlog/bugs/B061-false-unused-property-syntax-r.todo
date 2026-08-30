@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T05:30:00Z"
 depends_on: []
 estimate_hours: 1
 id: B061
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'False unused: property-syntax reads are not credited to their get_/set_ accessor'
@@ -24,3 +26,91 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Reported 2026-08-30 by session tm-tournament-station-f7 from the tm-tournament-station tree, verified against `src/` before filing.
+
+## Defect
+
+A read written in AngelScript property syntax is not credited to the accessor
+that implements it, so the accessor is reported `a function 'get_X' is never
+used` even where it is read from production files.
+
+Two distinct forms, and they must BOTH be covered — fixing only the first
+leaves the second live:
+
+1. **Namespace-qualified**: `Directives::Showing` read in `Main.as` does not
+   mark `Directives::get_Showing` used.
+2. **Member on an instance**: `c.IsSecure` where the class declares
+   `bool get_IsSecure()`.
+
+## Confirmed instances (reporter's tree, all read outside test/dev files)
+
+| accessor | read from |
+|---|---|
+| `Directives::get_Showing` | Main.as, Messages.as |
+| `Directives::get_HistoryCount` | Main.as |
+| `Messages::get_PendingCount` | Main.as |
+| `Session::get_IsConnected` | Main.as, Exports.as |
+| `Session::get_Status` | Main.as |
+| `Session::get_TournamentName` | Main.as, Branding.as, Directives.as |
+
+Not a threshold effect: `Directives::Showing` has 13 reads and is still
+reported unused.
+
+## Why (coordinator, pre-dispatch)
+
+The machinery EXISTS and some path is not reaching it. `src/analysis/unused.rs`
+contains no `get_`/`set_` handling at all (1303 lines, zero matches), but
+`src/typecheck/checker.rs` has both:
+
+- `record_value_use_variants` (:802) records `name`, `get_name`, `set_name`
+- `record_member_use_from_type` (:816) records `Type::member`,
+  `Type::get_member`, `Type::set_member` across the whole inheritance chain
+
+So this is an INCONSISTENCY, not an unimplemented feature — which means the
+fix is to route the missing paths through the existing helpers, not to invent
+a new mechanism. Find why a namespace-qualified read does not reach
+`record_value_use_variants`, and why the member form does not reach
+`record_member_use_from_type` (receiver type unresolved? class-name
+normalization failing? a different code path entirely?). Do not add a third
+recorder.
+
+Note the deliberate comment on `record_member_use_from_type`: it over-marks
+rather than under-marks, because "a false 'unused' is far worse than a missed
+warning". That principle decides any ambiguity in this ticket.
+
+## Test plan (TDD, red first)
+
+Red: a namespace `N` with `bool get_P()`, read as `N::P` from another file ->
+currently reports `get_P` unused.
+
+Variants (per CLAUDE.md, generalize — the reporter's two forms are the
+minimum, not the set):
+- namespace-qualified READ `N::P` -> marks `get_P`
+- namespace-qualified WRITE `N::P = x` -> marks `set_P`
+- read-modify-write `N::P += 1` -> marks BOTH
+- member on instance `obj.P` -> marks `Type::get_P`
+- member write `obj.P = x` -> marks `Type::set_P`
+- through a handle `objHandle.P`
+- inherited accessor declared on a PARENT class
+- accessor declared in a dep/export, read from the dependent plugin
+- getter-only property written to -> still an error, this must not silence it
+- a genuinely unused `get_P` (no reads anywhere) -> STILL reported. This is the
+  gate against over-marking everything to make the FP go away.
+- `this.P` inside the declaring class (already works per :1196 docstring —
+  pin it so the fix does not regress it)
+
+## Gate
+
+FP fixture ERROR/WARNING counts must not RISE. A DROP is expected here and is
+the win. Measure two binaries on the same machine at the same time with
+absolute paths, both plain and json.
+
+## Related
+
+Reporter's own correction, worth recording: they nearly filed ~19 of 24
+warnings as false positives, and on checking found only 6 were. The other 13
+were production functions whose only callers live in `*_Test.as`/`*_Dev.as`,
+which a release build excludes — genuinely unused, and their own code smell.
+Do not widen this ticket into 'unused analysis is too aggressive'. It is
+specifically the property-syntax/accessor mapping.
