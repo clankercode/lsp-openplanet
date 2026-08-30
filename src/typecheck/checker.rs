@@ -2224,14 +2224,13 @@ impl<'a> Checker<'a> {
         {
             return TypeRepr::Error(String::new());
         }
-        // GH #21: `MwAddRef` / `MwRelease` are AngelScript builtins on every
-        // CMwNod-derived type (manual refcount). The typedb never declares
-        // them, so any CMwNod-derived receiver gets a free pass here.
-        if matches!(member_name.as_str(), "MwAddRef" | "MwRelease")
-            && self.scope.is_external_derived_from(&type_name, "CMwNod")
-        {
-            // Returns void; the checker has no Void TypeRepr, so use the
-            // silence sentinel (same as untyped Nadeo methods above).
+        // Openplanet-injected methods (GH #21, B059): registered by the
+        // runtime, never present in the Nadeo dump, so every lookup above
+        // missed. This is the NON-call path (`p.GetCurrentEntityID` with no
+        // argument list), which yields no value in AngelScript — silence is
+        // all that's owed here. The call site is where the return type
+        // matters; see `injected_method_return`.
+        if self.injected_method(&type_name, &member_name).is_some() {
             return TypeRepr::Error(String::new());
         }
         self.diagnostics.push(TypeDiagnostic {
@@ -2242,6 +2241,58 @@ impl<'a> Checker<'a> {
             },
         });
         TypeRepr::Error(String::new())
+    }
+
+    /// The Openplanet-injected method `member_name` names on a receiver of
+    /// type `type_name`, if any (GH #21, B059).
+    ///
+    /// These are methods the Openplanet runtime registers on engine classes
+    /// but the Nadeo dump never lists, so every typedb lookup misses them
+    /// and B006's trusted-member-list rule fires `UndefinedMember` on code
+    /// the game compiles. Consulted at both member-access and call sites,
+    /// which is why the data lives in one table rather than in `matches!`
+    /// arms at each.
+    fn injected_method(
+        &self,
+        type_name: &str,
+        member_name: &str,
+    ) -> Option<&'static builtins::InjectedMethod> {
+        builtins::injected_methods_named(member_name).find(|m| match &m.receivers {
+            builtins::InjectedReceiver::EveryEngineClass => {
+                self.scope.is_external_derived_from(type_name, "CMwNod")
+            }
+            builtins::InjectedReceiver::Exact(names) => {
+                names.iter().any(|n| self.same_external_type(type_name, n))
+            }
+        })
+    }
+
+    /// True when `a` and `b` name the SAME external type, tolerating short
+    /// vs. namespace-qualified spellings on either side.
+    ///
+    /// The typedb parent chain is a tree, so mutual derivation can only mean
+    /// the two names resolve to one type. Expressed through the public
+    /// `is_external_derived_from` because `GlobalScope`'s name resolver is
+    /// private. Only reached on the lookup-miss path, so the two short chain
+    /// walks cost nothing on hot paths.
+    fn same_external_type(&self, a: &str, b: &str) -> bool {
+        self.scope.is_external_derived_from(a, b) && self.scope.is_external_derived_from(b, a)
+    }
+
+    /// Value an injected method's CALL yields.
+    ///
+    /// `void` rows carry no value. GH #21 has always returned the silence
+    /// sentinel for `MwAddRef`/`MwRelease`, and `TypeRepr::Void` takes part
+    /// in conversion rules the sentinel does not, so promoting them is a
+    /// separate behaviour change. Every other row must return its REAL type:
+    /// a sentinel would suppress the false positive while typing
+    /// `auto entId = player.GetCurrentEntityID()` wrong, which is the worse
+    /// and much less visible bug.
+    fn injected_method_return(m: &builtins::InjectedMethod) -> TypeRepr {
+        match TypeRepr::parse_type_string(m.return_type) {
+            TypeRepr::Void => TypeRepr::Error(String::new()),
+            t => t,
+        }
     }
 
     /// If `qualified_name` names a unique workspace free function, emit an
@@ -3582,13 +3633,21 @@ impl<'a> Checker<'a> {
                 {
                     return TypeRepr::Error(String::new());
                 }
-                // GH #21: `MwAddRef` / `MwRelease` are AngelScript builtins
-                // on every CMwNod-derived type; the typedb never declares
-                // them. Mirror of the gate in `member_access_type`.
-                if matches!(member_name.as_str(), "MwAddRef" | "MwRelease")
-                    && self.scope.is_external_derived_from(&type_name, "CMwNod")
-                {
-                    return TypeRepr::Error(String::new());
+                // Openplanet-injected methods (GH #21, B059). Absent from
+                // the Nadeo dump, so the overload/arity machinery above
+                // found nothing to check and `args` were walked unchecked:
+                // this table is their only arity authority, so check it
+                // here. Unlike the member-access mirror of this gate, the
+                // RETURN TYPE is load-bearing — `auto id = p.GetCurrentEntityID()`
+                // must infer `uint`, not the silence sentinel.
+                if let Some(inj) = self.injected_method(&type_name, &member_name) {
+                    self.check_arity_against_ranges(
+                        &member_name,
+                        &[inj.arity],
+                        args.len(),
+                        callee.span,
+                    );
+                    return Self::injected_method_return(inj);
                 }
                 self.diagnostics.push(TypeDiagnostic {
                     span: callee.span,
@@ -8122,6 +8181,356 @@ void Main() {
         );
     }
 
+    // ── B059: Openplanet-injected engine methods ───────────────────────────
+    //
+    // Openplanet registers methods on engine classes that the Nadeo dump
+    // never lists. B006 trusts a non-empty Nadeo member list, so the checker
+    // fired `UndefinedMember` on calls the game compiles. `MwAddRef` /
+    // `MwRelease` (GH #21, above) were the first case; `GetCurrentEntityID`
+    // and `GetManialinkPages` are the other two, across six explicit
+    // registrations.
+    //
+    // The authority for the table these tests exercise is
+    // `docs/probes/openplanet-injected-methods.md` — recovered from
+    // Openplanet.dll, NOT from the old `convert_nadeo.ts`, which listed the
+    // wrong return type for `GetManialinkPages` and missed `CGameNetwork`.
+    //
+    // Game ground truth — RemoteBuild probe, Trackmania + Openplanet 1.29.5,
+    // 2026-08-30: see the fixture gate test
+    // `check_command_issue_repro_b059_injected_methods_silences_only_the_legal_half`
+    // in `tests/cli_check_tests.rs` for the verbatim verdicts, including the
+    // REJECT lines that name each method's real return type.
+
+    /// `UndefinedMember` diagnostics naming `member`.
+    fn undefined_members_named<'d>(
+        diags: &'d [TypeDiagnostic],
+        member: &str,
+    ) -> Vec<&'d TypeDiagnostic> {
+        diags
+            .iter()
+            .filter(|d| {
+                matches!(&d.kind, TypeDiagnosticKind::UndefinedMember { member: m, .. }
+                    if m == member)
+            })
+            .collect()
+    }
+
+    /// `ArgCountMismatch` diagnostics naming `function_name`.
+    fn arg_count_mismatches<'d>(
+        diags: &'d [TypeDiagnostic],
+        name: &str,
+    ) -> Vec<&'d TypeDiagnostic> {
+        diags
+            .iter()
+            .filter(|d| {
+                matches!(&d.kind, TypeDiagnosticKind::ArgCountMismatch { function_name, .. }
+                    if function_name == name)
+            })
+            .collect()
+    }
+
+    /// B059: `GetCurrentEntityID` is injected on `CGamePlayer` itself, so a
+    /// receiver of the declaring type must be silent.
+    #[test]
+    fn injected_entity_id_on_declaring_type_stays_silent() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CGamePlayer@ gp) {
+                auto id = gp.GetCurrentEntityID();
+            }
+            "#,
+        );
+        assert!(
+            undefined_members_named(&diags, "GetCurrentEntityID").is_empty(),
+            "GetCurrentEntityID on its declaring type must be silent, got {:?}",
+            diags
+        );
+    }
+
+    /// B059 (the reported case): `CSmPlayer` is separately named in the
+    /// binary's explicit registration list. This is the call shape in
+    /// tm-dips-plus-plus `src/PlayerState.as:121`.
+    #[test]
+    fn injected_entity_id_on_subclass_stays_silent() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CSmPlayer@ player) {
+                auto entId = player.GetCurrentEntityID();
+            }
+            "#,
+        );
+        assert!(
+            undefined_members_named(&diags, "GetCurrentEntityID").is_empty(),
+            "GetCurrentEntityID on CSmPlayer must be silent, got {:?}",
+            diags
+        );
+    }
+
+    /// B059: the injected signature takes no arguments, so a call with
+    /// arguments must still be diagnosed. Before the injected-method table
+    /// this errored as `UndefinedMember`; the table knows the arity, so it
+    /// errors as `ArgCountMismatch` — but it must not go silent.
+    #[test]
+    fn injected_entity_id_wrong_arity_still_errors() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CSmPlayer@ player) {
+                auto entId = player.GetCurrentEntityID(1);
+            }
+            "#,
+        );
+        let hits = arg_count_mismatches(&diags, "GetCurrentEntityID");
+        assert_eq!(
+            hits.len(),
+            1,
+            "1-arg GetCurrentEntityID must fire ArgCountMismatch, got {:?}",
+            diags
+        );
+        assert_eq!(
+            hits[0].kind,
+            TypeDiagnosticKind::ArgCountMismatch {
+                function_name: "GetCurrentEntityID".into(),
+                expected_min: 0,
+                expected_max: 0,
+                got: 1,
+            }
+        );
+    }
+
+    /// B059 negative: the injection is scoped to the `CGamePlayer` branch.
+    /// A `CMwNod@` (the common ancestor) and an unrelated engine type must
+    /// still report the member as undefined — widening this to every engine
+    /// type would re-introduce the FP class the ticket exists to avoid.
+    #[test]
+    fn injected_entity_id_wrong_receiver_still_errors() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CMwNod@ nod, CGameCtnChallenge@ map) {
+                auto a = nod.GetCurrentEntityID();
+                auto b = map.GetCurrentEntityID();
+            }
+            "#,
+        );
+        assert_eq!(
+            undefined_members_named(&diags, "GetCurrentEntityID").len(),
+            2,
+            "GetCurrentEntityID off the CGamePlayer branch must still error, got {:?}",
+            diags
+        );
+    }
+
+    /// B059 / B006 fence: `CSmPlayer`'s member list is non-empty and stays
+    /// trusted. A genuine typo — including one a character away from the
+    /// injected name — must still be reported.
+    #[test]
+    fn injected_table_does_not_widen_b006_trust() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CSmPlayer@ player, CGameCtnNetwork@ net) {
+                auto a = player.GetCurrentEntityId();
+                auto b = player.NoSuchMemberAtAll();
+                auto c = net.GetManialinkPage();
+            }
+            "#,
+        );
+        for member in [
+            "GetCurrentEntityId",
+            "NoSuchMemberAtAll",
+            "GetManialinkPage",
+        ] {
+            assert_eq!(
+                undefined_members_named(&diags, member).len(),
+                1,
+                "`{member}` must still fire UndefinedMember, got {:?}",
+                diags
+            );
+        }
+    }
+
+    /// B059 sibling: `GetManialinkPages` is registered on FOUR types
+    /// (Openplanet.dll 0x180137cd3/…d43/…db3/…e23). tm-shadowless-chrono is
+    /// the live caller.
+    ///
+    /// Note `CGameManiaPlanetNetwork` carries an EMPTY member list in the
+    /// dump, so B006 would already silence anything on it — it is here for
+    /// completeness, not as a gate. `CGameNetwork` (48 members),
+    /// `CGameCtnNetwork` (11) and `CTrackManiaNetwork` (2) are trusted lists
+    /// and are the real assertions.
+    #[test]
+    fn injected_manialink_pages_stays_silent() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CGameNetwork@ gn, CGameCtnNetwork@ net,
+                     CGameManiaPlanetNetwork@ mpn, CTrackManiaNetwork@ tmn) {
+                auto a = gn.GetManialinkPages();
+                auto b = net.GetManialinkPages();
+                auto c = mpn.GetManialinkPages();
+                auto d = tmn.GetManialinkPages();
+            }
+            "#,
+        );
+        assert!(
+            undefined_members_named(&diags, "GetManialinkPages").is_empty(),
+            "GetManialinkPages on all four registered types must be silent, got {:?}",
+            diags
+        );
+    }
+
+    /// B059, coordinator's binary-derived correction: `CGameNetwork` is the
+    /// PARENT of `CGameCtnNetwork` and is registered in its own right. The
+    /// ticket's original "`CGameCtnNetwork` and descendants" rule — and the
+    /// stale `convert_nadeo.ts` it came from — would still fire here, so
+    /// this test is what separates the two designs.
+    #[test]
+    fn injected_manialink_pages_covers_the_parent_registration() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CGameNetwork@ gn) {
+                auto pages = gn.GetManialinkPages();
+            }
+            "#,
+        );
+        assert!(
+            undefined_members_named(&diags, "GetManialinkPages").is_empty(),
+            "CGameNetwork is a registered receiver, got {:?}",
+            diags
+        );
+    }
+
+    /// B059 sibling negative: same receiver fence as `GetCurrentEntityID`,
+    /// and same arity rule.
+    #[test]
+    fn injected_manialink_pages_receiver_and_arity_fences() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CSmPlayer@ player, CGameCtnNetwork@ net) {
+                auto a = player.GetManialinkPages();
+                auto b = net.GetManialinkPages(0);
+            }
+            "#,
+        );
+        assert_eq!(
+            undefined_members_named(&diags, "GetManialinkPages").len(),
+            1,
+            "GetManialinkPages off CGameCtnNetwork must still error, got {:?}",
+            diags
+        );
+        assert_eq!(
+            arg_count_mismatches(&diags, "GetManialinkPages").len(),
+            1,
+            "1-arg GetManialinkPages must fire ArgCountMismatch, got {:?}",
+            diags
+        );
+    }
+
+    /// B059, the load-bearing half: the call must yield `uint`, not the
+    /// `Error("")` silence sentinel GH #21 uses for the void `MwAddRef`.
+    /// A sentinel would suppress the diagnostic AND mis-type `auto entId`,
+    /// which is the harder bug to notice — so assert a downstream rule that
+    /// only fires when the receiving value really is unsigned. `uint < int`
+    /// is `SignedUnsignedMismatch`; a sentinel operand is silent.
+    #[test]
+    fn injected_entity_id_returns_a_real_unsigned_value() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CSmPlayer@ player, int limit) {
+                auto entId = player.GetCurrentEntityID();
+                if (entId < limit) { print("under"); }
+            }
+            "#,
+        );
+        let hits: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(&d.kind, TypeDiagnosticKind::SignedUnsignedMismatch))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "`auto entId` must infer uint (signed/unsigned compare fires), got {:?}",
+            diags
+        );
+    }
+
+    /// B059 sibling, same load-bearing point: the call yields
+    /// `array<CGameManialinkPage@>@`, so indexing it gives a receiver whose
+    /// members are checked. `Url` is a real member (silent); a bogus name is
+    /// not. A silence sentinel would leave BOTH silent.
+    #[test]
+    fn injected_manialink_pages_returns_a_real_page_array() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CGameCtnNetwork@ net) {
+                auto pages = net.GetManialinkPages();
+                auto ok = pages[0].Url;
+                auto bad = pages[0].ZZZNoSuchPageMember;
+            }
+            "#,
+        );
+        assert!(
+            undefined_members_named(&diags, "Url").is_empty(),
+            "`Url` is a real CGameManialinkPage member, got {:?}",
+            diags
+        );
+        let bogus = undefined_members_named(&diags, "ZZZNoSuchPageMember");
+        assert_eq!(
+            bogus.len(),
+            1,
+            "array element type must be CGameManialinkPage@ and checked, got {:?}",
+            diags
+        );
+        assert!(
+            matches!(&bogus[0].kind,
+                TypeDiagnosticKind::UndefinedMember { object_type, .. }
+                    if object_type.contains("CGameManialinkPage")),
+            "element receiver type must be CGameManialinkPage, got {:?}",
+            bogus[0].kind
+        );
+    }
+
+    /// B059, DELIBERATE behaviour change beyond the ticket's scope: moving
+    /// `MwAddRef`/`MwRelease` onto the shared table means the table's arity
+    /// now applies to them. `nod.MwAddRef(1)` used to be `UndefinedMember`
+    /// and, once the name was accepted, would have gone silent — a false
+    /// NEGATIVE, since the DLL declares both as `void M()` with no
+    /// parameters and the game rejects the call. Pinned here on BOTH
+    /// universal methods and on a subclass receiver so it is inherited on
+    /// purpose rather than by accident.
+    ///
+    /// Silence for the legal 0-arg form stays covered by
+    /// `mw_addref_release_on_mwnod_stays_silent`.
+    #[test]
+    fn injected_universal_methods_wrong_arity_still_errors() {
+        let diags = check_with_typedb(
+            r#"
+            void Use(CMwNod@ nod, CGameCtnBlockInfo@ bi) {
+                nod.MwAddRef(1);
+                nod.MwRelease(1);
+                bi.MwAddRef(1, 2);
+            }
+            "#,
+        );
+        assert_eq!(
+            arg_count_mismatches(&diags, "MwAddRef").len(),
+            2,
+            "1-arg and 2-arg MwAddRef must fire ArgCountMismatch, got {:?}",
+            diags
+        );
+        assert_eq!(
+            arg_count_mismatches(&diags, "MwRelease").len(),
+            1,
+            "1-arg MwRelease must fire ArgCountMismatch, got {:?}",
+            diags
+        );
+        // The name is still accepted — this is an arity error, not a
+        // reversal of GH #21.
+        assert!(
+            undefined_members_named(&diags, "MwAddRef").is_empty()
+                && undefined_members_named(&diags, "MwRelease").is_empty(),
+            "arity checking must not re-introduce UndefinedMember, got {:?}",
+            diags
+        );
+    }
+
     // Intake 2026-08-14 (tm-control-mcp log): unary `!` on a handle —
     // game rejects with "Illegal operation on this datatype" (OP 1.29.5,
     // AsyncDispatch.as:136 `!result.Get("success", false)`).
@@ -10098,6 +10507,113 @@ mod query_tests {
         // Second statement's `x` initializer starts at offset 33.
         let ty = c.type_at_span(33).expect("x recorded");
         assert!(matches!(ty, TypeRepr::Primitive(PrimitiveType::Int)));
+    }
+
+    /// Like `check_with_recording`, but with the fixture type databases
+    /// loaded — needed for engine receivers.
+    fn check_with_recording_typedb(src: &str) -> Checker<'static> {
+        use crate::typedb::TypeIndex;
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx: &'static TypeIndex = Box::leak(Box::new(
+            TypeIndex::load(&cp, &np).expect("typedb fixtures"),
+        ));
+        let src: &'static str = Box::leak(src.to_string().into_boxed_str());
+        let mut table = SymbolTable::new();
+        let fid = table.allocate_file_id();
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        let syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
+        table.set_file_symbols(fid, syms);
+        let table: &'static SymbolTable = Box::leak(Box::new(table));
+        let scope: &'static GlobalScope<'static> =
+            Box::leak(Box::new(GlobalScope::new(table, Some(idx))));
+        let mut c = Checker::new(src, scope).with_type_recording();
+        c.check_file(&analysis.file);
+        c
+    }
+
+    /// B059: the type the RECEIVING VARIABLE ends up with, asserted
+    /// directly rather than via absence-of-diagnostic. `Error("")` — the
+    /// silence sentinel GH #21 returns for the void `MwAddRef` — would
+    /// suppress the false positive while typing `entId` wrong, so the
+    /// absence assertion alone cannot tell the fix from that regression.
+    #[test]
+    fn injected_entity_id_infers_uint_on_the_local() {
+        let src =
+            "void Use(CSmPlayer@ p) { auto entId = p.GetCurrentEntityID(); uint c = entId; }\n";
+        let c = check_with_recording_typedb(src);
+        // The `entId` READ in `uint c = entId;` — the local's inferred type.
+        let read_at = src.rfind("entId").unwrap() as u32;
+        let ty = c.type_at_span(read_at).expect("entId read recorded");
+        assert_eq!(
+            ty,
+            &TypeRepr::Primitive(PrimitiveType::Uint),
+            "auto entId must infer uint, got {:?}",
+            ty
+        );
+    }
+
+    /// B059 sibling: `GetManialinkPages` returns
+    /// `array<CGameManialinkPage@>@` — a HANDLE to an array. The ticket's
+    /// `CGameManialinkPage@[]&` spelling came from the stale convert script;
+    /// the DLL registration is the authority
+    /// (`docs/probes/openplanet-injected-methods.md`).
+    #[test]
+    fn injected_manialink_pages_infers_page_handle_array() {
+        let src = "void Use(CGameCtnNetwork@ n) { auto pages = n.GetManialinkPages(); auto c = pages; }\n";
+        let c = check_with_recording_typedb(src);
+        let read_at = src.rfind("pages").unwrap() as u32;
+        let ty = c.type_at_span(read_at).expect("pages read recorded");
+        assert_eq!(
+            ty,
+            &TypeRepr::Handle(Box::new(TypeRepr::Array(Box::new(TypeRepr::Handle(
+                Box::new(TypeRepr::Named("CGameManialinkPage".into()))
+            ))))),
+            "auto pages must infer array<CGameManialinkPage@>@, got {:?}",
+            ty
+        );
+    }
+
+    /// B059 fence: the void rows on the injected table (GH #21
+    /// `MwAddRef`/`MwRelease`) keep the silence sentinel. Promoting them to
+    /// `TypeRepr::Void` would change unrelated conversion diagnostics and is
+    /// not part of this fix.
+    #[test]
+    fn injected_void_row_keeps_the_silence_sentinel() {
+        let src = "void Use(CMwNod@ n) { auto r = n.MwAddRef(); auto c = r; }\n";
+        let c = check_with_recording_typedb(src);
+        let read_at = src.rfind(" r;").unwrap() as u32 + 1;
+        let ty = c.type_at_span(read_at).expect("r read recorded");
+        assert!(
+            ty.is_error(),
+            "void injected row must stay the silence sentinel, got {:?}",
+            ty
+        );
+    }
+
+    /// B059, the downstream consequence of returning a REAL type: member
+    /// completion reads `type_at_offset` at the byte before the `.`
+    /// (`src/server/completion.rs`), so indexing the injected call has to
+    /// resolve there too. With a silence sentinel this query returns an
+    /// error type and `net.GetManialinkPages()[0].` offers nothing.
+    #[test]
+    fn injected_manialink_pages_element_resolves_for_member_queries() {
+        let src =
+            "void Use(CGameCtnNetwork@ n) { auto p = n.GetManialinkPages(); auto q = p[0]; }\n";
+        let c = check_with_recording_typedb(src);
+        // The byte completion would query: the `]` closing the index.
+        let bracket = src.rfind("p[0]").unwrap() + 3;
+        let ty = c
+            .type_at_offset(bracket as u32)
+            .expect("indexed element recorded");
+        assert_eq!(
+            ty,
+            &TypeRepr::Handle(Box::new(TypeRepr::Named("CGameManialinkPage".into()))),
+            "indexing the injected array must yield CGameManialinkPage@, got {:?}",
+            ty
+        );
     }
 
     #[test]

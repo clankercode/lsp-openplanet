@@ -4518,3 +4518,94 @@ fn check_manifest_export_rules_follow_the_search_path_flag() {
     let _ = fs::remove_dir_all(&root);
     let _ = fs::remove_dir_all(&home);
 }
+
+/// B059: Openplanet-injected engine methods. `uint GetCurrentEntityID()` and
+/// `array<CGameManialinkPage@>@ GetManialinkPages()` are registered by the
+/// Openplanet runtime on six engine types and appear in no Nadeo dump, so
+/// B006's trusted-member-list rule fired `UndefinedMember` on calls the game
+/// compiles. The complete injected surface — recovered from Openplanet.dll
+/// 1.29.5, md5 c179218b3b24582130ef42b92a3585f6 — is documented in
+/// `docs/probes/openplanet-injected-methods.md`.
+///
+/// The fixture is deliberately half legal, half fence: silencing the legal
+/// half is the fix, and keeping the fence half loud is what stops the fix
+/// from becoming a B006 widening. On the merge-base binary all 8 lines
+/// errored; only the 4 fences may error now.
+///
+/// Ground truth from BOTH directions, which is the point — the registration
+/// surface came from static analysis of `Openplanet.dll` 1.29.5 (next,
+/// Public, 1234ad9e), and the live compiler was then asked independently so
+/// the binary reading is not the only witness.
+///
+/// RemoteBuild probe, Trackmania + Openplanet 1.29.5, 2026-08-30, this
+/// fixture: game answers 4 ERR, exactly the four fences, with the legal half
+/// silent —
+///   (41,19) No matching symbol 'GetCurrentEntityID'          [wrong receiver]
+///   (43,22) No matching symbol 'GetManialinkPages'           [wrong receiver]
+///   (45,22) No matching signatures to
+///           'CSmPlayer::GetCurrentEntityID(const int)'       [arity]
+///   (47,22) No matching symbol 'GetCurrentEntityIdd'         [typo]
+///
+/// The arity line is why `MwAddRef`/`MwRelease` joining the shared table and
+/// gaining arity checking is correct rather than scope creep: the game
+/// rejects a wrong-arity call on an injected method, and we used to be
+/// silent.
+///
+/// Return types were established in the REJECT direction rather than assumed
+/// from silence — a companion probe compiled `string s = <call>;` so the
+/// compiler had to NAME the type it refused to convert:
+///   'uint' to 'string'                        => GetCurrentEntityID -> uint
+///   'CGameManialinkPage@[]@&' to 'string'     => GetManialinkPages
+/// `CGameManialinkPage@[]@` IS `array<CGameManialinkPage@>@` in the other
+/// spelling; the trailing `&` is AngelScript rendering the expression in an
+/// error, not part of the registered declaration, which is byte-exactly
+/// `array<CGameManialinkPage@>@ GetManialinkPages()` in `.rdata`. The old
+/// `convert_nadeo.ts` said `CGameManialinkPage@[]&` — a REFERENCE to an
+/// array rather than a HANDLE to one, which is the part that was wrong.
+///
+/// That last paragraph decodes a spelling, and a decoding is an inference, so
+/// the `@` was checked directly rather than argued: a fifth probe compiled
+/// `if (net.GetManialinkPages() is null)`, which AngelScript permits only on
+/// a handle. CLEAN. The handle is real, not a reading of an error message.
+/// (It changes no behaviour either way — `parse_type_string` strips a
+/// trailing `&` as a calling-convention decoration, so both spellings give
+/// the same `Handle(Array(Handle(Named)))` — but "it wouldn't have mattered"
+/// is a thing you can only say once you know.)
+///
+/// All six receivers were confirmed by a paired discriminator: each of
+/// `CGameNetwork`, `CGameCtnNetwork`, `CGameManiaPlanetNetwork`,
+/// `CTrackManiaNetwork`, `CGamePlayer`, `CSmPlayer` accepted its real call
+/// while rejecting `ZZZNoSuchMember` with `No matching symbol`. The rejection
+/// is what makes the acceptance mean something — it proves member lookup
+/// actually runs on that receiver.
+#[test]
+fn check_command_issue_repro_b059_injected_methods_silences_only_the_legal_half() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b059-injected-methods");
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains(": error: ")).collect();
+    assert_eq!(
+        errors.len(),
+        4,
+        "only the 4 fence lines may error; stdout={stdout:?} stderr={stderr:?}"
+    );
+    // Legal half (lines 25, 27, 31, 32) — the false positives B059 removes.
+    for line in ["Main.as:25", "Main.as:27", "Main.as:31", "Main.as:32"] {
+        assert!(
+            !errors.iter().any(|l| l.contains(line)),
+            "`{line}` is a legal injected call and must be silent; stdout={stdout:?}"
+        );
+    }
+    // Fence half. Wrong receiver, wrong receiver, wrong arity, real typo.
+    for (line, needle) in [
+        ("Main.as:41", "has no member `GetCurrentEntityID`"),
+        ("Main.as:43", "has no member `GetManialinkPages`"),
+        ("Main.as:45", "expects 0 args, got 1"),
+        ("Main.as:47", "has no member `GetCurrentEntityIdd`"),
+    ] {
+        assert!(
+            errors
+                .iter()
+                .any(|l| l.contains(line) && l.contains(needle)),
+            "`{line}` must still report `{needle}`; stdout={stdout:?}"
+        );
+    }
+}
