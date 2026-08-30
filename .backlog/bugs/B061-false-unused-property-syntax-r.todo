@@ -156,3 +156,29 @@ opposite sides. B060 applies the `X` <-> `get_X` mapping where it must not (a
 property read classified as function-shaped, killing overload resolution);
 this ticket fails to apply it where it must (a property read not crediting its
 accessor as used). Solving B060 first may hand you the predicate this needs.
+
+## The shared predicate does NOT close both (measured by lane-b060-b062, 2026-08-31)
+
+The framing appended to B060 asked whether one "this expression is a property
+read" predicate fixes B060 and B061 together. **Answer: no**, established by
+measurement, not by reading.
+
+Direct evidence: with B060's fix in (`a1e8f43`), the fixture still reports
+`Ns::get_Slot`, `Ns::get_Handler` and `VNs::get_PtrP` as never used while
+reading them as `Ns::Slot` / `Ns::Handler` / `VNs::PtrP` in the same files —
+warning output byte-identical to master, 6 warnings both sides.
+
+Two structural reasons, both worth keeping:
+
+1. **Opposite polarity.** B060 asks about an *expression* ("does this syntax
+   denote a function?"), answered before any name is recorded, and its fix is
+   to STOP widening `X` -> `get_X`. B061 asks about a *name* ("which
+   declarations does this read credit?") and its fix is to ENSURE widening
+   happens. A shared helper would have to be consulted with opposite polarity
+   at each site — that is the two fixes plus indirection.
+2. **Different pipeline stages.** B060's fix is on the typed-expression path
+   (it needs `arg_ty`). B061's failure is that the namespace-qualified read
+   never reaches a recorder at all.
+
+So B061 keeps its own fix and its own red test. Do not refactor toward a
+shared predicate on the strength of the shared vocabulary.
