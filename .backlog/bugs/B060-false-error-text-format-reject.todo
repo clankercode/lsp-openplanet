@@ -1,14 +1,14 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T05:12:54Z"
 depends_on: []
 estimate_hours: 1
 id: B060
 priority: medium
+started_at: null
 status: pending
-tags:
-    - false-positive
-    - overload
+tags: []
 title: 'False error: Text::Format rejects virtual-property getters as function-shaped (uint/float)'
 updated_at: "2026-08-30T05:12:54Z"
 ---
@@ -26,3 +26,99 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found 2026-08-30 via `openplanet-lsp check` on tm-dips-plus-plus. Two error strings, one defect. The typedb already has `Text::Format(const string&in, uint)` and `Text::Format(const string&in, float)` — this is not a missing overload.
+
+## Steps to Reproduce
+
+`openplanet-lsp check` on tm-dips-plus-plus (or the one-file plugin below).
+
+Live errors:
+
+```
+src/DebugWindow.as:265:78: error: No matching signatures to 'Text::Format(const string, uint)'
+src/DebugWindow.as:269:85: error: No matching signatures to 'Text::Format(const string, uint)'
+src/DebugWindow.as:270:85: error: No matching signatures to 'Text::Format(const string, uint)'
+src/MainUI/Donations.as:24:99: error: No matching signatures to 'Text::Format(const string, float)'
+```
+
+Minimal (verified 2026-08-30 against the live binary):
+
+```angelscript
+uint get_Off() { return 1; }
+const uint16 SZ = 4;
+
+class C {
+    float last = 1.5;
+    float get_Amt() { return last; }
+}
+
+void Use() {
+    uint u = 3;
+    float f = 1.5;
+    C@ c = C();
+    Text::Format("0x%04x", u);   // silent
+    Text::Format("%.2f", f);     // silent
+    Text::Format("0x%04x", SZ);  // silent
+    Text::Format("0x%04x", Off);     // ERR: Text::Format(const string, uint)
+    Text::Format(" ($%.2f)", c.Amt); // ERR: Text::Format(const string, float)
+}
+```
+
+## Expected Behavior
+
+Silent on all five calls. A virtual property (`get_X` / `get_Amt`) used as a value is a value. The game compiles the dips++ call sites.
+
+## Actual Behavior
+
+Only the getter forms error. Locals of the same primitive type, and a `const uint16`, are accepted. So the uint/float overloads resolve; the getter expression does not bind as a value.
+
+## Why
+
+B023's `arg_is_function_shaped` asks `lookup_arg_function_sigs`, which calls `lookup_function_overloads`. That helper's `workspace_function_property_candidates` also tries `get_{name}` / `set_{name}`.
+
+So:
+
+- bare ident `Off` finds free function `get_Off` → function-shaped
+- member `c.Amt` finds method `C::get_Amt` via `lookup_method_overloads_with_inheritance` → `lookup_function_overloads("C::Amt")` → `C::get_Amt` → function-shaped
+
+A function-shaped arg into a non-funcdef parameter rejects every candidate (`check_external_overload_set`). `Text::Format`'s second param is `uint`/`float`/etc., never a funcdef, so the whole set dies and the diagnostic renders the getter's *return* type (`uint` / `float`).
+
+That is why the message looks like a missing `Text::Format` overload. It is not.
+
+`const uint16 SZ` is a variable, not a getter, so it never takes this path — which is why DebugWindow.as:266-268 (`SZ_*` / `LEN_*` uint16 consts) are silent next to :265/:269/:270 (uint getters).
+
+## Live call sites (game accepts)
+
+- tm-dips-plus-plus `src/DebugWindow.as:265,269,270` — `Text::Format("0x%04x", O_CSmPlayer_NetPacketsBuf)` and the other two `uint get_O_*` properties in `src/Dev.as`
+- tm-dips-plus-plus `src/MainUI/Donations.as:24` — `Text::Format(" ($%.2f)", cheers[i].TotalAmt)` where `float get_TotalAmt()` lives on `Donations::DonoCheerCount`
+
+## Work
+
+`arg_is_function_shaped` / `lookup_arg_function_sigs` must not treat a virtual-property *value* use as a function. `get_X` is a function when written `get_X` or `&get_X`; `X` is a value.
+
+Do not drop `get_`/`set_` from `lookup_function_overloads` wholesale — other callers (value typing, member lookup) need that. Split the candidate set, or skip `get_`/`set_` alts on the B023 function-shaped path.
+
+Do not "fix" this by silencing `Text::Format`. Any non-funcdef parameter will false-reject a getter the same way (`Math::Max(Off, 0)`, `tostring(c.Amt)`, …). `Text::Format` is just where dips++ hits it.
+
+## Test plan (TDD, red first)
+
+Red: the two getter lines in the minimal plugin above.
+
+Variants:
+
+- free-function getter (`get_Off` / `Off`) — uint, float, int, bool, string
+- class getter (`c.Amt`) — same primitives
+- namespaced class getter (`Ns::C@` / `Ns::get_X`)
+- local of the same type stays silent
+- `const` of the same type stays silent
+- actual function passed to `Text::Format` still errors (keep B023)
+- `startnew(get_Off)` / real method reference still function-shaped
+- `Text::Format("%d", u)` uint local still silent
+- a non-Format non-funcdef call with a getter arg (`Math::Max(Off, 1)`) — same FP, same fix
+
+Game probe the fixture before treating LSP silence as ground truth.
+
+## Related
+
+B023 (function-shaped args vs funcdef slots — this is that rule over-firing on virtual properties), GH #47 (`No matching signatures` render), tm-dips-plus-plus `src/DebugWindow.as` / `src/MainUI/Donations.as` / `src/Dev.as`.
