@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-30T07:43:14Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-30T07:43:14Z"
 complexity: medium
 created_at: "2026-08-29T23:06:47Z"
 depends_on: []
+duration_minutes: 0.0029925898
 estimate_hours: 1
 id: B056
 priority: high
 started_at: "2026-08-30T07:43:14Z"
-status: in_progress
+status: done
 tags: []
 title: 'Qualified engine names: LSP accepts 1010 spellings the game rejects (synthetic module prefixes, bare nested enums)'
 updated_at: "2026-08-30T07:43:14Z"
