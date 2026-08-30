@@ -20,6 +20,16 @@
 //! database do these stamps name" and "which database is actually loaded" are
 //! separately observable, and a crossed pair is a fact rather than an
 //! inference.
+//!
+//! What this file can and cannot pin, measured against half-fixes rather than
+//! assumed. Collapse the locks but keep the second read — the change that
+//! "looks complete" — and eight tests here go red. Take the second read away
+//! but leave the two locks and NONE of them do: what is left of (a) is two
+//! adjacent lock operations with no work between them, and no polling reader
+//! catches a window that narrow. The tests therefore pin (b) independently and
+//! pin (a) only as it actually shipped. (a) is closed structurally instead:
+//! the stamps live inside `TypeIndex`, so there is no second value for the
+//! server to store and nothing to split.
 
 use std::path::{Path, PathBuf};
 
@@ -547,10 +557,20 @@ async fn regenerate_reports_the_database_it_loaded_when_the_dump_moves_mid_fligh
 /// samples the exact interval the defect lives in rather than hoping to land
 /// in it. Repeated, because one sample of a window is an anecdote.
 ///
-/// Would this pass with only (b) applied? No. Sourcing the stamps from the
-/// load changes WHAT is published, not whether the index and the stamps become
-/// visible at the same instant; two locks still publish them one at a time and
-/// this reader still catches the gap.
+/// Would this pass with only (b) applied? MEASURED, AND YES — which is worth
+/// knowing rather than glossing. Against the original code this test fails on
+/// round 1 (`index holds 8001 symbols; stamps say core-stamp-B`), because the
+/// stamps published second were a whole second read of two ~800KB files and the
+/// crossing stood open for milliseconds. Take that read away but leave the two
+/// locks, and the gap shrinks to "release one lock, acquire another" with no
+/// work in between — around a hundred nanoseconds — and this reader stopped
+/// catching it in either lock order.
+///
+/// So: this pins the defect as it SHIPPED, and it does not discriminate a
+/// residual two-lock split once the stamps come out of the load. No polling
+/// test could. What closes that hole is not a better test but the shape of the
+/// fix: the stamps live inside `TypeIndex`, so the server has no second value
+/// to store and the split is unrepresentable rather than merely absent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reader_never_sees_an_index_with_another_loads_stamps() {
     let _guard = regen_barrier::lock().lock().await;
@@ -627,8 +647,12 @@ async fn a_reader_never_sees_an_index_with_another_loads_stamps() {
 /// the race it is trying to reproduce. Only the Core file moves, so every load
 /// gets a whole database (see [`GAME_OP`]).
 ///
-/// Would this pass with only (b) applied? No — two locks written in sequence
-/// can still be crossed by two publishes whatever values they carry.
+/// Would this pass with only (a) applied? Measured: no — it fails on the
+/// per-answer check, because a regeneration that probes the files after
+/// parsing them reports a version the flipper has already moved past. With
+/// only (b) applied it passes, for the reason spelled out on
+/// [`a_reader_never_sees_an_index_with_another_loads_stamps`]: the crossing
+/// two locks still permit is too narrow to be caught by racing it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_regenerations_leave_the_pair_agreeing() {
     let _guard = regen_barrier::lock().lock().await;
