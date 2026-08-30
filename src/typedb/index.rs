@@ -791,8 +791,12 @@ impl TypeIndex {
 
     /// Return every short name registered in the type/enum short-name index.
     ///
-    /// Used by "did you mean" quick-fixes to enumerate known external type and
-    /// enum names for distance comparisons. Does not include global functions.
+    /// NOT a list of spellings source may use — a short name is frequently one
+    /// the game rejects (`EMenuOrder`, `ButtonFlags`). "Did you mean" used to
+    /// draw its candidates from here and so suggested names the resolver then
+    /// flagged; it reads [`Self::source_spellings`] now (B056). What remains
+    /// is index-consistency checking, where the point is precisely to observe
+    /// the raw bucket. Does not include global functions.
     pub fn all_short_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.short_type_index.keys().cloned().collect();
         names.sort();
