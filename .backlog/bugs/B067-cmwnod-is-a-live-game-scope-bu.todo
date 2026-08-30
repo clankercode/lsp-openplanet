@@ -1,0 +1,26 @@
+---
+complexity: medium
+created_at: "2026-08-30T07:30:19Z"
+depends_on: []
+estimate_hours: 1
+id: B067
+priority: high
+status: pending
+tags: []
+title: CMwNod is a live game scope but scope_exists answers false
+updated_at: "2026-08-30T07:30:19Z"
+---
+
+# CMwNod is a live game scope but scope_exists answers false
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior

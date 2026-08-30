@@ -65,3 +65,4 @@ bugs:
     - file: B064-type-index-and-type-db-version.todo
     - file: B065-test-helpers-leak-temp-dirs-b0.todo
     - file: B066-recheck-variant-folder-guard-i.todo
+    - file: B067-cmwnod-is-a-live-game-scope-bu.todo
