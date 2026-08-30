@@ -484,3 +484,65 @@ The test passes, and would have passed either way.
   **green**. `TempPath` exists to carry the guard with the path. When a
   mechanical migration touches fixtures, the thing to hunt is not the tests
   that broke but the ones that now pass without testing anything.
+
+---
+
+## The scoping hazard: a narrowing chosen for one failure mode blinds you to another
+
+The three mechanisms above are about instruments that lie. This one is about a
+*correct* instrument pointed at a deliberately reduced population — and it is
+harder to see, because every step of the reasoning is sound.
+
+**Three instances in one day, by three different people, none caught by
+re-reading the reasoning.**
+
+1. **A re-probe narrowed to ACCEPTED rows.** B068 let a batched parse abort
+   mark rows ACCEPTED that the game never accepted. Re-measuring 742 ACCEPTED
+   rows and skipping the REJECTED ones is correct *for that defect*: a REJECT
+   is self-evidencing and cannot be fabricated by an abort. It also excluded
+   the `*::ZZZNoSuch` **control** rows — the only rows that pin what the probe
+   fixture declared. So when the harness's fixture turned out to differ from
+   the one that produced the corpus, three rows "flipped" and the run could not
+   tell a fabricated ACCEPT from a changed question. The controls were dropped
+   *because* they were redundant for the defect being hunted.
+
+2. **Two checks sharing a population.** "Does this class declare a member
+   enum?" was answered by counting the class-level named-enum array (0) and,
+   as corroboration, by asking whether any member's *type* is an enum (also
+   no). Different questions, same underlying data, and the enum in question was
+   **anonymous** — invisible to both. Agreement read as confirmation; it was one
+   measurement counted twice.
+
+3. **A one-way law blind to a wrong answer.** A sweep asserting *hover answers
+   ⇒ checker accepts* catches over-acceptance, which was the defect in hand. It
+   cannot see a **wrong-but-present** answer, which satisfies the law while
+   still being wrong. Closed separately, by a construction argument plus a
+   measurement in an adversarial workspace.
+
+**The rule.**
+
+> A narrowing chosen for one failure mode makes another invisible, and **the
+> check that would have caught it looks redundant right up until it isn't.**
+
+**Countermeasures.**
+
+- **Write down what your narrowing assumes, not just what it excludes.**
+  "REJECTs can't be fabricated" is a claim about *one* defect. State the defect
+  it is scoped to, so the next reader knows what the scope does not cover.
+- **Keep the controls even when they are redundant.** Controls are cheap and
+  they are the only rows that describe the *environment* rather than the data.
+  A run that drops its controls cannot detect that its own conditions moved.
+- **When two checks agree, name the population each read.** Two checks over one
+  population are one check. Independence comes from differing *data*, not from
+  differing questions.
+- **Ask what your assertion cannot express.** A one-way implication cannot see
+  a wrong answer on the permitted side; a count cannot see a substitution; an
+  equality cannot see that both sides are empty.
+
+**And read the source first.** Three times in that same day, the answer someone
+was deriving from live-game probes and dump arithmetic was already written in a
+doc comment: `index.rs` on class namespaces ("named or anonymous — either is
+enough", naming the disputed class), `index.rs` on the module-name scope rule,
+and `global_scope.rs` on the `Foo::` provenance ("Probed on a plugin declaring
+`namespace Foo { namespace Bar { … } }`"). Grep for the answer before building
+an instrument to discover it.
