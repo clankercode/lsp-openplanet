@@ -419,6 +419,25 @@ impl TypeIndex {
                 TypeSource::Header => {}
             }
         }
+        // Declaring `A::B` declares `A` as well, so every ANCESTOR of a
+        // scope is a scope. Without this the LSP rejected
+        // `Internal::VirtualKey` — the Core database only ever names
+        // `Internal::NadeoServices`, never `Internal` on its own — while the
+        // game accepts it, which is a false POSITIVE and the damaging
+        // direction. Probed both ways: `Internal::VirtualKey` and
+        // `NSysCfgVision::VirtualKey` compile, and each answers `Identifier
+        // 'ZZZNoSuch' is not a data type in namespace '<ancestor>' or parent`
+        // for a name that is genuinely absent, which is the reply only a
+        // scope that EXISTS gives.
+        let ancestors: Vec<String> = self
+            .scopes
+            .iter()
+            .flat_map(|path| {
+                let segments: Vec<&str> = path.split("::").collect();
+                (1..segments.len()).map(move |n| segments[..n].join("::"))
+            })
+            .collect();
+        self.scopes.extend(ancestors);
         self.scopes.remove("");
     }
 

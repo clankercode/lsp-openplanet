@@ -2189,6 +2189,52 @@ mod tests {
         }
     }
 
+    /// B052: declaring `A::B` declares `A`, so an ANCESTOR of a known scope
+    /// is a scope. The Core database only ever names `Internal::NadeoServices`
+    /// — never `Internal` alone — and the deepest engine scopes are two
+    /// segments deep, so without this the LSP rejected paths the game
+    /// compiles. That is a false POSITIVE, the damaging direction.
+    ///
+    /// Every name here was probed. The ancestors accept a global enum, and
+    /// each answers `Identifier 'ZZZNoSuch' is not a data type in namespace
+    /// '<ancestor>' or parent` for an absent name — the reply only a scope
+    /// that EXISTS gives, as against `Namespace 'X' doesn't exist.`
+    #[test]
+    fn an_ancestor_of_a_known_scope_is_a_scope() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for prefix in [
+            // Core: only `Internal::NadeoServices` is ever named.
+            "Internal",
+            "Internal::NadeoServices",
+            // Engine: ancestors of the two deepest class scopes.
+            "NSysCfgVision",
+            "NSysCfgVision::SDeferred",
+            "CHmsSolidVisCst_TmCar",
+            "CHmsSolidVisCst_TmCar::SPrestige",
+        ] {
+            assert!(
+                index.scope_exists(prefix),
+                "`{prefix}` is a scope the game resolves through"
+            );
+            let qualified = format!("{prefix}::VirtualKey");
+            assert!(
+                scope.has_enum(&qualified),
+                "the game accepts `{qualified}`; rejecting it is a false positive"
+            );
+        }
+
+        // The ancestor rule takes whole PATH prefixes, never a short name
+        // lifted out of the middle: `SDeferred` alone is not a scope and the
+        // game answers `Namespace 'SDeferred' doesn't exist.`
+        assert!(!index.scope_exists("SDeferred"));
+        assert!(!scope.has_enum("SDeferred::VirtualKey"));
+        assert!(!index.scope_exists("SPrestige"));
+        assert!(!scope.has_enum("SPrestige::VirtualKey"));
+    }
+
     /// B052 fence: the bare spellings are untouched — they are how the game
     /// wants these three written in the first place.
     #[test]
