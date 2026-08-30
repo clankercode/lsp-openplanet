@@ -170,6 +170,24 @@ indistinguishable from "I am structurally incapable of seeing it".
   hidden by a later success, but a *success never attempted* wearing a failure's
   exit code.
 
+- **A flag that was accepted, documented, and ignored.** B068's fix added a
+  `--batch` knob so a corpus could be re-measured one name per compilation
+  unit. The flag parsed, was documented as a speed control — and **both corpus
+  writers ignored it**, so `--b052 --batch 1` silently ran at 200. Found by the
+  second review pass, and it is the sharpest near-miss in this batch: the
+  re-probe exists precisely to find rows that batching corrupted, so a
+  re-probe that silently batched would have **reproduced the original defect
+  and reported no flips**. A clean bill of health, produced by the very bug
+  under investigation, on a corpus five tickets cite as ground truth. Nothing
+  about the output would have looked wrong.
+
+  **This is the add-a-guard rule in its most expensive form.** The replacement
+  measurement was broken the same way as the thing it replaced, and the only
+  reason it surfaced is that someone tested the *flag* rather than the feature.
+  When a fix introduces a switch that changes how a measurement is taken,
+  **the switch needs its own test per call site** — a knob wired to nothing is
+  indistinguishable from a knob that works, from the outside.
+
 **Countermeasure — positive control.** Before trusting a probe that reports
 absence, confirm it can see a thing you *know* is present. A staleness check
 that cannot find a file you just touched is not reporting staleness. A counter
