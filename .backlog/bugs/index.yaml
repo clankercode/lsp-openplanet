@@ -72,3 +72,4 @@ bugs:
     - file: B071-enum-type-mismatches-are-not-d.todo
     - file: B072-typeindex-load-reads-its-two-j.todo
     - file: B073-gh-38-shadowing-is-not-applied.todo
+    - file: B074-b032-env-guard-enforcement-sca.todo
