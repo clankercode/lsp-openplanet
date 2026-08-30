@@ -99,3 +99,14 @@ formats.
 B040 (manifest validation was dead code — this uses the same already-resolved
 manifest data), B061 (the other false-unused report from the same session, but
 a genuine BUG rather than an enhancement; keep them separate).
+
+## Lane decision (coordinator, 2026-08-30)
+
+Serialised last in lane `b060-b062-property-semantics`, after B060 and B061.
+Shares `src/analysis/unused.rs` with B061. **Blocked until B059 merges.**
+
+Sequenced last deliberately: B061 fixes what the unused analysis COUNTS as a
+use, this ticket changes what it treats as a ROOT. Landing the counting fix
+first means this ticket's fixture numbers are measured against correct
+counting, so a drop here is attributable to rooting rather than to the two
+changes interacting.
