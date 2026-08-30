@@ -1,5 +1,12 @@
 //! B064: a rendezvous that stops one type-DB regeneration at a time.
 //!
+//! Why test plumbing is in production code at all — read this before deleting
+//! it. Both defects B064 closed are *windows*: one between parsing the dump and
+//! a second read of the same two files, one between publishing an index and
+//! publishing its stamps. A window you cannot stop the clock inside can only be
+//! tested by racing it, and a racing test is a probabilistic one. This seam is
+//! what makes the reproductions deterministic instead.
+//!
 //! [`wait_if_armed`] sits at ONE point in
 //! [`crate::server::Backend::regenerate_type_db`]: the new index has been
 //! parsed and NOTHING has been published yet. That point exists whatever shape

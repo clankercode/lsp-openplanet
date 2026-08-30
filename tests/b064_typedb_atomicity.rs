@@ -1,8 +1,10 @@
 //! B064: the type database and the stamps that describe it must never
 //! disagree.
 //!
-//! Two INDEPENDENT defects live here, and a fix for either leaves the other
-//! standing. Each test below says which one it pins.
+//! Two defects on master, and the ticket's warning was that a fix for one
+//! would look like a fix for both. Each test below says which it pins — and
+//! the last paragraph says what half-fix runs MEASURED, which is not the same
+//! as what that framing predicted.
 //!
 //! **(a) Shared-state interleaving.** The loaded index and its stamps lived
 //! behind two separate `RwLock`s, written one after the other. A reader takes
