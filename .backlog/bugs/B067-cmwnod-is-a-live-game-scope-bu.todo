@@ -85,3 +85,79 @@ quietly widening what qualifies.
 B056 (established the module-name rule and its one exception), B052
 (ancestor-walk / scope gating), `docs/probes/b052-qualified-enum-spellings.tsv`
 (the paired-probe corpus; extend it rather than starting a new one).
+
+## MEASURED (coordinator, 2026-08-31) — this ticket's premise is WRONG
+
+Ran the class-position campaign the Work section asked for, against the live
+game (Openplanet 1.29.5 next/Public/1234ad9e). Corpus:
+`docs/probes/b067-class-position-scopes.tsv`.
+
+**`CMwNod` is not an exception. Every engine class is a live scope.**
+
+41 engine classes sampled deterministically (seed 67), spread across all 20
+modules, deliberately split between types that HAVE nested enums (`e` key, 134
+in the dump) and types that do NOT (2451). **All 41 answered SCOPE** — the
+`Identifier 'ZZZNoSuchName' is not a data type in namespace 'X' or parent`
+discriminator, not `Namespace 'X' doesn't exist.` Having nested enums makes no
+difference, so the hypothesis "a class is a scope when members are registered
+under it" is refuted: classes with nothing under them are scopes too.
+
+### The rule
+
+    X is a live scope for `X::Y`  <=>  X is a declared namespace OR X is a known data type
+
+Both halves measured, in isolated compilation units (see B068 for why that
+matters):
+
+| probe | verdict | evidence |
+|---|---|---|
+| `ZZZNoSuchClass::` | NOT a scope | `Namespace 'ZZZNoSuchClass' doesn't exist.` |
+| `MwFoundations::` `Game::` `ShootMania::` | NOT scopes | same message — confirms B056's module rule |
+| `Audio::` `Net::` `Meta::` `GameData::` | scopes | the 4 known live module scopes |
+| `CMwNod::` `CGameAction::` `CAudioListener::` | scopes | re-verified individually |
+| `string::` | scope | a VALUE type, not an engine class — so the rule is about types generally |
+| `CMwNod` / `string` in type position | ARE data types | accepted as a declaration |
+
+This is ordinary AngelScript: `Type::Nested` is scope-resolution syntax, so any
+known type name opens a scope regardless of whether anything is in it.
+
+### B056's exception SURVIVES, and is not paired with this
+
+I tested the tempting unification — "GameData is a scope because it is secretly
+a type" — and it is **false**:
+
+    Identifier 'GameData' is not a data type in global namespace
+
+Same for `Audio`, `Net`, `Meta`. So `GameData` is a scope while being neither a
+Core-declared namespace (B056) nor a data type. It remains the single
+unexplained module-position exception. The ticket's reasoning that "two
+exceptions in two positions is more likely a missing rule" was right that a
+rule was missing — but the missing rule explains `CMwNod` and every other type,
+not `GameData`.
+
+### Consequence for the fix
+
+`scope_exists` under-approximates, and in the FALSE POSITIVE direction the
+ticket correctly flags as the damaging one. It should answer true when the name
+is a **known type in the loaded index**, not only when it is a namespace. That
+is derivable from the index itself, so it satisfies "do NOT hardcode names" —
+there is nothing to hardcode.
+
+Scope note: this is `src/typedb/index.rs:707` and
+`src/typecheck/global_scope.rs:481`. `index.rs` is lane-b057's file for the
+B056 follow-up, so **this ticket stays blocked until that lane lands**, and
+whoever takes it should read lane-b057's resolution of where the
+`scope_exists(ns)` gate sits before touching it.
+
+### Honest limits
+
+- 41 of 2585 types is a sample, not a census. All 41 agreed and the mechanism
+  explains why it should be universal, but it is a sample. A census is cheap if
+  ever wanted.
+- The 41 came from one batch. That batch is trustworthy **because all 41
+  produced distinct diagnostics** — a parse abort (B068) yields zero, not some.
+  Three were re-verified in isolation regardless.
+- Measured on one install, one Openplanet build. A probe bounds behaviour, not
+  intent.
+- The follow-up run to re-verify the B052 corpus could not complete: the game
+  exited mid-run. See B068.
