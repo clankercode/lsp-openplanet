@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T06:57:36Z"
 depends_on: []
 estimate_hours: 1
 id: B066
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'recheck_variant_folder guard is always true: an explicit openplanet_dir is silently replaced by the variant probe'
@@ -24,3 +26,89 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found 2026-08-30 by codex reviewing B039, proven by experiment by the B039
+lane, and confirmed independently by the coordinator by reading the code.
+Out of B039's scope; filed separately, nothing touched.
+
+## Defect
+
+`src/config.rs:1538`:
+
+    let auto_detected = config.openplanet_dir.clone();
+    config.recheck_variant_folder(auto_detected.as_deref());
+
+and inside `recheck_variant_folder` (`src/config.rs:1897`):
+
+    // Replace the auto-detected dir only when it was the Layer-1 default
+    // (not an explicit user override).
+    if self.openplanet_dir.as_deref() == auto_detected {
+        self.openplanet_dir = Some(p);
+    }
+
+`auto_detected` is a CLONE of `config.openplanet_dir` taken immediately
+before the call, and nothing mutates `openplanet_dir` in between. **The guard
+compares the value against a copy of itself, so it is always true.**
+
+The clone is taken AFTER every config layer has applied, so by the time
+`recheck_variant_folder` runs the code can no longer tell an explicitly
+configured `openplanet_dir` from one Layer 1 auto-detected. The docstring two
+lines up states the intent it cannot implement: "Only an explicit
+`openplanet_dir` (config / init options) wins over the variant probe."
+
+## Impact (user-facing)
+
+A user who sets `openplanet_dir` explicitly AND a `game_target` whose variant
+folder differs has their explicit setting **silently replaced** by
+`$HOME/<variant>`. No warning. Their configured install is ignored in favour
+of one the tool found on its own.
+
+Demonstrated by the B039 lane: a synthetic HOME with
+`~/.config/openplanet-lsp/config.toml` setting `game_target = "MP4"` and a
+populated `$HOME/OpenplanetMP4` caused a test whose fixture pinned an EMPTY
+`openplanet_dir` to load the fake install and report
+`{"ok":true,"regenerated":4276}` — through a pin that was supposed to make
+that impossible.
+
+## Work
+
+Capture whether `openplanet_dir` was set EXPLICITLY, and pass that, rather than
+re-deriving it from a value that has already been through the ladder. The
+provenance is knowable at the point each layer applies; it is only unknowable
+at line 1538 because it was never recorded.
+
+Note B050 already installs defines together with their ORIGINS
+(`set_base_defines`) so introspection can report where a value came from. The
+same shape of answer is what this needs. Check whether that origin tracking can
+be extended rather than adding a parallel mechanism.
+
+Do NOT fix by moving the clone earlier without recording provenance — an
+earlier clone still cannot distinguish "explicitly set to the Layer-1 default"
+from "auto-detected", and those must behave differently for the docstring to
+be true.
+
+## Test plan (TDD, red first)
+
+Red: explicit `openplanet_dir = X` plus `game_target` naming a different
+variant whose folder EXISTS under $HOME -> `openplanet_dir` must stay X.
+
+Variants (per CLAUDE.md, generalize):
+- explicit dir + matching target -> unchanged (already passes; pin it)
+- explicit dir + non-matching target, variant folder EXISTS -> stays explicit
+- explicit dir + non-matching target, variant folder ABSENT -> stays explicit
+- NO explicit dir + non-matching target, folder exists -> IS re-probed (this
+  is the behaviour GH #45 wanted and it must not regress)
+- explicit dir set via init options rather than config.toml -> same protection
+- explicit dir that happens to EQUAL the Layer-1 default, non-matching target
+  -> stays put. This is the case that proves provenance is tracked rather
+  than inferred from the value, and no value-comparison fix can pass it.
+- a no-build target (MP3 / NATIONS_FOREVER) -> unchanged behaviour
+
+Hermeticity: these tests probe $HOME by construction. Pin a synthetic HOME;
+`just test-hermetic` must stay green.
+
+## Related
+
+GH #45 (introduced the variant re-probe), B039 (whose fixture this defeated —
+that fixture now pins `game_target` as a workaround, which this ticket should
+make unnecessary), B050 (define origins — precedent for provenance tracking).
