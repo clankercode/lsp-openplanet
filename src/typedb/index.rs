@@ -5069,11 +5069,17 @@ mod single_read_tests {
 
     /// The bound is real, and a quiet load does not pay for it.
     ///
-    /// Counting reads pins both halves at once: exactly one pass over the
-    /// three files when nothing moves, and exactly [`READ_ATTEMPTS`] passes
-    /// before giving up when everything does. Without this, `READ_ATTEMPTS`
-    /// could be any number — including one, which would silently remove the
-    /// retry — and every other test here would still pass.
+    /// Read the assertions below carefully, because the obvious one is
+    /// vacuous. Comparing the count against `3 * READ_ATTEMPTS` derives the
+    /// expectation from the very constant under test: set `READ_ATTEMPTS = 1`,
+    /// silently deleting the retry, and that comparison still holds. So a
+    /// literal comes first — a retry must have HAPPENED — and the derived
+    /// comparison then pins where it stopped.
+    ///
+    /// Checked, not assumed: with `READ_ATTEMPTS = 1` the literal assertion
+    /// here fires, and so does
+    /// [`a_file_caught_mid_write_is_re_read_rather_than_parsed`], which needs
+    /// a second attempt to recover.
     #[test]
     fn a_quiet_load_reads_each_file_once_and_a_moving_one_stops_at_the_bound() {
         let quiet = Fixture::new("count-quiet");
@@ -5089,7 +5095,8 @@ mod single_read_tests {
         .expect("a quiet load succeeds");
         assert_eq!(
             reads, 3,
-            "an undisturbed load re-read the database; the retry must cost nothing              when nothing moved"
+            "an undisturbed load re-read the database; the retry must cost \
+             nothing when nothing moved"
         );
 
         let moving = Fixture::new("count-moving");
@@ -5107,10 +5114,20 @@ mod single_read_tests {
                 flip = if flip == Gen::A { Gen::B } else { Gen::A };
             },
         );
+        assert!(
+            reads > 3,
+            "a database that moved under every read was never RE-read, so there \
+             is no retry at all — it was merely refused on the first pass"
+        );
+        assert!(
+            READ_ATTEMPTS >= 2,
+            "a bound below 2 is not a bounded retry, it is no retry"
+        );
         assert_eq!(
             reads,
             3 * READ_ATTEMPTS,
-            "a database that never settles must be retried exactly {READ_ATTEMPTS}              times and then give up — an unbounded retry hangs `initialize`"
+            "a database that never settles must stop at the bound; an unbounded \
+             retry turns a churning dump into a hang inside `initialize`"
         );
     }
 
