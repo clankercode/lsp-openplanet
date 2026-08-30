@@ -1,17 +1,18 @@
 ---
+claimed_at: "2026-08-30T05:12:33Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T15:06:17Z"
 depends_on: []
 estimate_hours: 2
 id: B039
 priority: medium
-status: pending
-tags:
-    - lsp
-    - vscode-ext
-    - dead-code
+started_at: "2026-08-30T05:12:33Z"
+status: in_progress
+tags: []
 title: openplanet.regenerateTypeDb is advertised by the server but unreachable from any client
-updated_at: "2026-08-29T15:06:17Z"
+updated_at: "2026-08-30T05:12:33Z"
 ---
 Found by a coordinator feature-gap review, 2026-08-30. Verified on master
 @ 91a296c. Pre-existing.
