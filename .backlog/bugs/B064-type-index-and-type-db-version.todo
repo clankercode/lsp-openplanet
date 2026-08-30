@@ -85,3 +85,30 @@ Variants:
 
 B039 (introduced `type_db_versions`; the lane disclosed this rather than
 shipping it silently), GH #59 (naming the loaded build in the log).
+
+## Correction to the analysis above (coordinator, 2026-08-30)
+
+The B039 lane found the fact that removes `just add a mutex` as an apparent
+option, and it changes the ticket.
+
+**This is not purely a concurrency bug.** `TypeIndex` does not retain the
+stamps it parsed, which is why `after` has to be a SECOND read of the same
+files rather than a value carried out of the load. So the pair can tear on a
+SINGLE THREAD: if the dump is rewritten between the load and the probe, the
+stamps describe a different database than the one in memory, with no
+concurrency involved at all.
+
+Consequences:
+
+- Serialising the two writes fixes nothing, and neither does one lock over
+  both, if the stamps are still obtained by re-reading the file afterwards.
+  Both would produce a confident 'fixed' commit that leaves the defect.
+- The real fix is to make `TypeIndex::load` RETURN the stamps it parsed —
+  the load already reads those bytes — so the stamps are a product of the same
+  read that produced the index, and then to store index and stamps together.
+  The single lock is necessary but not sufficient; sourcing the stamps from
+  the load is the part that actually closes it.
+
+The original `do not fix by ordering the two write locks` warning still
+stands, and this is the stronger form of the same point: every lock-shaped fix
+addresses the visible symptom rather than the mechanism.
