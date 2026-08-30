@@ -23,9 +23,16 @@ compiler's own text, unedited.
   Filter `b052-qualified-enum-spellings.tsv` for `REJECTED`; most are the
   synthetic Nadeo module prefix (`Game::CGameCtnApp`) or a bare nested-enum
   name (`EMenuOrder`).
-- **B057** — 2373 bare value names the LSP accepts and the game answers
-  `No matching symbol` for. Filter `b053-bare-enum-values.tsv` for
-  `verdict == NO_SYMBOL`.
+- **B057** (landed) — the 2373 bare value names the LSP used to accept and the
+  game answers `No matching symbol` for. Filter `b053-bare-enum-values.tsv`
+  for `verdict == NO_SYMBOL`.
+
+  **`b053-bare-enum-values.tsv` is now read by the test suite, not only by
+  people.** `global_scope::tests::every_probed_bare_value_matches_the_games_verdict`
+  parses every row and asserts the crate's answer matches the game's, so the
+  file is load-bearing for `cargo test`: editing a verdict, a value name or the
+  row count changes what the suite demands. Re-probe before you edit it, and
+  say so in the commit.
 
 ## Regenerating
 

@@ -28,9 +28,16 @@ const NARROWED: [&str; 4] = [
     "Text_Icon",
 ];
 
-/// Also a value of the NAMED `Game::CGameManialinkControl::EAlignVertical`,
-/// so a bare reference to it is legitimate and must keep resolving.
-const SHARED_WITH_NAMED_ENUM: &str = "VCenter2";
+/// Also a value of the GLOBALLY VISIBLE `EGxTexAddress`, so a bare reference
+/// to it is legitimate and must keep resolving. B044 used `VCenter2` here,
+/// which is shared with a merely *named* (nested) enum; the exhaustive probe
+/// answered `No matching symbol 'VCenter2'`, so B057 moved this fence onto a
+/// name the game actually accepts.
+const SHARED_WITH_GLOBAL_ENUM: &str = "Border";
+
+/// Shared with a NESTED named enum only. The game rejects it, so it belongs
+/// on the narrowed side now — see `docs/probes/b053-bare-enum-values.tsv`.
+const SHARED_WITH_NESTED_ENUM: &str = "VCenter2";
 
 fn fixture_index() -> TypeIndex {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
@@ -88,7 +95,7 @@ fn hover_does_not_describe_a_bare_anonymous_enum_value() {
         // checker flags it undefined on the very same bytes. Observed
         // production text is "(local) <error:HyperTnL> HyperTnL" — the
         // unresolved sentinel carries the name. (A name that DOES resolve
-        // but has no stored value type reads "(local) <error> VCenter2";
+        // but has no stored value type reads "(local) <error> Border";
         // improving that display is hover's own ticket, not this one.)
         assert!(
             text.is_empty() || text.contains("error"),
@@ -164,23 +171,31 @@ fn shortcut_completion_still_offers_a_named_enums_values() {
     );
 }
 
-/// Fence: a value that ALSO belongs to a named enum is not narrowed anywhere.
-/// `VCenter2` is a value of the anonymous `Control::CControlBase::AlignVertical`
-/// AND of the named `Game::CGameManialinkControl::EAlignVertical`, so the
-/// checker keeps resolving it — the property this whole change turns on.
+/// Fence: a value that ALSO belongs to a GLOBALLY VISIBLE enum is not
+/// narrowed anywhere. `Border` is a value of an anonymous member enum AND of
+/// the global `EGxTexAddress`, so the checker keeps resolving it — the
+/// property this whole change turns on.
+///
+/// The negative half is B057's correction: `VCenter2` is shared with the
+/// NESTED `Game::CGameManialinkControl::EAlignVertical`, which puts nothing
+/// in the global value scope, and the game answers `No matching symbol`.
 #[test]
-fn a_value_shared_with_a_named_enum_still_resolves() {
+fn a_value_shared_with_a_global_enum_still_resolves() {
     let index = fixture_index();
     let snap = snapshot("void f() {}\n");
     let scope = GlobalScope::new(snap.symbols(), Some(&index));
     assert!(
-        scope.has_global_ident(SHARED_WITH_NAMED_ENUM),
-        "`{SHARED_WITH_NAMED_ENUM}` is a NAMED enum's value and must keep resolving"
+        scope.has_global_ident(SHARED_WITH_GLOBAL_ENUM),
+        "`{SHARED_WITH_GLOBAL_ENUM}` is a globally visible enum's value and must keep resolving"
+    );
+    assert!(
+        !scope.has_global_ident(SHARED_WITH_NESTED_ENUM),
+        "`{SHARED_WITH_NESTED_ENUM}` is only a nested enum's value; the game rejects it"
     );
     for name in NARROWED {
         assert!(
             !scope.has_global_ident(name),
-            "`{name}` belongs to no named enum and must not resolve"
+            "`{name}` belongs to no globally visible enum and must not resolve"
         );
     }
 }

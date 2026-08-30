@@ -533,10 +533,11 @@ impl<'a> GlobalScope<'a> {
     /// common AngelScript case where bare enum-value names (`Red` rather
     /// than `Color::Red`) are sometimes usable without a qualifier.
     ///
-    /// The external enum-value fallback covers *named* enums only (B044):
-    /// an inline member enum the engine dump leaves unnamed cannot be
-    /// spelled in source, so a bare name that is only one of its values is
-    /// not a symbol — the game answers `No matching symbol`.
+    /// The external enum-value fallback covers *globally visible* enums only
+    /// (B057, generalising B044): a nested, namespaced or anonymous engine
+    /// enum does not put its values in the global value scope, so a bare
+    /// name that is only one of those is not a symbol — the game answers
+    /// `No matching symbol`.
     pub fn has_global_ident(&self, name: &str) -> bool {
         if self.has_type(name) || self.has_function(name) || self.has_enum(name) {
             return true;
@@ -563,45 +564,54 @@ impl<'a> GlobalScope<'a> {
                 return true;
             }
         }
-        // External index: scan known enums for a matching bare value name.
-        // This is linear in enum count but enums are small and this only
-        // runs on identifiers that failed every earlier check.
+        // External index: is `name` a bare value of a GLOBALLY VISIBLE engine
+        // enum? Those are the only enums whose values AngelScript puts in the
+        // global value scope, so this is the last way a bare identifier can
+        // be a symbol.
         //
-        // B044: `source_enums_iter`, NOT `enums_iter` — only an enum source
-        // can NAME contributes its values here. An inline member enum the
-        // engine dump leaves unnamed has no name in the game either, so no
-        // source can reach its values except through the declaring member's
-        // type; a bare value name of one is not a symbol. Game ground truth,
-        // RemoteBuild probe, OP 1.29.5, on the exhaustive fixture
-        // `tests/fixtures/issue-repros/b044-anon-enum-value-names`:
-        // `No matching symbol 'HyperTnL'` and 257 siblings — all 258 of its
-        // names, with no residual. The 3 the game accepted (`DoubleJump`,
-        // `Jump`, `TechJump`) were never anonymous-only: they belong to the
-        // module-level enum `ESceneCharVisNotice`, which only `Openplanet.h`
-        // names. B046 taught the loader to read it, and they left this set.
+        // B057: `global_enum_value_owners`, NOT a scan over
+        // `source_enums_iter`. Being *named* is what lets source write the
+        // enum's own name; it is not what makes the enum's values reachable
+        // without a qualifier. An enum is globally visible iff its index key
+        // is depth <= 1 with the loader's synthetic module prefix stripped —
+        // see `TypeIndex::enum_is_global`, which owns that rule. A nested
+        // enum (`Game::CGameCtnBlock::ECardinalDirections`) and a namespaced
+        // Core enum (`UI::Cond`) never are, and neither contributes a bare
+        // name.
         //
-        // This is the whole seam. Two things keep it from over-rejecting:
-        //   * a value name that ALSO appears in a named enum is still found
-        //     on that enum (`VCenter2` lives in an anonymous enum *and* in
-        //     `Game::CGameManialinkControl::EAlignVertical`), and
-        //   * every other way a name can be global — type, function, virtual
-        //     property, workspace variable or enum value — was already tried
-        //     above, so a name that merely collides with an anonymous enum
-        //     value keeps resolving through its real declaration.
+        // Game ground truth, and it is exhaustive rather than sampled: all
+        // 2989 bare value names of the shipped DB's named enums were
+        // submitted to the live compiler (RemoteBuild, Trackmania +
+        // Openplanet 1.29.5, 2026-08-30) and the verdicts are committed at
+        // `docs/probes/b053-bare-enum-values.tsv`. The scan this replaced
+        // accepted 2373 names the game answers `No matching symbol` for —
+        // `North`, `Appearing`, `HyperTnL`'s named siblings, and so on.
+        // `every_probed_bare_value_matches_the_games_verdict` checks every
+        // row of that corpus against this call.
         //
-        // Member access is unaffected: `lookup_member_enum` reaches an
-        // anonymous enum by its declaring context, never through this scan.
+        // Two or more owners is NOT a rejection here: the name is a symbol,
+        // and the compiler's refusal to choose between them is B053's
+        // separate `AmbiguousEnumValue` diagnostic, raised by the checker
+        // before it ever reaches this lookup.
         //
-        // Deliberately deferred by B016, which was forbidden to tighten any
-        // rule: pre-B016 only the 14 anonymous enums that won their module's
-        // key collision had their values accepted here, so filtering would
-        // have turned 5 identifiers into fresh errors on a data-loss fix.
-        // B044 is that tightening, with the game probe behind it.
+        // B044 is subsumed, not undone. An anonymous enum has no name for
+        // `enum_is_global` to place, so it is not globally visible and its
+        // values still contribute nothing — the 258 anonymous-only names of
+        // `tests/fixtures/issue-repros/b044-anon-enum-value-names` stay
+        // rejected, now as a corollary of a wider rule instead of a rule of
+        // their own.
+        //
+        // What keeps this from over-rejecting is unchanged: every other way
+        // a name can be global — type, function, virtual property, workspace
+        // variable or enum value — was already tried above, so a name that
+        // merely collides with a non-global enum value keeps resolving
+        // through its real declaration.
+        //
+        // Member access is unaffected: `lookup_member_enum` reaches a nested
+        // or anonymous enum by its declaring context, never through here.
         if let Some(ext) = self.external {
-            for (_, en) in ext.source_enums_iter() {
-                if en.values.iter().any(|(v, _)| v == name) {
-                    return true;
-                }
+            if !ext.global_enum_value_owners(name).is_empty() {
+                return true;
             }
         }
         false
@@ -1867,25 +1877,30 @@ mod tests {
         }
     }
 
-    /// B044: the change's effect set, pinned against the shipped type DB.
+    /// B044's effect set, pinned against the shipped type DB, and B057's
+    /// correction to the half of it that was over-general.
     ///
-    /// The narrowing can only ever touch a value name that belongs to an
-    /// anonymous enum and to NO named one — every other name reaches
-    /// `has_global_ident` through a lookup that runs before the enum scan, or
-    /// through the scan's surviving named half. This asserts both halves over
-    /// the whole DB rather than over hand-picked names, so a regression
-    /// anywhere in the enum index shows up here.
+    /// B044 could see only the anonymous/named split, so it asserted two
+    /// halves: the 258 names reachable ONLY through an anonymous enum are
+    /// rejected, and every NAMED enum's value keeps resolving. The first
+    /// half still holds and is checked below unchanged — the game rejects
+    /// all 258, with no residual. The second half did not: the exhaustive
+    /// probe (`docs/probes/b053-bare-enum-values.tsv`) found the game
+    /// rejecting 2373 named-enum value names, because what puts a value in
+    /// the global scope is the enum's VISIBILITY, not its having a name.
+    /// B057 replaced that half with the assertion below, and
+    /// `every_probed_bare_value_matches_the_games_verdict` is where the full
+    /// rule is checked against the game.
     ///
-    /// 258 is the exact size of that set, and it is the list
+    /// 258 is the exact size of the anonymous-only set, and it is the list
     /// `scripts/gen_b044_probe.py` generates and the game was probed against.
     /// Refreshing the type DB moves it: regenerate the fixture and re-probe.
     ///
     /// It was 261 until B046. `ESceneCharVisNotice` is a module-level enum
     /// no dump member is typed by, so only `Openplanet.h` names it; once the
     /// loader reads the header, its 3 values that the game accepts
-    /// (`DoubleJump`, `Jump`, `TechJump`) land in the NAMED half and leave
-    /// the narrowed set. The narrowing itself is unchanged — the enum they
-    /// belong to stopped being invisible.
+    /// (`DoubleJump`, `Jump`, `TechJump`) land in the globally visible half
+    /// and leave the narrowed set.
     #[test]
     fn the_narrowing_touches_only_anonymous_only_value_names() {
         use std::collections::HashSet;
@@ -1911,12 +1926,27 @@ mod tests {
             "fixture guard: the DB must carry both kinds of enum"
         );
 
+        // B057: a GLOBALLY VISIBLE enum's value keeps resolving — that is
+        // the surviving half of the scan, and it is what stops the narrowing
+        // from swallowing the 592 names the game accepts and the 22 it calls
+        // ambiguous.
+        let mut global = 0usize;
         for value in &named {
+            if index.global_enum_value_owners(value).is_empty() {
+                continue;
+            }
+            global += 1;
             assert!(
                 scope.has_global_ident(value),
-                "`{value}` is a NAMED enum's value and must keep resolving"
+                "`{value}` is a globally visible enum's value and must keep \
+                 resolving"
             );
         }
+        assert!(
+            global > 500,
+            "fixture guard: the DB must carry a substantial globally visible \
+             set, got {global}"
+        );
 
         let mut narrowed: Vec<&str> = anonymous.difference(&named).copied().collect();
         narrowed.sort_unstable();
@@ -1961,34 +1991,72 @@ mod tests {
         names
     }
 
-    /// B044 fence: a value name that ALSO appears in a NAMED enum keeps
-    /// resolving. `VCenter2` is a value of the anonymous
-    /// `Control::CControlBase::AlignVertical` and of the named
-    /// `Game::CGameManialinkControl::EAlignVertical`, and a bare reference to
-    /// it is legitimate in-game.
+    /// B057 fence, correcting B044's: a value name that also appears in a
+    /// GLOBALLY VISIBLE enum keeps resolving. Sharing a name with a merely
+    /// *named* enum is not enough, and the game is the one that says so.
+    ///
+    /// B044 pinned this with `VCenter2` — shared between the anonymous
+    /// `Control::CControlBase::AlignVertical` and the named
+    /// `Game::CGameManialinkControl::EAlignVertical` — and asserted it
+    /// resolved. The probe answered `No matching symbol 'VCenter2'`: the
+    /// enum it is shared with is NESTED, so it never put the name in the
+    /// global scope. Both directions are pinned here now, on the 32 names
+    /// the DB shares between an anonymous enum and a global one.
     #[test]
-    fn bare_value_shared_with_a_named_enum_still_resolves() {
+    fn bare_value_shared_with_a_global_enum_still_resolves() {
         let index = typedb_fixture_index();
         let ws = SymbolTable::new();
         let scope = GlobalScope::new(&ws, Some(&index));
 
-        let named = "Game::CGameManialinkControl::EAlignVertical";
-        assert!(
-            index
-                .lookup_source_enum(named)
-                .is_some_and(|info| info.values.iter().any(|(v, _)| v == "VCenter2")),
-            "fixture guard: the named enum must still carry `VCenter2`"
-        );
-        assert!(
+        let is_anonymous_value = |value: &str| {
             index
                 .enums_iter()
-                .any(|(_, info)| info.anonymous
-                    && info.values.iter().any(|(v, _)| v == "VCenter2")),
+                .any(|(_, info)| info.anonymous && info.values.iter().any(|(v, _)| v == value))
+        };
+
+        // Shared with a GLOBAL enum → resolves. `Border` and `Jump` are game
+        // ACCEPTED, `Medium` and `None` are game AMBIGUOUS — both are
+        // symbols, and only the second pair reaches B053's diagnostic.
+        for (value, owner) in [
+            ("Border", "EGxTexAddress"),
+            ("Jump", "ESceneCharVisNotice"),
+            ("Medium", "EPlugRoadDensity"),
+            ("None", "EGameItemWaypointType"),
+        ] {
+            assert!(
+                is_anonymous_value(value),
+                "fixture guard: `{value}` must also be an anonymous enum value"
+            );
+            assert!(
+                index
+                    .global_enum_value_owners(value)
+                    .iter()
+                    .any(|o| o == owner),
+                "fixture guard: the global `{owner}` must carry `{value}`"
+            );
+            assert!(
+                scope.has_global_ident(value),
+                "`{value}` is shared with a globally visible enum and must \
+                 keep resolving"
+            );
+        }
+
+        // Shared with a merely NAMED enum → does not. This is the case B044
+        // got wrong; the game's answer is `No matching symbol 'VCenter2'`.
+        let nested = "Game::CGameManialinkControl::EAlignVertical";
+        assert!(
+            index
+                .lookup_source_enum(nested)
+                .is_some_and(|info| info.values.iter().any(|(v, _)| v == "VCenter2")),
+            "fixture guard: the named nested enum must still carry `VCenter2`"
+        );
+        assert!(
+            is_anonymous_value("VCenter2"),
             "fixture guard: `VCenter2` must also be an anonymous enum value"
         );
         assert!(
-            scope.has_global_ident("VCenter2"),
-            "a value shared with a named enum must keep resolving"
+            !scope.has_global_ident("VCenter2"),
+            "`{nested}` is nested, so it does not make `VCenter2` a symbol"
         );
     }
 
@@ -2826,10 +2894,19 @@ mod tests {
         );
     }
 
-    /// B044 fence: the values of a NAMED nested enum are untouched by the
-    /// narrowing, bare or qualified.
+    /// B057: the values of a NAMED but NOT globally visible enum are not
+    /// symbols. Being named is what lets source write the enum's own NAME;
+    /// it is not what puts the enum's values in the global value scope.
+    ///
+    /// This replaces the B044 fence `named_nested_enum_values_still_resolve_bare`,
+    /// which asserted the opposite for this very enum. B044 could only see
+    /// the anonymous/named split and generalised from it; the exhaustive
+    /// probe of all 2989 bare value names (`docs/probes/b053-bare-enum-values.tsv`)
+    /// showed the split that actually governs is global visibility. The game
+    /// answers `No matching symbol 'North'` — and the same for `East`,
+    /// `South` and `West` — for the nested enum this test used to pin.
     #[test]
-    fn named_nested_enum_values_still_resolve_bare() {
+    fn named_nested_enum_values_do_not_resolve_bare() {
         let index = typedb_fixture_index();
         let ws = SymbolTable::new();
         let scope = GlobalScope::new(&ws, Some(&index));
@@ -2843,12 +2920,175 @@ mod tests {
             .map(|(v, _)| v.clone())
             .collect();
         assert!(!values.is_empty(), "fixture guard: it must carry values");
+        // The enum's own name stays writable — the narrowing is about the
+        // enum's VALUES entering the global value scope, not about the enum
+        // disappearing from the type index.
+        assert!(
+            index.lookup_source_enum(named).is_some(),
+            "the nested enum itself stays indexed"
+        );
         for value in &values {
             assert!(
-                scope.has_global_ident(value),
-                "`{value}` is a named enum's value and must keep resolving"
+                !scope.has_global_ident(value),
+                "`{value}` belongs to a nested enum; the game answers \
+                 `No matching symbol`"
             );
         }
+    }
+
+    /// B057: a namespaced Core enum's values are not symbols either — the
+    /// same rule, reached through the other branch of `enum_is_global`.
+    ///
+    /// `UI::Cond` is named, source-writable and namespaced. The game rejects
+    /// the four values only it carries (`No matching symbol 'Appearing'`,
+    /// and likewise `Always`, `Once`, `FirstUseEver`); it also rejects
+    /// `UI::Appearing`, because value lookup does not walk ancestor scopes
+    /// the way type lookup does. See the README's third trap.
+    ///
+    /// Its fifth value, `None`, keeps resolving — fifteen globally visible
+    /// enums carry it, so the game answers `Found multiple matching enum
+    /// values` rather than `No matching symbol`. That is the fence: the
+    /// narrowing is a statement about which ENUM a name reaches the scope
+    /// through, never about the name.
+    #[test]
+    fn namespaced_core_enum_values_do_not_resolve_bare() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let named = "UI::Cond";
+        let info = index
+            .lookup_source_enum(named)
+            .expect("fixture guard: the namespaced Core enum must exist");
+        assert!(!info.anonymous, "fixture guard: it is source-writable");
+        let values: Vec<&str> = info.values.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(
+            values,
+            ["None", "Always", "Once", "FirstUseEver", "Appearing"],
+            "fixture guard: `UI::Cond`'s values changed — re-read the corpus"
+        );
+
+        for value in ["Always", "Once", "FirstUseEver", "Appearing"] {
+            assert!(
+                index.global_enum_value_owners(value).is_empty(),
+                "fixture guard: only `{named}` carries `{value}`"
+            );
+            assert!(
+                !scope.has_global_ident(value),
+                "`{value}` belongs to the namespaced `{named}`; the game \
+                 answers `No matching symbol`"
+            );
+        }
+        assert!(
+            scope.has_global_ident("None"),
+            "`None` is carried by globally visible enums too and must keep \
+             resolving — the game reports ambiguity, not an unknown symbol"
+        );
+        assert!(
+            !index
+                .global_enum_value_owners("None")
+                .iter()
+                .any(|o| o == "Cond"),
+            "`UI::Cond` is namespaced, so it is not what makes `None` visible"
+        );
+    }
+
+    /// B057: the whole rule, checked against the live game's own verdict on
+    /// every bare value name in the shipped type DB.
+    ///
+    /// `docs/probes/b053-bare-enum-values.tsv` is the compiler's verbatim
+    /// answer for all 2989 bare value names of the DB's named enums
+    /// (RemoteBuild, Trackmania + Openplanet 1.29.5, 2026-08-30). This is
+    /// the gate the ticket asks for: no name may change status without a
+    /// recorded game verdict behind it.
+    ///
+    /// The mapping from verdict to `has_global_ident`:
+    ///
+    /// * `ACCEPTED`  (592) → true. Exactly one globally visible enum carries it.
+    /// * `AMBIGUOUS` ( 22) → true. Two or more do; the name IS a symbol, and
+    ///   the refusal to choose is B053's separate diagnostic. Answering
+    ///   false here would report `undefined identifier` for a name the
+    ///   compiler can see perfectly well.
+    /// * `NO_SYMBOL` (2373) → false. This ticket's effect set.
+    /// * `OTHER`     (  2) → decided per name, because neither reached the
+    ///   engine's enums in the game either. Both are named below with the
+    ///   compiler's own words; the corpus is asserted to contain no third.
+    #[test]
+    fn every_probed_bare_value_matches_the_games_verdict() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let corpus = b053_probe_corpus();
+        assert_eq!(
+            corpus.len(),
+            2989,
+            "the probe corpus changed size — re-probe the game before \
+             touching this rule"
+        );
+
+        let mut wrong: Vec<String> = Vec::new();
+        let mut counts = std::collections::BTreeMap::new();
+        for (value, verdict) in &corpus {
+            *counts.entry(verdict.as_str()).or_insert(0usize) += 1;
+            let expected = match verdict.as_str() {
+                "NO_SYMBOL" => false,
+                "ACCEPTED" | "AMBIGUOUS" => true,
+                // The probe plugin's own `Main()` entry point answered, not
+                // the engine — hence a conversion error rather than `No
+                // matching symbol`. An empty workspace declares no `Main`,
+                // so `false` is the honest answer here; a real plugin's
+                // `Main()` is found by the function lookup at the top of
+                // `has_global_ident`, well before any enum.
+                "OTHER" if value == "Main" => false,
+                // `Expression 'RGBAColor' is a data type` — the game's own
+                // words. It is a Core TYPE, and the type lookup answers
+                // first here exactly as it does in-game.
+                "OTHER" if value == "RGBAColor" => true,
+                "OTHER" => panic!(
+                    "`{value}` is a new OTHER residual — read the game's \
+                     message in the corpus and decide it explicitly"
+                ),
+                other => panic!("unknown verdict `{other}` for `{value}`"),
+            };
+            if scope.has_global_ident(value) != expected {
+                wrong.push(format!("{value} ({verdict})"));
+            }
+        }
+        assert_eq!(
+            counts.get("NO_SYMBOL").copied().unwrap_or(0),
+            2373,
+            "the corpus no longer carries the 2373 rejects the ticket cites"
+        );
+        assert_eq!(
+            counts.get("OTHER").copied().unwrap_or(0),
+            2,
+            "the corpus has a residual the arms above do not name"
+        );
+        assert!(
+            wrong.is_empty(),
+            "{} of {} probed names disagree with the game: {:?}",
+            wrong.len(),
+            corpus.len(),
+            &wrong[..wrong.len().min(25)]
+        );
+    }
+
+    /// `(value, verdict)` for every row of the committed B053 probe corpus.
+    fn b053_probe_corpus() -> Vec<(String, String)> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/probes/b053-bare-enum-values.tsv");
+        let text = std::fs::read_to_string(&path).expect("the probe corpus must be committed");
+        text.lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .skip(1) // column header
+            .map(|line| {
+                let mut cols = line.split('\t');
+                let value = cols.next().expect("a value column").to_string();
+                let verdict = cols.next().expect("a verdict column").to_string();
+                (value, verdict)
+            })
+            .collect()
     }
 
     /// B044 fence: a name that collides with an anonymous enum value but has
