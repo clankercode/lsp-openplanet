@@ -80,3 +80,21 @@ the comment on `GAME_OP`.
 ## Related
 
 B064 (fixed the stamps and the lock split; this is the load's own read split).
+
+## Filing note (coordinator, 2026-08-31)
+
+Filed on behalf of lane-b064, which found this while fixing B064 and correctly
+declined to file it from a worktree — `bl` refuses mutating commands outside
+the main checkout, and writing into the main checkout while other lanes are
+live is the right thing to avoid. Body above is that lane's text verbatim.
+
+**Do not start this before B064 merges.** It lives in the same function B064
+restructures (`TypeIndex::load_with_header`, `src/typedb/index.rs`) and its red
+test builds on `tests/b064_typedb_atomicity.rs`, which B064 introduces.
+
+Worth preserving from the lane's note: that test file deliberately holds the
+GAME dump CONSTANT across its two versions specifically to keep this defect out
+of B064's scope. Whoever takes B072 must change that, and should read the
+comment on `GAME_OP` before doing so — the constancy is load-bearing for B064's
+own tests, so this ticket needs its own fixture rather than a mutation of that
+one.
