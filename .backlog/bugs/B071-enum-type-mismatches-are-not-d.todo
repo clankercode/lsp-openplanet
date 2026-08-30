@@ -171,3 +171,63 @@ close together; if it is not, this is another site needing the same diagnostic.
 See also B076 (a funcdef handle accepts a function whose RETURN type differs) —
 found in the same grep sweep, same "type equivalence is not fully checked"
 family, but a distinct defect.
+
+## GAME PROBED (coordinator, 2026-08-31) — four of five rows are real, one row CLOSES
+
+The game came back up. Every row in this ticket now has a live compiler
+verdict. Each fixture was compiled as its OWN unit (never batched — B068).
+Controls ran in the same session: a must-be-clean fixture returned CLEAN and a
+must-error fixture returned `Identifier 'ZZZNoSuchType' is not a data type`,
+so the oracle discriminates in both directions.
+
+| row | game verdict | engine message |
+|---|---|---|
+| enum A -> enum B (engine) | REJECT | `Can't implicitly convert from 'EDummyCollectionIdent' to 'EGhostNameLogoType'.` |
+| enum A -> enum B (workspace) | REJECT | `Can't implicitly convert from 'LocalOne' to 'LocalTwo'.` |
+| enum -> int (workspace) | CLEAN | — |
+| enum -> int (engine) | CLEAN | — |
+| int -> enum (engine) | REJECT | `Can't implicitly convert from 'int' to 'VirtualKey'.` |
+| bad member, engine enum | REJECT | `No matching symbol 'VirtualKey::ZZZNotAValue'` |
+| bad member, workspace enum | REJECT | `No matching symbol 'LocalOne::ZZZNotAValue'` |
+
+**ROW 2 CLOSES. `enum -> int` is LEGAL and the LSP's silence is CORRECT.**
+Do not implement a diagnostic for it. The ticket suspected this; it is now
+measured rather than assumed.
+
+**The other four rows are genuine missing diagnostics.** The implicit-conversion
+story that made row 2 legal does NOT extend to them — the engine rejects
+enum->enum in both directions of provenance, rejects int->enum, and rejects a
+member that was never declared on either an engine or a workspace enum.
+
+**A confound in the first pass, and how it was cleared — read this before
+trusting the row-2 result.** My first fixtures used `EDummyCollectionIdent::Undefined`,
+which DOES NOT EXIST in the live game: rows 1, 2 and 4 all carried a stray
+`No matching symbol 'EDummyCollectionIdent::Undefined'`. That does not disturb
+the REJECT rows — an error appeared, and an error is self-evidencing. It is
+fatal for row 2, whose conclusion is drawn from the ABSENCE of an error, which
+is exactly the direction that fails silently.
+
+Row 2 was therefore re-measured three ways:
+
+1. `r2s`: `VirtualKey a = VirtualKey::A;` alone -> CLEAN. This is the
+   anti-vacuity guard: it proves the fixture reaches the typechecker at all,
+   so a later CLEAN means 'accepted', not 'never looked'.
+2. `r2w`: workspace enum -> int, zero engine dependency -> CLEAN.
+3. `r2e`: verified-real engine enum -> int -> CLEAN.
+
+`VirtualKey::A` was taken from `docs/probes/b053-bare-enum-values.tsv`, where
+it is already recorded as a live-game ACCEPT — a known-good value rather than
+a guessed one. Rows 3 and 4 were also re-run against `VirtualKey` so that no
+surviving conclusion rests on the bad-value fixture.
+
+**Use the engine's own wording for the new diagnostics.** `Can't implicitly
+convert from 'A' to 'B'.` and `No matching symbol 'E::V'` — matching the
+engine's text is what lets a user searching an error string find both tools.
+
+**The recommended split in the section above still stands and is now stronger.**
+The workspace undeclared-member case needs no engine knowledge and can be
+implemented first; the game has now confirmed the engine agrees, so that half
+carries no residual risk.
+
+Probe fixtures were staged outside the repo; `issue_repro_game.py` unloads and
+removes each one (leave-as-found). Nothing was added to tests/fixtures/.
