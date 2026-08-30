@@ -382,6 +382,32 @@ The test passes, and would have passed either way.
     cheap-feeling move — patch it and ship without re-review — is the one with
     the worst record.
 
+- **Silence can mean "cannot tell", not "yes" — and a test that reads it as
+  assent asserts the opposite of what it claims.** A capstone test drove
+  completion and the checker end-to-end and asserted the two agree: what is
+  offered must be exactly what is accepted. It failed on
+  `CGameManiaPlanetNetwork.GetCurrentEntityID`, where the checker "accepts".
+  It does not accept — that type carries **0 members** in the dump, and B006
+  deliberately stays silent because an empty member list is *untrusted*, not
+  authoritative. The test had read an absence of diagnostics as a positive
+  verdict.
+
+  Diagnosed rather than adjusted away: for such receivers the assertion now
+  requires only the severe direction — completion must never offer what the
+  checker rejects — and records why the other direction is unavailable there.
+  **Before asserting that two components agree, establish that both can
+  actually answer.** A component that abstains is not a component that agrees,
+  and an equality over one that abstains is vacuous in exactly the region you
+  most wanted covered.
+
+- **Equal totals do not prove equal content.** A clippy comparison reporting
+  77 on both sides is consistent with any number of diagnostics having been
+  added and an equal number removed. The stronger check is cheap: diff the
+  diagnostic **sets**, and confirm nothing added and nothing removed. Same for
+  a suite total — reconciling to the expected number tells you the count moved
+  correctly, not that the same tests ran. Prefer an identity over a count
+  whenever one is available.
+
 - **Measure each half of a multi-part fix as a standalone variant.** Twice in
   this batch a ticket's own Work section proposed the half that closes nothing,
   and in both cases the wrong half was the plausible-sounding one:
