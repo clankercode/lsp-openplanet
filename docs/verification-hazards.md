@@ -74,6 +74,27 @@ indistinguishable from "I am structurally incapable of seeing it".
   same wrong mental model that produced the original. It deserves more
   suspicion than the code that prompted it, not less.
 
+  **Limit, found by a lane the day the rule was written.** The rule assumes a
+  *witness* exists — some case in the data the broken measurement got wrong.
+  Sometimes there is none. A collision test was tightened from comparing enum
+  member names to comparing `name=number` pairs, which is strictly the correct
+  equivalence; but no enum in the shipped databases differs *only* by number,
+  so both versions return the same answer on every real input and **no standing
+  assertion can tell them apart.** There is no guard to add.
+
+  Two things follow, and they generalise past enums:
+
+  - **When the corpus cannot discriminate two candidate rules, an assertion
+    over it is testing the corpus, not the rule.** The honest artifact is a
+    **mutation test that injects the discriminating case** — here, a duplicate
+    enum with identical member names and every number shifted — plus a recorded
+    note that the data contains no natural witness.
+  - **Say so.** The lane's first report described the tightening as making the
+    property "genuinely stronger than I had established", which implied the
+    verification had changed. It had not: not one result moved. That is a
+    correctness improvement with no evidentiary consequence, and calling it
+    that is more useful than letting it read as new confirmation.
+
 **Countermeasure — positive control.** Before trusting a probe that reports
 absence, confirm it can see a thing you *know* is present. A staleness check
 that cannot find a file you just touched is not reporting staleness. A counter
