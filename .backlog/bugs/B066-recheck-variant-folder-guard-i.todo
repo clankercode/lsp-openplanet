@@ -112,3 +112,39 @@ Hermeticity: these tests probe $HOME by construction. Pin a synthetic HOME;
 GH #45 (introduced the variant re-probe), B039 (whose fixture this defeated —
 that fixture now pins `game_target` as a workaround, which this ticket should
 make unnecessary), B050 (define origins — precedent for provenance tracking).
+
+## Why this evaded every existing test (coordinator, 2026-08-30)
+
+Worth recording, because it is the same root cause as a second bug found the
+same day and it explains why neither was caught by the suite.
+
+**Nothing in this test suite can tell one Openplanet install from another.**
+`tests/fixtures/typedb` is produced by `just typedb-refresh` from a real
+install, so the two are not merely equivalent — verified independently, the
+fixture's `OpenplanetCore.json` and `OpenplanetNext.json` are BYTE-IDENTICAL
+to `~/OpenplanetNext`, same md5, and `Openplanet.h` alongside them likewise.
+
+Consequences:
+
+- No assertion on payload content — stamps, symbol counts, any of it — can
+  discriminate which database loaded. This bug swaps one install for another
+  and every content assertion is blind to it by construction.
+- The ONLY mechanism keeping a real install out of a test is an explicit
+  `openplanet_dir` pin, and the only thing that can prove the pin works is
+  `just test-hermetic` (B045), which runs each binary under an isolated HOME.
+  That makes B045 load-bearing here rather than a nice-to-have.
+
+The same blindness produced a second, independent defect on the same day: the
+B039 lane asserted a symbol count believing it discriminated fixture from real
+install, and its fixture COPY silently omitted the `Openplanet.h` that
+`TypeIndex::load` folds in from beside the game database — so the copy was a
+quietly smaller database that a `> 0` assertion accepted. Two bugs, one cause.
+
+**Consequence for this ticket's test plan:** the red test cannot be written by
+asserting on what loaded. It has to assert on `config.openplanet_dir` itself
+after the ladder runs, or run under a synthetic HOME where the variant folder
+holds a DISTINGUISHABLE database (different byte content, not merely a
+different path). Constructing that distinguishable install is part of the work.
+
+Until this is fixed, `tests/execute_command_tests.rs` pins `game_target` as a
+workaround; its comment says so and says not to remove it before this lands.
