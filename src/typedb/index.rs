@@ -2193,6 +2193,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::testing::TempDir;
     use std::path::PathBuf;
 
     fn core_path() -> PathBuf {
@@ -4762,6 +4763,7 @@ mod module_level_enum_tests {
 #[cfg(test)]
 mod single_read_tests {
     use super::*;
+    use crate::testing::TempDir;
     use std::path::PathBuf;
 
     /// The three fixture files, written whole so a reader sees one generation
@@ -4814,19 +4816,22 @@ mod single_read_tests {
         }
     }
 
-    struct Scratch {
-        dir: PathBuf,
+    /// A directory holding one generation of the three fixture files.
+    ///
+    /// The self-cleaning [`TempDir`] from B065 rather than a bespoke one: that
+    /// ticket removed 101 hand-rolled temp dirs precisely because a guard that
+    /// exists in many copies is a guard that gets fixed once, and it also
+    /// covers the unwind path, which matters here because these tests assert
+    /// on load failures.
+    struct Fixture {
+        dir: TempDir,
     }
 
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let dir =
-                std::env::temp_dir().join(format!("oplsp-b072-{name}-{}-{n}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Scratch { dir }
+    impl Fixture {
+        fn new(label: &str) -> Self {
+            Fixture {
+                dir: TempDir::new(&format!("b072-{label}")),
+            }
         }
 
         fn core(&self) -> PathBuf {
@@ -4841,8 +4846,10 @@ mod single_read_tests {
             self.dir.join(HEADER_FILENAME)
         }
 
-        /// Replace all three files in one step each. `rename` rather than
-        /// truncate-and-write so no reader can observe a partial file.
+        /// Replace all three files, each in one step. `rename` rather than
+        /// truncate-and-write so no reader can observe a partial file — a torn
+        /// READ is a different defect and must not be able to masquerade as
+        /// this one.
         fn write(&self, gen: Gen) {
             for (path, contents) in [
                 (self.core(), gen.core_json()),
@@ -4853,12 +4860,6 @@ mod single_read_tests {
                 std::fs::write(&tmp, contents).unwrap();
                 std::fs::rename(&tmp, &path).unwrap();
             }
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
@@ -4939,17 +4940,17 @@ mod single_read_tests {
     }
 
     /// Rewrite the dump set immediately after read number `after_read`.
-    fn load_with_rewrite_after(scratch: &Scratch, after_read: usize) -> Result<TypeIndex, String> {
+    fn load_with_rewrite_after(fixture: &Fixture, after_read: usize) -> Result<TypeIndex, String> {
         let mut reads = 0usize;
-        let header = scratch.header();
+        let header = fixture.header();
         TypeIndex::load_instrumented(
-            &scratch.core(),
-            &scratch.nadeo(),
+            &fixture.core(),
+            &fixture.nadeo(),
             Some((header.as_path(), HeaderMode::Optional)),
             &mut || {
                 reads += 1;
                 if reads == after_read {
-                    scratch.write(Gen::B);
+                    fixture.write(Gen::B);
                 }
             },
         )
@@ -4960,9 +4961,9 @@ mod single_read_tests {
     /// the sequence, not at a moment on the clock.
     #[test]
     fn a_rewrite_between_the_core_and_game_reads_yields_one_generation() {
-        let scratch = Scratch::new("core-game");
-        scratch.write(Gen::A);
-        let loaded = load_with_rewrite_after(&scratch, 1);
+        let fixture = Fixture::new("core-game");
+        fixture.write(Gen::A);
+        let loaded = load_with_rewrite_after(&fixture, 1);
         assert_one_generation(&loaded, "rewritten after the Core read");
     }
 
@@ -4971,9 +4972,9 @@ mod single_read_tests {
     /// than the dumps it is meant to complete.
     #[test]
     fn a_rewrite_between_the_game_and_header_reads_yields_one_generation() {
-        let scratch = Scratch::new("game-header");
-        scratch.write(Gen::A);
-        let loaded = load_with_rewrite_after(&scratch, 2);
+        let fixture = Fixture::new("game-header");
+        fixture.write(Gen::A);
+        let loaded = load_with_rewrite_after(&fixture, 2);
         assert_one_generation(&loaded, "rewritten after the game-dump read");
     }
 
@@ -4983,9 +4984,9 @@ mod single_read_tests {
     #[test]
     fn a_rewrite_after_any_read_yields_one_generation() {
         for after_read in 1..=3 {
-            let scratch = Scratch::new(&format!("any-{after_read}"));
-            scratch.write(Gen::A);
-            let loaded = load_with_rewrite_after(&scratch, after_read);
+            let fixture = Fixture::new(&format!("any-{after_read}"));
+            fixture.write(Gen::A);
+            let loaded = load_with_rewrite_after(&fixture, after_read);
             assert_one_generation(&loaded, &format!("rewritten after read {after_read}"));
         }
     }
@@ -4995,9 +4996,9 @@ mod single_read_tests {
     /// load would pass every test above.
     #[test]
     fn an_undisturbed_load_returns_the_generation_on_disk() {
-        let scratch = Scratch::new("quiet");
-        scratch.write(Gen::A);
-        let index = TypeIndex::load(&scratch.core(), &scratch.nadeo())
+        let fixture = Fixture::new("quiet");
+        fixture.write(Gen::A);
+        let index = TypeIndex::load(&fixture.core(), &fixture.nadeo())
             .expect("an undisturbed load must succeed");
         assert_eq!(
             parts_of(&index),
@@ -5013,9 +5014,9 @@ mod single_read_tests {
     /// single-valued.
     #[test]
     fn an_undisturbed_load_of_the_other_generation_reads_it_whole() {
-        let scratch = Scratch::new("quiet-b");
-        scratch.write(Gen::B);
-        let index = TypeIndex::load(&scratch.core(), &scratch.nadeo())
+        let fixture = Fixture::new("quiet-b");
+        fixture.write(Gen::B);
+        let index = TypeIndex::load(&fixture.core(), &fixture.nadeo())
             .expect("an undisturbed load must succeed");
         assert_eq!(
             parts_of(&index),
@@ -5038,17 +5039,17 @@ mod single_read_tests {
     /// is the inode (unix) or the write time doing the work.
     #[test]
     fn a_dump_that_moves_under_every_read_is_refused_not_assembled() {
-        let scratch = Scratch::new("always-moving");
-        scratch.write(Gen::A);
+        let fixture = Fixture::new("always-moving");
+        fixture.write(Gen::A);
 
         let mut flip = Gen::B;
-        let header = scratch.header();
+        let header = fixture.header();
         let loaded = TypeIndex::load_instrumented(
-            &scratch.core(),
-            &scratch.nadeo(),
+            &fixture.core(),
+            &fixture.nadeo(),
             Some((header.as_path(), HeaderMode::Optional)),
             &mut || {
-                scratch.write(flip);
+                fixture.write(flip);
                 flip = if flip == Gen::A { Gen::B } else { Gen::A };
             },
         );
@@ -5061,7 +5062,7 @@ mod single_read_tests {
             "the error must say what actually happened: {err}"
         );
         assert!(
-            err.contains(&scratch.dir.display().to_string()),
+            err.contains(&fixture.dir.display().to_string()),
             "the error must name the file that moved: {err}"
         );
     }
@@ -5075,7 +5076,7 @@ mod single_read_tests {
     /// retry — and every other test here would still pass.
     #[test]
     fn a_quiet_load_reads_each_file_once_and_a_moving_one_stops_at_the_bound() {
-        let quiet = Scratch::new("count-quiet");
+        let quiet = Fixture::new("count-quiet");
         quiet.write(Gen::A);
         let mut reads = 0usize;
         let header = quiet.header();
@@ -5091,7 +5092,7 @@ mod single_read_tests {
             "an undisturbed load re-read the database; the retry must cost nothing              when nothing moved"
         );
 
-        let moving = Scratch::new("count-moving");
+        let moving = Fixture::new("count-moving");
         moving.write(Gen::A);
         let mut reads = 0usize;
         let mut flip = Gen::B;
@@ -5124,24 +5125,24 @@ mod single_read_tests {
     /// parse error, and correctly so.
     #[test]
     fn a_file_caught_mid_write_is_re_read_rather_than_parsed() {
-        let scratch = Scratch::new("mid-write");
-        scratch.write(Gen::A);
+        let fixture = Fixture::new("mid-write");
+        fixture.write(Gen::A);
 
         let mut calls = 0usize;
-        let header = scratch.header();
+        let header = fixture.header();
         let index = TypeIndex::load_instrumented(
-            &scratch.core(),
-            &scratch.nadeo(),
+            &fixture.core(),
+            &fixture.nadeo(),
             Some((header.as_path(), HeaderMode::Optional)),
             &mut || {
                 calls += 1;
                 if calls == 1 {
                     // A writer part-way through the game dump. Written in
                     // place, NOT renamed, so the read really can see it.
-                    std::fs::write(scratch.nadeo(), "{\"op\":\"game-gen-B").unwrap();
+                    std::fs::write(fixture.nadeo(), "{\"op\":\"game-gen-B").unwrap();
                 } else if calls == 2 {
                     // ... and now it finishes.
-                    scratch.write(Gen::B);
+                    fixture.write(Gen::B);
                 }
             },
         )
@@ -5168,9 +5169,9 @@ mod single_read_tests {
         assert_ne!(Gen::A.header_source(), Gen::B.header_source());
 
         for gen in [Gen::A, Gen::B] {
-            let scratch = Scratch::new(&format!("distinct-{}", gen.tag()));
-            scratch.write(gen);
-            let index = TypeIndex::load(&scratch.core(), &scratch.nadeo()).expect("loads");
+            let fixture = Fixture::new(&format!("distinct-{}", gen.tag()));
+            fixture.write(gen);
+            let index = TypeIndex::load(&fixture.core(), &fixture.nadeo()).expect("loads");
             assert_eq!(
                 parts_of(&index),
                 Parts {
