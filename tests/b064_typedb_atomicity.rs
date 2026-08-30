@@ -32,6 +32,8 @@
 //! server to store and nothing to split.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -514,7 +516,7 @@ async fn regenerate_reports_the_database_it_loaded_when_the_dump_moves_mid_fligh
     // The user regenerated because the game rewrote the dump: disk is now B.
     write_core(fixture.op_dir(), Version::B);
 
-    regen_barrier::arm();
+    let armed = regen_barrier::arm();
     let handle = tokio::spawn(async move {
         let payload = regenerate(&mut service).await;
         (service, payload)
@@ -527,7 +529,7 @@ async fn regenerate_reports_the_database_it_loaded_when_the_dump_moves_mid_fligh
     regen_barrier::release();
 
     let (_service, payload) = handle.await.expect("the regeneration task finishes");
-    regen_barrier::disarm();
+    drop(armed);
 
     assert_eq!(payload["ok"], json!(true), "{payload}");
     assert_eq!(
@@ -593,29 +595,36 @@ async fn a_reader_never_sees_an_index_with_another_loads_stamps() {
         };
         write_core(fixture.op_dir(), want);
 
-        regen_barrier::arm();
+        let armed = regen_barrier::arm();
         let handle = tokio::spawn(async move {
             let payload = regenerate(&mut service).await;
             (service, payload)
         });
         regen_barrier::wait_until_reached().await;
 
+        // The watcher stops when the publish is OVER, not on a timer.
+        // Everything this test can see happens between the release below and
+        // the regeneration returning; sampling an idle server after that adds
+        // no coverage and would put the dead time into every future run of the
+        // suite. Measured: 17s of suite time down to under 2s, with the
+        // detection unchanged (the crossed pair is still caught on round 0
+        // against the pre-fix code). The deadline is only a backstop, so a
+        // wedged regeneration fails here rather than hanging.
+        let stop = Arc::new(AtomicBool::new(false));
         let reader = backend.clone();
+        let watch_stop = stop.clone();
         let watcher = tokio::spawn(async move {
             let mut torn: Option<String> = None;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while torn.is_none() && !watch_stop.load(Ordering::SeqCst) {
                 let (loaded, claimed, detail) = observe(&reader).await;
-                if torn.is_none() && (loaded.is_none() || loaded != claimed) {
+                if loaded.is_none() || loaded != claimed {
                     torn = Some(detail);
                 }
                 if std::time::Instant::now() > deadline {
                     break;
                 }
                 tokio::task::yield_now().await;
-                if torn.is_some() {
-                    break;
-                }
             }
             torn
         });
@@ -623,7 +632,8 @@ async fn a_reader_never_sees_an_index_with_another_loads_stamps() {
         regen_barrier::release();
         let (returned, payload) = handle.await.expect("the regeneration task finishes");
         service = returned;
-        regen_barrier::disarm();
+        stop.store(true, Ordering::SeqCst);
+        drop(armed);
         assert_eq!(payload["ok"], json!(true), "round {round}: {payload}");
 
         let torn = watcher.await.expect("the watcher finishes");

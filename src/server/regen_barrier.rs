@@ -52,15 +52,28 @@ pub fn lock() -> &'static Mutex<()> {
 }
 
 /// Arm the barrier: the next regeneration to reach the publish point stops
-/// there until [`release`].
-pub fn arm() {
+/// there until [`release`]. Disarms when the returned guard drops.
+///
+/// A guard rather than a matching `disarm()` call because the thing that goes
+/// wrong otherwise is not a leak but a HANG: an assertion that fires between
+/// arming and disarming unwinds past the disarm, and the next test in the
+/// binary to regenerate parks at a barrier nobody will ever release. One test
+/// failing would take the rest of the binary with it, and the symptom — a
+/// timeout, somewhere else — would say nothing about the cause. Unwinding runs
+/// `Drop`, so the guard turns that into the single honest failure it should be.
+#[must_use = "the barrier disarms when this guard drops"]
+pub fn arm() -> Armed {
     ARMED.store(true, Ordering::SeqCst);
+    Armed(())
 }
 
-/// Disarm. Always call this before the test that armed it returns, including
-/// on the failure path, or a later regeneration hangs.
-pub fn disarm() {
-    ARMED.store(false, Ordering::SeqCst);
+/// Disarms the barrier on drop. See [`arm`].
+pub struct Armed(());
+
+impl Drop for Armed {
+    fn drop(&mut self) {
+        ARMED.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Production side. Returns immediately unless a test armed the barrier.
