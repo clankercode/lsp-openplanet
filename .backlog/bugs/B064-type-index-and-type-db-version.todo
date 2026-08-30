@@ -112,3 +112,30 @@ Consequences:
 The original `do not fix by ordering the two write locks` warning still
 stands, and this is the stronger form of the same point: every lock-shaped fix
 addresses the visible symptom rather than the mechanism.
+
+## Correction to the correction (coordinator, 2026-08-30)
+
+My previous append overstated the fix, having inherited the overstatement from
+the B039 lane's comment. Codex caught it and the lane confirmed. **B064 is TWO
+defects, not one, and they need two different fixes.**
+
+**(a) Shared-state interleaving.** `type_index` and `type_db_versions` are
+separate locks written non-atomically, so a reader can observe a new index with
+stale stamps. Fix: collapse both into one lock
+(`RwLock<Option<LoadedTypeDb>>`). This is the mechanical ~10-read-site change.
+
+**(b) Load/probe TOCTOU.** `TypeIndex::load` parses the files, then
+`TypeDbVersions::probe` reads them AGAIN. If the dump changes in between, the
+stamps describe a different database — on a single thread, with no concurrency
+and no lock involved. Fix: have `TypeIndex::load` return the stamps it already
+parsed (it reads those bytes anyway), or otherwise feed both from ONE read.
+
+I previously wrote that one lock is 'necessary but not sufficient' and that
+sourcing stamps from the load 'is the part that actually closes it'. That was
+closer but still wrong in framing: these are not two parts of one fix, they are
+two independent defects. (a) is a data race; (b) is a filesystem TOCTOU.
+Fixing either leaves the other. A change that only collapses the locks will
+look complete and close nothing on the single-threaded path.
+
+The original warning stands unchanged: do NOT fix (a) by ordering the two write
+locks, because readers still take one at a time.
