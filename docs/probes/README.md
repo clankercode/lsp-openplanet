@@ -286,21 +286,59 @@ known-answer controls re-run every 100 names. Result:
 | flipped to REJECTED | 3 |
 | UNDETERMINED | 0 |
 
-**None of the three flips is a B068 artefact**, and no conclusion moves. They
-are `Foo::Bar::VirtualKey`, `Foo::ESceneCharVisNotice` and `Foo::VirtualKey`,
-all now `Namespace 'Foo' doesn't exist.` — the plugin-namespace effect this
-document already warns about, not a fabricated verdict. All three are already
-the first three entries of `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which
-forces them to "must not resolve" regardless of the corpus verdict, so the Rust
-suite's expectations are unchanged.
+The delta MUST be read in two buckets, because they mean opposite things:
 
-The full artefact list splits cleanly along the same line, which is what
-identifies the mechanism: the three `Foo::*` spellings flipped, while all nine
-`GameData::*`, `MLFeed::*`, `MLHook::*`, `MathX::*` and `VehicleState::*`
-spellings still accept. The plugin declaring `namespace Foo` is no longer
-installed; the others still are. That is environmental drift between two
-machines-in-time, and it independently CONFIRMS the exclusion list a previous
-lane had reasoned out rather than measured.
+| bucket | rows | meaning |
+|---|---|---|
+| **A — batching fabricated an ACCEPT** | **0** | the real B068 result |
+| **B — the probing environment changed** | **3** | a corpus-provenance fact, not a corpus error |
+
+**Bucket A is empty. Not one row was fabricated by the batching defect.**
+
+The three bucket-B rows are `Foo::Bar::VirtualKey`, `Foo::ESceneCharVisNotice`
+and `Foo::VirtualKey`. **Do not "correct" them.** They were valid measurements
+of a machine on which the namespace `Foo` existed; it does not exist here.
+
+That is proven, not inferred, by the REJECTED rows that pin the context — and
+those are exactly the rows an ACCEPTED-only re-probe would never look at:
+
+```
+Foo::ZZZNoSuch       then: Identifier 'ZZZNoSuch' is not a data type in namespace 'Foo' or parent
+                     now : Namespace 'Foo' doesn't exist.
+Foo::Bar::ZZZNoSuch  then: Identifier 'ZZZNoSuch' is not a data type in namespace 'Foo::Bar' or parent
+                     now : Namespace 'Foo::Bar' doesn't exist.
+MathX::ZZZNoSuch     then: Identifier 'ZZZNoSuch' is not a data type in namespace 'MathX' or parent
+                     now : Identifier 'ZZZNoSuch' is not a data type in namespace 'MathX' or parent
+```
+
+The *is-a-scope* message form ("… in namespace 'Foo' or parent") can only be
+produced when the namespace exists. `Foo` produced it then and produces the
+namespace-absent form now; `MathX` produces the same form in both runs. The
+namespace, not the verdict logic, is what changed.
+
+`build_source` declares no namespace anywhere, so `Foo` was never supplied by
+the probe fixture — it came from the game's own loaded plugin set. A plugin
+declaring `namespace Foo` was installed when the corpus was generated and is
+not installed now. That is precisely the plugin-namespace effect documented
+above, and precisely why those three spellings are already the first three
+entries of `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which forces them to
+"must not resolve" whatever the corpus says. **No test expectation and no
+documented conclusion moves.**
+
+The whole twelve-entry artefact list splits along the same line, which is what
+identifies the mechanism rather than merely asserting it: the three `Foo::*`
+spellings flipped, while all nine `GameData::*`, `MLFeed::*`, `MLHook::*`,
+`MathX::*` and `VehicleState::*` spellings still accept — and the matching
+`::ZZZNoSuch` probes confirm those namespaces still exist. The re-probe
+therefore CONFIRMS an exclusion list a previous lane had reasoned out rather
+than measured.
+
+**Carry this forward when re-measuring anything here.** Restricting a re-probe
+to the rows a known defect could affect also blinds it to every defect you were
+not thinking about. ACCEPTED-only was correct for B068 — an abort cannot
+manufacture a REJECT — and it excluded the `*::ZZZNoSuch` rows that are the
+only witnesses to the environment changing underneath the corpus. Re-probe the
+context-pinning REJECTs too, whatever the narrowing.
 
 The shape of the result is itself the argument that B068 never fired here: an
 aborted batch fabricates ACCEPTED for *every* surviving name in the unit, so a
