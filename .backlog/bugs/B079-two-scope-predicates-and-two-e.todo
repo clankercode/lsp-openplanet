@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T22:58:07Z"
 depends_on: []
 estimate_hours: 1
 id: B079
 priority: medium
+started_at: null
 status: pending
 tags: []
 title: 'Two scope predicates and two enum predicates: callers pick the wrong one and the type system cannot tell'
@@ -24,3 +26,84 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Surfaced by lane-b057 while fixing B070 and closing B067 (2026-08-31). Filed
+as its own ticket on that lane's recommendation: it wants a structural change,
+not a behavioural one, and folding it into either of those tickets would have
+been scope creep.
+
+## The shape
+
+The codebase carries **two scope predicates and two enum predicates**, each
+pair with a wider member and a narrower one, and **nothing in the types stops a
+caller reaching for the wrong one**:
+
+| pair | narrow / correct for acceptance | wide |
+|---|---|---|
+| scope | `GlobalScope::scope_exists` (workspace OR index) | `TypeIndex::scope_exists` (index only) |
+| enum | `has_enum` (acceptance) | `canonical_enum_key` (canonicalisation) |
+
+Both members of each pair are legitimate. The wide one is deliberately wider:
+`canonical_enum_key` still carries the trailing-suffix match that `has_enum`
+dropped for B007, because every other caller reaches it only AFTER the checker
+has already accepted, so it is free to be permissive.
+
+## Two real defects, one at each end
+
+- **B070 (fixed).** `hover` reached `TypeIndex::source_reference_key`, whose
+  scope test is the INDEX-ONLY `scope_exists` - which cannot know what a
+  workspace declared. Hover was silent for `Foo::VirtualKey` with
+  `namespace Foo {}` declared, though the checker accepts it. A missing
+  feature.
+- **A near-miss introduced while fixing it.** The first revision of that fix
+  called `canonical_enum_key` UNGATED - using a canonicalizer as an acceptance
+  test. Hover then answered for **24 spellings the checker rejects**, all
+  `Plot::X` matching the real key `UI::Plot::X`, which the game refuses with
+  `Namespace 'Plot' doesn't exist.` Caught before it left the lane by a sweep
+  over all 1403 qualified spellings in `docs/probes/b052-qualified-enum-spellings.tsv`
+  asserting a one-way law (hover answers => checker accepts): 24 leaks ungated,
+  0 gated, 0 on a disabled-hunk baseline.
+
+**Opposite ends of one family.** One surface reached the too-narrow scope
+predicate; the other reached the too-wide enum predicate. The direction matters
+differently at each end: a silent surface is a missing feature, a confident
+wrong one is a lie.
+
+## Why a ticket rather than a fix in place
+
+Both live defects are fixed. What remains is that the next caller has nothing
+stopping it repeating either mistake - the pairs are distinguished only by name
+and by a doc comment. Candidate directions, none chosen:
+
+- Make the wide members harder to reach by accident (private, or renamed to say
+  what they are: `canonical_enum_key_assuming_accepted`).
+- Give the acceptance question ONE entry point that composes correctly, and
+  express the wide ones in terms of it.
+- At minimum, a doc-comment contract on each wide member naming its precondition
+  and pointing at the narrow one.
+
+## Bounded, by search rather than by reasoning
+
+lane-b057 checked exhaustively that no OTHER surface currently carries the
+defect: `source_reference_key` has exactly one production caller
+(`hover.rs:677`, fixed), and the index-only `scope_exists` has exactly one
+(`global_scope.rs:494`, which is the correct workspace-OR-index composition).
+B063 and B069 are adjacent but reach this area through different functions.
+
+**So this is not urgent - there is no known live defect.** It is a latent shape
+with two demonstrated instances in one day, in one file, by one author who
+knew the area well.
+
+## Test plan
+
+The one-way-law sweep from B070 is the model and should be generalised: for
+each pair, assert over the committed corpus that the permissive member is never
+consulted where acceptance is the question. Keep the anti-vacuity floors that
+sweep already has - on coverage AND on how many spellings the surface answers
+for - and note that it reads no game verdict, so B068's batching defect cannot
+reach it.
+
+## Related
+
+B070 (the fix), B067 (closed not-a-defect; its writeup carries the mechanism),
+B007 (why `has_enum` dropped the trailing-suffix match), B063, B069.
