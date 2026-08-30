@@ -12,6 +12,8 @@
 //! undefined-ident corpus histogram AND are verifiably builtin (not just
 //! a plugin global that the walker failed to pick up).
 
+use crate::typecheck::global_scope::GlobalScope;
+
 /// True if `name` refers to an AngelScript / Openplanet builtin type name
 /// that plugins can reference directly (as a constructor-like callable or
 /// a bare type reference). Currently covers the `CoroutineFunc` funcdef
@@ -145,9 +147,43 @@ pub static INJECTED_METHODS: &[InjectedMethod] = &[
 ];
 
 /// Injected rows whose method name is `name`. The caller applies the
-/// receiver test — this module has no access to the type database.
+/// receiver test; see [`injected_methods_for_receiver`] for the shared one.
 pub fn injected_methods_named(name: &str) -> impl Iterator<Item = &'static InjectedMethod> + '_ {
     INJECTED_METHODS.iter().filter(move |m| m.name == name)
+}
+
+/// B063: every injected method that applies to the receiver `type_name`.
+///
+/// **The receiver rule lives here, once.** It is the answer to "does this
+/// method exist on this type", and B063 exists because two features answered
+/// it differently: the checker consulted `INJECTED_METHODS`, completion walked
+/// only the `TypeIndex` — where an injected method is by definition absent,
+/// that being the whole premise of B059 — so the checker accepted
+/// `player.GetCurrentEntityID()` while completion would not suggest it.
+///
+/// Taking a [`GlobalScope`] rather than a `TypeIndex` is deliberate: the
+/// derivation walk it needs is already public there, and re-deriving a parent
+/// chain locally would be a second implementation of an existing predicate —
+/// exactly the hazard B079 describes.
+///
+/// `Exact` matches by identity rather than by descent, mirroring the binary:
+/// Openplanet hard-codes a registration list, so a future Nadeo type deriving
+/// from `CGamePlayer` would be offered the method by a descendants rule and
+/// rejected by the game (B059).
+pub fn injected_methods_for_receiver<'a>(
+    scope: &'a GlobalScope<'a>,
+    type_name: &'a str,
+) -> impl Iterator<Item = &'static InjectedMethod> + 'a {
+    INJECTED_METHODS.iter().filter(move |m| match &m.receivers {
+        InjectedReceiver::EveryEngineClass => scope.is_external_derived_from(type_name, "CMwNod"),
+        InjectedReceiver::Exact(names) => names.iter().any(|n| {
+            // Same external type, tolerating short vs qualified spellings:
+            // the typedb parent chain is a tree, so mutual derivation can
+            // only mean the two names resolve to one type.
+            scope.is_external_derived_from(type_name, n)
+                && scope.is_external_derived_from(n, type_name)
+        }),
+    })
 }
 
 /// True if `name` is a well-known AngelScript / Openplanet builtin global
