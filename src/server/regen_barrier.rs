@@ -1,24 +1,14 @@
-//! B064: a rendezvous that stops the clock inside a type-DB regeneration.
+//! B064: a rendezvous that stops one type-DB regeneration at a time.
 //!
-//! Both defects B064 closes are *windows*, and a window you cannot stop the
-//! clock inside can only be tested by racing it:
+//! [`wait_if_armed`] sits at ONE point in
+//! [`crate::server::Backend::regenerate_type_db`]: the new index has been
+//! parsed and NOTHING has been published yet. That point exists whatever shape
+//! the publish takes, which is what makes it a fair test seam rather than a
+//! mould of today's implementation.
 //!
-//! * the window between `TypeIndex::load` parsing the dump and a second read
-//!   of the same files taking its stamps (a filesystem TOCTOU, single
-//!   threaded), and
-//! * the window between publishing a new index and publishing its stamps
-//!   (shared-state interleaving).
-//!
-//! [`wait_if_armed`] sits at ONE point in [`crate::server::Backend::regenerate_type_db`]:
-//! the new index has been parsed and NOTHING has been published yet. That
-//! point exists whatever shape the publish takes, which is what makes it a
-//! fair test seam rather than a mould of today's implementation — a test that
-//! pauses there and rewrites the dump proves whether the reported stamps came
-//! out of the parse or out of a second read, and the answer does not depend on
-//! how the publish is spelled.
-//!
-//! Disarmed in every normal path: [`wait_if_armed`] is one relaxed atomic load
-//! and a return. Only a test ever calls [`arm`].
+//! Disarmed in every normal path: [`wait_if_armed`] returns immediately unless
+//! a test armed the barrier. An arm reserves exactly the next regeneration;
+//! later concurrent regenerations do not wait behind it.
 //!
 //! Process-global, and deliberately so — `Backend::new` takes only a `Client`,
 //! and threading a barrier handle through `build_service` would put test
@@ -26,14 +16,41 @@
 //! binary links its own copy of this library and runs in its own process, so
 //! arming it in one test file cannot reach another. Within a file, hold
 //! [`lock`] for the whole scenario: the barrier is one global rendezvous and
-//! two tests using it at once would trade releases.
+//! two tests using it at once would trade generations.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex as StdMutex, MutexGuard, OnceLock};
 
 use tokio::sync::{Mutex, Notify};
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Idle,
+    Armed(u64),
+    Waiting(u64),
+}
+
+struct BarrierState {
+    next_generation: u64,
+    phase: Phase,
+}
+
+fn state() -> &'static StdMutex<BarrierState> {
+    static STATE: OnceLock<StdMutex<BarrierState>> = OnceLock::new();
+    STATE.get_or_init(|| {
+        StdMutex::new(BarrierState {
+            next_generation: 0,
+            phase: Phase::Idle,
+        })
+    })
+}
+
+/// Keep the test seam useful after a panic: a panic while manipulating the
+/// state must not poison every later test in this integration-test process.
+fn lock_state() -> MutexGuard<'static, BarrierState> {
+    state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn reached() -> &'static Notify {
     static REACHED: OnceLock<Notify> = OnceLock::new();
@@ -51,46 +68,106 @@ pub fn lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Arm the barrier: the next regeneration to reach the publish point stops
-/// there until [`release`]. Disarms when the returned guard drops.
+/// Arm the barrier for exactly the next regeneration.
 ///
-/// A guard rather than a matching `disarm()` call because the thing that goes
-/// wrong otherwise is not a leak but a HANG: an assertion that fires between
-/// arming and disarming unwinds past the disarm, and the next test in the
-/// binary to regenerate parks at a barrier nobody will ever release. One test
-/// failing would take the rest of the binary with it, and the symptom — a
-/// timeout, somewhere else — would say nothing about the cause. Unwinding runs
-/// `Drop`, so the guard turns that into the single honest failure it should be.
-#[must_use = "the barrier disarms when this guard drops"]
+/// The returned guard controls only its own generation. Releasing or dropping
+/// a stale guard cannot release a later arm; dropping the live guard both
+/// disarms an unreached generation and wakes a generation already waiting.
+#[must_use = "the barrier disarms and releases its generation when this guard drops"]
 pub fn arm() -> Armed {
-    ARMED.store(true, Ordering::SeqCst);
-    Armed(())
+    let generation = {
+        let mut state = lock_state();
+        assert!(
+            matches!(state.phase, Phase::Idle),
+            "a regeneration barrier is already armed or waiting"
+        );
+        state.next_generation = state.next_generation.wrapping_add(1);
+        let generation = state.next_generation;
+        state.phase = Phase::Armed(generation);
+        generation
+    };
+    Armed { generation }
 }
 
-/// Disarms the barrier on drop. See [`arm`].
-pub struct Armed(());
+/// A generation-specific barrier arm. See [`arm`].
+pub struct Armed {
+    generation: u64,
+}
+
+impl Armed {
+    /// Wait until this arm's regeneration has reached the publish seam.
+    pub async fn wait_until_reached(&self) {
+        loop {
+            let reached = reached().notified();
+            tokio::pin!(reached);
+            reached.as_mut().enable();
+
+            match lock_state().phase {
+                Phase::Waiting(generation) if generation == self.generation => return,
+                Phase::Armed(generation) if generation == self.generation => {}
+                phase => panic!(
+                    "barrier generation {} was cancelled or replaced before it reached the seam: {phase:?}",
+                    self.generation
+                ),
+            }
+
+            reached.await;
+        }
+    }
+
+    /// Release this arm's generation, if it is still armed or waiting.
+    ///
+    /// The state check makes a stale guard inert. `notify_waiters` follows the
+    /// state change; waiters first register with `enable`, then check this
+    /// state, so neither ordering can lose a release.
+    pub fn release(&self) {
+        let released_generation = {
+            let mut state = lock_state();
+            match state.phase {
+                Phase::Armed(generation) | Phase::Waiting(generation)
+                    if generation == self.generation =>
+                {
+                    state.phase = Phase::Idle;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if released_generation {
+            released().notify_waiters();
+        }
+    }
+}
 
 impl Drop for Armed {
     fn drop(&mut self) {
-        ARMED.store(false, Ordering::SeqCst);
+        self.release();
     }
 }
 
 /// Production side. Returns immediately unless a test armed the barrier.
 pub(crate) async fn wait_if_armed() {
-    if !ARMED.load(Ordering::SeqCst) {
-        return;
+    let generation = {
+        let mut state = lock_state();
+        match state.phase {
+            Phase::Armed(generation) => {
+                state.phase = Phase::Waiting(generation);
+                generation
+            }
+            Phase::Idle | Phase::Waiting(_) => return,
+        }
+    };
+    reached().notify_waiters();
+
+    loop {
+        let released = released().notified();
+        tokio::pin!(released);
+        released.as_mut().enable();
+
+        if !matches!(lock_state().phase, Phase::Waiting(waiting) if waiting == generation) {
+            return;
+        }
+
+        released.await;
     }
-    reached().notify_one();
-    released().notified().await;
-}
-
-/// Test side: resolve once a regeneration has stopped at the publish point.
-pub async fn wait_until_reached() {
-    reached().notified().await;
-}
-
-/// Test side: let the paused regeneration publish.
-pub fn release() {
-    released().notify_one();
 }

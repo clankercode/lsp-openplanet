@@ -521,12 +521,12 @@ async fn regenerate_reports_the_database_it_loaded_when_the_dump_moves_mid_fligh
         let payload = regenerate(&mut service).await;
         (service, payload)
     });
-    regen_barrier::wait_until_reached().await;
+    armed.wait_until_reached().await;
 
     // ... and it rewrites it AGAIN while the reload is in flight. Version B is
     // parsed and in hand; version A is what a second read would find.
     write_core(fixture.op_dir(), Version::A);
-    regen_barrier::release();
+    armed.release();
 
     let (_service, payload) = handle.await.expect("the regeneration task finishes");
     drop(armed);
@@ -540,7 +540,7 @@ async fn regenerate_reports_the_database_it_loaded_when_the_dump_moves_mid_fligh
     assert_eq!(
         payload["after"]["op"],
         json!(Version::B.core_op()),
-        "`after` names the database on DISK, not the one that was loaded: {payload}"
+        "`after` must name the database that was loaded, not the later disk contents: {payload}"
     );
 
     let (loaded, claimed, detail) = observe(&backend).await;
@@ -600,7 +600,7 @@ async fn a_reader_never_sees_an_index_with_another_loads_stamps() {
             let payload = regenerate(&mut service).await;
             (service, payload)
         });
-        regen_barrier::wait_until_reached().await;
+        armed.wait_until_reached().await;
 
         // The watcher stops when the publish is OVER, not on a timer.
         // Everything this test can see happens between the release below and
@@ -629,7 +629,7 @@ async fn a_reader_never_sees_an_index_with_another_loads_stamps() {
             torn
         });
 
-        regen_barrier::release();
+        armed.release();
         let (returned, payload) = handle.await.expect("the regeneration task finishes");
         service = returned;
         stop.store(true, Ordering::SeqCst);
@@ -869,4 +869,78 @@ async fn the_barrier_is_inert_when_no_test_armed_it() {
             .await
             .expect("a regeneration with the barrier disarmed must not block");
     assert_eq!(payload["ok"], json!(true), "{payload}");
+}
+
+/// An armed regeneration must not remain stranded when an assertion unwinds
+/// past its guard. Dropping the guard after the generation reaches the seam
+/// cancels that exact wait and lets it publish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_an_armed_guard_releases_the_generation_that_reached_it() {
+    let _guard = regen_barrier::lock().lock().await;
+    let fixture = ServerFixture::new("drop-releases", Version::A);
+    let mut service = boot(fixture.root()).await;
+
+    let armed = regen_barrier::arm();
+    let handle = tokio::spawn(async move {
+        let payload = regenerate(&mut service).await;
+        (service, payload)
+    });
+    armed.wait_until_reached().await;
+    drop(armed);
+
+    let (_service, payload) = tokio::time::timeout(std::time::Duration::from_secs(30), handle)
+        .await
+        .expect("dropping the armed guard must release the paused regeneration")
+        .expect("the regeneration task finishes");
+    assert_eq!(payload["ok"], json!(true), "{payload}");
+}
+
+/// Arming is for the NEXT regeneration only. A second command may parse and
+/// publish while the first one is paused at the seam; otherwise one test
+/// rendezvous would stall unrelated concurrent requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_armed_barrier_pauses_only_one_concurrent_regeneration() {
+    use tower_lsp::LanguageServer;
+
+    let _guard = regen_barrier::lock().lock().await;
+    let fixture = ServerFixture::new("one-shot", Version::A);
+    let service = boot(fixture.root()).await;
+    let backend = service.inner().clone();
+    drop(service);
+
+    let armed = regen_barrier::arm();
+    let paused_backend = backend.clone();
+    let paused = tokio::spawn(async move {
+        paused_backend
+            .execute_command(tower_lsp::lsp_types::ExecuteCommandParams {
+                command: "openplanet.regenerateTypeDb".to_string(),
+                arguments: Vec::new(),
+                work_done_progress_params: Default::default(),
+            })
+            .await
+            .expect("the paused command runs")
+            .expect("the paused command answers")
+    });
+    armed.wait_until_reached().await;
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        backend.execute_command(tower_lsp::lsp_types::ExecuteCommandParams {
+            command: "openplanet.regenerateTypeDb".to_string(),
+            arguments: Vec::new(),
+            work_done_progress_params: Default::default(),
+        }),
+    )
+    .await
+    .expect("a second regeneration must not wait behind the one-shot barrier")
+    .expect("the second command runs")
+    .expect("the second command answers");
+    assert_eq!(second["ok"], json!(true), "{second}");
+
+    armed.release();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(30), paused)
+        .await
+        .expect("releasing the armed guard finishes the paused regeneration")
+        .expect("the paused regeneration task finishes");
+    assert_eq!(first["ok"], json!(true), "{first}");
 }
