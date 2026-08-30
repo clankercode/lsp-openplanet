@@ -2028,6 +2028,55 @@ mod tests {
     fn next_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/OpenplanetNext.json")
     }
+    /// A namespace that owns FREE FUNCTIONS is always a scope, so gating
+    /// namespace-shortcut completions on `scope_exists` can never cost a
+    /// function shortcut.
+    ///
+    /// This is a fence for a gate that lives above the functions loop in
+    /// `add_shortcut_completions` and so is wider than B056's own blast
+    /// radius. It holds by construction rather than by luck, in two steps:
+    /// the Nadeo loader inserts only types and enums and the header loader
+    /// only enums, so every entry in `functions` is Core-sourced; and
+    /// `build_scope_index` inserts the namespace of every Core function.
+    /// Either half breaking makes this red — add a Nadeo free function, or
+    /// stop crediting Core function namespaces, and a shortcut namespace
+    /// silently stops offering its functions.
+    #[test]
+    fn every_namespace_that_owns_functions_is_a_scope() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+
+        let mut checked = 0usize;
+        for qname in index.functions.keys() {
+            // `namespace_functions` matches a key by stripping `ns::` and
+            // requiring no `::` remains, so the namespace it would serve
+            // this function under is everything before the LAST separator.
+            let Some((ns, _)) = qname.rsplit_once("::") else {
+                continue;
+            };
+            assert!(
+                index.scope_exists(ns),
+                "`{qname}` is offered under namespace `{ns}`, which is not a scope"
+            );
+            checked += 1;
+        }
+
+        // Anti-vacuity: the loop must actually have contended something.
+        assert!(
+            checked > 100,
+            "fixture guard: the databases must carry namespaced free functions, saw {checked}"
+        );
+
+        // And the invariant the argument rests on: nothing but Core ever
+        // puts a function in the index.
+        assert!(
+            index
+                .functions
+                .values()
+                .flat_map(|o| o.iter())
+                .all(|f| f.source == TypeSource::Core),
+            "a non-Core free function would break the scope guarantee above"
+        );
+    }
 
     /// B056: the invariant `global_enum_names` is named for, checked both
     /// ways over the whole shipped DB.
@@ -2038,6 +2087,265 @@ mod tests {
     /// computed by separate code that could drift apart. If it ever does, the
     /// ancestor walk starts answering for enums that need a qualifier, or
     /// stops answering for ones that do not.
+    /// `global_enum_key` picks ONE key per bare name, and the pick must not
+    /// matter. It is deterministic by construction — the keys are sorted and
+    /// the first wins — but determinism alone would only make a wrong answer
+    /// reproducible. What makes the pick SAFE is that every colliding name is
+    /// one engine enum the loader filed under several modules, so the
+    /// candidates are interchangeable.
+    ///
+    /// This became load-bearing when `canonical_enum_key` switched to
+    /// `global_enum_key`: a canonical name is an identity, so an ambiguous
+    /// pick there would silently make two spellings of DIFFERENT enums equal
+    /// rather than fail visibly.
+    ///
+    /// Value sets are the discriminator, compared as `name=number` pairs
+    /// rather than names alone. Two enums carrying the same member names under
+    /// different numeric values are genuinely different enums, and a
+    /// names-only comparison calls them identical. Same members and same
+    /// numbers under a different module is one enum; anything else would be
+    /// two, and there are none. If the databases ever gain a real collision
+    /// this goes red, which is the point: the selection rule would then need
+    /// to encode which one the game means, and nothing in either database
+    /// says.
+    ///
+    /// Numbers are POSITIONAL in the Nadeo dump — members are a flat list and
+    /// the `_00`/`_04` placeholders exist to keep position equal to value — so
+    /// comparing pairs also compares ORDER, and no separate order check is
+    /// needed. The equivalence survives a future dump carrying explicit
+    /// values; it would need revisiting only if one carried DUPLICATE member
+    /// names.
+    ///
+    /// Honest limit, recorded rather than glossed: **no enum in the shipped
+    /// databases differs only by number.** Every differing collision also
+    /// differs by member name, so names-only and `name=number` give the same
+    /// answer on today's data and no standing assertion can tell them apart.
+    /// The pair comparison is the correct equivalence rather than a
+    /// demonstrably better-performing one, and its extra strength is proven
+    /// only by mutation — injecting a second `VirtualKey` whose members carry
+    /// identical names and shifted numbers, which names-only accepts and this
+    /// rejects.
+    /// The companion to `no_two_global_enums_share_a_bare_name_with_different_values`:
+    /// that test asserts an ABSENCE, and an absence can start holding for the
+    /// wrong reason. This pins WHY it holds.
+    ///
+    /// Ambiguous collisions are not rare in the databases — over every enum
+    /// the index carries, 90 bare names collide and 39 of those have
+    /// genuinely different member sets. They stay harmless in two ways, and
+    /// the split is worth naming because "the filter excludes them" is only
+    /// true of most:
+    ///
+    /// * 37 have NO globally visible owner at all — `enum_is_global` keeps
+    ///   the whole collision out of the index.
+    /// * 2 have exactly ONE globally visible owner, so there is a single
+    ///   candidate and nothing to choose between. Those are
+    ///   `ESpectatorCameraType` (global `Game::ESpectatorCameraType`, 3
+    ///   members, against a 16-member enum nested in
+    ///   `CGamePlaygroundClientScriptAPI`) and `EPrestigeMode` (global
+    ///   `MetaNotPersistent::EPrestigeMode`, 3 members, against two 4-member
+    ///   enums nested in classes).
+    ///
+    /// So the assertion that matters is not "the filter excludes ambiguity"
+    /// but the weaker and exactly true one: no differing name reaches
+    /// `global_enum_key` with more than one candidate. That covers all 39.
+    ///
+    /// Asserting only "no global collision differs" would go on passing
+    /// quietly if the filter widened and the population changed underneath
+    /// it. This asserts the filter is actively excluding ambiguity, so the
+    /// pair of tests fails on both sides of that transition.
+    #[test]
+    fn the_global_filter_is_what_excludes_ambiguous_collisions() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+
+        // Every enum key, global or not, grouped by bare name.
+        let mut by_name: HashMap<String, Vec<(Vec<String>, bool)>> = HashMap::new();
+        for (qname, info) in &index.enums {
+            let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
+            let mut values: Vec<String> = info
+                .values
+                .iter()
+                .map(|(value, number)| format!("{value}={number}"))
+                .collect();
+            values.sort();
+            by_name
+                .entry(name)
+                .or_default()
+                .push((values, TypeIndex::enum_is_global(qname, info)));
+        }
+
+        let mut differing = 0usize;
+        let mut no_global_owner = 0usize;
+        let mut exactly_one_global_owner = 0usize;
+        let mut choosable: Vec<String> = Vec::new();
+        for (name, owners) in &by_name {
+            if owners.len() < 2 {
+                continue;
+            }
+            let first = &owners[0].0;
+            if owners.iter().all(|(values, _)| values == first) {
+                continue;
+            }
+            differing += 1;
+            match owners.iter().filter(|(_, global)| *global).count() {
+                // The filter keeps this ambiguity out of the index entirely.
+                0 => no_global_owner += 1,
+                // Visible, but with a single candidate — nothing to choose.
+                1 => exactly_one_global_owner += 1,
+                // Two visible candidates that disagree: `global_enum_key`
+                // would have to pick, and either pick is wrong for someone.
+                _ => choosable.push(name.clone()),
+            }
+        }
+
+        assert!(
+            differing > 0,
+            "fixture guard: the databases must carry ambiguous collisions, \
+             or the companion test proves nothing"
+        );
+        assert!(
+            no_global_owner > 0,
+            "`enum_is_global` excludes no ambiguous collision at all, so the \
+             companion test now holds for an unknown reason rather than because \
+             the filter works ({differing} differing names)"
+        );
+        // The actual safety property, and it accounts for every differing
+        // name rather than most of them: whatever the split between the two
+        // benign cases, NO differing name may reach `global_enum_key` with
+        // more than one candidate.
+        assert!(
+            choosable.is_empty(),
+            "`global_enum_key` must choose between genuinely different enums \
+             for {choosable:?} — canonicalization would make two spellings of \
+             different enums compare equal"
+        );
+        assert_eq!(
+            no_global_owner + exactly_one_global_owner,
+            differing,
+            "every differing name must be accounted for as excluded or \
+             single-candidate, not merely most of them"
+        );
+
+        // WHICH ARM does the excluding. Forcing `enum_is_global` true fails
+        // the assertions above, which proves the filter matters in aggregate
+        // but not which of its three arms carries the weight. The arms are
+        // asymmetric and only two of them test qualification at all:
+        //
+        //     Header => true                              (no test)
+        //     Nadeo  => qname.matches("::").count() <= 1  (module-level only)
+        //     Core   => info.namespace.is_none()          (un-namespaced only)
+        //
+        // Every ambiguous collision measured here is Nadeo, excluded by the
+        // `::` count - the two single-candidate survivors included.
+        //
+        // The Header arm having NO test looks like the dangerous one, and it
+        // is not, for a reason worth asserting rather than reasoning about:
+        // header enums are keyed BARE, with `namespace: None`, so there is
+        // nothing for a qualification test to exclude. Adding
+        // `!qname.contains("::")` to that arm today is a NO-OP, which is why
+        // asserting the arm is "unfiltered" cannot fail and would be a test
+        // in name only. This asserts the fact that makes the missing test
+        // harmless, and that fact does have a witness.
+        let header_keys: Vec<&String> = index
+            .enums
+            .iter()
+            .filter(|(_, info)| info.source == TypeSource::Header && !info.anonymous)
+            .map(|(qname, _)| qname)
+            .collect();
+        assert!(
+            !header_keys.is_empty(),
+            "fixture guard: the header must contribute enums, or the assertion \
+             below is vacuous"
+        );
+        let qualified: Vec<&&String> = header_keys
+            .iter()
+            .filter(|qname| qname.contains("::"))
+            .collect();
+        assert!(
+            qualified.is_empty(),
+            "header enum keys must stay BARE - the Header arm of \
+             `enum_is_global` applies no qualification test, so a qualified \
+             header key would be globally visible at any depth: {qualified:?}"
+        );
+    }
+
+    #[test]
+    fn no_two_global_enums_share_a_bare_name_with_different_values() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+
+        let mut by_name: HashMap<String, Vec<(String, Vec<String>)>> = HashMap::new();
+        for (qname, info) in &index.enums {
+            if !TypeIndex::enum_is_global(qname, info) {
+                continue;
+            }
+            let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
+            let mut values: Vec<String> = info
+                .values
+                .iter()
+                .map(|(v, n)| format!("{v}={n}"))
+                .collect();
+            values.sort();
+            by_name
+                .entry(name)
+                .or_default()
+                .push((qname.clone(), values));
+        }
+
+        let mut collisions = 0usize;
+        let mut ambiguous: Vec<String> = Vec::new();
+        for (name, owners) in &by_name {
+            if owners.len() < 2 {
+                continue;
+            }
+            collisions += 1;
+
+            // WHICH candidate is selected, not merely that selection is
+            // stable. Found by the adversarial review: asserting only that
+            // `global_enum_key` agrees across loads is satisfied by an
+            // implementation returning the LAST candidate, so the sorted-first
+            // rule in `build_global_enum_value_index` was unpinned. The pick
+            // is semantically free here - the candidates are interchangeable,
+            // which is the point of this test - but it is the string a user
+            // SEES in hover and go-to, so it is behaviour and belongs pinned.
+            let sorted_first = owners
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .min()
+                .expect("a collision has at least two owners");
+            assert_eq!(
+                index.global_enum_key(name),
+                Some(sorted_first),
+                "`global_enum_key({name})` must select the sorted-first key"
+            );
+
+            let first = &owners[0].1;
+            if owners.iter().any(|(_, values)| values != first) {
+                let keys: Vec<&str> = owners.iter().map(|(k, _)| k.as_str()).collect();
+                ambiguous.push(format!("{name} keyed at {keys:?} with differing values"));
+            }
+        }
+        ambiguous.sort();
+
+        // Anti-vacuity: if nothing collides, this test proves nothing.
+        assert!(
+            collisions > 0,
+            "fixture guard: the dump must key some enum under several modules"
+        );
+        assert!(
+            ambiguous.is_empty(),
+            "`global_enum_key` would have to choose between genuinely different enums: {ambiguous:#?}"
+        );
+
+        // And the pick itself is stable across rebuilds of the same DB.
+        let again = TypeIndex::load(&core_path(), &next_path()).unwrap();
+        for name in by_name.keys() {
+            assert_eq!(
+                index.global_enum_key(name),
+                again.global_enum_key(name),
+                "`global_enum_key({name})` must not vary between loads"
+            );
+        }
+    }
+
     #[test]
     fn a_globally_visible_enum_is_exactly_one_with_a_bare_source_name() {
         let index = TypeIndex::load(&core_path(), &next_path()).unwrap();

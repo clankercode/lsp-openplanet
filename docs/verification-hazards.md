@@ -8,8 +8,8 @@ is the three shapes, not how many stories are filed under them.
 
 Across that batch, the recurring cost was never a check that *errored* — errors
 get investigated. It was checks that returned a clean, plausible, internally
-consistent answer that happened to be false. Every one of them cost more time
-than the bug it was hiding.
+consistent answer that happened to be false. Every hidden defect cost more
+time than the bug it was hiding.
 
 They fall into three mechanisms. Learn the shapes, not the stories.
 
@@ -223,6 +223,14 @@ The test passes, and would have passed either way.
   database, accepted by a `> 0` assertion.
 - **A comparison harness diffed against files it never wrote**, comparing two
   copies of the same thing.
+- **A warning count counted a different population than its name claimed.** A
+  clippy gate summed every output line matching `^(warning|error)`, which also
+  matches cargo's own per-target epilogue — ``warning: `openplanet-lsp` (lib)
+  generated 53 warnings``. With six build targets that is a silent, stable `+6`
+  on every measurement. It is self-consistent, so it never looks wrong; it only
+  surfaces when one number is compared against another taken a different way,
+  and then it reads as a regression that does not exist. Two measurements of
+  the same tree disagreed (75 vs 81) and the tree was innocent.
 - **A gate counted the wrong population.** B065's specified gate was "count
   `/tmp/oplsp-*` across two runs and assert it does not grow". Those helpers
   clean up at end of test and leak only on the unwind path, so the count reads
@@ -258,8 +266,10 @@ The test passes, and would have passed either way.
   investigation. Check for a crashed binary before concluding anything about
   your tests. (Observed: `multi_root_tests`, stack `Backend::new` →
   `LspConfig::load` → `read_config_file` → toml_edit's recursive parser, under
-  load with ~2G free RAM — a stack overflow in a recursive parser, not a defect
-  in any branch.)
+  load — a stack overflow in a recursive parser, not a defect in any branch.
+  Note the first diagnosis blamed "~2G free RAM"; that read the `free` column
+  when `available` governs, and `available` was 22G throughout. There was no
+  memory pressure. Wrong cause, right conclusion — which is its own hazard.)
 
 - **An intermittent failure will let you bisect it to any answer you like.**
   The same lane saw that crash three times in a row on its branch, once green
@@ -277,6 +287,11 @@ The test passes, and would have passed either way.
   would otherwise be vacuous (see `tests/execute_command_tests.rs`).
 - **Ask of every new test: would this still pass if only half the fix were
   applied?** If yes, it does not pin what it claims to.
+- **A count is a claim about a population — state which one.** Prefer a
+  categorised diff of two runs over comparing two totals, and exclude the
+  tool's own summary lines from any count of what the tool found. Totals taken
+  by different methods are not comparable, and a stable offset between them
+  looks exactly like a real delta.
 
 ---
 

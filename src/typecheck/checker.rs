@@ -9438,6 +9438,52 @@ void Main() {
         );
     }
 
+    /// B056 checker fence: the BARE spelling is the one a plugin author writes,
+    /// and it is an alias of the same enum as any scope-qualified form. Before
+    /// the canonicalization fix all three of these mismatched; two were false
+    /// positives on bindings the game accepts.
+    ///
+    /// B056 checker fence: the fixture's own aliases for one enum must compare
+    /// equal inside funcdef signatures, while a genuinely different enum must
+    /// remain incompatible. This asserts internal typedb/checker consistency,
+    /// not that either alias spelling is accepted by the game.
+    #[test]
+    fn funcdef_signature_comparison_honors_typedb_enum_alias_identity() {
+        let diags = check_with_typedb(
+            r#"
+            funcdef void EnumCallback(Meta::EDummyCollectionIdent value);
+            void SameEnum(UI::EDummyCollectionIdent value) {}
+            void BareEnum(EDummyCollectionIdent value) {}
+            void DistinctEnum(CGameCtnBlock::ECardinalDirections value) {}
+            void Main() {
+                EnumCallback(SameEnum);
+                EnumCallback(BareEnum);
+                EnumCallback(DistinctEnum);
+            }
+            "#,
+        );
+        let mismatches: Vec<_> = diags
+            .iter()
+            .filter(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. }))
+            .collect();
+        assert_eq!(
+            mismatches.len(),
+            1,
+            "both same-enum spellings must bind and the distinct enum must not, got {:?}",
+            diags
+        );
+        assert_eq!(
+            mismatches[0].kind,
+            TypeDiagnosticKind::ArgTypeMismatch {
+                function_name: "EnumCallback".into(),
+                param_index: 0,
+                expected: "void (Meta::EDummyCollectionIdent)".into(),
+                got: "void (CGameCtnBlock::ECardinalDirections)".into(),
+            },
+            "the sole mismatch must be the distinct-enum signature"
+        );
+    }
+
     /// Typedefs are stored as `SymbolKind::Funcdef` in the symbol table
     /// but are not funcdef constructors — `MyInt(1)` must stay a type
     /// conversion, not `ArgTypeMismatch`.
