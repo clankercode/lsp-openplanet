@@ -278,9 +278,11 @@ impl TypeDbMeta {
 /// already been read, and a dump rewritten in between (the game regenerates
 /// it; that is the whole reason the reload command exists) produced stamps
 /// describing a database that was never loaded. Single threaded, no lock
-/// involved. The only constructor is [`Self::of_parsed`], which takes the
-/// PARSED databases, so the stamps and the index are products of one read by
-/// construction and the defect has nowhere to live.
+/// involved. The only constructor that READS anything is [`Self::of_parsed`],
+/// which takes the already-parsed databases, so wherever these stamps come
+/// from a file they are a product of the same read that produced the index.
+/// (The fields stay public: a literal, and [`Default`], are how tests and the
+/// "nothing loaded" answer build one, and neither touches a file.)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeDbVersions {
     pub core_op: Option<String>,
