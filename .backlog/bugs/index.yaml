@@ -59,3 +59,4 @@ bugs:
     - file: B058-withruncontext-quick-fix-can-e.todo
     - file: B059-false-error-csmplayer-getcurre.todo
     - file: B060-false-error-text-format-reject.todo
+    - file: B061-false-unused-property-syntax-r.todo

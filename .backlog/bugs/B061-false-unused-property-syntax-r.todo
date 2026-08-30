@@ -1,0 +1,26 @@
+---
+complexity: medium
+created_at: "2026-08-30T05:30:00Z"
+depends_on: []
+estimate_hours: 1
+id: B061
+priority: high
+status: pending
+tags: []
+title: 'False unused: property-syntax reads are not credited to their get_/set_ accessor'
+updated_at: "2026-08-30T05:30:00Z"
+---
+
+# False unused: property-syntax reads are not credited to their get_/set_ accessor
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior
