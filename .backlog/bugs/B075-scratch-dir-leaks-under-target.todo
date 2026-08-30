@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: low
 created_at: "2026-08-30T17:54:14Z"
 depends_on: []
 estimate_hours: 0.5
 id: B075
 priority: medium
+started_at: null
 status: pending
 tags: []
 title: 'scratch_dir leaks under target/: the same start-only cleanup B065 fixed, outside /tmp'
@@ -80,3 +82,43 @@ it succeeded and created nothing. Verify the ID exists after filing.
 
 B065 (same defect in `/tmp`; `crate::testing::TempDir` is the guard to reuse),
 B046 (the tests this helper serves).
+
+## CORRECTION to the filing-trap note (coordinator, 2026-08-31)
+
+The note above says `bl` mutating commands "exit 0 while refusing". **That is
+not what happens, and the distinction changes the countermeasure.** Measured
+from `.worktrees/b064`:
+
+    bl bug --title "…"                 -> exit 1     (correct)
+    bl bug --title "…" 2>&1 | tail -3  -> exit 0     (WRONG, and this is the trap)
+    echo body | bl append B060         -> exit 1     (correct)
+
+`bl` refuses correctly, exits non-zero, and prints an unmissable message:
+
+    ERROR: 'bl bug' is a mutating backlog command and cannot be run from a
+    git worktree.
+
+**The masking is ours, not `bl`'s.** A shell pipeline reports the exit status of
+its LAST command, so `bl … | tail` or `bl … | grep` discards `bl`'s failure and
+reports `tail`'s success. The coordinator had been invoking it as
+`bl bug --title "…" 2>&1 | tail -3` all batch — the same trap, surviving only
+because those calls ran in the main checkout where `bl` succeeded anyway.
+
+Note `bl append` via heredoc is SAFE: `bl` is last in that pipeline, so its
+status propagates.
+
+**So do not file a defect against `bl`.** The countermeasures are:
+
+1. Do not pipe a mutating command through `tail`/`grep`. Run it bare and let
+   the output show.
+2. If you must pipe, check `${PIPESTATUS[0]}` (bash) / `$pipestatus[1]` (zsh),
+   not `$?`.
+3. Verify the artifact regardless — `ls .backlog/bugs/<ID>-*` — because that is
+   what actually caught this. Reading the output and noticing it looked like an
+   echo rather than a confirmation was the right instinct even though the
+   inferred cause was wrong.
+
+The advice in the original note still stands and is worth repeating: anyone who
+filed a ticket from a worktree today should confirm the ID exists. The
+coordinator has verified B069-B075 all exist with bodies, and that every
+coordinator append landed.
