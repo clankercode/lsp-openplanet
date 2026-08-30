@@ -1,7 +1,85 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::workspace::manifest::Manifest;
+
+/// Where a define in the resolved set came from (B050).
+///
+/// One variant per layer of the ladder that can PRODUCE a define, so a client
+/// can explain why a `#if` branch is live or dead without re-deriving the set
+/// itself — a second implementation of rules B017, B024, B026 and B028 each
+/// had to fix once already.
+///
+/// [`Self::DependencyMissing`] is the one variant that names something the
+/// server deliberately does NOT define (B019: a declared dependency that does
+/// not resolve here gets no macro, matching the game). It is reported anyway,
+/// inactive, because that row is the entire explanation for a dead
+/// `#if DEPENDENCY_X` branch.
+///
+/// Serialized in kebab-case, matching `DefineOrigin` in the VS Code
+/// extension's `packages/vscode-ext/src/defines.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DefineOrigin {
+    /// A `game_target` platform selector (`TMNEXT`, `MP41`, ...).
+    Target,
+    /// A `SIG_*` name from `signature_mode` (GH #64).
+    Signature,
+    /// `WINDOWS` / `WINDOWS_WINE` / `LINUX` from `os_target` (B028).
+    Os,
+    /// `MANIA64` / `MANIA32` from `arch_target` (B028).
+    Arch,
+    /// A build-shape flag from `build_flags` (B028).
+    Build,
+    /// An `info.toml` `[script].defines` entry.
+    Manifest,
+    /// `DEPENDENCY_<ID>` / `EXPORT_DEPENDENCY_<ID>` for a dependency that
+    /// RESOLVED on this machine (B019).
+    Dependency,
+    /// A declared dependency that did NOT resolve, so the game would not
+    /// define its macro either.
+    DependencyMissing,
+    /// Only the user's `defines` entries produce it.
+    User,
+}
+
+impl DefineOrigin {
+    /// Grouping order for [`LspConfig::resolved_defines`]: derived classes in
+    /// ladder order, the user's own last. Exposed so a client sorting its own
+    /// rows agrees with the server instead of inventing a second order.
+    pub fn sort_rank(self) -> u8 {
+        match self {
+            Self::Target => 0,
+            Self::Signature => 1,
+            Self::Os => 2,
+            Self::Arch => 3,
+            Self::Build => 4,
+            Self::Manifest => 5,
+            Self::Dependency => 6,
+            Self::DependencyMissing => 7,
+            Self::User => 8,
+        }
+    }
+}
+
+/// One define as `openplanet/resolvedDefines` reports it (B050).
+///
+/// `active` and `derived_active` are deliberately separate: a define the user
+/// turned off with `-NAME` is present-but-disabled (`active: false`,
+/// `derived_active: true`) and keeps its DERIVED origin, while a define
+/// nothing ever produced simply has no row. Removing an override and
+/// disabling a define are different edits, and a UI that cannot tell them
+/// apart writes the wrong one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedDefine {
+    pub name: String,
+    /// Effective state, the user's `defines` entries included.
+    pub active: bool,
+    pub origin: DefineOrigin,
+    /// The state this define would have with NO user `defines` entries.
+    pub derived_active: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct LspConfig {
@@ -28,6 +106,21 @@ pub struct LspConfig {
     /// narrow via config / CLI to model a real client.
     pub build_flags: BuildFlags,
     pub defines: HashSet<String>,
+    /// B050: origin per define name, recorded by the same statements that
+    /// produce the names, so the two cannot drift. Carries names that are NOT
+    /// in `defines` — a declared-but-unresolved dependency is recorded as
+    /// [`DefineOrigin::DependencyMissing`] precisely so the client can explain
+    /// the `#if` branch it kills. Read it through
+    /// [`LspConfig::resolved_defines`] rather than directly.
+    #[doc(hidden)]
+    pub define_origins: HashMap<String, DefineOrigin>,
+    /// B050: `defines` as it stood BEFORE the user's `defines` entries were
+    /// applied (Layer 5). The difference between this and `defines` is what
+    /// makes "the user removed their override" and "the user disabled a
+    /// derived define" distinguishable. Read it through
+    /// [`LspConfig::resolved_defines`].
+    #[doc(hidden)]
+    pub derived_defines: HashSet<String>,
     /// Raw `defines` entries from every config layer (user global, parent
     /// config, per-root config, init options), in the order they were read. They
     /// are ADDITIVE over the target-derived set and are applied last — after
@@ -121,7 +214,7 @@ impl Default for LspConfig {
     /// enabled. Used by tests and by callers that don't care about
     /// auto-detection or user config files.
     fn default() -> Self {
-        Self {
+        let mut config = Self {
             openplanet_dir: None,
             plugins_dir: None,
             core_json: None,
@@ -131,7 +224,9 @@ impl Default for LspConfig {
             os_target: OsTarget::default(),
             arch_target: ArchTarget::default(),
             build_flags: BuildFlags::default(),
-            defines: Self::default_defines(),
+            defines: HashSet::new(),
+            define_origins: HashMap::new(),
+            derived_defines: HashSet::new(),
             define_overrides: Vec::new(),
             source_paths: None,
             ignore_paths: None,
@@ -150,7 +245,12 @@ impl Default for LspConfig {
             inactive_regions: InactiveLevel::Hint,
             errors: ErrorGroup::Last,
             config_issues: Vec::new(),
-        }
+        };
+        // Through the same producer the ladder re-derives with, so an
+        // untouched config introspects exactly like a loaded one (B050).
+        config.set_base_defines(Self::default_tagged_defines());
+        config.derived_defines = config.defines.clone();
+        config
     }
 }
 
@@ -1105,30 +1205,90 @@ impl LspConfig {
         arch: ArchTarget,
         build: BuildFlags,
     ) -> HashSet<String> {
+        Self::tagged_defines_for_target(target, signature, os, arch, build)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// [`Self::defines_for_target`] with an ORIGIN per name (B050).
+    ///
+    /// This is the single producer of the base set — `defines_for_target` is
+    /// a view over it — so the origin map physically cannot disagree with the
+    /// define set about which names exist or where they came from.
+    pub fn tagged_defines_for_target(
+        target: &str,
+        signature: SignatureMode,
+        os: OsTarget,
+        arch: ArchTarget,
+        build: BuildFlags,
+    ) -> Vec<(String, DefineOrigin)> {
         // OS + arch + build-shape defines — independent of the game the
         // plugin targets and of how it is signed.
-        let mut set: HashSet<String> = os
+        let mut tagged: Vec<(String, DefineOrigin)> = os
             .defines()
             .iter()
-            .chain(arch.defines().iter())
-            .copied()
-            .chain(build.defines())
-            .chain(signature.defines().iter().copied())
-            .map(String::from)
+            .map(|name| ((*name).to_string(), DefineOrigin::Os))
+            .chain(
+                arch.defines()
+                    .iter()
+                    .map(|name| ((*name).to_string(), DefineOrigin::Arch)),
+            )
+            .chain(
+                build
+                    .defines()
+                    .map(|name| (name.to_string(), DefineOrigin::Build)),
+            )
+            .chain(
+                signature
+                    .defines()
+                    .iter()
+                    .map(|name| ((*name).to_string(), DefineOrigin::Signature)),
+            )
             .collect();
         // Platform selector(s) for the requested game. The game defines
         // exactly one ManiaPlanet-generation family; the others stay off so
         // their `#if` branches are dead (matching the game). Evidence (GH #36,
         // tm-skids-magician): TM2020 treats `#if MP4` and `#elif TURBO` as
         // DEAD — so TMNEXT does NOT imply MP4/TURBO.
-        let Some(platform) = Self::platform_family_for_target(target) else {
+        match Self::platform_family_for_target(target) {
+            Some(platform) => tagged.extend(
+                platform
+                    .iter()
+                    .map(|name| ((*name).to_string(), DefineOrigin::Target)),
+            ),
             // Unknown target: define the target token itself so its `#if`
             // branch is live; everything else off (conservative).
-            set.insert(target.to_string());
-            return set;
-        };
-        set.extend(platform.iter().map(|s| s.to_string()));
-        set
+            None => tagged.push((target.to_string(), DefineOrigin::Target)),
+        }
+        tagged
+    }
+
+    /// Replace the base set and its origins together (B050). Taking both from
+    /// one value is what stops a future layer updating `defines` and
+    /// forgetting the origins.
+    fn set_base_defines(&mut self, tagged: Vec<(String, DefineOrigin)>) {
+        self.defines = tagged.iter().map(|(name, _)| name.clone()).collect();
+        self.define_origins = tagged.into_iter().collect();
+    }
+
+    /// Record where a define came from, without letting a LATER
+    /// declaration downgrade an earlier stronger one.
+    ///
+    /// The only case that matters is Openplanet's id → macro collision
+    /// (`my-plugin` and `my.plugin` both give `MY_PLUGIN`): if one of the
+    /// colliding ids resolves and the other does not, the macro IS defined,
+    /// so `dependency` must win over `dependency-missing` whichever order the
+    /// manifest lists them in.
+    fn note_define_origin(&mut self, name: String, origin: DefineOrigin) {
+        match origin {
+            DefineOrigin::DependencyMissing => {
+                self.define_origins.entry(name).or_insert(origin);
+            }
+            _ => {
+                self.define_origins.insert(name, origin);
+            }
+        }
     }
 
     /// Every accepted `game_target` token, for CLI validation, the config
@@ -1176,13 +1336,78 @@ impl LspConfig {
     /// default signature level (developer — every `SIG_*` on), the default
     /// OS/arch (windows / 64) and the default build flags (all on).
     pub fn default_defines() -> HashSet<String> {
-        Self::defines_for_target(
+        Self::default_tagged_defines()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// [`Self::default_defines`] with origins (B050).
+    pub fn default_tagged_defines() -> Vec<(String, DefineOrigin)> {
+        Self::tagged_defines_for_target(
             "TMNEXT",
             SignatureMode::default(),
             OsTarget::default(),
             ArchTarget::default(),
             BuildFlags::default(),
         )
+    }
+
+    /// The ManiaPlanet-generation families, for clients (B050).
+    ///
+    /// The VS Code extension's "is this selector foreign to my target" guard
+    /// needs the GROUPING, not the flat [`Self::GAME_TARGETS`] list — under
+    /// `game_target = MP4` the name `MP41` is same-family and must not be
+    /// flagged — and used to carry its own copy of this table.
+    pub fn platform_families() -> &'static [&'static [&'static str]] {
+        Self::PLATFORM_FAMILIES
+    }
+
+    /// The effective define set with an origin per entry, and the state each
+    /// entry would have without the user's `defines` overrides (B050).
+    ///
+    /// Covers every name any layer produced, plus every declared dependency
+    /// that did NOT resolve — which has no define but is the reason a
+    /// `#if DEPENDENCY_X` branch is dead, and is therefore exactly what a
+    /// client asking "why is this greyed out" (B031) needs to hear.
+    ///
+    /// Ordered by [`DefineOrigin::sort_rank`] then name, so the answer is
+    /// stable across runs and a client never has to sort.
+    pub fn resolved_defines(&self) -> Vec<ResolvedDefine> {
+        let names: BTreeSet<&str> = self
+            .defines
+            .iter()
+            .chain(&self.derived_defines)
+            .map(String::as_str)
+            .chain(self.define_origins.keys().map(String::as_str))
+            .collect();
+        let mut out: Vec<ResolvedDefine> = names
+            .into_iter()
+            .map(|name| ResolvedDefine {
+                name: name.to_string(),
+                active: self.defines.contains(name),
+                // No recorded origin means no derivation layer produced it,
+                // so the user asked for it. That holds as an invariant, not
+                // as a shrug: the only places that insert into `defines`
+                // without an origin are `check --define` and the
+                // `define_matrix` / `define_combinations` combo axes in
+                // `cli/mod.rs`, both of which ARE the user. Pinned by
+                // `resolved_defines_reports_an_untagged_late_insert_as_user`.
+                origin: self
+                    .define_origins
+                    .get(name)
+                    .copied()
+                    .unwrap_or(DefineOrigin::User),
+                derived_active: self.derived_defines.contains(name),
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a.origin
+                .sort_rank()
+                .cmp(&b.origin.sort_rank())
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        out
     }
 
     /// GH #45: the Openplanet install folder name for a game target.
@@ -1298,13 +1523,16 @@ impl LspConfig {
         // step; they are layered on top further down, after the manifest.
         // B028: the same finality holds for the os/arch/build selectors —
         // all resolved through the ladder above by now.
-        config.defines = Self::defines_for_target(
+        // B050: the base set and its origins are installed together, from
+        // the one producer, so introspection reports the same names the
+        // compiler will see.
+        config.set_base_defines(Self::tagged_defines_for_target(
             &config.game_target,
             config.signature_mode,
             config.os_target,
             config.arch_target,
             config.build_flags,
-        );
+        ));
 
         // GH #45: the finalized target may expect a different install folder
         // than the Layer-1 TMNEXT default — re-probe before deriving paths.
@@ -1360,6 +1588,13 @@ impl LspConfig {
                 config.apply_manifest(&manifest, &resolved);
             }
         }
+
+        // B050: everything below this line is the USER's layer, so the set
+        // as it stands right now is the derived one. Snapshotting it here —
+        // rather than reconstructing it later — is what makes "the user
+        // disabled a derived define" distinguishable from "nothing produces
+        // this define", whatever layers get added above.
+        config.derived_defines = config.defines.clone();
 
         // Layer 5: the user's own `defines` entries, applied LAST so an
         // explicit `-NAME` can drop anything a lower layer turned on (B024).
@@ -1543,6 +1778,7 @@ impl LspConfig {
 
         for define in &script.defines {
             self.defines.insert(define.clone());
+            self.note_define_origin(define.clone(), DefineOrigin::Manifest);
         }
 
         // Openplanet's id → macro mapping collides (`my-plugin` and
@@ -1573,23 +1809,30 @@ impl LspConfig {
                 claimed.insert(name.clone(), dep.clone());
             }
             if !resolved.contains(dep) {
+                // No define — the game would not define it either (B019).
+                // The NAME is still recorded, so a client can say "declared
+                // but not installed" instead of leaving a dead
+                // `#if DEPENDENCY_X` branch unexplained (B050).
+                self.note_define_origin(name, DefineOrigin::DependencyMissing);
                 continue;
             }
-            self.defines.insert(name);
+            self.defines.insert(name.clone());
+            self.note_define_origin(name, DefineOrigin::Dependency);
         }
 
         // `export_dependencies` additionally get EXPORT_DEPENDENCY_<ID>, on
         // the same resolution gate.
         for dep in &script.export_dependencies {
-            if !resolved.contains(dep) {
+            if dependency_define_name(dep).is_none() {
                 continue;
             }
-            if dependency_define_name(dep).is_some() {
-                self.defines.insert(format!(
-                    "EXPORT_DEPENDENCY_{}",
-                    dependency_define_suffix(dep)
-                ));
+            let name = format!("EXPORT_DEPENDENCY_{}", dependency_define_suffix(dep));
+            if !resolved.contains(dep) {
+                self.note_define_origin(name, DefineOrigin::DependencyMissing);
+                continue;
             }
+            self.defines.insert(name.clone());
+            self.note_define_origin(name, DefineOrigin::Dependency);
         }
     }
 
@@ -5163,5 +5406,394 @@ shortcut_match_enums = true
             cfg.defines
         );
         let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    // ---------------------------------------------------------------------
+    // B050: config introspection. The resolved define set with an ORIGIN per
+    // entry, so a client can explain WHY a `#if` branch is live or dead.
+    //
+    // Two states the flat `defines` set cannot tell apart, and which the UI
+    // must: a define the user REMOVED (`-NAME`) is present-but-disabled with
+    // its derived origin intact, while a define nothing ever produced is
+    // absent. `derived_active` carries the state the set had before the
+    // user's `defines` entries were applied.
+    // ---------------------------------------------------------------------
+
+    /// A config whose base selectors are all pinned, so the expectations
+    /// below hold whatever this machine's user-global file says. Returns the
+    /// config and the temp dir the caller must clean up.
+    fn b050_pinned_config(name: &str) -> (LspConfig, PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("oplsp-b050-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "game_target = \"TMNEXT\"\nsignature_mode = \"developer\"\n\
+             os_target = \"windows\"\narch_target = \"64\"\ndefines = []\n",
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&tmp), None);
+        (cfg, tmp)
+    }
+
+    /// Look one name up in a resolved set.
+    fn resolved<'a>(set: &'a [ResolvedDefine], name: &str) -> Option<&'a ResolvedDefine> {
+        set.iter().find(|d| d.name == name)
+    }
+
+    /// Assert one entry's whole shape in one line.
+    #[track_caller]
+    fn assert_resolved(
+        set: &[ResolvedDefine],
+        name: &str,
+        origin: DefineOrigin,
+        active: bool,
+        derived_active: bool,
+    ) {
+        let found = resolved(set, name)
+            .unwrap_or_else(|| panic!("`{name}` missing from the resolved set: {set:#?}"));
+        assert_eq!(found.origin, origin, "origin of `{name}`");
+        assert_eq!(found.active, active, "active of `{name}`");
+        assert_eq!(
+            found.derived_active, derived_active,
+            "derived_active of `{name}`"
+        );
+    }
+
+    /// Every base origin class is named, not lumped under one bucket.
+    #[test]
+    fn resolved_defines_tags_every_base_origin_class() {
+        let (cfg, tmp) = b050_pinned_config("base-origins");
+        let set = cfg.resolved_defines();
+        assert_resolved(&set, "TMNEXT", DefineOrigin::Target, true, true);
+        assert_resolved(&set, "SIG_DEVELOPER", DefineOrigin::Signature, true, true);
+        assert_resolved(&set, "WINDOWS", DefineOrigin::Os, true, true);
+        assert_resolved(&set, "MANIA64", DefineOrigin::Arch, true, true);
+        assert_resolved(&set, "DEVELOPER", DefineOrigin::Build, true, true);
+        assert_resolved(&set, "LOGS", DefineOrigin::Build, true, true);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A user `-NAME` on a DERIVED define shows present-but-disabled, with
+    /// the derived origin preserved — removal and disabling are different
+    /// states, and the UI renders them differently.
+    ///
+    /// Generalized across every base origin class and both negation
+    /// prefixes: the distinction must not be an accident of one code path.
+    #[test]
+    fn resolved_defines_shows_a_user_disabled_derived_define_as_present() {
+        for (name, origin, prefix, os_arch) in [
+            ("TMNEXT", DefineOrigin::Target, "-", ""),
+            ("SIG_DEVELOPER", DefineOrigin::Signature, "-", ""),
+            ("SIG_SCHOOL", DefineOrigin::Signature, "!", ""),
+            ("WINDOWS", DefineOrigin::Os, "-", ""),
+            ("MANIA64", DefineOrigin::Arch, "!", ""),
+            ("DEVELOPER", DefineOrigin::Build, "-", ""),
+            ("LOGS", DefineOrigin::Build, "!", ""),
+            ("MANIA32", DefineOrigin::Arch, "-", "arch_target = \"32\"\n"),
+            ("LINUX", DefineOrigin::Os, "-", "os_target = \"linux\"\n"),
+        ] {
+            let tmp = std::env::temp_dir()
+                .join(format!("oplsp-b050-disable-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp).unwrap();
+            std::fs::write(
+                tmp.join(".openplanet-lsp.toml"),
+                format!("{os_arch}defines = [\"{prefix}{name}\"]\n"),
+            )
+            .unwrap();
+            let cfg = LspConfig::load(Some(&tmp), None);
+            assert!(
+                !cfg.defines.contains(name),
+                "`{prefix}{name}` must still turn the define off"
+            );
+            assert_resolved(&cfg.resolved_defines(), name, origin, false, true);
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+
+    /// A define ONLY the user asked for is `user`, active, and was never
+    /// derived — the counterpart of the case above.
+    #[test]
+    fn resolved_defines_tags_a_user_only_define_as_user() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-b050-useronly-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "defines = [\"MY_FLAG\", \"-NEVER_SET\"]\n",
+        )
+        .unwrap();
+        let set = LspConfig::load(Some(&tmp), None).resolved_defines();
+        assert_resolved(&set, "MY_FLAG", DefineOrigin::User, true, false);
+        assert!(
+            resolved(&set, "NEVER_SET").is_none(),
+            "a `-NAME` for something nothing derives is a no-op, not a row: {set:#?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The ticket's fixture: one resolvable and one unresolvable optional
+    /// dependency, plus a manifest `[script].defines` entry. Each lands on a
+    /// distinct origin, and the missing one is reported INACTIVE rather than
+    /// omitted — that row is the whole point, it explains a dead
+    /// `#if DEPENDENCY_X` branch.
+    #[test]
+    fn resolved_defines_separates_resolved_and_missing_dependencies() {
+        let (root, plugins) = b019_plugin(
+            "b050-origins",
+            "defines = [\"FROM_MANIFEST\"]\n\
+             dependencies = [\"ZzzB050Req\"]\n\
+             optional_dependencies = [\"ZzzB050Present\", \"ZzzB050Absent99\"]\n\
+             export_dependencies = [\"ZzzB050Export\"]\n",
+        );
+        b019_install(&plugins, "ZzzB050Req");
+        b019_install(&plugins, "ZzzB050Present");
+        b019_install(&plugins, "ZzzB050Export");
+        let set = LspConfig::load(Some(&root), None).resolved_defines();
+
+        assert_resolved(&set, "FROM_MANIFEST", DefineOrigin::Manifest, true, true);
+        assert_resolved(
+            &set,
+            "DEPENDENCY_ZZZB050REQ",
+            DefineOrigin::Dependency,
+            true,
+            true,
+        );
+        assert_resolved(
+            &set,
+            "DEPENDENCY_ZZZB050PRESENT",
+            DefineOrigin::Dependency,
+            true,
+            true,
+        );
+        assert_resolved(
+            &set,
+            "EXPORT_DEPENDENCY_ZZZB050EXPORT",
+            DefineOrigin::Dependency,
+            true,
+            true,
+        );
+        assert_resolved(
+            &set,
+            "DEPENDENCY_ZZZB050ABSENT99",
+            DefineOrigin::DependencyMissing,
+            false,
+            false,
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Forcing an uninstalled dependency on (the documented B019 escape
+    /// hatch) keeps the `dependency-missing` origin: it is still not
+    /// installed, the user has merely overridden the consequence.
+    #[test]
+    fn resolved_defines_keeps_the_missing_origin_when_the_user_forces_it_on() {
+        let (root, _plugins) = b019_plugin(
+            "b050-forced",
+            "optional_dependencies = [\"ZzzB050Forced99\"]\n",
+        );
+        std::fs::write(
+            root.join(".openplanet-lsp.toml"),
+            "defines = [\"DEPENDENCY_ZZZB050FORCED99\"]\n",
+        )
+        .unwrap();
+        let set = LspConfig::load(Some(&root), None).resolved_defines();
+        assert_resolved(
+            &set,
+            "DEPENDENCY_ZZZB050FORCED99",
+            DefineOrigin::DependencyMissing,
+            true,
+            false,
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Origins follow the B017 precedence ladder: the per-root file wins
+    /// over the parent one, so the platform selectors reported as `target`
+    /// are the WINNING target's, and the loser's family is absent.
+    #[test]
+    fn resolved_defines_origins_follow_the_config_precedence_ladder() {
+        let tmp = std::env::temp_dir().join(format!("oplsp-b050-ladder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("plugin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "game_target = \"TURBO\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".openplanet-lsp.toml"),
+            "game_target = \"MP41\"\n",
+        )
+        .unwrap();
+
+        let set = LspConfig::load_with_parent(Some(&root), Some(&tmp), None).resolved_defines();
+        assert_resolved(&set, "MP41", DefineOrigin::Target, true, true);
+        assert_resolved(&set, "MP4", DefineOrigin::Target, true, true);
+        assert!(
+            resolved(&set, "TURBO").is_none(),
+            "the losing layer's selector must not appear: {set:#?}"
+        );
+        assert!(
+            resolved(&set, "TMNEXT").is_none(),
+            "the default target's selector must not appear: {set:#?}"
+        );
+
+        // Init options are the top of the ladder and must win over both.
+        let init = serde_json::json!({ "game_target": "TMNEXT" });
+        let set =
+            LspConfig::load_with_parent(Some(&root), Some(&tmp), Some(&init)).resolved_defines();
+        assert_resolved(&set, "TMNEXT", DefineOrigin::Target, true, true);
+        assert!(resolved(&set, "MP41").is_none(), "{set:#?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The order is deterministic — origin class first, then name — so the
+    /// QuickPick groups rows and a client never has to sort.
+    #[test]
+    fn resolved_defines_is_ordered_by_origin_then_name() {
+        let (cfg, tmp) = b050_pinned_config("order");
+        let set = cfg.resolved_defines();
+        let keys: Vec<(u8, &str)> = set
+            .iter()
+            .map(|d| (d.origin.sort_rank(), d.name.as_str()))
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted, "resolved set must come back sorted");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Every name in the flat `defines` set is accounted for by a row — the
+    /// introspection view must never be a strict subset of what the compiler
+    /// actually sees.
+    #[test]
+    fn resolved_defines_covers_the_whole_effective_set() {
+        let (root, plugins) = b019_plugin(
+            "b050-cover",
+            "defines = [\"FROM_MANIFEST\"]\noptional_dependencies = [\"ZzzB050Cover\"]\n",
+        );
+        b019_install(&plugins, "ZzzB050Cover");
+        std::fs::write(
+            root.join(".openplanet-lsp.toml"),
+            format!(
+                "plugins_dir = {:?}\ndefines = [\"EXTRA\", \"-LOGS\"]\n",
+                plugins.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let cfg = LspConfig::load(Some(&root), None);
+        let set = cfg.resolved_defines();
+        for name in &cfg.defines {
+            let row = resolved(&set, name)
+                .unwrap_or_else(|| panic!("`{name}` is defined but has no row: {set:#?}"));
+            assert!(row.active, "`{name}` is in `defines` so it must be active");
+        }
+        for row in &set {
+            assert_eq!(
+                row.active,
+                cfg.defines.contains(&row.name),
+                "`{}` active flag disagrees with the effective set",
+                row.name
+            );
+        }
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Openplanet's id → macro mapping collides: `my-plugin` and `my.plugin`
+    /// both give `DEPENDENCY_MY_PLUGIN`. If ONE of the colliding ids resolves,
+    /// the macro IS defined, so the origin must say `dependency` — reporting
+    /// `dependency-missing` for a define that is live would tell the user a
+    /// live `#if` branch is dead.
+    ///
+    /// Both declaration orders are checked: the answer must not depend on
+    /// which id `info.toml` happens to list first.
+    #[test]
+    fn resolved_defines_lets_a_resolving_dependency_win_a_macro_collision() {
+        // Same two ids in the same order; only WHICH of them is installed
+        // changes, so the resolved one is declared first in one case and
+        // second in the other.
+        let first = "ZzzB050-collide";
+        let second = "ZzzB050.collide";
+        for installed in [first, second] {
+            let (root, plugins) = b019_plugin(
+                "b050-collide",
+                &format!("optional_dependencies = [\"{first}\", \"{second}\"]\n"),
+            );
+            b019_install(&plugins, installed);
+            let cfg = LspConfig::load(Some(&root), None);
+            assert!(
+                cfg.defines.contains("DEPENDENCY_ZZZB050_COLLIDE"),
+                "one colliding id resolved, so the macro is defined: {:?}",
+                cfg.defines
+            );
+            assert_resolved(
+                &cfg.resolved_defines(),
+                "DEPENDENCY_ZZZB050_COLLIDE",
+                DefineOrigin::Dependency,
+                true,
+                true,
+            );
+            let _ = std::fs::remove_dir_all(root.parent().unwrap());
+        }
+    }
+
+    /// Neither colliding id resolving leaves the macro undefined and reported
+    /// as missing — the counterpart of the case above.
+    #[test]
+    fn resolved_defines_reports_a_wholly_unresolved_collision_as_missing() {
+        let (root, _plugins) = b019_plugin(
+            "b050-collide-none",
+            "optional_dependencies = [\"ZzzB050-gone99\", \"ZzzB050.gone99\"]\n",
+        );
+        let cfg = LspConfig::load(Some(&root), None);
+        assert!(!cfg.defines.contains("DEPENDENCY_ZZZB050_GONE99"));
+        assert_resolved(
+            &cfg.resolved_defines(),
+            "DEPENDENCY_ZZZB050_GONE99",
+            DefineOrigin::DependencyMissing,
+            false,
+            false,
+        );
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// The `User` fallback is an INVARIANT, not a shrug: the only paths that
+    /// put a name into `defines` without tagging it are user-driven ones —
+    /// `check --define` (`cli/mod.rs`) and the `define_matrix` /
+    /// `define_combinations` combo axes, both of which the user asked for.
+    /// This pins the behaviour those callers rely on.
+    #[test]
+    fn resolved_defines_reports_an_untagged_late_insert_as_user() {
+        let (mut cfg, tmp) = b050_pinned_config("late-insert");
+        // Exactly what `run_check` does for a `--define` flag.
+        cfg.defines.insert("FROM_CLI".to_string());
+        assert_resolved(
+            &cfg.resolved_defines(),
+            "FROM_CLI",
+            DefineOrigin::User,
+            true,
+            false,
+        );
+        // And it must not disturb what the ladder already tagged.
+        assert_resolved(
+            &cfg.resolved_defines(),
+            "TMNEXT",
+            DefineOrigin::Target,
+            true,
+            true,
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The platform-family table is readable by clients, so the VS Code
+    /// extension can ask instead of duplicating the constant.
+    #[test]
+    fn platform_families_accessor_exposes_the_table() {
+        let exposed = LspConfig::platform_families();
+        assert_eq!(exposed, LspConfig::PLATFORM_FAMILIES);
+        assert!(exposed.iter().any(|f| f.contains(&"MP41")));
     }
 }
