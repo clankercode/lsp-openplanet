@@ -70,3 +70,4 @@ bugs:
     - file: B069-namespace-shortcut-completion.todo
     - file: B070-hover-returns-nothing-for-a-gl.todo
     - file: B071-enum-type-mismatches-are-not-d.todo
+    - file: B072-typeindex-load-reads-its-two-j.todo
