@@ -59,6 +59,21 @@ indistinguishable from "I am structurally incapable of seeing it".
   pattern structurally incapable of matching anything. Fixed by parsing the
   JSON instead of pattern-matching its serialisation.
 
+  **Two independent lanes wrote this same bug, and one of them wrote it
+  twice.** A gate first counted `grep -c "error:"`, which matches nothing in
+  JSON output, so every JSON corpus read as zero errors. The replacement
+  grepped `"severity":"error"` — and missed for the *different* reason above.
+  What caught the second attempt was a guard added while fixing the first:
+  *warn when a corpus reports zero diagnostics.* Hence the rule, which is the
+  most transferable thing in this document:
+
+  > **When you fix a broken measurement, add the guard that would have caught
+  > it — because your replacement is probably broken the same way.**
+
+  A correction is written by the same person, in the same session, under the
+  same wrong mental model that produced the original. It deserves more
+  suspicion than the code that prompted it, not less.
+
 **Countermeasure — positive control.** Before trusting a probe that reports
 absence, confirm it can see a thing you *know* is present. A staleness check
 that cannot find a file you just touched is not reporting staleness. A counter
