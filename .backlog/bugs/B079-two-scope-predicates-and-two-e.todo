@@ -107,3 +107,52 @@ reach it.
 
 B070 (the fix), B067 (closed not-a-defect; its writeup carries the mechanism),
 B007 (why `has_enum` dropped the trailing-suffix match), B063, B069.
+
+## A third instance, found independently by another lane (2026-08-31)
+
+lane-b060-b062 hit the same shape in `src/typecheck/checker.rs` while fixing
+B060, in a different file, on a different ticket, hours after this one was
+filed from `hover.rs`. Two independent discoveries is much stronger evidence
+for the structural claim than either instance alone.
+
+**Its instance: THREE predicates over "does this name a known type", each
+omitting what the others carry.**
+
+```
+names_a_known_type = has_type || has_enum || workspace_declares_type
+```
+
+- `has_type` **drops enums by design**
+- `has_enum` carries the asymmetric Nadeo/Core source-name rules that make
+  `UI::Plot::Marker` resolvable at all
+- `workspace_declares_type` carries workspace enums
+
+**The defect it caused.** Round 7 of that lane's review found a lost true
+positive: inside `namespace UI`, a property typed `Plot::Marker` (the Core enum
+`UI::Plot::Marker`, written relatively) passed into a callback slot. Master
+errored; the branch was silent. The cause was asking only ONE of the three
+predicates, so a Core enum stayed an unknown `Named` and went neutral. Exactly
+this ticket's shape: the caller reached for a predicate that could not see the
+case, and nothing in the types objected.
+
+**Its local fix is the right local move** - state the composition once and use
+it in both branches of `resolve_value_type_name`, so a type name resolves the
+same way everywhere. That does not close this ticket; it adds a third pair that
+a future caller can still get wrong.
+
+## Updated inventory
+
+| question | members |
+|---|---|
+| is this a scope? | `GlobalScope::scope_exists` (workspace OR index) / `TypeIndex::scope_exists` (index only) |
+| does this name an enum? | `has_enum` (acceptance) / `canonical_enum_key` (canonicalisation, wider) |
+| does this name a known type? | `has_type` (no enums) / `has_enum` / `workspace_declares_type` |
+
+Three questions, seven predicates, and **three demonstrated defects in one day**
+- two shipped-and-fixed, one caught pre-merge - all from a caller picking a
+member that could not see the case in front of it.
+
+That changes the urgency assessment recorded above. This ticket was filed as a
+latent shape with no known live defect. It still has none *outstanding*, but
+the rate is now three in a day across two files and two authors who both knew
+their areas well. The argument for acting is the rate, not any single instance.
