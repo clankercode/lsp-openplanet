@@ -63,3 +63,4 @@ bugs:
     - file: B062-manifest-exports-should-root-t.todo
     - file: B063-member-completion-never-offers.todo
     - file: B064-type-index-and-type-db-version.todo
+    - file: B065-test-helpers-leak-temp-dirs-b0.todo
