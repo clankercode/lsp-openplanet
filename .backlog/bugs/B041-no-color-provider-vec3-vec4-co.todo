@@ -103,3 +103,10 @@ Variants (per CLAUDE.md, generalize):
 ## Related
 Extension needs no change — VS Code renders color decorators natively once the
 server advertises the capability.
+
+## Lane decision (coordinator, 2026-08-30)
+
+Serialised behind B039 in lane `b039-b041-server-caps` — shared
+`ServerCapabilities` literal and `LanguageServer` impl in `src/server/mod.rs`.
+See B039 for the full reasoning. Start B041 only after B039 has merged to
+master and the lane has rebased onto that tip.
