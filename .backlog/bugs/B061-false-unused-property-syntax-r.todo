@@ -216,3 +216,46 @@ form can split them. Pin both directions of that pair explicitly.
 **Baseline confirmed:** B060 leaves this ticket's gate at exactly 24
 diagnostics on `tm-tournament-station` (24 on merge-base, 24 on B060's branch),
 so B061's drop is attributable to B061 alone.
+
+## Corrections from lane-b060-b062 (2026-08-31), measured
+
+**Root cause confirmed by measurement, not inspection.** One fixture, four
+predictions, all four confirmed:
+
+| read form | accessor | result |
+|---|---|---|
+| `Ns::P` (qualified read) | `Ns::get_P` | reported unused - WRONG |
+| `Ns::P = 5` (qualified write) | `Ns::set_P` | reported unused - WRONG |
+| `G` / `G = 7` (global) | `get_G` / `set_G` | credited correctly |
+| `c.M` / `c.M = 9` (member) | `C::get_M` / `C::set_M` | credited correctly |
+
+**The `set_` half is what makes this a discriminator rather than a plausible
+story.** If the defect were "getters are not credited", the setter would
+behave differently. It does not, because both go through the same
+`format!("get_{}", name)` / `format!("set_{}", name)` prefix placement, which
+for `Ns::P` produces **`get_Ns::P`** - a name nothing can ever match.
+`qualified_virtual_name` in `global_scope.rs` already builds `Ns::get_P`
+correctly, so the fix is to route through it.
+
+Global and member forms both working confirms the single-form reading: this is
+namespace-scoped resolution only.
+
+## THE TICKET UNDERSTATES THE SURFACE: two spellings, not one
+
+The forms list omits the second, and a test pinning only the first would pass
+while half the defect survives:
+
+1. **explicit `Ns::P`** from outside the namespace
+2. **bare `P` resolved through the namespace ladder from inside
+   `namespace Ns`** - observed live, where `Nz::get_NsShadowP` is read as bare
+   `NsShadowP` and still reported unused
+
+Both go through the same recorder, so one fix covers both. **Pin both anyway.**
+One fix covering two spellings is not a reason to test one.
+
+## FACTUAL ERROR IN THIS TICKET
+
+All four `IsSecure` reads are in `Transport_Test.as`. They therefore belong in
+the **18 that survive**, not the **6 that go**. Correct the counts before using
+them as an acceptance criterion - a fix measured against the wrong expected
+population would look wrong when it is right, or right when it is wrong.
