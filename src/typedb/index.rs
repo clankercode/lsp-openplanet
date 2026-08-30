@@ -2207,6 +2207,26 @@ mod tests {
                 continue;
             }
             collisions += 1;
+
+            // WHICH candidate is selected, not merely that selection is
+            // stable. Found by the adversarial review: asserting only that
+            // `global_enum_key` agrees across loads is satisfied by an
+            // implementation returning the LAST candidate, so the sorted-first
+            // rule in `build_global_enum_value_index` was unpinned. The pick
+            // is semantically free here - the candidates are interchangeable,
+            // which is the point of this test - but it is the string a user
+            // SEES in hover and go-to, so it is behaviour and belongs pinned.
+            let sorted_first = owners
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .min()
+                .expect("a collision has at least two owners");
+            assert_eq!(
+                index.global_enum_key(name),
+                Some(sorted_first),
+                "`global_enum_key({name})` must select the sorted-first key"
+            );
+
             let first = &owners[0].1;
             if owners.iter().any(|(_, values)| values != first) {
                 let keys: Vec<&str> = owners.iter().map(|(k, _)| k.as_str()).collect();
