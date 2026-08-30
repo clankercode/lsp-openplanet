@@ -20,10 +20,48 @@ They fall into three mechanisms. Learn the shapes, not the stories.
 The check runs, finds nothing, and reports "nothing" — which is
 indistinguishable from "I am structurally incapable of seeing it".
 
-- **`find <cargo-target> -maxdepth 2 -newermt '-6 hours'`** returned empty on a
-  live, actively-written 4 GB build tree, because cargo's files sit at depth 3+.
-  Read as "stale scratch, safe to delete". It was another session's live
-  reviewer target dir, deleted mid-run.
+- **`find <cargo-target> -maxdepth 2 -newermt '-6 hours' 2>/dev/null | head`**
+  returned empty on a live, actively-written 4 GB build tree. Read as "stale
+  scratch, safe to delete". It was another session's live reviewer target dir,
+  deleted mid-run.
+
+  **This entry originally blamed the wrong mechanism, and the correction is the
+  more useful lesson.** It said cargo's files sit at depth 3+ so `-maxdepth 2`
+  could not see them. That is true but *never reached*. Measured: `find` on this
+  machine is not GNU findutils — it is a shell function from the Claude Code
+  shell snapshot routing to **bfs 4.1.1**, and bfs **rejects** GNU-style
+  relative timestamps outright:
+
+  ```
+  bfs: error: … -maxdepth 2 -newermt "-6 hours"
+  bfs: error:                        ~~~~~~~~~~
+  bfs: error: Invalid timestamp.
+  ```
+
+  Exit 1, on stderr, with a caret under the offending argument. **The traversal
+  never started.** The tool diagnosed the mistake precisely and both channels it
+  used were silenced: `2>/dev/null` discarded the message, `| head` discarded
+  the status. Use `-mmin -N` for relative time under bfs — on a tree reporting
+  "0 files newer than 10 days", `-mmin -30` found 732.
+
+  Why the misdiagnosis mattered: anyone acting on the original entry would
+  "fix" it to `-maxdepth 5 -newermt '-6 hours'` and get the same silent empty
+  answer. **A wrong diagnosis that explains the symptom is worse than no
+  diagnosis, because it closes the investigation.**
+
+  Two consequences. This is a *second* instance of the pipeline-masking hazard
+  below, not an independent story — which makes masking the highest-frequency
+  hazard in this batch: two lanes, two tools, one shape. And **`2>/dev/null`
+  deserves its own rule**, because every agent reflexively appends it to keep
+  output tidy:
+
+  > **Never suppress stderr on a command whose *absence of output* is the thing
+  > you are about to act on.** It converts "I refused, and here is exactly why"
+  > into "no results".
+
+  Found by running the positive control this document prescribes, before a
+  deletion — the document's own countermeasure catching the document's own
+  error.
 - **`pgrep -f <pattern>`** matched its own command line, so "is that process
   running?" answered yes when only the check itself was running.
 - **The probe tool reported diagnostics from other installed plugins**, so an
