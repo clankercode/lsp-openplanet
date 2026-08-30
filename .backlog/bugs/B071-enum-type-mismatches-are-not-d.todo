@@ -121,3 +121,37 @@ without waiting, and that is the recommended split.
 
 The engine-enum half is closer to B052/B056 territory (which spellings the
 engine accepts) and should wait for a probe.
+
+
+## The gap is specific to ENUM members (2026-08-31)
+
+Measured on one plugin, branch binary. Every other kind of undeclared
+qualified member IS diagnosed; only enum members are silent.
+
+```angelscript
+enum LocalOne { X }
+class LocalCls { int Field; }
+namespace LocalNs { void Fn() {} }
+
+LocalOne a = LocalOne::ZZZNotAValue;          // SILENT   <-- the gap
+auto d = EDummyCollectionIdent::ZZZNotAValue; // SILENT   <-- the gap
+LocalNs::ZZZNotAFunction();                   // error: No matching symbol 'LocalNs::ZZZNotAFunction'
+c.ZZZNotAField = 1;                           // error: type `LocalCls` has no member `ZZZNotAField`
+ZZZNotAnything();                             // error: undefined identifier `ZZZNotAnything`
+```
+
+So this is not a broad "member checking is missing" gap. Three sibling
+paths - namespace member, class member, free identifier - already produce
+exactly the right diagnostic. Enum-value resolution is the one path that
+resolves the ENUM and then accepts any member name without checking it
+against the declared values.
+
+That makes the workspace half narrow and low-risk to fix: the value list is
+already on `EnumInfo`, and there is a well-formed message shape to copy from
+the namespace case.
+
+Note the split confirmed by the coordinator: the WORKSPACE case
+(`enum LocalOne { X }` declared in the analysed file) needs no game probe -
+the LSP has complete information and implicit enum-to-int conversion is about
+the type of a value, and here there is no value. The ENGINE case and rows 1-3
+above still want a live verdict.
