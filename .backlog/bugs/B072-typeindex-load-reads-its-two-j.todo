@@ -100,3 +100,47 @@ of B064's scope. Whoever takes B072 must change that, and should read the
 comment on `GAME_OP` before doing so — the constancy is load-bearing for B064's
 own tests, so this ticket needs its own fixture rather than a mutation of that
 one.
+
+## Correction from the lane (2026-08-31)
+
+Two errors in my own filing, both found by building the thing.
+
+**It is three reads, not two.** The body says "reads its two JSON files
+separately". `TypeIndex::load` makes THREE `read_to_string` calls, and the one
+I missed is the earliest:
+
+    load():               HeaderDatabase::load_from_file(Openplanet.h)   <- read 1
+      load_with_header():   CoreDatabase::load_from_file(...Core.json)   <- read 2
+                            index.add_core(&core)          <- the widest gap
+                            NadeoDatabase::load_from_file(...Next.json)  <- read 3
+
+so the chimera can span three generations, not two, and `Openplanet.h` is a
+first-class member of the set rather than an afterthought. Measured, not
+reasoned: rewriting the dump after read 2 produced `core: A, game: A,
+header: B`.
+
+**The Work sketch proposes the half that does not work.** "Read both files'
+BYTES first, so the two reads are as close together as they can be" was
+measured as a standalone change and left 6 of 9 tests red. Narrowing the window
+closes nothing, because the window is a position in a sequence rather than a
+duration and the writer is an unrelated process that can land anywhere in it.
+What closes the defect is stamping each file's identity before and after the
+reads and re-reading a set that moved - with narrowing kept as defence in
+depth, and because it is what lets a torn read be caught before anything is
+parsed. Anyone picking this up from the sketch alone would have shipped the
+wrong half.
+
+## Coordinator note (2026-08-31)
+
+Appended verbatim at the lane's request. The half-fix matrix behind it:
+
+| variant | red |
+|---|---|
+| narrow only (bytes up front, no check) - the ticket's sketch | 6 / 9 |
+| reject only (identity check, read span left wide) | 0 / 9 |
+| both (shipped) | 0 / 9 |
+
+This is the SECOND ticket in this batch whose own suggested fix was the half
+that does nothing - B064's (a) was the other. Both were caught by measuring
+each half as a standalone variant rather than by reading the code. Treat a
+ticket's Work section as a hypothesis to be measured, not as a specification.
