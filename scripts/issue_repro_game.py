@@ -79,7 +79,22 @@ def probe(fixture: Path) -> dict:
         rec["load_response"] = load
         rec["diagnostics"] = fleet.parse_game_diagnostics(window)
         rec["raw_window"] = window[-4000:]
-        rec["game_errors"] = [d for d in rec["diagnostics"] if d["sev"] == "ERR"]
+        # Attribute errors to THIS probe. Openplanet.log is shared: other
+        # sessions load their own plugins into the same game, and the log
+        # window is a time slice, not a per-plugin channel. Counting a
+        # foreign plugin's ERR as ours turns a game ACCEPT into a false
+        # REJECT -- and REJECT is the direction we treat as solid evidence
+        # about the engine, so it would be encoded into a test as fact.
+        errs = [d for d in rec["diagnostics"] if d["sev"] == "ERR"]
+        rec["game_errors"] = [d for d in errs if d["file"].startswith(f"{fid}/")]
+        # Never silently drop the rest: an unattributable ERR means the
+        # window is ambiguous and the run should not be trusted.
+        rec["foreign_errors"] = [
+            d for d in errs
+            if not d["file"].startswith(f"{fid}/") and d["file"] != "?"
+        ]
+        rec["unattributed_errors"] = [d for d in errs if d["file"] == "?"]
+        rec["contended"] = bool(rec["foreign_errors"] or rec["unattributed_errors"])
         rec["compiled_clean"] = not rec["game_errors"] and not load.get("error")
     finally:
         fleet.rb_route("unload_plugin", {"id": fid}, timeout=15)
