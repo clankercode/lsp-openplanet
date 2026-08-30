@@ -1,4 +1,6 @@
 ---
+claimed_at: "2026-08-30T04:07:31Z"
+claimed_by: cli-user
 completed_at: null
 complexity: medium
 created_at: "2026-08-29T23:31:39Z"
@@ -6,11 +8,11 @@ depends_on: []
 estimate_hours: 1
 id: B057
 priority: high
-started_at: null
-status: pending
+started_at: "2026-08-30T04:07:31Z"
+status: in_progress
 tags: []
 title: 'Bare enum values: LSP accepts 2373 names the game answers ''No matching symbol'' for (non-global named enums)'
-updated_at: "2026-08-29T23:31:39Z"
+updated_at: "2026-08-30T04:07:31Z"
 ---
 
 # Bare enum values: LSP accepts 2373 names the game answers 'No matching symbol' for (non-global named enums)
