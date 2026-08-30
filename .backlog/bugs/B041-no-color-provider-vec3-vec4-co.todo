@@ -1,17 +1,18 @@
 ---
+claimed_at: "2026-08-30T05:12:33Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-29T15:07:25Z"
 depends_on: []
 estimate_hours: 6
 id: B041
 priority: medium
-status: pending
-tags:
-    - lsp
-    - ux
-    - color
+started_at: "2026-08-30T05:12:33Z"
+status: in_progress
+tags: []
 title: 'No color provider: vec3/vec4 colors and $-escape color codes get no swatch or picker'
-updated_at: "2026-08-29T15:07:25Z"
+updated_at: "2026-08-30T05:12:33Z"
 ---
 Found by a coordinator feature-gap review, 2026-08-30. Enhancement.
 
