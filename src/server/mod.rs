@@ -1,5 +1,6 @@
 pub mod call_hierarchy;
 pub mod code_actions;
+pub mod colors;
 pub mod commands;
 pub mod completion;
 pub mod diagnostics;
@@ -1318,6 +1319,8 @@ impl LanguageServer for Backend {
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                // B041: vec3/vec4 literals and Openplanet `$xxx` escapes.
+                color_provider: Some(ColorProviderCapability::Simple(true)),
                 // B039: from the one list `execute_command` dispatches on,
                 // never a literal here — an advertised name with no handler
                 // behind it is invisible to every client.
@@ -1643,6 +1646,38 @@ impl LanguageServer for Backend {
             params.context.include_declaration,
         );
         Ok(Some(refs))
+    }
+
+    /// `textDocument/documentColor` (B041): swatches for `vec3`/`vec4`
+    /// literals and Openplanet `$xxx` escape codes.
+    ///
+    /// Reads the open document directly — the whole feature is decidable from
+    /// the token stream, so there is no snapshot or type index to consult and
+    /// nothing to go stale between keystrokes.
+    async fn document_color(&self, params: DocumentColorParams) -> Result<Vec<ColorInformation>> {
+        let Some(source) = self.documents.get(&params.text_document.uri) else {
+            return Ok(Vec::new());
+        };
+        Ok(colors::document_colors(source.value()))
+    }
+
+    /// `textDocument/colorPresentation` (B041): what the picker writes back.
+    ///
+    /// The form comes from the source at `range`, never from the request, so
+    /// the user's representation survives: a `$f00` stays a `$f00` and a
+    /// `vec3` never becomes a `vec4`.
+    async fn color_presentation(
+        &self,
+        params: ColorPresentationParams,
+    ) -> Result<Vec<ColorPresentation>> {
+        let Some(source) = self.documents.get(&params.text_document.uri) else {
+            return Ok(Vec::new());
+        };
+        Ok(colors::color_presentations(
+            source.value(),
+            params.range,
+            params.color,
+        ))
     }
 
     async fn document_highlight(

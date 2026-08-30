@@ -95,3 +95,55 @@ Measure, do not inspect. The ticket's own test plan is the gate: count
 `/tmp/oplsp-*` before and after two consecutive full runs. A `Drop` impl that
 reads correctly and never fires is the failure mode here, so a review of the
 code is not evidence — only the count is.
+
+## CORRECTION — the premise above is half wrong (lane-b065-b066, verified by
+## coordinator, 2026-08-31)
+
+Measured, not inspected. **The named `oplsp-*` helpers are NOT the leak**, and
+the gate this ticket specified would have passed while leaking 640 dirs.
+
+**Two leak classes, one defect:**
+
+- **Class A — unconditional, ~320 dirs per green run.** Helpers with no
+  end-of-test cleanup at all: `openplanet-lsp-typedb-*` (~150),
+  `openplanet-lsp-gitignore-*` (27), `opl-config-tui-*` (24),
+  `openplanet-lsp-ws-*` (22), `opl-user-config-*` (10), `opl-config-cmd-*` (8),
+  `openplanet-lsp-p*-*` (16), `ols-*` (10), misc (~53). This is all the volume.
+- **Class B — unwind path only, 0 per green run.** The `oplsp-b017/b019/
+  defines/ucbad` helpers this ticket named. They DO remove at end of test
+  (`src/config.rs:4130` opens, callers close at `:4382/:4412/:4510/:4548`;
+  97 `remove_dir_all` calls vs 14 helper opens). They leak only when a test
+  panics, fails, or is killed — which is why the 24 stray dirs observed are
+  the residue of red or interrupted runs, matching this batch's two /tmp
+  exhaustion incidents.
+
+Coordinator verified both halves by reading the code independently.
+
+**The 141,080 accumulated dirs need no separate ticket.** 320/run x ~440 runs
+~= 141k, and only ~960 of /tmp's ~142k entries are not this repo's prefixes.
+It is entirely this defect, via the helpers the ticket failed to name.
+
+**The specified gate was vacuous.** "Count `/tmp/oplsp-*` across two runs and
+assert it does not grow" reads 24 -> 24 -> 24 on green runs while 640 new dirs
+land under other prefixes. It measures the one family that does not leak on the
+happy path. Worse, a raw `/tmp` diff cannot attribute anything at all here:
+sibling lanes run the same suite into the same `/tmp` (observed 142,041 ->
+143,835 with no run by the measuring lane in between).
+
+**Replacement gate, load-bearing:** run with
+`TMPDIR=<isolated dir>` (`std::env::temp_dir()` honours it; verified no test
+hardcodes a `/tmp` path it creates — the `"/tmp..."` literals in `src/` are all
+path-parsing assertions). The isolated count starts at 0 and must return to 0.
+Report `/tmp/oplsp-*` too, but label it as the weak signal it is.
+
+**Class B is invisible to any count on a green run.** The deliberate-panic test
+is not a variant on top of a moving count — it is the *only* instrument that
+can observe Class B at all.
+
+**Decision (coordinator):** single `TempDir` guard with a `Drop` impl (B039's
+shape) hoisted to one place and applied to both classes, ~105 `temp_dir()` call
+sites across `src/` and `tests/`. Exposed as `#[doc(hidden)] pub mod testing;`
+on the lib rather than duplicated into `tests/common/mod.rs` — integration
+tests are separate crates so `#[cfg(test)]` items are invisible to them, and
+duplicating the one component whose entire job is unwind-path correctness is
+how a drifted copy silently stops cleaning.

@@ -14,6 +14,28 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **Colour swatches and a colour picker** (B041) — the server now advertises
+  `color_provider`, so VS Code shows an editable swatch beside the two forms
+  Openplanet code actually uses: `vec3`/`vec4` literals in the game's 0..1
+  space, and `$xxx` escape codes inside strings, which were previously
+  invisible unless you knew the hex by heart.
+
+  The picker writes back **the form it read**. A `$f00` stays a `$f00` (and
+  keeps its digit case); a `vec3` never becomes a `vec4`; an `f` suffix, a
+  trailing `.0` and a leading-dot `.5` all survive. Values are rounded to
+  three decimals, because a picker that writes `0.5019608` into source for
+  128/255 is worse than no picker.
+
+  Only literal arguments get a swatch — `vec3(x, 0, 0)` and `vec3(f(1), 0, 0)`
+  get none, since a swatch you cannot edit is noise. Components must lie
+  within 0..1: measured against this repo's plugin fixtures, that gate drops
+  259 world coordinates such as `vec3(696, 1799.8, 534)` that would otherwise
+  render as identical clamped-white swatches, and drops no colour. The `$xxx`
+  grammar was taken from Openplanet's own docs rather than guessed — exactly
+  three hex digits, `$$` is a literal dollar and reports nothing, and the
+  style codes (`$z`, `$g`, `$o`, …) are all outside the hex alphabet.
+  Codes in comments are reported too, since that is where commented-out UI
+  code and colour notes live.
 - **`openplanet.regenerateTypeDb` reports what changed** (B039) — the command
   now answers with the type-database build stamps BEFORE and AFTER the
   reload (`before` / `after` / `changed`, using the same `op` / `mp` /

@@ -156,3 +156,63 @@ opposite sides. B060 applies the `X` <-> `get_X` mapping where it must not (a
 property read classified as function-shaped, killing overload resolution);
 this ticket fails to apply it where it must (a property read not crediting its
 accessor as used). Solving B060 first may hand you the predicate this needs.
+
+## The shared predicate does NOT close both (measured by lane-b060-b062, 2026-08-31)
+
+The framing appended to B060 asked whether one "this expression is a property
+read" predicate fixes B060 and B061 together. **Answer: no**, established by
+measurement, not by reading.
+
+Direct evidence: with B060's fix in (`a1e8f43`), the fixture still reports
+`Ns::get_Slot`, `Ns::get_Handler` and `VNs::get_PtrP` as never used while
+reading them as `Ns::Slot` / `Ns::Handler` / `VNs::PtrP` in the same files —
+warning output byte-identical to master, 6 warnings both sides.
+
+Two structural reasons, both worth keeping:
+
+1. **Opposite polarity.** B060 asks about an *expression* ("does this syntax
+   denote a function?"), answered before any name is recorded, and its fix is
+   to STOP widening `X` -> `get_X`. B061 asks about a *name* ("which
+   declarations does this read credit?") and its fix is to ENSURE widening
+   happens. A shared helper would have to be consulted with opposite polarity
+   at each site — that is the two fixes plus indirection.
+2. **Different pipeline stages.** B060's fix is on the typed-expression path
+   (it needs `arg_ty`). B061's failure is that the namespace-qualified read
+   never reaches a recorder at all.
+
+So B061 keeps its own fix and its own red test. Do not refactor toward a
+shared predicate on the strength of the shared vocabulary.
+
+## CORRECTION to this ticket's gate (lane-b060-b062, 2026-08-31; accepted)
+
+**`Transport::get_IsSecure` belongs in the 18 that SURVIVE, not the 6 that go.**
+The ticket lists `c.IsSecure` among the six that must disappear, while itself
+flagging Transport as appearing in both lists and saying to confirm against the
+tree. Confirmed: the tree holds exactly four `IsSecure` reads and **all four
+are in `src/Transport_Test.as`**. There is no production read, so by this
+ticket's own rule — test-only callers mean genuinely unused — it survives.
+
+**Consequence, and it narrows the ticket.** The second claimed failure mode,
+"member on an instance", rested entirely on that one example. Probing shows the
+member form already credits its accessor correctly. So **B061 is a single-form
+bug: namespace-qualified reads only.** That is consistent with all six rows in
+the ticket's own table being namespace-qualified (`Directives::Showing`,
+`Directives::HistoryCount`, `Messages::PendingCount`, `Session::IsConnected`,
+`Session::Status`, `Session::TournamentName`).
+
+**Likely root cause (by inspection, confirm by measurement before fixing):**
+`record_value_use_variants` builds variants as `format!("get_{}", name)`. For a
+qualified name that yields **`get_Ns::Slot`**, which can never match anything —
+the correct form is `Ns::get_Slot`. `global_scope.rs::qualified_virtual_name`
+already does this correctly. Route the missing path through that existing
+helper; do NOT add a third recorder.
+
+**The gate that actually discriminates:** `Directives::PendingCount` must
+survive while `Messages::PendingCount` goes, and `Messages::Showing` must
+survive while `Directives::Showing` goes. Same short name, opposite outcome —
+anything keyed on the bare name gets these backwards, and only the qualified
+form can split them. Pin both directions of that pair explicitly.
+
+**Baseline confirmed:** B060 leaves this ticket's gate at exactly 24
+diagnostics on `tm-tournament-station` (24 on merge-base, 24 on B060's branch),
+so B061's drop is attributable to B061 alone.

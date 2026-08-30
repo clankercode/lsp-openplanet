@@ -1,0 +1,53 @@
+# B071 probe corpus - enum conversion and enum-member verdicts from the LIVE game.
+# Trackmania + Openplanet 1.29.5, RemoteBuild 127.0.0.1:30000, 2026-08-31.
+# See README.md for the ACCEPT-vs-REJECT asymmetry before using any row.
+#
+# METHOD. Every row was compiled as its OWN plugin (one fixture, one unit).
+#   Never batched: B068 showed that one parse error in a batched unit makes
+#   every other name in that unit read as ACCEPTED. A batched run of this
+#   corpus would have reported rows 3-7 as clean.
+#
+# CONTROLS, run in the same session as the samples:
+#   r0  enum LocalOne{X}; LocalOne a = LocalOne::X;   -> CLEAN  (oracle accepts)
+#   rX  ZZZNoSuchType q;                              -> ERR    (oracle rejects)
+#   Both behaved. An oracle that cannot fail proves nothing about the rows.
+#
+# CONFOUND FOUND AND CLEARED. The first pass used
+# `EDummyCollectionIdent::Undefined`, which DOES NOT EXIST in the live game;
+# rows 1, 3 and 6 carried a stray "No matching symbol" as a result. That is
+# harmless for a REJECT row (an error appeared, and an error is
+# self-evidencing) and FATAL for row 4, whose conclusion is drawn from the
+# ABSENCE of an error. Row 4 was therefore re-measured three ways, including
+# an anti-vacuity guard (r2s) proving the fixture reaches the typechecker at
+# all, and with VirtualKey::A - a value already recorded as a live ACCEPT in
+# b053-bare-enum-values.tsv, rather than a guessed one.
+#
+# lsp_today: MEASURED, not inherited. openplanet-lsp release binary built from
+#   a586825 (a verified ancestor of master) run as `openplanet-lsp check` in
+#   each fixture dir, 2026-08-31. Two anti-vacuity signals in the same run:
+#   the rX control returned rc=1 `unknown type ZZZNoSuchType`, and rows 2 and 8
+#   emitted `an enum value ... is never used` warnings. So the analyser
+#   demonstrably reads these files and can report on them; the silence below is
+#   specifically the absence of a mismatch diagnostic, not the absence of
+#   analysis. Every mismatch row exited rc=0 with no error.
+row	case	fixture	game_verdict	game_message	lsp_today
+1	enum A -> enum B (engine)	EDummyCollectionIdent a; EGhostNameLogoType b = a;	REJECT	Can't implicitly convert from 'EDummyCollectionIdent' to 'EGhostNameLogoType'.	silent
+2	enum A -> enum B (workspace)	enum LocalOne{X} enum LocalTwo{Y} LocalTwo d = c;	REJECT	Can't implicitly convert from 'LocalOne' to 'LocalTwo'.	silent
+3	enum -> int (engine, confounded)	EDummyCollectionIdent a = ::Undefined; int b = a;	INVALID	fixture used a non-existent enum value; superseded by row 5	n/a
+4	enum -> int (workspace)	enum LocalOne{X} LocalOne a = LocalOne::X; int b = a;	CLEAN		silent (CORRECT - matches game)
+5	enum -> int (engine, verified value)	VirtualKey a = VirtualKey::A; int b = a;	CLEAN		silent (CORRECT - matches game)
+6	int -> enum (engine, verified)	int a = 0; VirtualKey b = a;	REJECT	Can't implicitly convert from 'int' to 'VirtualKey'.	silent
+7	bad member, engine enum	auto b = VirtualKey::ZZZNotAValue;	REJECT	No matching symbol 'VirtualKey::ZZZNotAValue'	silent
+8	bad member, workspace enum	enum LocalOne{X} LocalOne a = LocalOne::ZZZNotAValue;	REJECT	No matching symbol 'LocalOne::ZZZNotAValue'	silent
+#
+# READING THIS TABLE.
+#   Rows 4 and 5 CLOSE a line of work: enum -> int is legal and the LSP's
+#   silence is correct. Do not implement a diagnostic for it.
+#   Rows 1, 2, 6, 7, 8 are five real missing diagnostics.
+#   Row 3 is retained deliberately. Deleting a measurement that turned out to
+#   be invalid hides the fact that the corpus was once wrong, and the reason
+#   it was wrong is the most transferable thing in this file.
+#
+# WORDING. Match the engine's own text in any new diagnostic
+# ("Can't implicitly convert from 'A' to 'B'.", "No matching symbol 'E::V'"),
+# so a user searching an error string finds both tools.

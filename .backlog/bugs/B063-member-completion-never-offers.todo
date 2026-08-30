@@ -98,3 +98,85 @@ building new scaffolding.
 ## Related
 
 B059 (the checker half, and the source table), GH #21.
+
+## Decisions on the two open questions (coordinator, 2026-08-31)
+
+Both questions in the Work section are resolved. Do not re-litigate them.
+
+**1. `opCast` / `opImplCast`: DO NOT offer them. Excluded.**
+
+Verified against the source: `typecheck::builtins::INJECTED_METHODS` holds
+exactly four entries — `MwAddRef`, `MwRelease` (EveryEngineClass),
+`GetCurrentEntityID` (2 receivers), `GetManialinkPages` (4 receivers). The cast
+operators are NOT in it, deliberately, per B059.
+
+The whole defect in this ticket is that the checker and completion contradict
+each other about which members exist. Offering `opCast`/`opImplCast` in
+completion while the checker does not accept them written as calls would create
+a fresh contradiction in the opposite direction — and a worse one, because it
+would actively suggest something that then errors. They also back `cast<T>(x)`
+syntax rather than being written as method calls, so they would be noise on
+every engine-class member list.
+
+**Invariant to hold: completion's injected source and the checker's injected
+source are the same table.** If the cast operators are ever added, they are
+added to `INJECTED_METHODS` and both features change together. That invariant
+is worth a test of its own — assert the set completion offers for a receiver
+matches what the checker accepts for it, so the two can never drift again.
+That test is more valuable than any individual name assertion here.
+
+**2. Hover / signature help / go-to-definition: split.**
+
+- **Signature help — IN SCOPE** if it resolves members through the same path
+  you are wiring. It is the same "does this member exist" question and would
+  otherwise be the third feature disagreeing with the other two.
+- **Hover — DEFERRED, and not for design reasons.** `src/server/hover.rs` is
+  lane-b057's working file for the B056 follow-up, which has an open finding
+  that hover does not participate in B052's ancestor walk. Touching hover here
+  would collide. File it as a follow-up once that lane lands, and fold it in
+  with lane-b057's hover finding rather than as a separate one-line patch.
+- **Go-to-definition — NO target exists.** These methods are registered from
+  C++ and have no AngelScript declaration anywhere, so there is nothing to jump
+  to. Requirement is only that it degrades gracefully: returns no location,
+  does not error, does not panic. Add a test that pins the graceful path — an
+  unhandled `None` here is the kind of thing that surfaces as a client-side
+  crash rather than a missing feature.
+
+**Blocked until lane-b057 lands** (`completion.rs` overlap) and until
+lane-b060-b062 lands (`checker.rs` overlap). Branch from master tip after both.
+
+## Lane plan (coordinator, 2026-08-31)
+
+**B063 + B069 + B070 run as ONE lane, serial, in that order**
+(`lane-b063-b069-b070`). All three touch `src/server/completion.rs` and/or
+`src/server/hover.rs`; run in parallel they would conflict at merge.
+
+**BLOCKED until lane-b057's B056 follow-up merges** (it holds
+`fix/b056-followup-canonical-keys`). Branch from that tip, not from now.
+
+**The three are one defect wearing three hats, and that is the framing worth
+having before you start.** In every case the CHECKER already has the right
+answer and a second feature disagrees with it:
+
+- **B063** — the checker accepts `player.GetCurrentEntityID()` from
+  `INJECTED_METHODS`; completion walks only the `TypeIndex` and never offers it.
+- **B069** — the resolver rejects `Game::CGameMenu::EMenuOrder` since B056;
+  shortcut completion offers it anyway, straight from the loader's storage keys.
+- **B070** — the checker accepts `Foo::VirtualKey` via B052's ancestor walk;
+  hover asks `lookup_external`, an index-only view that does not know workspace
+  namespaces participate, and returns nothing.
+
+So B063 and B070 are features under-reporting what the checker accepts, and
+B069 is a feature over-reporting what the checker rejects. **Same root shape:
+completion and hover each build their OWN view of what exists instead of
+consulting the one the checker already computed.**
+
+Ask explicitly whether one shared accessor — "what does the checker believe is
+reachable on this receiver / in this scope?" — closes all three, and answer it
+with evidence. Note B060/B061 were given the same framing and the honest answer
+there was NO, with structural reasons; that answer was worth as much as a yes.
+Do not let the framing widen the tickets: each keeps its own red test and gate.
+
+**One invariant is worth a test regardless of how the fixes are structured:**
+what a feature OFFERS and what the checker ACCEPTS must not diverge. That is
+the bug in all three, and it is the thing that will regress again.

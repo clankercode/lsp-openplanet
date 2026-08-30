@@ -208,3 +208,52 @@ every suite after it*, which a runner reports as silence — i.e. as success.
 That is the same "absence read as a pass" shape as the `grep` and
 foreign-diagnostic traps above, and it is worth recognising as a recurring
 class rather than three separate accidents.
+
+## Every known TYPE is a scope; only four MODULE names are
+
+Measured 2026-08-31 on Openplanet 1.29.5 (next, Public, 1234ad9e) for B067.
+Corpus: `b067-class-position-scopes.tsv`.
+
+    X is a live scope for `X::Y`  <=>  X is a declared namespace OR X is a known data type
+
+41 engine classes across all 20 modules, split between those with nested enums
+and those without, **all** answered scope. Having members registered under the
+name makes no difference — a class with nothing in it is still a scope, because
+`Type::Nested` is ordinary AngelScript scope-resolution syntax. `string` is a
+scope too, so this is about types in general, not engine classes.
+
+The module-position rule from B056 is unchanged and *different*: of the 20
+Nadeo module names only `Audio`, `Meta`, `Net` and `GameData` are scopes; the
+rest give `Namespace 'X' doesn't exist.` And `GameData` remains the one
+unexplained case — it is a scope while being neither a Core-declared namespace
+nor, as measured here, a data type (`Identifier 'GameData' is not a data type
+in global namespace`). The obvious unification is therefore refuted; do not
+re-derive it.
+
+Practical consequence: `CMwNod` being a scope is not an anomaly to special-case,
+it is the general rule for type names.
+
+# Harness hazard: never trust a batched ACCEPT
+
+`probe_enum_corpus.py` puts every name in a batch (default 200) into ONE
+compilation unit and attributes diagnostics by line, recording ACCEPTED when a
+line drew no message. **A parse error anywhere in the unit aborts compilation
+before semantic analysis, so no line draws a message and every other name in
+the batch is recorded ACCEPTED.** Demonstrated: `CMwNod::ZZZNoSuchName` flips
+REJECT -> ACCEPT purely by sharing a batch with `int::ZZZNoSuchName`, which
+cannot parse because `int` is a keyword. Tracked as **B068**.
+
+This manufactures precisely the verdict this document says not to lean on, and
+it is silent — the run reports success and emits a complete-looking corpus. It
+briefly convinced the coordinator that a name they had *invented*
+(`ZZZNoSuchClass::`) was accepted by the game, which would have "disproved"
+B056.
+
+Two rules follow:
+
+- **Probe with `batch=1` when the answer matters**, or otherwise ensure a
+  parse-class diagnostic forces a name-by-name re-run.
+- **Always run a negative control** — a name you are certain is not a scope,
+  in the same run. If your fabricated name comes back ACCEPTED, the run is
+  void, not surprising. A batch that returns a distinct message for *every*
+  name is sound, because an abort yields zero messages rather than some.
