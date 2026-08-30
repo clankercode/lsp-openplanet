@@ -1391,34 +1391,48 @@ impl<'a> GlobalScope<'a> {
     /// their signature data isn't wired through to the checker yet.
     pub fn lookup_function_overloads(&self, qualified: &str) -> Vec<OverloadSig> {
         let mut out = Vec::new();
-        let alt_names = workspace_function_property_candidates(qualified);
-        for name in &alt_names {
-            for s in self.lookup_workspace(name) {
-                if let SymbolKind::Function {
-                    return_type,
-                    params,
-                    min_args,
-                    ..
-                } = &s.kind
-                {
-                    out.push(OverloadSig {
-                        param_names: params.iter().map(|(name, _)| Some(name.clone())).collect(),
-                        param_types: params.iter().map(|(_, ty_text)| ty_text.clone()).collect(),
-                        // B027: workspace param text carries the source
-                        // `&out` decoration (the `Reference` type span
-                        // covers it) — derive the flag from it.
-                        param_out: params
-                            .iter()
-                            .map(|(_, ty_text)| ty_text.contains("&out"))
-                            .collect(),
-                        param_modes: params
-                            .iter()
-                            .map(|(_, ty_text)| param_mode_from_text(ty_text))
-                            .collect(),
-                        min_args: *min_args,
-                        return_type: return_type.clone(),
-                    });
-                }
+        for name in &workspace_function_property_candidates(qualified) {
+            out.extend(self.lookup_function_overloads_exact(name));
+        }
+        out
+    }
+
+    /// B060: [`Self::lookup_function_overloads`] WITHOUT the virtual-property
+    /// alternates — only functions literally named `qualified`.
+    ///
+    /// The `X` -> `get_X` / `set_X` widening is what makes a property READ
+    /// resolve to a value; a caller asking "is this expression a function
+    /// reference?" must not get that widening, or `Text::Format("%d", Off)`
+    /// classifies the `uint` property read `Off` as function-shaped and
+    /// every non-funcdef overload is rejected. `get_X` is a function when
+    /// WRITTEN `get_X`; `X` is a value.
+    pub fn lookup_function_overloads_exact(&self, qualified: &str) -> Vec<OverloadSig> {
+        let mut out = Vec::new();
+        for s in self.lookup_workspace(qualified) {
+            if let SymbolKind::Function {
+                return_type,
+                params,
+                min_args,
+                ..
+            } = &s.kind
+            {
+                out.push(OverloadSig {
+                    param_names: params.iter().map(|(name, _)| Some(name.clone())).collect(),
+                    param_types: params.iter().map(|(_, ty_text)| ty_text.clone()).collect(),
+                    // B027: workspace param text carries the source
+                    // `&out` decoration (the `Reference` type span
+                    // covers it) — derive the flag from it.
+                    param_out: params
+                        .iter()
+                        .map(|(_, ty_text)| ty_text.contains("&out"))
+                        .collect(),
+                    param_modes: params
+                        .iter()
+                        .map(|(_, ty_text)| param_mode_from_text(ty_text))
+                        .collect(),
+                    min_args: *min_args,
+                    return_type: return_type.clone(),
+                });
             }
         }
         out
@@ -1513,6 +1527,32 @@ impl<'a> GlobalScope<'a> {
         class_name: &str,
         method: &str,
     ) -> Vec<OverloadSig> {
+        self.method_overloads_walk(class_name, method, Self::lookup_function_overloads)
+    }
+
+    /// B060: [`Self::lookup_method_overloads_with_inheritance`] WITHOUT the
+    /// virtual-property alternates — `C::Amt` no longer resolves through
+    /// `C::get_Amt`, so a property read on a receiver (`c.Amt`) is a value
+    /// rather than a method reference. See
+    /// [`Self::lookup_function_overloads_exact`].
+    pub fn lookup_method_overloads_exact_with_inheritance(
+        &self,
+        class_name: &str,
+        method: &str,
+    ) -> Vec<OverloadSig> {
+        self.method_overloads_walk(class_name, method, Self::lookup_function_overloads_exact)
+    }
+
+    /// Shared inheritance walk behind the two method-overload lookups: the
+    /// class itself first, then parents breadth-first, normalized in the
+    /// child's namespace context and cycle-guarded. `resolve` decides
+    /// whether `Class::method` widens to its `get_`/`set_` accessors.
+    fn method_overloads_walk(
+        &self,
+        class_name: &str,
+        method: &str,
+        resolve: fn(&Self, &str) -> Vec<OverloadSig>,
+    ) -> Vec<OverloadSig> {
         let mut out: Vec<OverloadSig> = Vec::new();
         let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1523,7 +1563,7 @@ impl<'a> GlobalScope<'a> {
                 continue;
             }
             let qualified = format!("{}::{}", name, method);
-            for sig in self.lookup_function_overloads(&qualified) {
+            for sig in resolve(self, &qualified) {
                 if claimed.insert(override_key(&sig.param_types)) {
                     out.push(sig);
                 }

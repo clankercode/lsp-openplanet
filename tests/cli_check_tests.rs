@@ -1747,6 +1747,104 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
     }
 }
 
+/// B060: a virtual-property READ is a VALUE, not a function reference.
+/// `arg_is_function_shaped` resolved through `lookup_function_overloads`,
+/// whose `get_`/`set_` alternates made `Off` / `c.Amt` / `d.Weight`
+/// function-shaped, so they could not bind `Text::Format`'s `uint`/`float`
+/// slot and the whole overload set died with a bogus `No matching
+/// signatures`. Live in tm-dips-plus-plus (`src/DebugWindow.as:265,269,270`,
+/// `src/MainUI/Donations.as:24`) — the game compiles every one.
+///
+/// The fixture pins BOTH sides of the line, because a fix that silences more
+/// than it should is indistinguishable from a correct one until something
+/// pins the boundary. Master reports 35 errors across the two files and 24
+/// of them are false; the 11 true ones must survive, and so must the
+/// neighbouring case of every silenced line — notably
+/// `startnew(BadHandler)`, a funcdef-handle property of the WRONG signature
+/// sitting right beside the three right-signature ones this fix silences,
+/// and `Variants.as`' four real functions in the same slot shapes its
+/// property reads use.
+#[test]
+fn check_command_issue_repro_b060_property_getter_value_arg() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b060-property-getter-value-arg");
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains("error:")).collect();
+    let expected = [
+        "Main.as:106",    // B023: free fn into Text::Format's value slot
+        "Main.as:108",    // B023: wrong-signature fn into a funcdef slot
+        "Main.as:112",    // boundary: WRONG-sig funcdef property into startnew
+        "Main.as:113",    // ... and its member form
+        "Main.as:116",    // boundary: funcdef handle cannot bind a uint slot
+        "Main.as:117",    // ... member form
+        "Main.as:118",    // ... plain global form
+        "Main.as:123",    // B060 mirror: a uint property VALUE is not a delegate
+        "Main.as:124",    // ... same through startnew's CoroutineFunc slot
+        "Variants.as:74", // a real function in each slot shape the property
+        "Variants.as:75", // reads above sweep — uint64, const string&in,
+        "Variants.as:76", // a 2-overload set, and a bool-carrying set
+        "Variants.as:77",
+    ];
+    assert_eq!(
+        errors.len(),
+        expected.len(),
+        "expected exactly {} errors; stdout={stdout:?} stderr={stderr:?}",
+        expected.len()
+    );
+    for line in expected {
+        assert!(
+            errors.iter().any(|e| e.contains(line)),
+            "{line} must still be flagged; stdout={stdout:?}"
+        );
+    }
+    // Main.as: free-function getters (70-72), class getters through a handle
+    // (75-76), namespace-qualified and namespaced-class getters (80-81), a
+    // non-Format overload set (84-85), right-signature funcdef-handle
+    // properties into a funcdef slot (90-92), unchanged B023 legal forms
+    // (96-101). Variants.as: the value-type / receiver-form / getter-flavour
+    // sweep (36-37, 57-62, 65-71).
+    for line in [
+        "Main.as:64",
+        "Main.as:65",
+        "Main.as:66",
+        "Main.as:67",
+        "Main.as:70",
+        "Main.as:71",
+        "Main.as:72",
+        "Main.as:75",
+        "Main.as:76",
+        "Main.as:80",
+        "Main.as:81",
+        "Main.as:84",
+        "Main.as:85",
+        "Main.as:90",
+        "Main.as:91",
+        "Main.as:92",
+        "Main.as:96",
+        "Main.as:97",
+        "Main.as:99",
+        "Main.as:101",
+        "Variants.as:36",
+        "Variants.as:37",
+        "Variants.as:57",
+        "Variants.as:58",
+        "Variants.as:59",
+        "Variants.as:60",
+        "Variants.as:61",
+        "Variants.as:62",
+        "Variants.as:65",
+        "Variants.as:66",
+        "Variants.as:67",
+        "Variants.as:68",
+        "Variants.as:69",
+        "Variants.as:70",
+        "Variants.as:71",
+    ] {
+        assert!(
+            !errors.iter().any(|e| e.contains(line)),
+            "property read / legal callable on {line} must stay silent; stdout={stdout:?}"
+        );
+    }
+}
+
 /// GH #49: AngelScript has no implicit nat3 -> int3 conversion — the game
 /// rejects both the implicit init and the int3(nat3) constructor form.
 /// Ground truth quoted in the issue (tm-editor-plus-plus). Fixed — must flag.

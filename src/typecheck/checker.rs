@@ -2581,15 +2581,29 @@ impl<'a> Checker<'a> {
         if !sigs.is_empty() {
             return !sigs.iter().any(|sig| self.func_matches_funcdef(sig, fd));
         }
-        // A funcdef-typed value (variable, ctor result) with no resolvable
-        // overloads compares by its own funcdef signature.
-        if let TypeRepr::Funcdef(n) = Self::peel_const_handle(arg_ty) {
-            if let Some(arg_fd) = self.scope.lookup_funcdef(n) {
-                return !self.func_matches_funcdef(&Self::funcdef_overload_sig(&arg_fd), fd);
-            }
+        // A funcdef-typed value (variable, property, ctor result) with no
+        // resolvable overloads compares by its own funcdef signature.
+        if let Some(arg_fd) = self.arg_value_funcdef(arg_ty) {
+            return !self.func_matches_funcdef(&Self::funcdef_overload_sig(&arg_fd), fd);
         }
         !matches!(Self::peel_const_handle(arg_ty), TypeRepr::Null)
             && self.is_clearly_not_a_function(arg_ty)
+    }
+
+    /// The funcdef a VALUE-typed arg denotes, if any.
+    ///
+    /// `Cb@` reaches the checker as `Funcdef(Cb)` down the member path but
+    /// as `Named(Cb)` down the global/property path, and the two mean the
+    /// same thing. B060 made this matter: once the `X` -> `get_X` widening
+    /// stopped standing in for a property read, `startnew(BadHandler)`
+    /// (`BadCb@ get_BadHandler()`) had nothing left to compare against and
+    /// went silent on the `Named` side while still erroring on the member
+    /// side. Recognising both keeps the two paths on one answer.
+    fn arg_value_funcdef(&self, arg_ty: &TypeRepr) -> Option<FuncdefSig> {
+        match Self::peel_const_handle(arg_ty) {
+            TypeRepr::Funcdef(n) | TypeRepr::Named(n) => self.scope.lookup_funcdef(n),
+            _ => None,
+        }
     }
 
     /// A funcdef signature as an `OverloadSig` for the shared bind test.
@@ -2615,7 +2629,7 @@ impl<'a> Checker<'a> {
         if !self.lookup_arg_function_sigs(arg, arg_ty).is_empty() {
             return true;
         }
-        matches!(Self::peel_const_handle(arg_ty), TypeRepr::Funcdef(_))
+        self.arg_value_funcdef(arg_ty).is_some()
     }
 
     fn arg_binds_to_funcdef(&self, fd: &FuncdefSig, arg: &Expr, arg_ty: &TypeRepr) -> bool {
@@ -2732,6 +2746,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The function signatures `arg` can denote when read as a FUNCTION
+    /// REFERENCE.
+    ///
+    /// B060: every lookup here is EXACT — the `X` -> `get_X` / `set_X`
+    /// virtual-property widening must not apply. A property read (`Off`,
+    /// `c.Amt`, `Ns::Slot`) is a value of the accessor's RETURN type, not a
+    /// reference to the accessor; widening made it function-shaped, so it
+    /// could not bind a `uint`/`float` parameter and killed the whole
+    /// overload set (`Text::Format("0x%04x", Off)`). Writing `get_Off`
+    /// still resolves, because that IS the function's name.
     fn lookup_arg_function_sigs(&self, arg: &Expr, arg_ty: &TypeRepr) -> Vec<OverloadSig> {
         let mut out = Vec::new();
         match &arg.kind {
@@ -2755,21 +2779,21 @@ impl<'a> Checker<'a> {
                 if let Some(cls) = self.current_class() {
                     out.extend(
                         self.scope
-                            .lookup_method_overloads_with_inheritance(&cls.name, name),
+                            .lookup_method_overloads_exact_with_inheritance(&cls.name, name),
                     );
                 }
-                out.extend(self.scope.lookup_function_overloads(name));
+                out.extend(self.scope.lookup_function_overloads_exact(name));
                 for depth in (1..=self.namespace_stack.len()).rev() {
                     let ns = self.namespace_stack[..depth].join("::");
                     out.extend(
                         self.scope
-                            .lookup_function_overloads(&format!("{ns}::{name}")),
+                            .lookup_function_overloads_exact(&format!("{ns}::{name}")),
                     );
                 }
             }
             ExprKind::NamespaceAccess { path } => {
                 let qual = path.to_string(self.source);
-                out.extend(self.scope.lookup_function_overloads(&qual));
+                out.extend(self.scope.lookup_function_overloads_exact(&qual));
             }
             ExprKind::Member { object, member } => {
                 // B025: a method reference (`this.M`, `c.M`, `g.M`,
@@ -2784,7 +2808,7 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .and_then(Self::base_type_name)
                 {
-                    let mut sigs = self.scope.lookup_method_overloads_with_inheritance(
+                    let mut sigs = self.scope.lookup_method_overloads_exact_with_inheritance(
                         &cls_name,
                         member.text(self.source),
                     );
@@ -2803,7 +2827,7 @@ impl<'a> Checker<'a> {
         }
         if let TypeRepr::Funcdef(n) = Self::peel_const_handle(arg_ty) {
             if out.is_empty() {
-                out.extend(self.scope.lookup_function_overloads(n));
+                out.extend(self.scope.lookup_function_overloads_exact(n));
             }
         }
         out
