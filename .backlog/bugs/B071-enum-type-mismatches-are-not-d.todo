@@ -1,0 +1,78 @@
+---
+complexity: medium
+created_at: "2026-08-30T17:39:22Z"
+depends_on: []
+estimate_hours: 2
+id: B071
+priority: medium
+status: pending
+tags: []
+title: 'Enum type mismatches are not diagnosed: assigning one enum type to another is silent'
+updated_at: "2026-08-30T17:39:22Z"
+---
+Found 2026-08-31 while verifying that the B056 canonicalization fix could not
+move a diagnostic. It cannot - but the reason turned out to be broader than
+expected, and worth its own ticket.
+
+## Actual Behavior
+
+`openplanet-lsp check` is SILENT on all of these:
+
+```angelscript
+void Mismatch() {
+    // two different engine enums
+    EDummyCollectionIdent a = EDummyCollectionIdent::Undefined;
+    EGhostNameLogoType b = a;              // silent
+
+    // two workspace-declared enums
+    LocalOne c = LocalOne::X;
+    LocalTwo d = c;                        // silent
+}
+enum LocalOne { X }
+enum LocalTwo { Y }
+```
+
+Zero diagnostics. The file IS being analysed - a positive control in the same
+file (`Meta::ZZZNoSuchEnumName` as a type, and a wrong-arity call) is flagged
+normally, so this is not a parse or resolution failure.
+
+Also silent, and probably the same root: a bad enum VALUE.
+
+```angelscript
+EDummyCollectionIdent a = EDummyCollectionIdent::NoSuchValueZZZ;   // silent
+```
+
+## Expected Behavior
+
+UNVERIFIED - the game was down when this was found, so there is no live
+compiler verdict here. AngelScript does implicitly convert enum values to
+integer types, so it is genuinely possible that some or all of the above are
+LEGAL and the LSP is correct to stay silent. That must be probed before any
+fix. Specifically worth probing separately:
+
+- enum A -> enum B assignment (the case above)
+- enum -> int / uint assignment (likely legal)
+- int -> enum assignment (likely requires a cast)
+- an undeclared value on a known enum (`E::NoSuchValue`)
+
+A game REJECT on any of these makes it a real missing diagnostic. A game
+ACCEPT closes that row and is worth recording either way, since right now the
+behaviour is simply unknown.
+
+## Why this was found
+
+B056's canonicalization fix changes `canonicalize_type_name` for 57 enums.
+`named_types_equivalent` (`src/typecheck/checker.rs`) compares canonicalized
+names, so the fix looked like it could move an argument-type diagnostic. It
+cannot - measured on a purpose-built plugin covering locals, parameters,
+return types, arrays and both scope qualifiers, base vs branch binaries, zero
+difference. The reason is that no enum-mismatch diagnostic exists to move.
+
+That makes the B056 fix safe on stronger grounds than the call-graph argument
+originally given for it, and it means `named_types_equivalent`'s enum handling
+is currently reachable only for unique EXTERNAL overload sets.
+
+## Related
+
+B056 (source names / canonicalization), B023 (function-shaped args), GH #47
+(`No matching signatures` render).
