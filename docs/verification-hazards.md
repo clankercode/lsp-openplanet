@@ -145,6 +145,31 @@ indistinguishable from "I am structurally incapable of seeing it".
     correctness improvement with no evidentiary consequence, and calling it
     that is more useful than letting it read as new confirmation.
 
+- **A connectivity check that never opened a socket.** `(exec 3<>/dev/tcp/127.0.0.1/30000) || echo closed`
+  reported the game's RemoteBuild port CLOSED while it was serving compiles.
+  `/dev/tcp` is a **bash builtin, not a kernel feature**, and this session's
+  shell is zsh — the redirection simply fails, so the `||` branch fires for a
+  check that never tested anything. A `socket.connect` from python said OPEN.
+  Worse than the `find`/bfs case below, and in the same family: bfs *errored*,
+  so its traversal visibly never ran, whereas this returned a plausible,
+  confident answer **in the direction of "nothing is there"** — which is the
+  answer that stops you looking. Caught only because a log showed the game
+  alive seven minutes earlier, making "closed" implausible. The lane that hit
+  it had written the `find`/bfs correction hours before: **knowing a hazard by
+  name does not protect you from it; only a control does.** Its countermeasure
+  is the right one — confirm the method against a port you know is open
+  (`:22`) before believing a negative.
+
+- **A glob that matched nothing aborted the gate, and the exit code belonged to
+  the wrong command.** `rm -f .../sha<SHA>-*.log && cargo test ...` — the glob
+  matched nothing, zsh's `nomatch` aborted the `&&` chain, and **cargo test
+  never ran**. The captured `TEST_EXIT=1` was the failed `rm`. A careless read
+  reports a red suite that was never measured; a slightly less careless one
+  re-runs and reports the second attempt without noticing the first never
+  happened. This is pipeline masking with the polarity reversed — not a failure
+  hidden by a later success, but a *success never attempted* wearing a failure's
+  exit code.
+
 **Countermeasure — positive control.** Before trusting a probe that reports
 absence, confirm it can see a thing you *know* is present. A staleness check
 that cannot find a file you just touched is not reporting staleness. A counter
@@ -176,6 +201,14 @@ suspicious signal that had a ready innocent explanation available.
   binaries byte-identical. Plausible — the source delta was comment-only. The
   real cause was building the base into a target dir that already held branch
   artifacts; cargo's `Finished in 0.15s` was reuse, not a build.
+- **A stale file of the same name read as a fresh result.** A gate polled for
+  `final-hermetic.log` to become non-empty. A **20-hour-old file of that exact
+  name**, from a previous session, was already sitting in the shared scratchpad,
+  and "17 binaries, 1493 passed" was read as this run's result. It was caught
+  only because the reader knew the tree has 23 binaries and ~2255 tests — by
+  implausibility, not by any check. Countermeasure used afterwards: **stamp the
+  filename with the commit SHA and verify mtime before trusting it.** A shared
+  scratch directory is shared across *time* as well as across agents.
 - **A build racing a rebase**, so the artifact under test was not the tree
   under review.
 - **Cargo replayed cached diagnostics in a stale format.** A clippy comparison
