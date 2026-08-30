@@ -257,3 +257,75 @@ Two rules follow:
   in the same run. If your fabricated name comes back ACCEPTED, the run is
   void, not surprising. A batch that returns a distinct message for *every*
   name is sound, because an abort yields zero messages rather than some.
+
+## Fixed in the harness (B068), and what it means for the corpora
+
+The script now emits a **sentinel** on the last probed line of every unit — a
+name the game must reject semantically. Silence on a name counts as ACCEPTED
+only when the sentinel's own diagnostic came back, which proves analysis
+reached the end of the unit. Otherwise the name is `UNDETERMINED` and is
+re-probed on its own. That makes batch size a speed knob rather than a
+correctness one, and `--batch` is now settable; `just probe-selftest` checks
+the logic offline, with no game.
+
+The negative-control rule above still stands. The sentinel is a *positive*
+control and they answer different questions: the sentinel proves the compiler
+got to the end of your unit, a fabricated name proves your ACCEPTs are not
+being manufactured by the machine's installed plugins.
+
+### b052 has been re-probed. The batching defect never fired on it.
+
+All **742 ACCEPTED rows** of `b052-qualified-enum-spellings.tsv` were
+re-measured at `batch=1` against the live game on 2026-08-31, with the three
+known-answer controls re-run every 100 names. Result:
+
+| | |
+|---|---|
+| re-probed | 742 |
+| unchanged (still ACCEPTED) | 739 |
+| flipped to REJECTED | 3 |
+| UNDETERMINED | 0 |
+
+**None of the three flips is a B068 artefact**, and no conclusion moves. They
+are `Foo::Bar::VirtualKey`, `Foo::ESceneCharVisNotice` and `Foo::VirtualKey`,
+all now `Namespace 'Foo' doesn't exist.` — the plugin-namespace effect this
+document already warns about, not a fabricated verdict. All three are already
+the first three entries of `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which
+forces them to "must not resolve" regardless of the corpus verdict, so the Rust
+suite's expectations are unchanged.
+
+The full artefact list splits cleanly along the same line, which is what
+identifies the mechanism: the three `Foo::*` spellings flipped, while all nine
+`GameData::*`, `MLFeed::*`, `MLHook::*`, `MathX::*` and `VehicleState::*`
+spellings still accept. The plugin declaring `namespace Foo` is no longer
+installed; the others still are. That is environmental drift between two
+machines-in-time, and it independently CONFIRMS the exclusion list a previous
+lane had reasoned out rather than measured.
+
+The shape of the result is itself the argument that B068 never fired here: an
+aborted batch fabricates ACCEPTED for *every* surviving name in the unit, so a
+200-name batch would show ~199 spurious rows. Three isolated spellings sharing
+one namespace family, each with a stated environmental cause, is not that shape.
+
+REJECTED rows were never at risk and were not re-probed: an abort produces the
+*absence* of diagnostics, and a REJECTED row required the game to name that
+spelling, so the defect can only invent an ACCEPTED. Every "the LSP must reject
+this" assertion built on these files was always sound, and B056's narrowing
+claim is unaffected.
+
+**`b053-bare-enum-values.tsv` has NOT been re-probed** — its 592 ACCEPTED rows
+remain open work under B068.
+
+**A verdict this document does not yet contain: `UNDETERMINED`.** If a
+regenerated corpus carries one, `global_scope.rs` panics on it by design, but
+`resolver.rs` computes `verdict == "ACCEPTED"` and would silently read it as
+REJECTED — an unknown asserted as a fact.
+
+So a corpus containing one is never written to its real path. The generator
+parks it at `<name>.partial`, leaves the existing file untouched, and exits
+non-zero. Exiting alone was not enough: the file had already been written, and
+an ignored exit code would have left a complete-looking TSV that the Rust
+suite reads without complaint. Two things can make a run indeterminate — a
+value that could not be probed, and an enum whose own type probe was
+indeterminate, which silently shrinks `global_enum_owners`, the column that
+decides the B053 verdict. Both are counted.
