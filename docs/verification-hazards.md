@@ -83,11 +83,18 @@ suspicious signal that had a ready innocent explanation available.
 - **Cargo replayed cached diagnostics in a stale format.** A clippy comparison
   reused a base target dir from an earlier run that had used a *different*
   `--message-format`, so cargo replayed the cached diagnostics rather than
-  re-emitting them, giving `81 vs 6`. Rebuilt in empty dirs with identical
-  flags: **75 on both sides**, the only diff being line-number shifts of
-  pre-existing lints. Note this is the stale-target-dir hazard wearing a new
-  coat — it is not only *staleness* that poisons a reused dir, it is any flag
-  that changes what cargo caches. Two lanes hit variants of this within hours.
+  re-emitting them. Rebuilt in empty dirs with identical flags, both sides
+  agreed. This is the stale-target-dir hazard wearing a new coat — it is not
+  only *staleness* that poisons a reused dir, it is any flag that changes what
+  cargo caches.
+
+  **A correction worth keeping, because getting it wrong is instructive.** The
+  coordinator first attributed a *second* lane's clippy discrepancy to this
+  same cache mechanism. It was not: that one was the epilogue-counting bug
+  below. Two plausible mechanisms existed for one symptom, the first was
+  reached for, and it fitted badly — it could not explain a third lane's
+  stable, self-consistent `81/81`. **A hypothesis that explains your case but
+  not the neighbouring case is not finished.**
 
 **Countermeasures.** Echo `pwd` immediately before any gate, and bind
 `cd <abs-path> && <cmd>` into a single invocation. Build comparison baselines
