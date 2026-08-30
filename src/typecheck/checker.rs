@@ -2594,21 +2594,29 @@ impl<'a> Checker<'a> {
         // `startnew(SomeClassProperty)` goes silent: master caught it only
         // through the `get_` widening B060 removes, and never caught the
         // plain-global spelling at all.
-        if self.arg_is_workspace_non_callable(arg_ty) {
+        if self.arg_is_known_non_callable(arg_ty) {
             return true;
         }
         !matches!(Self::peel_const_handle(arg_ty), TypeRepr::Null)
             && self.is_clearly_not_a_function(arg_ty)
     }
 
-    /// True when `arg_ty` is a handle to a class or interface the workspace
-    /// declares — a value that can never be a function reference.
-    fn arg_is_workspace_non_callable(&self, arg_ty: &TypeRepr) -> bool {
+    /// True when `arg_ty` names a type the checker KNOWS and that type is
+    /// not a funcdef — a class, interface or enum, from the workspace or the
+    /// typedb. Such a value can never be a function reference.
+    ///
+    /// Knowing the type is the whole point: `is_clearly_not_a_function`
+    /// leaves every `Named` neutral to protect GH #47's guard for shapes the
+    /// checker cannot see, and a name it can resolve is not one of those.
+    /// Restricting this to WORKSPACE classes (round 5) left a Core enum
+    /// property — `Plot::Marker` inside `namespace UI` — unresolved and
+    /// therefore neutral, losing a diagnostic master reports.
+    fn arg_is_known_non_callable(&self, arg_ty: &TypeRepr) -> bool {
         let TypeRepr::Named(n) = Self::peel_const_handle(arg_ty) else {
             return false;
         };
         let candidate = self.resolve_value_type_name(n);
-        self.scope.is_workspace_class(&candidate) || self.scope.is_workspace_interface(&candidate)
+        self.scope.names_a_known_non_callable_type(&candidate)
     }
 
     /// The funcdef a VALUE-typed arg denotes, if any.
@@ -2665,14 +2673,12 @@ impl<'a> Checker<'a> {
         // wins if it denotes a type the checker knows AT ALL — typedb
         // included. A BARE name still takes the ladder first, because there
         // the inner scope legitimately shadows the outer one.
-        if name.contains("::")
-            && (self.scope.has_type(name) || self.scope.workspace_declares_type(name))
-        {
+        if name.contains("::") && self.scope.names_a_known_type(name) {
             return name.to_string();
         }
         for depth in (1..=self.namespace_stack.len()).rev() {
             let candidate = format!("{}::{}", self.namespace_stack[..depth].join("::"), name);
-            if self.scope.workspace_declares_type(&candidate) {
+            if self.scope.names_a_known_type(&candidate) {
                 return candidate;
             }
         }

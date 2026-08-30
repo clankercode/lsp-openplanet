@@ -1757,14 +1757,14 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
 ///
 /// The fixture pins BOTH sides of the line, because a fix that silences more
 /// than it should is indistinguishable from a correct one until something
-/// pins the boundary. Master reports 51 errors across the fixture, 33 of
+/// pins the boundary. Master reports 52 errors across the fixture, 33 of
 /// them false; the 11 true ones must survive, and the fix adds 2 more that
 /// master misses (a funcdef handle into a `uint` slot from a plain global,
 /// and a `uint` property value into a delegate ctor), plus 2 a namespaced
 /// funcdef masked by a same-named global class, and 3 that only survive
 /// because the shadowing guard refuses to let a same-named VARIABLE stand in
 /// for a type, and 6 where a workspace class or interface handle cannot bind
-/// a funcdef slot — 24 asserted below.
+/// a funcdef slot, and 1 for a Core enum value — 25 asserted below.
 ///
 /// DELIBERATE SCOPE ADDITION, engine-verified — do not "fix" the two
 /// `Main.as:126`/`127` lines by silencing them. Game probe (OP 1.29.5, each
@@ -1819,6 +1819,11 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         "Shadowing.as:134",
         "Shadowing.as:135",
         "Shadowing.as:148",
+        // Round 7: a CORE ENUM value reached by a relative qualified
+        // spelling (`Plot::Marker` inside `namespace UI`). Restricting the
+        // non-callable test to WORKSPACE classes left it unresolved and
+        // neutral, losing a diagnostic master reports.
+        "Shadowing.as:181",
         // A workspace class / interface handle can never bind a funcdef
         // slot. Master catches only the property spelling, and only through
         // the `get_` widening this ticket removes; the plain-global

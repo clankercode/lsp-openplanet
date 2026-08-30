@@ -168,3 +168,16 @@ namespace Qz {
         UI::InputText("##qz", s, 0, qzCallback);
     }
 }
+
+// Round 7: the value's type is a CORE ENUM reached by a relative qualified
+// spelling — `Plot::Marker` inside `namespace UI` is `UI::Plot::Marker`.
+// Restricting the non-callable test to WORKSPACE classes left this
+// unresolved and therefore neutral, losing a diagnostic master reports.
+// An enum value binds no funcdef slot, so this MUST error.
+namespace UI {
+    Plot::Marker get_EnumCallback() { return Plot::Marker::Auto; }
+    void EnumUse() {
+        string t = "x";
+        InputText("##enum", t, 0, EnumCallback);
+    }
+}

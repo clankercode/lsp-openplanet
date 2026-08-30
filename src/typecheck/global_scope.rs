@@ -1499,6 +1499,31 @@ impl<'a> GlobalScope<'a> {
         Vec::new()
     }
 
+    /// True when the checker knows `qualified` as a TYPE at all — a
+    /// workspace class / interface / enum / funcdef, or a typedb type, enum
+    /// or funcdef.
+    ///
+    /// Deliberately spans all three of [`Self::has_type`],
+    /// [`Self::has_enum`] and [`Self::workspace_declares_type`], because
+    /// each omits something the others carry: `has_type` excludes enums
+    /// entirely, `has_enum` carries the asymmetric Nadeo/Core source-name
+    /// rules that make a Core `UI::Plot::Marker` resolvable, and
+    /// `workspace_declares_type` carries workspace enums. Asking only one of
+    /// them is how a Core enum came to be treated as an unknown shape.
+    pub fn names_a_known_type(&self, qualified: &str) -> bool {
+        self.has_type(qualified)
+            || self.has_enum(qualified)
+            || self.workspace_declares_type(qualified)
+    }
+
+    /// True when `qualified` names a type the checker knows AND that type is
+    /// not a funcdef — a value of it can never be a function reference.
+    /// `false` for a name the checker does not know, which keeps GH #47's
+    /// guard for shapes it cannot see.
+    pub fn names_a_known_non_callable_type(&self, qualified: &str) -> bool {
+        self.names_a_known_type(qualified) && self.lookup_funcdef(qualified).is_none()
+    }
+
     /// GH #38 shadowing, funcdef edition: true when the workspace declares
     /// `name` as something that is NOT a real funcdef.
     ///
