@@ -2937,6 +2937,114 @@ mod tests {
         );
     }
 
+    /// B056: a Nadeo MODULE name is a live AngelScript scope exactly when
+    /// Core also declares it as a namespace — with one recorded exception.
+    ///
+    /// Driven from the paired probes already committed in
+    /// `docs/probes/b052-qualified-enum-spellings.tsv`: every one of the 20
+    /// module names was submitted as `<Module>::ZZZNoSuchEnumName`, and the
+    /// compiler's two answers separate the cases cleanly.
+    ///
+    /// * `Namespace 'X' doesn't exist.` — not a scope. 16 of them.
+    /// * `Identifier ... is not a data type in namespace 'X' or parent` — it
+    ///   IS a scope. 4 of them: `Audio`, `Meta`, `Net`, `GameData`.
+    ///
+    /// Three of the four are Core namespaces, which is why `scope_exists`
+    /// already answers for them and why `Meta::ESceneCharVisNotice` resolves
+    /// while `Game::ESceneCharVisNotice` does not. `GameData` is the sole
+    /// exception: a live engine scope that neither shipped database records,
+    /// so this crate answers false for it and the corpus test excludes that
+    /// one row. See `UNEXPLAINED_ENGINE_SCOPES` in the resolver tests.
+    ///
+    /// The point of pinning it here is that the exception stays exactly one
+    /// name. If a second module name ever starts behaving this way, or if a
+    /// module name that is NOT a Core namespace starts answering true, this
+    /// goes red rather than quietly widening what a qualifier may be.
+    #[test]
+    fn a_module_name_is_a_scope_only_when_core_declares_it() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // The loader's own module names — the first segment of every Nadeo
+        // key — taken from the index rather than re-derived.
+        let modules: std::collections::HashSet<String> =
+            index.nadeo_module_names().into_iter().collect();
+        assert_eq!(
+            modules.len(),
+            20,
+            "fixture guard: the dump must carry its 20 module names"
+        );
+
+        // The paired-probe verdicts, read out of the committed corpus.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/probes/b052-qualified-enum-spellings.tsv");
+        let text = std::fs::read_to_string(&path).expect("the probe corpus must be committed");
+        let mut game_says_scope: Vec<String> = Vec::new();
+        let mut game_says_not: Vec<String> = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with('#')).skip(1) {
+            let mut cols = line.split('\t');
+            let spelling = cols.next().unwrap_or_default();
+            let _verdict = cols.next();
+            let message = cols.next().unwrap_or_default();
+            let Some(prefix) = spelling.strip_suffix("::ZZZNoSuchEnumName") else {
+                continue;
+            };
+            // MODULE names only. The corpus also pairs engine CLASS prefixes,
+            // which follow a different rule (B052: a class is a namespace iff
+            // it declares an enum) and are not what this test is about. Note
+            // in passing that `CMwNod` is a live game scope `scope_exists`
+            // answers false for — the same shape as `GameData`, in class
+            // position. No corpus row depends on it, so it stays an
+            // observation rather than a change.
+            if !modules.contains(prefix) {
+                continue;
+            }
+            if message.contains("doesn't exist") {
+                game_says_not.push(prefix.to_string());
+            } else if message.contains("is not a data type in namespace") {
+                game_says_scope.push(prefix.to_string());
+            }
+        }
+        assert_eq!(
+            game_says_scope.len() + game_says_not.len(),
+            20,
+            "fixture guard: all 20 module names must have a paired probe"
+        );
+        assert_eq!(
+            game_says_scope.len(),
+            4,
+            "exactly four module names are live scopes: Audio, Meta, Net, GameData"
+        );
+
+        for prefix in &game_says_not {
+            assert!(
+                !scope.scope_exists(prefix),
+                "the game answers `Namespace '{prefix}' doesn't exist.`, so it \
+                 must not qualify anything"
+            );
+        }
+        for prefix in &game_says_scope {
+            // `GameData` is the one scope neither database records. Keeping it
+            // false is a known, documented under-approximation, not a bug —
+            // and it must stay the ONLY one.
+            if prefix == "GameData" {
+                assert!(
+                    !scope.scope_exists(prefix),
+                    "`GameData` is not recorded by either DB; if this starts \
+                     answering true, the exclusion in the resolver's corpus \
+                     test is now wrong and must be removed"
+                );
+                continue;
+            }
+            assert!(
+                scope.scope_exists(prefix),
+                "the game treats `{prefix}` as a scope and Core declares it, \
+                 so `scope_exists` must agree"
+            );
+        }
+    }
+
     /// B053: which enums are globally visible, pinned directly. The index
     /// half of the rule, so a loader change that starts keying enums
     /// differently fails here rather than silently changing the diagnostic.

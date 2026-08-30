@@ -1201,6 +1201,33 @@ impl TypeIndex {
         self.funcdefs.get(qualified_name)
     }
 
+    /// The synthetic MODULE names the Nadeo loader keys its entries under
+    /// (`Game`, `Scene`, `Audio`, …), sorted.
+    ///
+    /// These are this crate's own invention, not namespaces the game has —
+    /// which is the whole subject of B056. Exposed because whether a given
+    /// module name is nonetheless a live AngelScript scope is a question the
+    /// probe corpus answers and a test pins; see
+    /// `global_scope::tests::a_module_name_is_a_scope_only_when_core_declares_it`.
+    pub fn nadeo_module_names(&self) -> Vec<String> {
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (key, info) in &self.types {
+            if info.source == TypeSource::Nadeo {
+                if let Some((module, _)) = key.split_once("::") {
+                    names.insert(module.to_string());
+                }
+            }
+        }
+        for (key, info) in &self.enums {
+            if info.source == TypeSource::Nadeo {
+                if let Some((module, _)) = key.split_once("::") {
+                    names.insert(module.to_string());
+                }
+            }
+        }
+        names.into_iter().collect()
+    }
+
     /// Iterate all known enums by qualified name.
     pub fn enums_iter(&self) -> impl Iterator<Item = (&String, &EnumInfo)> {
         self.enums.iter()

@@ -300,18 +300,10 @@ mod tests {
     /// the namespace — `MLFeedRaceData.op`, `vehicle-state-list-dev` and
     /// friends — or, for `Foo`, because the probe plugin declared it itself.
     /// A workspace with none of those installed must reject them, and does.
-    /// `GameData` is the sharpest of them: it is BOTH a Nadeo module name the
-    /// loader invents AND, on the probing machine, a namespace some plugin
-    /// declares. The paired probe `GameData::ZZZNoSuchEnumName` answered
-    /// `Identifier 'ZZZNoSuchEnumName' is not a data type in namespace
-    /// 'GameData'`, which proves it was a scope THERE — and proves nothing
-    /// about the engine. Contrast `Game::ZZZNoSuchEnumName`, which answered
-    /// `Namespace 'Game' doesn't exist.`
-    const PLUGIN_NAMESPACE_ARTEFACTS: [&str; 13] = [
+    const PLUGIN_NAMESPACE_ARTEFACTS: [&str; 12] = [
         "Foo::Bar::VirtualKey",
         "Foo::ESceneCharVisNotice",
         "Foo::VirtualKey",
-        "GameData::EGameInventoryItemClass",
         "GameData::ESceneCharVisNotice",
         "GameData::ESceneVehicleVisEvent",
         "GameData::VirtualKey",
@@ -322,6 +314,53 @@ mod tests {
         "MathX::VirtualKey",
         "VehicleState::VirtualKey",
     ];
+
+    /// `GameData` is a live AngelScript scope that NEITHER shipped database
+    /// records, so this crate cannot know it is one.
+    ///
+    /// This is not a plugin artefact and was mislabelled as one when first
+    /// written. Nothing on the probing machine declares `namespace GameData`
+    /// — all 44 installed plugin entries, all 9 `.op` archives unzipped,
+    /// `DisabledPlugins`, `Scripts`, `Extract` and this repo's own fixture
+    /// plugins were searched, and the only file containing that string is
+    /// `Openplanet.h` itself.
+    ///
+    /// What the row actually is, is B052's ancestor walk working normally.
+    /// `EGameInventoryItemClass` is a globally visible enum — it is ACCEPTED
+    /// bare too — and it lives in the header's trailing `namespace Enums`,
+    /// not in `namespace GameData`. So it is not a member of that scope, it
+    /// is reached THROUGH it, exactly as `Meta::EPlugAnimGraphStateSelectCond`
+    /// is. The LSP resolves it the moment it believes `GameData` is a scope,
+    /// and refuses it otherwise. It refuses.
+    ///
+    /// The anomaly is `GameData` alone, and it is exactly one name. Pairing
+    /// `<Module>::ZZZNoSuchEnumName` over all 20 Nadeo module names in the
+    /// committed corpus splits them cleanly:
+    ///
+    /// * 4 answer `Identifier ... is not a data type in namespace 'X' or
+    ///   parent` — they ARE scopes: `Audio`, `Meta`, `Net`, `GameData`.
+    /// * 16 answer `Namespace 'X' doesn't exist.` — `Game`, `Scene`, `Plug`,
+    ///   `Hms`, `System`, `Control`, and the rest.
+    ///
+    /// And three of the four are fully explained: `Audio`, `Meta` and `Net`
+    /// are also real CORE namespaces, so `build_scope_index` already has
+    /// them and `scope_exists` answers true. `GameData` is not a Core
+    /// namespace — the Core DB declares 30 top-level namespaces and it is not
+    /// among them.
+    ///
+    /// So the rule for the other 19 is "a module name is a scope iff Core
+    /// declares it as one", and `GameData` is the single exception with no
+    /// evidence behind it in either DB.
+    ///
+    /// OPEN QUESTION, deliberately left open rather than guessed at: what
+    /// makes `GameData` a live scope when `Game`, `Hms`, `Plug` and `Scene`
+    /// are not? Nothing in the dump or the header distinguishes them — all
+    /// twenty are `ns` keys and all twenty have a `namespace X { }` block in
+    /// the header. Until that is known, excluding this row is the honest
+    /// call: the crate would have to hardcode `GameData` to match, and
+    /// hardcoding an engine fact nothing records is how this repo's earlier
+    /// wrong numbers were made.
+    const UNEXPLAINED_ENGINE_SCOPES: [&str; 1] = ["GameData::EGameInventoryItemClass"];
 
     /// A pre-existing LEXER gap, not a resolution one: `string` is tokenised
     /// as a keyword, so `string::X` never parses as a type expression at all.
@@ -381,7 +420,9 @@ mod tests {
             }
             // An empty workspace has none of the probing machine's plugins,
             // so these must be rejected here even though the game took them.
-            let expected_resolves = if PLUGIN_NAMESPACE_ARTEFACTS.contains(&spelling.as_str()) {
+            let expected_resolves = if PLUGIN_NAMESPACE_ARTEFACTS.contains(&spelling.as_str())
+                || UNEXPLAINED_ENGINE_SCOPES.contains(&spelling.as_str())
+            {
                 false
             } else {
                 verdict == "ACCEPTED"
