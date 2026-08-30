@@ -1,14 +1,14 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T05:07:21Z"
 depends_on: []
 estimate_hours: 1
 id: B059
 priority: medium
+started_at: null
 status: pending
-tags:
-    - false-positive
-    - typedb
+tags: []
 title: 'False error: CSmPlayer.GetCurrentEntityID — Openplanet-injected method missing from typedb'
 updated_at: "2026-08-30T05:07:21Z"
 ---
@@ -26,3 +26,93 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found 2026-08-30 while checking tm-dips-plus-plus. The game compiles this; the LSP does not. Same family as GH #21 (`MwAddRef`/`MwRelease`): Openplanet injects methods the Nadeo dump never lists.
+
+## Steps to Reproduce
+
+1. Check any plugin that calls `player.GetCurrentEntityID()` on a `CSmPlayer@` (tm-dips-plus-plus, tm-change-car-color, tm-magic-spectator), or the one-file repro below.
+2. `openplanet-lsp check` reports an error on the call.
+
+Minimal:
+
+```angelscript
+void Use(CSmPlayer@ player) {
+    auto entId = player.GetCurrentEntityID();
+}
+```
+
+## Expected Behavior
+
+Silent. Openplanet injects `uint GetCurrentEntityID()` on `CGamePlayer` (no args). It returns an offset value. `CSmPlayer` inherits `CGamePlayer`, so the call is legal and the in-game compiler accepts it.
+
+## Actual Behavior
+
+```
+src/PlayerState.as:121:22: error
+type `ShootMania::CSmPlayer` has no member `GetCurrentEntityID`
+```
+
+tm-dips-plus-plus currently has to whitelist that exact substring in `tools/lsp-known-errors.txt` so its LSP gate stays live for real errors.
+
+## Why
+
+Typedb (`OpenplanetNext.json`, both the live dump and `tests/fixtures/typedb/`):
+
+- `ShootMania::CSmPlayer` parent `CGamePlayer`
+- `Game::CGamePlayer` parent `CMwNod`, members: `User` only
+- Neither type lists `GetCurrentEntityID`. `Openplanet.h` does not declare it either.
+
+B006 trusts a Nadeo type's member list when it is non-empty, so this fires `UndefinedMember` instead of staying silent. The GH #21 special-case in `lookup_member` only covers `MwAddRef`/`MwRelease` on `CMwNod`-derived types.
+
+The previous vscode-openplanet-angelscript already patched this at dump-convert time (`language-server/src/convert_nadeo.ts`):
+
+```
+if (ret.name == "CGamePlayer") {
+    addToMethods({name: "GetCurrentEntityID", returntypedecl: "uint", args: [], isEnum: false, i: -1});
+}
+```
+
+openplanet-lsp loads the dump as-is and has no equivalent injection.
+
+## Live call sites (game accepts)
+
+- tm-dips-plus-plus `src/PlayerState.as:121`
+- tm-change-car-color `src/Main.as:72`
+- tm-magic-spectator `src/PlayerState.as:105`
+
+## Sibling injection (same class of bug — cover in this ticket)
+
+`CGameCtnNetwork::GetManialinkPages()` is the other Openplanet-injected method in that convert script (`CGameManialinkPage@[]&`, no args). Also absent from the dump. tm-shadowless-chrono calls it. Same fix, not a second ticket.
+
+(`MwAddRef`/`MwRelease` on `CMwNod` is the third injection in that script and is already GH #21.)
+
+## Work
+
+Mirror GH #21: treat Openplanet-injected methods as builtins, not dump members.
+
+- `GetCurrentEntityID` on `CGamePlayer` and descendants → `uint`, no args
+- `GetManialinkPages` on `CGameCtnNetwork` and descendants → `CGameManialinkPage@[]&`, no args
+
+Prefer a small injected-methods table over two more hard-coded name matches, so the next Openplanet-only method is one row. Do not widen B006's "untrusted empty list" silence — `CSmPlayer`'s list is trusted and should stay trusted for real missing members.
+
+Return type matters: a silent `Error("")` sentinel (what GH #21 does for void `MwAddRef`) would hide the call but type `auto entId` wrong. The method returns `uint`.
+
+## Test plan (TDD, red first)
+
+Red: `CSmPlayer@ p; auto id = p.GetCurrentEntityID();` currently `UndefinedMember`.
+
+Variants:
+
+- `CGamePlayer@` (the type it is actually declared on)
+- `CSmPlayer@` (the live call-site type)
+- wrong arity still errors
+- wrong receiver (`CMwNod@ n; n.GetCurrentEntityID()`) still errors
+- `GetManialinkPages` on `CGameCtnNetwork@`
+- GH #21 `MwAddRef` stays silent
+
+Game probe the fixture before treating the LSP silence as ground truth. A game ACCEPT on this machine can leak from other installed plugins; a game REJECT is solid.
+
+## Related
+
+GH #21 (`MwAddRef`/`MwRelease`), B006 (trusted Nadeo member lists), tm-dips-plus-plus `tools/lsp-known-errors.txt`.
