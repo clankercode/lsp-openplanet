@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T07:30:19Z"
 depends_on: []
 estimate_hours: 1
 id: B067
 priority: high
+started_at: null
 status: pending
 tags: []
 title: CMwNod is a live game scope but scope_exists answers false
@@ -24,3 +26,62 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Observed 2026-08-30 by the B056 lane while pinning the module-name scope rule.
+Recorded as an observation, not acted on: no corpus row depends on it, and it
+was found mid-gate on an unrelated ticket.
+
+## Observation
+
+`CMwNod` behaves as a live AngelScript scope in the game, but
+`GlobalScope::scope_exists` answers false for it. Same shape as the
+`GameData` exception B056 documented, except in CLASS position rather than
+module position.
+
+## Why it may matter
+
+B056 established, and the coordinator verified independently against all 20
+Nadeo module names, that:
+
+    a module name is a live scope  <=>  Core declares it as a namespace
+
+with `GameData` the single unexplained exception (4 scopes: Audio, Meta, Net,
+GameData; Audio/Meta/Net are Core namespaces, GameData is not). `CMwNod` is a
+SECOND unexplained live scope, in a different position, which weakens the
+'lone exception' reading — two exceptions in two positions is more likely a
+missing rule than two quirks.
+
+If the rule is actually something like 'a name is a scope when the engine
+registers members under it', then both `GameData` and `CMwNod` may be
+explained by the same mechanism, and `scope_exists` is under-approximating
+rather than these being anomalies. Worth finding out before either is treated
+as permanent.
+
+## Work
+
+Probe first, implement second. Establish what IS a scope in the live game
+beyond the 20 module names — at minimum a paired `ZZZNoSuchEnumName` probe
+across a sample of engine CLASS names, so the class-position rule is measured
+rather than assumed from one observation.
+
+Then decide whether `scope_exists` should recognise them. Note the
+consequence direction: `scope_exists` answering false where the game says true
+is a FALSE POSITIVE risk (the LSP rejects a spelling the game accepts), which
+is the more damaging direction and the one B052/B056/B057 exist to remove.
+
+Do NOT hardcode names. The B056 lane declined to match `GameData` for exactly
+that reason — hardcoding an engine fact neither database records is how this
+repo's earlier wrong numbers were made.
+
+## Test plan
+
+Whatever lands must pin the measured set the way
+`a_module_name_is_a_scope_only_when_core_declares_it` does: assert the split
+AND the exact count of exceptions, so a new exception goes red rather than
+quietly widening what qualifies.
+
+## Related
+
+B056 (established the module-name rule and its one exception), B052
+(ancestor-walk / scope gating), `docs/probes/b052-qualified-enum-spellings.tsv`
+(the paired-probe corpus; extend it rather than starting a new one).
