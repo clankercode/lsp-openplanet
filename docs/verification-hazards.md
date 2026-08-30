@@ -172,7 +172,26 @@ The test passes, and would have passed either way.
 - **An adversarial review is not a formality to run in parallel with the merge.**
   It is the only check that reads intent rather than behaviour. Merging while it
   runs has twice landed real defects on master that the review then found.
-- **Test helpers own their temp dirs via `Drop`,** so cleanup happens on the
-  unwind path — a panicking test is exactly when a dir gets left behind. Verify
-  by counting `/tmp/oplsp-*` across two consecutive runs; a `Drop` impl that
-  reads correctly and never fires is the failure mode (B065).
+- **Test helpers own their temp dirs via `openplanet_lsp::testing::TempDir`,**
+  whose `Drop` cleans up on the unwind path too — a panicking test is exactly
+  when a dir gets left behind. Verify by running under a **private `TMPDIR`**
+  and counting before/after. Never count a prefix in the shared `/tmp`: sibling
+  lanes write it concurrently, so the number moves on its own. And never count
+  `oplsp-*` specifically — those helpers clean up at end of test and leak only
+  on red runs, so they read flat across two green ones and the check cannot see
+  the defect (B065).
+
+  This bullet previously prescribed exactly that broken check. It was written
+  from the ticket's assumption rather than from a measurement, and the lane
+  that had to use it proved it vacuous: `oplsp-*` read 26 → 25 → 25 while the
+  real leak was 320 per run under eight unmentioned prefixes. **A countermeasure
+  in this document is a claim like any other, and this one was wrong.**
+
+- **A guard that drops too early turns a passing test into a vacuous one.**
+  Migrating ~101 call sites to `TempDir`, helpers that returned a *derived*
+  path (`dir/config.toml`) dropped the guard on the way out and deleted the
+  tree before the caller looked at it. Eight tests went red — loudly, which is
+  the lucky case. A test whose assertion cannot see its own fixture goes
+  **green**. `TempPath` exists to carry the guard with the path. When a
+  mechanical migration touches fixtures, the thing to hunt is not the tests
+  that broke but the ones that now pass without testing anything.
