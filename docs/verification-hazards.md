@@ -322,6 +322,31 @@ The test passes, and would have passed either way.
   when `available` governs, and `available` was 22G throughout. There was no
   memory pressure. Wrong cause, right conclusion — which is its own hazard.)
 
+- **Measure each half of a multi-part fix as a standalone variant.** Twice in
+  this batch a ticket's own Work section proposed the half that closes nothing,
+  and in both cases the wrong half was the plausible-sounding one:
+
+  - **B064.** Merging the two locks (a) was the headline; carrying the stamps
+    out of the parse (b) was the fix. `(b)`-only left 0 tests red, `(a)`-only
+    left 8.
+  - **B072.** "Read both files' bytes first so the reads are close together"
+    left **6 of 9 tests red** as a standalone change. Narrowing a race window
+    closes nothing, because **the window is a position in a sequence, not a
+    duration** — the writer is an unrelated process that can land anywhere in
+    it. The identity check alone closed all 9.
+
+  In both cases a commit doing only the proposed half would have **looked like
+  a fix and been none**, and no amount of reading the diff distinguishes the
+  two. The matrix does, cheaply: build each half, run the reproductions,
+  record which stay red. **Treat a ticket's Work section as a hypothesis to be
+  measured, not as a specification** — it was written before anyone built the
+  thing, usually by someone reasoning from the symptom.
+
+  The corollary matters for review: if a fix has two parts and only one is
+  load-bearing, **say which**, in the commit. Otherwise the next person to
+  touch it cannot tell defence-in-depth from the mechanism, and will delete
+  the wrong one.
+
 - **An intermittent failure will let you bisect it to any answer you like.**
   The same lane saw that crash three times in a row on its branch, once green
   on merge-base, and began bisecting its own change: disable half — passes;
