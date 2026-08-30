@@ -163,3 +163,112 @@ whoever takes it should read lane-b057's resolution of where the
   intent.
 - The follow-up run to re-verify the B052 corpus could not complete: the game
   exited mid-run. See B068.
+
+
+## Investigation result (lane-b057, 2026-08-31): NOT A DEFECT — `scope_exists` does not under-approximate
+
+Measured agreement between the LSP and the game on every corpus row that
+exercises a single-segment engine-class qualifier: **25 agree, 0 disagree**.
+`scope_exists` is already correct. No production change was made and none is
+needed.
+
+### The rule
+
+A class qualifies a globally visible enum **iff Openplanet registered at least
+one member enum under it — named OR anonymous.** Openplanet registers a
+class's enums by setting the default AngelScript namespace to the class name,
+so having an enum to register is what creates the class-named namespace. With
+no enum there is no namespace, `::` resolves against the class TYPE and its
+base classes only, and the walk never reaches global.
+
+This rule was already documented at `src/typedb/index.rs:456-464`, and
+`build_scope_index`'s Nadeo arm already implements it by deriving scopes from
+enum qnames. The investigation confirmed the documentation rather than
+correcting it.
+
+| class | member enums (named / anonymous) | scope_exists | game |
+|---|---|---|---|
+| CGameCtnChallenge | 3 named | true | ACCEPTED |
+| CGameMenu | 1 named (`EMenuOrder`) | true | ACCEPTED |
+| CGameCtnApp | **0 named, 1 anonymous** | true | ACCEPTED |
+| CMwNod | none | false | REJECTED |
+| CSceneVehicleVis | none | false | REJECTED |
+| CSystemFidFile | none | false | REJECTED |
+| CTrackMania | none | false | REJECTED |
+
+Namespace-hood is NOT inherited: `CTrackMania -> CGameManiaPlanet ->
+CGameCtnApp -> CGameApp -> CMwNod`, and `CGameCtnApp` is a namespace while its
+descendant `CTrackMania` is not. The default namespace attaches to the class
+that declares the enum, not to the subtree.
+
+### Two measurement errors worth recording, because both nearly closed this wrong
+
+The ticket's original premise ("CMwNod is a live game scope but `scope_exists`
+answers false") and the coordinator's re-framing ("every engine class is a
+scope, 41/41") were both refuted by the **12 REJECTED corpus rows** — the
+direction B068 cannot corrupt. Widening `scope_exists` would have turned 12
+correct rejections into false negatives. The discriminator used for the 41/41
+measurement was the game's rejection MESSAGE FORM, which separates *head
+recognised* from *head unknown* and says nothing about whether lookup through
+that head reaches a global enum: `CMwNod::ZZZNoSuchName` and
+`CMwNod::VirtualKey` produce the same form, yet `CGameCtnApp::VirtualKey`
+ACCEPTS and `CMwNod::VirtualKey` REJECTS.
+
+Then, while confirming the surviving rule, two further errors landed on the
+same fact from opposite sides:
+
+1. **Reading enum-TYPED MEMBERS as declared enums.** `VehicleCollectionId`,
+   `Kind`, `Difficulty`, `ColorPalette`, `MenuOrder` are fields whose type is
+   an enum, not enums. Counting members that carry an inline `e` block gave a
+   perfect 7/7 correlation — for a reason the author did not understand and
+   described incorrectly.
+2. **Counting only the class-level `e` array.** That array lists NAMED enums
+   only. Anonymous inline enums are keyed by declaring context via
+   `anon_member_enum_key` (`src/typedb/index.rs:1123-1136`), because the
+   `UnnamedEnum` placeholder is shared across a module and keying by it
+   collapsed 118 of the fixture's 132 into one `or_insert` (B016). So this
+   count reads 0 for `CGameCtnApp` while the index does hold an enum under it,
+   and suggested a 3-row disagreement that does not exist.
+
+Error 1 had wrong labels and the right quantity; error 2 had right labels and
+an incomplete quantity. The first nearly closed the ticket on a rule stated
+wrongly; the second nearly held it open pending a re-probe of `CGameCtnApp::*`
+that would not have flipped. Neither was caught by re-reading the reasoning —
+both were caught by measuring the loaded index directly.
+
+### The actual answer to what this ticket asked
+
+B067 was filed to find out whether these were anomalies or a missing rule. They
+are neither: the rule exists, is documented, and is implemented. What the
+investigation did surface is a real structural hazard worth more than the
+close.
+
+**The codebase carries two scope predicates and two enum predicates, and the
+bugs live where a caller picks the wrong one.**
+
+- `TypeIndex::scope_exists` (index-only) vs `GlobalScope::scope_exists`
+  (workspace OR index). B070 was a surface reaching the index-only half, so
+  hover was silent on a spelling the checker accepts.
+- `has_enum` (an ACCEPTANCE test) vs `canonical_enum_key` (a CANONICALIZER,
+  free to be wider than acceptance because every other caller reaches it only
+  after acceptance). B070's first fix reached the canonicalizer as though it
+  were an acceptance test and made hover answer for 24 spellings the checker
+  rejects, all `Plot::X` matching the real key `UI::Plot::X`.
+
+Opposite ends of one family: a surface using a predicate that is too narrow,
+and a surface using one that is too wide. Both are invisible at the call site,
+because both pairs have near-identical names and plausible-looking semantics.
+
+Exhaustive check by search, not by reasoning: `source_reference_key` has
+exactly ONE production caller (`src/server/hover.rs`, fixed by B070), and the
+index-only `scope_exists` has exactly ONE (`src/typecheck/global_scope.rs:494`,
+the correct workspace-OR-index composition). No other surface currently carries
+the defect. B063 and B069 are adjacent but reach it through different
+functions.
+
+### Recommendation
+
+Close as **not a defect**. Do not widen `scope_exists`. If the two-predicates
+hazard is to be acted on, it wants its own ticket — naming the pairs so a
+future caller cannot pick the wrong one by accident is the fix, not a
+behavioural change.
