@@ -1,5 +1,6 @@
 pub mod call_hierarchy;
 pub mod code_actions;
+pub mod colors;
 pub mod commands;
 pub mod completion;
 pub mod diagnostics;
@@ -10,6 +11,7 @@ pub mod hover;
 pub mod inlay_hints;
 pub mod lexical_scope;
 pub mod navigation;
+pub mod regen_barrier;
 pub mod rename;
 pub mod scope_query;
 pub mod semantic_tokens;
@@ -122,15 +124,23 @@ pub struct ResolvedDefinesResult {
 pub struct Backend {
     client: Client,
     config: Arc<tokio::sync::RwLock<LspConfig>>,
-    type_index: Arc<tokio::sync::RwLock<Option<Arc<TypeIndex>>>>,
-    /// B039: the build stamps of the type DB currently held in `type_index`,
-    /// recorded when it was loaded.
+    /// The loaded type database, and — inside it — the build stamps that
+    /// describe it (B039's `before`/`after` report).
     ///
-    /// Not re-probed on read, and that is the point: re-probing would report
-    /// what is on DISK, and the whole question `openplanet.regenerateTypeDb`
-    /// answers is whether what is loaded still matches it. `None` means no
-    /// database is loaded.
-    type_db_versions: Arc<tokio::sync::RwLock<Option<TypeDbVersions>>>,
+    /// B064: the stamps used to live in a SECOND `RwLock` beside this one.
+    /// Two locks written one after the other cannot be read as a pair: a
+    /// reader takes one at a time, so between the two writes it saw a new
+    /// index carrying the previous load's stamps, and two regenerations
+    /// racing could leave that crossing permanent. Ordering the two writes
+    /// would not have helped — that serialises WRITERS while readers still
+    /// take one lock at a time. Nor would one lock over a struct of both, on
+    /// its own: the stamps were also a second READ of the files, which is a
+    /// separate defect with no lock in it (see [`TypeIndex::versions`]).
+    ///
+    /// So the stamps moved into the index, where the load puts them, and the
+    /// second lock was deleted rather than merged. There is now one value; a
+    /// crossed pair has nowhere to come from.
+    type_index: Arc<tokio::sync::RwLock<Option<Arc<TypeIndex>>>>,
     /// Open document contents: URI → source text
     documents: Arc<DashMap<Url, String>>,
     /// Cached analysis snapshot: rebuilt on every document lifecycle event
@@ -514,12 +524,27 @@ impl Backend {
 }
 
 impl Backend {
+    /// The type database the server is serving, and the stamps that describe
+    /// it, in ONE observation. `None` when no database is loaded.
+    ///
+    /// The single place server code answers "what is loaded?" — B039's
+    /// `before`, and the atomicity tests, both come through here, so the
+    /// answer the user is given and the answer a test checks cannot drift
+    /// apart. Keeping it a real method rather than two field reads is also
+    /// what makes B064 hard to reintroduce: the stamps are taken from the
+    /// index in hand, so there is no version of this that can read them from
+    /// somewhere else and disagree.
+    pub async fn loaded_type_db(&self) -> Option<(Arc<TypeIndex>, TypeDbVersions)> {
+        let index = self.type_index.read().await.clone()?;
+        let versions = index.versions().clone();
+        Some((index, versions))
+    }
+
     pub fn new(client: Client) -> Self {
         Self {
             client,
             config: Arc::new(tokio::sync::RwLock::new(LspConfig::load(None, None))),
             type_index: Arc::new(tokio::sync::RwLock::new(None)),
-            type_db_versions: Arc::new(tokio::sync::RwLock::new(None)),
             documents: Arc::new(DashMap::new()),
             snapshot: Arc::new(tokio::sync::RwLock::new(Arc::new(
                 AnalysisSnapshot::from_files(&[], &LspConfig::default()),
@@ -1233,18 +1258,19 @@ impl LanguageServer for Backend {
         if let (Some(core), Some(game)) = (&config.core_json, &config.game_json) {
             match TypeIndex::load(core, game) {
                 Ok(index) => {
-                    *self.type_index.write().await = Some(Arc::new(index));
                     // GH #59: name the build, not just the success — a
                     // "confidently wrong" diagnostic is traceable to a DB
-                    // version only if the log says which one loaded.
-                    let versions = TypeDbVersions::probe(core, game);
+                    // version only if the log says which one loaded. B064:
+                    // asked of the index, so it names what LOADED rather than
+                    // what a fresh read of the files would find.
                     tracing::info!(
                         "Type database loaded successfully; {}",
-                        versions.summary_line()
+                        index.versions().summary_line()
                     );
-                    // B039: remembered so a later regeneration can say what
-                    // CHANGED rather than just that it ran.
-                    *self.type_db_versions.write().await = Some(versions);
+                    // B039: the stamps travel with the index, so a later
+                    // regeneration can say what CHANGED rather than just that
+                    // it ran.
+                    *self.type_index.write().await = Some(Arc::new(index));
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load type database: {}", e);
@@ -1293,6 +1319,8 @@ impl LanguageServer for Backend {
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                // B041: vec3/vec4 literals and Openplanet `$xxx` escapes.
+                color_provider: Some(ColorProviderCapability::Simple(true)),
                 // B039: from the one list `execute_command` dispatches on,
                 // never a literal here — an advertised name with no handler
                 // behind it is invisible to every client.
@@ -1618,6 +1646,38 @@ impl LanguageServer for Backend {
             params.context.include_declaration,
         );
         Ok(Some(refs))
+    }
+
+    /// `textDocument/documentColor` (B041): swatches for `vec3`/`vec4`
+    /// literals and Openplanet `$xxx` escape codes.
+    ///
+    /// Reads the open document directly — the whole feature is decidable from
+    /// the token stream, so there is no snapshot or type index to consult and
+    /// nothing to go stale between keystrokes.
+    async fn document_color(&self, params: DocumentColorParams) -> Result<Vec<ColorInformation>> {
+        let Some(source) = self.documents.get(&params.text_document.uri) else {
+            return Ok(Vec::new());
+        };
+        Ok(colors::document_colors(source.value()))
+    }
+
+    /// `textDocument/colorPresentation` (B041): what the picker writes back.
+    ///
+    /// The form comes from the source at `range`, never from the request, so
+    /// the user's representation survives: a `$f00` stays a `$f00` and a
+    /// `vec3` never becomes a `vec4`.
+    async fn color_presentation(
+        &self,
+        params: ColorPresentationParams,
+    ) -> Result<Vec<ColorPresentation>> {
+        let Some(source) = self.documents.get(&params.text_document.uri) else {
+            return Ok(Vec::new());
+        };
+        Ok(colors::color_presentations(
+            source.value(),
+            params.range,
+            params.color,
+        ))
     }
 
     async fn document_highlight(
@@ -2087,11 +2147,16 @@ impl Backend {
     /// The answer reports the stamps BEFORE and AFTER, not just success.
     /// This command exists for one situation — the user updated Openplanet
     /// or the game and the symbol surface went stale — and in that situation
-    /// "done" does not answer the question they asked. `before` is what the
-    /// server had loaded; `after` is what is on disk now. Equal stamps mean
-    /// the reload picked up nothing new, which is a real and common outcome
-    /// (the dump has not been regenerated by the game yet) and one a user
-    /// otherwise mistakes for success.
+    /// "done" does not answer the question they asked. `before` is the
+    /// database the server had loaded; `after` is the one it has now. Equal
+    /// stamps mean the reload picked up nothing new, which is a real and
+    /// common outcome (the dump has not been regenerated by the game yet) and
+    /// one a user otherwise mistakes for success.
+    ///
+    /// B064: `after` describes the database that was LOADED, not whatever is
+    /// on disk by the time the answer is written. Those are the same thing
+    /// only when nothing rewrites the dump mid-reload — and the game
+    /// rewriting the dump is the event this command exists to report on.
     async fn regenerate_type_db(&self) -> Value {
         let start = std::time::Instant::now();
         let (core, game) = {
@@ -2107,40 +2172,34 @@ impl Backend {
                 });
             }
         };
-        let before = self.type_db_versions.read().await.clone();
+        // B064: the stamps of what is loaded NOW, asked of the index itself
+        // and through the same accessor the atomicity tests observe, so
+        // `before` and what a reader sees cannot drift apart.
+        let before = self.loaded_type_db().await.map(|(_, versions)| versions);
         match TypeIndex::load(&core, &game) {
             Ok(index) => {
                 let count = index.type_count() + index.function_count() + index.enum_count();
-                // KNOWN RACE, deliberate, tracked as B064.
+                // B064, both halves of it.
                 //
-                // The index and its stamps live behind two separate locks and
-                // are written non-atomically, and `after` re-reads the files
-                // that `TypeIndex::load` just parsed. So two regenerations
-                // fired at once — or a dump rewritten in the microseconds
-                // between the load and the probe — can report stamps that do
-                // not describe the index actually loaded.
+                // `after` is asked of the INDEX, not of the files. It used to
+                // be `TypeDbVersions::probe(&core, &game)` — a second read of
+                // the two files `TypeIndex::load` had just parsed — so a dump
+                // the game rewrote in between produced a report describing a
+                // database that was never loaded. On one thread, with no lock
+                // anywhere near it.
                 //
-                // Left alone because the blast radius is a wrong REPORT, not
-                // wrong analysis: diagnostics always come from whatever index
-                // is in `type_index`, whatever this says about it. It is
-                // reachable through concurrent palette invocations or, on one
-                // thread, when the dump changes after load but before probe.
-                //
-                // DO NOT "fix" this by taking the two write locks in a fixed
-                // order. That serialises writers and reads like a fix, but
-                // every reader still takes one lock at a time, so a torn read
-                // survives untouched. And note there are TWO defects here,
-                // not one: collapsing both into a single lock
-                // (`RwLock<Option<LoadedTypeDb>>`) closes the shared-state
-                // interleaving, but NOT the load-then-probe window, which is
-                // a filesystem TOCTOU — `TypeIndex::load` parses the files and
-                // `TypeDbVersions::probe` reads them again, because
-                // `TypeIndex` does not retain the stamps it parsed. That half
-                // needs the stamps carried out of the load, and no lock
-                // touches it. Both are B064's job, not B039's.
-                *self.type_index.write().await = Some(Arc::new(index));
-                let after = TypeDbVersions::probe(&core, &game);
-                *self.type_db_versions.write().await = Some(after.clone());
+                // And the index and its stamps are ONE value under ONE lock,
+                // so publishing them is one step. It used to be two writes to
+                // two locks, which a reader taking one lock at a time could
+                // catch half-done, and which two concurrent regenerations
+                // could interleave into a pair that permanently described
+                // different loads.
+                let after = index.versions().clone();
+                let index = Arc::new(index);
+                // The one point a test can stop the clock at: parsed, nothing
+                // published. Inert unless a test armed it.
+                regen_barrier::wait_if_armed().await;
+                *self.type_index.write().await = Some(index);
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let changed = before.as_ref() != Some(&after);
                 tracing::info!(

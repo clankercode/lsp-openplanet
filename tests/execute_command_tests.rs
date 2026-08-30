@@ -323,8 +323,8 @@ async fn the_advertised_surface_is_exactly_the_documented_one() {
 
 /// The command's own contract with the extension: it reports WHAT CHANGED,
 /// not merely that it ran. `before` is the DB the server had loaded; `after`
-/// is what is on disk now — which is the whole question a user asks after
-/// updating Openplanet.
+/// is the parsed and published index, which equals disk only when the dump
+/// does not change during the reload.
 #[tokio::test]
 async fn regenerate_type_db_reports_the_versions_before_and_after() {
     let fixture = fixture("versions", true);

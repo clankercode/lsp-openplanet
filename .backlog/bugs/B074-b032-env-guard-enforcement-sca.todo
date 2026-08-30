@@ -1,0 +1,96 @@
+---
+completed_at: null
+complexity: medium
+created_at: "2026-08-30T17:54:05Z"
+depends_on: []
+estimate_hours: 1
+id: B074
+priority: high
+started_at: null
+status: pending
+tags: []
+title: B032 env-guard enforcement scans only update.rs, so an unguarded HOME test in any other module is invisible
+updated_at: "2026-08-30T17:54:05Z"
+---
+
+# B032 env-guard enforcement scans only update.rs, so an unguarded HOME test in any other module is invisible
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior
+
+Found 2026-08-31 by lane-b065-b066 while preparing B066's provenance tests;
+the enforcement gap was localized by the coordinator.
+
+## Defect
+
+B032 added `env_guard()` (`src/update.rs:1698`) and an enforcement test
+`every_env_touching_test_takes_the_env_guard` (`:1732`) so no test can mutate
+process env without taking the lock.
+
+**That enforcement has a corpus of one file.** `test_fns()` (`:1703`) is:
+
+    let src = include_str!("update.rs");
+
+so it scans `update.rs`'s test module and nothing else. A test in any other
+module that touches env is invisible to it — not failed, not warned, simply
+never considered.
+
+## The live consequence, which is a real race today
+
+`src/config.rs:2936` does `std::env::set_var("HOME", &tmp)` and `:2939`
+`remove_var("HOME")`, and `env_guard` appears nowhere in `config.rs` (verified:
+`grep -rln env_guard src/` returns `src/update.rs` alone).
+
+`cargo test --lib` runs all modules as threads in ONE process, so a `config`
+test rewriting `HOME` already races an `update` test reading it. B032 fixed the
+`update` side of exactly this class and the enforcement could not see that the
+other side existed.
+
+## Why it is worth its own ticket rather than folding into B066
+
+B066's lane is hoisting the lock into `crate::testing` so its provenance tests
+can take it, which fixes the `config.rs` instance. **It does not fix the
+enforcement.** After that change the gate still scans one file, so the third
+module to touch env reopens the gap silently. The fix here is to widen what the
+gate looks at, which is independent of where the lock lives.
+
+## Work
+
+Widen the enforcement's corpus. It must consider every module that mutates
+process env, not one file. Options: walk `src/**/*.rs` at test time; or drive
+it from a list that a second test proves is complete by grepping for
+`set_var`/`remove_env`/`remove_var` and asserting every hit's module is
+covered. The second shape is preferable — it fails loudly when a new module
+starts touching env, which is the event that matters.
+
+Do NOT fix this by adding `config.rs` to a hardcoded pair. That closes today's
+instance and leaves the mechanism.
+
+## Test plan (TDD, red first)
+
+Red: the enforcement must FAIL on master today, because `config.rs:2936` is
+unguarded. If a candidate implementation passes before the `config.rs` test is
+guarded, it is not scanning what it claims to.
+
+Variants:
+- an unguarded env-touching test in a THIRD module is caught
+- a guarded test in any module passes
+- a module with no env access is not required to do anything
+- the completeness check itself fails when a new `set_var` appears in a module
+  the enforcement does not cover
+
+## Related
+
+B032 (added the guard and the single-file enforcement), B066 (needs the lock in
+`crate::testing`; will fix the `config.rs` instance but not this),
+`docs/verification-hazards.md` — this is "a gate only finds what its corpus
+contains" inside a gate whose whole purpose is enforcement.

@@ -1,0 +1,250 @@
+---
+completed_at: null
+complexity: medium
+created_at: "2026-08-30T17:39:22Z"
+depends_on: []
+estimate_hours: 2
+id: B071
+priority: medium
+started_at: null
+status: pending
+tags: []
+title: 'Enum type mismatches are not diagnosed: assigning one enum type to another is silent'
+updated_at: "2026-08-30T17:39:22Z"
+---
+Found 2026-08-31 while verifying that the B056 canonicalization fix could not
+move a diagnostic. It cannot - but the reason turned out to be broader than
+expected, and worth its own ticket.
+
+## Actual Behavior
+
+`openplanet-lsp check` is SILENT on all of these:
+
+```angelscript
+void Mismatch() {
+    // two different engine enums
+    EDummyCollectionIdent a = EDummyCollectionIdent::Undefined;
+    EGhostNameLogoType b = a;              // silent
+
+    // two workspace-declared enums
+    LocalOne c = LocalOne::X;
+    LocalTwo d = c;                        // silent
+}
+enum LocalOne { X }
+enum LocalTwo { Y }
+```
+
+Zero diagnostics. The file IS being analysed - a positive control in the same
+file (`Meta::ZZZNoSuchEnumName` as a type, and a wrong-arity call) is flagged
+normally, so this is not a parse or resolution failure.
+
+Also silent, and probably the same root: a bad enum VALUE.
+
+```angelscript
+EDummyCollectionIdent a = EDummyCollectionIdent::NoSuchValueZZZ;   // silent
+```
+
+## Expected Behavior
+
+UNVERIFIED - the game was down when this was found, so there is no live
+compiler verdict here. AngelScript does implicitly convert enum values to
+integer types, so it is genuinely possible that some or all of the above are
+LEGAL and the LSP is correct to stay silent. That must be probed before any
+fix. Specifically worth probing separately:
+
+- enum A -> enum B assignment (the case above)
+- enum -> int / uint assignment (likely legal)
+- int -> enum assignment (likely requires a cast)
+- an undeclared value on a known enum (`E::NoSuchValue`)
+
+A game REJECT on any of these makes it a real missing diagnostic. A game
+ACCEPT closes that row and is worth recording either way, since right now the
+behaviour is simply unknown.
+
+## Why this was found
+
+B056's canonicalization fix changes `canonicalize_type_name` for 57 enums.
+`named_types_equivalent` (`src/typecheck/checker.rs`) compares canonicalized
+names, so the fix looked like it could move an argument-type diagnostic. It
+cannot - measured on a purpose-built plugin covering locals, parameters,
+return types, arrays and both scope qualifiers, base vs branch binaries, zero
+difference. The reason is that no enum-mismatch diagnostic exists to move.
+
+That makes the B056 fix safe on stronger grounds than the call-graph argument
+originally given for it, and it means `named_types_equivalent`'s enum handling
+is currently reachable only for unique EXTERNAL overload sets.
+
+## Related
+
+B056 (source names / canonicalization), B023 (function-shaped args), GH #47
+(`No matching signatures` render).
+
+## Independently reproduced, and the ticket SPLITS (coordinator, 2026-08-31)
+
+Reproduced on a master-based release binary
+(`~/.cache/lsp-openplanet-builds/b041-base/release/openplanet-lsp`), separate
+from the lane's measurement. Positive controls in the same file fire normally —
+`error: unknown type ZZZNoSuchType` and
+`error: function Format expects 2 args, got 0` — while every enum row stays
+silent. **The null result is real, not the checker failing to look.**
+
+**A fifth row, and it does not belong with the other four.** An undeclared
+value on a KNOWN enum is silent for BOTH workspace-declared and engine enums:
+
+```angelscript
+enum LocalOne { X }
+LocalOne a = LocalOne::ZZZNotAValue;          // silent  (workspace enum)
+auto b = EDummyCollectionIdent::ZZZNotAValue; // silent  (engine enum)
+LocalOne c = LocalOne::X;                     // silent  (correct)
+auto d = EDummyCollectionIdent::Undefined;    // silent  (correct)
+```
+
+So the LSP never diagnoses a non-existent enum MEMBER at all.
+
+**Why that splits this ticket:**
+
+- **Rows 1-3 (enum -> other enum, enum -> int, int -> enum) genuinely need the
+  game.** AngelScript implicitly converts enums to integers, so silence may
+  well be correct. Do not guess; probe when the game is back.
+- **The undeclared-member row does NOT need the game to be actionable in the
+  workspace case.** `enum LocalOne { X }` is declared in the same file the LSP
+  is analysing; it has complete information and does not need the engine to
+  know `ZZZNotAValue` was never declared. No implicit-conversion story can make
+  a member that does not exist into a legal one — implicit conversion is about
+  the TYPE of a value, and here there is no value.
+
+Confidence on the workspace case is high but not absolute, so still probe it
+for completeness when the game returns — it is one row, and this repo's history
+says a spelling that "obviously" must be rejected is worth ten seconds of
+compiler time. But it is reasonable to implement and test the workspace half
+without waiting, and that is the recommended split.
+
+The engine-enum half is closer to B052/B056 territory (which spellings the
+engine accepts) and should wait for a probe.
+
+
+## The gap is specific to ENUM members (2026-08-31)
+
+Measured on one plugin, branch binary. Every other kind of undeclared
+qualified member IS diagnosed; only enum members are silent.
+
+```angelscript
+enum LocalOne { X }
+class LocalCls { int Field; }
+namespace LocalNs { void Fn() {} }
+
+LocalOne a = LocalOne::ZZZNotAValue;          // SILENT   <-- the gap
+auto d = EDummyCollectionIdent::ZZZNotAValue; // SILENT   <-- the gap
+LocalNs::ZZZNotAFunction();                   // error: No matching symbol 'LocalNs::ZZZNotAFunction'
+c.ZZZNotAField = 1;                           // error: type `LocalCls` has no member `ZZZNotAField`
+ZZZNotAnything();                             // error: undefined identifier `ZZZNotAnything`
+```
+
+So this is not a broad "member checking is missing" gap. Three sibling
+paths - namespace member, class member, free identifier - already produce
+exactly the right diagnostic. Enum-value resolution is the one path that
+resolves the ENUM and then accepts any member name without checking it
+against the declared values.
+
+That makes the workspace half narrow and low-risk to fix: the value list is
+already on `EnumInfo`, and there is a well-formed message shape to copy from
+the namespace case.
+
+Note the split confirmed by the coordinator: the WORKSPACE case
+(`enum LocalOne { X }` declared in the analysed file) needs no game probe -
+the LSP has complete information and implicit enum-to-int conversion is about
+the type of a value, and here there is no value. The ENGINE case and rows 1-3
+above still want a live verdict.
+
+## A sibling instance, same sweep (lane-b057, 2026-08-31)
+
+Walking the `named_types_equivalent` call sites turned up a second silent case
+in this family: **assigning to an engine PROPERTY does not flag an enum
+mismatch either.** Identical on both binaries, so pre-existing and not caused by
+the B056 follow-up.
+
+That extends this ticket's population beyond locals and parameters. When the
+game is back, probe the property-assignment form alongside the four rows
+already listed — if enum→enum is legal by implicit conversion, all of these
+close together; if it is not, this is another site needing the same diagnostic.
+
+See also B076 (a funcdef handle accepts a function whose RETURN type differs) —
+found in the same grep sweep, same "type equivalence is not fully checked"
+family, but a distinct defect.
+
+## GAME PROBED (coordinator, 2026-08-31) — four of five rows are real, one row CLOSES
+
+The game came back up. Every row in this ticket now has a live compiler
+verdict. Each fixture was compiled as its OWN unit (never batched — B068).
+Controls ran in the same session: a must-be-clean fixture returned CLEAN and a
+must-error fixture returned `Identifier 'ZZZNoSuchType' is not a data type`,
+so the oracle discriminates in both directions.
+
+| row | game verdict | engine message |
+|---|---|---|
+| enum A -> enum B (engine) | REJECT | `Can't implicitly convert from 'EDummyCollectionIdent' to 'EGhostNameLogoType'.` |
+| enum A -> enum B (workspace) | REJECT | `Can't implicitly convert from 'LocalOne' to 'LocalTwo'.` |
+| enum -> int (workspace) | CLEAN | — |
+| enum -> int (engine) | CLEAN | — |
+| int -> enum (engine) | REJECT | `Can't implicitly convert from 'int' to 'VirtualKey'.` |
+| bad member, engine enum | REJECT | `No matching symbol 'VirtualKey::ZZZNotAValue'` |
+| bad member, workspace enum | REJECT | `No matching symbol 'LocalOne::ZZZNotAValue'` |
+
+**ROW 2 CLOSES. `enum -> int` is LEGAL and the LSP's silence is CORRECT.**
+Do not implement a diagnostic for it. The ticket suspected this; it is now
+measured rather than assumed.
+
+**The other four rows are genuine missing diagnostics.** The implicit-conversion
+story that made row 2 legal does NOT extend to them — the engine rejects
+enum->enum in both directions of provenance, rejects int->enum, and rejects a
+member that was never declared on either an engine or a workspace enum.
+
+**A confound in the first pass, and how it was cleared — read this before
+trusting the row-2 result.** My first fixtures used `EDummyCollectionIdent::Undefined`,
+which DOES NOT EXIST in the live game: rows 1, 2 and 4 all carried a stray
+`No matching symbol 'EDummyCollectionIdent::Undefined'`. That does not disturb
+the REJECT rows — an error appeared, and an error is self-evidencing. It is
+fatal for row 2, whose conclusion is drawn from the ABSENCE of an error, which
+is exactly the direction that fails silently.
+
+Row 2 was therefore re-measured three ways:
+
+1. `r2s`: `VirtualKey a = VirtualKey::A;` alone -> CLEAN. This is the
+   anti-vacuity guard: it proves the fixture reaches the typechecker at all,
+   so a later CLEAN means 'accepted', not 'never looked'.
+2. `r2w`: workspace enum -> int, zero engine dependency -> CLEAN.
+3. `r2e`: verified-real engine enum -> int -> CLEAN.
+
+`VirtualKey::A` was taken from `docs/probes/b053-bare-enum-values.tsv`, where
+it is already recorded as a live-game ACCEPT — a known-good value rather than
+a guessed one. Rows 3 and 4 were also re-run against `VirtualKey` so that no
+surviving conclusion rests on the bad-value fixture.
+
+**Use the engine's own wording for the new diagnostics.** `Can't implicitly
+convert from 'A' to 'B'.` and `No matching symbol 'E::V'` — matching the
+engine's text is what lets a user searching an error string find both tools.
+
+**The recommended split in the section above still stands and is now stronger.**
+The workspace undeclared-member case needs no engine knowledge and can be
+implemented first; the game has now confirmed the engine agrees, so that half
+carries no residual risk.
+
+Probe fixtures were staged outside the repo; `issue_repro_game.py` unloads and
+removes each one (leave-as-found). Nothing was added to tests/fixtures/.
+
+## Corpus committed
+
+The verdicts above, plus the invalid row and both anti-vacuity controls, are
+committed as `docs/probes/b071-enum-conversion.tsv` (master @ 58416a4).
+
+The `lsp_today` column there is measured, not inherited: a release binary
+built from a586825 (a verified ancestor of master), run as
+`openplanet-lsp check` in each fixture directory. Every mismatch row exits
+rc=0 with no error. Two signals in the same run show that is real silence and
+not an unanalysed file — the negative control returned rc=1
+`unknown type \`ZZZNoSuchType\``, and the two workspace-enum rows emitted
+`an enum value ... is never used` warnings.
+
+So the implementer starts from: five confirmed missing diagnostics, one row
+closed as correct-silence, the engine's exact wording for each message, and a
+fixture set that is already known to be non-vacuous.

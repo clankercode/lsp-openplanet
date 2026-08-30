@@ -160,3 +160,74 @@ way and belongs in the ledger.
 Do NOT let that framing widen the tickets. Each keeps its own red test and its
 own gate; the shared predicate is an implementation option, not a licence to
 refactor property handling wholesale.
+
+## Coordinator decision on scope (2026-08-31), re commit a1e8f43
+
+**The two NEW true positives are ACCEPTED into this ticket.** They are
+`UintFn@ bad = UintFn(Off)` (a `uint` property value cannot construct a
+delegate) and `Text::Format("%d", handlerVar)` for a plain global `Cb@`.
+
+Reasoning, since they are behaviour beyond the ticket's stated scope:
+
+- They are **consistency, not novelty**. Master already errors on the sibling
+  `startnew(Off)` via `is_clearly_not_a_function`, so the LSP already asserts
+  this semantics — it just applied it unevenly. Making it uniform is the
+  smaller change; preserving the old silence would require special-casing to
+  keep a known-wrong answer.
+- The blast radius is **measured, not argued**: 0 diagnostics added across all
+  six FP fixtures (tm-dips-plus-plus, tm-editor-plus-plus, tm-archivist,
+  tm-counter, tm-dashboard, showcase-diags), with 19 errors surviving untouched
+  in the four byte-identical ones.
+
+Conditions: both must be pinned by tests **labelled as deliberate scope
+additions**, so a later change cannot silently drop them and call it a
+false-positive fix. Neither is game-probed — the game is down (see B068) — so
+say so in the test comment rather than implying a live verdict.
+
+**Note the asymmetry that makes this the risky half of the commit.** Removing
+a false positive is the safe direction; adding an error is the direction that
+creates one if the reasoning is wrong. The 18 removals are verified against
+source at file:line; these two rest on an argument plus fixture silence. That
+is enough here, but it is the part a reviewer should read hardest.
+
+`Dev::Write(1, VecP)` (`const vec3&in`) is accepted as-is: silencing a `vec3`
+property read is the safe direction and the overload-table reasoning is sound.
+
+## Game probe of the two scope additions (coordinator, 2026-08-31) — SUPERSEDES the 'not game-probed' caveat
+
+The game came back up (RemoteBuild LISTEN on 127.0.0.1:30000). The two new
+true positives I accepted on argument-plus-fixture-silence are now
+**engine-verified**. Four fixtures, each probed as its OWN compilation unit
+(never batched — see B068: a batched parse abort marks every other name in the
+unit ACCEPTED).
+
+| fixture | game verdict |
+|---|---|
+| `funcdef uint UintFn(); uint get_Off(); UintFn@ bad = UintFn(Off);` | ERR `No matching signatures to 'UintFn(uint)'` |
+| `funcdef void Cb(); Cb@ handlerVar = Handler; Text::Format("%d", handlerVar);` | ERR `No matching signatures to 'Text::Format(const string, Cb@&)'` |
+| `uint get_Off(); Text::Format("0x%04x", Off);` | CLEAN |
+| `uint get_Off(); startnew(Off);` (control) | ERR `No matching signatures to 'startnew(uint)'` |
+
+**Three of the four are REJECT-direction**, which is the trustworthy direction
+on this machine — a game ACCEPT can leak from another installed plugin, a
+REJECT cannot. The one ACCEPT (row 3) is still sound because nothing in that
+fixture resolves through a foreign namespace: `get_Off` is declared in the
+fixture and `Text::Format` is core Openplanet. State that limit rather than
+implying all four carry equal weight.
+
+**The engine types the property read as `uint` in all three error messages.**
+That is not incidental — it is exactly the semantics this ticket implements
+(a property READ is a value of the getter's return type), confirmed from the
+other side. The control (row 4) also shows master's existing `startnew(Off)`
+error was correct, so the consistency argument I used to accept the two
+additions is now backed by the engine instead of by my reasoning.
+
+**Consequence for the tests.** My earlier instruction was to label these as
+deliberate scope additions AND to say in the comment that they are not
+game-probed. The second half is now obsolete: cite these verdicts, verbatim,
+including the exact engine message. Keep the 'deliberate scope addition'
+labelling — the reason for it was to stop a later change silently reverting
+them as false positives, and that reason is unchanged and now stronger.
+
+Probe fixtures were staged outside the repo and the script unloads and removes
+them (leave-as-found); nothing was added to tests/fixtures/issue-repros/.

@@ -67,3 +67,12 @@ bugs:
     - file: B066-recheck-variant-folder-guard-i.todo
     - file: B067-cmwnod-is-a-live-game-scope-bu.todo
     - file: B068-probe-enum-corpus-py-batches-n.todo
+    - file: B069-namespace-shortcut-completion.todo
+    - file: B070-hover-returns-nothing-for-a-gl.todo
+    - file: B071-enum-type-mismatches-are-not-d.todo
+    - file: B072-typeindex-load-reads-its-two-j.todo
+    - file: B073-gh-38-shadowing-is-not-applied.todo
+    - file: B074-b032-env-guard-enforcement-sca.todo
+    - file: B075-scratch-dir-leaks-under-target.todo
+    - file: B076-a-funcdef-handle-accepts-a-fun.todo
+    - file: B077-issue-repro-game-py-leaves-sta.todo

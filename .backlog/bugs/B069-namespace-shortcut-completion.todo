@@ -1,0 +1,73 @@
+---
+completed_at: null
+complexity: low
+created_at: "2026-08-30T17:27:56Z"
+depends_on: []
+estimate_hours: 1
+id: B069
+priority: medium
+started_at: null
+status: pending
+tags: []
+title: Namespace-shortcut completion offers raw storage keys for a configured Nadeo module
+updated_at: "2026-08-30T17:27:56Z"
+---
+Found 2026-08-31 while evaluating the B056 review. Not fixed by B056; the
+review's `f7d99b7` carries a candidate fix that was held back as out of scope.
+
+## Actual Behavior
+
+`add_shortcut_completions` (`src/server/completion.rs`) iterates the user's
+configured shortcut namespaces and offers `index.namespace_enums(ns)`, which
+yields INDEX KEYS. Configure a synthetic Nadeo module such as `Game` as a
+shortcut namespace and completion offers labels like:
+
+    Game::CGameMenu::EMenuOrder
+
+That is the loader's storage key, not a spelling the game accepts. Since B056
+the resolver rejects it, so the LSP suggests a name and then flags it as
+unknown - the tool contradicting itself.
+
+## Expected Behavior
+
+Offer the SOURCE spelling (`CGameMenu::EMenuOrder`), or offer nothing for a
+namespace that is not a real source scope. `Game` is not a scope: the B052
+corpus records `Game::ZZZNoSuchEnumName` -> `Namespace 'Game' doesn't exist.`
+
+## Note on the obvious fix
+
+Gating the whole loop on `index.scope_exists(ns)` also gates FUNCTION
+shortcuts, which is wider than the enum defect. That widening is harmless -
+every namespace owning free functions is necessarily a scope, because only
+Core contributes free functions and `build_scope_index` credits every Core
+function's namespace. `every_namespace_that_owns_functions_is_a_scope`
+(`src/typedb/index.rs`) pins both halves and is red-checked, so the gate can
+be placed with that fence already in place.
+
+## Related
+
+B056 (source names), B052 (scope rules), B016 (shortcut completions).
+
+
+## B067 changes which fix is correct (2026-08-31)
+
+B067 measured the scope rule against the live game:
+
+    X is a live scope for `X::Y`  <=>  X is a declared namespace OR X is a known data type
+
+That makes `scope_exists` an UNDER-approximation - it answers false for names
+the game accepts, including every engine class (41 measured, `CMwNod` and
+`string` among them).
+
+Consequence for the obvious fix here: gating the shortcut loop on
+`index.scope_exists(ns)` errs toward offering too LITTLE. A user who configures
+a real engine class as a shortcut namespace would silently get no shortcuts
+from it. That is a missing suggestion rather than a wrong diagnostic, so it is
+the mild direction - but it is the wrong fix to reach for if B067 widens
+`scope_exists`, because the gate would then quietly start passing names it
+used to block.
+
+Preferred order: land B067's widening first, then gate here; or fix this by
+offering the SOURCE SPELLING rather than by gating the namespace at all, which
+is closer to the actual defect (the label is a storage key, not that the
+namespace is bogus).

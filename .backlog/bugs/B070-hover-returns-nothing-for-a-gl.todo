@@ -1,0 +1,47 @@
+---
+complexity: low
+created_at: "2026-08-30T17:28:06Z"
+depends_on: []
+estimate_hours: 1
+id: B070
+priority: medium
+status: pending
+tags: []
+title: Hover returns nothing for a global enum reached through a workspace namespace (B052 ancestor walk)
+updated_at: "2026-08-30T17:28:06Z"
+---
+Found 2026-08-31 while evaluating the B056 review. Not fixed by B056; the
+review's `f7d99b7` carries a candidate fix that was held back as out of scope.
+
+## Actual Behavior
+
+    namespace Foo {}
+    void main() { Foo::VirtualKey value; }
+
+The checker ACCEPTS `Foo::VirtualKey` - B052's ancestor walk makes a
+workspace-declared namespace a real scope, and `VirtualKey` is a globally
+visible enum. Hover on it returns nothing.
+
+`hover()` (`src/server/hover.rs`) asks `lookup_external`, which consults only
+`index.source_reference_key`. That is an index-only view and does not know
+workspace-declared namespaces participate in the walk, so the spelling the
+checker just accepted has no hover.
+
+## Expected Behavior
+
+Hover shows the enum, matching what the checker accepts. The two must not
+disagree about whether a spelling names something.
+
+## Scope note
+
+This is the editor half of a resolver/surface split. The resolver half - a
+global enum keyed under a synthetic module canonicalizing to its spelling
+rather than its key - was a genuine B056 defect and is fixed separately by
+`fix B056: a global enum canonicalizes to its KEY through any scope`. With
+that in place `canonicalize_type_name` is a usable source of the canonical
+key for a hover fix, which it was not before.
+
+## Related
+
+B052 (ancestor walk), B056 (source names), B063 (member completion omits
+injected methods - same family: a surface disagreeing with the checker).

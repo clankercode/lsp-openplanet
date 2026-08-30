@@ -1,0 +1,87 @@
+---
+completed_at: null
+complexity: medium
+created_at: "2026-08-30T17:51:44Z"
+depends_on: []
+estimate_hours: 1
+id: B073
+priority: high
+started_at: null
+status: pending
+tags: []
+title: 'GH #38 shadowing is not applied when a workspace type collides with a typedb funcdef'
+updated_at: "2026-08-30T17:51:44Z"
+---
+
+# GH #38 shadowing is not applied when a workspace type collides with a typedb funcdef
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior
+
+Found 2026-08-31 by the B060 lane while fixing a regression of its own. It is
+NOT that regression — this one is on master and on the branch alike, resolves
+upstream of any code B060 touched, and was deliberately left alone there.
+
+## Defect
+
+A LOCAL declared with a workspace type whose name collides with a typedb
+funcdef resolves to the ENGINE funcdef, not to the workspace declaration:
+
+```angelscript
+class CoroutineFunc {}          // the plugin's own type
+void f() {
+    CoroutineFunc@ local;       // errors: resolved to the engine funcdef
+}
+```
+
+GH #38 establishes that a plugin's own declaration shadows an engine one. That
+rule is applied for class-vs-class collisions. It is NOT applied when the
+colliding engine symbol is a **funcdef**, which is a different code path.
+
+## Where
+
+Upstream in type resolution, before the checker's argument-shape logic runs.
+B060's `GlobalScope::workspace_shadows_funcdef` fixes the ARGUMENT-position
+half of this family (a value of such a type reaching a call slot); the local
+declaration path is untouched and is what this ticket is about.
+
+## Severity
+
+A false positive — the LSP rejects a declaration the game accepts — which is
+the damaging direction. Bounded in practice: it needs a plugin to name a type
+exactly after a Core funcdef. No fixture does, which is precisely why no gate
+in this batch could see the related regressions (see below).
+
+## Test plan (TDD, red first)
+
+Red: `class CoroutineFunc {}` plus `CoroutineFunc@ local;` in a function.
+
+Variants, per repo CLAUDE.md — B060 established these axes matter, so sweep
+them rather than pinning one:
+
+- each shadowing SHAPE: class, interface, enum, `typedef` (note a typedef
+  reuses `SymbolKind::Funcdef` and `lookup_funcdef` deliberately skips it, then
+  falls through to the typedb — that is the subtle hole)
+- each POSITION: local, parameter, return type, member field, `array<T>` element
+- the NAMESPACE axis: a type declared inside `namespace Nz` arrives at the
+  checker as a BARE name, because a value's type text is stored as written.
+  Any exact-name guard misses this no matter how many shapes it enumerates.
+- a NON-COLLIDING control of each shape, so the test distinguishes "shadowing
+  works" from "this shape is simply never treated as a funcdef"
+- a real engine funcdef with NO workspace collision must still resolve to the
+  engine funcdef
+
+## Related
+
+GH #38 (class-vs-class shadowing, the rule this path does not honour), B060
+(fixed the argument-position half; `workspace_shadows_funcdef` is the predicate
+to reuse or generalize).

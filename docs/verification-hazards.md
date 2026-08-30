@@ -3,18 +3,27 @@
 Agent-facing. Not user documentation.
 
 This is the transferable finding from the B029-B068 bug batch (2026-08-29 to 08-31).
-This is the twelve-incident version; the eleventh (B068) is in Mechanism 1 and
-is the reason the negative-control rule is stated twice. The twelfth is in
-Mechanism 3 and is the only one that cost nothing — a phantom regression, not a
-hidden defect — because the two numbers that disagreed were both of the same
-innocent tree.
+It grows as new instances turn up, so it carries no running total — the point
+is the three shapes, not how many stories are filed under them.
 
 Across that batch, the recurring cost was never a check that *errored* — errors
 get investigated. It was checks that returned a clean, plausible, internally
 consistent answer that happened to be false. Every hidden defect cost more
 time than the bug it was hiding.
 
-They fall into three mechanisms. Learn the shapes, not the twelve stories.
+They fall into three mechanisms. Learn the shapes, not the stories.
+
+One lane, closing out, put the whole thing better than this introduction does:
+
+> Every claim of mine that mattered and was wrong was wrong **in the direction
+> of looking clean**, and each was caught by a check that could **observe
+> failure** — never by re-reading the reasoning.
+
+Both halves earn their keep. The errors are not randomly distributed: a broken
+probe reports "nothing found", a crashed binary reports a lower total, a
+suppressed stderr reports silence. They fail toward the answer you were hoping
+for. And re-reading your own reasoning cannot catch them, because the reasoning
+is usually correct — it is the instrument that is lying.
 
 ---
 
@@ -23,16 +32,53 @@ They fall into three mechanisms. Learn the shapes, not the twelve stories.
 The check runs, finds nothing, and reports "nothing" — which is
 indistinguishable from "I am structurally incapable of seeing it".
 
-- **`find <cargo-target> -maxdepth 2 -newermt '-6 hours'`** returned empty on a
-  live, actively-written 4 GB build tree, because cargo's files sit at depth 3+.
-  Read as "stale scratch, safe to delete". It was another session's live
-  reviewer target dir, deleted mid-run.
+- **`find <cargo-target> -maxdepth 2 -newermt '-6 hours' 2>/dev/null | head`**
+  returned empty on a live, actively-written 4 GB build tree. Read as "stale
+  scratch, safe to delete". It was another session's live reviewer target dir,
+  deleted mid-run.
+
+  **This entry originally blamed the wrong mechanism, and the correction is the
+  more useful lesson.** It said cargo's files sit at depth 3+ so `-maxdepth 2`
+  could not see them. That is true but *never reached*. Measured: `find` on this
+  machine is not GNU findutils — it is a shell function from the Claude Code
+  shell snapshot routing to **bfs 4.1.1**, and bfs **rejects** GNU-style
+  relative timestamps outright:
+
+  ```
+  bfs: error: … -maxdepth 2 -newermt "-6 hours"
+  bfs: error:                        ~~~~~~~~~~
+  bfs: error: Invalid timestamp.
+  ```
+
+  Exit 1, on stderr, with a caret under the offending argument. **The traversal
+  never started.** The tool diagnosed the mistake precisely and both channels it
+  used were silenced: `2>/dev/null` discarded the message, `| head` discarded
+  the status. Use `-mmin -N` for relative time under bfs — on a tree reporting
+  "0 files newer than 10 days", `-mmin -30` found 732.
+
+  Why the misdiagnosis mattered: anyone acting on the original entry would
+  "fix" it to `-maxdepth 5 -newermt '-6 hours'` and get the same silent empty
+  answer. **A wrong diagnosis that explains the symptom is worse than no
+  diagnosis, because it closes the investigation.**
+
+  Two consequences. This is a *second* instance of the pipeline-masking hazard
+  below, not an independent story — which makes masking the highest-frequency
+  hazard in this batch: two lanes, two tools, one shape. And **`2>/dev/null`
+  deserves its own rule**, because every agent reflexively appends it to keep
+  output tidy:
+
+  > **Never suppress stderr on a command whose *absence of output* is the thing
+  > you are about to act on.** It converts "I refused, and here is exactly why"
+  > into "no results".
+
+  Found by running the positive control this document prescribes, before a
+  deletion — the document's own countermeasure catching the document's own
+  error.
 - **`pgrep -f <pattern>`** matched its own command line, so "is that process
   running?" answered yes when only the check itself was running.
 - **The probe tool reported diagnostics from other installed plugins**, so an
   ACCEPT could leak from code that was not under test. (See
   `probes/README.md` — a game REJECT is evidence, an ACCEPT may not be.)
-
 - **A batched probe reported a name the coordinator had invented as ACCEPTED
   by the game.** `probe_enum_corpus.py` compiles a whole batch as one unit and
   records ACCEPTED for any line that drew no diagnostic; a parse error anywhere
@@ -44,9 +90,65 @@ indistinguishable from "I am structurally incapable of seeing it".
   impossible row invalidated a run that otherwise looked complete and would
   have "disproved" an established rule (B056).
 
+- **A shell pipeline hid a command's failure.** `bl` refuses to mutate the
+  backlog from a git worktree, exiting 1 with a clear `ERROR:` line. Invoked as
+  `bl bug --title "…" 2>&1 | tail -3` it appears to succeed, because a pipeline
+  reports the exit status of its **last** command — `tail`'s. A lane filed a
+  ticket that was never created and the command looked like it worked. Note the
+  near-miss: the coordinator had been using that exact pattern all batch, and
+  was saved only by running in the main checkout where the command succeeded
+  anyway. Countermeasure: run mutating commands bare; if you must pipe, test
+  `${PIPESTATUS[0]}` (bash) or `$pipestatus[1]` (zsh), never `$?`; and verify
+  the artifact exists rather than trusting either. **Diagnose before filing:**
+  the first read of this was "the tool exits 0 when it refuses", which would
+  have been a defect in `bl`. `bl` was blameless.
+- **A grep pattern that could never match.** A gate counted errors with
+  `grep '"severity":"error"'` against a **pretty-printed** report, which writes
+  `"severity": "error"` with a space. It matched zero on both sides and printed
+  a confident `errors 0 -> 0` for every row — a perfect score produced by a
+  pattern structurally incapable of matching anything. Fixed by parsing the
+  JSON instead of pattern-matching its serialisation.
+
+  **Two independent lanes wrote this same bug, and one of them wrote it
+  twice.** A gate first counted `grep -c "error:"`, which matches nothing in
+  JSON output, so every JSON corpus read as zero errors. The replacement
+  grepped `"severity":"error"` — and missed for the *different* reason above.
+  What caught the second attempt was a guard added while fixing the first:
+  *warn when a corpus reports zero diagnostics.* Hence the rule, which is the
+  most transferable thing in this document:
+
+  > **When you fix a broken measurement, add the guard that would have caught
+  > it — because your replacement is probably broken the same way.**
+
+  A correction is written by the same person, in the same session, under the
+  same wrong mental model that produced the original. It deserves more
+  suspicion than the code that prompted it, not less.
+
+  **Limit, found by a lane the day the rule was written.** The rule assumes a
+  *witness* exists — some case in the data the broken measurement got wrong.
+  Sometimes there is none. A collision test was tightened from comparing enum
+  member names to comparing `name=number` pairs, which is strictly the correct
+  equivalence; but no enum in the shipped databases differs *only* by number,
+  so both versions return the same answer on every real input and **no standing
+  assertion can tell them apart.** There is no guard to add.
+
+  Two things follow, and they generalise past enums:
+
+  - **When the corpus cannot discriminate two candidate rules, an assertion
+    over it is testing the corpus, not the rule.** The honest artifact is a
+    **mutation test that injects the discriminating case** — here, a duplicate
+    enum with identical member names and every number shifted — plus a recorded
+    note that the data contains no natural witness.
+  - **Say so.** The lane's first report described the tightening as making the
+    property "genuinely stronger than I had established", which implied the
+    verification had changed. It had not: not one result moved. That is a
+    correctness improvement with no evidentiary consequence, and calling it
+    that is more useful than letting it read as new confirmation.
+
 **Countermeasure — positive control.** Before trusting a probe that reports
 absence, confirm it can see a thing you *know* is present. A staleness check
-that cannot find a file you just touched is not reporting staleness.
+that cannot find a file you just touched is not reporting staleness. A counter
+that reports zero should be shown a case it must count.
 
 **And a negative control.** Include an input whose answer you are certain of
 and which should come back negative. If your fabricated, impossible input comes
@@ -76,6 +178,21 @@ suspicious signal that had a ready innocent explanation available.
   artifacts; cargo's `Finished in 0.15s` was reuse, not a build.
 - **A build racing a rebase**, so the artifact under test was not the tree
   under review.
+- **Cargo replayed cached diagnostics in a stale format.** A clippy comparison
+  reused a base target dir from an earlier run that had used a *different*
+  `--message-format`, so cargo replayed the cached diagnostics rather than
+  re-emitting them. Rebuilt in empty dirs with identical flags, both sides
+  agreed. This is the stale-target-dir hazard wearing a new coat — it is not
+  only *staleness* that poisons a reused dir, it is any flag that changes what
+  cargo caches.
+
+  **A correction worth keeping, because getting it wrong is instructive.** The
+  coordinator first attributed a *second* lane's clippy discrepancy to this
+  same cache mechanism. It was not: that one was the epilogue-counting bug
+  below. Two plausible mechanisms existed for one symptom, the first was
+  reached for, and it fitted badly — it could not explain a third lane's
+  stable, self-consistent `81/81`. **A hypothesis that explains your case but
+  not the neighbouring case is not finished.**
 
 **Countermeasures.** Echo `pwd` immediately before any gate, and bind
 `cd <abs-path> && <cmd>` into a single invocation. Build comparison baselines
@@ -114,12 +231,55 @@ The test passes, and would have passed either way.
   surfaces when one number is compared against another taken a different way,
   and then it reads as a regression that does not exist. Two measurements of
   the same tree disagreed (75 vs 81) and the tree was innocent.
+- **A gate counted the wrong population.** B065's specified gate was "count
+  `/tmp/oplsp-*` across two runs and assert it does not grow". Those helpers
+  clean up at end of test and leak only on the unwind path, so the count reads
+  24 → 24 → 24 on green runs — while ~320 dirs per run land under eight *other*
+  prefixes nobody was watching. The gate would have passed, on a defect
+  producing 141,000 directories. The population was chosen by name, from the
+  ticket's assumption, rather than by measurement.
+- **The measurement was taken on shared state.** A raw `/tmp` count could not
+  attribute anything: sibling lanes run the same suite into the same `/tmp`, and
+  two snapshots minutes apart moved 142,041 → 143,835 with no run by the
+  measuring process at all. Fixed by re-running under an isolated `TMPDIR`,
+  which turns an un-attributable diff into an exact one that starts at 0 and
+  must return to 0.
 
 **Countermeasures.**
 
+- **Choose the population by measurement, not by name.** Before trusting a
+  count-based gate, confirm the number *moves* on a known-bad case. A baseline
+  that reads identically before and after a run is not a passing gate, it is an
+  instrument pointed somewhere else.
+- **Never measure on state other processes write.** If the thing you count
+  lives in a shared location, isolate it first (`TMPDIR`, a private directory,
+  a container) or your before/after diff measures your neighbours.
 - **Count reconciliation.** After adding tests, check the suite total moved by
   the number of tests you added. A green suite whose total did not move means
   your tests are not running. This is cheap and it has caught real problems.
+
+  **But know how it fails.** A test binary that **SIGSEGVs** takes its whole
+  suite with it, and the reported total silently *drops* rather than reporting
+  a failure — 2190 and 2218 were observed against a true 2223. So a total that
+  does not reconcile has two causes, not one: your tests are not running, or a
+  binary crashed. Chasing the first when it was the second wastes the
+  investigation. Check for a crashed binary before concluding anything about
+  your tests. (Observed: `multi_root_tests`, stack `Backend::new` →
+  `LspConfig::load` → `read_config_file` → toml_edit's recursive parser, under
+  load — a stack overflow in a recursive parser, not a defect in any branch.
+  Note the first diagnosis blamed "~2G free RAM"; that read the `free` column
+  when `available` governs, and `available` was 22G throughout. There was no
+  memory pressure. Wrong cause, right conclusion — which is its own hazard.)
+
+- **An intermittent failure will let you bisect it to any answer you like.**
+  The same lane saw that crash three times in a row on its branch, once green
+  on merge-base, and began bisecting its own change: disable half — passes;
+  re-enable partially — passes; restore in full — **passes**. Each step was a
+  single run of a flaky test, and single observations were being read as
+  causality. Re-measured properly: 10/10 green, then 25 interleaved runs of
+  both binaries, 0 failures each. **Before bisecting, establish the failure is
+  deterministic.** A bisect over noise terminates and hands you a confident
+  culprit.
 - **Mutation proof.** Break the thing on purpose and confirm the gate goes red.
   A gate never observed failing is not known to be a gate.
 - **Anti-vacuity guards.** A loop over an empty collection passes. Assert the
@@ -146,7 +306,45 @@ The test passes, and would have passed either way.
 - **An adversarial review is not a formality to run in parallel with the merge.**
   It is the only check that reads intent rather than behaviour. Merging while it
   runs has twice landed real defects on master that the review then found.
-- **Test helpers own their temp dirs via `Drop`,** so cleanup happens on the
-  unwind path — a panicking test is exactly when a dir gets left behind. Verify
-  by counting `/tmp/oplsp-*` across two consecutive runs; a `Drop` impl that
-  reads correctly and never fires is the failure mode (B065).
+
+  **This is now measured, not asserted.** On B060, two successive review passes
+  each returned FAIL and each was right — four regressions the lane had
+  introduced, every one reproduced against the merge-base binary. **None was
+  visible to any gate.** The suite, `test-hermetic`, clippy and the
+  false-positive fixture gate were all green on both rejected commits. The
+  fixture gate in particular *could not* see them: the defect needed a plugin
+  declaring a type named after a Core funcdef, and no fixture does. That is
+  Mechanism 3 at the level of the whole strategy — the measurement this batch
+  treats as most authoritative was structurally blind to the class of bug being
+  introduced.
+
+  The lesson is not that the gates are bad. It is that **a gate can only find
+  what its corpus contains**, so a green gate bounds the blast radius on
+  *existing* code and says nothing about a shape no fixture exercises. Reviews
+  and hand-built probes cover a different space, and the two are not
+  substitutes. When a change invents a new interaction, the corpus by
+  definition has no case for it — that is the moment to build one, not to lean
+  on the fixtures.
+- **Test helpers own their temp dirs via `openplanet_lsp::testing::TempDir`,**
+  whose `Drop` cleans up on the unwind path too — a panicking test is exactly
+  when a dir gets left behind. Verify by running under a **private `TMPDIR`**
+  and counting before/after. Never count a prefix in the shared `/tmp`: sibling
+  lanes write it concurrently, so the number moves on its own. And never count
+  `oplsp-*` specifically — those helpers clean up at end of test and leak only
+  on red runs, so they read flat across two green ones and the check cannot see
+  the defect (B065).
+
+  This bullet previously prescribed exactly that broken check. It was written
+  from the ticket's assumption rather than from a measurement, and the lane
+  that had to use it proved it vacuous: `oplsp-*` read 26 → 25 → 25 while the
+  real leak was 320 per run under eight unmentioned prefixes. **A countermeasure
+  in this document is a claim like any other, and this one was wrong.**
+
+- **A guard that drops too early turns a passing test into a vacuous one.**
+  Migrating ~101 call sites to `TempDir`, helpers that returned a *derived*
+  path (`dir/config.toml`) dropped the guard on the way out and deleted the
+  tree before the caller looked at it. Eight tests went red — loudly, which is
+  the lucky case. A test whose assertion cannot see its own fixture goes
+  **green**. `TempPath` exists to carry the guard with the path. When a
+  mechanical migration touches fixtures, the thing to hunt is not the tests
+  that broke but the ones that now pass without testing anything.
