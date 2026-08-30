@@ -1757,11 +1757,13 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
 ///
 /// The fixture pins BOTH sides of the line, because a fix that silences more
 /// than it should is indistinguishable from a correct one until something
-/// pins the boundary. Master reports 45 errors across the fixture, 32 of
+/// pins the boundary. Master reports 48 errors across the fixture, 34 of
 /// them false; the 11 true ones must survive, and the fix adds 2 more that
 /// master misses (a funcdef handle into a `uint` slot from a plain global,
 /// and a `uint` property value into a delegate ctor), plus 2 a namespaced
-/// funcdef masked by a same-named global class — 15 asserted below.
+/// funcdef masked by a same-named global class, and 3 that only survive
+/// because the shadowing guard refuses to let a same-named VARIABLE stand in
+/// for a type — 18 asserted below.
 /// The neighbouring case of every silenced line must keep erroring, notably
 /// `startnew(BadHandler)`, a funcdef-handle property of the WRONG signature
 /// sitting right beside the three right-signature ones this fix silences,
@@ -1791,6 +1793,13 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         // both: it tested one name for shadowing and looked up another.
         "Shadowing.as:116",
         "Shadowing.as:117",
+        // Over-blocking guard: only a TYPE declaration shadows a TYPE name.
+        // An unrelated namespace VARIABLE of the same name — reached through
+        // the ladder (134-135) and through the tail table (148) — must not
+        // suppress these. Master gets all three right.
+        "Shadowing.as:134",
+        "Shadowing.as:135",
+        "Shadowing.as:148",
     ];
     assert_eq!(
         errors.len(),

@@ -2635,7 +2635,7 @@ impl<'a> Checker<'a> {
     fn resolve_value_type_name(&self, name: &str) -> String {
         for depth in (1..=self.namespace_stack.len()).rev() {
             let candidate = format!("{}::{}", self.namespace_stack[..depth].join("::"), name);
-            if !self.scope.lookup_workspace(&candidate).is_empty() {
+            if self.scope.workspace_declares_type(&candidate) {
                 return candidate;
             }
         }

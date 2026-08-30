@@ -1518,18 +1518,39 @@ impl<'a> GlobalScope<'a> {
     /// that are really CLASS MEMBERS are skipped, exactly as
     /// [`Self::has_global_ident`] skips them (GH #30).
     pub fn workspace_shadows_funcdef(&self, name: &str) -> bool {
-        let shadows = |s: &&Symbol| match &s.kind {
-            SymbolKind::Funcdef { is_typedef, .. } => *is_typedef,
-            _ => true,
-        };
-        if self.lookup_workspace(name).iter().any(shadows) {
+        self.any_workspace_symbol(name, |kind| {
+            declares_type(kind)
+                && !matches!(
+                    kind,
+                    SymbolKind::Funcdef {
+                        is_typedef: false,
+                        ..
+                    }
+                )
+        })
+    }
+
+    /// True when the workspace declares `name` as a TYPE, by exact name or
+    /// through the tail table. The candidate test behind
+    /// [`Self::workspace_shadows_funcdef`], split out because resolving a
+    /// value's written type name needs the same "is this a type at all?"
+    /// question without the funcdef half.
+    pub fn workspace_declares_type(&self, name: &str) -> bool {
+        self.any_workspace_symbol(name, declares_type)
+    }
+
+    /// Exact-then-tail symbol scan for `name`, skipping tail hits that are
+    /// really CLASS MEMBERS exactly as [`Self::has_global_ident`] skips them
+    /// (GH #30).
+    fn any_workspace_symbol(&self, name: &str, pred: impl Fn(&SymbolKind) -> bool) -> bool {
+        if self.lookup_workspace(name).iter().any(|s| pred(&s.kind)) {
             return true;
         }
         let suffix = format!("::{}", name);
         self.lookup_workspace_tail(name)
             .iter()
             .filter(|s| !self.tail_prefix_is_class_member(&s.name, &suffix))
-            .any(shadows)
+            .any(|s| pred(&s.kind))
     }
 
     /// True when `name` names a workspace interface symbol. The interface
@@ -1886,6 +1907,21 @@ fn workspace_function_property_candidates(name: &str) -> [String; 3] {
         qualified_virtual_name(name, "get_"),
         qualified_virtual_name(name, "set_"),
     ]
+}
+
+/// True when a symbol DECLARES A TYPE — the only kind of declaration that
+/// can shadow a type name. A variable or function that happens to share the
+/// name is a VALUE: `namespace Inner { int MaskedCb = 3; }` does not stop
+/// `MaskedCb` naming the global funcdef, and treating it as if it did
+/// silently swallows the diagnostics that depend on knowing the type.
+fn declares_type(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Class { .. }
+            | SymbolKind::Interface { .. }
+            | SymbolKind::Enum { .. }
+            | SymbolKind::Funcdef { .. }
+    )
 }
 
 fn qualified_virtual_name(name: &str, prefix: &str) -> String {

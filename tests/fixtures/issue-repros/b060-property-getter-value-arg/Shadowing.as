@@ -117,3 +117,33 @@ namespace Nq {
         startnew(nqCb);
     }
 }
+
+// The over-blocking direction, which the first three rounds of this guard
+// all got wrong in some form: only a TYPE declaration can shadow a TYPE
+// name. A variable that happens to share the name is a VALUE, and treating
+// it as shadowing silently swallows the diagnostics that depend on knowing
+// the type. Both blocks below MUST keep erroring — master gets them right
+// and an over-broad guard loses them.
+funcdef void MaskedCb(int);
+MaskedCb@ maskedHandle;
+MaskedCb@ get_MaskedP() { return maskedHandle; }
+
+namespace Inner {
+    int MaskedCb = 3;
+    void InnerUse() {
+        Text::Format("%d", MaskedP);
+        startnew(MaskedP);
+    }
+}
+
+// Same shape reached through the TAIL table rather than the ladder: an
+// unrelated namespace-level VALUE must not shadow the Core funcdef name.
+CoroutineFuncUserdataUint64@ coreCb;
+CoroutineFuncUserdataUint64@ get_CoreCbP() { return coreCb; }
+namespace Unrelated {
+    int CoroutineFuncUserdataUint64 = 7;
+}
+
+void OverblockUse() {
+    Text::Format("%d", CoreCbP);
+}
