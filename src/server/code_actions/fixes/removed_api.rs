@@ -138,7 +138,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
         // The checker names the exact successor member and the call keeps
         // its shape, so this is unambiguous and lossless — the B035 bar for
         // leading the menu and for joining `source.fixAll.openplanet`.
-        is_preferred: Some(true),
+        is_preferred: true,
         auto_applicable: true,
     }]
 }
@@ -489,7 +489,7 @@ mod tests {
             assert_eq!(described.len(), 1);
             let descriptor = &described[0];
             assert_eq!(descriptor.kind, CodeActionKind::QUICKFIX);
-            assert_eq!(descriptor.is_preferred, Some(true));
+            assert!(descriptor.is_preferred);
             assert!(descriptor.auto_applicable);
             assert!(
                 descriptor.title.contains("WithRunContext")

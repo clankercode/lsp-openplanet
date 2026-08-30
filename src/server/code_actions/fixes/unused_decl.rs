@@ -25,12 +25,27 @@
 //!   is provably lossless, and never as the preferred fix: a name may be
 //!   unused today and wanted tomorrow, and the `_` prefix keeps it.
 //!
-//! For a local, the `_` prefix is mechanical and reversible, so it joins
-//! `source.fixAll.openplanet`. Removal never does: it is lossy, and the
-//! auto-applicable filter runs before edits are materialized, so the two
-//! overlapping alternatives never compete in the batcher. Parameter
-//! prefixes remain manual because AngelScript named arguments make the
-//! parameter name part of the callable API.
+//! **Fix-all (B047).** For a local, the `_` prefix is mechanical, reversible
+//! and changes no API surface — the criterion `rename_and_const/*` already
+//! uses to refuse — so it joins `source.fixAll.openplanet`. Removal never
+//! does: it is lossy. The two DO overlap (the name span sits inside the
+//! statement span), but that is not why removal is excluded and must not be
+//! offered as the reason: `fix_all_action` filters on `auto_applicable`
+//! BEFORE `select_non_overlapping` runs, so an excluded fix never reaches
+//! the batcher and never competes. Parameter prefixes stay manual because
+//! AngelScript named arguments make the parameter name part of the callable
+//! API.
+//!
+//! **Known caveat, deliberately accepted.** This is the one auto-applicable
+//! fix in the tree that fires on code the user is still WRITING rather than
+//! on code that is finished and wrong: `int count = 0;` is unused until the
+//! loop below it is typed. A user who puts `source.fixAll.openplanet` in
+//! `editor.codeActionsOnSave` and hits save mid-edit gets `int _count = 0;`,
+//! and the next keystroke referencing `count` is then an undefined
+//! identifier. It is opt-in, visible and one undo away, and no other rule
+//! in this codebase excludes a fix for that reason — but if this is ever
+//! reported as a nuisance, this paragraph is the reason to revisit, not a
+//! new discovery.
 //!
 //! **The side-effecting initializer.** `int x = Foo();` cannot simply be
 //! deleted — that silently drops the call. The alternative of "remove the
@@ -52,7 +67,7 @@
 //! declaration that is not an element of a statement LIST — a `for`
 //! initializer, where that `;` is the loop's separator, or an unbraced
 //! branch body, where the declaration IS the body — would leave
-//! `for ( c; s)` or a branch with nothing to run. See [`classify_stmts`].
+//! `for ( c; s)` or a branch with nothing to run. See `classify_stmts`.
 
 use tower_lsp::lsp_types::*;
 
@@ -98,7 +113,7 @@ fn describe(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<DiagnosticFixD
             descriptor: FixDescriptor {
                 title: offer.title,
                 kind: CodeActionKind::QUICKFIX,
-                is_preferred: offer.is_preferred.then_some(true),
+                is_preferred: offer.is_preferred,
                 auto_applicable: offer.auto_applicable,
             },
             materialization_id: None,

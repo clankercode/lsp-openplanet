@@ -390,7 +390,10 @@ fn candidate_action(
         diagnostics: Some(vec![diagnostic]),
         edit,
         command: None,
-        is_preferred: candidate.descriptor.is_preferred,
+        // LSP treats an absent `isPreferred` and an explicit `false` the
+        // same, and `lsp_types` skips serializing `None`, so the seam sends
+        // the field only for the action it actually leads with.
+        is_preferred: candidate.descriptor.is_preferred.then_some(true),
         disabled: None,
         data: resolve_data(
             req.uri,
@@ -688,7 +691,7 @@ mod tests {
         vec![fix::FixDescriptor {
             title: "Unbatchable auto fix".to_string(),
             kind: CodeActionKind::QUICKFIX,
-            is_preferred: None,
+            is_preferred: false,
             auto_applicable: true,
         }]
     }
@@ -726,7 +729,7 @@ mod tests {
         vec![fix::FixDescriptor {
             title: "Descriptor-owned synthetic fix".to_string(),
             kind: CodeActionKind::QUICKFIX,
-            is_preferred: None,
+            is_preferred: false,
             auto_applicable: false,
         }]
     }
@@ -1393,7 +1396,15 @@ mod tests {
     }
 
     #[test]
-    fn did_you_mean_preserves_explicit_false_for_alternative_suggestions() {
+    /// Exactly one spelling leads the menu — the closest — and the
+    /// alternatives do not.
+    ///
+    /// Asserted as "preferred / not preferred", not as `Some(true)` /
+    /// `Some(false)`: LSP's `isPreferred?: boolean` gives an absent field
+    /// and an explicit `false` the same meaning, so the seam sends the
+    /// field only for the action it leads with and every other action
+    /// omits it.
+    fn exactly_one_did_you_mean_suggestion_leads_the_menu() {
         let table = workspace_with_classes(&["Foo", "Food"]);
         let h = Harness::with_workspace("Foa value;", table);
         let range = mk_range(0, 0, 0, 3);
@@ -1403,8 +1414,23 @@ mod tests {
             .filter(|action| action.title.starts_with("Did you mean"))
             .collect();
         assert!(suggestions.len() >= 2, "titles: {:?}", titles(&suggestions));
+        assert_eq!(suggestions[0].title, "Did you mean 'Foo'?");
         assert_eq!(suggestions[0].is_preferred, Some(true));
-        assert_eq!(suggestions[1].is_preferred, Some(false));
+        for alternative in &suggestions[1..] {
+            assert_ne!(
+                alternative.is_preferred,
+                Some(true),
+                "`{}` must not also lead the menu",
+                alternative.title
+            );
+        }
+        assert_eq!(
+            suggestions
+                .iter()
+                .filter(|action| action.is_preferred == Some(true))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1467,7 +1493,7 @@ mod tests {
             descriptor: fix::FixDescriptor {
                 title: "Synthetic published fix".to_string(),
                 kind: CodeActionKind::QUICKFIX,
-                is_preferred: None,
+                is_preferred: false,
                 auto_applicable: false,
             },
             materialization_id: None,
@@ -1482,7 +1508,7 @@ mod tests {
             descriptor: fix::FixDescriptor {
                 title: "Synthetic batchable fix".to_string(),
                 kind: CodeActionKind::QUICKFIX,
-                is_preferred: None,
+                is_preferred: false,
                 auto_applicable: true,
             },
             materialization_id: None,

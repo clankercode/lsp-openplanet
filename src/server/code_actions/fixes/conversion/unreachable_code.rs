@@ -89,7 +89,7 @@ fn describe(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Vec<FixDescriptor> {
     vec![FixDescriptor {
         title: title(tail.len()),
         kind: CodeActionKind::QUICKFIX,
-        is_preferred: None,
+        is_preferred: false,
         auto_applicable: false,
     }]
 }

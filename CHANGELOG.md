@@ -266,6 +266,16 @@ GitHub Release body to match this section (gh release edit).
   `game_target` is the intended way to pick a game.
 
 ### Changed
+- **`source.fixAll.openplanet` now prefixes unused LOCALS with `_` (B047)** —
+  previously no unused-declaration fix could be applied on save at all,
+  because that producer sat outside the fix registry. Now that it is a
+  registry family it can be batched, and the `_` prefix for a local is:
+  mechanical, reversible, and changes no API surface. Two things are still
+  never applied on save — **removing** a declaration, which is lossy, and
+  prefixing a **parameter**, which renames part of the callable API since
+  AngelScript has named arguments. Both remain available as ordinary quick
+  fixes. Only affects users who opted into `source.fixAll.openplanet` in
+  `editor.codeActionsOnSave`; it is never applied by default.
 - **Quick fixes for unused declarations and misspelled names now follow the
   same rules as every other quick fix (B047)** — they are scoped to the range
   the editor asked about, and their edit is computed when the action is picked

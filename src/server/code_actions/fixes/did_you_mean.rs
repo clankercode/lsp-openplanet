@@ -47,7 +47,7 @@ fn describe(diagnostic: &Diagnostic, ctx: &FixContext<'_>) -> Vec<DiagnosticFixD
                 kind: CodeActionKind::QUICKFIX,
                 // The closest candidate leads the menu; the rest are guesses
                 // the user is choosing between.
-                is_preferred: Some(i == 0),
+                is_preferred: i == 0,
                 auto_applicable: false,
             },
             materialization_id: Some(name),

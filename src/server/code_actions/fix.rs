@@ -90,10 +90,14 @@ pub struct Fix {
 pub struct FixDescriptor {
     pub title: String,
     pub kind: CodeActionKind,
-    /// Preserve the LSP tri-state: absent for ordinary actions, `true` for
-    /// the leading choice, and explicit `false` where a producer intentionally
-    /// ranks an alternative behind that leading choice.
-    pub is_preferred: Option<bool>,
+    /// The leading choice among the actions offered for one diagnostic.
+    ///
+    /// A plain `bool`, not the wire type's `Option<bool>`: LSP's
+    /// `isPreferred?: boolean` treats an absent field and an explicit
+    /// `false` identically (and `lsp_types` skips serializing `None`), so a
+    /// tri-state here would ask every family author to choose between two
+    /// spellings of the same answer.
+    pub is_preferred: bool,
     pub auto_applicable: bool,
 }
 
@@ -433,7 +437,7 @@ pub fn materialize_descriptor(
             title: candidate.descriptor.title.clone(),
             kind: candidate.descriptor.kind.clone(),
             edit,
-            is_preferred: candidate.descriptor.is_preferred.unwrap_or(false),
+            is_preferred: candidate.descriptor.is_preferred,
             auto_applicable: candidate.descriptor.auto_applicable,
         },
     }
@@ -556,7 +560,7 @@ mod tests {
             .then(|| FixDescriptor {
                 title: "Synthetic cross-file fix".to_string(),
                 kind: CodeActionKind::QUICKFIX,
-                is_preferred: None,
+                is_preferred: false,
                 auto_applicable: false,
             })
             .into_iter()
@@ -603,7 +607,7 @@ mod tests {
         FixDescriptor {
             title: title.to_string(),
             kind: CodeActionKind::QUICKFIX,
-            is_preferred: None,
+            is_preferred: false,
             auto_applicable,
         }
     }
