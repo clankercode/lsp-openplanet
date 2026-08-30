@@ -513,7 +513,17 @@ re-reading the reasoning.**
    **anonymous** — invisible to both. Agreement read as confirmation; it was one
    measurement counted twice.
 
-3. **A one-way law blind to a wrong answer.** A sweep asserting *hover answers
+3. **A defence against the wrong failure mode.** The `Foo::` corpus rows above
+   were argued safe from B068 because interleaved REJECTED controls proved the
+   probe was still discriminating across that region. **That argument was
+   correct, and the re-probe confirmed it** — B068 never fired on this corpus.
+   It answered a question about *batching* while the rows were compromised by
+   *environment*: a plugin declaring `namespace Foo` was installed when the
+   corpus was measured and is not now. Defending a claim against the failure
+   mode you have in mind, and treating that as a general defence, is the same
+   error one level up.
+
+4. **A one-way law blind to a wrong answer.** A sweep asserting *hover answers
    ⇒ checker accepts* catches over-acceptance, which was the defect in hand. It
    cannot see a **wrong-but-present** answer, which satisfies the law while
    still being wrong. Closed separately, by a construction argument plus a
@@ -523,6 +533,16 @@ re-reading the reasoning.**
 
 > A narrowing chosen for one failure mode makes another invisible, and **the
 > check that would have caught it looks redundant right up until it isn't.**
+
+**And the failures are silent.** In one delete-safety check, three successive
+methods all reported "safe" for a directory with three live processes in it:
+`find -newermt` (bfs rejects GNU relative timestamps, so it errored and matched
+nothing), directory mtime (not the question asked — a build writes deep, not at
+the top), and an open-handle scan (zsh's `nomatch` aborted the loop before it
+printed). **None of them said "I could not check."** They said "nothing found",
+which is the same string a successful check produces. That is why a positive
+control is not optional before a destructive action: it is the only thing that
+distinguishes the two.
 
 **Countermeasures.**
 
