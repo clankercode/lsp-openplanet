@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T22:24:33Z"
 depends_on: []
 estimate_hours: 1
 id: B078
 priority: medium
+started_at: null
 status: pending
 tags: []
 title: 'Flaky SIGSEGV in multi_root_tests: stack overflow at Backend::new to LspConfig::load, and a crashed binary silently lowers the suite total'
@@ -24,3 +26,85 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Filed by the coordinator from lane-b060-b062's investigation, 2026-08-31.
+The evidence below is the lane's; the notable feature is that the coredump
+REFUTED the lane's own first hypothesis rather than confirming it.
+
+## Measured
+
+- `multi_root_tests` SIGSEGV'd 3 times consecutively on 2026-08-31 ~04:07-04:09,
+  then passed 10/10 immediately after with identical code, then 0 failures in
+  25 interleaved runs of the merge-base and branch binaries.
+- Crash signature `SIGSEGV si_code=SEGV_ACCERR` - invalid permissions on a
+  mapped page, i.e. a guard-page hit, i.e. a genuine stack overflow.
+- **The stack is SHALLOW**: ~32 frames stored (systemd's cap), ~40 in an
+  earlier live gdb read, bottoming out in tokio `Runtime::block_on`.
+- Frame #0 is `toml_edit::parser::prelude::new_input`. Frames #10-#14 are
+  `openplanet_lsp::config::read_config_file` (`src/config.rs:740`) ->
+  `LspConfig::apply_config_layers` -> `load_with_parent` -> `load` ->
+  `server::Backend::new`. Frame #18 is the async body of
+  `multi_root_isolation_sibling_symbols_do_not_resolve`
+  (`tests/multi_root_tests.rs:79`).
+- The crashing thread is the tokio worker (TID 109672), not the main test
+  thread (109671).
+- **When a test binary crashes, `cargo test` LOWERS the suite total instead of
+  reporting a failure.** Observed 2190 and 2218 against a true 2223.
+
+## Inferred
+
+Stack exhaustion on the tokio worker BEFORE the TOML parse begins. The large
+`Backend::new` / `LspConfig` values inside a large async state machine are the
+plausible consumer. This also explains the intermittency better than any
+pressure story: if the frame sits right at the boundary, small variations in
+what is on the stack tip it over, and nothing external needs to change.
+
+## REFUTED: deep TOML recursion
+
+The first hypothesis - "a stack overflow in toml_edit's recursive parser,
+caused by deeply nested input" - is refuted by the coredump, and it is worth
+recording HOW, because the reasoning is reusable.
+
+A recursive-descent parser that overflows on nested input shows **hundreds or
+thousands** of frames. This shows **tens**. And frame #0 is `new_input`, the
+parser's ENTRY POINT, before any recursion has occurred - the crash happens on
+the first call, in its own prologue. So the thread was already out of stack
+when it arrived. **The TOML input is a bystander, not the cause.**
+
+The generalisable form: when a stack overflow is blamed on recursion, the
+stack DEPTH is the discriminator, and it is cheap to read. A shallow stack
+means something consumed the stack before the suspect ran.
+
+## UNSUPPORTED - do not act on: memory pressure
+
+`available` was 21-22G throughout. The "~2G free" figure that circulated came
+from reading the `free` column, which is the wrong one. `/tmp` was at 87% at
+the time but has since been cleared to 18% (see B065), so neither pressure
+explanation has anything left to stand on. **A fix that adds RAM or disk is
+fixing the wrong thing.**
+
+## Why this matters beyond one flake
+
+It defeats **count reconciliation**, which is this batch's mandated
+countermeasure for "are my tests actually running". A suite total that does
+not reconcile now has two causes - tests not running, or a binary crashed -
+and chasing the first when it was the second wastes the investigation. See
+`docs/verification-hazards.md`.
+
+## Suggested next step
+
+Raise the tokio worker stack size for these tests, or box the large values in
+`Backend::new`, and see whether it stops reproducing. Alternatively instrument
+remaining stack at `LspConfig::load` under `#[tokio::test]`.
+
+Reproduction is intermittent, so **establish determinism before bisecting**:
+this same flake already let a bisect terminate with a confident wrong answer
+(disable half - passes; re-enable partially - passes; restore in full -
+passes), because each step was a single run of a flaky test.
+
+## Evidence
+
+`/home/xertrov/.cache/lsp-openplanet-builds/b060-flake-evidence/multi_root_tests-109671.core`
+(3.6MB). NOTE: the matching binary has since been rebuilt, so gdb can no
+longer read the core against it; the systemd-stored trace
+(`coredumpctl info 109671`, while the boot lasts) is the durable artefact.
