@@ -57,3 +57,4 @@ bugs:
     - file: B056-qualified-engine-names-lsp-acc.todo
     - file: B057-bare-enum-values-lsp-accepts-2.todo
     - file: B058-withruncontext-quick-fix-can-e.todo
+    - file: B059-false-error-csmplayer-getcurre.todo
