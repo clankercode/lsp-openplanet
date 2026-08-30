@@ -3,15 +3,15 @@
 Agent-facing. Not user documentation.
 
 This is the transferable finding from the B029-B068 bug batch (2026-08-29 to 08-31).
-This is the eleven-incident version; the eleventh (B068) is in Mechanism 1 and
-is the reason the negative-control rule is stated twice.
+It grows as new instances turn up, so it carries no running total — the point
+is the three shapes, not how many stories are filed under them.
 
 Across that batch, the recurring cost was never a check that *errored* — errors
 get investigated. It was checks that returned a clean, plausible, internally
 consistent answer that happened to be false. Every one of them cost more time
 than the bug it was hiding.
 
-They fall into three mechanisms. Learn the shapes, not the eleven stories.
+They fall into three mechanisms. Learn the shapes, not the stories.
 
 ---
 
@@ -29,7 +29,6 @@ indistinguishable from "I am structurally incapable of seeing it".
 - **The probe tool reported diagnostics from other installed plugins**, so an
   ACCEPT could leak from code that was not under test. (See
   `probes/README.md` — a game REJECT is evidence, an ACCEPT may not be.)
-
 - **A batched probe reported a name the coordinator had invented as ACCEPTED
   by the game.** `probe_enum_corpus.py` compiles a whole batch as one unit and
   records ACCEPTED for any line that drew no diagnostic; a parse error anywhere
@@ -103,9 +102,29 @@ The test passes, and would have passed either way.
   database, accepted by a `> 0` assertion.
 - **A comparison harness diffed against files it never wrote**, comparing two
   copies of the same thing.
+- **A gate counted the wrong population.** B065's specified gate was "count
+  `/tmp/oplsp-*` across two runs and assert it does not grow". Those helpers
+  clean up at end of test and leak only on the unwind path, so the count reads
+  24 → 24 → 24 on green runs — while ~320 dirs per run land under eight *other*
+  prefixes nobody was watching. The gate would have passed, on a defect
+  producing 141,000 directories. The population was chosen by name, from the
+  ticket's assumption, rather than by measurement.
+- **The measurement was taken on shared state.** A raw `/tmp` count could not
+  attribute anything: sibling lanes run the same suite into the same `/tmp`, and
+  two snapshots minutes apart moved 142,041 → 143,835 with no run by the
+  measuring process at all. Fixed by re-running under an isolated `TMPDIR`,
+  which turns an un-attributable diff into an exact one that starts at 0 and
+  must return to 0.
 
 **Countermeasures.**
 
+- **Choose the population by measurement, not by name.** Before trusting a
+  count-based gate, confirm the number *moves* on a known-bad case. A baseline
+  that reads identically before and after a run is not a passing gate, it is an
+  instrument pointed somewhere else.
+- **Never measure on state other processes write.** If the thing you count
+  lives in a shared location, isolate it first (`TMPDIR`, a private directory,
+  a container) or your before/after diff measures your neighbours.
 - **Count reconciliation.** After adding tests, check the suite total moved by
   the number of tests you added. A green suite whose total did not move means
   your tests are not running. This is cheap and it has caught real problems.
