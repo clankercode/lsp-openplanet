@@ -8,8 +8,9 @@
 //! explicitly in the workspace `.openplanet-lsp.toml`, which wins over any
 //! user-global config the developer happens to have.
 
+use openplanet_lsp::testing::TempDir;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tower_lsp::lsp_types::*;
 use tower_lsp::{LanguageServer, LspService};
@@ -18,13 +19,8 @@ use openplanet_lsp::server::Backend;
 
 /// A plugin root with `src/Main.as` plus a gitignored `generated/Gen.as`, and
 /// `honor_gitignore` pinned to `honor` in the workspace config.
-fn write_plugin(name: &str, honor: bool) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "openplanet-lsp-gitignore-srv-{}-{}",
-        name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
+fn write_plugin(name: &str, honor: bool) -> TempDir {
+    let root = TempDir::new(&format!("openplanet-lsp-gitignore-srv-{}", name));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::create_dir_all(root.join("generated")).unwrap();
     fs::write(root.join("info.toml"), "[meta]\n").unwrap();

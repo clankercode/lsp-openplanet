@@ -143,15 +143,12 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("opl-config-cmd-{}-{}", std::process::id(), name));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn temp_dir(name: &str) -> crate::testing::TempDir {
+        let dir = crate::testing::TempDir::new(&format!("opl-config-cmd-{}", name));
         dir
     }
 
-    fn plugin_dir(name: &str) -> PathBuf {
+    fn plugin_dir(name: &str) -> crate::testing::TempDir {
         let dir = temp_dir(name);
         std::fs::write(dir.join("info.toml"), "name = \"CfgTest\"\n").unwrap();
         dir

@@ -188,16 +188,13 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn temp_home(name: &str) -> PathBuf {
+    fn temp_home(name: &str) -> crate::testing::TempDir {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-cfgwatch-{}-{}-{}",
+        let dir = crate::testing::TempDir::new(&format!(
+            "openplanet-lsp-cfgwatch-{}-{}",
             name,
-            std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -258,7 +255,6 @@ mod tests {
             user_config_watch_root(Some(&home)).unwrap(),
             home.join(".config/openplanet-lsp")
         );
-        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -387,7 +383,5 @@ mod tests {
         fs::remove_file(&user).unwrap();
         assert_eq!(config_reload_action(&workspace), ConfigReloadAction::Reload);
         assert_eq!(config_reload_action(&user), ConfigReloadAction::Reload);
-
-        let _ = fs::remove_dir_all(&home);
     }
 }

@@ -12,6 +12,7 @@
 //! shape is the contract with `packages/vscode-ext/src/resolvedDefines.ts`:
 //! a renamed serde field would be invisible to a typed assertion.
 
+use openplanet_lsp::testing::TempDir;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -27,9 +28,8 @@ const METHOD: &str = "openplanet/resolvedDefines";
 /// A plugin root with `info.toml` + `.openplanet-lsp.toml`, and an adjacent
 /// plugins dir the config points at. Mirrors the B019 config-level fixture so
 /// the two layers are exercised by the same tree shape.
-fn fixture(name: &str, script: &str) -> (PathBuf, PathBuf) {
-    let tmp = std::env::temp_dir().join(format!("oplsp-b050-e2e-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
+fn fixture(name: &str, script: &str) -> (TempDir, PathBuf, PathBuf) {
+    let tmp = TempDir::new(&format!("oplsp-b050-e2e-{name}"));
     let root = tmp.join("plugin");
     let plugins = tmp.join("plugins");
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -45,7 +45,7 @@ fn fixture(name: &str, script: &str) -> (PathBuf, PathBuf) {
         format!("plugins_dir = {:?}\n", plugins.to_str().unwrap()),
     )
     .unwrap();
-    (root, plugins)
+    (tmp, root, plugins)
 }
 
 /// Install a resolvable directory plugin, so its `DEPENDENCY_*` is defined.
@@ -117,7 +117,7 @@ fn has_row(result: &Value, name: &str) -> bool {
 /// client, with the right origin, over the real router.
 #[tokio::test]
 async fn resolved_defines_reports_manifest_dependency_origins_over_the_wire() {
-    let (root, plugins) = fixture(
+    let (_tmp, root, plugins) = fixture(
         "deps",
         "defines = [\"FROM_MANIFEST\"]\n\
          optional_dependencies = [\"ZzzE2ePresent\", \"ZzzE2eAbsent99\"]\n",
@@ -151,7 +151,7 @@ async fn resolved_defines_reports_manifest_dependency_origins_over_the_wire() {
 /// class arrives named.
 #[tokio::test]
 async fn resolved_defines_reports_the_whole_derived_base_set() {
-    let (root, _plugins) = fixture("base", "");
+    let (_tmp, root, _plugins) = fixture("base", "");
     let result = resolved_defines_for(&root, serde_json::json!({})).await;
 
     for (name, origin) in [
@@ -174,7 +174,7 @@ async fn resolved_defines_reports_the_whole_derived_base_set() {
 /// define arrives present-but-off, with its derived origin intact.
 #[tokio::test]
 async fn resolved_defines_reports_a_user_disabled_derived_define_as_present() {
-    let (root, plugins) = fixture("disabled", "optional_dependencies = [\"ZzzE2eOff\"]\n");
+    let (_tmp, root, plugins) = fixture("disabled", "optional_dependencies = [\"ZzzE2eOff\"]\n");
     install(&plugins, "ZzzE2eOff");
     std::fs::write(
         root.join(".openplanet-lsp.toml"),
@@ -204,7 +204,7 @@ async fn resolved_defines_reports_a_user_disabled_derived_define_as_present() {
 /// ask instead of duplicating `LspConfig::PLATFORM_FAMILIES`.
 #[tokio::test]
 async fn resolved_defines_carries_the_platform_family_table() {
-    let (root, _plugins) = fixture("families", "");
+    let (_tmp, root, _plugins) = fixture("families", "");
     let result = resolved_defines_for(&root, serde_json::json!({})).await;
 
     let families = result["platformFamilies"]
@@ -236,8 +236,7 @@ async fn resolved_defines_carries_the_platform_family_table() {
 /// exactly the multi-root case the flat `config` field cannot serve.
 #[tokio::test]
 async fn resolved_defines_routes_a_uri_to_its_own_plugin_workspace() {
-    let tmp = std::env::temp_dir().join(format!("oplsp-b050-e2e-multi-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
+    let tmp = TempDir::new("oplsp-b050-e2e-multi");
     for (name, target) in [("alpha", "TMNEXT"), ("beta", "TURBO")] {
         let root = tmp.join(name);
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -275,8 +274,6 @@ async fn resolved_defines_routes_a_uri_to_its_own_plugin_workspace() {
             "{name}: the other shard's selector leaked in: {result:#}"
         );
     }
-
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// Dispatch through the real router but keep a JSON-RPC error intact, for the
@@ -298,9 +295,8 @@ async fn call_result(
 
 /// A window serving `roots` plugin dirs under one opened folder, each with its
 /// own `game_target`. Returns the opened folder.
-fn multi_root_window(name: &str, roots: &[(&str, &str)]) -> PathBuf {
-    let tmp = std::env::temp_dir().join(format!("oplsp-b050-e2e-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
+fn multi_root_window(name: &str, roots: &[(&str, &str)]) -> TempDir {
+    let tmp = TempDir::new(&format!("oplsp-b050-e2e-{name}"));
     for (dir, target) in roots {
         let root = tmp.join(dir);
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -508,7 +504,7 @@ async fn resolved_defines_picks_the_deepest_owning_root() {
 /// call, `openplanet/resolvedDefines` would land here too.
 #[tokio::test]
 async fn an_unregistered_custom_method_is_rejected_by_the_same_router() {
-    let (root, _plugins) = fixture("control", "");
+    let (_tmp, root, _plugins) = fixture("control", "");
     let (mut service, _socket) = build_service();
     let init = Request::build("initialize")
         .params(serde_json::to_value(init_params(&root)).unwrap())

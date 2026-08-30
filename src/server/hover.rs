@@ -796,8 +796,7 @@ mod tests {
         // records the callee span with the resolved return type — `void`,
         // never `<error>` (user report: `(local) <error> ts_log` after
         // declaring the callee in another file).
-        let dir = std::env::temp_dir().join(format!("ols-hover-wsfn-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new("ols-hover-wsfn");
         let a = dir.join("A.as");
         let b = dir.join("B.as");
         let src_a = "void caller() {\n    ts_log(\"x\");\n}";
@@ -832,7 +831,6 @@ mod tests {
         // Positive pin: the recorded return type is `void`, not a
         // placeholder — CHANGELOG promises `(local) void ts_log`.
         assert!(m.value.contains("void"), "missing void: {:?}", m.value);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -891,8 +889,7 @@ mod tests {
     fn hover_uses_checked_view_types() {
         // GH #42: with a checked view, hover reads the checker's recorded
         // span→type instead of the scope_query approximation.
-        let dir = std::env::temp_dir().join("ols-hover-checked-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new("ols-hover-checked-test");
         let path = dir.join("e.as");
         let src = "void main() { int x = 1; int y = x; }";
         std::fs::write(&path, src).unwrap();

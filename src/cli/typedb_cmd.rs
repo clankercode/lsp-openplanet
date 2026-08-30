@@ -893,14 +893,8 @@ mod tests {
     use super::*;
     use crate::typedb::index::{DbChange, DbSymbolKind};
 
-    fn tmp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-typedb-cmd-{}-{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn tmp_dir(tag: &str) -> crate::testing::TempDir {
+        let dir = crate::testing::TempDir::new(&format!("openplanet-lsp-typedb-cmd-{}", tag));
         dir
     }
 

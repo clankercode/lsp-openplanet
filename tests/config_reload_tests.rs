@@ -6,6 +6,7 @@
 //! drives `Backend` through workspace-file events and the public reload
 //! entry point.
 
+use openplanet_lsp::testing::TempDir;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,13 +16,8 @@ use tower_lsp::{LanguageServer, LspService};
 
 use openplanet_lsp::server::Backend;
 
-fn temp_plugin(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "openplanet-lsp-cfgreload-{}-{}",
-        name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
+fn temp_plugin(name: &str) -> TempDir {
+    let root = TempDir::new(&format!("openplanet-lsp-cfgreload-{}", name));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::create_dir_all(root.join("generated")).unwrap();
     fs::create_dir_all(root.join("extra")).unwrap();
@@ -362,11 +358,10 @@ async fn user_config_watched_uri_triggers_reload() {
 
     // Path *outside* the plugin, but with the user-global suffix so routing
     // treats it as a config event (contents are irrelevant — load() reads HOME).
-    let user = root.parent().unwrap().join(format!(
-        "cfgreload-user-{}-{}/.config/openplanet-lsp/config.toml",
-        "uri",
-        std::process::id()
-    ));
+    // Its own guard: deriving it from `root.parent()` would put it in the
+    // shared temp dir, which nothing owns and nothing cleans up.
+    let user_home = TempDir::new("cfgreload-user-uri-home");
+    let user = user_home.join(".config/openplanet-lsp/config.toml");
     fs::create_dir_all(user.parent().unwrap()).unwrap();
     fs::write(&user, "game_target = \"TURBO\"\n").unwrap();
     watched(backend, &user, FileChangeType::CHANGED).await;
@@ -384,17 +379,13 @@ async fn user_config_watched_uri_triggers_reload() {
 #[tokio::test(flavor = "current_thread")]
 async fn user_config_notify_watch_reloads() {
     let root = temp_plugin("user-notify");
-    let home = root
-        .parent()
-        .unwrap()
-        .join(format!("cfgreload-notify-home-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&home);
+    let home = TempDir::new("cfgreload-notify-home");
     fs::create_dir_all(home.join(".config/openplanet-lsp")).unwrap();
 
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend.initialize(init_params(&root)).await.unwrap();
-    backend.start_user_config_file_watch(Some(home.clone()));
+    backend.start_user_config_file_watch(Some(home.to_path_buf()));
 
     fs::write(
         root.join(".openplanet-lsp.toml"),
@@ -422,5 +413,4 @@ async fn user_config_notify_watch_reloads() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    let _ = fs::remove_dir_all(&home);
 }

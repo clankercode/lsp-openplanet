@@ -2,6 +2,7 @@
 //! `docs/superpowers/specs/2026-08-21-multi-root-plugin-workspaces.md`
 //! ("Runtime root lifecycle"). Harness mirrors `multi_root_config_tests.rs`.
 
+use openplanet_lsp::testing::TempDir;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,12 +12,8 @@ use tower_lsp::{LanguageServer, LspService};
 use openplanet_lsp::analysis_snapshot::AnalysisSnapshot;
 use openplanet_lsp::server::Backend;
 
-fn temp_parent(name: &str) -> PathBuf {
-    let base =
-        std::env::temp_dir().join(format!("openplanet-lsp-p4-{}-{}", name, std::process::id()));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).unwrap();
-    base
+fn temp_parent(name: &str) -> TempDir {
+    TempDir::new(&format!("openplanet-lsp-p4-{name}"))
 }
 
 fn write_plugin(parent: &Path, dir: &str, source: &str) -> PathBuf {

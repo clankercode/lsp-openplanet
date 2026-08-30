@@ -645,14 +645,8 @@ mod tests {
     use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticKind};
     use std::fs;
 
-    fn temp_tree(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "openplanet-lsp-ws-load-{}-{}",
-            name,
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
+    fn temp_tree(name: &str) -> crate::testing::TempDir {
+        let base = crate::testing::TempDir::new(&format!("openplanet-lsp-ws-load-{}", name));
         base
     }
 
@@ -702,11 +696,7 @@ mod tests {
     /// `load_plugin_workspace` (the seam both CLI and server call).
     #[test]
     fn load_plugin_workspace_applies_gitignore() {
-        let base = std::env::temp_dir().join(format!(
-            "openplanet-lsp-load-gitignore-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::testing::TempDir::new("openplanet-lsp-load-gitignore");
         std::fs::create_dir_all(base.join("src")).unwrap();
         std::fs::create_dir_all(base.join("generated")).unwrap();
         std::fs::write(base.join("info.toml"), "[meta]\n").unwrap();
@@ -800,8 +790,6 @@ dependencies = ["DepPlugin"]
                 || !table.lookup("DepPlugin::SharedType").is_empty(),
             "SharedType from dependency export should be in symbol table; lookup empty"
         );
-
-        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
@@ -829,7 +817,6 @@ optional_dependencies = ["MissingOptional"]
         // deps dir may not exist — still ok
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         assert!(load.missing_required_dependencies.is_empty());
-        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
@@ -857,7 +844,6 @@ dependencies = ["NoSuchPlugin"]
         };
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         assert_eq!(load.missing_required_dependencies, vec!["NoSuchPlugin"]);
-        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
@@ -881,7 +867,6 @@ dependencies = ["NoSearchPath"]
             load_plugin_workspace(&base.join("consumer"), &DependencySearch::with_defaults())
                 .unwrap();
         assert_eq!(load.missing_required_dependencies, vec!["NoSearchPath"]);
-        let _ = fs::remove_dir_all(base);
     }
 
     /// Build a consumer plugin with sources in several root-relative dirs.
@@ -927,7 +912,6 @@ dependencies = ["NoSearchPath"]
         assert!(rel.iter().any(|p| p == "src/Main.as"), "{rel:?}");
         assert!(rel.iter().any(|p| p == "OtherPacks/DS.as"), "{rel:?}");
         assert!(rel.iter().any(|p| p == "Scripts/Util.as"), "{rel:?}");
-        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
@@ -943,7 +927,6 @@ dependencies = ["NoSearchPath"]
         assert!(rel.iter().any(|p| p == "src/Main.as"), "{rel:?}");
         assert!(!rel.iter().any(|p| p.starts_with("OtherPacks/")), "{rel:?}");
         assert!(!rel.iter().any(|p| p.starts_with("Scripts/")), "{rel:?}");
-        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
@@ -957,7 +940,6 @@ dependencies = ["NoSearchPath"]
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         let rel = loaded_rel_paths(&load, &base);
         assert_eq!(rel, vec!["src/Main.as".to_string()], "{rel:?}");
-        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
@@ -973,7 +955,6 @@ dependencies = ["NoSearchPath"]
         let load = load_plugin_workspace(&base.join("consumer"), &search).unwrap();
         let rel = loaded_rel_paths(&load, &base);
         assert_eq!(rel, vec!["src/Main.as".to_string()], "{rel:?}");
-        let _ = fs::remove_dir_all(base);
     }
 
     /// A source filter deliberately drops own-module files from the pooled
@@ -1015,8 +996,6 @@ dependencies = ["NoSearchPath"]
                 "{name}: source filtering must make the module surface non-authoritative"
             );
         }
-
-        let _ = fs::remove_dir_all(base);
     }
 
     /// Build a `.op` ZIP archive on disk containing `info.toml` + export files.
@@ -1176,8 +1155,6 @@ exports = ["Namespace.as", "PotentialFn.as"]
                     complete,
                     "{shape:?}/{state:?}: B013 must be armed exactly for the complete surface: {no_matches:?}"
                 );
-
-                let _ = fs::remove_dir_all(base);
             }
         }
     }
@@ -1263,8 +1240,6 @@ dependencies = ["MLFeedRaceData"]
             !table.lookup("HookData").is_empty() || !table.lookup("MLFeed::HookData").is_empty(),
             "HookData from .op shared_export should be in symbol table"
         );
-
-        let _ = fs::remove_dir_all(base);
     }
 
     /// GH #20 acceptance #4: a `.op` dependency's own `export_dependencies`
@@ -1347,8 +1322,6 @@ dependencies = ["MLFeedRaceData"]
             !table.lookup("HookEvent").is_empty() || !table.lookup("MLHook::HookEvent").is_empty(),
             "HookEvent from nested export_dependency .op should be in symbol table"
         );
-
-        let _ = fs::remove_dir_all(base);
     }
 
     /// own exports: a plugin's own info.toml `exports` land in
@@ -1385,7 +1358,6 @@ exports = ["src/Export.as"]
             "export_paths={:?} expected {expected:?}",
             load.export_paths
         );
-        let _ = fs::remove_dir_all(base);
     }
 
     /// No info.toml → no own export paths (empty set, load still succeeds).
@@ -1403,7 +1375,6 @@ exports = ["src/Export.as"]
             "export_paths={:?} expected empty",
             load.export_paths
         );
-        let _ = fs::remove_dir_all(base);
     }
 
     /// shared_exports entries are collected too, alongside plain exports.
@@ -1454,7 +1425,6 @@ shared_exports = ["src/SharedExport.as"]
             "export_paths={:?} expected {expected_shared:?}",
             load.export_paths
         );
-        let _ = fs::remove_dir_all(base);
     }
     /// GH #58 x GH #60: an open buffer arriving through the LSP overlay must
     /// not restore a claim of authority the disk load already gave up. A
@@ -1506,8 +1476,6 @@ shared_exports = ["src/SharedExport.as"]
             !merged.dependency_closure_complete,
             "opening one excluded file does not restore the missing surface"
         );
-
-        let _ = fs::remove_dir_all(base);
     }
 
     /// Root-relative paths of the usage-only set (GH #61), sorted.
@@ -1528,8 +1496,9 @@ shared_exports = ["src/SharedExport.as"]
 
     /// A plugin root with a caller of `UsedOnlyByOmitted` in `omitted/`.
     /// `gitignore` is written verbatim (empty = no `.gitignore` at all).
-    fn omitted_caller_plugin(name: &str, gitignore: &str) -> PathBuf {
-        let root = temp_tree(name).join("plugin");
+    fn omitted_caller_plugin(name: &str, gitignore: &str) -> crate::testing::TempPath {
+        let base = temp_tree(name);
+        let root = base.join("plugin");
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("omitted")).unwrap();
         fs::write(
@@ -1550,7 +1519,7 @@ shared_exports = ["src/SharedExport.as"]
             "void GenCaller() { UsedOnlyByOmitted(); }\n",
         )
         .unwrap();
-        root
+        base.into_child("plugin")
     }
 
     /// GH #61: a gitignored own-module file is read for usage recording —

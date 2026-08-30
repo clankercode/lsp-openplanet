@@ -1,3 +1,4 @@
+use openplanet_lsp::testing::TempDir;
 use std::fs;
 use std::process::Command;
 
@@ -5,9 +6,8 @@ use std::process::Command;
 /// Openplanet-vs-openplanet-lsp diagnostic mismatches (see main.rs ISSUE_URL).
 const ISSUE_ASK_TRAILER: &str = "https://github.com/clankercode/lsp-openplanet/issues";
 
-fn make_temp_plugin(name: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!("openplanet-lsp-{}-{}", name, std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+fn make_temp_plugin(name: &str) -> TempDir {
+    let root = TempDir::new(&format!("openplanet-lsp-{}", name));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
         root.join("info.toml"),
@@ -21,13 +21,8 @@ version = "0.1.0"
     root
 }
 
-fn isolated_home(name: &str) -> std::path::PathBuf {
-    let home = std::env::temp_dir().join(format!(
-        "openplanet-lsp-home-{}-{}",
-        name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&home);
+fn isolated_home(name: &str) -> TempDir {
+    let home = TempDir::new(&format!("openplanet-lsp-home-{}", name));
     fs::create_dir_all(home.join(".config/openplanet-lsp")).unwrap();
     home
 }
@@ -105,8 +100,6 @@ fn check_command_reports_workspace_diagnostics() {
         !stdout.contains("unknown type `Foo`"),
         "expected check command to use plugin-wide workspace symbols, got stdout={stdout:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -129,8 +122,6 @@ fn check_command_keeps_utf8_byte_columns_with_unicode_prefixes() {
         )),
         "CLI byte-column output changed: {stdout:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -163,8 +154,6 @@ fn check_command_exits_zero_when_clean() {
         stdout.contains("0 diagnostics"),
         "expected summary output, got stdout={stdout:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -197,9 +186,6 @@ fn check_command_reports_each_config_problem_once() {
         stderr.contains("key `unused`") && stderr.contains("expected one of"),
         "warning should identify the bad key and accepted values; stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// A source filter can omit a sibling file that contributes to an open
@@ -243,8 +229,6 @@ void Main() {
         output.status.success(),
         "the source filter must not turn an omitted sibling declaration into a diagnostic; stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -295,8 +279,6 @@ fn check_command_accepts_relative_plugin_path() {
         stdout.contains("0 diagnostics"),
         "expected summary output, got stdout={stdout:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
 }
 
 /// B024: a workspace `defines` list ADDS to the game-target set. Before the
@@ -341,9 +323,6 @@ void Main() {}
         output.status.success() && stdout.contains("0 diagnostics"),
         "custom defines must not wipe the target set; stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// B024: `-NAME` / `!NAME` still turns a define OFF — the one thing the old
@@ -395,9 +374,6 @@ void Main() {}
         output.status.success() && stdout.contains("0 diagnostics"),
         "removal prefixes not applied; stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// B026: `check` used to re-apply the plugin manifest AFTER `LspConfig::load`
@@ -461,9 +437,6 @@ void Main() {}
         "manifest/dependency define removals must survive the CLI path; \
          stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// B026 variant: the CLI flag is the top layer, so `--define X` still wins
@@ -499,9 +472,6 @@ fn check_command_define_flag_beats_a_config_removal() {
         output.status.success() && stdout.contains("0 diagnostics"),
         "--define must win over a config removal; stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// GH #64: `--signature` narrows the SIG_* set for one run, so a plugin can
@@ -568,9 +538,6 @@ void Main() {}
         !output.status.success() && !stdout.contains("0 diagnostics"),
         "default must stay developer (all four SIG_* on); stdout={stdout:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// GH #64: `--signature` is the top layer — it beats a workspace
@@ -606,9 +573,6 @@ fn check_command_signature_flag_beats_config_signature_mode() {
         output.status.success() && stdout.contains("0 diagnostics"),
         "--signature must beat config signature_mode; stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// GH #64: `--game-target` selects the platform family for one run, beating
@@ -653,9 +617,6 @@ void Main() {}
         output.status.success() && stdout.contains("0 diagnostics"),
         "--game-target must beat config game_target; stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// A typo'd selector is a usage error (exit 2), never a silently different
@@ -681,7 +642,6 @@ fn check_command_rejects_unknown_selector_values() {
         assert_eq!(output.status.code(), Some(2), "{flag} exit code: {stderr}");
         assert!(stderr.contains(needle), "{flag} message: {stderr}");
     }
-    let _ = fs::remove_dir_all(root);
 }
 
 /// B024 + GH #36: a hand-listed platform selector REPLACES the target's, so
@@ -729,9 +689,6 @@ void Main() {}
         stderr.contains("game_target"),
         "expected a warning pointing at game_target; stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 // ── B028: `--os` / `--arch` selectors and build-flag narrowing ──────────
@@ -785,9 +742,6 @@ void Main() {}
         "--os linux must make LINUX live and WINDOWS dead; \
          stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// B028: `--arch 32` flips the arch pair — MANIA32 live, MANIA64 dead.
@@ -829,9 +783,6 @@ void Main() {}
         "--arch 32 must make MANIA32 live and MANIA64 dead; \
          stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// B028 (2026-08-29 Wine probe ground truth): `--os wine` defines WINDOWS
@@ -882,9 +833,6 @@ void Main() {}
         "--os wine must define WINDOWS + WINDOWS_WINE and nothing else; \
          stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// B028: `--os` is the top of the ladder — it beats a workspace
@@ -926,9 +874,6 @@ void Main() {}
         output.status.success() && stdout.contains("0 diagnostics"),
         "--os must beat config os_target; stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 /// B028 decision (a): the build flags default ON (no default churn) and are
@@ -975,9 +920,6 @@ void Main() {}
         "defines = [\"SERVER\"] must re-enable SERVER under the narrowed \
          profile; stdout={stdout:?} stderr={stderr:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 #[test]
@@ -1044,18 +986,11 @@ void Main() {}
         stdout.contains("0 diagnostics"),
         "expected no diagnostics, got stdout={stdout:?}"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 #[test]
 fn check_command_resolves_exports_via_plugin_files_search_path() {
-    let base = std::env::temp_dir().join(format!(
-        "openplanet-lsp-plugin-search-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
+    let base = TempDir::new("openplanet-lsp-plugin-search");
     fs::create_dir_all(base.join("deps/dep-plugin/src")).unwrap();
     fs::create_dir_all(base.join("consumer/src")).unwrap();
 
@@ -1120,15 +1055,11 @@ dependencies = ["DepPlugin"]
         stdout.contains("0 diagnostics"),
         "expected no diagnostics, got stdout={stdout:?}"
     );
-
-    let _ = fs::remove_dir_all(base);
 }
 
 #[test]
 fn check_command_reports_missing_required_dependency() {
-    let base =
-        std::env::temp_dir().join(format!("openplanet-lsp-missing-dep-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
+    let base = TempDir::new("openplanet-lsp-missing-dep");
     fs::create_dir_all(base.join("plugins")).unwrap();
     fs::create_dir_all(base.join("consumer/src")).unwrap();
     fs::write(
@@ -1163,7 +1094,6 @@ dependencies = ["NoSuchDep"]
         stdout.contains("NoSuchDep") || stderr.contains("NoSuchDep"),
         "expected missing dep name in output; stdout={stdout:?} stderr={stderr:?}"
     );
-    let _ = fs::remove_dir_all(base);
 }
 
 /// Curated screenshot/CI fixture: must stay in the demo band (>=10 diags).
@@ -1670,7 +1600,6 @@ fn check_command_issue_repro_b028_os_arch_probe_matches_game_with_os_wine() {
         "b028-os-arch-defines-probe must be clean under --os wine (the \
          measured game set); stdout={stdout:?} stderr={stderr:?}"
     );
-    let _ = fs::remove_dir_all(home);
 }
 
 /// B028 probe fixture for the build-shape flags: SERVER/LOGS/HAS_DEV/
@@ -1709,7 +1638,6 @@ fn check_command_issue_repro_b028_build_flag_probe_matches_client_profile() {
          the four build flags are narrowed away; stdout={stdout:?} \
          stderr={stderr:?}"
     );
-    let _ = fs::remove_dir_all(home);
 }
 
 /// B027: delegate construction requires EXACT parameter passing modes.
@@ -2055,8 +1983,6 @@ fn check_command_exit_codes_and_warnings_as_errors() {
         Some(2),
         "invalid --warnings-as-errors value must be a usage error"
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 /// GH #48 follow-up: `warnings_as_errors` as a persistent config option.
@@ -2075,9 +2001,7 @@ fn check_command_warnings_as_errors_config_precedence() {
     .unwrap();
 
     // Fake $HOME with a user-global config setting warnings_as_errors.
-    let home =
-        std::env::temp_dir().join(format!("openplanet-lsp-gh48-home-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&home);
+    let home = TempDir::new("openplanet-lsp-gh48-home");
     fs::create_dir_all(home.join(".config/openplanet-lsp")).unwrap();
 
     let run = |home_value: Option<&std::path::Path>, extra: &[&str]| {
@@ -2164,9 +2088,6 @@ fn check_command_warnings_as_errors_config_precedence() {
         Some(1),
         "--warnings-as-errors must override workspace warnings_as_errors=false"
     );
-
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(home);
 }
 
 // ── GH #37: warning-parity batch ────────────────────────────────────────
@@ -2632,7 +2553,6 @@ void Main() {}
         !stdout.contains("Stats::Existing"),
         "declared Stats::Existing must stay silent; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// todo-cover-cases-next.txt (2026-08-23): `check` on a plugin whose tree
@@ -2676,7 +2596,6 @@ fn check_command_skips_nested_plugin_roots() {
         stdout.contains("0 diagnostics"),
         "parent-only tree must be clean; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// GH #58 trigger (c): the namespace is declared only in a RESOLVED
@@ -2685,8 +2604,7 @@ fn check_command_skips_nested_plugin_roots() {
 /// member is a real `No matching symbol`; the exported one stays silent.
 #[test]
 fn check_command_unknown_member_of_dependency_namespace_diagnoses() {
-    let base = std::env::temp_dir().join(format!("openplanet-lsp-dep-ns-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
+    let base = TempDir::new("openplanet-lsp-dep-ns");
     fs::create_dir_all(base.join("deps/dep-plugin/src")).unwrap();
     fs::create_dir_all(base.join("consumer/src")).unwrap();
     fs::write(
@@ -2730,7 +2648,6 @@ fn check_command_unknown_member_of_dependency_namespace_diagnoses() {
             .any(|l| l.contains("Main.as:2") && l.contains("error")),
         "the exported member must stay silent; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(base);
 }
 
 /// GH #58 authority guard (B013 decision 3): when a REQUIRED dependency
@@ -2740,8 +2657,7 @@ fn check_command_unknown_member_of_dependency_namespace_diagnoses() {
 /// silent even though the namespace is declared locally.
 #[test]
 fn check_command_unknown_namespaced_symbol_silent_when_required_dep_missing() {
-    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-nodep-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
+    let base = TempDir::new("openplanet-lsp-ns-nodep");
     fs::create_dir_all(base.join("plugins")).unwrap();
     fs::create_dir_all(base.join("consumer/src")).unwrap();
     fs::write(
@@ -2773,7 +2689,6 @@ fn check_command_unknown_namespaced_symbol_silent_when_required_dep_missing() {
         stdout.contains("NoSuchDep"),
         "the missing-dependency error itself must still be reported; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(base);
 }
 
 /// GH #58 with the exports machinery in play: a namespace declared across a
@@ -2783,8 +2698,7 @@ fn check_command_unknown_namespaced_symbol_silent_when_required_dep_missing() {
 /// the ordinary file). Only members nothing contributes are errors.
 #[test]
 fn check_command_namespaced_symbol_across_export_files() {
-    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-exp-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
+    let base = TempDir::new("openplanet-lsp-ns-exp");
     fs::create_dir_all(base.join("src")).unwrap();
     fs::write(
         base.join("info.toml"),
@@ -2824,7 +2738,6 @@ fn check_command_namespaced_symbol_across_export_files() {
             && !stdout.contains("No matching symbol 'Shared::Helper'"),
         "members contributed by any pooled file must resolve; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(base);
 }
 
 /// GH #58: AngelScript namespaces are ADDITIVE across modules — a resolved
@@ -2833,8 +2746,7 @@ fn check_command_namespaced_symbol_across_export_files() {
 /// name neither declares is a `No matching symbol`.
 #[test]
 fn check_command_namespace_members_union_across_modules() {
-    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-add-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
+    let base = TempDir::new("openplanet-lsp-ns-add");
     fs::create_dir_all(base.join("deps/dep-plugin/src")).unwrap();
     fs::create_dir_all(base.join("consumer/src")).unwrap();
     fs::write(
@@ -2877,7 +2789,6 @@ fn check_command_namespace_members_union_across_modules() {
             && !stdout.contains("No matching symbol 'Shared::FromDep'"),
         "additive namespace members from either module must resolve; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(base);
 }
 
 /// GH #58 authority guard, optional-dependency half — REWRITTEN by B019.
@@ -2894,8 +2805,7 @@ fn check_command_namespace_members_union_across_modules() {
 /// OUTSIDE it is reported again.
 #[test]
 fn check_command_unknown_namespaced_symbol_rearms_when_optional_dep_missing() {
-    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-opt-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
+    let base = TempDir::new("openplanet-lsp-ns-opt");
     fs::create_dir_all(base.join("plugins")).unwrap();
     fs::create_dir_all(base.join("consumer/src")).unwrap();
     fs::write(
@@ -2930,7 +2840,6 @@ fn check_command_unknown_namespaced_symbol_rearms_when_optional_dep_missing() {
          surface, so the rule must re-arm for the rest of the file; \
          stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(base);
 }
 
 /// GH #58 authority guard, transitive half: a resolved dependency names an
@@ -2939,8 +2848,7 @@ fn check_command_unknown_namespaced_symbol_rearms_when_optional_dep_missing() {
 /// module may declare the member, so the rule must stay silent.
 #[test]
 fn check_command_unknown_namespaced_symbol_silent_when_nested_export_dep_missing() {
-    let base = std::env::temp_dir().join(format!("openplanet-lsp-ns-nest-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
+    let base = TempDir::new("openplanet-lsp-ns-nest");
     fs::create_dir_all(base.join("deps/dep-plugin/src")).unwrap();
     fs::create_dir_all(base.join("consumer/src")).unwrap();
     fs::write(
@@ -2978,7 +2886,6 @@ fn check_command_unknown_namespaced_symbol_silent_when_nested_export_dep_missing
         !stdout.contains("No matching symbol"),
         "an unresolved nested export_dependency must silence the rule; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(base);
 }
 
 /// GH #58 decision 4: every declaration kind a namespace can contribute
@@ -3012,15 +2919,13 @@ fn check_command_namespaced_typedef_resolves_without_parse_or_symbol_error() {
         !stdout.contains("parse error") && !stdout.contains("No matching symbol 'Names::Alias'"),
         "typedef must parse and resolve as a namespace member; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// Write a plugin whose `.gitignore` line is caller-chosen: `generated/Gen.as`
 /// contributes `Shared::FromGenerated`, `src/Main.as` calls it plus a member
 /// nothing declares. Shared by the GH #58 × GH #60 authority triplet.
-fn gitignore_authority_plugin(name: &str, gitignore: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!("openplanet-lsp-{}-{}", name, std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+fn gitignore_authority_plugin(name: &str, gitignore: &str) -> TempDir {
+    let root = TempDir::new(&format!("openplanet-lsp-{}", name));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::create_dir_all(root.join("generated")).unwrap();
     fs::write(
@@ -3066,7 +2971,6 @@ fn check_command_namespaced_symbol_silent_when_gitignore_excluded_a_source() {
         !stdout.contains("No matching symbol"),
         "a gitignore-excluded own-module file must silence the rule; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// The same plugin with `--no-gitignore`: the generated file is discovered, so
@@ -3085,7 +2989,6 @@ fn check_command_namespaced_symbol_armed_when_gitignore_honoring_is_disabled() {
         stdout.contains("No matching symbol 'Shared::DeclaredNowhere'"),
         "with nothing excluded the rule must stay armed; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// Honoring gitignore is the DEFAULT, so "honoring is on" cannot be the
@@ -3104,7 +3007,6 @@ fn check_command_namespaced_symbol_armed_when_gitignore_excludes_nothing() {
         !stdout.contains("No matching symbol 'Shared::FromGenerated'"),
         "the discovered generated declaration must resolve; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// GH #61 helper: a plugin whose ONLY caller of `UsedOnlyByOmitted` lives in
@@ -3117,9 +3019,8 @@ fn omitted_caller_plugin(
     gitignore: &str,
     config: &str,
     extra_omitted: &str,
-) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!("openplanet-lsp-{}-{}", name, std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+) -> TempDir {
+    let root = TempDir::new(&format!("openplanet-lsp-{}", name));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::create_dir_all(root.join("omitted")).unwrap();
     fs::write(
@@ -3157,7 +3058,6 @@ fn check_command_unused_silent_when_the_only_caller_is_gitignored() {
         !stdout.contains("UsedOnlyByOmitted"),
         "a gitignored caller still counts as usage; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// GH #61 repro 2 (`ignore_paths` route) — proof the defect PREDATES GH #60:
@@ -3175,7 +3075,6 @@ fn check_command_unused_silent_when_the_only_caller_is_in_ignore_paths() {
         !stdout.contains("UsedOnlyByOmitted"),
         "an ignore_paths caller still counts as usage; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// Variant: the `source_paths` allowlist route.
@@ -3192,7 +3091,6 @@ fn check_command_unused_silent_when_the_only_caller_is_outside_source_paths() {
         !stdout.contains("UsedOnlyByOmitted"),
         "a caller outside source_paths still counts as usage; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// NON-VACUITY: the pass must still warn when the omitted files really do
@@ -3215,7 +3113,6 @@ fn check_command_unused_still_warns_when_omitted_files_do_not_use_it() {
         !stdout.contains("UsedOnlyByOmitted"),
         "the omitted caller's usage must still be credited; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// GUARD: the GH #60 goal must survive — a file the author believes is
@@ -3238,7 +3135,6 @@ fn check_command_reports_no_diagnostics_inside_an_omitted_file() {
         !stdout.contains("GenDead") && !stdout.contains("GenCaller"),
         "an omitted file's declarations must never be reported; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
 /// `--no-gitignore` is unchanged: the file is CHECKED, so `GenCaller` is a
@@ -3256,10 +3152,9 @@ fn check_command_unused_reports_the_omitted_caller_with_no_gitignore() {
         !stdout.contains("UsedOnlyByOmitted"),
         "the call is visible either way; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(root);
 }
 
-fn unused_kinds_plugin(name: &str) -> std::path::PathBuf {
+fn unused_kinds_plugin(name: &str) -> TempDir {
     let root = make_temp_plugin(name);
     fs::write(
         root.join("src/Main.as"),
@@ -3333,8 +3228,6 @@ fn check_command_unused_flag_ignore_warn_error_variants() {
         stdout.contains("error:") && stdout.contains("`DeadFn`"),
         "unused=error must emit error severity: {stdout}"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// B030: `hint` / `info` report the same findings at a quieter severity —
@@ -3382,8 +3275,6 @@ fn check_command_unused_quiet_levels_are_reported_but_never_fail() {
         Some(1),
         "-Werror must still promote warn-level unused: {stdout}"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// B031 design call 1: greying out preprocessor-dead `#if` branches is an
@@ -3430,8 +3321,6 @@ fn check_command_never_reports_inactive_regions() {
             "pin={pin:?} expected a clean run: {stdout}"
         );
     }
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// GH #62: `check --typedb-dir --no-typedb <path>` must be a usage error
@@ -3483,8 +3372,6 @@ fn check_command_unused_config_and_flag_precedence() {
         unused_mentions(&stdout),
         "flag error still reports: {stdout}"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -3504,7 +3391,7 @@ fn check_help_mentions_unused_flag() {
 
 /// Plugin whose analysis order is warning, error, warning — so last / first /
 /// off are distinguishable.
-fn mixed_severity_plugin(name: &str) -> std::path::PathBuf {
+fn mixed_severity_plugin(name: &str) -> TempDir {
     let root = make_temp_plugin(name);
     fs::write(root.join("src/Alpha.as"), "void AlphaDead() {}\n").unwrap();
     fs::write(
@@ -3611,8 +3498,6 @@ fn check_command_groups_errors_last_first_off_plain_pretty_json() {
         analysis,
         "json ignores --errors last: {json}"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 /// Workspace `errors = "first"` is honored; `--errors last` / `off` win.
@@ -3657,8 +3542,6 @@ fn check_command_errors_config_and_flag_precedence() {
         [MIXED_WARN_A, MIXED_WARN_B, MIXED_ERR],
         "workspace errors=end alias is last: {stdout}"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -4365,12 +4248,7 @@ fn check_command_issue_repro_b056_workspace_names_win() {
 /// the header would get a hard load error rather than the old behaviour.
 #[test]
 fn check_command_without_a_header_still_loads_the_type_db() {
-    let base = std::env::temp_dir().join(format!(
-        "openplanet-lsp-b046-no-header-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).unwrap();
+    let base = TempDir::new("openplanet-lsp-b046-no-header");
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src = manifest.join("tests/fixtures/typedb");
     for name in ["OpenplanetCore.json", "OpenplanetNext.json"] {
@@ -4405,7 +4283,6 @@ fn check_command_without_a_header_still_loads_the_type_db() {
         stdout.contains("57 errors"),
         "without the header the pre-B046 diagnostics return; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(&base);
 }
 
 /// B019: the config layer decides whether `DEPENDENCY_<ID>` is defined, and it
@@ -4416,11 +4293,7 @@ fn check_command_without_a_header_still_loads_the_type_db() {
 /// the opposite direction to the bug B019 fixes.
 #[test]
 fn check_command_plugins_dir_flag_is_visible_to_the_dependency_define_probe() {
-    let base = std::env::temp_dir().join(format!(
-        "openplanet-lsp-b019-plugins-dir-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&base);
+    let base = TempDir::new("openplanet-lsp-b019-plugins-dir");
     fs::create_dir_all(base.join("deps/ZzzFlagOnlyDep/src")).unwrap();
     fs::create_dir_all(base.join("consumer/src")).unwrap();
     fs::write(
@@ -4456,7 +4329,6 @@ fn check_command_plugins_dir_flag_is_visible_to_the_dependency_define_probe() {
         "a dependency resolvable only via --plugins-dir must still define its \
          DEPENDENCY_ macro, keeping the guarded branch live; stdout={stdout:?}"
     );
-    let _ = fs::remove_dir_all(base);
 }
 
 /// B033: a declaration whose type begins with `const` is anchored at the
@@ -4511,7 +4383,6 @@ fn check_command_const_handle_declaration_is_anchored_at_the_const_keyword() {
             "a `const Doc@` declaration re-anchored at the named type; stdout={stdout:?}"
         );
     }
-    let _ = fs::remove_dir_all(root);
 }
 
 // ---------------------------------------------------------------------
@@ -4523,13 +4394,8 @@ fn check_command_const_handle_declaration_is_anchored_at_the_const_keyword() {
 // ---------------------------------------------------------------------
 
 /// A plugin whose `info.toml` is exactly `manifest`, plus one trivial source.
-fn plugin_with_manifest(name: &str, manifest: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "openplanet-lsp-manifest-{}-{}",
-        name,
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
+fn plugin_with_manifest(name: &str, manifest: &str) -> TempDir {
+    let root = TempDir::new(&format!("openplanet-lsp-manifest-{}", name));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(root.join("info.toml"), manifest).unwrap();
     fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
@@ -4585,8 +4451,6 @@ fn check_reports_manifest_errors_and_exits_non_zero() {
             code, 1,
             "{name}: a manifest error must fail the run; got {stdout}"
         );
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&home);
     }
 }
 
@@ -4607,8 +4471,6 @@ fn check_reports_manifest_warnings_without_failing() {
         code, 0,
         "a warning alone must not fail the run; got {stdout}"
     );
-    let _ = fs::remove_dir_all(&root);
-    let _ = fs::remove_dir_all(&home);
 }
 
 /// False-positive guard: exports that resolve through the loader's `src/`
@@ -4630,8 +4492,6 @@ fn check_does_not_report_exports_that_resolve_under_src() {
         "exports under src/ must resolve; got {stdout}"
     );
     assert_eq!(code, 0, "{stdout}");
-    let _ = fs::remove_dir_all(&root);
-    let _ = fs::remove_dir_all(&home);
 }
 
 /// `--plugin-files-search-path` moves where exports are looked for, and the
@@ -4670,8 +4530,6 @@ fn check_manifest_export_rules_follow_the_search_path_flag() {
         "the flag must move the export lookup too; got {stdout}"
     );
     assert_eq!(output.status.code(), Some(0), "{stdout}");
-    let _ = fs::remove_dir_all(&root);
-    let _ = fs::remove_dir_all(&home);
 }
 
 /// B059: Openplanet-injected engine methods. `uint GetCurrentEntityID()` and

@@ -2278,9 +2278,7 @@ mod tests {
 
     #[test]
     fn unused_workspace_overrides_user_and_accepts_bool() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-unused-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-unused");
         let user = tmp.join("user.toml");
         std::fs::write(&user, "unused = \"error\"\n").unwrap();
 
@@ -2315,20 +2313,15 @@ mod tests {
             UnusedLevel::Error,
             "user-global unused = error when workspace does not set it"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn unused_init_options_override_config_file() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-unused-init-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-unused-init");
         std::fs::write(tmp.join(".openplanet-lsp.toml"), "unused = \"ignore\"\n").unwrap();
         let opts = serde_json::json!({ "unused": "error" });
         let cfg = LspConfig::load(Some(&tmp), Some(&opts));
         assert_eq!(cfg.unused, UnusedLevel::Error);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -2383,9 +2376,7 @@ mod tests {
 
     #[test]
     fn inactive_regions_resolve_through_the_whole_ladder() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-inactive-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-inactive");
 
         let user = tmp.join("user.toml");
         std::fs::write(&user, "inactive_regions = \"info\"\n").unwrap();
@@ -2434,8 +2425,6 @@ mod tests {
                 "initializationOptions must beat the workspace file"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -2460,9 +2449,7 @@ mod tests {
     /// precedence as ignore/warn/error.
     #[test]
     fn unused_quiet_levels_resolve_through_the_whole_ladder() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-unused-quiet-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-unused-quiet");
 
         let user = tmp.join("user.toml");
         std::fs::write(&user, "unused = \"hint\"\n").unwrap();
@@ -2510,8 +2497,6 @@ mod tests {
                 "initializationOptions unused = {json_value} must beat the workspace file"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -2545,9 +2530,7 @@ mod tests {
 
     #[test]
     fn errors_workspace_overrides_user_and_accepts_aliases() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-errors-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-errors");
         let user = tmp.join("user.toml");
         std::fs::write(&user, "errors = \"first\"\n").unwrap();
 
@@ -2664,20 +2647,15 @@ mod tests {
             ErrorGroup::First,
             "invalid workspace value is ignored; user first remains"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn errors_init_options_override_config_file() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-errors-init-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-errors-init");
         std::fs::write(tmp.join(".openplanet-lsp.toml"), "errors = \"off\"\n").unwrap();
         let opts = serde_json::json!({ "errors": "first" });
         let cfg = LspConfig::load(Some(&tmp), Some(&opts));
         assert_eq!(cfg.errors, ErrorGroup::First);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -2808,9 +2786,7 @@ mod tests {
 
     #[test]
     fn define_matrix_keys_parse_from_config_file() {
-        let tmp = std::env::temp_dir().join(format!("opl-defmatrix-cfg-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("opl-defmatrix-cfg");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             r#"define_matrix = ["DEV", "DEPENDENCY_MLHOOK"]
@@ -2824,14 +2800,11 @@ define_matrix_max_combinations = 32
         assert_eq!(cfg.define_groups, vec![vec!["A", "B"]]);
         assert_eq!(cfg.define_combinations, None);
         assert_eq!(cfg.define_matrix_max_combinations, 32);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn define_combinations_parse_from_config_file() {
-        let tmp = std::env::temp_dir().join(format!("opl-defcombos-cfg-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("opl-defcombos-cfg");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             r#"define_combinations = [[], ["DEV"], ["DEV", "DEPENDENCY_MLHOOK"]]
@@ -2847,7 +2820,6 @@ define_matrix_max_combinations = 32
                 vec!["DEV".to_string(), "DEPENDENCY_MLHOOK".to_string()],
             ])
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // ── GH #45: variant-aware folder / typedb selection ──────────────────
@@ -2917,8 +2889,7 @@ define_matrix_max_combinations = 32
     fn test_game_json_derivation_uses_variant_folder() {
         // Build a fake variant install: home/OpenplanetTurbo with the two
         // JSON files, plus an OpenplanetNext alongside to prove selection.
-        let tmp = std::env::temp_dir().join(format!("oplsp-gh45-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::testing::TempDir::new("oplsp-gh45");
         let turbo = tmp.join("OpenplanetTurbo");
         let next = tmp.join("OpenplanetNext");
         std::fs::create_dir_all(&turbo).unwrap();
@@ -2953,7 +2924,6 @@ define_matrix_max_combinations = 32
             Some(turbo.join("Plugins")),
             "plugins_dir must derive from the variant folder"
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // === Namespace-shortcut config (completion QoL) ===
@@ -3011,8 +2981,7 @@ define_matrix_max_combinations = 32
 
     #[test]
     fn shortcut_settings_parse_from_config_file() {
-        let tmp = std::env::temp_dir().join(format!("opl-shortcut-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("opl-shortcut-cfg");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             r#"shortcut_namespaces = ["Net", "Audio"]
@@ -3024,7 +2993,6 @@ shortcut_match_enums = true
         let cfg = LspConfig::load(Some(&tmp), None);
         assert_eq!(cfg.shortcut_namespace_list(), vec!["Net", "Audio"]);
         assert!(cfg.shortcut_match_enums);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -3045,8 +3013,7 @@ shortcut_match_enums = true
     /// applied last — it wins over any user-global value.
     #[test]
     fn test_user_prefs_warnings_as_errors_from_workspace_toml() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-wae-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::testing::TempDir::new("oplsp-wae");
 
         let ws_true = tmp.join("ws-true");
         std::fs::create_dir_all(&ws_true).unwrap();
@@ -3073,8 +3040,6 @@ shortcut_match_enums = true
             !UserPrefs::load(Some(&ws_false)).warnings_as_errors,
             "workspace warnings_as_errors = false must stay false"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// GH #56: `unused_callbacks` precedence. Tested through the pure
@@ -3084,8 +3049,7 @@ shortcut_match_enums = true
     /// by [`unused_callbacks_load_wiring_end_to_end`], in a subprocess.
     #[test]
     fn unused_callbacks_workspace_overrides_user_global() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-uc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::testing::TempDir::new("oplsp-uc");
         let user = tmp.join("user.toml");
         let ws = tmp.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -3153,8 +3117,6 @@ shortcut_match_enums = true
                 .unused_callbacks,
             vec!["FromParent".to_string()]
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Public-seam coverage for the complete config-loading ladder: the
@@ -3169,8 +3131,7 @@ shortcut_match_enums = true
     /// env var would otherwise show green while asserting nothing at all.
     #[test]
     fn unused_callbacks_load_wiring_end_to_end() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-uc-load-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::testing::TempDir::new("oplsp-uc-load");
         // Scenario outcomes are collected rather than asserted in the loop, so
         // a red scenario still reaches the cleanup below instead of leaving its
         // fixture behind in a shared /tmp.
@@ -3432,9 +3393,7 @@ shortcut_match_enums = true
     /// other keys in the same file.
     #[test]
     fn unused_callbacks_malformed_values_are_ignored() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-ucbad-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-ucbad");
 
         let cases: &[(&str, &str, Vec<String>)] = &[
             ("not-an-array", "unused_callbacks = \"OnThing\"\n", vec![]),
@@ -3473,8 +3432,6 @@ shortcut_match_enums = true
         let mut cfg = LspConfig::default();
         cfg.apply_config_layers(None, None, Some(&dir));
         assert_eq!(cfg.game_target, "MP4");
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // --- B024: custom `defines` are ADDITIVE over the target-derived set ---
@@ -3484,9 +3441,7 @@ shortcut_match_enums = true
     /// TMNEXT/WINDOWS and killed every `#if TMNEXT` branch).
     #[test]
     fn config_file_defines_add_to_target_defines() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-defines-add-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-defines-add");
         std::fs::write(tmp.join(".openplanet-lsp.toml"), "defines = [\"DEV\"]\n").unwrap();
         let cfg = LspConfig::load(Some(&tmp), None);
         assert!(cfg.defines.contains("DEV"), "custom define missing");
@@ -3500,7 +3455,6 @@ shortcut_match_enums = true
             cfg.defines.contains("SIG_DEVELOPER"),
             "always-on define wiped"
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Same rule for `initializationOptions` (the editor-side layer).
@@ -3533,9 +3487,7 @@ shortcut_match_enums = true
     /// lower layer) turned on. Removals win over additions in the same list.
     #[test]
     fn define_overrides_can_remove_with_dash_or_bang() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-defines-rm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-defines-rm");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "defines = [\"DEV\", \"-SIG_DEVELOPER\", \"!LOGS\", \"DEAD\", \"-DEAD\"]\n",
@@ -3551,7 +3503,6 @@ shortcut_match_enums = true
             "a removal must beat an addition of the same name"
         );
         assert!(cfg.defines.contains("SIG_REGULAR"), "siblings untouched");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// A hand-listed platform selector still leaves exactly ONE platform
@@ -3592,8 +3543,7 @@ shortcut_match_enums = true
     /// can still drop a parent-added define.
     #[test]
     fn parent_and_root_defines_accumulate() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-defines-multi-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::testing::TempDir::new("oplsp-defines-multi");
         let root = tmp.join("PluginA");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
@@ -3611,17 +3561,13 @@ shortcut_match_enums = true
         assert!(cfg.defines.contains("ROOT_Y"));
         assert!(!cfg.defines.contains("PARENT_DROPPED"));
         assert!(cfg.defines.contains("TMNEXT"));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Manifest `[script].defines` stay additive, and a config-file removal
     /// gets the last word over them (user overrides apply after the manifest).
     #[test]
     fn config_defines_apply_after_manifest_defines() {
-        let tmp =
-            std::env::temp_dir().join(format!("oplsp-defines-manifest-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-defines-manifest");
         std::fs::write(
             tmp.join("info.toml"),
             "[meta]\nname = \"T\"\nauthor = \"A\"\n\n[script]\ndefines = [\"MANIFEST_ON\", \"MANIFEST_OFF\"]\n",
@@ -3640,7 +3586,6 @@ shortcut_match_enums = true
         );
         assert!(cfg.defines.contains("DEV"));
         assert!(cfg.defines.contains("TMNEXT"));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // --- GH #64: signature-mode selector (which SIG_* defines are live) ---
@@ -3709,9 +3654,7 @@ shortcut_match_enums = true
     /// the platform or always-on defines.
     #[test]
     fn config_file_signature_mode_narrows_sig_defines() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-sigmode-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-sigmode");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "signature_mode = \"regular\"\n",
@@ -3725,14 +3668,11 @@ shortcut_match_enums = true
         assert!(!cfg.defines.contains("SIG_DEVELOPER"));
         assert!(cfg.defines.contains("TMNEXT"), "platform defines untouched");
         assert!(cfg.defines.contains("WINDOWS"), "always-on flags untouched");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn init_options_signature_mode_wins_over_config_file() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-sigmode-init-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-sigmode-init");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "signature_mode = \"official\"\n",
@@ -3743,7 +3683,6 @@ shortcut_match_enums = true
         assert_eq!(cfg.signature_mode, SignatureMode::School);
         assert!(cfg.defines.contains("SIG_SCHOOL"));
         assert!(!cfg.defines.contains("SIG_DEVELOPER"));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// An unknown value falls back PERMISSIVE (developer): masking code out
@@ -3751,9 +3690,7 @@ shortcut_match_enums = true
     /// direction is more defines, not fewer. Sibling keys keep working.
     #[test]
     fn invalid_signature_mode_keeps_developer_and_sibling_keys() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-sigmode-bad-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-sigmode-bad");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "signature_mode = \"banana\"\ngame_target = \"TURBO\"\n",
@@ -3763,15 +3700,13 @@ shortcut_match_enums = true
         assert_eq!(cfg.signature_mode, SignatureMode::Developer);
         assert!(cfg.defines.contains("SIG_DEVELOPER"));
         assert_eq!(cfg.game_target, "TURBO", "sibling key must still apply");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// `defines` overrides still get the last word over the derived SIG_ set,
     /// in both directions (B024 ordering).
     #[test]
     fn define_overrides_beat_the_signature_mode_set() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-sigmode-ovr-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::testing::TempDir::new("oplsp-sigmode-ovr");
 
         let add = tmp.join("add-back");
         std::fs::create_dir_all(&add).unwrap();
@@ -3797,8 +3732,6 @@ shortcut_match_enums = true
         let cfg = LspConfig::load(Some(&drop), None);
         assert!(!cfg.defines.contains("SIG_DEVELOPER"), "removal ignored");
         assert!(cfg.defines.contains("SIG_SCHOOL"));
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // --- B028: OS / arch / build-flag selectors ---
@@ -3957,9 +3890,7 @@ shortcut_match_enums = true
     /// from `game_target`.
     #[test]
     fn config_file_os_and_arch_keys_derive_defines() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-osarch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-osarch");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "os_target = \"wine\"\narch_target = \"32\"\n",
@@ -3974,7 +3905,6 @@ shortcut_match_enums = true
         assert!(!cfg.defines.contains("LINUX"), "{:?}", cfg.defines);
         assert!(!cfg.defines.contains("MANIA64"));
         assert!(cfg.defines.contains("SERVER"), "build flags stay on");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// An unknown value warns and keeps the default (permissive direction:
@@ -3982,9 +3912,7 @@ shortcut_match_enums = true
     /// sibling keys still apply — same contract as `signature_mode`.
     #[test]
     fn invalid_os_or_arch_config_value_keeps_default_and_siblings() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-osarch-bad-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-osarch-bad");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "os_target = \"banana\"\narch_target = \"banana\"\ngame_target = \"TURBO\"\n",
@@ -3995,15 +3923,12 @@ shortcut_match_enums = true
         assert_eq!(cfg.arch_target, ArchTarget::Arch64);
         assert_eq!(cfg.game_target, "TURBO", "sibling key must still apply");
         assert!(cfg.defines.contains("TURBO"));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Init options sit above the config-file layer in the ladder.
     #[test]
     fn init_options_os_and_arch_win_over_config_file() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-osarch-init-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-osarch-init");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "os_target = \"wine\"\narch_target = \"32\"\n",
@@ -4016,7 +3941,6 @@ shortcut_match_enums = true
         assert!(cfg.defines.contains("LINUX"));
         assert!(!cfg.defines.contains("WINDOWS_WINE"));
         assert!(cfg.defines.contains("MANIA64"));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Init options also carry the build-flag booleans, above the
@@ -4024,9 +3948,7 @@ shortcut_match_enums = true
     /// rung had no test for the four booleans).
     #[test]
     fn init_options_build_flags_win_over_config_file() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-bflags-init-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-bflags-init");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "server = false\nlogs = true\n",
@@ -4039,16 +3961,13 @@ shortcut_match_enums = true
         assert!(!cfg.build_flags.logs, "init option beats config true");
         assert!(!cfg.defines.contains("LOGS"));
         assert!(cfg.build_flags.has_dev, "untouched flag stays on");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The build-flag config keys narrow the derived set without touching
     /// the os/arch pairs.
     #[test]
     fn build_flag_config_keys_narrow_defines() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-bflags-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-bflags");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "server = false\nlogs = false\n",
@@ -4063,15 +3982,13 @@ shortcut_match_enums = true
         assert!(cfg.defines.contains("HAS_DEV"));
         assert!(cfg.defines.contains("WINDOWS"), "os/arch pairs untouched");
         assert!(cfg.defines.contains("MANIA64"));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// B024 ordering is preserved: `defines` gets the last word over the
     /// derived selector set, in both directions.
     #[test]
     fn define_overrides_last_word_over_os_arch_selectors() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-osarch-ovr-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::testing::TempDir::new("oplsp-osarch-ovr");
 
         let drop = tmp.join("drop-wine");
         std::fs::create_dir_all(&drop).unwrap();
@@ -4090,8 +4007,6 @@ shortcut_match_enums = true
         let cfg = LspConfig::load(Some(&add), None);
         assert!(cfg.defines.contains("LINUX"), "explicit add ignored");
         assert!(cfg.defines.contains("WINDOWS"), "default os stays live");
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The CLI/TUI target list and the platform-family table must not drift
@@ -4125,14 +4040,14 @@ shortcut_match_enums = true
 
     /// Fresh temp dir for a B017 case, with `user.toml` + `parent/` + `root/`
     /// laid out. Returns `(tmp, user_file, parent_dir, root_dir)`.
-    fn b017_layers(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
-        let tmp = std::env::temp_dir().join(format!("oplsp-b017-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+    fn b017_layers(name: &str) -> (crate::testing::TempDir, PathBuf, PathBuf, PathBuf) {
+        let tmp = crate::testing::TempDir::new(&format!("oplsp-b017-{name}"));
         let parent = tmp.join("parent");
         let root = tmp.join("root");
+        let user = tmp.join("user.toml");
         std::fs::create_dir_all(&parent).unwrap();
         std::fs::create_dir_all(&root).unwrap();
-        (tmp.clone(), tmp.join("user.toml"), parent, root)
+        (tmp, user, parent, root)
     }
 
     fn write_ws(dir: &Path, body: &str) {
@@ -4355,7 +4270,7 @@ shortcut_match_enums = true
     /// every key the shared ladder carries, not just `source_paths`.
     #[test]
     fn per_root_workspace_config_beats_the_user_global_for_every_ladder_key() {
-        let (tmp, user, _parent, root) = b017_layers("ws-over-user");
+        let (_tmp, user, _parent, root) = b017_layers("ws-over-user");
         for case in ladder_cases() {
             std::fs::write(&user, format!("{}\n", case.user)).unwrap();
             write_ws(&root, &format!("{}\n", case.workspace));
@@ -4379,14 +4294,13 @@ shortcut_match_enums = true
                 case.key
             );
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Multi-root: the per-root file beats the opened-folder parent, and the
     /// parent beats the user global.
     #[test]
     fn per_root_beats_parent_which_beats_user_global() {
-        let (tmp, user, parent, root) = b017_layers("root-parent-user");
+        let (_tmp, user, parent, root) = b017_layers("root-parent-user");
         for case in ladder_cases() {
             std::fs::write(&user, format!("{}\n", case.user)).unwrap();
             write_ws(&parent, &format!("{}\n", case.user));
@@ -4409,15 +4323,12 @@ shortcut_match_enums = true
                 case.key
             );
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// initializationOptions stay at the top of the ladder after the flip.
     #[test]
     fn init_options_still_beat_every_config_file_layer() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-b017-init-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-b017-init");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "game_target = \"TURBO\"\nshortcut_match_enums = false\nunused = \"ignore\"\n\
@@ -4437,14 +4348,13 @@ shortcut_match_enums = true
         assert_eq!(cfg.unused, UnusedLevel::Error);
         assert_eq!(cfg.errors, ErrorGroup::First);
         assert_eq!(cfg.inactive_regions, InactiveLevel::Info);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// B017 defect 2: ONE mistyped key must not take its siblings down with
     /// it. Every type class the schema uses gets a variant.
     #[test]
     fn one_mistyped_key_leaves_sibling_keys_in_the_same_file_effective() {
-        let (tmp, _user, _parent, root) = b017_layers("bad-key-siblings");
+        let (_tmp, _user, _parent, root) = b017_layers("bad-key-siblings");
         // (case name, the bad line, the key that must be reported)
         let bad_lines: &[(&str, &str, &str)] = &[
             ("wrong-scalar-type", "game_target = 7", "game_target"),
@@ -4507,14 +4417,13 @@ shortcut_match_enums = true
                 "case {name}: expected an issue naming `{reported_key}`, got {issues:?}"
             );
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// A recorded issue names the file, the key, the expected type and what
     /// was actually there — enough to fix the file without reading the source.
     #[test]
     fn config_issues_name_the_file_key_expected_and_found() {
-        let (tmp, _user, _parent, root) = b017_layers("issue-shape");
+        let (_tmp, _user, _parent, root) = b017_layers("issue-shape");
         write_ws(&root, "source_paths = 7\n");
         let (_cfg, issues) = LspConfig::from_layers(None, None, Some(&root));
         assert_eq!(issues.len(), 1, "one bad key, one issue: {issues:?}");
@@ -4545,7 +4454,6 @@ shortcut_match_enums = true
             "array element type should be described: {:?}",
             issues[0].found
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Genuinely malformed TOML stays a whole-file skip — but it must warn,
@@ -4576,13 +4484,12 @@ shortcut_match_enums = true
         // Missing files are not a problem at all.
         let (_cfg, issues) = LspConfig::from_layers(None, None, Some(&tmp.join("nonexistent")));
         assert!(issues.is_empty(), "a missing file is not an issue");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Unknown keys are reported (they are nearly always typos) and ignored.
     #[test]
     fn unknown_keys_are_reported_and_never_drop_the_file() {
-        let (tmp, _user, _parent, root) = b017_layers("unknown-key");
+        let (_tmp, _user, _parent, root) = b017_layers("unknown-key");
         write_ws(&root, "definitely_not_a_key = 1\ngame_target = \"MP4\"\n");
         let (cfg, issues) = LspConfig::from_layers(None, None, Some(&root));
         assert_eq!(cfg.game_target, "MP4");
@@ -4593,14 +4500,13 @@ shortcut_match_enums = true
             "issue should say the key is unknown: {:?}",
             issues[0].found
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// B024 must not regress: `defines` ACCUMULATE across layers rather than
     /// obeying the last-file-wins ladder, and `-NAME` still removes.
     #[test]
     fn defines_still_accumulate_across_every_layer_after_the_ladder_flip() {
-        let (tmp, user, parent, root) = b017_layers("defines-accumulate");
+        let (_tmp, user, parent, root) = b017_layers("defines-accumulate");
         std::fs::write(&user, "defines = [\"FROM_USER\"]\n").unwrap();
         write_ws(&parent, "defines = [\"FROM_PARENT\"]\n");
         write_ws(&root, "defines = [\"FROM_ROOT\", \"-FROM_USER\"]\n");
@@ -4613,7 +4519,6 @@ shortcut_match_enums = true
             "an explicit removal in a higher layer still wins: {:?}",
             cfg.defines
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// A malformed replacement list is an unusable KEY, not a partially
@@ -4689,7 +4594,7 @@ shortcut_match_enums = true
         ];
 
         for case in cases {
-            let (tmp, user, _parent, root) = b017_layers(case.key);
+            let (_tmp, user, _parent, root) = b017_layers(case.key);
             std::fs::write(&user, format!("{}\n", case.lower)).unwrap();
 
             for (variant, higher) in [("mixed", case.mixed), ("all-invalid", case.all_invalid)] {
@@ -4717,7 +4622,6 @@ shortcut_match_enums = true
                 case.key
             );
             assert!(issues.is_empty(), "{} empty array: {issues:?}", case.key);
-            let _ = std::fs::remove_dir_all(&tmp);
         }
     }
 
@@ -4726,7 +4630,7 @@ shortcut_match_enums = true
     /// selector falls through independently and valid siblings still apply.
     #[test]
     fn semantic_selector_errors_report_and_fall_through_per_key() {
-        let (tmp, user, _parent, root) = b017_layers("semantic-selectors");
+        let (_tmp, user, _parent, root) = b017_layers("semantic-selectors");
         std::fs::write(
             &user,
             "signature_mode = \"official\"\nos_target = \"linux\"\narch_target = \"32\"\n",
@@ -4776,12 +4680,11 @@ shortcut_match_enums = true
                 );
             }
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn game_target_errors_fall_through_while_valid_forms_normalize() {
-        let (tmp, user, _parent, root) = b017_layers("game-target-validation");
+        let (_tmp, user, _parent, root) = b017_layers("game-target-validation");
         std::fs::write(
             &user,
             "game_target = \"MP4\"\nsource_paths = [\"user-src\"]\n",
@@ -4818,8 +4721,6 @@ shortcut_match_enums = true
             !issues.iter().any(|issue| issue.key == "game_target"),
             "CLI-compatible case/whitespace must be accepted: {issues:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// `unused_callbacks` keeps its pre-B017 legacy tolerance: usable names
@@ -4827,7 +4728,7 @@ shortcut_match_enums = true
     /// and falls through; an explicit empty list wins outright.
     #[test]
     fn unused_callbacks_mixed_all_invalid_and_empty_keep_legacy_contract() {
-        let (tmp, user, _parent, root) = b017_layers("callbacks-list-contract");
+        let (_tmp, user, _parent, root) = b017_layers("callbacks-list-contract");
         std::fs::write(&user, "unused_callbacks = [\"Lower\"]\n").unwrap();
 
         let variants = [
@@ -4855,14 +4756,13 @@ shortcut_match_enums = true
                 "case {name}: {issues:?}"
             );
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The second ladder (`UserPrefs`) obeys the same order, and a bad key
     /// no longer discards its siblings either.
     #[test]
     fn user_prefs_workspace_beats_user_global_and_survives_a_bad_key() {
-        let (tmp, user, _parent, root) = b017_layers("user-prefs");
+        let (_tmp, user, _parent, root) = b017_layers("user-prefs");
         std::fs::write(&user, "default_mode = \"lsp\"\nwarnings_as_errors = true\n").unwrap();
         write_ws(
             &root,
@@ -4885,7 +4785,6 @@ shortcut_match_enums = true
             !prefs.warnings_as_errors,
             "a bad `game_target` must not take `warnings_as_errors` with it"
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The bare-TTY/UserPrefs-only loader must diagnose semantic and scalar
@@ -4893,7 +4792,7 @@ shortcut_match_enums = true
     /// report them. This pure seam avoids mutating process-global HOME.
     #[test]
     fn user_prefs_reports_default_mode_issues_and_keeps_valid_siblings() {
-        let (tmp, user, _parent, root) = b017_layers("user-prefs-issues");
+        let (_tmp, user, _parent, root) = b017_layers("user-prefs-issues");
         std::fs::write(&user, "default_mode = \"lsp\"\nwarnings_as_errors = true\n").unwrap();
 
         for (name, bad_mode, found) in [
@@ -4929,7 +4828,6 @@ shortcut_match_enums = true
                 "{name}: {stderr:?}"
             );
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Keys the catalog lists that the LADDER deliberately does not read.
@@ -4985,9 +4883,7 @@ shortcut_match_enums = true
     fn a_config_file_written_by_our_own_writer_produces_no_issues() {
         use crate::user_config::{SettingKind, UserConfigFile, SETTINGS};
 
-        let dir = std::env::temp_dir().join(format!("oplsp-b017-writer-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new("oplsp-b017-writer");
         let path = dir.join("config.toml");
 
         let mut file = UserConfigFile::load(&path).unwrap();
@@ -5014,8 +4910,6 @@ shortcut_match_enums = true
             issues.is_empty(),
             "openplanet-lsp must not warn about a config file it wrote itself: {issues:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The known-key catalog must cover every key the tool itself writes —
@@ -5171,9 +5065,8 @@ shortcut_match_enums = true
 
     /// Plugin root with an `info.toml` `[script]` body, plus an adjacent
     /// plugins dir the config points at. Returns `(root, plugins_dir)`.
-    fn b019_plugin(name: &str, script: &str) -> (PathBuf, PathBuf) {
-        let tmp = std::env::temp_dir().join(format!("oplsp-b019-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+    fn b019_plugin(name: &str, script: &str) -> (crate::testing::TempDir, PathBuf, PathBuf) {
+        let tmp = crate::testing::TempDir::new(&format!("oplsp-b019-{name}"));
         let root = tmp.join("plugin");
         let plugins = tmp.join("plugins");
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -5191,7 +5084,7 @@ shortcut_match_enums = true
             format!("plugins_dir = {:?}\n", plugins.to_str().unwrap()),
         )
         .unwrap();
-        (root, plugins)
+        (tmp, root, plugins)
     }
 
     /// Install a resolvable directory plugin into `plugins_dir`.
@@ -5208,7 +5101,7 @@ shortcut_match_enums = true
     /// RED: an uninstalled OPTIONAL dependency must not define its macro.
     #[test]
     fn unresolved_optional_dependency_is_not_defined() {
-        let (root, _plugins) = b019_plugin(
+        let (_tmp, root, _plugins) = b019_plugin(
             "opt-missing",
             "optional_dependencies = [\"ZzzNoSuchOptDep99\"]\n",
         );
@@ -5228,7 +5121,7 @@ shortcut_match_enums = true
     /// resolution, it does not stop defining.
     #[test]
     fn resolved_dependencies_are_still_defined() {
-        let (root, plugins) = b019_plugin(
+        let (_tmp, root, plugins) = b019_plugin(
             "resolved",
             "dependencies = [\"ZzzReqDep\"]\noptional_dependencies = [\"ZzzOptDep\"]\n",
         );
@@ -5251,7 +5144,7 @@ shortcut_match_enums = true
     /// A dependency shipped as an `.op` archive resolves like a directory one.
     #[test]
     fn dependency_resolved_from_an_op_archive_is_defined() {
-        let (root, plugins) = b019_plugin("op-archive", "dependencies = [\"ZzzArchived\"]\n");
+        let (_tmp, root, plugins) = b019_plugin("op-archive", "dependencies = [\"ZzzArchived\"]\n");
         let mut zip =
             zip::ZipWriter::new(std::fs::File::create(plugins.join("ZzzArchived.op")).unwrap());
         zip.start_file("info.toml", zip::write::SimpleFileOptions::default())
@@ -5276,7 +5169,7 @@ shortcut_match_enums = true
     /// (`PluginWorkspaceLoad::missing_required_dependencies`) is untouched.
     #[test]
     fn unresolved_required_dependency_is_not_defined_but_is_still_reported() {
-        let (root, _plugins) =
+        let (_tmp, root, _plugins) =
             b019_plugin("req-missing", "dependencies = [\"ZzzNoSuchReqDep99\"]\n");
         let cfg = LspConfig::load(Some(&root), None);
         assert!(
@@ -5302,7 +5195,7 @@ shortcut_match_enums = true
     /// An unresolved `export_dependencies` entry withholds BOTH macros.
     #[test]
     fn unresolved_export_dependency_withholds_both_defines() {
-        let (root, _plugins) = b019_plugin(
+        let (_tmp, root, _plugins) = b019_plugin(
             "export-missing",
             "export_dependencies = [\"ZzzNoSuchExportDep99\"]\n",
         );
@@ -5324,7 +5217,7 @@ shortcut_match_enums = true
     /// A RESOLVED `export_dependencies` entry keeps both macros.
     #[test]
     fn resolved_export_dependency_defines_both() {
-        let (root, plugins) = b019_plugin(
+        let (_tmp, root, plugins) = b019_plugin(
             "export-resolved",
             "export_dependencies = [\"ZzzExportDep\"]\n",
         );
@@ -5350,7 +5243,7 @@ shortcut_match_enums = true
     /// axis naming an unresolved dep's macro still turns the branch live.
     #[test]
     fn define_matrix_can_still_toggle_an_unresolved_dependency_on() {
-        let (root, _plugins) = b019_plugin(
+        let (_tmp, root, _plugins) = b019_plugin(
             "matrix-toggle",
             "optional_dependencies = [\"ZzzMatrixDep99\"]\n",
         );
@@ -5390,7 +5283,7 @@ shortcut_match_enums = true
     /// user modelling "a machine that has X" must still be able to say so.
     #[test]
     fn explicit_defines_entry_can_force_an_unresolved_dependency_on() {
-        let (root, _plugins) = b019_plugin(
+        let (_tmp, root, _plugins) = b019_plugin(
             "explicit-force",
             "optional_dependencies = [\"ZzzForcedDep99\"]\n",
         );
@@ -5422,10 +5315,8 @@ shortcut_match_enums = true
     /// A config whose base selectors are all pinned, so the expectations
     /// below hold whatever this machine's user-global file says. Returns the
     /// config and the temp dir the caller must clean up.
-    fn b050_pinned_config(name: &str) -> (LspConfig, PathBuf) {
-        let tmp = std::env::temp_dir().join(format!("oplsp-b050-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+    fn b050_pinned_config(name: &str) -> (LspConfig, crate::testing::TempDir) {
+        let tmp = crate::testing::TempDir::new(&format!("oplsp-b050-{name}"));
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "game_target = \"TMNEXT\"\nsignature_mode = \"developer\"\n\
@@ -5463,7 +5354,7 @@ shortcut_match_enums = true
     /// Every base origin class is named, not lumped under one bucket.
     #[test]
     fn resolved_defines_tags_every_base_origin_class() {
-        let (cfg, tmp) = b050_pinned_config("base-origins");
+        let (cfg, _tmp) = b050_pinned_config("base-origins");
         let set = cfg.resolved_defines();
         assert_resolved(&set, "TMNEXT", DefineOrigin::Target, true, true);
         assert_resolved(&set, "SIG_DEVELOPER", DefineOrigin::Signature, true, true);
@@ -5471,7 +5362,6 @@ shortcut_match_enums = true
         assert_resolved(&set, "MANIA64", DefineOrigin::Arch, true, true);
         assert_resolved(&set, "DEVELOPER", DefineOrigin::Build, true, true);
         assert_resolved(&set, "LOGS", DefineOrigin::Build, true, true);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// A user `-NAME` on a DERIVED define shows present-but-disabled, with
@@ -5493,10 +5383,7 @@ shortcut_match_enums = true
             ("MANIA32", DefineOrigin::Arch, "-", "arch_target = \"32\"\n"),
             ("LINUX", DefineOrigin::Os, "-", "os_target = \"linux\"\n"),
         ] {
-            let tmp = std::env::temp_dir()
-                .join(format!("oplsp-b050-disable-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&tmp);
-            std::fs::create_dir_all(&tmp).unwrap();
+            let tmp = crate::testing::TempDir::new(&format!("oplsp-b050-disable-{name}"));
             std::fs::write(
                 tmp.join(".openplanet-lsp.toml"),
                 format!("{os_arch}defines = [\"{prefix}{name}\"]\n"),
@@ -5508,7 +5395,6 @@ shortcut_match_enums = true
                 "`{prefix}{name}` must still turn the define off"
             );
             assert_resolved(&cfg.resolved_defines(), name, origin, false, true);
-            let _ = std::fs::remove_dir_all(&tmp);
         }
     }
 
@@ -5516,9 +5402,7 @@ shortcut_match_enums = true
     /// derived — the counterpart of the case above.
     #[test]
     fn resolved_defines_tags_a_user_only_define_as_user() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-b050-useronly-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = crate::testing::TempDir::new("oplsp-b050-useronly");
         std::fs::write(
             tmp.join(".openplanet-lsp.toml"),
             "defines = [\"MY_FLAG\", \"-NEVER_SET\"]\n",
@@ -5530,7 +5414,6 @@ shortcut_match_enums = true
             resolved(&set, "NEVER_SET").is_none(),
             "a `-NAME` for something nothing derives is a no-op, not a row: {set:#?}"
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The ticket's fixture: one resolvable and one unresolvable optional
@@ -5540,7 +5423,7 @@ shortcut_match_enums = true
     /// `#if DEPENDENCY_X` branch.
     #[test]
     fn resolved_defines_separates_resolved_and_missing_dependencies() {
-        let (root, plugins) = b019_plugin(
+        let (_tmp, root, plugins) = b019_plugin(
             "b050-origins",
             "defines = [\"FROM_MANIFEST\"]\n\
              dependencies = [\"ZzzB050Req\"]\n\
@@ -5589,7 +5472,7 @@ shortcut_match_enums = true
     /// installed, the user has merely overridden the consequence.
     #[test]
     fn resolved_defines_keeps_the_missing_origin_when_the_user_forces_it_on() {
-        let (root, _plugins) = b019_plugin(
+        let (_tmp, root, _plugins) = b019_plugin(
             "b050-forced",
             "optional_dependencies = [\"ZzzB050Forced99\"]\n",
         );
@@ -5614,8 +5497,7 @@ shortcut_match_enums = true
     /// are the WINNING target's, and the loser's family is absent.
     #[test]
     fn resolved_defines_origins_follow_the_config_precedence_ladder() {
-        let tmp = std::env::temp_dir().join(format!("oplsp-b050-ladder-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = crate::testing::TempDir::new("oplsp-b050-ladder");
         let root = tmp.join("plugin");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
@@ -5647,14 +5529,13 @@ shortcut_match_enums = true
             LspConfig::load_with_parent(Some(&root), Some(&tmp), Some(&init)).resolved_defines();
         assert_resolved(&set, "TMNEXT", DefineOrigin::Target, true, true);
         assert!(resolved(&set, "MP41").is_none(), "{set:#?}");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The order is deterministic — origin class first, then name — so the
     /// QuickPick groups rows and a client never has to sort.
     #[test]
     fn resolved_defines_is_ordered_by_origin_then_name() {
-        let (cfg, tmp) = b050_pinned_config("order");
+        let (cfg, _tmp) = b050_pinned_config("order");
         let set = cfg.resolved_defines();
         let keys: Vec<(u8, &str)> = set
             .iter()
@@ -5663,7 +5544,6 @@ shortcut_match_enums = true
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         assert_eq!(keys, sorted, "resolved set must come back sorted");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Every name in the flat `defines` set is accounted for by a row — the
@@ -5671,7 +5551,7 @@ shortcut_match_enums = true
     /// actually sees.
     #[test]
     fn resolved_defines_covers_the_whole_effective_set() {
-        let (root, plugins) = b019_plugin(
+        let (_tmp, root, plugins) = b019_plugin(
             "b050-cover",
             "defines = [\"FROM_MANIFEST\"]\noptional_dependencies = [\"ZzzB050Cover\"]\n",
         );
@@ -5718,7 +5598,7 @@ shortcut_match_enums = true
         let first = "ZzzB050-collide";
         let second = "ZzzB050.collide";
         for installed in [first, second] {
-            let (root, plugins) = b019_plugin(
+            let (_tmp, root, plugins) = b019_plugin(
                 "b050-collide",
                 &format!("optional_dependencies = [\"{first}\", \"{second}\"]\n"),
             );
@@ -5744,7 +5624,7 @@ shortcut_match_enums = true
     /// as missing — the counterpart of the case above.
     #[test]
     fn resolved_defines_reports_a_wholly_unresolved_collision_as_missing() {
-        let (root, _plugins) = b019_plugin(
+        let (_tmp, root, _plugins) = b019_plugin(
             "b050-collide-none",
             "optional_dependencies = [\"ZzzB050-gone99\", \"ZzzB050.gone99\"]\n",
         );
@@ -5767,7 +5647,7 @@ shortcut_match_enums = true
     /// This pins the behaviour those callers rely on.
     #[test]
     fn resolved_defines_reports_an_untagged_late_insert_as_user() {
-        let (mut cfg, tmp) = b050_pinned_config("late-insert");
+        let (mut cfg, _tmp) = b050_pinned_config("late-insert");
         // Exactly what `run_check` does for a `--define` flag.
         cfg.defines.insert("FROM_CLI".to_string());
         assert_resolved(
@@ -5785,7 +5665,6 @@ shortcut_match_enums = true
             true,
             true,
         );
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The platform-family table is readable by clients, so the VS Code

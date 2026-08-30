@@ -28,6 +28,7 @@
 //! configured, because that is what the gate does to each of them. A command
 //! that cannot meet that should not be advertised unconditionally.
 
+use openplanet_lsp::testing::TempDir;
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
@@ -53,19 +54,16 @@ const METHOD: &str = "workspace/executeCommand";
 /// too. Nothing here needs post-mortem inspection of the tree: every assertion
 /// carries the server's own payload in its message.
 struct Fixture {
-    base: PathBuf,
+    /// Held for its [`Drop`]: dropping the guard removes the whole tree,
+    /// `root` included. B065 hoisted that guard out of this file so the rest
+    /// of the suite gets the same cleanup.
+    _base: TempDir,
     root: PathBuf,
 }
 
 impl Fixture {
     fn root(&self) -> &Path {
         &self.root
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.base);
     }
 }
 
@@ -99,8 +97,7 @@ impl Drop for Fixture {
 /// `just test-hermetic` is what proves the pin is working; no in-test
 /// assertion can substitute for it.
 fn fixture(name: &str, with_typedb: bool) -> Fixture {
-    let base = std::env::temp_dir().join(format!("oplsp-b039-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let base = TempDir::new(&format!("oplsp-b039-{name}"));
     let root = base.join("plugin");
     let op_dir = base.join("OpenplanetNext");
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -128,7 +125,7 @@ fn fixture(name: &str, with_typedb: bool) -> Fixture {
         ),
     )
     .unwrap();
-    Fixture { base, root }
+    Fixture { _base: base, root }
 }
 
 fn typedb_fixture_dir() -> PathBuf {

@@ -6,6 +6,7 @@
 //! suppressed by tower-lsp 0.20 until the service transitions to
 //! `Initialized` (we never do), so nothing drains the socket.
 
+use openplanet_lsp::testing::TempDir;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,12 +21,8 @@ fn write_config(dir: &Path, body: &str) {
     fs::write(dir.join(".openplanet-lsp.toml"), body).unwrap();
 }
 
-fn temp_parent(name: &str) -> PathBuf {
-    let base =
-        std::env::temp_dir().join(format!("openplanet-lsp-p2-{}-{}", name, std::process::id()));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).unwrap();
-    base
+fn temp_parent(name: &str) -> TempDir {
+    TempDir::new(&format!("openplanet-lsp-p2-{name}"))
 }
 
 fn write_plugin(parent: &Path, dir: &str, source: &str) -> PathBuf {
@@ -79,7 +76,7 @@ async fn multi_root_isolation_sibling_symbols_do_not_resolve() {
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend
-        .initialize(init_params(&parent, Some(vec![parent.clone()])))
+        .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
         .await
         .unwrap();
 
@@ -157,7 +154,7 @@ async fn multi_root_workspace_symbol_union() {
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend
-        .initialize(init_params(&parent, Some(vec![parent.clone()])))
+        .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
         .await
         .unwrap();
 
@@ -196,7 +193,7 @@ async fn multi_root_per_workspace_rebuild_pin() {
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend
-        .initialize(init_params(&parent, Some(vec![parent.clone()])))
+        .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
         .await
         .unwrap();
 
@@ -256,7 +253,7 @@ async fn multi_root_stray_file_gets_fallback_parse_only() {
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend
-        .initialize(init_params(&parent, Some(vec![parent.clone()])))
+        .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
         .await
         .unwrap();
 
@@ -291,7 +288,7 @@ async fn multi_root_manifest_open_is_routed_to_owner() {
     let (service, _socket) = LspService::new(Backend::new);
     let backend = service.inner();
     backend
-        .initialize(init_params(&parent, Some(vec![parent.clone()])))
+        .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
         .await
         .unwrap();
 

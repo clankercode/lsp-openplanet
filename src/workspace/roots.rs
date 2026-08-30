@@ -128,14 +128,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn temp_tree(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "openplanet-lsp-ws-roots-{}-{}",
-            name,
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&base);
-        fs::create_dir_all(&base).unwrap();
+    fn temp_tree(name: &str) -> crate::testing::TempDir {
+        let base = crate::testing::TempDir::new(&format!("openplanet-lsp-ws-roots-{}", name));
         base
     }
 
@@ -152,7 +146,7 @@ mod tests {
         let base = temp_tree("at-root");
         write_info_toml(&base);
         assert_eq!(
-            discover_plugin_roots(std::slice::from_ref(&base)),
+            discover_plugin_roots(&[base.to_path_buf()]),
             vec![canonic(&base)]
         );
     }
@@ -193,7 +187,7 @@ mod tests {
         fs::create_dir_all(&plugin).unwrap();
         write_info_toml(&plugin);
 
-        let roots = discover_plugin_roots(std::slice::from_ref(&base));
+        let roots = discover_plugin_roots(&[base.to_path_buf()]);
         assert_eq!(roots, vec![canonic(&plugin)]);
     }
 
@@ -208,7 +202,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, base.join("link-two")).unwrap();
 
         assert_eq!(
-            discover_plugin_roots(std::slice::from_ref(&base)),
+            discover_plugin_roots(&[base.to_path_buf()]),
             vec![canonic(&real)]
         );
     }
@@ -220,7 +214,7 @@ mod tests {
         fs::create_dir_all(&plugin).unwrap();
         write_info_toml(&plugin);
         assert_eq!(
-            discover_plugin_roots(std::slice::from_ref(&base)),
+            discover_plugin_roots(&[base.to_path_buf()]),
             vec![canonic(&plugin)]
         );
     }
@@ -234,7 +228,7 @@ mod tests {
             write_info_toml(&p);
         }
         assert_eq!(
-            discover_plugin_roots(std::slice::from_ref(&base)),
+            discover_plugin_roots(&[base.to_path_buf()]),
             vec![
                 canonic(&base.join("plugin-a")),
                 canonic(&base.join("plugin-b"))
@@ -252,7 +246,7 @@ mod tests {
         write_info_toml(&inner);
         // First-match stop: outer is a root, inner is unreachable.
         assert_eq!(
-            discover_plugin_roots(std::slice::from_ref(&base)),
+            discover_plugin_roots(&[base.to_path_buf()]),
             vec![canonic(&outer)]
         );
     }
@@ -270,7 +264,7 @@ mod tests {
         fs::create_dir_all(&hidden_root).unwrap();
         write_info_toml(&hidden_root);
         assert_eq!(
-            discover_plugin_roots(std::slice::from_ref(&base)),
+            discover_plugin_roots(&[base.to_path_buf()]),
             Vec::<PathBuf>::new()
         );
     }
@@ -278,14 +272,14 @@ mod tests {
     #[test]
     fn depth_six_is_not_reached() {
         let base = temp_tree("depth-six");
-        let mut deep = base.clone();
+        let mut deep = base.to_path_buf();
         for i in 0..6 {
             deep = deep.join(format!("d{i}"));
         }
         fs::create_dir_all(&deep).unwrap();
         write_info_toml(&deep);
         assert_eq!(
-            discover_plugin_roots(std::slice::from_ref(&base)),
+            discover_plugin_roots(&[base.to_path_buf()]),
             Vec::<PathBuf>::new()
         );
     }
@@ -293,26 +287,29 @@ mod tests {
     #[test]
     fn depth_five_is_reached() {
         let base = temp_tree("depth-five");
-        let mut deep = base.clone();
+        let mut deep = base.to_path_buf();
         for i in 0..5 {
             deep = deep.join(format!("d{i}"));
         }
         fs::create_dir_all(&deep).unwrap();
         write_info_toml(&deep);
         assert_eq!(
-            discover_plugin_roots(std::slice::from_ref(&base)),
+            discover_plugin_roots(&[base.to_path_buf()]),
             vec![canonic(&deep)]
         );
     }
 
     #[test]
     fn nonexistent_folder_is_skipped() {
-        let ghost = std::env::temp_dir().join(format!(
-            "openplanet-lsp-ws-roots-nonexistent-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&ghost);
-        assert_eq!(discover_plugin_roots(&[ghost]), Vec::<PathBuf>::new());
+        // `reserve` hands back a unique path it does NOT create, so nothing
+        // another test leaves in the temp dir can make this one green by
+        // accident.
+        let ghost = crate::testing::TempDir::reserve("openplanet-lsp-ws-roots-nonexistent");
+        assert!(!ghost.exists());
+        assert_eq!(
+            discover_plugin_roots(&[ghost.to_path_buf()]),
+            Vec::<PathBuf>::new()
+        );
     }
 
     #[test]
@@ -326,7 +323,7 @@ mod tests {
         write_info_toml(&plugin);
         // Same folder twice + a parent folder that also finds it.
         assert_eq!(
-            discover_plugin_roots(&[base.clone(), base.clone(), parent.clone()]),
+            discover_plugin_roots(&[base.clone(), base.clone(), parent.to_path_buf()]),
             vec![canonic(&plugin)]
         );
     }

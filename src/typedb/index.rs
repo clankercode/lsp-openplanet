@@ -2556,12 +2556,8 @@ mod tests {
             {"ns":"Names","name":"Foxtrot"}]}
         "#;
         let load = |tag: &str| {
-            let dir = std::env::temp_dir().join(format!(
-                "openplanet-lsp-typedb-short-order-{tag}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
+            let dir =
+                crate::testing::TempDir::new(&format!("openplanet-lsp-typedb-short-order-{tag}"));
             std::fs::write(dir.join("OpenplanetCore.json"), core).unwrap();
             std::fs::write(dir.join("OpenplanetNext.json"), r#"{"op":"1.0.0","ns":{}}"#).unwrap();
             TypeIndex::load(
@@ -2698,19 +2694,15 @@ mod meta_tests {
 
     /// Unique tmp dir per test tag (the pid alone repeats across tests in
     /// one binary).
-    fn tmp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-typedb-meta-{}-{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn tmp_dir(tag: &str) -> crate::testing::TempDir {
+        crate::testing::TempDir::new(&format!("openplanet-lsp-typedb-meta-{tag}"))
     }
 
-    fn write_db(tag: &str, name: &str, contents: &str) -> std::path::PathBuf {
-        let path = tmp_dir(tag).join(name);
+    /// `into_child` keeps the directory's guard attached to the path it
+    /// returns; a bare `PathBuf` would be pointing at a tree already deleted
+    /// by the time the caller reads it.
+    fn write_db(tag: &str, name: &str, contents: &str) -> crate::testing::TempPath {
+        let path = tmp_dir(tag).into_child(name);
         std::fs::write(&path, contents).unwrap();
         path
     }
@@ -2791,7 +2783,7 @@ mod meta_tests {
 
     #[test]
     fn typedb_meta_probe_missing_file_errs() {
-        let path = tmp_dir("missing").join("OpenplanetCore.json");
+        let path = tmp_dir("missing").into_child("OpenplanetCore.json");
         let err = TypeDbMeta::probe(&path).unwrap_err();
         assert!(
             err.contains("OpenplanetCore.json"),
@@ -2864,14 +2856,8 @@ mod diff_tests {
 
     const EMPTY_NADEO: &str = r#"{"op":"1.0.0","ns":{}}"#;
 
-    fn tmp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-typedb-diff-{}-{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn tmp_dir(tag: &str) -> crate::testing::TempDir {
+        let dir = crate::testing::TempDir::new(&format!("openplanet-lsp-typedb-diff-{}", tag));
         dir
     }
 
@@ -3531,15 +3517,9 @@ mod shape_guard_tests {
         fixture_dir().join("OpenplanetNext.json")
     }
 
-    fn tmp_file(tag: &str, name: &str, contents: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-typedb-shape-{}-{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
+    fn tmp_file(tag: &str, name: &str, contents: &str) -> crate::testing::TempPath {
+        let dir = crate::testing::TempDir::new(&format!("openplanet-lsp-typedb-shape-{tag}"));
+        let path = dir.into_child(name);
         std::fs::write(&path, contents).unwrap();
         path
     }
@@ -3675,7 +3655,9 @@ mod shape_guard_tests {
 
     #[test]
     fn typedb_shape_guard_rejects_missing_file() {
-        let missing = std::env::temp_dir().join("openplanet-lsp-no-such-db.json");
+        // Unique per run: a fixed name could be created by something else
+        // in the shared temp dir and quietly turn this test green.
+        let missing = crate::testing::TempDir::reserve("openplanet-lsp-no-such-db");
         let problems = check_typedb_shape(&missing, &fixture_game()).unwrap_err();
         assert!(!problems.is_empty(), "{problems:?}");
     }
@@ -3711,13 +3693,7 @@ mod anon_member_enum_tests {
 
     /// Build an index over a synthetic Nadeo dump (Core stays empty).
     fn nadeo_index(tag: &str, nadeo: &str) -> TypeIndex {
-        let dir = std::env::temp_dir().join(format!(
-            "openplanet-lsp-anon-enum-{}-{}",
-            tag,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::TempDir::new(&format!("openplanet-lsp-anon-enum-{}", tag));
         let core_path = dir.join("OpenplanetCore.json");
         let nadeo_path = dir.join("OpenplanetNext.json");
         std::fs::write(&core_path, CORE_MIN).unwrap();
