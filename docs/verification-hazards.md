@@ -315,12 +315,25 @@ The test passes, and would have passed either way.
   does not reconcile has two causes, not one: your tests are not running, or a
   binary crashed. Chasing the first when it was the second wastes the
   investigation. Check for a crashed binary before concluding anything about
-  your tests. (Observed: `multi_root_tests`, stack `Backend::new` →
-  `LspConfig::load` → `read_config_file` → toml_edit's recursive parser, under
-  load — a stack overflow in a recursive parser, not a defect in any branch.
-  Note the first diagnosis blamed "~2G free RAM"; that read the `free` column
-  when `available` governs, and `available` was 22G throughout. There was no
-  memory pressure. Wrong cause, right conclusion — which is its own hazard.)
+  your tests. (Observed: `multi_root_tests`. **The cause was diagnosed wrong
+  twice, and the coredump refuted both.** First reading: a stack overflow in
+  toml_edit's recursive parser, from deeply nested input. Second: memory
+  pressure, from "~2G free" — which read the `free` column where `available`
+  governs, and `available` was 21–22G throughout.
+
+  What the coredump shows: `si_code=SEGV_ACCERR`, a guard-page hit, so it **is**
+  a stack overflow — but the stack is **shallow**, ~32–40 frames, and **frame #0
+  is the parser's ENTRY point**, before any recursion. A recursive-descent
+  parser overflowing on nested input shows hundreds or thousands of frames. The
+  thread was already out of stack when it arrived; the TOML input is a
+  bystander. The consumer is the large `Backend::new` / `LspConfig` values
+  inside a big async state machine on a tokio worker.
+
+  **Transferable: when a stack overflow is blamed on recursion, the stack DEPTH
+  is the discriminator, and it costs nothing to read.** A shallow stack means
+  something consumed the stack before the suspect ran. Both wrong diagnoses
+  were plausible, self-consistent, and pointed at fixes that would have
+  addressed nothing — more RAM, or a recursion limit. Evidence: B078.)
 
 - **Measure each half of a multi-part fix as a standalone variant.** Twice in
   this batch a ticket's own Work section proposed the half that closes nothing,
