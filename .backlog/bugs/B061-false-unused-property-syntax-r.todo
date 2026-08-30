@@ -114,3 +114,31 @@ were production functions whose only callers live in `*_Test.as`/`*_Dev.as`,
 which a release build excludes — genuinely unused, and their own code smell.
 Do not widen this ticket into 'unused analysis is too aggressive'. It is
 specifically the property-syntax/accessor mapping.
+
+## Discriminating gate (reporter, 2026-08-30) — USE THIS, it is the whole test
+
+The reporting tree contains BOTH halves already classified, which makes it a
+ready-made discriminator rather than just a source of examples. Repo:
+`~/src/openplanet/my-plugins/tm-tournament-station` at master; `just lsp`
+reproduces exactly 24 warnings; the breakdown is in its `AGENTS.md`.
+
+- **6 must DISAPPEAR** — the table above, including `c.IsSecure` (member form).
+- **18 must SURVIVE** — 13 production functions whose only callers live in
+  `*_Test.as`/`*_Dev.as` (excluded from a release build, so genuinely unused),
+  4 export-surface functions that are B062's business and NOT this ticket's,
+  and 1 with no caller anywhere (`Branding::get_Logo`).
+
+**The part that makes it a real gate: 8 of those 13 are THEMSELVES `get_`
+accessors** — `Directives::get_Latest`, `get_PendingCount`, `get_ShownAt`,
+`get_HasSnoozed`, `Messages::get_Showing`, `MatchGuard::get_Current`,
+`get_MsInCurrent`, `Transport::get_IsSecure`.
+
+So the lazy fix — stop warning on accessors, or mark every `get_X` used
+whenever `X` appears anywhere — PASSES the six-row table and silently eats
+eight correct warnings in the same repo. Same-shaped symbol, opposite expected
+outcome, one tree. A fix is only correct if it moves 24 -> 18, not 24 -> 10.
+
+Note `Transport::get_IsSecure` appears in BOTH lists: read as `c.IsSecure` from
+production (must disappear) while a different `Transport` accessor is test-only
+(must survive). Confirm which is which against the tree before asserting
+either — do not assume the name alone decides it.
