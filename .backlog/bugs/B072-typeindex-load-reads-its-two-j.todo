@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-30T18:53:19Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-30T23:19:57Z"
 complexity: medium
 created_at: "2026-08-30T17:50:07Z"
 depends_on: []
+duration_minutes: 266.64207069885
 estimate_hours: 1
 id: B072
 priority: high
 started_at: "2026-08-30T18:53:19Z"
-status: in_progress
+status: done
 tags: []
 title: 'TypeIndex::load reads its two JSON files separately: a dump rewritten between them yields a half-and-half index'
-updated_at: "2026-08-30T18:53:19Z"
+updated_at: "2026-08-30T23:19:57Z"
 ---
 
 # TypeIndex::load reads its two JSON files separately: a dump rewritten between them yields a half-and-half index
