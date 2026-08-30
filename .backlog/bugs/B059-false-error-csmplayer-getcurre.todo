@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-30T05:12:33Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-30T06:39:45Z"
 complexity: medium
 created_at: "2026-08-30T05:07:21Z"
 depends_on: []
+duration_minutes: 87.20124281751667
 estimate_hours: 1
 id: B059
 priority: medium
 started_at: "2026-08-30T05:12:33Z"
-status: in_progress
+status: done
 tags: []
 title: 'False error: CSmPlayer.GetCurrentEntityID — Openplanet-injected method missing from typedb'
-updated_at: "2026-08-30T05:12:33Z"
+updated_at: "2026-08-30T06:39:45Z"
 ---
 
 # False error: CSmPlayer.GetCurrentEntityID — Openplanet-injected method missing from typedb
