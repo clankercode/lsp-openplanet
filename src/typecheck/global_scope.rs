@@ -257,10 +257,27 @@ impl<'a> GlobalScope<'a> {
             return true;
         }
         if let Some(ext) = self.external {
-            if ext.lookup_type(qualified).is_some() {
-                return true;
-            }
-            if ext.lookup_funcdef(qualified).is_some() {
+            // B056: NARROWER than the old exact-key test, and narrower on
+            // purpose. The Nadeo dump is keyed `Module::Rest` and the module
+            // is this crate's invention, so the key was accepted verbatim and
+            // `Game::CGameCtnApp` resolved — the game answers `Namespace
+            // 'Game' doesn't exist.`
+            //
+            // Deliberately NOT widened to source names here. A bare Nadeo
+            // class name is a real spelling, but it arrives through
+            // `resolve_unqualified`'s short-name rescue, which already
+            // handled it. Accepting source names in `has_type` would also
+            // admit `MwFoundations::Bool` as bare `Bool`, and the b053 corpus
+            // shows the game has no such type: `No matching symbol 'Bool'`,
+            // where a type it really has answers `Expression 'X' is a data
+            // type` (as `RGBAColor` does).
+            // Kind matters: `source_names` spans types, enums and funcdefs,
+            // and `Bool` is a CLASS key (`MwFoundations::Bool`). Asking only
+            // "is this a source name" here would let an enum answer a type
+            // question and vice versa.
+            if ext.spelling_is_source_name(qualified)
+                && (ext.lookup_type(qualified).is_some() || ext.lookup_funcdef(qualified).is_some())
+            {
                 return true;
             }
         }
@@ -332,16 +349,22 @@ impl<'a> GlobalScope<'a> {
             return true;
         }
         if let Some(ext) = self.external {
-            if ext.lookup_source_enum(qualified).is_some() {
-                return true;
-            }
-            // The typedb keys a nested engine enum under its MODULE
-            // (`Game::CGameCtnBlock::ECardinalDirections`), but source spells
-            // it without one (`CGameCtnBlock::ECardinalDirections`), so a
-            // qualified lookup must try the trailing path before giving up
-            // (B007). A trailing PATH — the leading part still has to be the
-            // enum's real declaring scope, which is what the game checks.
-            if ext.lookup_source_enum_by_suffix(qualified).is_some() {
+            // B056: the SOURCE name, which for a nested Nadeo enum is the key
+            // minus its module (`CGameCtnBlock::ECardinalDirections`) and for
+            // a Core enum is the key in full (`UI::Plot::Marker`).
+            //
+            // This replaces two lookups. The first accepted the index KEY
+            // verbatim, so `Game::CGameCtnBlock::ECardinalDirections`
+            // resolved — `Namespace 'Game::CGameCtnBlock' doesn't exist.` in
+            // the game. The second (B007) accepted any trailing PATH, so
+            // `Plot::Marker` resolved against `UI::Plot::Marker` —
+            // `Namespace 'Plot' doesn't exist.` The rule is asymmetric by
+            // origin and a single trailing-path test cannot express it:
+            // Nadeo must lose exactly its module, Core must lose nothing.
+            if ext
+                .source_name_key(qualified)
+                .is_some_and(|key| ext.key_is_source_enum(key))
+            {
                 return true;
             }
             // AngelScript's ancestor walk (B052): `P::T` looks `T` up in
@@ -357,7 +380,20 @@ impl<'a> GlobalScope<'a> {
             // game answered `Namespace 'Scene' doesn't exist.` Live probe,
             // Trackmania + Openplanet 1.29.5, 2026-08-30.
             if let Some((head, tail)) = qualified.rsplit_once("::") {
-                if ext.lookup_source_enum(tail).is_some() && self.scope_exists(head) {
+                // B056: `global_enum_key`, not `lookup_source_enum(tail)`.
+                // The latter only answered when the KEY was bare, which is
+                // true of a header enum and a namespace-less Core one but NOT
+                // of a Nadeo module-level enum — `EPlugSurfaceGameplayId` is
+                // keyed `Meta::EPlugSurfaceGameplayId`. Those used to resolve
+                // by accident, because the loader's module name `Meta`
+                // happens to coincide with a real Core namespace and the
+                // exact-key test matched the spelling. Removing the exact-key
+                // test exposed that, and the walk has to do the work
+                // honestly: paired probe `Meta::ZZZNoSuchEnumName` answers
+                // `Identifier 'ZZZNoSuchEnumName' is not a data type in
+                // namespace 'Meta' or parent`, so `Meta` IS a scope and
+                // `Meta::EPlugSurfaceGameplayId` is a genuine engine accept.
+                if self.scope_exists(head) && ext.global_enum_key(tail).is_some() {
                     return true;
                 }
             }
@@ -397,6 +433,25 @@ impl<'a> GlobalScope<'a> {
         // enum. The source-facing lookup also excludes anonymous synthetic
         // keys; acceptance is never inferred merely from a matching tail.
         ext.lookup_source_enum(tail).map(|_| tail.to_string())
+    }
+
+    /// True when `qualified` is a type's own key, exactly as stored — no
+    /// module-stripped spelling (B056). Callers that need a canonical name,
+    /// rather than "does this resolve", ask this.
+    fn is_canonical_type_key(&self, qualified: &str) -> bool {
+        if self.lookup_workspace(qualified).iter().any(|s| {
+            matches!(
+                s.kind,
+                SymbolKind::Class { .. }
+                    | SymbolKind::Interface { .. }
+                    | SymbolKind::Funcdef { .. }
+            )
+        }) {
+            return true;
+        }
+        self.external.is_some_and(|ext| {
+            ext.lookup_type(qualified).is_some() || ext.lookup_funcdef(qualified).is_some()
+        })
     }
 
     /// True when `qualified` is an enum's own key, exactly as stored —
@@ -456,11 +511,33 @@ impl<'a> GlobalScope<'a> {
         if short.contains("::") {
             return None;
         }
-        // External index first.
+        // External index first, by SOURCE name (B056). `find_by_short_name`
+        // matched any key whose TAIL was `short`, which rescued names the
+        // game does not have: bare `EMenuOrder` against
+        // `Game::CGameMenu::EMenuOrder`, bare `Align` against `nvg::Align`,
+        // bare `Cond` against `UI::Cond`. The game answers `Identifier 'X' is
+        // not a data type in global namespace` for all three.
+        //
+        // The class rescue this exists for is UNAFFECTED, because a Nadeo
+        // class's source name IS its bare name — `CGameCtnEditorFree` is the
+        // source spelling of the key `Game::CGameCtnEditorFree`, and the game
+        // takes it. What goes away is only the tail match against a name the
+        // game requires a qualifier for.
         if let Some(ext) = self.external {
-            let candidates = ext.find_by_short_name(short);
-            if !candidates.is_empty() {
-                return Some(candidates[0].clone());
+            if let Some(key) = ext.source_name_key(short) {
+                return Some(key.to_string());
+            }
+            // Not a source name. The short-name rescue still applies to
+            // CLASSES and funcdefs — that is what this method exists for, and
+            // the game takes `CGameCtnEditorFree` bare — but NOT to enums: a
+            // nested or namespaced enum needs its qualifier, and the game
+            // answers `Identifier 'EMenuOrder' is not a data type in global
+            // namespace`. Same for `Align` (`nvg::Align`) and `Cond`
+            // (`UI::Cond`), 436 names in all.
+            for candidate in ext.find_by_short_name(short) {
+                if !ext.key_is_source_enum(candidate) {
+                    return Some(candidate.clone());
+                }
             }
         }
         // Workspace fallback: scan for any type-kind symbol whose qualified
@@ -496,9 +573,23 @@ impl<'a> GlobalScope<'a> {
         let needle = format!("::{}", qualified);
         let short = qualified.rsplit("::").next()?;
 
+        // B056: the SOURCE name, not any trailing path. A trailing path
+        // accepted `Plot::Marker` against `UI::Plot::Marker`, and the game
+        // answers `Namespace 'Plot' doesn't exist.` — a Core namespace has to
+        // be written in full. The case this method exists for is unchanged,
+        // because dropping the Nadeo module IS the source name:
+        // `CGameEditorPluginMap::ECardinalDirections` still finds
+        // `Game::CGameEditorPluginMap::ECardinalDirections`.
         if let Some(ext) = self.external {
+            if let Some(key) = ext.source_name_key(qualified) {
+                return Some(key.to_string());
+            }
+            // As in `resolve_unqualified`: the trailing-path rescue survives
+            // for classes and funcdefs, and goes away for enums, where it
+            // accepted `Plot::Marker` against `UI::Plot::Marker` and the game
+            // answers `Namespace 'Plot' doesn't exist.`
             for candidate in ext.find_by_short_name(short) {
-                if candidate.ends_with(&needle) {
+                if candidate.ends_with(&needle) && !ext.key_is_source_enum(candidate) {
                     return Some(candidate.clone());
                 }
             }
@@ -1146,11 +1237,15 @@ impl<'a> GlobalScope<'a> {
     /// Canonical FQN for a type/enum name used in equality checks.
     /// Leaves the input unchanged when nothing in the index matches.
     pub fn canonicalize_type_name(&self, name: &str) -> String {
-        // Only an EXACT key is already canonical. `has_enum` is deliberately
-        // wider than that — it also answers for the module-stripped spelling
-        // the game wants and for a global enum behind a real scope's
-        // qualifier (B052) — and neither of those is the canonical key.
-        if self.has_type(name) || self.is_canonical_enum_key(name) {
+        // Only an EXACT key is already canonical. `has_type` and `has_enum`
+        // are both deliberately wider than that — since B056 they answer for
+        // the SOURCE spelling, which for a Nadeo entry is the key minus its
+        // module (`CGameCtnApp`, not `Game::CGameCtnApp`), and `has_enum`
+        // also answers for a global enum behind a real scope's qualifier
+        // (B052). None of those is the canonical key, so asking `has_type`
+        // here would canonicalize `CGameCtnApp` to itself and leave two
+        // spellings of one type unequal.
+        if self.is_canonical_type_key(name) || self.is_canonical_enum_key(name) {
             return name.to_string();
         }
         if let Some(key) = self.canonical_enum_key(name) {
@@ -1780,13 +1875,30 @@ mod tests {
             "an anonymous key must remain unresolved rather than canonicalized"
         );
 
+        // A NAMED nested enum, to show the anonymous filter is not what
+        // hides things here. B056 changed which SPELLING of it resolves: the
+        // index key carries the loader's synthetic `Game::` module, and the
+        // game answers `Namespace 'Game::CGameCtnBlock' doesn't exist.` for
+        // it (corpus row in `docs/probes/b052-qualified-enum-spellings.tsv`).
+        // The source spelling — the key minus its module — is what compiles,
+        // and this used to assert the opposite.
         let named = "Game::CGameCtnBlock::ECardinalDirections";
+        let source_spelling = "CGameCtnBlock::ECardinalDirections";
         assert!(index.lookup_source_enum(named).is_some());
-        assert!(scope.has_enum(named) && scope.resolves(named));
+        assert!(
+            !scope.has_enum(named) && !scope.resolves(named),
+            "the module-prefixed KEY is not a spelling the game accepts"
+        );
+        assert!(
+            scope.has_enum(source_spelling) && scope.resolves(source_spelling),
+            "the source spelling must resolve — the anonymous filter must not \
+             hide named enums"
+        );
         assert_eq!(
-            scope.canonicalize_type_name("CGameCtnBlock::ECardinalDirections"),
+            scope.canonicalize_type_name(source_spelling),
             named,
-            "the anonymous filter must not hide named enums"
+            "…and it must canonicalize back to the stored key, or two \
+             spellings of one enum compare unequal"
         );
         assert_eq!(
             scope.canonical_enum_key("CGameCtnBlock::ECardinalDirections"),
@@ -2823,6 +2935,114 @@ mod tests {
             scope.ambiguous_global_enum_value("JumpChain1").is_none(),
             "a class member is not a global"
         );
+    }
+
+    /// B056: a Nadeo MODULE name is a live AngelScript scope exactly when
+    /// Core also declares it as a namespace — with one recorded exception.
+    ///
+    /// Driven from the paired probes already committed in
+    /// `docs/probes/b052-qualified-enum-spellings.tsv`: every one of the 20
+    /// module names was submitted as `<Module>::ZZZNoSuchEnumName`, and the
+    /// compiler's two answers separate the cases cleanly.
+    ///
+    /// * `Namespace 'X' doesn't exist.` — not a scope. 16 of them.
+    /// * `Identifier ... is not a data type in namespace 'X' or parent` — it
+    ///   IS a scope. 4 of them: `Audio`, `Meta`, `Net`, `GameData`.
+    ///
+    /// Three of the four are Core namespaces, which is why `scope_exists`
+    /// already answers for them and why `Meta::ESceneCharVisNotice` resolves
+    /// while `Game::ESceneCharVisNotice` does not. `GameData` is the sole
+    /// exception: a live engine scope that neither shipped database records,
+    /// so this crate answers false for it and the corpus test excludes that
+    /// one row. See `UNEXPLAINED_ENGINE_SCOPES` in the resolver tests.
+    ///
+    /// The point of pinning it here is that the exception stays exactly one
+    /// name. If a second module name ever starts behaving this way, or if a
+    /// module name that is NOT a Core namespace starts answering true, this
+    /// goes red rather than quietly widening what a qualifier may be.
+    #[test]
+    fn a_module_name_is_a_scope_only_when_core_declares_it() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // The loader's own module names — the first segment of every Nadeo
+        // key — taken from the index rather than re-derived.
+        let modules: std::collections::HashSet<String> =
+            index.nadeo_module_names().into_iter().collect();
+        assert_eq!(
+            modules.len(),
+            20,
+            "fixture guard: the dump must carry its 20 module names"
+        );
+
+        // The paired-probe verdicts, read out of the committed corpus.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/probes/b052-qualified-enum-spellings.tsv");
+        let text = std::fs::read_to_string(&path).expect("the probe corpus must be committed");
+        let mut game_says_scope: Vec<String> = Vec::new();
+        let mut game_says_not: Vec<String> = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with('#')).skip(1) {
+            let mut cols = line.split('\t');
+            let spelling = cols.next().unwrap_or_default();
+            let _verdict = cols.next();
+            let message = cols.next().unwrap_or_default();
+            let Some(prefix) = spelling.strip_suffix("::ZZZNoSuchEnumName") else {
+                continue;
+            };
+            // MODULE names only. The corpus also pairs engine CLASS prefixes,
+            // which follow a different rule (B052: a class is a namespace iff
+            // it declares an enum) and are not what this test is about. Note
+            // in passing that `CMwNod` is a live game scope `scope_exists`
+            // answers false for — the same shape as `GameData`, in class
+            // position. No corpus row depends on it, so it stays an
+            // observation rather than a change.
+            if !modules.contains(prefix) {
+                continue;
+            }
+            if message.contains("doesn't exist") {
+                game_says_not.push(prefix.to_string());
+            } else if message.contains("is not a data type in namespace") {
+                game_says_scope.push(prefix.to_string());
+            }
+        }
+        assert_eq!(
+            game_says_scope.len() + game_says_not.len(),
+            20,
+            "fixture guard: all 20 module names must have a paired probe"
+        );
+        assert_eq!(
+            game_says_scope.len(),
+            4,
+            "exactly four module names are live scopes: Audio, Meta, Net, GameData"
+        );
+
+        for prefix in &game_says_not {
+            assert!(
+                !scope.scope_exists(prefix),
+                "the game answers `Namespace '{prefix}' doesn't exist.`, so it \
+                 must not qualify anything"
+            );
+        }
+        for prefix in &game_says_scope {
+            // `GameData` is the one scope neither database records. Keeping it
+            // false is a known, documented under-approximation, not a bug —
+            // and it must stay the ONLY one.
+            if prefix == "GameData" {
+                assert!(
+                    !scope.scope_exists(prefix),
+                    "`GameData` is not recorded by either DB; if this starts \
+                     answering true, the exclusion in the resolver's corpus \
+                     test is now wrong and must be removed"
+                );
+                continue;
+            }
+            assert!(
+                scope.scope_exists(prefix),
+                "the game treats `{prefix}` as a scope and Core declares it, \
+                 so `scope_exists` must agree"
+            );
+        }
     }
 
     /// B053: which enums are globally visible, pinned directly. The index

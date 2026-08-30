@@ -94,7 +94,7 @@ fn complete_namespace_members(
         return Vec::new();
     };
     index
-        .namespace_members(namespace)
+        .source_scope_members(namespace)
         .into_iter()
         .map(|name| make_item(&name, CompletionItemKind::FUNCTION))
         .collect()
@@ -328,9 +328,9 @@ fn complete_identifier(
         }
     }
 
-    // External top-level namespaces.
+    // External source-writable scopes.
     if let Some(index) = type_index {
-        for ns in index.namespaces() {
+        for ns in index.source_scopes() {
             items.push(make_item(&ns, CompletionItemKind::MODULE));
         }
     }
@@ -646,7 +646,7 @@ mod tests {
     fn namespace_completion_hides_anonymous_member_enum_key() {
         let idx = index_with_anonymous_member_enums();
 
-        let anonymous_src = "void f() { Control::CControlEntry:: }";
+        let anonymous_src = "void f() { CControlEntry:: }";
         let anonymous_items = complete(
             &crate::analysis::DocumentAnalysis::analyze_plain(anonymous_src),
             None,
@@ -662,7 +662,7 @@ mod tests {
             labels(&anonymous_items)
         );
 
-        let named_src = "void f() { Game::CGameCtnBlock:: }";
+        let named_src = "void f() { CGameCtnBlock:: }";
         let named_items = complete(
             &crate::analysis::DocumentAnalysis::analyze_plain(named_src),
             None,
@@ -676,6 +676,52 @@ mod tests {
             labels(&named_items).contains(&"ECardinalDirections"),
             "named enum must remain in completion: {:?}",
             labels(&named_items)
+        );
+    }
+
+    #[test]
+    fn synthetic_nadeo_modules_are_not_identifier_completions() {
+        let idx = index_with_anonymous_member_enums();
+        let src = "void f() { Ga }";
+        let items = complete(
+            &crate::analysis::DocumentAnalysis::analyze_plain(src),
+            None,
+            pos_after(src, "Ga"),
+            Some(&idx),
+            None,
+            &[],
+            false,
+        );
+        let labels = labels(&items);
+        // `Audio` and `Meta` are also genuine Core namespaces in this
+        // combined fixture, so their labels must remain. `Game` and `Scene`
+        // have no Core origin: seeing either proves the Nadeo storage module
+        // leaked through.
+        for synthetic in ["Game", "Scene"] {
+            assert!(
+                !labels.contains(&synthetic),
+                "synthetic Nadeo module {synthetic:?} leaked into completion: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn core_namespace_remains_an_identifier_completion() {
+        let idx = index_with_ui();
+        let src = "void f() { U }";
+        let items = complete(
+            &crate::analysis::DocumentAnalysis::analyze_plain(src),
+            None,
+            pos_after(src, "U"),
+            Some(&idx),
+            None,
+            &[],
+            false,
+        );
+        assert!(
+            labels(&items).contains(&"UI"),
+            "real Core namespace must remain in completion: {:?}",
+            labels(&items)
         );
     }
 

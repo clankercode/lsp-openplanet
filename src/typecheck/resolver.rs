@@ -262,6 +262,201 @@ mod tests {
         );
     }
 
+    /// The shipped type-DB fixtures, loaded as a `TypeIndex`.
+    fn typedb_fixture_index() -> crate::typedb::index::TypeIndex {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        crate::typedb::index::TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
+    /// `(spelling, verdict)` for every row of the committed B052 probe corpus.
+    fn b052_probe_corpus() -> Vec<(String, String)> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/probes/b052-qualified-enum-spellings.tsv");
+        let text = std::fs::read_to_string(&path).expect("the probe corpus must be committed");
+        text.lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .skip(1) // column header
+            .map(|l| {
+                let mut c = l.split('\t');
+                let spelling = c.next().expect("a spelling column").to_string();
+                let verdict = c.next().expect("a verdict column").to_string();
+                (spelling, verdict)
+            })
+            .collect()
+    }
+
+    /// Spellings the game ACCEPTED that are NOT engine facts, and so must not
+    /// be read as evidence about this crate. `docs/probes/README.md` explains
+    /// the asymmetry: a game REJECT is solid evidence about the engine, but a
+    /// game ACCEPT on an unrecognised prefix may only be an artefact of the
+    /// probing machine's installed plugins.
+    ///
+    /// Each of these compiled only because a plugin on that machine declares
+    /// the namespace — `MLFeedRaceData.op`, `vehicle-state-list-dev` and
+    /// friends — or, for `Foo`, because the probe plugin declared it itself.
+    /// A workspace with none of those installed must reject them, and does.
+    const PLUGIN_NAMESPACE_ARTEFACTS: [&str; 12] = [
+        "Foo::Bar::VirtualKey",
+        "Foo::ESceneCharVisNotice",
+        "Foo::VirtualKey",
+        "GameData::ESceneCharVisNotice",
+        "GameData::ESceneVehicleVisEvent",
+        "GameData::VirtualKey",
+        "MLFeed::VirtualKey",
+        "MLHook::VirtualKey",
+        "MathX::ESceneCharVisNotice",
+        "MathX::ESceneVehicleVisEvent",
+        "MathX::VirtualKey",
+        "VehicleState::VirtualKey",
+    ];
+
+    /// `GameData` is a live AngelScript scope that NEITHER shipped database
+    /// records, so this crate cannot know it is one.
+    ///
+    /// This is not a plugin artefact and was mislabelled as one when first
+    /// written. Nothing on the probing machine declares `namespace GameData`
+    /// — all 44 installed plugin entries, all 9 `.op` archives unzipped,
+    /// `DisabledPlugins`, `Scripts`, `Extract` and this repo's own fixture
+    /// plugins were searched, and the only file containing that string is
+    /// `Openplanet.h` itself.
+    ///
+    /// What the row actually is, is B052's ancestor walk working normally.
+    /// `EGameInventoryItemClass` is a globally visible enum — it is ACCEPTED
+    /// bare too — and it lives in the header's trailing `namespace Enums`,
+    /// not in `namespace GameData`. So it is not a member of that scope, it
+    /// is reached THROUGH it, exactly as `Meta::EPlugAnimGraphStateSelectCond`
+    /// is. The LSP resolves it the moment it believes `GameData` is a scope,
+    /// and refuses it otherwise. It refuses.
+    ///
+    /// The anomaly is `GameData` alone, and it is exactly one name. Pairing
+    /// `<Module>::ZZZNoSuchEnumName` over all 20 Nadeo module names in the
+    /// committed corpus splits them cleanly:
+    ///
+    /// * 4 answer `Identifier ... is not a data type in namespace 'X' or
+    ///   parent` — they ARE scopes: `Audio`, `Meta`, `Net`, `GameData`.
+    /// * 16 answer `Namespace 'X' doesn't exist.` — `Game`, `Scene`, `Plug`,
+    ///   `Hms`, `System`, `Control`, and the rest.
+    ///
+    /// And three of the four are fully explained: `Audio`, `Meta` and `Net`
+    /// are also real CORE namespaces, so `build_scope_index` already has
+    /// them and `scope_exists` answers true. `GameData` is not a Core
+    /// namespace — the Core DB declares 30 top-level namespaces and it is not
+    /// among them.
+    ///
+    /// So the rule for the other 19 is "a module name is a scope iff Core
+    /// declares it as one", and `GameData` is the single exception with no
+    /// evidence behind it in either DB.
+    ///
+    /// OPEN QUESTION, deliberately left open rather than guessed at: what
+    /// makes `GameData` a live scope when `Game`, `Hms`, `Plug` and `Scene`
+    /// are not? Nothing in the dump or the header distinguishes them — all
+    /// twenty are `ns` keys and all twenty have a `namespace X { }` block in
+    /// the header. Until that is known, excluding this row is the honest
+    /// call: the crate would have to hardcode `GameData` to match, and
+    /// hardcoding an engine fact nothing records is how this repo's earlier
+    /// wrong numbers were made.
+    const UNEXPLAINED_ENGINE_SCOPES: [&str; 1] = ["GameData::EGameInventoryItemClass"];
+
+    /// A pre-existing LEXER gap, not a resolution one: `string` is tokenised
+    /// as a keyword, so `string::X` never parses as a type expression at all.
+    /// Pinned so the gap stays visible; B052 recorded the same three.
+    const PARSER_GAP: [&str; 4] = [
+        "string::ESceneCharVisNotice",
+        "string::ESceneVehicleVisEvent",
+        "string::VirtualKey",
+        "string::ZZZNoSuchEnumName",
+    ];
+
+    /// B056: every qualified and bare TYPE spelling in the committed corpus,
+    /// resolved through the real `TypeResolver`, checked against the live
+    /// game's own verdict.
+    ///
+    /// `docs/probes/b052-qualified-enum-spellings.tsv` is the compiler's
+    /// verbatim answer for 1901 spellings submitted as `<spelling> v;`
+    /// (RemoteBuild, Trackmania + Openplanet 1.29.5, 2026-08-30). This drives
+    /// the same shape — a top-level type reference with an empty namespace
+    /// stack — so it exercises `resolves`, the namespace walk and the
+    /// `resolve_unqualified` / `resolve_qualified_suffix` fallbacks exactly as
+    /// the checker does, rather than re-implementing the rule in the test.
+    ///
+    /// The rule the corpus supports, and the one implemented:
+    ///
+    /// * a type or enum has a SOURCE NAME — for Nadeo, its index key minus
+    ///   the loader's synthetic leading module segment; for Core, its key in
+    ///   full; for a header enum, its bare name — and a spelling is accepted
+    ///   when it equals that name;
+    /// * or `P::T` where P is a REAL scope and T is a globally visible enum,
+    ///   which is AngelScript's ancestor walk (B052, already landed).
+    ///
+    /// The asymmetry is the part that is easy to get wrong in either
+    /// direction: `CGameCtnBlock::ECardinalDirections` is ACCEPTED while
+    /// `Game::CGameCtnBlock::ECardinalDirections` is REJECTED, and
+    /// `UI::Plot::Axis` is ACCEPTED while `Plot::Axis` is REJECTED. A rule
+    /// phrased as "drop leading segments" gets the second pair wrong; one
+    /// phrased as "require the whole key" gets the first pair wrong.
+    #[test]
+    fn every_probed_type_spelling_matches_the_games_verdict() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let corpus = b052_probe_corpus();
+        assert_eq!(
+            corpus.len(),
+            1901,
+            "the probe corpus changed size — re-probe the game before \
+             touching this rule"
+        );
+
+        let mut wrong: Vec<String> = Vec::new();
+        for (spelling, verdict) in &corpus {
+            if PARSER_GAP.contains(&spelling.as_str()) {
+                continue;
+            }
+            // An empty workspace has none of the probing machine's plugins,
+            // so these must be rejected here even though the game took them.
+            let expected_resolves = if PLUGIN_NAMESPACE_ARTEFACTS.contains(&spelling.as_str())
+                || UNEXPLAINED_ENGINE_SCOPES.contains(&spelling.as_str())
+            {
+                false
+            } else {
+                verdict == "ACCEPTED"
+            };
+
+            let tokens = tokenize_filtered(spelling);
+            let mut parser = Parser::new(&tokens, spelling);
+            let Ok(ty) = parser.parse_type_expr() else {
+                wrong.push(format!("{spelling} (did not parse)"));
+                continue;
+            };
+            let mut r = TypeResolver::new(&scope, spelling);
+            let _ = r.resolve(&ty);
+            let resolved = r.take_diagnostics().is_empty();
+
+            if resolved != expected_resolves {
+                let direction = if resolved {
+                    "accepted, game REJECTS"
+                } else {
+                    "rejected, game ACCEPTS"
+                };
+                wrong.push(format!("{spelling} [{verdict}] {direction}"));
+            }
+        }
+
+        assert!(
+            wrong.is_empty(),
+            "{} of {} probed spellings disagree with the game: {:#?}",
+            wrong.len(),
+            corpus.len(),
+            &wrong[..wrong.len().min(30)]
+        );
+    }
+
     #[test]
     fn resolve_primitive_int() {
         let source = "int";

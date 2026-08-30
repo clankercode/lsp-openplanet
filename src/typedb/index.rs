@@ -34,6 +34,24 @@ pub struct TypeIndex {
     /// see [`Self::global_enum_value_owners`] for what "globally visible"
     /// means and why the names, not the keys, are what get counted.
     global_enum_values: HashMap<String, Vec<String>>,
+    /// Bare enum name → index key, for every GLOBALLY VISIBLE enum (B056).
+    ///
+    /// These are the enums AngelScript's ancestor walk can reach from any
+    /// real scope, so this is the set `P::T` is checked against once `P` is
+    /// known to be a scope. A globally visible enum's source name is bare by
+    /// construction — that equivalence is pinned by
+    /// `a_globally_visible_enum_is_exactly_one_with_a_bare_source_name`.
+    global_enum_names: HashMap<String, String>,
+    /// SOURCE NAME → index key, for every source-writable type, enum and
+    /// funcdef (B056). The source name is the spelling the GAME accepts,
+    /// which is not the index key: see [`Self::source_name_of`].
+    ///
+    /// One source name can own several keys — the loader keys one engine
+    /// enum under several modules, so `Hms::EHmsLightMapQuality` and
+    /// `MetaNotPersistent::EHmsLightMapQuality` both reduce to
+    /// `EHmsLightMapQuality`. The lexicographically first key wins, matching
+    /// `build_short_type_index`, so the mapping is deterministic.
+    source_names: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +264,8 @@ impl Default for TypeIndex {
             short_type_index: HashMap::new(),
             scopes: HashSet::new(),
             global_enum_values: HashMap::new(),
+            global_enum_names: HashMap::new(),
+            source_names: HashMap::new(),
         }
     }
 }
@@ -343,6 +363,7 @@ impl TypeIndex {
         }
         self.build_scope_index();
         self.build_global_enum_value_index();
+        self.build_source_name_index();
     }
 
     /// Rebuild [`Self::scopes`] — every namespace-like scope the GAME has.
@@ -485,13 +506,25 @@ impl TypeIndex {
     ///  ≥2 owners → `Found multiple matching enum values` (22 names)
     fn build_global_enum_value_index(&mut self) {
         self.global_enum_values.clear();
-        for (qname, info) in &self.enums {
+        self.global_enum_names.clear();
+        let mut keys: Vec<&String> = self.enums.keys().collect();
+        keys.sort();
+        let ordered: Vec<String> = keys.into_iter().cloned().collect();
+        for qname in &ordered {
+            let info = &self.enums[qname];
             if !Self::enum_is_global(qname, info) {
                 continue;
             }
             let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
-            for (value, _) in &info.values {
-                let owners = self.global_enum_values.entry(value.clone()).or_default();
+            // Deterministic on collision, like `build_short_type_index`: the
+            // loader keys one engine enum under several modules, so
+            // `Hms::EHmsLightMapQuality` and
+            // `MetaNotPersistent::EHmsLightMapQuality` are one enum.
+            self.global_enum_names
+                .entry(name.clone())
+                .or_insert_with(|| qname.clone());
+            for (value, _) in info.values.clone() {
+                let owners = self.global_enum_values.entry(value).or_default();
                 if !owners.contains(&name) {
                     owners.push(name.clone());
                 }
@@ -500,6 +533,158 @@ impl TypeIndex {
         for owners in self.global_enum_values.values_mut() {
             owners.sort();
         }
+    }
+
+    /// The spelling SOURCE must use for the entry keyed `qname` (B056), or
+    /// `None` when the key is not source-writable at all.
+    ///
+    /// The index key is not the game's name for a type, and the difference is
+    /// asymmetric by origin — which is the whole reason this is a function
+    /// branching on [`TypeSource`] rather than segment arithmetic:
+    ///
+    /// * **Nadeo.** The dump is keyed `Module::Rest`, and the module —
+    ///   `Game`, `Scene`, `Plug`, `Audio`, … — is this crate's invention. The
+    ///   game has no such namespace and says so, so the module is DROPPED:
+    ///   `Audio::CAudioScriptManager::ELibSound` is written
+    ///   `CAudioScriptManager::ELibSound`, and
+    ///   `Meta::NPlugAnim::EExtractMotionMode` is written
+    ///   `NPlugAnim::EExtractMotionMode`.
+    /// * **Core.** The namespace is real and must be written in FULL:
+    ///   `UI::ButtonFlags`, `nvg::Align`, `UI::Plot::Marker`. Dropping a
+    ///   segment here is exactly the bug — the game answers `Namespace 'Plot'
+    ///   doesn't exist.` for `Plot::Marker`.
+    /// * **Header.** `Openplanet.h` module-level enums (B046) are keyed by
+    ///   their bare name already, with no namespace, and the game takes them
+    ///   bare and rejects every qualifier. They get their own arm rather than
+    ///   falling through the Nadeo one: a single-segment key sent through
+    ///   "drop the leading module" would yield the empty string.
+    ///
+    /// Every one of those spellings is a recorded game verdict in
+    /// `docs/probes/b052-qualified-enum-spellings.tsv`, both directions.
+    fn source_name_of(qname: &str, source: TypeSource) -> Option<String> {
+        match source {
+            TypeSource::Core => Some(qname.to_string()),
+            TypeSource::Header => {
+                // Keyed bare by construction (B046). Never route this through
+                // the Nadeo arm.
+                debug_assert!(
+                    !qname.contains("::"),
+                    "a header entry must be keyed by its bare name, got `{qname}`"
+                );
+                Some(qname.to_string())
+            }
+            TypeSource::Nadeo => {
+                let (module, rest) = qname.split_once("::")?;
+                // A key with no module is not a shape the dump produces; if
+                // one ever appears, dropping its only segment would leave
+                // nothing, so refuse rather than invent an empty name.
+                if module.is_empty() || rest.is_empty() {
+                    return None;
+                }
+                Some(rest.to_string())
+            }
+        }
+    }
+
+    /// Rebuild [`Self::source_names`].
+    ///
+    /// Anonymous enums are excluded for the same reason they are excluded
+    /// from `build_short_type_index`: their key is synthesized from the
+    /// declaring context and names nothing source can write.
+    fn build_source_name_index(&mut self) {
+        self.source_names.clear();
+        let mut entries: Vec<(String, TypeSource)> = self
+            .types
+            .iter()
+            .map(|(k, i)| (k.clone(), i.source))
+            .chain(
+                self.enums
+                    .iter()
+                    .filter(|(_, i)| !i.anonymous)
+                    .map(|(k, i)| (k.clone(), i.source)),
+            )
+            .chain(self.funcdefs.iter().map(|(k, i)| (k.clone(), i.source)))
+            .collect();
+        // Sorted so a source name owned by several keys resolves to the
+        // lexicographically first, exactly as `build_short_type_index` does.
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (qname, source) in entries {
+            if let Some(name) = Self::source_name_of(&qname, source) {
+                self.source_names.entry(name).or_insert(qname);
+            }
+        }
+    }
+
+    /// B056: the index key of the GLOBALLY VISIBLE enum named `name`, or
+    /// `None` when no globally visible enum answers to it.
+    ///
+    /// This is the second half of AngelScript's `P::T` rule (B052): once `P`
+    /// is known to be a real scope, the walk out to the global namespace
+    /// finds `T` exactly when `T` is one of these.
+    pub fn global_enum_key(&self, name: &str) -> Option<&str> {
+        self.global_enum_names.get(name).map(|s| s.as_str())
+    }
+
+    /// B056: is `spelling` an index key that is ALSO its own source name?
+    ///
+    /// True for a Core entry, whose namespace is real and whose key the game
+    /// accepts verbatim (`UI::Cond`, `Reflection::MwClassInfo`), and for a
+    /// header enum. False for every Nadeo key, because the key carries the
+    /// loader's synthetic module and the game has no such namespace.
+    ///
+    /// This is the NARROWING half on its own, and `has_type` wants exactly
+    /// it: a bare Nadeo class name like `CGameCtnApp` is a real spelling, but
+    /// it reaches the resolver through `resolve_unqualified`'s short-name
+    /// rescue, not through here. Widening `has_type` to source names instead
+    /// would admit `Bool`, `Real`, `Int8` and the rest of `MwFoundations`,
+    /// which the dump carries but AngelScript never registers — the game
+    /// answers `No matching symbol 'Bool'`, not `Expression 'Bool' is a data
+    /// type` as it does for a type it really has.
+    pub fn spelling_is_source_name(&self, spelling: &str) -> bool {
+        self.source_names.get(spelling).map(|k| k.as_str()) == Some(spelling)
+    }
+
+    /// B056: is the entry keyed `qname` an ENUM? Used by the resolver's
+    /// short-name rescues, which narrow for enums and leave classes alone.
+    pub fn key_is_source_enum(&self, qname: &str) -> bool {
+        self.lookup_source_enum(qname).is_some()
+    }
+
+    /// B056: the index key for the source spelling `spelling`, or `None` when
+    /// no source-writable entry answers to it.
+    ///
+    /// This is the lookup a qualified TYPE reference goes through. It is not
+    /// [`Self::lookup_type`] / [`Self::lookup_source_enum`], which take an
+    /// index KEY and stay the right call for data access once a name has
+    /// already resolved.
+    pub fn source_name_key(&self, spelling: &str) -> Option<&str> {
+        self.source_names.get(spelling).map(|s| s.as_str())
+    }
+
+    /// Every exact source spelling accepted by [`Self::source_name_key`], in
+    /// deterministic order. Unlike [`Self::all_short_names`], these are
+    /// complete spellings: a nested Nadeo enum is
+    /// `CGameMenu::EMenuOrder`, never the rejected bare `EMenuOrder`, while a
+    /// Core name keeps its full real namespace and a header enum stays bare.
+    pub fn source_spellings(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.source_names.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Resolve a source-written type reference to its storage key.
+    ///
+    /// In addition to exact source names, this preserves B052's AngelScript
+    /// ancestor walk: `P::T` can name a globally visible enum `T` when `P` is
+    /// a real source scope. Synthetic Nadeo modules never pass that gate.
+    pub fn source_reference_key(&self, spelling: &str) -> Option<&str> {
+        if let Some(key) = self.source_name_key(spelling) {
+            return Some(key);
+        }
+        let (scope, name) = spelling.rsplit_once("::")?;
+        self.scope_exists(scope)
+            .then(|| self.global_enum_key(name))
+            .flatten()
     }
 
     /// B053: the globally visible enums that carry the bare value name
@@ -521,6 +706,55 @@ impl TypeIndex {
     /// module names precisely because the index keys them that way.
     pub fn scope_exists(&self, path: &str) -> bool {
         self.scopes.contains(path)
+    }
+
+    /// Every real source scope, in deterministic order. This is the
+    /// completion-facing counterpart to [`Self::scope_exists`]: Core
+    /// namespaces and Nadeo enum-declaring class scopes are included, while
+    /// loader-only modules such as `Game`, `Scene` and `Audio` are not.
+    pub fn source_scopes(&self) -> Vec<String> {
+        let mut scopes: Vec<String> = self.scopes.iter().cloned().collect();
+        scopes.sort();
+        scopes
+    }
+
+    /// Direct source-writable members of a real scope, in deterministic
+    /// order. Names are derived from the same origin-aware spellings used by
+    /// the resolver, so storage prefixes cannot leak into editor output.
+    pub fn source_scope_members(&self, scope: &str) -> Vec<String> {
+        if !self.scope_exists(scope) {
+            return Vec::new();
+        }
+
+        let prefix = format!("{}::", scope);
+        let mut members = BTreeSet::new();
+        for spelling in self.source_names.keys() {
+            if let Some(rest) = spelling.strip_prefix(&prefix) {
+                if !rest.contains("::") {
+                    members.insert(rest.to_string());
+                }
+            }
+        }
+        for (qname, overloads) in &self.functions {
+            for info in overloads {
+                let Some(spelling) = Self::source_name_of(qname, info.source) else {
+                    continue;
+                };
+                if let Some(rest) = spelling.strip_prefix(&prefix) {
+                    if !rest.contains("::") {
+                        members.insert(rest.to_string());
+                    }
+                }
+            }
+        }
+        for nested in &self.scopes {
+            if let Some(rest) = nested.strip_prefix(&prefix) {
+                if !rest.contains("::") {
+                    members.insert(rest.to_string());
+                }
+            }
+        }
+        members.into_iter().collect()
     }
 
     /// The fully qualified enum key `qualified` is a genuine trailing PATH
@@ -557,8 +791,12 @@ impl TypeIndex {
 
     /// Return every short name registered in the type/enum short-name index.
     ///
-    /// Used by "did you mean" quick-fixes to enumerate known external type and
-    /// enum names for distance comparisons. Does not include global functions.
+    /// NOT a list of spellings source may use — a short name is frequently one
+    /// the game rejects (`EMenuOrder`, `ButtonFlags`). "Did you mean" used to
+    /// draw its candidates from here and so suggested names the resolver then
+    /// flagged; it reads [`Self::source_spellings`] now (B056). What remains
+    /// is index-consistency checking, where the point is precisely to observe
+    /// the raw bucket. Does not include global functions.
     pub fn all_short_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.short_type_index.keys().cloned().collect();
         names.sort();
@@ -716,6 +954,14 @@ impl TypeIndex {
                 },
             );
         }
+        // Rebuild the derived indexes, exactly as `add_nadeo` does. `load`
+        // calls this first and `add_nadeo` second, so this used to be
+        // redundant there and absent everywhere else — an index built from
+        // Core alone had an empty short-name index, no scopes, no global enum
+        // tables and (B056) no source names, so nothing resolved through any
+        // of them. Harmless while every source-facing lookup read `types` and
+        // `enums` directly; a silent footgun once they did not.
+        self.build_short_type_index();
     }
 
     fn add_nadeo(&mut self, db: &NadeoDatabase) {
@@ -989,6 +1235,16 @@ impl TypeIndex {
         self.functions.get(qualified_name).map(|v| v.as_slice())
     }
 
+    /// Look up a free function by its source spelling rather than its
+    /// storage key. All overloads under one key share an origin.
+    pub fn lookup_source_function(&self, spelling: &str) -> Option<&[FunctionInfo]> {
+        let overloads = self.lookup_function(spelling)?;
+        overloads
+            .iter()
+            .any(|info| Self::source_name_of(spelling, info.source).as_deref() == Some(spelling))
+            .then_some(overloads)
+    }
+
     pub fn lookup_enum(&self, qualified_name: &str) -> Option<&EnumInfo> {
         self.enums.get(qualified_name)
     }
@@ -1032,6 +1288,33 @@ impl TypeIndex {
     /// `CoroutineFunc`).
     pub fn lookup_funcdef(&self, qualified_name: &str) -> Option<&FuncdefInfo> {
         self.funcdefs.get(qualified_name)
+    }
+
+    /// The synthetic MODULE names the Nadeo loader keys its entries under
+    /// (`Game`, `Scene`, `Audio`, …), sorted.
+    ///
+    /// These are this crate's own invention, not namespaces the game has —
+    /// which is the whole subject of B056. Exposed because whether a given
+    /// module name is nonetheless a live AngelScript scope is a question the
+    /// probe corpus answers and a test pins; see
+    /// `global_scope::tests::a_module_name_is_a_scope_only_when_core_declares_it`.
+    pub fn nadeo_module_names(&self) -> Vec<String> {
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (key, info) in &self.types {
+            if info.source == TypeSource::Nadeo {
+                if let Some((module, _)) = key.split_once("::") {
+                    names.insert(module.to_string());
+                }
+            }
+        }
+        for (key, info) in &self.enums {
+            if info.source == TypeSource::Nadeo {
+                if let Some((module, _)) = key.split_once("::") {
+                    names.insert(module.to_string());
+                }
+            }
+        }
+        names.into_iter().collect()
     }
 
     /// Iterate all known enums by qualified name.
@@ -1654,6 +1937,117 @@ mod tests {
 
     fn next_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb/OpenplanetNext.json")
+    }
+
+    /// B056: the invariant `global_enum_names` is named for, checked both
+    /// ways over the whole shipped DB.
+    ///
+    /// A globally visible enum is EXACTLY one whose source name is bare. That
+    /// is not a coincidence — it is the same fact stated twice, once by
+    /// `enum_is_global` and once by `source_name_of` — and the two are
+    /// computed by separate code that could drift apart. If it ever does, the
+    /// ancestor walk starts answering for enums that need a qualifier, or
+    /// stops answering for ones that do not.
+    #[test]
+    fn a_globally_visible_enum_is_exactly_one_with_a_bare_source_name() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+        let mut global = 0usize;
+        let mut bare = 0usize;
+        for (qname, info) in index.enums_iter() {
+            if info.anonymous {
+                continue;
+            }
+            let is_global = TypeIndex::enum_is_global(qname, info);
+            let source_is_bare =
+                TypeIndex::source_name_of(qname, info.source).is_some_and(|n| !n.contains("::"));
+            assert_eq!(
+                is_global,
+                source_is_bare,
+                "`{qname}` ({:?}): globally visible = {is_global}, but its \
+                 source name is {}bare",
+                info.source,
+                if source_is_bare { "" } else { "not " }
+            );
+            if is_global {
+                global += 1;
+                assert!(
+                    index.global_enum_key(&info.name).is_some(),
+                    "`{qname}` is globally visible, so its bare name must be \
+                     reachable through `global_enum_key`"
+                );
+            }
+            if source_is_bare {
+                bare += 1;
+            }
+        }
+        assert_eq!(global, bare);
+        assert!(
+            global > 50,
+            "fixture guard: the shipped DB must carry a real global set, got {global}"
+        );
+    }
+
+    /// B056: the source name follows the entry's ORIGIN, not the shape of its
+    /// key. Both are pinned at every depth the shipped DB actually has,
+    /// because segment arithmetic alone cannot tell these apart — a Core key
+    /// and a Nadeo key of the same length want opposite treatment.
+    ///
+    /// Every pair below is a recorded game verdict in
+    /// `docs/probes/b052-qualified-enum-spellings.tsv`, both directions.
+    #[test]
+    fn a_source_name_follows_the_origin_not_the_key_shape() {
+        let index = TypeIndex::load(&core_path(), &next_path()).unwrap();
+
+        for (key, source_name) in [
+            // Nadeo: the module is dropped, at every depth it occurs.
+            ("Game::CGameCtnApp", "CGameCtnApp"),
+            ("Game::CGameMenu::EMenuOrder", "CGameMenu::EMenuOrder"),
+            (
+                "Meta::NPlugAnim::EExtractMotionMode",
+                "NPlugAnim::EExtractMotionMode",
+            ),
+            (
+                "Meta::EPlugAnimGraphStateSelectCond",
+                "EPlugAnimGraphStateSelectCond",
+            ),
+            // Core: the namespace is real and survives whole. Note
+            // `UI::Plot::Marker` is three segments, exactly like the Nadeo
+            // nested case above, and wants the opposite answer.
+            ("UI::ButtonFlags", "UI::ButtonFlags"),
+            ("nvg::Align", "nvg::Align"),
+            ("UI::Plot::Marker", "UI::Plot::Marker"),
+            // Header: bare, and it must not travel through the Nadeo arm,
+            // where a single-segment key would reduce to the empty string.
+            ("ESceneCharVisNotice", "ESceneCharVisNotice"),
+            ("ESceneVehicleVisEvent", "ESceneVehicleVisEvent"),
+        ] {
+            assert!(
+                index.lookup_source_enum(key).is_some() || index.lookup_type(key).is_some(),
+                "fixture guard: `{key}` must be indexed"
+            );
+            assert_eq!(
+                index.source_name_key(source_name),
+                Some(key),
+                "`{source_name}` must be the source spelling of `{key}`"
+            );
+            if key != source_name {
+                assert!(
+                    !index.spelling_is_source_name(key),
+                    "`{key}` is the loader's key, not a spelling the game takes"
+                );
+            }
+        }
+
+        // The empty-name trap, stated directly: no source name is empty, and
+        // none of them still carries a leading module.
+        for (qname, info) in index.enums_iter() {
+            if info.anonymous {
+                continue;
+            }
+            let name = TypeIndex::source_name_of(qname, info.source)
+                .unwrap_or_else(|| panic!("`{qname}` must have a source name"));
+            assert!(!name.is_empty(), "`{qname}` reduced to an empty name");
+        }
     }
 
     #[test]

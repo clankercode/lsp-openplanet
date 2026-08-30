@@ -4204,6 +4204,161 @@ fn check_command_issue_repro_b057_workspace_declarations_win() {
     );
 }
 
+/// B056: a type or enum answers to its SOURCE NAME and to nothing else.
+///
+/// The index key is not the game's name for a type. openplanet-lsp accepted
+/// the key, so `Game::CGameCtnApp` resolved where the game answers `Namespace
+/// 'Game' doesn't exist.`; it also accepted any trailing path, so
+/// `Plot::Marker` resolved against `UI::Plot::Marker`; and it rescued any bare
+/// short name, so `EMenuOrder` resolved. 1012 spellings the game rejects,
+/// accepted in silence.
+///
+/// The rule is ONE rule, and it is asymmetric by origin — which is what makes
+/// it easy to get wrong in both directions at once. A NADEO key loses its
+/// synthetic module (`CGameMenu::EMenuOrder`); a CORE key keeps its namespace
+/// in full (`UI::Plot::Marker`); a HEADER enum is bare. "Drop leading
+/// segments" breaks the second, "require the whole key" breaks the first, and
+/// both spellings are recorded game verdicts pointing opposite ways.
+///
+/// Ground truth: 1901 spellings submitted individually (RemoteBuild, OP
+/// 1.29.5, 2026-08-30), committed at
+/// `docs/probes/b052-qualified-enum-spellings.tsv`, and checked row by row
+/// through the real resolver by
+/// `resolver::tests::every_probed_type_spelling_matches_the_games_verdict`.
+///
+/// This fixture then went to the game as ONE plugin and produced exactly 16
+/// errors, on exactly the lines and columns asserted below — seven `Namespace
+/// 'X' doesn't exist.`, three more for `Plot`, and six `Identifier 'X' is not
+/// a data type in global namespace`. All six accepted sections compiled clean.
+#[test]
+fn check_command_issue_repro_b056_source_name_spellings() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b056-source-name-spellings");
+
+    let unknown: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("unknown type"))
+        .collect();
+    assert_eq!(
+        unknown.len(),
+        16,
+        "every spelling the game rejects must be diagnosed; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+
+    for rejected in [
+        // A Nadeo key written with the loader's synthetic module.
+        "Game::CGameCtnApp",
+        "Game::CGameMenu",
+        "Game::CGameMenu::EMenuOrder",
+        "Audio::CAudioScriptManager::ELibSound",
+        "Meta::NPlugAnim::EExtractMotionMode",
+        "Scene::ESceneCharVisNotice",
+        "Enums::ESceneCharVisNotice",
+        // A Core key with a segment dropped — the mirror image.
+        "Plot::Marker",
+        "Plot::Axis",
+        "Plot::Cond",
+        // A non-global enum written bare.
+        "EMenuOrder",
+        "EExtractMotionMode",
+        "ECardinalDirections",
+        "ButtonFlags",
+        "Cond",
+        "Align",
+    ] {
+        let quoted = format!("`{rejected}`");
+        assert!(
+            unknown.iter().any(|l| l.contains(&quoted)),
+            "the game rejects `{rejected}`; it must be diagnosed; \
+             stdout={stdout:?}"
+        );
+    }
+
+    // The fence, and the direction that matters: these compile in-game, so
+    // diagnosing one would be a false POSITIVE.
+    for accepted in [
+        // Nadeo source names — the module dropped, nothing else.
+        "CGameCtnApp",
+        "CGameMenu::EMenuOrder",
+        "CAudioScriptManager::ELibSound",
+        "NPlugAnim::EExtractMotionMode",
+        "CGameCtnBlock::ECardinalDirections",
+        // Core source names — the namespace in full.
+        "UI::ButtonFlags",
+        "UI::Cond",
+        "nvg::Align",
+        "UI::Plot::Marker",
+        "UI::Plot::Axis",
+        // Header enums, bare.
+        "ESceneCharVisNotice",
+        "ESceneVehicleVisEvent",
+        // B052's ancestor walk, untouched by this ticket.
+        "UI::VirtualKey",
+        "CGameMenu::VirtualKey",
+        "Meta::EPlugAnimGraphStateSelectCond",
+        "Meta::ESceneCharVisNotice",
+    ] {
+        // Backticked and terminated: an unanchored substring would let the
+        // rejected `Game::CGameMenu` satisfy a check for `CGameMenu`, and let
+        // `Plot::Axis` satisfy one for `UI::Plot::Axis`.
+        let quoted = format!("`{accepted}`");
+        assert!(
+            !unknown.iter().any(|l| l.contains(&quoted)),
+            "the game accepts `{accepted}`; diagnosing it would be a false \
+             positive; stdout={stdout:?}"
+        );
+    }
+
+    assert!(
+        stdout.contains("16 diagnostics (16 errors)"),
+        "the 16 rejects and nothing else — no warning, no second diagnostic \
+         on the same line; stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+/// B056, second half: the plugin's own names win, and so does a class member.
+///
+/// Both names were found by auditing the shipping plugins in
+/// `tests/fixtures/tm-*` against all 436 bare names the narrowing rejects.
+/// Eleven of those names occur there; nine are string literals, member
+/// accesses or a loop variable. These two are real code:
+///
+/// * `Axis` — `tm-editor-plus-plus` declares `enum Axis` and uses it 67
+///   times. The engine's `UI::Plot::Axis` is rejected bare, so the WORKSPACE
+///   declaration has to win or 67 lines of a shipping plugin light up.
+/// * `WindowFlags` — `tm-archivist` and `tm-editor-plus-plus` both write
+///   `UI::Begin(name, open, WindowFlags)` against their own
+///   `int get_WindowFlags()`, declared in 13 files. The CLASS MEMBER has to
+///   win.
+///
+/// Note what `WindowFlags` actually guards. The corpus verdict is about TYPE
+/// position (`is not a data type`); this use is a VALUE read. B056 narrows
+/// type-position resolution only, so a correctly scoped change never sees it.
+/// If this goes red, the change leaked into value position — the rule is not
+/// what is wrong.
+///
+/// Game ground truth (RemoteBuild, OP 1.29.5, 2026-08-30): compiled with zero
+/// diagnostics.
+#[test]
+fn check_command_issue_repro_b056_workspace_names_win() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b056-source-name-workspace");
+
+    for name in ["Axis", "WindowFlags"] {
+        let quoted = format!("`{name}`");
+        assert!(
+            !stdout.contains(&quoted),
+            "`{name}` is declared by the plugin itself and the game compiles \
+             it; any diagnostic naming it is a false positive; \
+             stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+    assert!(
+        stdout.contains("0 diagnostics"),
+        "the game compiled this clean, so the LSP must too; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
 /// B046: the header is OPTIONAL. An install with no `Openplanet.h` must still
 /// load its type DB and check cleanly — the module-level enums simply stay
 /// unknown, exactly as before B046. Without this, a user whose install lacks
