@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-30T06:42:21Z"
 depends_on: []
 estimate_hours: 1
 id: B065
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Test helpers leak temp dirs: b017, b019 and defines suites never clean up'
@@ -24,3 +26,57 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found 2026-08-30 while gating B039, whose own fixture leak was fixed there.
+
+## Defect
+
+Several test helpers build a temp dir keyed on `std::process::id()` and call
+`remove_dir_all` only at the START of the run, never at the end. Each run uses
+a fresh PID, so every invocation leaves its dirs behind forever.
+
+Measured on this machine after B039's own leak was fixed: **24 stray
+`/tmp/oplsp-*` dirs**, some over nine hours old —
+
+    13  oplsp-b017-*
+     6  oplsp-b019-*
+     4  oplsp-defines-*
+     1  oplsp-ucbad-*
+
+and **0** `oplsp-b039-*`, which is the point: B039 fixed its own and the
+others were left.
+
+## Why it is worth a ticket
+
+Small in bytes (~100 MB accumulated) but this batch lost real time to /tmp
+exhaustion twice, and a full /tmp does not fail cleanly here — it produced 44
+spurious `StorageFull` test failures in one lane and silently LOST another
+lane's command output. A suite that litters on every invocation contributes to
+a failure mode that costs far more than the disk does.
+
+## Work
+
+Copy the fix B039 already landed: a `Fixture` struct with a `Drop` impl that
+removes its base dir, so cleanup happens on the unwind path too — a test that
+panics is exactly when the dir gets left behind today.
+
+Find the helpers by grepping `temp_dir()` in `tests/`. Do not just delete the
+accumulated dirs; that is the symptom.
+
+## Test plan
+
+Verify by MEASUREMENT, not inspection, the way B039 did: count
+`/tmp/oplsp-*` before and after two consecutive full runs and assert it does
+not grow. A code review of a `Drop` impl cannot tell you it actually fires on
+the paths that matter.
+
+Variants:
+- a test that PANICS still cleans up (the unwind path is the whole point)
+- two concurrent runs do not delete each other's dirs
+- `just test-hermetic`, which runs binaries directly under an isolated env,
+  also cleans up
+
+## Related
+
+B039 (fixed the same defect in `tests/execute_command_tests.rs`; copy that
+`Drop` guard), B045 (hermeticity gate — these helpers run under it too).
