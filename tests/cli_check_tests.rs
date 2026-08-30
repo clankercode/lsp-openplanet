@@ -4164,6 +4164,46 @@ fn check_command_issue_repro_b057_nonglobal_enum_value_names() {
     );
 }
 
+/// B057, second half: a plugin's OWN declaration of a rejected name wins.
+///
+/// The false-POSITIVE direction, which is the damaging one for this tool. The
+/// narrowing runs LAST in `has_global_ident`, after the type, function,
+/// virtual-property, workspace-variable and workspace-enum-value lookups, so a
+/// plugin that declares one of the 2373 names for itself must keep it.
+///
+/// This needs its own plugin: declaring `North` inside
+/// `b057-nonglobal-enum-value-names` would make the statement that fixture
+/// asserts an error on resolve. Same split as B053's `-workspace` companion.
+///
+/// All four names are real collisions from
+/// `docs/probes/b053-bare-enum-values.tsv` and the game rejects all four bare
+/// when nothing declares them, so a merge-base binary cannot pass this by
+/// accident — it passes for the wrong reason there, and this fixture is the
+/// one that would go red if the narrowing were placed before the workspace
+/// lookups instead of after.
+///
+/// Game ground truth (RemoteBuild, OP 1.29.5, 2026-08-30): compiled with zero
+/// diagnostics.
+#[test]
+fn check_command_issue_repro_b057_workspace_declarations_win() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b057-nonglobal-enum-values-workspace");
+
+    for name in ["North", "VCenter2", "Once", "Appearing"] {
+        let quoted = format!("`{name}`");
+        assert!(
+            !stdout.contains(&quoted),
+            "the plugin declares `{name}` itself and the game compiles it; \
+             any diagnostic naming it is a false positive; \
+             stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+    assert!(
+        stdout.contains("0 diagnostics"),
+        "the game compiled this clean, so the LSP must too; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
 /// B046: the header is OPTIONAL. An install with no `Openplanet.h` must still
 /// load its type DB and check cleanly — the module-level enums simply stay
 /// unknown, exactly as before B046. Without this, a user whose install lacks
