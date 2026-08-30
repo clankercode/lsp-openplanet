@@ -406,9 +406,9 @@ const READ_ATTEMPTS: usize = 3;
 /// process, so this needs no concurrency in the LSP at all.
 ///
 /// The point is what the caller can no longer receive: an index built from two
-/// different generations of the dump is not a value this function can return.
-/// It yields a set that provably did not move while it was being read, or an
-/// error saying so.
+/// different observed generations of the dump is not a value this function can
+/// return. It yields a set whose observed file identities stayed stable while
+/// it was being read, or an error saying so.
 ///
 /// `between` is called after each read; see [`TypeIndex::load_instrumented`].
 fn read_db_files(
