@@ -144,3 +144,39 @@ That test is more valuable than any individual name assertion here.
 
 **Blocked until lane-b057 lands** (`completion.rs` overlap) and until
 lane-b060-b062 lands (`checker.rs` overlap). Branch from master tip after both.
+
+## Lane plan (coordinator, 2026-08-31)
+
+**B063 + B069 + B070 run as ONE lane, serial, in that order**
+(`lane-b063-b069-b070`). All three touch `src/server/completion.rs` and/or
+`src/server/hover.rs`; run in parallel they would conflict at merge.
+
+**BLOCKED until lane-b057's B056 follow-up merges** (it holds
+`fix/b056-followup-canonical-keys`). Branch from that tip, not from now.
+
+**The three are one defect wearing three hats, and that is the framing worth
+having before you start.** In every case the CHECKER already has the right
+answer and a second feature disagrees with it:
+
+- **B063** — the checker accepts `player.GetCurrentEntityID()` from
+  `INJECTED_METHODS`; completion walks only the `TypeIndex` and never offers it.
+- **B069** — the resolver rejects `Game::CGameMenu::EMenuOrder` since B056;
+  shortcut completion offers it anyway, straight from the loader's storage keys.
+- **B070** — the checker accepts `Foo::VirtualKey` via B052's ancestor walk;
+  hover asks `lookup_external`, an index-only view that does not know workspace
+  namespaces participate, and returns nothing.
+
+So B063 and B070 are features under-reporting what the checker accepts, and
+B069 is a feature over-reporting what the checker rejects. **Same root shape:
+completion and hover each build their OWN view of what exists instead of
+consulting the one the checker already computed.**
+
+Ask explicitly whether one shared accessor — "what does the checker believe is
+reachable on this receiver / in this scope?" — closes all three, and answer it
+with evidence. Note B060/B061 were given the same framing and the honest answer
+there was NO, with structural reasons; that answer was worth as much as a yes.
+Do not let the framing widen the tickets: each keeps its own red test and gate.
+
+**One invariant is worth a test regardless of how the fixes are structured:**
+what a feature OFFERS and what the checker ACCEPTS must not diverge. That is
+the bug in all three, and it is the thing that will regress again.
