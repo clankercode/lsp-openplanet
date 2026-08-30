@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: low
 created_at: "2026-08-30T18:41:21Z"
 depends_on: []
 estimate_hours: 1
 id: B077
 priority: low
+started_at: null
 status: pending
 tags: []
 title: issue_repro_game.py leaves staged state in the game Plugins dir when a run is interrupted, and a leftover .as file silently contaminates every later ACCEPT
@@ -24,3 +26,73 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+## Evidence
+
+Found 2026-08-31 while verifying that my own B060/B071 probes had left the game
+as found. They had — 13 fixtures staged and removed, **zero** residue. But two
+directories from an earlier session were still present in
+`~/OpenplanetNext/Plugins/` (a symlink to the Steam prefix), dated 2026-08-30 10:02:
+
+- `lsp-issue-repro-b028---duplicate-declaration-across-arch/`
+- `lsp-issue-repro-b028-probe---os/`
+
+Both are **completely empty** — 0 files at any depth.
+
+## Why the empty dirs are harmless but the finding is not
+
+An empty directory declares no namespace, enum, class or funcdef, so it cannot
+affect a probe compile. I checked before assuming.
+
+The finding is what the empty dirs are *evidence of*: **the staging is not
+transactional.** A successful run removes both files and directory. An
+interrupted one leaves the directory behind, which means there is a window in
+which a run that dies leaves whatever it had staged. These two happened to die
+after the files were removed. A run that dies BEFORE that point leaves the
+`.as` file in place.
+
+That is the case that matters, because of the asymmetry the probe README
+already documents:
+
+> Namespaces declared by OTHER INSTALLED PLUGINS are visible to a probe
+> compile. So an ACCEPT on a prefix you do not recognise may be an artefact of
+> that machine's plugin set.
+
+A stranded fixture is exactly such a plugin, and it is one that DECLARES THE
+VERY NAMES A PROBE IS ABOUT TO ASK ABOUT. It would turn the next probe's
+REJECT into an ACCEPT for precisely the spelling under investigation — and the
+corpus files in `docs/probes/` are committed and cited by B052, B053, B056,
+B057 and B067 as ground truth. The failure is silent, self-consistent, and in
+the direction of looking correct.
+
+## Work
+
+1. Stage under a name that is obviously disposable and **sweep on startup**:
+   before probing, remove any pre-existing `lsp-issue-repro-*` /
+   `lsp-enum-corpus-probe*` directory. Start-of-run cleanup is what B065 just
+   showed is insufficient ON ITS OWN, so do it in addition to, not instead of,
+   the teardown.
+2. Make teardown run on the failure path — `try/finally` or a context manager
+   around the staged-plugin lifetime, so SIGINT and an exception both unstage.
+3. Remove the directory, not just its contents (the current code already does
+   this on the happy path; keep it).
+4. **Add the guard that would have caught this**: before reporting any ACCEPT,
+   assert that no probe-owned plugin directory exists in `Plugins/`. An ACCEPT
+   measured with a stranded fixture installed must be refused, not recorded.
+
+## Test plan
+
+- Stage a fixture, kill the process mid-run (SIGINT after staging, before
+  teardown), and assert `Plugins/` is clean afterwards.
+- Stage a fixture that declares `ZZZProbeOwnedNamespace`, leave it stranded,
+  then run a probe for `ZZZProbeOwnedNamespace::Foo` and assert the tool
+  REFUSES rather than reporting ACCEPT. This is the anti-vacuity guard: it
+  proves the new check can actually fail.
+- Happy path still leaves zero residue (already true — my 13 fixtures today).
+
+## Related
+
+B065 (start-only cleanup is insufficient — same shape, different directory),
+B068 (a probe harness that manufactures false ACCEPTs), `docs/probes/README.md`
+(the ACCEPT-vs-REJECT asymmetry this exploits),
+`docs/verification-hazards.md` Mechanism 2 (the environment lied).
