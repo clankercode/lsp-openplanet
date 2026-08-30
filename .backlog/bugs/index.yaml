@@ -74,3 +74,4 @@ bugs:
     - file: B073-gh-38-shadowing-is-not-applied.todo
     - file: B074-b032-env-guard-enforcement-sca.todo
     - file: B075-scratch-dir-leaks-under-target.todo
+    - file: B076-a-funcdef-handle-accepts-a-fun.todo
