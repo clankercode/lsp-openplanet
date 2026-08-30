@@ -1,0 +1,72 @@
+# B067 probe corpus - CLASS-position scope verdicts, live game.
+# Trackmania + Openplanet 1.29.5 (next, Public, 1234ad9e), RemoteBuild, 2026-08-31.
+# Probe: '<name>::ZZZNoSuchName v;' in TYPE position. Paired discriminator:
+#   "Namespace 'X' doesn't exist."                          -> X is NOT a scope
+#   "Identifier 'ZZZNoSuchName' is not a data type in ..."  -> X IS a scope
+# Batch runs are UNSAFE (see B068): every row here whose set is CONTROL was
+# measured in an isolated compilation unit (batch=1). The SAMPLE rows come
+# from one 41-name batch that parsed cleanly, with 3 re-verified in isolation.
+name	set	verdict	message
+CAudioScriptManager::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CAudioScriptManager' or parent
+CAudioScriptMusic::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CAudioScriptMusic' or parent
+CGameClientTrackingScript::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameClientTrackingScript' or parent
+CGameCtnAnchoredObject::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameCtnAnchoredObject' or parent
+CGameActionModel::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameActionModel' or parent
+CGameCommonItemEntityModelEdition::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameCommonItemEntityModelEdition' or parent
+CGxLightBall::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGxLightBall' or parent
+CHmsViewport::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CHmsViewport' or parent
+CInputScriptEvent::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CInputScriptEvent' or parent
+CInputScriptManager::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CInputScriptManager' or parent
+CAdvertisingManager::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CAdvertisingManager' or parent
+CGameCtnMediaBlockGhostTM_SuperSKeyVal::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameCtnMediaBlockGhostTM_SuperSKeyVal' or parent
+CNetMasterServerUserInfo::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CNetMasterServerUserInfo' or parent
+CNetScriptHttpEvent::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CNetScriptHttpEvent' or parent
+CPlugBitmap::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CPlugBitmap' or parent
+CPlugMaterialUserInst::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CPlugMaterialUserInst' or parent
+CSmActionInstanceEvent::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CSmActionInstanceEvent' or parent
+CSmArenaRules::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CSmArenaRules' or parent
+CSystemPlatformScript::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CSystemPlatformScript' or parent
+CTrackManiaNetworkServerInfo::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CTrackManiaNetworkServerInfo' or parent
+CMwNod::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CMwNod' or parent
+CAudioBufferKeeper::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CAudioBufferKeeper' or parent
+CAudioListener::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CAudioListener' or parent
+CControlBase::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CControlBase' or parent
+CControlButton::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CControlButton' or parent
+CFunc::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CFunc' or parent
+CFuncColorGradient::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CFuncColorGradient' or parent
+CGameAction::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameAction' or parent
+CGameActionFxPhy::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameActionFxPhy' or parent
+CGameActionFxResources::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameActionFxResources' or parent
+CGameArmorModel::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameArmorModel' or parent
+CGxFog::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGxFog' or parent
+CGxLightFrustum::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGxLightFrustum' or parent
+CHmsAmbientOcc::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CHmsAmbientOcc' or parent
+CHmsCamera::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CHmsCamera' or parent
+CInputBindingsConfig::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CInputBindingsConfig' or parent
+CInputDevice::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CInputDevice' or parent
+CEventMenuNavigation::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CEventMenuNavigation' or parent
+CEventMenuNavigationOnAction::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CEventMenuNavigationOnAction' or parent
+CAccountTrophyGain::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CAccountTrophyGain' or parent
+CAccountTrophyGainForHistory::ZZZNoSuchName	SAMPLE	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CAccountTrophyGainForHistory' or parent
+ZZZNoSuchClass::ZZZNoSuchName	CONTROL	NOT_SCOPE	Namespace 'ZZZNoSuchClass' doesn't exist.
+MwFoundations::ZZZNoSuchName	CONTROL	NOT_SCOPE	Namespace 'MwFoundations' doesn't exist.
+Game::ZZZNoSuchName	CONTROL	NOT_SCOPE	Namespace 'Game' doesn't exist.
+ShootMania::ZZZNoSuchName	CONTROL	NOT_SCOPE	Namespace 'ShootMania' doesn't exist.
+Audio::ZZZNoSuchName	CONTROL	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'Audio' or parent
+GameData::ZZZNoSuchName	CONTROL	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'GameData' or parent
+Net::ZZZNoSuchName	CONTROL	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'Net' or parent
+Meta::ZZZNoSuchName	CONTROL	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'Meta' or parent
+int::ZZZNoSuchName	CONTROL	PARSE_ERROR	Expected identifier
+string::ZZZNoSuchName	CONTROL	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'string' or parent
+CMwNod::ZZZNoSuchName	CONTROL	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CMwNod' or parent
+CGameAction::ZZZNoSuchName	CONTROL	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CGameAction' or parent
+CAudioListener::ZZZNoSuchName	CONTROL	SCOPE	Identifier 'ZZZNoSuchName' is not a data type in namespace 'CAudioListener' or parent
+GameData	CONTROL	NOT_A_TYPE	Identifier 'GameData' is not a data type in global namespace
+Audio	CONTROL	NOT_A_TYPE	Identifier 'Audio' is not a data type in global namespace
+Net	CONTROL	NOT_A_TYPE	Identifier 'Net' is not a data type in global namespace
+Meta	CONTROL	NOT_A_TYPE	Identifier 'Meta' is not a data type in global namespace
+Game	CONTROL	NOT_A_TYPE	Identifier 'Game' is not a data type in global namespace
+MwFoundations	CONTROL	NOT_A_TYPE	Identifier 'MwFoundations' is not a data type in global namespace
+ShootMania	CONTROL	NOT_A_TYPE	Identifier 'ShootMania' is not a data type in global namespace
+CMwNod	CONTROL	IS_A_TYPE	
+string	CONTROL	IS_A_TYPE	
