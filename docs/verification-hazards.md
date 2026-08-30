@@ -172,6 +172,25 @@ The test passes, and would have passed either way.
 - **An adversarial review is not a formality to run in parallel with the merge.**
   It is the only check that reads intent rather than behaviour. Merging while it
   runs has twice landed real defects on master that the review then found.
+
+  **This is now measured, not asserted.** On B060, two successive review passes
+  each returned FAIL and each was right — four regressions the lane had
+  introduced, every one reproduced against the merge-base binary. **None was
+  visible to any gate.** The suite, `test-hermetic`, clippy and the
+  false-positive fixture gate were all green on both rejected commits. The
+  fixture gate in particular *could not* see them: the defect needed a plugin
+  declaring a type named after a Core funcdef, and no fixture does. That is
+  Mechanism 3 at the level of the whole strategy — the measurement this batch
+  treats as most authoritative was structurally blind to the class of bug being
+  introduced.
+
+  The lesson is not that the gates are bad. It is that **a gate can only find
+  what its corpus contains**, so a green gate bounds the blast radius on
+  *existing* code and says nothing about a shape no fixture exercises. Reviews
+  and hand-built probes cover a different space, and the two are not
+  substitutes. When a change invents a new interaction, the corpus by
+  definition has no case for it — that is the moment to build one, not to lean
+  on the fixtures.
 - **Test helpers own their temp dirs via `openplanet_lsp::testing::TempDir`,**
   whose `Drop` cleans up on the unwind path too — a panicking test is exactly
   when a dir gets left behind. Verify by running under a **private `TMPDIR`**
