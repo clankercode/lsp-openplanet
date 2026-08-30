@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: low
 created_at: "2026-08-30T06:01:04Z"
 depends_on: []
 estimate_hours: 1
 id: B063
 priority: medium
+started_at: null
 status: pending
 tags: []
 title: Member completion never offers Openplanet-injected methods (MwAddRef, GetCurrentEntityID, GetManialinkPages)
@@ -24,3 +26,75 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+
+Found 2026-08-30 while landing B059. Not a regression — this gap predates
+B059 and is symmetric across every injected method.
+
+## Steps to Reproduce
+
+1. Open a plugin with the type DB loaded.
+2. `void f(CSmPlayer@ player) { player. }` — trigger member completion.
+3. `GetCurrentEntityID` is not offered. Same for `MwAddRef` / `MwRelease` on
+   any `CMwNod@` receiver, and `GetManialinkPages` on the network types.
+
+## Expected Behavior
+
+The injected methods appear in the member list, like any other member of the
+receiver type.
+
+## Actual Behavior
+
+They are absent. The checker ACCEPTS `player.GetCurrentEntityID()` (B059) but
+completion will not suggest it, so the tool contradicts itself between two
+features: type-check says the member exists, completion says it does not.
+
+## Why
+
+`src/server/completion.rs` `add_type_members` walks the `TypeIndex` (and then
+workspace class definitions) only. Openplanet-injected methods are, by
+definition, absent from the Nadeo dump — that is the whole premise of B059 —
+so a TypeIndex walk can never find them.
+
+This is NOT how the checker finds them: B059 added
+`typecheck::builtins::INJECTED_METHODS`, which the checker consults after the
+typedb lookups miss. Completion has no equivalent step.
+
+## Work
+
+Wire `INJECTED_METHODS` into `add_type_members` as an additional source, using
+the same receiver-matching rule the checker uses (`Checker::injected_method`):
+`EveryEngineClass` = derives from CMwNod for the GH #21 pair, exact name match
+for the six Mechanism B registrations.
+
+This is WIRING, not discovery: the table already exists and the surface is
+bounded, not best-effort. `docs/probes/openplanet-injected-methods.md` proves
+the set is closed, so there is no research step.
+
+Two decisions to make while doing it:
+
+- Whether `opCast` / `opImplCast` should be offered. They are injected on
+  every engine class, but they back `cast<T>(x)` rather than being written as
+  calls, so offering them is probably noise. B059 left them out deliberately.
+- Whether hover and signature help need the same source. Hover on
+  `GetCurrentEntityID` has nothing to show today, and go-to-definition has no
+  source target at all — these methods have no AngelScript declaration
+  anywhere, they are registered from C++.
+
+## Test plan
+
+Completion tests live in `src/server/completion.rs`. The existing ones pass
+`None` for the `checked` argument; a receiver typed from the typedb needs a
+loaded `TypeIndex`, so check whether an existing test already does that before
+building new scaffolding.
+
+- `player.` on a `CSmPlayer@` offers `GetCurrentEntityID`
+- the same receiver still offers its ordinary dump members (no regression)
+- `nod.` on a `CMwNod@` offers `MwAddRef` and `MwRelease`
+- each of the four network types offers `GetManialinkPages`
+- a receiver OFF the registration list (e.g. `CGameCtnChallenge@`) does NOT
+  offer `GetCurrentEntityID` — the same exact-list fence the checker keeps
+
+## Related
+
+B059 (the checker half, and the source table), GH #21.
