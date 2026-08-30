@@ -76,3 +76,4 @@ bugs:
     - file: B075-scratch-dir-leaks-under-target.todo
     - file: B076-a-funcdef-handle-accepts-a-fun.todo
     - file: B077-issue-repro-game-py-leaves-sta.todo
+    - file: B078-flaky-sigsegv-in-multi-root-te.todo
