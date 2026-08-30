@@ -155,3 +155,19 @@ Note the split confirmed by the coordinator: the WORKSPACE case
 the LSP has complete information and implicit enum-to-int conversion is about
 the type of a value, and here there is no value. The ENGINE case and rows 1-3
 above still want a live verdict.
+
+## A sibling instance, same sweep (lane-b057, 2026-08-31)
+
+Walking the `named_types_equivalent` call sites turned up a second silent case
+in this family: **assigning to an engine PROPERTY does not flag an enum
+mismatch either.** Identical on both binaries, so pre-existing and not caused by
+the B056 follow-up.
+
+That extends this ticket's population beyond locals and parameters. When the
+game is back, probe the property-assignment form alongside the four rows
+already listed — if enum→enum is legal by implicit conversion, all of these
+close together; if it is not, this is another site needing the same diagnostic.
+
+See also B076 (a funcdef handle accepts a function whose RETURN type differs) —
+found in the same grep sweep, same "type equivalence is not fully checked"
+family, but a distinct defect.
