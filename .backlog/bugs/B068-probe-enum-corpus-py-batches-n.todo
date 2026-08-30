@@ -135,3 +135,33 @@ re-probe the 742 ACCEPTED rows of `b052-qualified-enum-spellings.tsv` in
 isolation, diff, and report the flip count before touching anything else — that
 number decides whether this is a tooling fix or a corpus regeneration that
 B052/B056/B057 all need to hear about.
+
+## Exposure to the SHIPPED corpora is bounded — and it is the mild direction
+## (lane-b057, 2026-08-31; reasoning checked by coordinator)
+
+Corpus sizes: `b052` = **1159 REJECTED / 742 ACCEPTED**; `b053` = **2373
+NO_SYMBOL / 592 ACCEPTED**.
+
+**This defect can only manufacture a spurious ACCEPTED.** A REJECTED row
+required the game to emit a real diagnostic naming that spelling; a parse abort
+produces the *absence* of diagnostics, never their presence. So no REJECTED row
+can be an artefact of B068, and every "the LSP must reject this" assertion
+built on the corpora is sound.
+
+Consequences, which lower this ticket's severity:
+
+- **B056 is robust.** Its headline claim — the LSP accepted 1010 spellings the
+  game rejects — is a narrowing built entirely on REJECTED rows.
+- **The risk runs the other way.** A spurious ACCEPTED tells the LSP to accept
+  something the game may reject, i.e. B056 possibly narrowed too *little*.
+  That is a missed error (false negative), not a false positive. **The
+  damaging direction is not exposed.**
+
+This does not make the fix optional — a corpus that can silently invent
+ACCEPTED rows will eventually be used for a claim that leans on them, and the
+harness stays wrong until fixed. But it does mean this is not a fire, nothing
+already merged needs revisiting on its account, and the re-probe (Work step 2)
+is a confirmation rather than a rescue.
+
+Anything that DOES lean on an ACCEPTED row should say so explicitly, the way
+`d51fc32` does after moving the canonicalization fence off three of them.
