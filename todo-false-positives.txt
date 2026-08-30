@@ -134,3 +134,60 @@ tests/fixtures/issue-repros/b046-module-level-enums, which documents them
 inline). Pre-existing and unrelated to B046 — many engine value names are
 already multiply defined — but B046 adds two more enums to the pool that can
 collide. Needs its own probe and its own ticket before narrowing.
+
+## 2026-08-30, B052 + B053 (enum resolution accuracy)
+
+### Probe hygiene — applies to EVERY ticket in this file that says "verified against the game"
+A game REJECT is evidence about the engine. A game ACCEPT may not be.
+
+Namespaces declared by OTHER INSTALLED PLUGINS are visible to a probe compile.
+`MLFeed::VirtualKey` and `VehicleState::VirtualKey` both compiled here purely
+because MLFeedRaceData.op and vehicle-state-list-dev are installed; `MathX` and
+`GameData` behaved the same way and were excluded from B052's model for that
+reason. Discriminate with a PAIRED probe — submit `Prefix::RealName` alongside
+`Prefix::ZZZNoSuchName`. `Namespace 'Prefix' doesn't exist.` for both means it
+is not a scope; `Identifier 'ZZZNoSuchName' is not a data type in namespace
+'Prefix' or parent` means it is, and the first result means something.
+
+Two more traps that have each already produced a wrong number in this repo:
+  * Count distinct NAMES, not index keys. The loader keys ONE engine enum under
+    several modules (`Hms::EHmsLightMapQuality` and
+    `MetaNotPersistent::EHmsLightMapQuality` are one enum), so `len(keys)`
+    overcounts. This inflated B053's estimate 34x — 758 predicted, 22 real —
+    and inflated B046's enum count before it.
+  * Type lookup walks ancestor scopes; VALUE lookup does not. `UI::VirtualKey`
+    compiles (the walk reaches the global enum) but `UI::GlassSmash` does not,
+    though bare `GlassSmash` compiles. Never generalise a type-position result
+    to value position or the reverse.
+
+Full write-up + the committed verdict corpora (1901 qualified spellings, 2989
+bare value names, with the game's verbatim message for each):
+    docs/probes/README.md
+    docs/probes/b052-qualified-enum-spellings.tsv
+    docs/probes/b053-bare-enum-values.tsv
+Regenerate with scripts/probe_enum_corpus.py (needs the game up; ONE game on
+ONE port, so coordinate before running).
+
+### Closed: bare value carried by two enums (was "Still open" above) [FIXED by B053]
+Now diagnosed as `ambiguous enum value`, naming the candidate enums. The
+"Still open" note above predicted 758 such names by counting index keys; the
+probe says 22. Only enums the game puts in the GLOBAL namespace take part —
+nested (`CGameMenu::EMenuOrder`) and namespaced (`UI::Cond`) enums are not
+reachable bare at all, so they cannot collide. Its three named examples
+(`Turbo`, `WallJump`, `FreeWheeling`) were all correct; only the rule was wrong.
+
+### Still open, both found by B052/B053's probes and filed
+B056 — 1010 qualified spellings the LSP accepts and the game rejects, mostly
+    the synthetic Nadeo module prefix (`Game::CGameCtnApp` -> `Namespace 'Game'
+    doesn't exist.`) and bare nested-enum names (`EMenuOrder`). False NEGATIVE.
+    Corpus: filter b052-qualified-enum-spellings.tsv for REJECTED.
+B057 — 2373 bare value names the LSP accepts and the game answers `No matching
+    symbol` for: the bare-value scan walks every named enum instead of only the
+    globally visible ones. B044 fixed this shape for ANONYMOUS enums; this is
+    the named-but-not-global remainder. False NEGATIVE.
+    Corpus: filter b053-bare-enum-values.tsv for verdict == NO_SYMBOL.
+
+Also unfixed, and neither caused nor fixed by B052/B053: a qualified VALUE
+access does not walk ancestors in-game (`UI::GlassSmash`, `UI::Turbo`,
+`CGameMenu::Turbo` are all `No matching symbol`) and both the merge-base and
+post-B053 binaries are silent on all three.

@@ -159,6 +159,12 @@ impl<'a> TypeResolver<'a> {
         }
 
         if self.scope.resolves(&qualified) {
+            // A nested engine enum spelled the way the game wants it — no
+            // module prefix — resolves here now (B052), but equality is by
+            // the stored key, so hand back the key rather than the spelling.
+            if let Some(key) = self.scope.canonical_enum_key(&qualified) {
+                return TypeRepr::Named(key);
+            }
             return TypeRepr::Named(qualified);
         }
 
@@ -469,12 +475,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_qualified_nested_enum_cgame_editor_plugin_map() {
+    fn resolve_qualified_enum_spellings_to_canonical_keys() {
         use crate::typedb::TypeIndex;
 
-        let source = "CGameEditorPluginMap::ECardinalDirections";
-        let ty = parse_type(source);
-        let ws = SymbolTable::new();
         let index = TypeIndex::load(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/typedb/OpenplanetCore.json")
@@ -484,18 +487,47 @@ mod tests {
                 .as_path(),
         )
         .expect("failed to load type index");
+        let ws = SymbolTable::new();
         let scope = GlobalScope::new(&ws, Some(&index));
-        let mut r = TypeResolver::new(&scope, source);
-        let out = r.resolve(&ty);
-        let diags = r.take_diagnostics();
-        assert!(
-            diags.is_empty(),
-            "expected no diagnostics, got: {:?}",
-            diags
-        );
-        assert_eq!(
-            out,
-            TypeRepr::Named("Game::CGameEditorPluginMap::ECardinalDirections".into())
-        );
+
+        // The nested engine enum maps from its source spelling to the stored
+        // module-qualified key. B052 ancestor-walk spellings instead map to
+        // the same bare global key as their unqualified spelling.
+        for (scoped, canonical, bare) in [
+            (
+                "CGameEditorPluginMap::ECardinalDirections",
+                "Game::CGameEditorPluginMap::ECardinalDirections",
+                None,
+            ),
+            ("UI::VirtualKey", "VirtualKey", Some("VirtualKey")),
+            ("UI::Font::VirtualKey", "VirtualKey", Some("VirtualKey")),
+            (
+                "CGameCtnApp::ESceneVehicleVisEvent",
+                "ESceneVehicleVisEvent",
+                Some("ESceneVehicleVisEvent"),
+            ),
+        ] {
+            let scoped_ty = parse_type(scoped);
+            let mut scoped_resolver = TypeResolver::new(&scope, scoped);
+            let scoped_out = scoped_resolver.resolve(&scoped_ty);
+            assert!(
+                scoped_resolver.take_diagnostics().is_empty(),
+                "the game accepts `{scoped}`"
+            );
+            assert_eq!(scoped_out, TypeRepr::Named(canonical.into()));
+
+            if let Some(bare) = bare {
+                let bare_ty = parse_type(bare);
+                let mut bare_resolver = TypeResolver::new(&scope, bare);
+                let bare_out = bare_resolver.resolve(&bare_ty);
+                assert!(bare_resolver.take_diagnostics().is_empty());
+
+                assert_eq!(bare_out, TypeRepr::Named(bare.into()));
+                assert_eq!(
+                    scoped_out, bare_out,
+                    "`{scoped}` and `{bare}` are spellings of the same enum"
+                );
+            }
+        }
     }
 }

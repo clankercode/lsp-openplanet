@@ -16,6 +16,34 @@ Usage:
 
 Requires: Trackmania + Openplanet running with RemoteBuild on 127.0.0.1:30000.
 Never writes to the fleet ledger (docs/plugin-fleet-ledger.json).
+
+READ THIS BEFORE TRUSTING A RESULT
+----------------------------------
+A game REJECT is evidence about the engine. A game ACCEPT may not be.
+
+Namespaces declared by OTHER INSTALLED PLUGINS are visible to a probe compile.
+`MLFeed::VirtualKey` and `VehicleState::VirtualKey` both compiled on the
+machine that produced docs/probes/, not because the engine has those
+namespaces but because MLFeedRaceData.op and vehicle-state-list-dev were
+installed. So an ACCEPT on a prefix you do not recognise may be an artefact of
+that machine's plugin set, while a REJECT with 44 plugins installed means no
+plugin declared it and the engine does not have it either.
+
+The discriminator is a PAIRED probe: submit `Prefix::RealName` and
+`Prefix::ZZZNoSuchName` together.
+  * `Namespace 'Prefix' doesn't exist.` for both  -> not a scope.
+  * `Identifier 'ZZZNoSuchName' is not a data type in namespace 'Prefix' or
+    parent`                                       -> it IS a scope, and the
+    first result means something.
+
+Two more traps, both of which have already produced wrong numbers here:
+  * Count distinct NAMES, not index keys. The loader keys one engine enum
+    under several modules, so `len(keys)` overcounts — it inflated a B053
+    estimate 34x (758 predicted, 22 real).
+  * Type lookup walks ancestor scopes; VALUE lookup does not. `UI::VirtualKey`
+    compiles, `UI::GlassSmash` does not, though `GlassSmash` compiles bare.
+
+Full write-up, and the committed verdict corpora: docs/probes/README.md
 """
 from __future__ import annotations
 import argparse, json, re, sys, time

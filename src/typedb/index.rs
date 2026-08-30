@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use super::core_format::{CoreClass, CoreDatabase};
@@ -24,6 +24,16 @@ pub struct TypeIndex {
     /// Covers types, enums, and funcdefs — functions are keyed differently
     /// and this map is only consulted when resolving a referenced *type* name.
     short_type_index: HashMap<String, Vec<String>>,
+    /// Every scope the GAME has, spelled the way source must spell it (B052).
+    /// Built by `build_scope_index` alongside the short-name index; see
+    /// [`Self::scope_exists`] for what qualifies and why the Nadeo module
+    /// prefixes this crate keys the dump under are excluded.
+    scopes: HashSet<String>,
+    /// Bare enum-value name → the distinct NAMES of the globally visible
+    /// enums that carry it (B053). Built by `build_global_enum_value_index`;
+    /// see [`Self::global_enum_value_owners`] for what "globally visible"
+    /// means and why the names, not the keys, are what get counted.
+    global_enum_values: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +244,8 @@ impl Default for TypeIndex {
             enums: HashMap::new(),
             funcdefs: HashMap::new(),
             short_type_index: HashMap::new(),
+            scopes: HashSet::new(),
+            global_enum_values: HashMap::new(),
         }
     }
 }
@@ -329,6 +341,204 @@ impl TypeIndex {
                 .to_string();
             self.short_type_index.entry(short).or_default().push(qname);
         }
+        self.build_scope_index();
+        self.build_global_enum_value_index();
+    }
+
+    /// Rebuild [`Self::scopes`] — every namespace-like scope the GAME has.
+    ///
+    /// Two sources, and the difference between them is the whole point:
+    ///
+    /// * **Core namespaces.** `UI`, `Meta`, `Json`, `IO`, `nvg`, `UI::Font`,
+    ///   … are declared by the Core database and registered in the engine as
+    ///   real AngelScript namespaces.
+    ///
+    /// * **Engine classes that declare an enum.** Openplanet registers a
+    ///   class's enums by setting the default namespace to the class name, so
+    ///   declaring one (named or anonymous — either is enough) is what makes
+    ///   a class a namespace. `CGameMenu` and `CGameCtnApp` are; the game
+    ///   accepts `CGameMenu::VirtualKey`. `CSceneVehicleVis`, `CTrackMania`,
+    ///   `CMwNod` and `CSystemFidFile` declare none and the game rejects the
+    ///   same spelling. The class is spelled WITHOUT the module prefix,
+    ///   because that prefix is not part of its name.
+    ///
+    /// What is deliberately NOT here: the Nadeo `ns` MODULE names this crate
+    /// keys the dump under — `Game`, `Scene`, `Plug`, `System`, `Hms`, …
+    /// The game has no such namespaces and answers `Namespace 'Game' doesn't
+    /// exist.` for every path through one. Their module-level enums are
+    /// global, so they contribute an empty scope path and drop out.
+    ///
+    /// Nor namespaces that only some *other* installed plugin declares: a
+    /// live probe sees `MLFeed::` and `MathX::` resolve purely because those
+    /// plugins are installed on that machine, which is an environment fact
+    /// and not an engine one.
+    fn build_scope_index(&mut self) {
+        self.scopes.clear();
+        for info in self.types.values().filter(|i| i.source == TypeSource::Core) {
+            if let Some(ns) = &info.namespace {
+                self.scopes.insert(ns.clone());
+            }
+        }
+        for overloads in self.functions.values() {
+            for f in overloads.iter().filter(|f| f.source == TypeSource::Core) {
+                if let Some(ns) = &f.namespace {
+                    self.scopes.insert(ns.clone());
+                }
+            }
+        }
+        for info in self
+            .funcdefs
+            .values()
+            .filter(|i| i.source == TypeSource::Core)
+        {
+            if let Some(ns) = &info.namespace {
+                self.scopes.insert(ns.clone());
+            }
+        }
+        for (qname, info) in &self.enums {
+            match info.source {
+                // A Core enum's own namespace is a real namespace.
+                TypeSource::Core => {
+                    if let Some(ns) = &info.namespace {
+                        self.scopes.insert(ns.clone());
+                    }
+                }
+                // A Nadeo enum's key is `Module::Scope…::Name`. Drop the
+                // module — an invention of this crate — and whatever is left
+                // is the class scope the game registered the enum under.
+                // A module-level enum leaves nothing, which is correct: it
+                // is global and its module is not a scope.
+                TypeSource::Nadeo => {
+                    let mut segments: Vec<&str> = qname.split("::").collect();
+                    segments.pop();
+                    if segments.len() > 1 {
+                        self.scopes.insert(segments[1..].join("::"));
+                    }
+                }
+                // Header enums are module-level and carry no namespace.
+                TypeSource::Header => {}
+            }
+        }
+        // Declaring `A::B` declares `A` as well, so every ANCESTOR of a
+        // scope is a scope. Without this the LSP rejected
+        // `Internal::VirtualKey` — the Core database only ever names
+        // `Internal::NadeoServices`, never `Internal` on its own — while the
+        // game accepts it, which is a false POSITIVE and the damaging
+        // direction. Probed both ways: `Internal::VirtualKey` and
+        // `NSysCfgVision::VirtualKey` compile, and each answers `Identifier
+        // 'ZZZNoSuch' is not a data type in namespace '<ancestor>' or parent`
+        // for a name that is genuinely absent, which is the reply only a
+        // scope that EXISTS gives.
+        let ancestors: Vec<String> = self
+            .scopes
+            .iter()
+            .flat_map(|path| {
+                let segments: Vec<&str> = path.split("::").collect();
+                (1..segments.len()).map(move |n| segments[..n].join("::"))
+            })
+            .collect();
+        self.scopes.extend(ancestors);
+        self.scopes.remove("");
+    }
+
+    /// True when the game puts this enum in the GLOBAL namespace, so its
+    /// values are reachable by a bare name (B053).
+    ///
+    /// Exactly the enums with no enclosing scope once the loader's synthetic
+    /// Nadeo module prefix is dropped:
+    ///
+    /// * `Openplanet.h` enums — module-level by construction (B046);
+    /// * a Nadeo key with ONE module segment (`Game::EGhostNameLogoType`).
+    ///   The module is this crate's invention, so the enum is global;
+    /// * a Core enum with no namespace (`VirtualKey`).
+    ///
+    /// And nothing else. A NESTED Nadeo enum (`Game::CGameMenu::EMenuOrder`)
+    /// lives in the `CGameMenu` namespace and a Core enum with a namespace
+    /// (`UI::Cond`) lives in `UI`; the game answers `No matching symbol` for
+    /// a bare reference to either one's values.
+    ///
+    /// Two enums of the same NAME under different modules are one engine
+    /// enum the loader keyed twice (`Hms::EHmsLightMapQuality` and
+    /// `MetaNotPersistent::EHmsLightMapQuality`), which is why callers count
+    /// distinct names rather than keys.
+    fn enum_is_global(qname: &str, info: &EnumInfo) -> bool {
+        if info.anonymous {
+            return false;
+        }
+        match info.source {
+            TypeSource::Header => true,
+            TypeSource::Nadeo => qname.matches("::").count() <= 1,
+            TypeSource::Core => info.namespace.is_none(),
+        }
+    }
+
+    /// Rebuild [`Self::global_enum_values`].
+    ///
+    /// Ground truth: all 2989 bare value names of the shipped DB's named
+    /// enums were submitted to the live game (RemoteBuild, Trackmania +
+    /// Openplanet 1.29.5, 2026-08-30). The rule below predicted 2987 of
+    /// them; the 2 it missed (`Main`, `RGBAColor`) resolve to a non-enum
+    /// symbol, so they are not counterexamples.
+    ///
+    ///   0 owners → `No matching symbol`          (2373 names)
+    ///   1 owner  → accepted                      ( 592 names)
+    ///  ≥2 owners → `Found multiple matching enum values` (22 names)
+    fn build_global_enum_value_index(&mut self) {
+        self.global_enum_values.clear();
+        for (qname, info) in &self.enums {
+            if !Self::enum_is_global(qname, info) {
+                continue;
+            }
+            let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
+            for (value, _) in &info.values {
+                let owners = self.global_enum_values.entry(value.clone()).or_default();
+                if !owners.contains(&name) {
+                    owners.push(name.clone());
+                }
+            }
+        }
+        for owners in self.global_enum_values.values_mut() {
+            owners.sort();
+        }
+    }
+
+    /// B053: the globally visible enums that carry the bare value name
+    /// `value`, by enum name and sorted. Empty when nothing global carries
+    /// it; TWO OR MORE is what the game rejects with `Found multiple
+    /// matching enum values`.
+    pub fn global_enum_value_owners(&self, value: &str) -> &[String] {
+        self.global_enum_values
+            .get(value)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// B052: does `path` name a scope the game will resolve a qualified name
+    /// through? See [`Self::build_scope_index`] for what counts.
+    ///
+    /// This is NOT [`Self::namespace_exists`], which answers the looser "does
+    /// the index know this prefix at all" and is true for the synthetic Nadeo
+    /// module names precisely because the index keys them that way.
+    pub fn scope_exists(&self, path: &str) -> bool {
+        self.scopes.contains(path)
+    }
+
+    /// The fully qualified enum key `qualified` is a genuine trailing PATH
+    /// of, if there is one (B052). `CGameMenu::EMenuOrder` finds
+    /// `Game::CGameMenu::EMenuOrder`; `Bogus::EMenuOrder` finds nothing.
+    ///
+    /// A trailing path, not a trailing SEGMENT: the leading part still has to
+    /// be the enum's real declaring scope, which is what the game checks.
+    pub fn lookup_source_enum_by_suffix(&self, qualified: &str) -> Option<&str> {
+        if !qualified.contains("::") {
+            return None;
+        }
+        let short = qualified.rsplit("::").next()?;
+        let needle = format!("::{}", qualified);
+        self.find_by_short_name(short)
+            .iter()
+            .find(|key| key.ends_with(&needle) && self.lookup_source_enum(key).is_some())
+            .map(|key| key.as_str())
     }
 
     /// Return all fully qualified names of types/enums whose tail segment

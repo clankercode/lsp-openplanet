@@ -83,3 +83,110 @@ B046 (exposed it; explicitly did not touch it), B044 (the same class of
 permissive-scan narrowing, with the probe methodology to copy), B007 (the
 ticket the tail fallback was originally written for — check what it needed
 before removing anything), B016.
+---
+
+# Findings (B052 lane, 2026-08-30) — probe first, implement second
+
+## CORRECTION: this ticket's core premise is FALSE
+
+> "The fallback is generic to every enum in the index."
+
+It is not, and the fix should not be reviewed as though it were. `has_enum`'s
+fallback calls `lookup_source_enum(tail)`, and that only answers for a
+COMPLETE index key. A key with no `::` is the only kind a bare tail can match,
+and there are exactly **three** of those among the 630 named enum keys:
+
+    VirtualKey   ESceneVehicleVisEvent   ESceneCharVisNotice
+
+So the fallback's entire surface was `<any prefix>::` + one of those three.
+Every other enum is keyed `Module::Class::Enum` or `CoreNs::Enum` and never
+reached it. `CGameMenu::EMenuOrder` — the shape the fallback's own B007 comment
+claimed to serve — did **not** resolve through it; it resolved through
+`resolve_qualified_suffix` in the resolver, and `has_enum` answered false.
+
+Counted with the crate's own loader (`tests/zz_probe_enum_dump.rs`), not a
+Python re-derivation.
+
+## What the game actually does
+
+AngelScript resolves `P::T` by looking `T` up in scope `P`, then walking P's
+ancestors out to the global namespace. Three outcomes, all probed:
+
+  * `P` is not a scope            -> `Namespace 'P' doesn't exist.`
+  * `P` is a scope, `T` unreachable -> `Identifier 'T' is not a data type in
+                                       namespace 'P' or parent`
+  * `P` is a scope, `T` global    -> ACCEPTED
+
+So deleting the fallback would have been WRONG in the damaging direction: it
+would reject `UI::VirtualKey`, `Meta::ESceneCharVisNotice`, `IO::VirtualKey`
+and ~100 more spellings the game compiles happily — turning a false negative
+into a false POSITIVE.
+
+## What counts as a scope (each half probed, not reasoned)
+
+  * a Core namespace: `UI`, `Meta`, `Json`, `IO`, `nvg`, `UI::Font`, ...
+  * an engine CLASS that declares at least one enum, named or anonymous,
+    spelled WITHOUT the loader's module prefix. This predicted the game 8/8:
+    `CGameMenu`, `CGameCtnApp`, `CGameCtnChallenge` declare enums and
+    `X::VirtualKey` compiles; `CSceneVehicleVis`, `CTrackMania`, `CMwNod`,
+    `CSystemFidFile`, `Meta::Plugin` declare none and it does not.
+  * a namespace the WORKSPACE declares, nested included. Probed with a plugin
+    declaring `namespace Foo { namespace Bar { ... } }`: `Foo::VirtualKey` and
+    `Foo::Bar::VirtualKey` both compile.
+  * every ANCESTOR of any of the above. Declaring `A::B` declares `A`. The
+    Core DB names `Internal::NadeoServices` and never `Internal`, so
+    `Internal::VirtualKey` was a FALSE POSITIVE until 9d8625b. Same for
+    `NSysCfgVision` and `CHmsSolidVisCst_TmCar`. Found by the Codex review
+    flagging it as unprobed; probing it proved it real.
+
+NOT a scope: the Nadeo `ns` MODULE names this crate keys the dump under
+(`Game`, `Scene`, `Plug`, `System`, `Hms`, `Input`, `Control`, `Function`,
+`Graphic`, `Script`, `Vision`, `Xml`, `TrackMania`, `ShootMania`,
+`MwFoundations`, `MetaNotPersistent`). They are this crate's invention. Their
+module-level enums are global, so they contribute an empty scope path and drop
+out by construction rather than by a hardcoded list.
+
+## Probe corpus — committed, verbatim
+
+`docs/probes/b052-qualified-enum-spellings.tsv` — 1901 spellings, each with
+the game's own message. 742 accepted, 1159 rejected. Regenerate with
+`scripts/probe_enum_corpus.py --b052`. Read `docs/probes/README.md` first.
+
+Sample, verbatim:
+
+    ESceneCharVisNotice                     ACCEPTED
+    Scene::ESceneCharVisNotice              REJECTED  Namespace 'Scene' doesn't exist.
+    Enums::ESceneCharVisNotice              REJECTED  Namespace 'Enums' doesn't exist.
+    Game::CGameMenu::VirtualKey             REJECTED  Namespace 'Game::CGameMenu' doesn't exist.
+    CSceneVehicleVis::VirtualKey            REJECTED  Identifier 'VirtualKey' is not a data type in namespace 'CSceneVehicleVis' or parent
+    Meta::Plugin::VirtualKey                REJECTED  Identifier 'VirtualKey' is not a data type in namespace 'Plugin' or parent
+    UI::VirtualKey                          ACCEPTED
+    CGameMenu::VirtualKey                   ACCEPTED
+    CGameMenu::EMenuOrder                   ACCEPTED
+    Internal::VirtualKey                    ACCEPTED
+    CGameHighScore::EMenuOrder              REJECTED  Identifier 'EMenuOrder' is not a data type in namespace 'CGameHighScore' or parent
+
+## Probe lines of my own that were WRONG, recorded so the rest is credible
+
+  * I initially treated `MathX` and `GameData` as engine namespaces because
+    `MathX::VirtualKey` and `GameData::VirtualKey` compiled. They are not.
+    Both are artefacts of plugins installed on this machine — the same reason
+    `MLFeed::VirtualKey` and `VehicleState::VirtualKey` compile here. Excluded
+    from the model. This is the ACCEPT-is-not-evidence trap; see
+    `docs/probes/README.md`.
+  * My first pass at "which enums are globally visible" used "the game accepts
+    the bare NAME as a type", which wrongly admitted `ESpectatorCameraType` and
+    `EPrestigeMode` — both have a nested enum of the same name as a
+    module-level one. Corrected to "key depth <= 1", which predicts 2987 of
+    2989 verdicts instead of 2970.
+  * The b052 fixture's 3 `string::VirtualKey` lines are a PRE-EXISTING parser
+    false positive (the lexer treats `string` as a keyword), not a B052 effect.
+    The merge-base binary emits them identically. Pinned in the fixture's own
+    `KnownParserGap()` section rather than quietly dropped.
+
+## Not fixed here — filed as B056
+
+1010 qualified spellings the LSP accepts and the game rejects, which are NOT
+the tail fallback: exact-key acceptance of the synthetic module prefix
+(`Game::CGameCtnApp`), and `resolve_unqualified` rescuing bare nested-enum
+names (`EMenuOrder`). Correct for CLASSES, wrong for nested ENUMS.

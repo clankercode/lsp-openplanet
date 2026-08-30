@@ -77,3 +77,142 @@ collidable pool, documented inline in its new fixture and in
 `todo-false-positives.txt`), B044 (anonymous-enum value names — the adjacent
 but distinct case), B016, B052 (the other resolution-accuracy gap B046 found
 and declined to fix), B007.
+---
+
+# Findings (B053 lane, 2026-08-30) — probe first, implement second
+
+## CORRECTION: the rule in this ticket is wrong by 34x. The examples are right.
+
+> "When a bare value name is carried by more than one NAMED enum, the game
+> refuses to compile it."
+
+That predicts **758** names. The real answer is **22**.
+
+The ticket's three named examples — `Turbo`, `WallJump`, `FreeWheeling` — are
+all in the real 22. **The examples were right while the rule was wrong**, which
+is exactly the shape that lets a bad rule survive review: every spot-check of
+the examples passes.
+
+## THE TRAP: count distinct NAMES, not index keys
+
+This is the thing to carry forward; the number is downstream of it.
+
+Two independent over-counts are folded into the 758:
+
+1. **The loader keys ONE engine enum under several modules.**
+   `Hms::EHmsLightMapQuality` and `MetaNotPersistent::EHmsLightMapQuality` are
+   the same enum. `EPrestigeMode` appears under three keys. Counting keys
+   makes one enum look like a collision with itself.
+2. **Nested and namespaced enums are not reachable bare at all.**
+   A value of `Game::CGameMenu::EMenuOrder` or of `UI::Cond` cannot be
+   referenced by a bare name in any spelling, so it cannot participate in an
+   ambiguity. 2373 of the 2989 bare names are `No matching symbol` for this
+   reason alone.
+
+Counting keys instead of distinct names has now inflated an estimate **twice**
+in this repo — here, and in B046's enum count. If a number in a ticket came
+from `len(keys)`, re-derive it before believing it.
+
+## The rule that holds
+
+An enum is GLOBALLY VISIBLE iff its index key has depth <= 1 once the
+synthetic Nadeo module prefix is dropped:
+
+  * `Openplanet.h` enums (module-level by construction, B046);
+  * a Nadeo key with ONE module segment (`Game::EGhostNameLogoType`);
+  * a Core enum with no namespace (`VirtualKey`).
+
+68 keys -> **60 distinct names**. Then, for a bare value name:
+
+    0 globally visible owners  -> `No matching symbol`                    2373
+    1 owner                    -> accepted                                 592
+   >=2 owners                  -> `Found multiple matching enum values`     22
+                                  (+2 resolve to a non-enum symbol)
+
+This predicts **2987 of the 2989** probed verdicts. The 2 misses are `Main` and
+`RGBAColor`, which resolve to something that is not an enum value — not
+counterexamples.
+
+The 22: Blend, Cling, Down, Energy, FreeWheeling, Heavy, High, Light, Medium,
+Mesh, None, Player, Road, Static, Turbo, Undefined, Up, Vehicle, WallJump,
+Water, WaterSplash, XXX_Null.
+
+## The workspace half — probed per shape, because reasoning gets it BACKWARDS
+
+  * A plugin's own GLOBAL `enum` **JOINS** the pool. `GlassSmash` has exactly
+    one engine owner and compiles bare; add `enum LocalPick { GlassSmash }` to
+    the plugin and the game starts answering `Found multiple matching enum
+    values`. A workspace enum is a CANDIDATE, not a shield.
+  * A global VARIABLE or function **WINS** outright. `Down` is carried by two
+    engine enums and is ambiguous bare, yet `int Down = 1;` makes the game
+    accept it.
+  * A NAMESPACED workspace enum (`namespace N { enum E { Horn } }`) and a
+    class member take no part — the same rule that excludes namespaced and
+    nested ENGINE enums.
+
+The first of those forced an ordering constraint in the checker: the ambiguity
+check must run BEFORE `lookup_global_value_type`, or a workspace enum would
+resolve first and hide the collision it just created. Reasoning about it would
+very likely have produced the opposite order.
+
+## Probe corpus — committed, verbatim
+
+`docs/probes/b053-bare-enum-values.tsv` — all 2989 bare value names of named
+enums, each with the game's own message, its globally-visible owners, and (for
+contrast) every index key carrying it. Regenerate with
+`scripts/probe_enum_corpus.py --b053`. Read `docs/probes/README.md` first.
+
+Sample, verbatim:
+
+    Turbo         AMBIGUOUS  Found multiple matching enum values
+    WallJump      AMBIGUOUS  Found multiple matching enum values
+    FreeWheeling  AMBIGUOUS  Found multiple matching enum values
+    GlassSmash    ACCEPTED
+    JumpChain1    ACCEPTED
+    Ordered       NO_SYMBOL  No matching symbol 'Ordered'
+
+## Editor surfaces (this ticket asked)
+
+Hover and go-to-definition do NOT have the first-hit problem: neither reaches
+the engine type DB for a bare enum value, so both return nothing rather than
+an arbitrary candidate. Verified through the real entry points and pinned in
+`tests/b053_ambiguous_surfaces.rs`, including an assertion that they currently
+answer None — so a later change that DOES teach them the type DB has to decide
+what an ambiguous name means before it can land.
+
+## b046's fixture moves 0 -> 4, and that is B046's own prediction
+
+B046 landed with four statements silent and its fixture said so inline, naming
+the ticket that would fix them. Re-probed against the live game: 4 errors, all
+`Found multiple matching enum values`, on exactly these four statements and
+nothing else --
+
+    SharedValues_ESceneCharVisNotice():    print("" + WallJump);
+                                           print("" + Turbo);
+                                           print("" + FreeWheeling);
+    SharedValues_ESceneVehicleVisEvent():  print("" + Turbo);
+
+-- and the LSP reports the same four, statement for statement. The other 63
+value statements in the fixture produce nothing on either binary.
+
+Deliberately no line numbers: the probe ran against the fixture as committed
+in dc78a60, and the file's COMMENTS have been edited since (to warn future
+readers that 4 is correct), which moves every line. Comments cannot change the
+compiler's verdict on a statement, so the result stands; recording statements
+rather than line numbers is what keeps it from going stale again. Editing a
+comment invalidated a recorded line number twice during this lane.
+
+The distinction that proves B046 is not partially regressed: the names still
+RESOLVE. What they get is an ambiguity error that NAMES `ESceneCharVisNotice`
+and `ESceneVehicleVisEvent` as candidates — so the two enums B046 added are
+demonstrably still in the pool. `No matching symbol` is what losing them would
+look like, and the gate test asserts its absence.
+
+## Not fixed here — filed as B057
+
+2373 bare names the LSP accepts and the game answers `No matching symbol` for.
+The bare-value scan walks `source_enums_iter` (every named enum) instead of
+only the globally visible ones. B044 fixed this shape for ANONYMOUS enums;
+this is the named-but-not-global remainder, and it is ~100x B053. B057
+inherits the visibility model this ticket had to build in order to diagnose
+the 22 at all.

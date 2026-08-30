@@ -311,16 +311,102 @@ impl<'a> GlobalScope<'a> {
             if ext.lookup_source_enum(qualified).is_some() {
                 return true;
             }
-            // Typedb indexes enums by short name (`ECardinalDirections`), so
-            // a qualified lookup (`CGameCtnBlock::ECardinalDirections`) must
-            // fall through to the tail segment before giving up (B007).
-            if let Some((_, tail)) = qualified.rsplit_once("::") {
-                if ext.lookup_source_enum(tail).is_some() {
+            // The typedb keys a nested engine enum under its MODULE
+            // (`Game::CGameCtnBlock::ECardinalDirections`), but source spells
+            // it without one (`CGameCtnBlock::ECardinalDirections`), so a
+            // qualified lookup must try the trailing path before giving up
+            // (B007). A trailing PATH — the leading part still has to be the
+            // enum's real declaring scope, which is what the game checks.
+            if ext.lookup_source_enum_by_suffix(qualified).is_some() {
+                return true;
+            }
+            // AngelScript's ancestor walk (B052): `P::T` looks `T` up in
+            // scope `P` and then in each of P's ancestors out to the global
+            // namespace, so a GLOBAL enum answers to any real scope's
+            // qualifier. `lookup_source_enum(tail)` only hits when `tail` is
+            // a whole key, which for an enum means it has no namespace, so
+            // this reaches exactly the global enums and nothing else.
+            //
+            // The `scope_exists` gate is the fix. Without it every prefix
+            // qualified them — including the Nadeo module names this crate
+            // invents, so `Scene::ESceneCharVisNotice` resolved while the
+            // game answered `Namespace 'Scene' doesn't exist.` Live probe,
+            // Trackmania + Openplanet 1.29.5, 2026-08-30.
+            if let Some((head, tail)) = qualified.rsplit_once("::") {
+                if ext.lookup_source_enum(tail).is_some() && self.scope_exists(head) {
                     return true;
                 }
             }
         }
         false
+    }
+
+    /// The stored source key for an accepted, non-canonical enum spelling.
+    /// This covers both a module-stripped nested enum
+    /// (`CGameCtnBlock::ECardinalDirections` →
+    /// `Game::CGameCtnBlock::ECardinalDirections`) and a global enum reached
+    /// through a real scope's ancestor walk (`UI::VirtualKey` →
+    /// `VirtualKey`). `None` when the spelling already IS the key, or names
+    /// no source-visible enum at all.
+    ///
+    /// `has_enum` accepts the module-stripped spelling because the game does
+    /// (B052), but type equality is by key, so a resolver that stops at
+    /// "it resolves" would leave two spellings of one enum unequal.
+    pub fn canonical_enum_key(&self, qualified: &str) -> Option<String> {
+        if self.is_canonical_enum_key(qualified) {
+            return None;
+        }
+        let ext = self.external?;
+
+        // Preserve the declaring-scope suffix mapping before considering the
+        // broader ancestor walk: it is the more specific resolution path.
+        if let Some(key) = ext.lookup_source_enum_by_suffix(qualified) {
+            return Some(key.to_string());
+        }
+
+        let (head, tail) = qualified.rsplit_once("::")?;
+        if !self.scope_exists(head) {
+            return None;
+        }
+
+        // `tail` is a complete key here, so this can only select a global
+        // enum. The source-facing lookup also excludes anonymous synthetic
+        // keys; acceptance is never inferred merely from a matching tail.
+        ext.lookup_source_enum(tail).map(|_| tail.to_string())
+    }
+
+    /// True when `qualified` is an enum's own key, exactly as stored —
+    /// no module-stripped spelling, no ancestor walk. Callers that need a
+    /// canonical name, rather than "does this resolve", ask this.
+    fn is_canonical_enum_key(&self, qualified: &str) -> bool {
+        if self
+            .lookup_workspace(qualified)
+            .iter()
+            .any(|s| matches!(s.kind, SymbolKind::Enum { .. }))
+        {
+            return true;
+        }
+        self.external
+            .is_some_and(|ext| ext.lookup_source_enum(qualified).is_some())
+    }
+
+    /// True when `path` names a scope a qualified name resolves through —
+    /// a Core namespace, an engine class that declares an enum, or a
+    /// namespace the workspace itself declares (B052).
+    ///
+    /// The workspace half is not a nicety: a plugin that writes `namespace
+    /// Foo { … }` can spell a global engine enum `Foo::VirtualKey`, and the
+    /// game accepts it. Probed on a plugin declaring `namespace Foo {
+    /// namespace Bar { … } }`: `Foo::VirtualKey` and `Foo::Bar::VirtualKey`
+    /// both compile.
+    pub fn scope_exists(&self, path: &str) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        if self.workspace_namespace_declared(path) {
+            return true;
+        }
+        self.external.is_some_and(|ext| ext.scope_exists(path))
     }
 
     /// True if the qualified name refers to *anything* resolvable — a type,
@@ -495,6 +581,80 @@ impl<'a> GlobalScope<'a> {
             }
         }
         false
+    }
+
+    /// B053: the bare value name `name` is carried by two or more globally
+    /// visible engine enums, so the game refuses to choose — `Found multiple
+    /// matching enum values`. Returns the candidate enum names, sorted, so
+    /// the diagnostic can spell out how to qualify it.
+    ///
+    /// `None` when the name is unambiguous or something outranks the enums.
+    ///
+    /// The workspace cuts BOTH ways, and the game was asked which (probed
+    /// with a plugin declaring each shape, OP 1.29.5, 2026-08-30):
+    ///
+    /// * a global `enum` of the plugin's own JOINS the pool. `GlassSmash` is
+    ///   carried by one engine enum and compiles bare; add `enum Local {
+    ///   GlassSmash }` to the plugin and the game starts answering `Found
+    ///   multiple matching enum values`. So a workspace enum is a candidate,
+    ///   not a shield.
+    /// * a global `int Turbo = 1;` WINS outright — the game accepts bare
+    ///   `Turbo` even though two engine enums carry it. A variable, function
+    ///   or virtual property of the name is the answer, and no ambiguity is
+    ///   reported.
+    /// * a NAMESPACED workspace enum (`namespace N { enum E { Horn } }`) and
+    ///   a class member do not take part at all, exactly as a namespaced or
+    ///   nested ENGINE enum does not.
+    pub fn ambiguous_global_enum_value(&self, name: &str) -> Option<Vec<String>> {
+        if name.contains("::") {
+            return None;
+        }
+        // A type or enum of this name is a type reference, never a value.
+        if self.has_type(name) || self.has_enum(name) {
+            return None;
+        }
+        let mut owners: Vec<String> = self
+            .external
+            .map(|ext| ext.global_enum_value_owners(name).to_vec())
+            .unwrap_or_default();
+
+        // Both tables, exactly as `lookup_global_value_type` reads them: a
+        // top-level `int Down = 1;` is stored under its bare name and is
+        // absent from the tail index, so scanning only tails would miss the
+        // declaration that outranks the enums.
+        let tail = format!("::{}", name);
+        let mut candidates: Vec<&crate::symbols::scope::Symbol> = self.lookup_workspace(name);
+        candidates.extend(self.lookup_workspace_tail(name));
+        for s in candidates {
+            if self.tail_prefix_is_class_member(&s.name, &tail) {
+                // `ClassName::field` is not a global: it neither outranks the
+                // engine's enums nor joins them (GH #30).
+                continue;
+            }
+            match &s.kind {
+                // Outranks the enums entirely.
+                SymbolKind::Variable { .. } | SymbolKind::Function { .. } => return None,
+                // Only a GLOBAL workspace enum is in scope for a bare name;
+                // one inside a namespace is not.
+                SymbolKind::EnumValue { enum_name, .. }
+                    if !enum_name.contains("::") && !owners.contains(enum_name) =>
+                {
+                    owners.push(enum_name.clone());
+                }
+                _ => {}
+            }
+        }
+        // A virtual property (`get_Turbo`) is a value that outranks them too.
+        if self.has_function(&qualified_virtual_name(name, "get_"))
+            || self.has_function(&qualified_virtual_name(name, "set_"))
+        {
+            return None;
+        }
+        if owners.len() < 2 {
+            return None;
+        }
+        owners.sort();
+        Some(owners)
     }
 
     /// GH #30: `ClassName::field` / `ClassName::method` symbols are class
@@ -952,8 +1112,15 @@ impl<'a> GlobalScope<'a> {
     /// Canonical FQN for a type/enum name used in equality checks.
     /// Leaves the input unchanged when nothing in the index matches.
     pub fn canonicalize_type_name(&self, name: &str) -> String {
-        if self.has_type(name) || self.has_enum(name) {
+        // Only an EXACT key is already canonical. `has_enum` is deliberately
+        // wider than that — it also answers for the module-stripped spelling
+        // the game wants and for a global enum behind a real scope's
+        // qualifier (B052) — and neither of those is the canonical key.
+        if self.has_type(name) || self.is_canonical_enum_key(name) {
             return name.to_string();
+        }
+        if let Some(key) = self.canonical_enum_key(name) {
+            return key;
         }
         if let Some(resolved) = self.resolve_qualified_suffix(name) {
             return resolved;
@@ -1537,6 +1704,7 @@ mod tests {
             !scope.has_enum(anonymous) && !scope.resolves(anonymous),
             "synthesized keys must not resolve from source"
         );
+        assert_eq!(scope.canonical_enum_key(anonymous), None);
         assert_eq!(
             scope.canonicalize_type_name(anonymous),
             anonymous,
@@ -1550,6 +1718,10 @@ mod tests {
             scope.canonicalize_type_name("CGameCtnBlock::ECardinalDirections"),
             named,
             "the anonymous filter must not hide named enums"
+        );
+        assert_eq!(
+            scope.canonical_enum_key("CGameCtnBlock::ECardinalDirections"),
+            Some(named.to_string())
         );
     }
 
@@ -1806,11 +1978,14 @@ mod tests {
     ///
     /// The game rejects `Scene::ESceneCharVisNotice` with `Namespace 'Scene'
     /// doesn't exist.` and `Enums::ESceneCharVisNotice` likewise, so neither
-    /// spelling may become a key. `has_enum` still answers true for them via
-    /// the generic B007 tail fallback, which is deliberately permissive for
-    /// EVERY enum and predates this ticket; what is pinned here is that the
-    /// INDEX carries no such entry, which is what a namespace-inventing fix
-    /// would have added.
+    /// spelling may become a key. What is pinned here is that the INDEX
+    /// carries no such entry, which is what a namespace-inventing fix would
+    /// have added.
+    ///
+    /// B046 left `has_enum` answering true for both anyway, through the tail
+    /// fallback it was forbidden to touch. B052 closed that; the resolution
+    /// half of the rule is pinned by
+    /// `a_nadeo_module_prefix_does_not_qualify_a_global_enum`.
     #[test]
     fn no_namespace_is_invented_for_a_module_level_enum() {
         let index = typedb_fixture_index();
@@ -1826,6 +2001,744 @@ mod tests {
             );
         }
         assert!(!index.namespace_exists("Enums"));
+    }
+
+    // ---- B052: qualified paths to a GLOBAL enum -----------------------
+    //
+    // AngelScript resolves `P::T` by looking `T` up in scope `P` and then
+    // walking P's ancestors out to the global namespace. Three things follow,
+    // all of them measured against the live game (RemoteBuild, Trackmania +
+    // Openplanet 1.29.5, 2026-08-30) rather than reasoned from the dump:
+    //
+    //   * `P` is not a scope at all  -> `Namespace 'P' doesn't exist.`
+    //   * `P` is a scope, `T` is not reachable from it
+    //                                -> `Identifier 'T' is not a data type in
+    //                                    namespace 'P' or parent`
+    //   * `P` is a scope and `T` is a GLOBAL enum -> accepted.
+    //
+    // Only three named enum keys are global (single-segment): `VirtualKey`,
+    // `ESceneVehicleVisEvent`, `ESceneCharVisNotice`. Every other key is
+    // `Module::Class::Enum` or `CoreNs::Enum`, so this rule reaches exactly
+    // those three names — the pre-B052 fallback's whole surface, because
+    // `lookup_source_enum(tail)` demands `tail` be a complete key.
+    //
+    // What IS a scope, and what is not:
+    //   * a Core namespace (`UI`, `Meta`, `Json`, `IO`, `nvg`, `UI::Font`, …)
+    //     — yes, and the walk reaches global from it;
+    //   * an engine class that declares at least one enum, named or
+    //     anonymous, spelled WITHOUT the loader's synthetic module prefix
+    //     (`CGameMenu`, `CGameCtnApp`, `CGameCtnChallenge`) — yes;
+    //   * an engine class that declares none (`CSceneVehicleVis`,
+    //     `CTrackMania`, `CMwNod`, `CSystemFidFile`, `Meta::Plugin`) — no;
+    //   * a namespace the workspace itself declares, nested included — yes;
+    //   * the loader's Nadeo MODULE prefixes (`Scene`, `Game`, `Plug`,
+    //     `System`, `Hms`, …) — no. They are this crate's invention for
+    //     keying the dump and name nothing the game has.
+
+    /// B052 red: a Nadeo module prefix is not a namespace, so a qualified
+    /// path through one names nothing. Every name below was submitted to the
+    /// live game and rejected with `Namespace '<prefix>' doesn't exist.`
+    #[test]
+    fn a_nadeo_module_prefix_does_not_qualify_a_global_enum() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // Every module the loader keys the Nadeo dump under, plus the
+        // `Openplanet.h` bucket name and a control that is nothing at all.
+        let prefixes = [
+            "Scene",
+            "Game",
+            "Plug",
+            "System",
+            "Hms",
+            "Input",
+            "Control",
+            "Function",
+            "Graphic",
+            "Script",
+            "Vision",
+            "Xml",
+            "TrackMania",
+            "ShootMania",
+            "MwFoundations",
+            "MetaNotPersistent",
+            "Enums",
+            "Bogus",
+        ];
+        for prefix in prefixes {
+            for tail in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+                let qualified = format!("{prefix}::{tail}");
+                assert!(
+                    !scope.has_enum(&qualified),
+                    "the game answers `Namespace '{prefix}' doesn't exist.` for `{qualified}`"
+                );
+                assert!(
+                    !scope.resolves(&qualified),
+                    "`{qualified}` must not resolve as a type either"
+                );
+                assert_eq!(scope.canonical_enum_key(&qualified), None);
+                assert_eq!(scope.canonicalize_type_name(&qualified), qualified);
+            }
+        }
+    }
+
+    /// B052 red: a deeper path through a non-scope is no better, and neither
+    /// is an engine class that declares no enum — the game reports
+    /// `Namespace 'Game::CGameMenu' doesn't exist.` for the first and
+    /// `Identifier 'VirtualKey' is not a data type in namespace
+    /// 'CSceneVehicleVis' or parent` for the second.
+    #[test]
+    fn a_scopeless_or_enumless_prefix_does_not_qualify_a_global_enum() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for prefix in [
+            // module-prefixed class path: the module segment is synthetic.
+            "Game::CGameMenu",
+            "MetaNotPersistent::NPlugAnim",
+            // real engine classes that declare no enum, so no namespace of
+            // their name exists and the ancestor walk never starts.
+            "CSceneVehicleVis",
+            "CTrackMania",
+            "CMwNod",
+            "CSystemFidFile",
+            // a Core CLASS (not namespace) under a real Core namespace.
+            "Meta::Plugin",
+        ] {
+            for tail in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+                let qualified = format!("{prefix}::{tail}");
+                assert!(
+                    !scope.has_enum(&qualified),
+                    "the game rejects `{qualified}`"
+                );
+                assert!(
+                    !scope.resolves(&qualified),
+                    "`{qualified}` must not resolve"
+                );
+                assert_eq!(scope.canonical_enum_key(&qualified), None);
+                assert_eq!(scope.canonicalize_type_name(&qualified), qualified);
+            }
+        }
+    }
+
+    /// B052 fence: the ancestor walk is real, so a REAL scope does qualify a
+    /// global enum and must keep resolving. Narrowing the fallback without
+    /// this test would trade a false negative for a false POSITIVE — the
+    /// damaging direction. Every name below the game accepted.
+    #[test]
+    fn a_real_scope_qualifies_a_global_enum() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let prefixes = [
+            // Core namespaces, flat and nested.
+            "UI",
+            "Meta",
+            "Json",
+            "Net",
+            "Audio",
+            "IO",
+            "nvg",
+            "Text",
+            "Math",
+            "Regex",
+            "Dev",
+            "Import",
+            "XML",
+            "Time",
+            "Icons",
+            "Fids",
+            "Path",
+            "Crypto",
+            "Auth",
+            "Display",
+            "Reflection",
+            "Permissions",
+            "SQLite",
+            "Settings",
+            "Tests",
+            "mat3",
+            "mat4",
+            "string",
+            "UI::Font",
+            "UI::Plot",
+            // Engine classes that declare an enum, module prefix stripped:
+            // `CGameMenu` a named one, `CGameCtnApp` only an anonymous one.
+            "CGameMenu",
+            "CGameCtnApp",
+            "CGameCtnChallenge",
+        ];
+        for prefix in prefixes {
+            for tail in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+                let qualified = format!("{prefix}::{tail}");
+                assert!(
+                    scope.has_enum(&qualified),
+                    "the game accepts `{qualified}` through the ancestor walk"
+                );
+                assert!(scope.resolves(&qualified), "`{qualified}` must resolve");
+                assert_eq!(
+                    scope.canonical_enum_key(&qualified),
+                    Some(tail.to_string()),
+                    "`{qualified}` canonicalizes to its global enum key"
+                );
+                assert_eq!(scope.canonicalize_type_name(&qualified), tail);
+            }
+        }
+    }
+
+    /// B052: declaring `A::B` declares `A`, so an ANCESTOR of a known scope
+    /// is a scope. The Core database only ever names `Internal::NadeoServices`
+    /// — never `Internal` alone — and the deepest engine scopes are two
+    /// segments deep, so without this the LSP rejected paths the game
+    /// compiles. That is a false POSITIVE, the damaging direction.
+    ///
+    /// Every name here was probed. The ancestors accept a global enum, and
+    /// each answers `Identifier 'ZZZNoSuch' is not a data type in namespace
+    /// '<ancestor>' or parent` for an absent name — the reply only a scope
+    /// that EXISTS gives, as against `Namespace 'X' doesn't exist.`
+    #[test]
+    fn an_ancestor_of_a_known_scope_is_a_scope() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for prefix in [
+            // Core: only `Internal::NadeoServices` is ever named.
+            "Internal",
+            "Internal::NadeoServices",
+            // Engine: ancestors of the two deepest class scopes.
+            "NSysCfgVision",
+            "NSysCfgVision::SDeferred",
+            "CHmsSolidVisCst_TmCar",
+            "CHmsSolidVisCst_TmCar::SPrestige",
+        ] {
+            assert!(
+                index.scope_exists(prefix),
+                "`{prefix}` is a scope the game resolves through"
+            );
+            let qualified = format!("{prefix}::VirtualKey");
+            assert!(
+                scope.has_enum(&qualified),
+                "the game accepts `{qualified}`; rejecting it is a false positive"
+            );
+        }
+
+        // The ancestor rule takes whole PATH prefixes, never a short name
+        // lifted out of the middle: `SDeferred` alone is not a scope and the
+        // game answers `Namespace 'SDeferred' doesn't exist.`
+        assert!(!index.scope_exists("SDeferred"));
+        assert!(!scope.has_enum("SDeferred::VirtualKey"));
+        assert!(!index.scope_exists("SPrestige"));
+        assert!(!scope.has_enum("SPrestige::VirtualKey"));
+    }
+
+    /// B052/B053 determinism: both new indexes are order-stable, so two loads
+    /// of identical bytes answer identically.
+    ///
+    /// Worth pinning rather than assuming: both are built by iterating
+    /// `HashMap`s, whose order is not stable across runs. The scope index is a
+    /// set, so order cannot leak; the global-enum-value index builds a `Vec`
+    /// of owner names and must therefore SORT, because that vector is printed
+    /// verbatim in the B053 diagnostic and an unsorted one would give the same
+    /// file different messages on different runs.
+    #[test]
+    fn the_scope_and_global_enum_indexes_are_deterministic() {
+        let a = typedb_fixture_index();
+        let b = typedb_fixture_index();
+
+        for path in [
+            "UI",
+            "Internal",
+            "Internal::NadeoServices",
+            "CGameMenu",
+            "NSysCfgVision::SDeferred",
+            "Scene",
+            "Bogus",
+        ] {
+            assert_eq!(
+                a.scope_exists(path),
+                b.scope_exists(path),
+                "`{path}` must answer the same on both loads"
+            );
+        }
+
+        for value in ["Turbo", "None", "WallJump", "GlassSmash", "Ordered"] {
+            assert_eq!(
+                a.global_enum_value_owners(value),
+                b.global_enum_value_owners(value),
+                "`{value}`'s candidate list must be identical, and in the same \
+                 order — it is printed verbatim in the diagnostic"
+            );
+            let owners = a.global_enum_value_owners(value);
+            let mut sorted = owners.to_vec();
+            sorted.sort();
+            assert_eq!(
+                owners,
+                sorted.as_slice(),
+                "`{value}`'s owners must be sorted"
+            );
+        }
+    }
+
+    /// B052: the workspace half of `scope_exists` cannot act at a distance.
+    ///
+    /// A plugin's `namespace Foo` makes `Foo::VirtualKey` resolve, which is
+    /// correct — the game compiles a plugin as ONE module, so a namespace
+    /// declared in any of its files is in scope in all of them, and that was
+    /// probed. The risk is the other direction: that declaring or deleting a
+    /// namespace silently changes a file that never mentions it.
+    ///
+    /// It cannot, and this pins why. `scope_exists` is only ever reached
+    /// through a qualified name the source itself wrote, so a file that spells
+    /// no `Foo::` path never asks about `Foo`.
+    #[test]
+    fn a_workspace_namespace_only_affects_names_that_spell_it() {
+        let index = typedb_fixture_index();
+
+        let without = SymbolTable::new();
+        let mut with = SymbolTable::new();
+        let fid = with.allocate_file_id();
+        with.set_file_symbols(fid, vec![make_symbol("Foo", SymbolKind::Namespace)]);
+
+        let a = GlobalScope::new(&without, Some(&index));
+        let b = GlobalScope::new(&with, Some(&index));
+
+        // The ONE name whose answer may differ is the one that spells `Foo`.
+        assert!(!a.has_enum("Foo::VirtualKey"));
+        assert!(b.has_enum("Foo::VirtualKey"));
+
+        // Everything else is unmoved by the namespace's presence.
+        for name in [
+            "VirtualKey",
+            "ESceneCharVisNotice",
+            "UI::VirtualKey",
+            "CGameMenu::VirtualKey",
+            "CGameMenu::EMenuOrder",
+            "Scene::ESceneCharVisNotice",
+            "Game::CGameMenu::VirtualKey",
+            "Bogus::VirtualKey",
+            "Quux::VirtualKey",
+        ] {
+            assert_eq!(
+                a.has_enum(name),
+                b.has_enum(name),
+                "`{name}` does not spell `Foo`, so declaring `namespace Foo` \
+                 must not change it"
+            );
+            assert_eq!(a.resolves(name), b.resolves(name), "`{name}` likewise");
+        }
+    }
+
+    /// B052 fence: the bare spellings are untouched — they are how the game
+    /// wants these three written in the first place.
+    #[test]
+    fn a_global_enum_still_resolves_bare() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for name in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+            assert!(scope.has_enum(name), "`{name}` must resolve bare");
+            assert!(scope.resolves(name));
+            assert!(scope.has_global_ident(name));
+        }
+    }
+
+    /// B052 red: a namespace the WORKSPACE declares is a scope, so the same
+    /// ancestor walk applies inside plugin code. Probed with a plugin that
+    /// declares `namespace Foo { namespace Bar { … } }`: the game accepts
+    /// `Foo::VirtualKey` and `Foo::Bar::VirtualKey`, and answers `Identifier
+    /// 'ZZZNoSuch' is not a data type in namespace 'Foo' or parent` for a
+    /// name that is genuinely absent.
+    #[test]
+    fn a_workspace_namespace_qualifies_a_global_enum() {
+        let index = typedb_fixture_index();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![
+                make_symbol("Foo", SymbolKind::Namespace),
+                make_symbol("Foo::Bar", SymbolKind::Namespace),
+            ],
+        );
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for tail in ["VirtualKey", "ESceneVehicleVisEvent", "ESceneCharVisNotice"] {
+            for prefix in ["Foo", "Foo::Bar"] {
+                let qualified = format!("{prefix}::{tail}");
+                assert!(
+                    scope.has_enum(&qualified),
+                    "`{qualified}` resolves through the workspace namespace"
+                );
+            }
+            // A namespace nobody declares is still nothing.
+            assert!(!scope.has_enum(&format!("Quux::{tail}")));
+        }
+    }
+
+    /// B052: the fallback the old tail match was reaching for. A nested
+    /// engine enum written the way the game wants it — class scope, no
+    /// module prefix — is an enum, and `has_enum` said no. The suffix has to
+    /// be a genuine trailing PATH of a key, not merely its last segment.
+    #[test]
+    fn a_module_stripped_nested_enum_path_is_an_enum() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // Left: what the game accepts. Right: the key the loader stores.
+        for (spelling, key) in [
+            ("CGameMenu::EMenuOrder", "Game::CGameMenu::EMenuOrder"),
+            (
+                "CGameCtnBlock::ECardinalDirections",
+                "Game::CGameCtnBlock::ECardinalDirections",
+            ),
+            ("CGameHighScore::EMedal", "Game::CGameHighScore::EMedal"),
+            (
+                "CHmsViewport::EPC3Quality",
+                "Hms::CHmsViewport::EPC3Quality",
+            ),
+        ] {
+            assert!(
+                index.lookup_source_enum(key).is_some(),
+                "fixture guard: `{key}` must be a named enum key"
+            );
+            assert!(
+                scope.has_enum(spelling),
+                "the game accepts `{spelling}`, so it is an enum"
+            );
+            assert!(scope.resolves(spelling));
+        }
+
+        // The suffix must be a whole trailing path. A real enum name behind
+        // a prefix that is not its declaring class is still nothing, and the
+        // game agrees: `Namespace 'Bogus' doesn't exist.`
+        assert!(!scope.has_enum("Bogus::EMenuOrder"));
+        assert!(!scope.has_enum("CGameHighScore::EMenuOrder"));
+    }
+
+    // ---- B053: a bare value two globally visible enums carry ------------
+    //
+    // The game resolves a bare enum-value name against the enums in scope,
+    // and when two of them carry it, it refuses to choose:
+    // `Found multiple matching enum values`. openplanet-lsp took the first
+    // hit and said nothing.
+    //
+    // Which enums are in scope for a BARE name is the whole question, and it
+    // is narrower than "every named enum". Ground truth, all 2989 bare value
+    // names of the shipped DB's named enums submitted to the live game
+    // (RemoteBuild, Trackmania + Openplanet 1.29.5, 2026-08-30):
+    //
+    //     2373  No matching symbol
+    //      592  accepted
+    //       22  Found multiple matching enum values
+    //        2  resolved to a non-enum symbol (`Main`, `RGBAColor`)
+    //
+    // Only enums the game puts in the GLOBAL namespace take part — 68 keys,
+    // 60 distinct names. A nested enum's values (`CGameMenu::EMenuOrder`) and
+    // a Core namespaced enum's values (`UI::Cond`) are not reachable bare at
+    // all, which is the 2373. Counting NAMES not keys matters: the loader
+    // keys one engine enum under several modules, so `EHmsLightMapQuality`
+    // appears twice and is still one enum.
+    //
+    // The ticket predicted this set from "carried by two or more NAMED
+    // enums", which is 758 names — 34x too many. The rule above predicts
+    // 2987 of the 2989 verdicts, and misses only the two that resolve to
+    // something that is not an enum value.
+    //
+    // The 2373 are a real and much larger false negative, and they are NOT
+    // fixed here: narrowing the bare-value scan needs its own probe and its
+    // own false-positive gate. B053 is the ambiguity half only.
+
+    /// B053 red: each of the 22 names the game rejects as ambiguous.
+    #[test]
+    fn a_value_two_global_enums_carry_is_ambiguous() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // Every name the live game answered `Found multiple matching enum
+        // values` for, with no residual: this list IS the game's answer.
+        let ambiguous = [
+            "Blend",
+            "Cling",
+            "Down",
+            "Energy",
+            "FreeWheeling",
+            "Heavy",
+            "High",
+            "Light",
+            "Medium",
+            "Mesh",
+            "None",
+            "Player",
+            "Road",
+            "Static",
+            "Turbo",
+            "Undefined",
+            "Up",
+            "Vehicle",
+            "WallJump",
+            "Water",
+            "WaterSplash",
+            "XXX_Null",
+        ];
+        for name in ambiguous {
+            let candidates = scope
+                .ambiguous_global_enum_value(name)
+                .unwrap_or_else(|| panic!("the game rejects `{name}` as ambiguous"));
+            assert!(
+                candidates.len() >= 2,
+                "`{name}` needs at least two candidates to be ambiguous, got {candidates:?}"
+            );
+            let mut sorted = candidates.clone();
+            sorted.sort();
+            assert_eq!(
+                sorted, candidates,
+                "candidates must be sorted for a stable message"
+            );
+        }
+
+        // Spot-check the candidate sets the message will print.
+        assert_eq!(
+            scope.ambiguous_global_enum_value("Turbo").unwrap(),
+            vec![
+                "EPlugSurfaceGameplayId".to_string(),
+                "ESceneCharVisNotice".to_string(),
+                "ESceneVehicleVisEvent".to_string(),
+            ]
+        );
+        assert_eq!(
+            scope.ambiguous_global_enum_value("WallJump").unwrap(),
+            vec![
+                "EPlugSurfaceMaterialId".to_string(),
+                "ESceneCharVisNotice".to_string(),
+            ]
+        );
+    }
+
+    /// B053 fence: a value only ONE globally visible enum carries is not
+    /// ambiguous and must stay silent. The game compiles all of these.
+    #[test]
+    fn a_value_one_global_enum_carries_is_not_ambiguous() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        for name in [
+            // ESceneVehicleVisEvent, carried by nothing else global.
+            "GlassSmash",
+            "Horn",
+            "ImpactBody",
+            "BeginBulletTime",
+            // ESceneCharVisNotice.
+            "JumpChain1",
+            "DoubleJump",
+            "TechJump",
+            "GestureVictory",
+            // VirtualKey.
+            "Space",
+            "Escape",
+        ] {
+            assert!(
+                scope.ambiguous_global_enum_value(name).is_none(),
+                "the game accepts `{name}`; it must not be called ambiguous"
+            );
+            assert!(scope.has_global_ident(name), "`{name}` must keep resolving");
+        }
+    }
+
+    /// B053 fence: a value carried only by NESTED or NAMESPACED enums is not
+    /// ambiguous either — those enums are not in scope for a bare name, so
+    /// there is nothing to be ambiguous between. (The game rejects these with
+    /// `No matching symbol`, a separate and much larger false negative that
+    /// B053 deliberately does not touch; pinned here so a later fix for it
+    /// cannot be mistaken for this one.)
+    #[test]
+    fn a_value_only_nested_enums_carry_is_not_ambiguous() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // `Ordered` belongs to the nested `Game::CGameMenu::EMenuOrder`;
+        // `Object` to the nested `GameData::CGameCtnCollector::EProdState`
+        // family. Neither is reachable bare in-game.
+        for name in ["Ordered", "Aborted"] {
+            assert!(
+                scope.ambiguous_global_enum_value(name).is_none(),
+                "`{name}` is carried by no globally visible enum"
+            );
+        }
+        assert!(
+            index.global_enum_value_owners("Ordered").is_empty(),
+            "a nested enum's value has no globally visible owner"
+        );
+    }
+
+    /// B053: a workspace VARIABLE or FUNCTION of the name outranks the
+    /// engine's enums, and the game agrees — `int Turbo = 1;` in a plugin
+    /// makes bare `Turbo` compile even though two engine enums carry it.
+    #[test]
+    fn a_workspace_variable_or_function_outranks_the_engine_enums() {
+        let index = typedb_fixture_index();
+        for kind in [
+            SymbolKind::Variable {
+                type_name: "int".into(),
+            },
+            SymbolKind::Function {
+                return_type: "void".into(),
+                params: Vec::new(),
+                min_args: 0,
+                imported: false,
+            },
+        ] {
+            let mut ws = SymbolTable::new();
+            let fid = ws.allocate_file_id();
+            ws.set_file_symbols(fid, vec![make_symbol("Turbo", kind.clone())]);
+            let scope = GlobalScope::new(&ws, Some(&index));
+            assert!(
+                scope.ambiguous_global_enum_value("Turbo").is_none(),
+                "a workspace `{kind:?}` named `Turbo` is the answer, so there \
+                 is no ambiguity to report"
+            );
+        }
+    }
+
+    /// B053: a plugin's own GLOBAL enum JOINS the pool rather than shielding
+    /// against it — the counter-intuitive half, and the one the game settled.
+    /// `GlassSmash` is carried by exactly one engine enum and compiles bare;
+    /// add `enum LocalPick { GlassSmash }` to the plugin and the game starts
+    /// answering `Found multiple matching enum values`.
+    #[test]
+    fn a_workspace_global_enum_joins_the_ambiguity_pool() {
+        let index = typedb_fixture_index();
+        let bare = SymbolTable::new();
+        let bare_scope = GlobalScope::new(&bare, Some(&index));
+        assert!(
+            bare_scope
+                .ambiguous_global_enum_value("GlassSmash")
+                .is_none(),
+            "fixture guard: one engine enum carries `GlassSmash`, so it starts \
+             out unambiguous"
+        );
+
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![
+                make_symbol("LocalPick", SymbolKind::Enum { values: Vec::new() }),
+                make_symbol(
+                    "LocalPick::GlassSmash",
+                    SymbolKind::EnumValue {
+                        enum_name: "LocalPick".into(),
+                        value: Some(0),
+                    },
+                ),
+            ],
+        );
+        let scope = GlobalScope::new(&ws, Some(&index));
+        assert_eq!(
+            scope.ambiguous_global_enum_value("GlassSmash"),
+            Some(vec![
+                "ESceneVehicleVisEvent".to_string(),
+                "LocalPick".to_string()
+            ]),
+            "the plugin's own enum must appear as a candidate, by name"
+        );
+    }
+
+    /// B053: a NAMESPACED workspace enum and a class member take no part —
+    /// the same rule that keeps a namespaced or nested ENGINE enum out.
+    /// Probed: with `namespace NsBox { enum NsEnum { Horn } }` the game still
+    /// compiles bare `Horn`.
+    #[test]
+    fn a_namespaced_workspace_enum_or_class_member_does_not_join_the_pool() {
+        let index = typedb_fixture_index();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            vec![
+                make_symbol("NsBox", SymbolKind::Namespace),
+                make_symbol("NsBox::NsEnum", SymbolKind::Enum { values: Vec::new() }),
+                make_symbol(
+                    "NsBox::NsEnum::Horn",
+                    SymbolKind::EnumValue {
+                        enum_name: "NsBox::NsEnum".into(),
+                        value: Some(0),
+                    },
+                ),
+                make_symbol(
+                    "Holder",
+                    SymbolKind::Class {
+                        parents: Vec::new(),
+                        members: vec!["JumpChain1".into()],
+                    },
+                ),
+                make_symbol(
+                    "Holder::JumpChain1",
+                    SymbolKind::Variable {
+                        type_name: "int".into(),
+                    },
+                ),
+            ],
+        );
+        let scope = GlobalScope::new(&ws, Some(&index));
+        assert!(
+            scope.ambiguous_global_enum_value("Horn").is_none(),
+            "a namespaced workspace enum is not in scope for a bare name"
+        );
+        assert!(
+            scope.ambiguous_global_enum_value("JumpChain1").is_none(),
+            "a class member is not a global"
+        );
+    }
+
+    /// B053: which enums are globally visible, pinned directly. The index
+    /// half of the rule, so a loader change that starts keying enums
+    /// differently fails here rather than silently changing the diagnostic.
+    #[test]
+    fn only_module_level_enums_are_globally_visible() {
+        let index = typedb_fixture_index();
+
+        // Global: the two header enums, and a Nadeo module-level one.
+        for (value, owner) in [
+            ("Jump", "ESceneCharVisNotice"),
+            ("GlassSmash", "ESceneVehicleVisEvent"),
+            ("Space", "VirtualKey"),
+        ] {
+            assert!(
+                index
+                    .global_enum_value_owners(value)
+                    .iter()
+                    .any(|o| o == owner),
+                "`{value}` must be attributed to the global `{owner}`"
+            );
+        }
+
+        // Not global: a nested Nadeo enum, and a namespaced Core enum.
+        assert!(index
+            .lookup_source_enum("Game::CGameMenu::EMenuOrder")
+            .is_some());
+        assert!(
+            index.global_enum_value_owners("Ordered").is_empty(),
+            "a nested engine enum contributes no globally visible value"
+        );
+        assert!(index.lookup_source_enum("UI::Cond").is_some());
+        for (value, _) in &index.lookup_source_enum("UI::Cond").unwrap().values {
+            assert!(
+                !index
+                    .global_enum_value_owners(value)
+                    .iter()
+                    .any(|o| o == "Cond"),
+                "`UI::Cond` is namespaced, so `{value}` is not global through it"
+            );
+        }
     }
 
     /// B046 fence: a value a module-level enum SHARES with an enum the dump

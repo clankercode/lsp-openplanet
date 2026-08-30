@@ -8,8 +8,9 @@
 // cannot express them at all and `Openplanet.h` is the only source:
 // `ESceneCharVisNotice` and `ESceneVehicleVisEvent`.
 //
-// Game verdict (RemoteBuild probe, OP 1.29.5, 2026-08-30): every statement
-// below compiles EXCEPT the four in the `SharedValues_*` functions -- see
+// Game verdict (RemoteBuild probe, OP 1.29.5, 2026-08-30, re-probed the same
+// day for B053): every statement below compiles EXCEPT the four in the
+// `SharedValues_*` functions, which the game rejects as AMBIGUOUS -- see
 // there. Bare value names, the bare enum name used as a type, and a value
 // reached through the bare enum name are all accepted.
 //
@@ -21,6 +22,25 @@
 //
 // One statement per line: AngelScript reports one error per statement, at the
 // first unresolved symbol, so every rejected name gets its own line.
+//
+// ===========================================================================
+// THIS FIXTURE EXPECTS 4 DIAGNOSTICS, NOT 0. DO NOT "FIX" IT BACK TO 0.
+// ===========================================================================
+// It was 0 when B046 merged, and B046's own comments (in the `SharedValues_*`
+// blocks below) predicted it would become 4 as soon as somebody modelled
+// in-game enum-value ambiguity. B053 did that, so 4 is correct and 0 is now
+// the regression.
+//
+// What B046 guarantees is that these names RESOLVE. What the four get is an
+// `ambiguous enum value` error that NAMES `ESceneCharVisNotice` and
+// `ESceneVehicleVisEvent` among the candidates -- which is positive proof the
+// two module-level enums B046 added are still in the pool. If you ever see
+// `No matching symbol` or `undefined identifier` here instead, THAT is a real
+// B046 regression: the module-level enums have been lost again. The gate test
+// `check_command_issue_repro_b046_module_level_enums_resolve` asserts exactly
+// that distinction, so the two failures cannot be confused.
+//
+// The other 63 value statements in this file must stay silent.
 
 // ESceneCharVisNotice: 33 values, 30 of which no other enum carries.
 void BareValues_ESceneCharVisNotice() {
@@ -56,17 +76,21 @@ void BareValues_ESceneCharVisNotice() {
     print("" + GestureVictory);
 }
 
-// Values ESceneCharVisNotice shares with an enum the dump already carries.
-// They resolved before this fixture existed and must keep resolving, so they
-// guard against a fix that only works by shadowing.
+// Values ESceneCharVisNotice shares with another GLOBALLY VISIBLE enum.
 //
-// DIVERGENCE, deliberately not fixed here: the game rejects each of these with
-// "Found multiple matching enum values" -- a bare name carried by two named
-// enums is ambiguous to it. openplanet-lsp accepts the first match, so it is
-// silent where the game errors. That is a false NEGATIVE and it predates this
-// ticket (many engine value names are already multiply defined); narrowing it
-// needs its own probe and its own ticket. Recorded here because B046 adds two
-// more enums to the pool that can collide.
+// The divergence B046 recorded here is now CLOSED by B053: the game rejects
+// each of these with "Found multiple matching enum values", and so does
+// openplanet-lsp. These four statements (three here, one in the
+// ESceneVehicleVisEvent block below) are the whole of this fixture's error
+// count, and the live game produces exactly the same four statements --
+// re-probed 2026-08-30 against this exact file, line for line with what
+// openplanet-lsp reports. (No line numbers recorded on purpose: editing this
+// comment moves them.)
+//
+// They still prove what B046 needed them to prove. The names RESOLVE: what
+// they get is an ambiguity error naming the candidate enums, not `No matching
+// symbol`, so the module-level enums are still in the pool and no fix that
+// worked by shadowing them would pass.
 void SharedValues_ESceneCharVisNotice() {
     print("" + WallJump);
     print("" + Turbo);
@@ -102,17 +126,8 @@ void BareValues_ESceneVehicleVisEvent() {
     print("" + WallBounce);
 }
 
-// Values ESceneVehicleVisEvent shares with an enum the dump already carries.
-// They resolved before this fixture existed and must keep resolving, so they
-// guard against a fix that only works by shadowing.
-//
-// DIVERGENCE, deliberately not fixed here: the game rejects each of these with
-// "Found multiple matching enum values" -- a bare name carried by two named
-// enums is ambiguous to it. openplanet-lsp accepts the first match, so it is
-// silent where the game errors. That is a false NEGATIVE and it predates this
-// ticket (many engine value names are already multiply defined); narrowing it
-// needs its own probe and its own ticket. Recorded here because B046 adds two
-// more enums to the pool that can collide.
+// Values ESceneVehicleVisEvent shares with another GLOBALLY VISIBLE enum.
+// Closed by B053, exactly as the ESceneCharVisNotice block above.
 void SharedValues_ESceneVehicleVisEvent() {
     print("" + Turbo);
 }
