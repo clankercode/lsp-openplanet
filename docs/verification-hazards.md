@@ -335,6 +335,25 @@ The test passes, and would have passed either way.
   were plausible, self-consistent, and pointed at fixes that would have
   addressed nothing — more RAM, or a recursion limit. Evidence: B078.)
 
+**The strongest datapoint in this batch for that claim.** One lane's change
+  went through **six** adversarial review passes. Every pass found a real
+  defect the lane had introduced — and **all six were invisible to every gate**:
+  the full suite, the hermetic run, clippy, and a false-positive fixture gate
+  over six real plugins were green on all six rejected commits. Worse, **each
+  round's fix introduced the next round's defect** (a rule taught in round 5
+  was found in round 6 to have been tested against the wrong domain), a
+  measured 5-for-5 rate.
+
+  Two conclusions, and the second is the uncomfortable one:
+
+  - A green gate on a subtle semantic change means the change did not break
+    anything **the corpus contains**. On a change to name resolution, no
+    fixture declares the colliding shapes, so the gate is structurally blind.
+  - **An unreviewed fix to a subtle defect is more dangerous than the defect.**
+    Where fixes have a demonstrated history of introducing the next defect, the
+    cheap-feeling move — patch it and ship without re-review — is the one with
+    the worst record.
+
 - **Measure each half of a multi-part fix as a standalone variant.** Twice in
   this batch a ticket's own Work section proposed the half that closes nothing,
   and in both cases the wrong half was the plausible-sounding one:
