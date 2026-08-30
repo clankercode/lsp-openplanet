@@ -10,6 +10,8 @@ pub mod preprocessor;
 pub mod server;
 pub mod symbols;
 pub mod term;
+#[doc(hidden)]
+pub mod testing;
 pub mod tui;
 pub mod typecheck;
 pub mod typedb;
