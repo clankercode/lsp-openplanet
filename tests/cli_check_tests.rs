@@ -1757,9 +1757,11 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
 ///
 /// The fixture pins BOTH sides of the line, because a fix that silences more
 /// than it should is indistinguishable from a correct one until something
-/// pins the boundary. Master reports 35 errors across the two files and 24
-/// of them are false; the 11 true ones must survive, and so must the
-/// neighbouring case of every silenced line — notably
+/// pins the boundary. Master reports 37 errors across the three files, 26 of
+/// them false; the 11 true ones must survive, and the fix adds 2 more that
+/// master misses (a funcdef handle into a `uint` slot from a plain global,
+/// and a `uint` property value into a delegate ctor) — 13 asserted below.
+/// The neighbouring case of every silenced line must keep erroring, notably
 /// `startnew(BadHandler)`, a funcdef-handle property of the WRONG signature
 /// sitting right beside the three right-signature ones this fix silences,
 /// and `Variants.as`' four real functions in the same slot shapes its
@@ -1837,6 +1839,14 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         "Variants.as:69",
         "Variants.as:70",
         "Variants.as:71",
+        // Shadowing.as: a plugin class named after a Core funcdef, read as a
+        // property (29) and as a plain global (30), plus the non-colliding
+        // control (32-33) that must behave identically. Master errors on 29
+        // and 32.
+        "Shadowing.as:29",
+        "Shadowing.as:30",
+        "Shadowing.as:32",
+        "Shadowing.as:33",
     ] {
         assert!(
             !errors.iter().any(|e| e.contains(line)),

@@ -2601,7 +2601,19 @@ impl<'a> Checker<'a> {
     /// side. Recognising both keeps the two paths on one answer.
     fn arg_value_funcdef(&self, arg_ty: &TypeRepr) -> Option<FuncdefSig> {
         match Self::peel_const_handle(arg_ty) {
-            TypeRepr::Funcdef(n) | TypeRepr::Named(n) => self.scope.lookup_funcdef(n),
+            TypeRepr::Funcdef(n) => self.scope.lookup_funcdef(n),
+            // GH #38 shadowing: `lookup_funcdef` falls through to the typedb
+            // when the workspace symbol of that name is not a funcdef, so a
+            // plugin class named after a Core funcdef (`class
+            // CoroutineFunc`) would resolve to the ENGINE funcdef and its
+            // instances would be rejected as function-shaped at a value
+            // slot. The plugin's own declaration wins.
+            TypeRepr::Named(n) if !self.scope.is_workspace_class(n) => {
+                if self.scope.is_workspace_interface(n) {
+                    return None;
+                }
+                self.scope.lookup_funcdef(n)
+            }
             _ => None,
         }
     }
