@@ -61,3 +61,4 @@ bugs:
     - file: B060-false-error-text-format-reject.todo
     - file: B061-false-unused-property-syntax-r.todo
     - file: B062-manifest-exports-should-root-t.todo
+    - file: B063-member-completion-never-offers.todo
