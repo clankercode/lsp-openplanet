@@ -540,51 +540,148 @@ mod b153_nadeo_dump_field_audit {
         false
     }
 
-    /// (struct, WIRE field name, why nothing reads it). Rows are grouped:
-    /// genuinely nothing to consume, meaning undetermined, or a tracked open
-    /// finding. An empty reason is rejected, so silence is never a default.
-    const JUSTIFIED: &[(&str, &str, &str)] = &[
-        // --- genuinely nothing for a language server to consume ---
+    /// Machine-checked evidence for a claim about a dump field (B168).
+    ///
+    /// B157 found that B138's audit carried a row exempting the exact literal
+    /// that turned out to be the bug, and the stated reason WAS the false
+    /// claim. The audit did not accept the defect despite a justification; it
+    /// accepted it BECAUSE of one. Free text records that somebody was
+    /// convinced, never that they were right, and once written the scanner
+    /// stops asking — so a wrong belief becomes permanent and load-bearing.
+    ///
+    /// `READ_CONFIRMED` never had that weakness: its snippet must literally
+    /// still occur. This is the same idea applied to the JUSTIFIED half —
+    /// every row now carries at least one claim the shipped dump can refute.
+    #[derive(Debug, Clone, Copy)]
+    enum Evidence {
+        /// The key appears on exactly this many objects.
+        OccursExactly(usize),
+        /// Every occurrence has exactly this integer value.
+        AlwaysExactly(u64),
+        /// Every value is a string of hex digits.
+        EveryValueIsHexDigits,
+        /// No two objects share a value.
+        EveryValueIsUnique,
+        /// Every value is a non-empty string.
+        EveryValueIsNonEmptyString,
+        /// Exactly this many values end with the suffix, ignoring case. A
+        /// COUNTED distribution claim: "mostly Gbx files" is prose, "294 of
+        /// 314 end in gbx" is refutable.
+        CaseInsensitiveSuffixCount(&'static str, usize),
+        /// Following `p`, no class carries a smaller value than its base.
+        /// Zero-valued children are skipped — they record no size.
+        NeverSmallerThanParentIgnoringZero,
+        /// This key and the named one occur in all four presence
+        /// combinations, so neither is a spelling of the other.
+        VariesIndependentlyOf(&'static str),
+        /// NOTHING IN THE DUMP SUBSTANTIATES THE MEANING. The row's counts
+        /// may still be checked; this marks the INTERPRETATION as unexamined,
+        /// and a row carrying it must say UNEXAMINED in its prose so the next
+        /// reader is invited to look rather than told not to.
+        Unexamined,
+    }
+
+    /// (struct, WIRE field name, why nothing reads it, EVIDENCE).
+    ///
+    /// The fourth element is the point of B168: every row must carry at least
+    /// one claim the shipped dump can refute. A row with an empty evidence
+    /// list is rejected, and a row whose meaning is genuinely undetermined
+    /// must carry `Evidence::Unexamined` AND say UNEXAMINED in its prose.
+    ///
+    /// Converting the prose to predicates immediately refuted two of these
+    /// rows, both written from a couple of samples and then blessed — which
+    /// is precisely the failure B157 found in B138.
+    const JUSTIFIED: &[(&str, &str, &str, &[Evidence])] = &[
+        // --- nothing for a language server to consume ---
         (
             "NadeoType",
             "i",
-            "Gbx class id (\"1001000\"); identifies the class in the file \
-             format, not in the script API",
+            "a per-class id: a 7-or-8 character HEX string, unique across all \
+             2585 classes (CMwNod = 1001000, CMwCmdBuffer = 101C000). It names \
+             the class in the Gbx file format, not in the script API. \
+             CORRECTED BY B168: this row used to say `Gbx class id (1001000)`, \
+             which reads as decimal — 1522 of the 2585 values contain hex \
+             letters, which nobody who checked would have written.",
+            &[
+                Evidence::OccursExactly(2585),
+                Evidence::EveryValueIsHexDigits,
+                Evidence::EveryValueIsUnique,
+            ],
         ),
         (
             "NadeoType",
             "f",
-            "the Gbx file this class roots (\"Title.Gbx\"); a file-format \
-             association, not script API surface",
+            "a file name associated with the class: 296 of the 314 end in `gbx` \
+             case-insensitively (229 `.Gbx`, 65 `.gbx`, and 2 bare `gbx` with \
+             no dot at all), and 18 do not — 11 `.json`, 3 `.txt`/`.Txt`, 1 \
+             `.svg`, and 3 with no extension (`Vehicle`, `txt`, `zip`). \
+             CORRECTED THREE TIMES BY B168, each time by the evaluator: the \
+             row began as `the Gbx file this class roots`; the first fix still \
+             claimed every value was filename-shaped, refuted by the 5 with no \
+             dot; the second said 294, refuted because the 2 bare `gbx` values \
+             end in gbx too. Prose survives arithmetic that a predicate does \
+             not.",
+            &[
+                Evidence::OccursExactly(314),
+                Evidence::EveryValueIsNonEmptyString,
+                Evidence::CaseInsensitiveSuffixCount("gbx", 296),
+            ],
         ),
         (
             "NadeoType",
             "s",
-            "instance size in bytes; C++ memory layout, verified against \
-             1978 parent links but of no use to a language server",
+            "instance size in bytes, `0` on the 23 classes that record none. \
+             C++ memory layout, so nothing in a language server consumes it. \
+             The reading is structural rather than inferred from the name: \
+             across 1978 parent links with a non-zero child, no class is ever \
+             smaller than its base.",
+            &[
+                Evidence::OccursExactly(2585),
+                Evidence::NeverSmallerThanParentIgnoringZero,
+            ],
         ),
-        // --- meaning undetermined: one bit, and the dump says no more ---
+        // --- counted, but the MEANING is UNEXAMINED ---
         (
             "NadeoType",
             "c",
-            "a presence flag on 869 classes, always literal 1; nothing in \
-             the dump says which bit, and guessing is the B146 defect",
+            "a presence flag on 869 classes, always the literal 1. Its MEANING \
+             IS UNEXAMINED: it carries one bit and nothing in the dump says \
+             which. Guessing what a bit means is how B146 nearly shipped 57 \
+             false positives, so this is recorded as unknown rather than \
+             explained.",
+            &[
+                Evidence::OccursExactly(869),
+                Evidence::AlwaysExactly(1),
+                Evidence::Unexamined,
+            ],
         ),
         (
             "NadeoMember",
             "c",
-            "a presence flag on 3831 members, always literal 1; measured \
-             NOT to be constness (B137) and otherwise undetermined",
+            "a presence flag on 3831 members, always the literal 1. Measured \
+             NOT to be method constness — it sits on 1943 properties and 264 \
+             enum members but only 4 of 3084 methods (B137). Beyond that its \
+             MEANING IS UNEXAMINED.",
+            &[
+                Evidence::OccursExactly(3831),
+                Evidence::AlwaysExactly(1),
+                Evidence::Unexamined,
+            ],
         ),
         (
             "NadeoMember",
             "m",
-            "a second presence flag on 5036 members, always literal 1 and \
-             independent of `c`; undetermined, so declared but not read",
+            "a second presence flag on 5036 members, always the literal 1 and \
+             independent of `c` — all four presence combinations occur, so it \
+             is not a spelling of `c`. Its MEANING IS UNEXAMINED, so it is \
+             declared to be visible and deliberately not consumed.",
+            &[
+                Evidence::OccursExactly(5036),
+                Evidence::AlwaysExactly(1),
+                Evidence::VariesIndependentlyOf("c"),
+                Evidence::Unexamined,
+            ],
         ),
-        // --- OPEN FINDINGS, tracked: real data with a real consumer,
-        // --- deliberately not consumed here because the field and its
-        // --- consumer must land together (B125).
     ];
 
     /// The structs the audit knows about, in the order their objects nest.
@@ -629,6 +726,214 @@ mod b153_nadeo_dump_field_audit {
         ("NadeoType", "d", "self.d.as_ref()?.get(\"d\")"),
         ("NadeoMember", "i", "notes.get(&member.i?)"),
     ];
+
+    /// Every object a struct is deserialized from, in dump order.
+    fn objects_for<'a>(db: &'a serde_json::Value, role: &str) -> Vec<&'a serde_json::Value> {
+        let mut out = Vec::new();
+        for ns in db["ns"].as_object().expect("ns").values() {
+            for class in ns.as_object().expect("classes").values() {
+                match role {
+                    "NadeoType" => out.push(class),
+                    "NadeoMember" => {
+                        if let Some(ms) = class.get("m").and_then(|m| m.as_array()) {
+                            out.extend(ms.iter());
+                        }
+                    }
+                    _ => panic!("no object walker for {role}"),
+                }
+            }
+        }
+        out
+    }
+
+    /// Check one `Evidence` against the shipped dump. `Err` carries what the
+    /// dump actually says, so a refuted row reports the truth rather than
+    /// only that it was wrong.
+    fn check_evidence(
+        db: &serde_json::Value,
+        role: &str,
+        field: &str,
+        ev: &Evidence,
+    ) -> Result<(), String> {
+        let objs = objects_for(db, role);
+        let present: Vec<&serde_json::Value> = objs.iter().filter_map(|o| o.get(field)).collect();
+        match ev {
+            Evidence::OccursExactly(n) => (present.len() == *n)
+                .then_some(())
+                .ok_or_else(|| format!("occurs {} times, not {n}", present.len())),
+            Evidence::AlwaysExactly(v) => {
+                let bad: Vec<String> = present
+                    .iter()
+                    .filter(|x| x.as_u64() != Some(*v))
+                    .map(|x| x.to_string())
+                    .collect();
+                bad.is_empty().then_some(()).ok_or_else(|| {
+                    format!(
+                        "{} values are not {v}, e.g. {:?}",
+                        bad.len(),
+                        &bad[..bad.len().min(3)]
+                    )
+                })
+            }
+            Evidence::EveryValueIsHexDigits => {
+                let bad: Vec<String> = present
+                    .iter()
+                    .filter(|x| {
+                        !x.as_str().is_some_and(|t| {
+                            !t.is_empty() && t.chars().all(|c| c.is_ascii_hexdigit())
+                        })
+                    })
+                    .map(|x| x.to_string())
+                    .collect();
+                bad.is_empty().then_some(()).ok_or_else(|| {
+                    format!(
+                        "{} values are not hex, e.g. {:?}",
+                        bad.len(),
+                        &bad[..bad.len().min(3)]
+                    )
+                })
+            }
+            Evidence::EveryValueIsUnique => {
+                let mut seen = BTreeSet::new();
+                let mut dupes = Vec::new();
+                for v in &present {
+                    if !seen.insert(v.to_string()) {
+                        dupes.push(v.to_string());
+                    }
+                }
+                dupes.is_empty().then_some(()).ok_or_else(|| {
+                    format!(
+                        "{} duplicate values, e.g. {:?}",
+                        dupes.len(),
+                        &dupes[..dupes.len().min(3)]
+                    )
+                })
+            }
+            Evidence::EveryValueIsNonEmptyString => {
+                let bad: Vec<String> = present
+                    .iter()
+                    .filter(|x| !x.as_str().is_some_and(|t| !t.trim().is_empty()))
+                    .map(|x| x.to_string())
+                    .collect();
+                bad.is_empty().then_some(()).ok_or_else(|| {
+                    format!(
+                        "{} are not non-empty strings, e.g. {:?}",
+                        bad.len(),
+                        &bad[..bad.len().min(3)]
+                    )
+                })
+            }
+            Evidence::CaseInsensitiveSuffixCount(suffix, n) => {
+                let want = suffix.to_ascii_lowercase();
+                let got = present
+                    .iter()
+                    .filter(|x| {
+                        x.as_str()
+                            .is_some_and(|t| t.to_ascii_lowercase().ends_with(&want))
+                    })
+                    .count();
+                (got == *n)
+                    .then_some(())
+                    .ok_or_else(|| format!("{got} values end with `{suffix}`, not {n}"))
+            }
+            Evidence::NeverSmallerThanParentIgnoringZero => {
+                let mut by_name = std::collections::HashMap::new();
+                for ns in db["ns"].as_object().expect("ns").values() {
+                    for (name, class) in ns.as_object().expect("classes") {
+                        by_name.insert(name.clone(), class);
+                    }
+                }
+                let (mut checked, mut viol) = (0usize, Vec::new());
+                for (name, class) in &by_name {
+                    let (Some(size), Some(parent)) = (
+                        class.get(field).and_then(|v| v.as_u64()),
+                        class.get("p").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    if size == 0 {
+                        continue;
+                    }
+                    let Some(psize) = by_name
+                        .get(parent)
+                        .and_then(|p| p.get(field))
+                        .and_then(|v| v.as_u64())
+                    else {
+                        continue;
+                    };
+                    checked += 1;
+                    if size < psize {
+                        viol.push(format!("{name} {size} < {parent} {psize}"));
+                    }
+                }
+                if !viol.is_empty() {
+                    return Err(format!("{} smaller than parent: {viol:?}", viol.len()));
+                }
+                (checked >= 1000)
+                    .then_some(())
+                    .ok_or_else(|| format!("only {checked} parent links checked — vacuous"))
+            }
+            Evidence::VariesIndependentlyOf(other) => {
+                let mut combos = BTreeSet::new();
+                for o in &objs {
+                    combos.insert((o.get(field).is_some(), o.get(*other).is_some()));
+                }
+                (combos.len() == 4).then_some(()).ok_or_else(|| {
+                    format!(
+                        "only {} of 4 presence combinations with `{other}`",
+                        combos.len()
+                    )
+                })
+            }
+            // Nothing to check — the honesty is enforced by the prose rule.
+            Evidence::Unexamined => Ok(()),
+        }
+    }
+
+    /// B168: EVERY JUSTIFIED ROW MUST STATE SOMETHING THE DUMP CAN REFUTE.
+    ///
+    /// Free-text justification is how a wrong belief becomes a permanent
+    /// exemption: it records that somebody was convinced, never that they
+    /// were right, and the scanner then stops asking. This test is the
+    /// scanner continuing to ask.
+    #[test]
+    fn every_justified_row_states_evidence_the_dump_confirms() {
+        let db = nadeo();
+        let mut failures: Vec<String> = Vec::new();
+        for (role, field, why, evidence) in JUSTIFIED {
+            assert!(
+                !evidence.is_empty(),
+                "{role}.{field} carries no evidence — prose alone is what B157 \
+                 found protecting the defect in B138"
+            );
+            let unexamined = evidence.iter().any(|e| matches!(e, Evidence::Unexamined));
+            if unexamined && !why.contains("UNEXAMINED") {
+                failures.push(format!(
+                    "{role}.{field} is marked Unexamined but its prose does not \
+                     SAY so — the next reader must be invited to look"
+                ));
+            }
+            if !unexamined
+                && evidence
+                    .iter()
+                    .all(|e| matches!(e, Evidence::OccursExactly(_)))
+            {
+                failures.push(format!(
+                    "{role}.{field} only counts occurrences — a count is not a \
+                     claim about what the field MEANS"
+                ));
+            }
+            for e in *evidence {
+                if let Err(actual) = check_evidence(&db, role, field, e) {
+                    failures.push(format!("{role}.{field}: {e:?} REFUTED — {actual}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "JUSTIFIED rows the dump refutes: {failures:#?}"
+        );
+    }
 
     /// Direction 1 — THE DEFECT THIS FILE HAD. Every key the dump carries
     /// must be declared, or serde drops it silently and no one finds out.
@@ -683,7 +988,7 @@ mod b153_nadeo_dump_field_audit {
             for (wire, rust) in declared_fields_pairs(name) {
                 let is_justified = justified
                     .iter()
-                    .any(|(s, field, why)| *s == name && *field == wire && !why.is_empty());
+                    .any(|(s, field, why, _)| *s == name && *field == wire && !why.is_empty());
                 if is_justified {
                     continue;
                 }
@@ -739,7 +1044,7 @@ mod b153_nadeo_dump_field_audit {
     fn every_justified_row_is_live_and_reasoned() {
         let prod = production_loader_text();
         let mut stale: Vec<String> = Vec::new();
-        for (name, wire, why) in JUSTIFIED {
+        for (name, wire, why, _evidence) in JUSTIFIED {
             assert!(
                 !why.trim().is_empty(),
                 "{name}.{wire} has an empty justification"
