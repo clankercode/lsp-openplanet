@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T12:13:09Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T12:43:52Z"
 complexity: medium
 created_at: "2026-08-31T12:08:52Z"
 depends_on: []
+duration_minutes: 30.73153628898333
 estimate_hours: 1
 id: B112
 priority: high
 started_at: "2026-08-31T12:13:09Z"
-status: in_progress
+status: done
 tags: []
 title: render_signature strips all whitespace, so void I::M(const string&in) renders as conststring&in and cannot be matched against a compile log
-updated_at: "2026-08-31T12:13:09Z"
+updated_at: "2026-08-31T12:43:52Z"
 ---
 
 # render_signature strips all whitespace, so void I::M(const string&in) renders as conststring&in and cannot be matched against a compile log
