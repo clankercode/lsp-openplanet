@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T13:39:48Z"
+depends_on: []
+estimate_hours: 1
+id: B118
+priority: high
+status: pending
+tags: []
+title: 'issue_repro_game.probe has two false-green channels: a build that never ran reads identically to a clean one, and a location-less engine error is invisible to every error bucket'
+updated_at: "2026-08-31T13:39:48Z"
+---
+
+issue_repro_game.probe has two false-green channels: a build that never ran reads identically to a clean one, and a location-less engine error is invisible to every error bucket

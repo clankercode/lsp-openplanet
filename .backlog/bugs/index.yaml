@@ -116,3 +116,4 @@ bugs:
     - file: B115-class-field-visibility-is-drop.todo
     - file: B116-nonconstmethodonconstreceiver.todo
     - file: B117-member-visibility-is-set-by-th.todo
+    - file: B118-issue-repro-game-probe-has-two.todo
