@@ -527,6 +527,65 @@ indistinguishable from "I am structurally incapable of seeing it".
   point.** The counting hazard was the point and it was right. The lane name
   was scenery, and scenery is what goes unverified.
 
+- **A protocol about a shared resource is only as good as your knowledge of
+  what your code touches.** A lane's probe selftest was documented as offline,
+  described as offline to the coordinator and to its reviewer, and **was not
+  offline**. Its anti-vacuity check calls `probe()` a second time; with nothing
+  stranded, that call passes the contamination guard and falls through to a
+  liveness check that opens a socket to the live game, then to
+  `load_plugin`/`unload_plugin`. A mutation harness running the selftest twelve
+  times therefore made twelve round-trips to a shared resource the lane had
+  explicitly released, and the game's own log recorded every one.
+
+  **The violation was not a decision — it was the absence of one.** Nobody
+  chose to take the port; the code took it while its docstring said it did not.
+  That is the part worth generalising: **you cannot comply with a protocol
+  governing a resource you do not know you are using**, so "I did not intend
+  to" and "I did not" are different claims, and only the second is checkable.
+
+  The remedy the lane chose is the right shape and the general one: **assert
+  that the call is never made, not that the outcome looks right.** An outcome
+  assertion cannot distinguish "did not touch the resource" from "touched it
+  and got the expected answer". Only an assertion on the *call* can.
+
+- **An assertion that passes in both states proves nothing, and a negative
+  substring check is the easiest way to write one.** From the same selftest:
+
+      check("with nothing stranded, that refusal does not fire",
+            "already installed" in rec.get("skipped", ""), False)
+
+  This passes when the game is up. It also passes when the game is **down**,
+  because `probe()` then returns `skipped="RemoteBuild not alive"` — a
+  different string, so the substring is still absent, so the assertion is still
+  satisfied. Half of an anti-vacuity *pair* therefore established nothing,
+  while looking like the careful half.
+
+  **Negative assertions are especially prone to this.** "X is not in the
+  output" is satisfied by an output that lacks X for the intended reason, and
+  equally by an output produced by a subsystem that never ran. Pair every
+  "should not appear" with a positive assertion that the mechanism was actually
+  exercised — otherwise deleting the whole feature makes the test greener, not
+  redder.
+
+- **Two lanes independently converged on the same fix: a mutation harness must
+  refuse to score a mutation it could not apply.** One lane's variant patch
+  silently no-opped when its anchor moved and reported "all green"; another's
+  mutation runner hit a wrong-indentation anchor and reported **10/11 with an
+  explicit MISS** rather than a clean 10/10. Had it skipped silently, the run
+  would have shown full marks **while never testing the contamination guard at
+  all** — the harness becoming the vacuous thing it exists to detect.
+
+  The convergence matters more than either instance: **a mutation that cannot
+  be applied and a mutation that is not detected are indistinguishable in the
+  result, and they mean opposite things.** One says the guard is untested; the
+  other says the guard is absent. A harness that does not separate them reports
+  a number with two incompatible meanings.
+
+  Note the lane's own framing when it retracted an earlier figure: *read the
+  previous "10 of 10" as the one I cannot reproduce, and this one as the one
+  you can.* Reproducibility, not the number, is what makes a verification claim
+  worth anything.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
