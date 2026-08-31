@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T15:08:43Z"
 depends_on: []
 estimate_hours: 1
 id: B139
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Sweep every gate for a missing pre-flight: three infrastructure conditions in one batch were reported as code defects, and the fix is never in the checker that fired'
@@ -12,3 +14,68 @@ updated_at: "2026-08-31T15:08:43Z"
 ---
 
 Sweep every gate for a missing pre-flight: three infrastructure conditions in one batch were reported as code defects, and the fix is never in the checker that fired
+
+
+## Three instances in one batch, 2026-09-01 — a class, not a coincidence
+
+| incident | what the tool said | what was actually true |
+|---|---|---|
+| B106 | "your code does not compile" | x-alpha's disk was full |
+| the name-filtered run | a green `test result:` summary | `--test <name>` filtered every test out |
+| B132 | "encountered diff marker" | a peer session was mid-merge in the shared checkout |
+
+**The shape is always the same: the tool reports what it saw rather than why it
+could not see.** And in every case **the fix was not in the checker that fired** —
+it was a missing PRE-FLIGHT. The checker was working correctly on the input it
+received; nothing had established that the input was worth checking.
+
+Two of the three were caught only by a number that failed to reconcile, which is
+luck dressed as process.
+
+## Deliverable
+
+**One sweep of every gate and probe entry point**, asking of each: *what
+condition could make this measure nothing, or measure the wrong thing, while
+still returning a verdict?* Then add the pre-flight that refuses by name.
+
+Candidates to examine, at minimum:
+- `scripts/test-suite.py` — has the filtered-out guard (added after incident 2)
+  and the binaries-reported reconciliation. Does it cover a zero-binary run, a
+  missing typedb fixture, a `HOME` that is not the isolated one?
+- `scripts/clippy_delta.py` — has the zero-workspace-units guard (which is what
+  caught incident 3). Does it verify the baseline's toolchain matches the current
+  one, rather than only recording it?
+- `scripts/remote-build.py` — B132 added the git-operation pre-flight and B106
+  added the free-space floor. What else silently degrades: a stale remote tree, a
+  half-finished rsync, a remote `HOME` that moved?
+- The probe entry points — `issue_repro_game`, `probe_enum_corpus`,
+  `probe_export_binding`, `probe_shared_modifiers`, `probe_const_receiver`,
+  `probe_member_visibility`, `probe_engine_const_receiver`. B118/B123/B127
+  hardened three of these; the rest have not been examined for this specifically.
+
+## The rule to apply, stated once
+
+**An empty result is not a clean result.** Every gate must be able to
+distinguish "I looked and found nothing wrong" from "I could not look". Where it
+cannot, that is the finding.
+
+## Do not fix by adding a warning
+
+A warning that fires on a common, legitimate condition becomes one nobody reads —
+B132 made this call correctly, printing `dirty=N` in the banner rather than
+warning on it, because a dirty tree is the normal lane workflow. **Refuse on the
+condition that makes the measurement meaningless; report everything else as
+data.**
+
+## Test axes
+
+Each pre-flight needs its pair, and needs mutation:
+- The bad condition -> refuses, and NAMES the condition.
+- The legitimate look-alike -> proceeds. This is the row that stops the cure
+  being worse than the disease, and B132's `dirty=4` gate run is the model.
+- **Mutation:** delete the pre-flight and confirm the bad condition reaches the
+  gate. Include an over-condemn mutation — a pre-flight that refuses everything
+  passes a suite that only checks things get refused.
+
+This batch found guards that could not fire in four separate tickets. Assume any
+new pre-flight is vacuous until a mutation run says otherwise.
