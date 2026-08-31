@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T12:44:57Z"
 depends_on: []
 estimate_hours: 1
 id: B114
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'SymbolKind records what a symbol IS, not what it was DECLARED AS: every modifier is dropped at pooling, and three AST sidecars exist to work around it'
@@ -24,3 +26,86 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by lane-resolver, 2026-08-31, answering a question I asked after the
+SECOND instance in one week. It is a pattern, not three bugs.
+
+## The measured table
+
+| declared modifier | parser records | reaches the pool |
+|---|---|---|
+| `is_const` (method) | yes | **now** — B101 |
+| `is_mixin` (class) | yes | **now** — B111 |
+| `is_shared` (function, class, interface, enum, funcdef) | yes | **NO** |
+| `is_abstract` (class) | yes | **NO** |
+| `is_override` / `is_final` | yes | **NO** |
+| `is_private` / `is_protected` | yes | **NO** |
+
+`shared` is never pooled at all — the only occurrences under `symbols/` are
+test strings.
+
+## THE GENERALISATION, which is the reason this is one ticket
+
+`SymbolKind` records what a symbol **is**, not what it was **declared as**. So
+every declaration modifier has to be re-derived from the AST by whoever wants
+it — and that only works **within one file**, because an AST sidecar is built
+per document while the pool is the **cross-file** surface.
+
+That is the actual defect. It predicts exactly where the next instance bites:
+any rule needing a modifier for a symbol declared in ANOTHER file.
+
+## Three sidecars already exist to work around it
+
+* `shared_declaration_roots` (`analysis/unused.rs:459`) — B087 needed `shared`
+  and walked the AST per file to get it.
+* `file_const_methods` (`typecheck/checker.rs`) — reported during B101. Its sole
+  `NonConstMethodOnConstReceiver` emit site sits inside the `file_classes` arm,
+  so **a const method on a class declared in another file has no const metadata
+  at all.** That is a live cross-file gap, not a hypothetical one.
+* A third for the mixin/abstract family.
+
+Retiring these is the deliverable, not just adding fields. A sidecar that stays
+after the pool can answer is a second source of truth that will drift.
+
+## Cost of NOT doing it, concretely
+
+`is_private` is the one waiting. Completion has **no visibility filtering at
+all** today — no `private` handling anywhere in `completion.rs` — and it cannot
+be written without pooled visibility. So this ticket is a prerequisite for a
+user-visible feature, not only cleanup.
+
+## The two instances already fixed both cost a real defect
+
+Neither was noticed as "a field is missing". Each was found by the FALSE OUTPUT
+it caused, one ticket at a time:
+
+* B101: `void M() const` and `void M()` were indistinguishable to every
+  consumer, so B094 shipped with a deliberate hole — and B095's code action
+  silently stopped being offered for const methods, because it parses a rendered
+  signature and `strip_suffix(')')` returns `None` on a trailing `const`.
+* B111: a `mixin class` was flagged for not implementing an interface it never
+  owed, a false ERROR on two SHIPPING plugins.
+
+At two instances that is coincidence. At three-plus with the mechanism named, a
+systematic fix is cheaper than waiting for each to surface as a user-visible
+defect.
+
+## Scope discipline
+
+`is_abstract` is provably harmless RIGHT NOW — B094 measured that `abstract`
+does not exempt, and `an_abstract_class_is_not_exempt` pins it. So do not
+justify this ticket on `is_abstract`; it is carried for uniformity, and say so.
+
+Add the fields, retire the sidecars, and — per B101's own hazards entry — do
+NOT treat the compile errors as the affected set. Enumerating them tells you
+where a TYPE changed, not where BEHAVIOUR did. B101's one real breakage was
+invisible to the compiler because the consumer parsed a rendered string rather
+than reading the enum. Look for consumers that re-derive a modifier from text or
+from an AST walk, not only those that destructure the enum.
+
+## Related
+
+B101, B111 (the two fixed instances), B087 (`shared_declaration_roots`), B094
+(the `abstract` measurement), B095 (the invisible breakage), and the hazards
+entry "'Add the field and see what breaks' cannot see a consumer that parses the
+rendered string".
