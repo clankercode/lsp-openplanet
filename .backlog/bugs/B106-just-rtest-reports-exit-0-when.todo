@@ -36,3 +36,9 @@ scripts/remote-build.py must propagate the remote command's real exit status thr
 - Sibling false-green fixed same day in 586d18b: 'just rtest -- --test <name>' sends --test to libtest (name substring, matches nothing) -> 30/30 coverage, 0 failures, exit 0, 'SUITE-VERIFIED: 0 passed'. Mechanism: completeness measured per-binary, totals per-test — different axes. Detection now uses libtest's own 'filtered out' count.
 - Their hypothesis for THIS bug: the gate reconciles what cargo PRINTED but never checks cargo actually ran; test the specific input 'ENOSPC run emits partial sections that still reconcile' — that is the case that slips through. If no sections at all are emitted the marker is withheld, so the partial-sections case is the dangerous one.
 - docs/verification-hazards.md has a section on this family ('coverage and totals on different axes'); the fix for this ticket should add the ENOSPC/transport case there.
+
+## Invocation found (2026-08-31, coordinator, from the reporting lane's transcript)
+The false-green run was invoked as: just rtest 2>&1 | tail -8 (zsh, no pipefail). So the exit 0 observed is MECHANISM 3 — the pipeline's status is tail's, not the build's — and the incident is fully explained caller-side; it does not prove a wrapper defect. The ENOSPC error text WAS present in the visible tail window; only the exit code lied.
+Consequences for this ticket:
+- Still worth a red/green measurement of mechanism 2: does scripts/remote-build.py itself propagate a nonzero remote status (ENOSPC mid-build) when invoked with NO pipe? If yes, this ticket becomes guard-and-docs.
+- Guard ideas regardless: remote-build.py prints a final unmistakable FAILED marker line (so tail windows show it); docs/verification-hazards.md gains the pipe-destroys-exit-code entry; optionally the justfile recipe sets pipefail for its own internals.
