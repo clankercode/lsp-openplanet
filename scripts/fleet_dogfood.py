@@ -905,8 +905,33 @@ def cmd_compare(path_a: Path, path_b: Path) -> int:
     return 0
 
 def parse_lsp_count(output: str) -> int | None:
-    m = re.search(r"(\d+) diagnostics?", output)
-    return int(m.group(1)) if m else None
+    """How many diagnostics the CLI reported, or None if it did not say.
+
+    B145: the CLI has TWO summary shapes and this parser knew one of them.
+    B090 gave the zero case its own wording --
+
+        12 diagnostics (12 errors) in <path>
+        0 errors/warnings (6 info hidden: 6 unused function ...) in <path>
+
+    -- and the second matches no `N diagnostics` pattern, so every clean run
+    that had folded infos parsed as None. Measured on three issue-repro
+    fixtures. Whether that None then reads as "clean" or as "broken" depends
+    entirely on the caller, which is the same absence-shaped defect this batch
+    has been chasing: a shape the parser does not know produces silence, and
+    silence gets an interpretation it did not earn.
+
+    None is still returned for genuinely unrecognised output, and callers must
+    keep treating it as "I could not measure", never as zero.
+    """
+    m = re.search(r"(\d+) diagnostics?\b", output)
+    if m:
+        return int(m.group(1))
+    if re.search(r"\b0 errors/warnings\b", output):
+        # Folded infos are deliberately NOT counted: they are hidden by
+        # default (B090), so counting them would make a clean run look dirty
+        # to every consumer that only sees this number.
+        return 0
+    return None
 
 # ---- staging / restore ------------------------------------------------------
 def stage(pdir: Path, fid: str, root: Path | None = None) -> Path:
@@ -1329,6 +1354,26 @@ def run_selftest() -> int:
           "it drops [ TRAC], so both build markers are invisible and a build "
           "that never ran reads as one that ran clean",
           offenders, [])
+
+    # --- B145: the CLI has TWO summary shapes and this knew one ------------
+    # Measured on three issue-repro fixtures: B090 gave the zero case its own
+    # wording, and every clean run with folded infos parsed as None. Whether
+    # None then reads as "clean" or "broken" is the caller's guess, which is
+    # the absence-shaped defect again.
+    check("B145: the ordinary summary shape still parses",
+          parse_lsp_count("12 diagnostics (12 errors) in /x"), 12)
+    check("B145: B090's zero shape parses as ZERO, not as unknown",
+          parse_lsp_count(
+              "0 errors/warnings (6 info hidden: 6 unused function"
+              " -- --show-info to list) in /x"), 0)
+    check("B145: a plain zero-diagnostic summary still parses",
+          parse_lsp_count("0 diagnostics in /x"), 0)
+    # PAIR: unrecognised output must stay None. A parser that answers 0 for
+    # anything it does not understand turns a crashed CLI into a clean run.
+    check("B145: output the parser does not recognise stays UNKNOWN",
+          parse_lsp_count("error: could not open project\n"), None)
+    check("B145: empty output stays UNKNOWN",
+          parse_lsp_count(""), None)
 
     # --- B147 END-TO-END: a sync that silently did not happen ---------------
     # This is the ticket's own mutation, RUN rather than described. Two

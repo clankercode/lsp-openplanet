@@ -113,6 +113,16 @@ MUTATIONS = [
      '    game_errors = [d for d in errs if d["file"].startswith(mine)]',
      "    game_errors = [d for d in errs]"),
 
+    # --- B145: the CLI's second summary shape ------------------------------
+    ("B145: B090's `0 errors/warnings` shape stops parsing, so every clean "
+     "run with folded infos becomes an unknown the caller must guess about",
+     '    if re.search(r"\\b0 errors/warnings\\b", output):\n        # Folded infos are deliberately NOT counted: they are hidden by\n        # default (B090), so counting them would make a clean run look dirty\n        # to every consumer that only sees this number.\n        return 0',
+     "    if False:\n        return 0"),
+    ("B145 OVER-CONDEMN: unrecognised output parses as ZERO, so a crashed CLI "
+     "reads as a clean run",
+     "        return 0\n    return None\n\n# ---- staging",
+     "        return 0\n    return 0\n\n# ---- staging"),
+
     # --- B147: a comparison must know its two inputs were different --------
     # The measured incident: a before/after fleet sweep reported IDENTICAL
     # while both halves ran the same stale binary, because the sync between

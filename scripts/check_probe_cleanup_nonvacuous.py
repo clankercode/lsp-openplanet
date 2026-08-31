@@ -123,6 +123,84 @@ MUTATIONS = [
      "fleet_dogfood.py",
      "    game_errors = [d for d in errs if d[\"file\"].startswith(mine)]",
      "    game_errors = [d for d in errs]"),
+
+    # --- B145: the engine's verdict must be RECORDED, and recorded honestly --
+    # The ticket's own two mutations, plus the shapes that make a recorder look
+    # right while saying nothing: 64 fixtures got here because a generator
+    # printed and nobody stored, so a recorder that WRITES but writes the same
+    # thing for every fixture would have been just as invisible.
+    ("B145: the recorder writes an EMPTY record for every fixture",
+     '        "engine_message": message,',
+     '        "engine_message": "",'),
+    ("B145: every fixture is recorded as CLEAN, the ticket's own mutation",
+     '    verdict = {"CLEAN": "ACCEPT", "REJECTED": "REJECT"}.get(status, "UNKNOWN")',
+     '    verdict = "ACCEPT"'),
+    ("B145: a probe that NEVER RAN is recorded as an accepted build — silence "
+     "read as an answer, which is the shape this artifact exists to stop",
+     '    status = rec.get("build_status") or "NOT-RUN"',
+     '    status = rec.get("build_status") or "CLEAN"'),
+    ("B145: an UNMEASURED LSP is recorded as clean",
+     '    lsp_says = "UNMEASURED" if lsp_count is None else (',
+     '    lsp_says = "CLEAN" if lsp_count is None else ('),
+    ("B145: run_lsp_on_fixture reports a clean LSP when the CLI could not be "
+     "run at all",
+     '        return {"count": None, "error": f"no LSP binary at {binary}"}',
+     '        return {"count": 0, "error": ""}'),
+    ("B145: run_lsp_on_fixture reports clean when the count cannot be parsed",
+     '        return {"count": None, "error": "no diagnostic count in LSP output"}',
+     '        return {"count": 0, "error": ""}'),
+    ("B145: the engine message keeps the staging folder id, so the record "
+     "churns on a probe-id change and is not about the fixture",
+     '    leaf = str(d.get("file", "")).split("/")[-1] or "?"',
+     '    leaf = str(d.get("file", "")) or "?"'),
+    # --- B145: the engine's WARNINGS are ground truth too ------------------
+    # The first run of this recorder dropped them: 37d-variable-shadow came
+    # back CLEAN with the boilerplate, while the engine had said `Variable 'x'
+    # hides another variable`. That both lost the message text and
+    # manufactured a disagreement with an LSP that was right.
+    ("B145: engine warnings are dropped, so a warned fixture records the "
+     "clean boilerplate and loses the engine's own text",
+     "        message = \" | \".join(_engine_text(d) for d in warns) or CLEAN_REASON",
+     "        message = CLEAN_REASON"),
+    ("B145: a warned fixture is indistinguishable from a silent one, which "
+     "turns an LSP that agrees with the engine into a reported gap",
+     '    if verdict == "ACCEPT" and warns:\n        verdict = "ACCEPT-WITH-WARNINGS"',
+     "    pass"),
+    ("B145 OVER-CONDEMN: every accepted fixture is recorded as warned",
+     '    if verdict == "ACCEPT" and warns:',
+     '    if verdict == "ACCEPT":'),
+    ("B145: another session's warning in the shared log is attributed to this "
+     "fixture — Openplanet.log is shared, so this is a false verdict at random",
+     '            and str(d.get("file", "")).split("/")[0] == fid]',
+     "            ]"),
+    ("B145: folder_warnings picks up ERRORS too, double-counting them",
+     '            if d.get("sev") == "WARN"',
+     '            if d.get("sev") in ("WARN", "ERR")'),
+    ("B145: engine/LSP disagreement is never reported",
+     "        agrees = engine_silent == (lsp == \"CLEAN\")",
+     "        agrees = True"),
+    ("B145 OVER-CONDEMN: every row is reported as disagreeing, which would "
+     "make the artifact impossible to commit at all",
+     "        agrees = engine_silent == (lsp == \"CLEAN\")",
+     "        agrees = False"),
+    ("B145: a NOT-RUN engine verdict is accepted as evidence",
+     '        if status in ("NOT-RUN", "BUILD-ERR"):',
+     "        if False:"),
+    ("B145: a STALE divergence note on a row that now agrees is not reported, "
+     "so a fixed gap keeps being described as an open one",
+     '        if agrees and declared != "-":',
+     "        if False:"),
+    ("B145: hand-written divergence notes are dropped on regen, turning every "
+     "explained gap into an unexplained one",
+     "    if not dest.is_file():\n        return {}",
+     "    if True:\n        return {}"),
+    ("B145: a tab inside an engine message is written raw, shifting every "
+     "later column of that row",
+     '        lines.append("\\t".join(str(row[c]).replace("\\t", " ") for c in TSV_COLUMNS))',
+     '        lines.append("\\t".join(str(row[c]) for c in TSV_COLUMNS))'),
+    ("B145: the corpus header stops naming its columns",
+     '    lines = preamble + ["\\t".join(TSV_COLUMNS)]',
+     '    lines = preamble + ["fixture"]'),
 ]
 
 def run(root: Path) -> int:

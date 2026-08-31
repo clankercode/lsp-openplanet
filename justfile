@@ -66,6 +66,20 @@ test-selftest:
 rtest-inventory-mutants:
     python3 scripts/remote-build.py run -- python3 scripts/check_test_inventory_nonvacuous.py
 
+# Prove the B145 issue-repro corpus gate can fail. That corpus is engine ground
+# truth nothing in CI can re-derive — the game is not available there — so a
+# vacuous gate would quietly turn the artifact back into decoration, which is
+# the state B145 was raised to end. Runs on the remote: one sync, N cargo runs.
+b145-corpus-mutants:
+    python3 scripts/remote-build.py run -- python3 scripts/check_b145_corpus_nonvacuous.py
+
+# Re-measure every issue-repro fixture against the LIVE game and rewrite the
+# committed corpus. Needs Trackmania + Openplanet with RemoteBuild; takes ~10
+# minutes and stages each fixture in turn. Hand-written `divergence` notes are
+# carried across. Leaves a dirty tree on purpose — a human reviews and commits.
+b145-regen:
+    python3 scripts/issue_repro_game.py --all --tsv docs/probes/b145-issue-repro-verdicts.tsv
+
 # The inventory check alone, on the remote.
 rtest-inventory *ARGS:
     python3 scripts/remote-build.py run -- python3 scripts/test_inventory.py {{ARGS}}

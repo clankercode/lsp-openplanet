@@ -50,7 +50,34 @@ scripts/issue_repro_game.py 44-indexed-handle-assign --json /tmp/out.json
 Requires Trackmania + Openplanet running with RemoteBuild on 127.0.0.1:30000.
 RemoteBuild flaps intermittently — the script retries; if a probe reports
 `compiled_clean=false` with an empty window, retry (the load itself wedged).
-Record the game verdict in the fixture's gate-test doc comment.
+
+### The verdict is COMMITTED, not just printed (B145)
+
+`docs/probes/b145-issue-repro-verdicts.tsv` holds one row per fixture: the
+engine's four-valued build status, **the engine's own message text**, the
+Openplanet version it was measured at, the date, and what this LSP says about
+the same bytes today. It is registered in `docs/probes/MANIFEST.tsv` with the
+generator above as its named regenerator:
+
+```bash
+python3 scripts/issue_repro_game.py --all --tsv docs/probes/b145-issue-repro-verdicts.tsv
+```
+
+That artifact is the record. Before it, the rule at the top of this section
+held **at the moment someone ran the probe and not afterwards**: the engine's
+message was read by a human and hand-typed into a doc comment, and nothing
+detected that the engine's answer had changed. 64 fixture directories carried
+zero committed engine evidence.
+
+`tests/b145_issue_repro_verdicts.rs` re-measures the LSP side on every run and
+requires it to match the corpus, so a checker change that moves a fixture
+shows up there rather than being absorbed silently. Where the engine and this
+LSP disagree, the row's `divergence` column must say why — and where they
+agree, it must be empty, so a note about a gap that has since been FIXED
+cannot sit in the artifact unnoticed.
+
+A doc comment quoting the engine is still welcome as prose. It is no longer
+the record, and if the two disagree the corpus is the one that was measured.
 
 ## Current fixtures
 

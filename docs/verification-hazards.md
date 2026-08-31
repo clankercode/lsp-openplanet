@@ -4244,3 +4244,86 @@ with `==` or `flag=`, so `--sync-back-must-change` is **not** covered by the
 is handed to the remote shell as `command not found`. `--allow-unresolved` had
 had that gap since B132, from the ordinary cause: the list is a second place to
 remember. Both are now in the list and both are asserted.
+
+## The recorder you write to stop losing evidence loses evidence (B145)
+
+64 fixture directories carried zero committed engine verdicts. The generator
+existed and had been hardened three times over; its output went to an ad-hoc
+path a human named, and the engine's message was then hand-typed into a Rust
+doc comment. So the fixture README's own rule — *a fixture's LSP assertion is
+only meaningful against the game compiler's verdict on the same bytes* — held
+**at the moment someone ran the probe and not afterwards**.
+
+Writing the recorder produced four findings, and only one of them was the thing
+the ticket described.
+
+### 1. The first run's disagreements were mostly the recorder's own fault
+
+The first live sweep reported **15 rows** where the engine and this LSP did not
+line up. Eight of those were artefacts of the recorder:
+
+* **Five were dropped engine WARNINGS.** `build_verdict` buckets ERRORS,
+  because B118 is about errors, and the recorder wrote `CLEAN` plus the
+  boilerplate `no error attributed to this folder` for a fixture the engine had
+  in fact said `Variable 'x' hides another variable of same name in outer
+  scope` about. That both **threw away the message text the artifact exists to
+  keep** and **manufactured a disagreement with an LSP that was right**. An
+  engine that compiles-with-a-complaint and a linter that complains are
+  agreeing; comparing error-polarity alone cannot see that.
+* **Three were a CLI summary line the parser did not know.** B090 gave the
+  zero case its own wording — `0 errors/warnings (6 info hidden: …)` — which
+  matches no `N diagnostics` pattern, so three measured-and-clean fixtures were
+  recorded as *unmeasured*. `fleet_dogfood.parse_lsp_count` had the same hole
+  and still has every fleet consumer downstream of it.
+
+**The rule: a comparison's first run measures your comparison, not the
+subject.** Both defects made the artifact look like it was finding things. A
+recorder whose first output is 15 interesting-looking rows is not evidence that
+it works; it is the point at which to ask which of them are about you.
+
+### 2. Seven were real, and each one is a different kind of real
+
+Worth listing, because "engine and LSP disagree" turned out to name four
+unrelated conditions that a single boolean would have flattened:
+
+* **two LSP gaps** — the engine rejects `startnew(Worker::Tick)` ("Can't pass
+  class method as arg directly") and rejects all three comparators in
+  `b102-array-sort-**correct**-callbacks`; the LSP is silent on both. The
+  second also means **the fixture is misnamed**: the "correct" callbacks do not
+  compile, which bears directly on B144's const-handle question;
+* **one LSP over-report** that is the fixture's own subject — under strict
+  module semantics the engine never compiles the exports body file, so its
+  undefined identifier is dead code to the engine;
+* **one version straddle** — the engine is 1.29.14 and `tests/fixtures/typedb`
+  is stamped 1.29.5, so `Text::Join` exists for one and not the other. B129's
+  per-artifact version rule is the only reason this reads as a version fact
+  rather than as a checker bug;
+* **one measurement artefact** — the fixture needs per-fixture `defines` that
+  its Rust test supplies through an isolated HOME and the corpus's uniform
+  invocation does not;
+* **two fixtures that cannot be probed at all** — their `info.toml` names
+  contain a `/`, so no safe staging id can be derived and the guard refuses.
+  Recorded as `UNKNOWN` with the reason, per B129: **an artifact that cannot be
+  regenerated is a finding, and the run reports it as one every time.**
+
+### 3. A `divergence` column has to be wrong in BOTH directions
+
+The one hand-authored field. It is required wherever the two sides disagree —
+and **refused wherever they agree**. Only the second half stops a note about a
+gap that has since been *fixed* from sitting in the artifact forever, which is
+the same rot as a stale comment but with a green gate over it. Both directions
+are mutation-tested.
+
+The same symmetry applies to the regen: the notes are the only thing a
+regeneration cannot re-derive, so a regen that dropped them would convert every
+explained gap into an unexplained one — **and the run would still look green,
+because the notes were what made it green.**
+
+### 4. `0 passed` is not `passed`
+
+`just rtest b145` reported `test result: ok` across every binary with **0
+passed, 0 failed** — cargo's filter matches test *names*, and none of the new
+test functions contained `b145`. A tidy wall of `ok` for a run that executed
+nothing. Same family as this batch's other zero-denominator greens, and the
+only reason it was caught is that a green with no numbers in it is now a thing
+to look at twice.

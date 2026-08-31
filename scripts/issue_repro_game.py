@@ -1231,6 +1231,227 @@ def run_selftest() -> int:
         check("an un-injected probe is refused rather than reaching the game",
               refused is not None and "must not touch the game" in refused, True)
 
+    # --- B145: the engine's verdict must be RECORDED, and recorded honestly --
+    # 64 fixtures carried zero committed engine evidence because the generator
+    # printed and nobody stored. Every case here is a PAIR: a recorder that
+    # refuses everything, or that calls everything CLEAN, passes a suite that
+    # only checks records get written.
+    def rec_of(status, errors=(), skipped=None):
+        r = {"fixture": "fx", "build_status": status,
+             "game_errors": [dict(file="lsp-issue-repro-fx/Main.as", line=l,
+                                  col=c, sev="ERR", msg=m)
+                             for l, c, m in errors]}
+        if skipped:
+            r["skipped"] = skipped
+        return r
+
+    rejected = tsv_row(rec_of("REJECTED", [(21, 25, "Only object types ... &inout")]),
+                       {"count": 12}, "1.29.14", "2026-09-01")
+    check("B145: a REJECTED fixture records the engine's polarity",
+          (rejected["verdict"], rejected["build_status"]), ("REJECT", "REJECTED"))
+    check("B145: the engine message is recorded VERBATIM to the right of the "
+          "colon — that is the part hand-transcription loses",
+          rejected["engine_message"],
+          "Main.as(21,25): Only object types ... &inout")
+    check("B145: the staging folder id is normalised away — it is an artefact "
+          "of the probe, not of the fixture",
+          "lsp-issue-repro" in rejected["engine_message"], False)
+    check("B145: this LSP's answer is recorded beside the engine's",
+          rejected["lsp_today"], "DIAGNOSES(12)")
+
+    # PAIR: the ACCEPT half. B086's defect was a recorder that only handled
+    # one polarity.
+    accepted = tsv_row(rec_of("CLEAN"), {"count": 0}, "1.29.14", "2026-09-01")
+    check("B145: a CLEAN fixture records the OTHER polarity",
+          (accepted["verdict"], accepted["build_status"], accepted["lsp_today"]),
+          ("ACCEPT", "CLEAN", "CLEAN"))
+    check("B145: the two polarities produce DIFFERENT rows",
+          rejected["engine_message"] == accepted["engine_message"], False)
+
+    # A probe that could not look must not be recorded as an answer.
+    notrun = tsv_row(rec_of("NOT-RUN", skipped="RemoteBuild not alive"),
+                     {"count": 0}, "1.29.14", "2026-09-01")
+    check("B145: a probe that never ran is NOT recorded as ACCEPT",
+          notrun["verdict"], "UNKNOWN")
+    # A skipped probe never sets build_status AT ALL -- that is the real shape,
+    # and testing only an explicit "NOT-RUN" left the fallback untested. It is
+    # the fallback that decides what a probe which never spoke is recorded as.
+    absent = tsv_row({"fixture": "fx", "skipped": "RemoteBuild not alive"},
+                     {"count": 0}, "1.29.14", "2026-09-01")
+    check("B145: a record with NO build_status at all falls back to NOT-RUN, "
+          "not to CLEAN — a probe that never spoke has not accepted anything",
+          (absent["build_status"], absent["verdict"]), ("NOT-RUN", "UNKNOWN"))
+    check("B145: and its message says why it could not be measured",
+          absent["engine_message"], "RemoteBuild not alive")
+    check("B145: an unmeasured LSP is UNMEASURED, not CLEAN",
+          tsv_row(rec_of("CLEAN"), {"count": None}, "1.29.14",
+                  "2026-09-01")["lsp_today"], "UNMEASURED")
+
+    # --- B145: measuring the LSP side, and refusing to guess ---------------
+    # Every one of these returns "I could not measure", which the recorder
+    # turns into UNMEASURED. A version that answered 0 instead would record a
+    # CLI that never ran as a clean run -- the same silence-as-answer shape
+    # that left 64 fixtures with no evidence.
+    class _Proc:
+        def __init__(self, out):
+            self.stdout, self.stderr = out, ""
+
+    _fx = FIXTURES / "does-not-matter"
+    check("B145: an LSP binary that is not there is UNMEASURED, not clean",
+          run_lsp_on_fixture(_fx, binary=Path("/nonexistent/openplanet-lsp"))
+          ["count"], None)
+    check("B145: output with no recognised summary line is UNMEASURED",
+          run_lsp_on_fixture(_fx, binary=Path(__file__),
+                             runner=lambda c: _Proc("panicked at src/main.rs"))
+          ["count"], None)
+    check("B145: a CLI that could not be launched at all is UNMEASURED",
+          run_lsp_on_fixture(
+              _fx, binary=Path(__file__),
+              runner=lambda c: (_ for _ in ()).throw(OSError("boom")))
+          ["count"], None)
+    # PAIR: and real output must still parse, or the recorder can never
+    # measure anything and the artifact is empty by construction.
+    check("B145: an ordinary summary line parses",
+          run_lsp_on_fixture(_fx, binary=Path(__file__),
+                             runner=lambda c: _Proc("7 diagnostics (7 errors) in /x"))
+          ["count"], 7)
+    check("B145: B090's zero shape parses as zero, not as unmeasured",
+          run_lsp_on_fixture(
+              _fx, binary=Path(__file__),
+              runner=lambda c: _Proc("0 errors/warnings (3 info hidden) in /x"))
+          ["count"], 0)
+
+    # folder_warnings must select on SEVERITY as well as attribution. Widening
+    # it to errors would double-count every rejection: the errors are already
+    # in the message from `game_errors`.
+    _mixed = {"folder_id": "lsp-issue-repro-fx", "diagnostics": [
+        {"file": "lsp-issue-repro-fx/Main.as", "line": 1, "col": 1,
+         "sev": "ERR", "msg": "an error"},
+        {"file": "lsp-issue-repro-fx/Main.as", "line": 2, "col": 1,
+         "sev": "WARN", "msg": "a warning"},
+        {"file": "lsp-issue-repro-fx/Main.as", "line": 3, "col": 1,
+         "sev": "INFO", "msg": "compiling"},
+    ]}
+    check("B145: folder_warnings selects WARN only — errors are already "
+          "carried by game_errors and would be double-counted",
+          [d["msg"] for d in folder_warnings(_mixed)], ["a warning"])
+    check("B145: a record with no folder id attributes nothing rather than "
+          "attributing everything",
+          folder_warnings({"diagnostics": _mixed["diagnostics"]}), [])
+
+    # --- B145: engine and LSP must be compared, with gaps DECLARED ----------
+    def agree_row(**kw):
+        base = {"fixture": "fx", "build_status": "REJECTED",
+                "verdict": "REJECT", "lsp_today": "DIAGNOSES(3)",
+                "divergence": "-"}
+        base.update(kw)
+        return base
+
+    check("B145: engine REJECTED and LSP diagnosing is agreement",
+          agreement_problems([agree_row()]), [])
+    check("B145: engine CLEAN and LSP clean is agreement",
+          agreement_problems([agree_row(build_status="CLEAN",
+                                        verdict="ACCEPT",
+                                        lsp_today="CLEAN")]), [])
+    # An engine WARNING is the engine saying something. Recording it as
+    # silence manufactured a disagreement with an LSP that was right, and lost
+    # the message text this artifact exists to keep.
+    check("B145: an engine WARNING beside an LSP diagnostic is AGREEMENT, not "
+          "a gap — the engine is a compiler and this LSP is also a linter",
+          agreement_problems([agree_row(build_status="CLEAN",
+                                        verdict="ACCEPT-WITH-WARNINGS",
+                                        lsp_today="DIAGNOSES(1)")]), [])
+    # PAIR: and a warned fixture the LSP says NOTHING about is still a gap.
+    if not agreement_problems([agree_row(build_status="CLEAN",
+                                         verdict="ACCEPT-WITH-WARNINGS",
+                                         lsp_today="CLEAN")]):
+        check("B145: a fixture the engine WARNS about and the LSP is silent "
+              "on is still reported", [], ["<a problem>"])
+    warned = tsv_row(
+        {"fixture": "fx", "folder_id": "lsp-issue-repro-fx",
+         "build_status": "CLEAN", "game_errors": [],
+         "diagnostics": [{"file": "lsp-issue-repro-fx/Main.as", "line": 8,
+                          "col": 13, "sev": "WARN",
+                          "msg": "Variable 'x' hides another variable"},
+                         {"file": "someone-elses-plugin/Main.as", "line": 1,
+                          "col": 1, "sev": "WARN", "msg": "not ours"}]},
+        {"count": 1}, "1.29.14", "2026-09-01")
+    check("B145: an engine WARNING is recorded verbatim, not replaced by the "
+          "clean boilerplate",
+          warned["engine_message"],
+          "Main.as(8,13): Variable 'x' hides another variable")
+    check("B145: a warned fixture is distinguishable from a silent one",
+          warned["verdict"], "ACCEPT-WITH-WARNINGS")
+    check("B145: another session's warning in the shared log is NOT "
+          "attributed to this fixture",
+          "not ours" in warned["engine_message"], False)
+
+    for label, row, want in (
+        ("a gap the LSP misses",
+         agree_row(lsp_today="CLEAN"), "no divergence is declared"),
+        ("a false positive the LSP invents",
+         agree_row(build_status="CLEAN", verdict="ACCEPT"),
+         "no divergence is declared"),
+        ("an engine verdict the probe could not take",
+         agree_row(build_status="NOT-RUN", verdict="UNKNOWN"),
+         "could not measure"),
+        ("a BUILD-ERR engine verdict",
+         agree_row(build_status="BUILD-ERR", verdict="UNKNOWN"),
+         "could not measure"),
+        ("an LSP answer that was never measured",
+         agree_row(lsp_today="UNMEASURED"), "not measured"),
+        ("a STALE divergence note on a row that now agrees",
+         agree_row(divergence="the LSP misses this"), "now AGREE"),
+    ):
+        got = agreement_problems([row])
+        if not got:
+            check(f"B145: {label} is reported", got, ["<a problem>"])
+        elif want not in got[0]:
+            check(f"B145: the report for {label} says why", got, [want])
+
+    # PAIR: a DECLARED divergence is data, not a failure. A check that refuses
+    # every known gap would make the artifact impossible to commit at all.
+    check("B145: a declared divergence is accepted — a known gap is a "
+          "recorded fact, not an error",
+          agreement_problems([agree_row(lsp_today="CLEAN",
+                                        divergence="LSP has no &inout check")]),
+          [])
+
+    # --- B145: writing and reading the corpus back -------------------------
+    _b145 = Path(tempfile.mkdtemp(prefix="b145-tsv-"))
+    try:
+        dest = _b145 / "corpus.tsv"
+        rows = [tsv_row(rec_of("CLEAN"), {"count": 0}, "1.29.14", "2026-09-01")]
+        rows[0]["fixture"] = "fx-a"
+        rows[0]["divergence"] = "a hand-written note"
+        write_tsv(dest, rows, "1.29.14", "2026-09-01", "e" * 64)
+        text = dest.read_text()
+        for want in ("1.29.14", "2026-09-01", "e" * 64, "fx-a"):
+            if want not in text:
+                check(f"B145: the corpus records {want!r}", text[:200], want)
+        body = [l for l in text.splitlines() if not l.startswith("#")]
+        check("B145: the corpus has a header row and one data row per fixture",
+              (body[0].split("\t"), len(body)), (list(TSV_COLUMNS), 2))
+        # The hand-written note is the ONLY authored field; a regen that drops
+        # it turns every explained gap into an unexplained one, and the run
+        # still looks green because the notes were what made it green.
+        check("B145: hand-written divergence notes survive a regen",
+              read_declared_divergences(dest), {"fx-a": "a hand-written note"})
+        check("B145: a corpus that does not exist yet yields no notes rather "
+              "than raising",
+              read_declared_divergences(_b145 / "nope.tsv"), {})
+        # A tab inside a message would silently shift every later column.
+        tabby = tsv_row(rec_of("REJECTED", [(1, 1, "a\tb")]), {"count": 1},
+                        "1.29.14", "2026-09-01")
+        write_tsv(dest, [tabby], "1.29.14", "2026-09-01", None)
+        data = [l for l in dest.read_text().splitlines()
+                if not l.startswith("#")][1]
+        check("B145: a tab inside an engine message does not shift the "
+              "columns of every row after it",
+              len(data.split("\t")), len(TSV_COLUMNS))
+    finally:
+        shutil.rmtree(_b145, ignore_errors=True)
+
     if failures:
         print(f"FAIL: {len(failures)} check(s) failed", file=sys.stderr)
         for f in failures:
@@ -1238,6 +1459,260 @@ def run_selftest() -> int:
         return 1
     print("PASS: cleanup, isolation, and fail-closed guards verified.")
     return 0
+
+
+# ---- B145: committing the engine's verdict, not just printing it -----------
+# 64 fixtures carried ZERO committed engine evidence. The generator existed and
+# was hardened (B118's four-valued build_status, B127's load-is-not-build fix,
+# B123's raw reader); its output went to an ad-hoc path a human named, and the
+# engine's message was then hand-typed into a Rust assertion. So the fixture
+# README's own rule -- "a fixture's LSP assertion is only meaningful against the
+# game compiler's verdict on the same bytes" -- held at the moment someone ran
+# the probe and not afterwards.
+#
+# The record is a B129 CORPUS artifact and a manifest row, deliberately not a
+# parallel mechanism: B129's inventory found the load-bearing gap is that the
+# artifact -> generator edge exists nowhere machine-readable, and "a generator
+# with no recorded output" is exactly that shape.
+#
+# TWO measurements per fixture, both machine-produced:
+#   * the ENGINE's verdict, from this probe;
+#   * what THIS LSP says about the same bytes today, from the real CLI.
+# The only hand-written field is `divergence`, and it is required precisely
+# where the two disagree -- so a disagreement cannot be recorded silently, and
+# a disagreement that gets FIXED shows up as a stale divergence note.
+
+LSP_TSV_FLAGS = ("--typedb-dir", "tests/fixtures/typedb")
+CLEAN_REASON = "compiled and loaded, no error attributed to this folder"
+
+
+def repo_root_for_tsv() -> Path:
+    return FIXTURES.parent.parent.parent
+
+
+def lsp_cli_bin() -> Path:
+    """The CLI the Rust issue-repro tests drive, which is the DEBUG binary.
+
+    Deliberately not the release build: `run_issue_repro` uses
+    `CARGO_BIN_EXE_openplanet-lsp`, and recording a different binary's answer
+    would make the corpus agree with something no test runs.
+    """
+    return repo_root_for_tsv() / "target/debug/openplanet-lsp"
+
+
+def run_lsp_on_fixture(fixture: Path, binary: Path | None = None,
+                       runner=None) -> dict:
+    """What this LSP says about the fixture today. Never raises.
+
+    Returns `count=None` when the CLI could not be run or its output could not
+    be parsed. That is a THIRD answer and the corpus writer refuses on it:
+    "I could not measure the LSP" must not be recorded as "the LSP was clean",
+    which is the shape that put 64 fixtures here in the first place.
+    """
+    binary = lsp_cli_bin() if binary is None else binary
+    if not binary.is_file():
+        return {"count": None, "error": f"no LSP binary at {binary}"}
+    cmd = [str(binary), "check", *LSP_TSV_FLAGS, str(fixture)]
+    run = runner or (lambda c: subprocess.run(
+        c, capture_output=True, text=True, timeout=120,
+        cwd=str(repo_root_for_tsv()),
+        env={**os.environ, "NO_COLOR": "1"}))
+    try:
+        proc = run(cmd)
+    except Exception as exc:  # noqa: BLE001 - a driver failure, not a verdict
+        return {"count": None, "error": f"lsp run failed: {exc}"}
+    out = (proc.stdout or "") + (proc.stderr or "")
+    # fleet.parse_lsp_count, not a fourth copy of the regex: it already knew
+    # one summary shape and B145 measured a second (B090's `0 errors/warnings
+    # (N info hidden: ...)`), which is exactly the kind of drift a duplicated
+    # pattern keeps out of sight.
+    count = fleet.parse_lsp_count(out)
+    if count is None:
+        return {"count": None, "error": "no diagnostic count in LSP output"}
+    return {"count": count, "error": ""}
+
+
+def _engine_text(d: dict) -> str:
+    """One engine diagnostic, with the STAGING path normalised away.
+
+    The folder id is an artefact of this probe -- it is derived from the
+    fixture's info.toml name and changes when that does -- so keeping it would
+    make the record churn for a reason that has nothing to do with the engine.
+    Everything to the right of the colon is verbatim: that is the part
+    hand-transcription loses and the part that moves between engine versions.
+    """
+    leaf = str(d.get("file", "")).split("/")[-1] or "?"
+    return f"{leaf}({d['line']},{d['col']}): {d['msg']}"
+
+
+def folder_warnings(rec: dict) -> list[dict]:
+    """WARN diagnostics attributed to THIS probe's folder.
+
+    `build_verdict` buckets errors by attribution because Openplanet.log is
+    shared; warnings get no such bucket, so they are filtered here by the same
+    rule rather than by widening a shared primitive four consumers depend on.
+    An unattributed warning is another session's, and counting it would turn a
+    clean fixture into a warned one at random.
+    """
+    fid = rec.get("folder_id") or ""
+    if not fid:
+        return []
+    return [d for d in rec.get("diagnostics", [])
+            if d.get("sev") == "WARN"
+            and str(d.get("file", "")).split("/")[0] == fid]
+
+
+def tsv_row(rec: dict, lsp: dict, engine_version: str, probe_date: str,
+            divergences: dict[str, str] | None = None) -> dict:
+    """One corpus row: the engine's answer and this LSP's, side by side."""
+    divergences = divergences or {}
+    slug = rec["fixture"]
+    status = rec.get("build_status") or "NOT-RUN"
+    # B145. The engine's WARNINGS are ground truth too, and the first run of
+    # this recorder dropped them: 37d-variable-shadow came back CLEAN with the
+    # boilerplate "no error attributed", while the engine had in fact said
+    # `Variable 'x' hides another variable of same name in outer scope`. That
+    # is precisely the message text this artifact exists to stop losing, and
+    # discarding it also manufactured a disagreement with an LSP that was
+    # right to flag the same line.
+    #
+    # build_status stays B118's four ERROR-polarity values -- that contract is
+    # not this ticket's to change. The warnings ride in `verdict` and in the
+    # message, so "the engine said nothing at all" stays distinguishable from
+    # "the engine compiled it but complained".
+    warns = folder_warnings(rec)
+    verdict = {"CLEAN": "ACCEPT", "REJECTED": "REJECT"}.get(status, "UNKNOWN")
+    if verdict == "ACCEPT" and warns:
+        verdict = "ACCEPT-WITH-WARNINGS"
+
+    if status == "REJECTED":
+        # The staging folder id is an artefact of THIS probe, not engine ground
+        # truth about the fixture, so the path is normalised to the file inside
+        # it. Everything to the right of the colon -- which is the part
+        # hand-transcription loses and the part that moves between engine
+        # versions -- is verbatim.
+        message = " | ".join(_engine_text(d)
+                             for d in rec.get("game_errors", [])) \
+            or "REJECTED with no attributed error"
+    elif status == "CLEAN":
+        message = " | ".join(_engine_text(d) for d in warns) or CLEAN_REASON
+    else:
+        message = rec.get("skipped") or f"build_status={status}"
+
+    lsp_count = lsp.get("count")
+    lsp_says = "UNMEASURED" if lsp_count is None else (
+        "CLEAN" if lsp_count == 0 else f"DIAGNOSES({lsp_count})")
+    return {
+        "fixture": slug,
+        "verdict": verdict,
+        "build_status": status,
+        "engine_message": message,
+        "lsp_today": lsp_says,
+        "engine_version": engine_version,
+        "probe_date": probe_date,
+        "divergence": divergences.get(slug, "-"),
+    }
+
+
+TSV_COLUMNS = ("fixture", "verdict", "build_status", "engine_message",
+               "lsp_today", "engine_version", "probe_date", "divergence")
+
+
+def agreement_problems(rows: list[dict]) -> list[str]:
+    """Where the engine and this LSP disagree without a declared reason.
+
+    The check the ticket asks for, expressed over the corpus rather than over
+    the Rust source: a hand-typed assertion cannot drift from the engine
+    evidence behind it if both sides are measured and compared.
+
+    An UNMEASURED LSP or a NOT-RUN engine is refused rather than skipped. "I
+    could not look" is not "I looked and they agree" -- the whole reason this
+    artifact exists is that a silence was being read as an answer.
+    """
+    problems = []
+    for row in rows:
+        slug = row["fixture"]
+        status, lsp = row["build_status"], row["lsp_today"]
+        declared = (row.get("divergence") or "-").strip()
+        if status in ("NOT-RUN", "BUILD-ERR"):
+            problems.append(
+                f"{slug}: the engine verdict is {status} -- the probe could "
+                f"not measure it, so this row is not evidence of anything. "
+                f"Re-probe it or remove the row; do not leave it recorded as "
+                f"though it were an answer.")
+            continue
+        if lsp == "UNMEASURED":
+            problems.append(
+                f"{slug}: this LSP's answer was not measured, so the row "
+                f"cannot say whether it agrees with the engine.")
+            continue
+        # B145. Compared on "did this side say ANYTHING about the code", not
+        # on error polarity. The engine is a compiler and this LSP is also a
+        # linter, so a fixture the engine compiles WITH A WARNING and the LSP
+        # flags is agreement, not a gap -- and treating it as a gap was
+        # manufacturing divergences the first run of this recorder reported.
+        # `verdict` carries that distinction; `build_status` deliberately does
+        # not, because B118's four values are about errors.
+        engine_silent = row.get("verdict") == "ACCEPT"
+        agrees = engine_silent == (lsp == "CLEAN")
+        if agrees and declared != "-":
+            problems.append(
+                f"{slug}: a divergence is declared ({declared!r}) but the "
+                f"engine ({status}) and this LSP ({lsp}) now AGREE. A stale "
+                f"divergence note is how a fixed gap keeps being described as "
+                f"an open one -- delete it.")
+        elif not agrees and declared == "-":
+            problems.append(
+                f"{slug}: the engine says {status} and this LSP says {lsp}, "
+                f"and no divergence is declared. Either the LSP has a gap "
+                f"worth naming in the `divergence` column, or one of the two "
+                f"has drifted since this row was written.")
+    return problems
+
+
+def write_tsv(path: Path, rows: list[dict], engine_version: str,
+              probe_date: str, binary_sha: str | None) -> None:
+    preamble = [
+        "# B145 ISSUE-REPRO ENGINE VERDICTS - what the GAME compiler says about",
+        "# each fixture in tests/fixtures/issue-repros/, beside what THIS LSP",
+        "# says about the same bytes.",
+        "#",
+        "# Registered in docs/probes/MANIFEST.tsv. Regenerate with the",
+        "# generator named there; it needs Trackmania + Openplanet with",
+        "# RemoteBuild, and it stages/loads/unloads each fixture in turn.",
+        "#",
+        "# COLUMNS",
+        "#   fixture         directory under tests/fixtures/issue-repros/.",
+        "#   verdict         ACCEPT / REJECT / UNKNOWN - the engine's polarity.",
+        "#   build_status    B118's four values. CLEAN and REJECTED are",
+        "#                   answers; NOT-RUN and BUILD-ERR are the probe",
+        "#                   saying it could not look, and are never recorded",
+        "#                   as agreement.",
+        "#   engine_message  the engine's text, verbatim to the right of the",
+        "#                   colon. The staging folder id is normalised away -",
+        "#                   it is an artefact of the probe, not of the fixture",
+        "#                   - so `Main.as(21,25): <msg>`. Multiple errors are",
+        "#                   joined with ` | `.",
+        "#   lsp_today       what this repo's CLI reports for the same fixture,",
+        f"#                   run as `check {' '.join(LSP_TSV_FLAGS)} <fixture>`.",
+        "#   engine_version  PER ROW, not only per file: the repo already holds",
+        "#                   claims from three engine generations, and a",
+        "#                   partial re-probe must not silently inherit the",
+        "#                   file's stamp.",
+        "#   probe_date      when this row was last measured.",
+        "#   divergence      why the two columns differ, or `-`. REQUIRED",
+        "#                   wherever they differ, and REFUSED where they",
+        "#                   agree - so neither an unexplained gap nor a stale",
+        "#                   note about a fixed one can sit here quietly.",
+        "#",
+        f"# LSP binary sha256: {binary_sha or 'UNKNOWN'}",
+        f"# Engine: {engine_version}   Probed: {probe_date}",
+        "#",
+    ]
+    lines = preamble + ["\t".join(TSV_COLUMNS)]
+    for row in rows:
+        lines.append("\t".join(str(row[c]).replace("\t", " ") for c in TSV_COLUMNS))
+    path.write_text("\n".join(lines) + "\n")
 
 
 def main() -> int:
@@ -1248,6 +1723,9 @@ def main() -> int:
     ap.add_argument("fixture", nargs="?", help="fixture dir name or path")
     ap.add_argument("--all", action="store_true", help="probe every fixture")
     ap.add_argument("--json", help="also write results to this JSON file")
+    ap.add_argument("--tsv", help="write the committed B129 corpus (B145). "
+                                  "Refuses to write a partial or unmeasured "
+                                  "record; see agreement_problems.")
     ap.add_argument("--selftest", action="store_true", help="offline cleanup checks; no game")
     args = ap.parse_args()
 
@@ -1302,8 +1780,107 @@ def main() -> int:
         Path(args.json).write_text(json.dumps(results, indent=2))
         print(f"wrote {args.json}")
 
+    if args.tsv:
+        rc = write_corpus(Path(args.tsv), results, all_fixtures=args.all)
+        if rc:
+            return rc
+
     # Exit non-zero if any probe failed to run (skipped) so CI/callers notice.
     return 1 if any(r.get("skipped") for r in results) else 0
+
+
+def write_corpus(dest: Path, results: list[dict], *, all_fixtures: bool) -> int:
+    """B145. Measure this LSP beside the engine, then commit both.
+
+    Refuses a PARTIAL write. The corpus is registered in B129's manifest with a
+    row count the Rust test checks against the file on disk, so a single-fixture
+    run overwriting the 64-row artifact would be a silent, total data loss that
+    looks exactly like a successful regen. `--tsv` without `--all` is the
+    natural way to do that by accident, so it is refused by name.
+    """
+    if not all_fixtures:
+        print("--tsv writes the WHOLE corpus and would truncate it to the "
+              "fixtures probed in this run. Use --all --tsv, or --json for a "
+              "single fixture.", file=sys.stderr)
+        return 2
+    version = fleet_engine_version()
+    if version is None:
+        print("cannot stamp the corpus: no Openplanet version line in the log. "
+              "An unstamped engine artifact is one that cannot be diffed "
+              "against a later generation, and this repo already holds claims "
+              "from three of them (B129).", file=sys.stderr)
+        return 2
+    binary = lsp_cli_bin()
+    sha = _sha256(binary)
+    date = time.strftime("%Y-%m-%d")
+    rows = []
+    declared = read_declared_divergences(dest)
+    for rec in results:
+        lsp = run_lsp_on_fixture(FIXTURES / rec["fixture"])
+        rows.append(tsv_row(rec, lsp, version, date, declared))
+    rows.sort(key=lambda r: r["fixture"])
+    problems = agreement_problems(rows)
+    write_tsv(dest, rows, version, date, sha)
+    print(f"wrote {dest} ({len(rows)} rows, engine {version})")
+    if problems:
+        print(f"\n{len(problems)} row(s) need attention:", file=sys.stderr)
+        for pr in problems:
+            print(f"  - {pr}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def read_declared_divergences(dest: Path) -> dict[str, str]:
+    """Carry hand-written `divergence` notes across a regen.
+
+    They are the ONLY hand-authored field in the artifact, so a regen that
+    dropped them would silently convert every explained gap into an
+    unexplained one -- and the run would still look green because the notes
+    were what made it green.
+    """
+    if not dest.is_file():
+        return {}
+    out: dict[str, str] = {}
+    header = None
+    for line in dest.read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        cells = line.split("\t")
+        if header is None:
+            header = cells
+            continue
+        row = dict(zip(header, cells))
+        note = (row.get("divergence") or "-").strip()
+        if row.get("fixture") and note != "-":
+            out[row["fixture"]] = note
+    return out
+
+
+def fleet_engine_version() -> str | None:
+    """The live engine's version, read from the same log the probe reads."""
+    m = None
+    try:
+        text = Path(fleet.OPN_LOG).read_text(errors="replace") \
+            if hasattr(fleet, "OPN_LOG") else \
+            (fleet.HOME / "OpenplanetNext/Openplanet.log").read_text(errors="replace")
+    except Exception:
+        return None
+    for line in text.splitlines():
+        hit = re.search(r"Openplanet:\s+(\d+\.\d+\.\d+)", line)
+        if hit:
+            m = hit.group(1)
+    return m
+
+
+def _sha256(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 if __name__ == "__main__":
