@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T15:08:43Z"
+depends_on: []
+estimate_hours: 1
+id: B137
+priority: high
+status: pending
+tags: []
+title: 'The Nadeo loader hardcodes is_const: false on every method, so false means UNKNOWN — the same bool-defaults-to-a-lie defect as B125/B131, surviving in the loader''s other half'
+updated_at: "2026-08-31T15:08:43Z"
+---
+
+The Nadeo loader hardcodes is_const: false on every method, so false means UNKNOWN — the same bool-defaults-to-a-lie defect as B125/B131, surviving in the loader's other half

@@ -135,3 +135,4 @@ bugs:
     - file: B134-gh-18-lead-a-subset-of-enum-va.todo
     - file: B135-hover-and-navigation-do-not-co.todo
     - file: B136-a-leading-const-binds-to-the-f.todo
+    - file: B137-the-nadeo-loader-hardcodes-is.todo
