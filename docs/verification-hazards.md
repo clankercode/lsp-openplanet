@@ -2532,3 +2532,31 @@ as `game_route`'s docstring promising behaviour its own branch condition could
 no longer deliver, and the same defect as a comment saying "before the fix". In
 every case the text was TRUE when written and stayed plausible after it stopped
 being true.
+
+## A soft reset onto a moving ref is `git add -A` by another name
+
+lane-unused squashed its B115 work with `git reset --soft master`. Master had
+moved since the lane rebased — two docs commits, `71b13c5` and `5f54f85`. The
+reset dutifully staged the difference between the lane's tree and the NEW
+master, which meant `docs/BATCH-STATE.md` and `docs/verification-hazards.md`
+were swept into the lane's commit **as reversions to their older content**.
+
+The lane caught it on `git show --stat`, restored both from master, amended, and
+reported it against itself. Final commit was exactly three files.
+
+**Why this is the `git add -A` hazard wearing a different face.** Both are one
+command that stages "everything different from here" against a reference the
+author has not re-checked. `add -A` sweeps whatever is in the working tree;
+`reset --soft <branch>` sweeps whatever the branch has done since you last
+looked. Neither errors, both produce a commit that applies cleanly, and the
+damage is *deletions of other people's work*, which no test in this repo would
+catch — the reverted files were documentation.
+
+**The tell is the file count.** A lane commit whose stat lists files the lane
+never opened is wrong, and that check takes one command. `git show --stat` before
+you report, every time, and reconcile the file list against what you actually
+edited — the same discipline as reconciling a test total, applied to a diff.
+
+**Prefer `git reset --soft $(git merge-base HEAD master)`** over
+`git reset --soft master`. The merge base is where the lane actually diverged and
+it does not move when master does.
