@@ -148,9 +148,26 @@ def git_branch(root: Path) -> str:
         return "?"
 
 
-# An unresolved git operation, by the sentinel git itself writes. Ordered
-# most-specific first, because a stopped rebase has BOTH `REBASE_HEAD` and a
-# `rebase-merge/` directory and should be named once, as a rebase.
+# An unresolved git operation, by the sentinel git itself writes.
+#
+# THE MEMBERSHIP RULE IS "GIT REMOVES IT ON RESOLUTION", NOT "GIT WRITES IT
+# DURING THE OPERATION" (B169). Those two are the same for three of the four
+# HEAD-style files and DIFFERENT for `REBASE_HEAD`, which is why it used to be
+# here and no longer is. Measured, one throwaway repo per operation, each
+# conflicted and then resolved:
+#
+#     op            mid-conflict                  survives resolution
+#     merge         MERGE_HEAD                    --
+#     cherry-pick   CHERRY_PICK_HEAD              --
+#     revert        REVERT_HEAD                   --
+#     rebase        REBASE_HEAD, rebase-merge/    REBASE_HEAD
+#
+# So `REBASE_HEAD` is not evidence of an UNRESOLVED rebase: it survives a
+# successful one, and git itself then says `fatal: no rebase in progress`. With
+# it in this table the gate refused to run for exactly the lane that had just
+# resolved a conflict and was re-gating -- the workflow this repo mandates.
+# `rebase-merge/` and `rebase-apply/` are removed on resolution and are what
+# git's own "is a rebase in progress" check uses.
 #
 # `BISECT_LOG` is deliberately ABSENT. A bisect checks out real commits and
 # produces no conflict markers, so gating during one is a legitimate thing to
@@ -159,11 +176,17 @@ def git_branch(root: Path) -> str:
 GIT_OPERATION_SENTINELS = (
     ("rebase-merge", "rebase"),
     ("rebase-apply", "rebase"),
-    ("REBASE_HEAD", "rebase"),
     ("MERGE_HEAD", "merge"),
     ("CHERRY_PICK_HEAD", "cherry-pick"),
     ("REVERT_HEAD", "revert"),
 )
+
+# Files git writes DURING an operation but does NOT remove when it completes,
+# so their presence says nothing about whether anything is unresolved. Pinned
+# as a named exclusion for the same reason `BISECT_LOG` is: the next person to
+# "complete" the sentinel list must be told this one was measured and excluded
+# on purpose, not overlooked (B169).
+NOT_UNRESOLVED_SENTINELS = ("REBASE_HEAD",)
 
 
 def git_dir_for(root: Path) -> Path | None:
@@ -271,10 +294,20 @@ def unresolved_verdict(operation: str | None, unmerged: list[str]) -> str | None
         "YOUR CODE -- which is the wrong diagnosis and has cost real time. In a "
         "shared checkout the operation may belong to ANOTHER SESSION."
     )
+    # B169: print the invocation that actually works. `--allow-unresolved` is a
+    # remote-build FLAG, and flags go BEFORE the action -- so it cannot be
+    # passed through `just rtest`, which forwards everything after its own `--`
+    # to libtest. Advising "pass --allow-unresolved" without saying that made
+    # `just rtest --allow-unresolved` reprint THIS SAME REFUSAL, handing the
+    # reader a second instance of the fault instead of a way out.
     lines.append(
         f"\nFinish or abort it (`git {operation} --continue` / "
-        f"`git {operation} --abort`), or gate a different worktree. "
-        "Pass --allow-unresolved to gate the tree exactly as it sits."
+        f"`git {operation} --abort`), or gate a different worktree."
+    )
+    lines.append(
+        "\nTo gate the tree exactly as it sits, use the flag form -- it must "
+        "come BEFORE the action, so it cannot go through `just rtest`:\n"
+        "    python3 scripts/remote-build.py --allow-unresolved test"
     )
     return "\n".join(lines)
 
@@ -855,13 +888,24 @@ def run_selftest() -> int:
         # `CHERRY_PICK_HEAD` from the table and that loop still passes, having
         # simply stopped testing it. A test that derives its expectations from
         # the thing under test cannot see an omission. So the required
-        # operations are named HERE, by the filename git actually writes,
-        # independent of the table.
+        # operations are named HERE, independent of the table.
+        #
+        # B169 RESTATED WHAT "REQUIRED" MEANS, AND KEPT THE INDEPENDENCE. The
+        # original wording was "the filename git actually writes", which is
+        # true of `REBASE_HEAD` and still made this list wrong, because git
+        # writes that file and then LEAVES IT BEHIND once the rebase finishes.
+        # The property a sentinel needs is the two-sided one: git writes it
+        # during the operation AND REMOVES IT ON RESOLUTION. Requiring the
+        # one-sided version made the gate refuse a resolved tree. So all four
+        # operations are still required here by hand -- an omission still gets
+        # caught -- but each is required through a sentinel that clears.
+        # Rebase's is `rebase-merge/` / `rebase-apply/`, asserted in the loop
+        # directly below, which is equally hardcoded; `REBASE_HEAD` moves to
+        # the exclusion pin further down.
         for filename, want in (
             ("MERGE_HEAD", "merge"),
             ("CHERRY_PICK_HEAD", "cherry-pick"),
             ("REVERT_HEAD", "revert"),
-            ("REBASE_HEAD", "rebase"),
         ):
             marker = gd / filename
             marker.write_text("x")
@@ -873,6 +917,11 @@ def run_selftest() -> int:
                     f"probe reported {got!r} — that operation would be gated "
                     f"with conflict markers in the tree"
                 )
+        # This loop is the REBASE half of the hardcoded requirement above, not
+        # a bonus check: with `REBASE_HEAD` correctly out of the table, these
+        # two directories are the only thing standing between a mid-conflict
+        # rebase and the remote. Drop `rebase-merge` from the table and this
+        # fails, which is the omission protection working.
         for dirname in ("rebase-merge", "rebase-apply"):
             marker = gd / dirname
             marker.mkdir()
@@ -880,8 +929,9 @@ def run_selftest() -> int:
             shutil.rmtree(marker)
             if got != "rebase":
                 problems.append(
-                    f"git writes {dirname}/ during a rebase, but the probe "
-                    f"reported {got!r}"
+                    f"git writes {dirname}/ during a rebase AND REMOVES IT on "
+                    f"resolution, but the probe reported {got!r} — a rebase "
+                    f"stopped on conflicts would reach the remote"
                 )
 
         # Deliberate NON-sentinel: a bisect checks out real commits and cannot
@@ -893,6 +943,37 @@ def run_selftest() -> int:
             problems.append(
                 "a bisect was treated as an unresolved operation — it produces "
                 "no conflict markers, so gating during one is legitimate"
+            )
+        (gd / "BISECT_LOG").unlink()
+
+        # Deliberate NON-sentinel (B169): git writes `REBASE_HEAD` during a
+        # rebase and does NOT remove it when the rebase completes, so it is
+        # present in a perfectly clean tree — every lane's tree, after every
+        # rebase this repo's workflow mandates. Treating it as a sentinel made
+        # the gate refuse to run for the one lane that had just resolved a
+        # conflict and was re-gating. Measured, not reasoned: after a resolved
+        # conflicted rebase the file remains and `git rebase --continue` says
+        # `fatal: no rebase in progress`.
+        #
+        # This pin is asserted through NOT_UNRESOLVED_SENTINELS so the
+        # exclusion is declared in the table's own file and checked here; a
+        # future "the list is missing REBASE_HEAD" fix has to delete a named,
+        # explained pin rather than fill a silent gap.
+        for filename in NOT_UNRESOLVED_SENTINELS:
+            marker = gd / filename
+            marker.write_text("x")
+            got = operation_in_progress(gd)
+            marker.unlink()
+            if got is not None:
+                problems.append(
+                    f"{filename} was treated as an unresolved operation, but "
+                    f"git leaves it behind after the operation SUCCEEDS — this "
+                    f"refuses a clean post-rebase tree, which is every lane's"
+                )
+        if "REBASE_HEAD" not in NOT_UNRESOLVED_SENTINELS:
+            problems.append(
+                "REBASE_HEAD dropped out of the exclusion pin — the B169 "
+                "regression can return silently without it"
             )
 
     # THE WIRING. Every case above tests the decision; none of them proves
