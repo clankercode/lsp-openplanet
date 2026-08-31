@@ -1,7 +1,42 @@
 use std::collections::{BTreeMap, HashMap};
 
-use super::scope::{Symbol, SymbolKind};
+use super::scope::{DeclModifiers, Symbol, SymbolKind};
 use crate::parser::ast;
+
+/// B114: the modifiers a FUNCTION-shaped declaration was written with.
+/// Covers class methods, constructors, destructors, interface methods and
+/// free functions — the parser fills the same `FunctionDecl` for all of
+/// them, so one helper keeps them from drifting apart.
+fn fn_modifiers(f: &ast::FunctionDecl) -> DeclModifiers {
+    DeclModifiers {
+        is_shared: f.is_shared,
+        is_const: f.is_const,
+        is_override: f.is_override,
+        is_final: f.is_final,
+        is_private: f.is_private,
+        is_protected: f.is_protected,
+        ..DeclModifiers::default()
+    }
+}
+
+/// B114: the modifiers a CLASS declaration was written with.
+fn class_modifiers(c: &ast::ClassDecl) -> DeclModifiers {
+    DeclModifiers {
+        is_shared: c.is_shared,
+        is_mixin: c.is_mixin,
+        is_abstract: c.is_abstract,
+        ..DeclModifiers::default()
+    }
+}
+
+/// B114: `shared` is the only modifier an interface, enum or funcdef can
+/// carry.
+fn shared_only(is_shared: bool) -> DeclModifiers {
+    DeclModifiers {
+        is_shared,
+        ..DeclModifiers::default()
+    }
+}
 
 /// Extract a base-class name from a `TypeExpr`. Strips `Handle`, `Const`,
 /// `Reference` wrappers and pulls the underlying `QualifiedName` if present.
@@ -376,11 +411,11 @@ impl SymbolTable {
                     .filter_map(|b| base_class_name(source, b))
                     .collect();
                 out.push(Symbol {
+                    modifiers: class_modifiers(cls),
                     name: class_name.clone(),
                     kind: SymbolKind::Class {
                         parents,
                         // B111: a mixin never owes the interface it names.
-                        is_mixin: cls.is_mixin,
                     },
                     span: cls.span,
                     file_id,
@@ -400,6 +435,7 @@ impl SymbolTable {
                             for decl in &var.declarators {
                                 let mname = format!("{}::{}", class_name, decl.name.text(source));
                                 out.push(Symbol {
+                                    modifiers: DeclModifiers::default(),
                                     name: mname,
                                     kind: SymbolKind::Variable {
                                         type_name: type_text.clone(),
@@ -415,6 +451,7 @@ impl SymbolTable {
                             let (params, min_args) = extract_params(source, &func.params);
                             let return_type = func.return_type.span.text(source).to_string();
                             out.push(Symbol {
+                                modifiers: fn_modifiers(func),
                                 name: mname,
                                 kind: SymbolKind::Function {
                                     return_type,
@@ -424,7 +461,6 @@ impl SymbolTable {
                                     // B101: the trailing `const`. The engine
                                     // treats `void M() const` and `void M()`
                                     // as different signatures.
-                                    is_const: func.is_const,
                                 },
                                 span: func.span,
                                 file_id,
@@ -442,6 +478,7 @@ impl SymbolTable {
                             // gets a Named(simple) that downstream lookups
                             // can reason about.
                             out.push(Symbol {
+                                modifiers: fn_modifiers(func),
                                 name: mname,
                                 kind: SymbolKind::Function {
                                     return_type: simple_class.clone(),
@@ -449,7 +486,6 @@ impl SymbolTable {
                                     min_args,
                                     imported: false,
                                     // A constructor cannot be const.
-                                    is_const: false,
                                 },
                                 span: func.span,
                                 file_id,
@@ -463,6 +499,7 @@ impl SymbolTable {
                             let mname = format!("{}::{}", class_name, func.name.text(source));
                             let (params, min_args) = extract_params(source, &func.params);
                             out.push(Symbol {
+                                modifiers: fn_modifiers(func),
                                 name: mname,
                                 kind: SymbolKind::Function {
                                     return_type: String::new(),
@@ -470,7 +507,6 @@ impl SymbolTable {
                                     min_args,
                                     imported: false,
                                     // A destructor cannot be const.
-                                    is_const: false,
                                 },
                                 span: func.span,
                                 file_id,
@@ -481,6 +517,7 @@ impl SymbolTable {
                             let mname = format!("{}::{}", class_name, prop.name.text(source));
                             let type_text = prop.type_expr.span.text(source).to_string();
                             out.push(Symbol {
+                                modifiers: DeclModifiers::default(),
                                 name: mname,
                                 kind: SymbolKind::Variable {
                                     type_name: type_text,
@@ -506,6 +543,7 @@ impl SymbolTable {
                     .filter_map(|b| base_class_name(source, b))
                     .collect();
                 out.push(Symbol {
+                    modifiers: shared_only(iface.is_shared),
                     name: iface_name.clone(),
                     kind: SymbolKind::Interface { parents },
                     span: iface.span,
@@ -515,6 +553,10 @@ impl SymbolTable {
                 for method in &iface.methods {
                     let (params, min_args) = extract_params(source, &method.params);
                     out.push(Symbol {
+                        // The METHOD's own modifiers — `void M() const;` is
+                        // a const requirement. `shared` belongs to the
+                        // interface declaration, not to each method.
+                        modifiers: fn_modifiers(method),
                         name: format!("{}::{}", iface_name, method.name.text(source)),
                         kind: SymbolKind::Function {
                             return_type: method.return_type.span.text(source).to_string(),
@@ -523,7 +565,6 @@ impl SymbolTable {
                             imported: false,
                             // B101: `void M() const;` in an interface is a
                             // const REQUIREMENT, not decoration.
-                            is_const: method.is_const,
                         },
                         span: method.span,
                         file_id,
@@ -535,6 +576,7 @@ impl SymbolTable {
                 let enum_name = qualify(en.name.text(source));
                 let values = enum_values(source, en);
                 out.push(Symbol {
+                    modifiers: shared_only(en.is_shared),
                     name: enum_name.clone(),
                     kind: SymbolKind::Enum {
                         values: values.clone(),
@@ -546,6 +588,11 @@ impl SymbolTable {
                 // Also register each enum value
                 for (val, (_, value)) in en.values.iter().zip(&values) {
                     out.push(Symbol {
+                        // An enum VALUE carries no modifier of its own; it
+                        // is covered by its enum's declaration span, which
+                        // is how membership of a `shared` entity is
+                        // decided (see `is_shared_or_inside_shared`).
+                        modifiers: DeclModifiers::default(),
                         name: format!("{}::{}", enum_name, val.name.text(source)),
                         kind: SymbolKind::EnumValue {
                             enum_name: enum_name.clone(),
@@ -560,6 +607,7 @@ impl SymbolTable {
             ast::Item::Namespace(ns) => {
                 let ns_name = qualify(ns.name.text(source));
                 out.push(Symbol {
+                    modifiers: DeclModifiers::default(),
                     name: ns_name.clone(),
                     kind: SymbolKind::Namespace,
                     span: ns.span,
@@ -577,6 +625,7 @@ impl SymbolTable {
                 // `GlobalScope::lookup_funcdef` can compare delegate args.
                 let (params, _) = extract_params(source, &fd.params);
                 out.push(Symbol {
+                    modifiers: shared_only(fd.is_shared),
                     name,
                     kind: SymbolKind::Funcdef {
                         return_type: fd.return_type.span.text(source).to_string(),
@@ -591,6 +640,7 @@ impl SymbolTable {
             ast::Item::Typedef(td) => {
                 let name = qualify(td.name.text(source));
                 out.push(Symbol {
+                    modifiers: DeclModifiers::default(),
                     name,
                     // A typedef is a first-class type name. The current
                     // symbol surface already represents user-defined
@@ -613,13 +663,13 @@ impl SymbolTable {
                 let name = qualify(func.name.text(source));
                 let (params, min_args) = extract_params(source, &func.params);
                 out.push(Symbol {
+                    modifiers: fn_modifiers(func),
                     name,
                     kind: SymbolKind::Function {
                         return_type: func.return_type.span.text(source).to_string(),
                         params,
                         min_args,
                         imported: false,
-                        is_const: func.is_const,
                     },
                     span: func.span,
                     file_id,
@@ -635,6 +685,7 @@ impl SymbolTable {
                     let qualified_name = qualify(name.text(source));
                     let (params, min_args) = extract_params(source, params);
                     out.push(Symbol {
+                        modifiers: DeclModifiers::default(),
                         name: qualified_name,
                         kind: SymbolKind::Function {
                             return_type: return_type.span.text(source).to_string(),
@@ -645,7 +696,6 @@ impl SymbolTable {
                             // real definition when one exists in the workspace.
                             imported: true,
                             // `import` declares a free function.
-                            is_const: false,
                         },
                         span: import.span,
                         file_id,
@@ -663,6 +713,7 @@ impl SymbolTable {
                 for decl in &var.declarators {
                     let name = qualify(decl.name.text(source));
                     out.push(Symbol {
+                        modifiers: DeclModifiers::default(),
                         name,
                         kind: SymbolKind::Variable {
                             type_name: type_text.clone(),
@@ -677,6 +728,7 @@ impl SymbolTable {
                 let name = qualify(prop.name.text(source));
                 let type_text = prop.type_expr.span.text(source).to_string();
                 out.push(Symbol {
+                    modifiers: DeclModifiers::default(),
                     name,
                     kind: SymbolKind::Variable {
                         type_name: type_text,
@@ -792,7 +844,6 @@ mod tests {
                 params,
                 min_args,
                 imported,
-                is_const,
             } => {
                 assert_eq!(return_type, "int");
                 assert_eq!(
@@ -804,7 +855,10 @@ mod tests {
                 );
                 assert_eq!(*min_args, 1, "the defaulted parameter is optional");
                 assert!(!imported);
-                assert!(!is_const, "no trailing `const` was written");
+                assert!(
+                    !sym.modifiers.is_const,
+                    "no trailing `const` was written"
+                );
             }
             other => panic!("I::Count must be a Function symbol, got {:?}", other),
         }
@@ -820,7 +874,7 @@ mod tests {
             .find(|s| s.name == name)
             .unwrap_or_else(|| panic!("{name} must be pooled in `{src}`"));
         match &sym.kind {
-            SymbolKind::Class { is_mixin, .. } => *is_mixin,
+            SymbolKind::Class { .. } => sym.modifiers.is_mixin,
             other => panic!("{name} must be a Class symbol, got {other:?}"),
         }
     }
@@ -903,10 +957,12 @@ mod tests {
             .iter()
             .find(|s| s.name == name)
             .unwrap_or_else(|| panic!("{name} must be pooled in `{src}`"));
-        match &sym.kind {
-            SymbolKind::Function { is_const, .. } => *is_const,
-            other => panic!("{name} must be a Function symbol, got {other:?}"),
-        }
+        assert!(
+            matches!(sym.kind, SymbolKind::Function { .. }),
+            "{name} must be a Function symbol, got {:?}",
+            sym.kind
+        );
+        sym.modifiers.is_const
     }
 
     /// A class method's trailing `const` survives into the pool, and its
@@ -1011,8 +1067,8 @@ mod tests {
         assert_eq!(ctor_dtor.len(), 2, "constructor and destructor both pooled");
         for sym in ctor_dtor {
             match &sym.kind {
-                SymbolKind::Function { is_const, .. } => {
-                    assert!(!is_const, "a ctor/dtor can never be const")
+                SymbolKind::Function { .. } => {
+                    assert!(!sym.modifiers.is_const, "a ctor/dtor can never be const")
                 }
                 other => panic!("expected a Function symbol, got {other:?}"),
             }
@@ -1123,13 +1179,13 @@ mod tests {
         table.set_file_symbols(
             fid,
             vec![Symbol {
+                modifiers: DeclModifiers::default(),
                 name: "Main".to_string(),
                 kind: SymbolKind::Function {
                     return_type: "void".into(),
                     params: vec![],
                     min_args: 0,
                     imported: false,
-                    is_const: false,
                 },
                 span: Span::new(0, 4),
                 file_id: fid,

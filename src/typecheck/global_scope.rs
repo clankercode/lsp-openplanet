@@ -8,7 +8,7 @@
 
 use super::access_position::AccessPosition;
 use super::repr::{param_mode_from_text, ParamMode, TypeRepr};
-use crate::symbols::scope::{Symbol, SymbolKind};
+use crate::symbols::scope::{DeclModifiers, Symbol, SymbolKind};
 use crate::symbols::SymbolTable;
 use crate::typedb::index::ParamInfo;
 use crate::typedb::TypeIndex;
@@ -2443,6 +2443,7 @@ mod tests {
 
     fn make_symbol(name: &str, kind: SymbolKind) -> Symbol {
         Symbol {
+            modifiers: DeclModifiers::default(),
             name: name.to_string(),
             kind,
             span: empty_span(),
@@ -2494,7 +2495,6 @@ mod tests {
                 "CSmPlayer",
                 SymbolKind::Class {
                     parents: Vec::new(),
-                    is_mixin: false,
                 },
             )],
         );
@@ -3616,7 +3616,6 @@ mod tests {
                 params: Vec::new(),
                 min_args: 0,
                 imported: false,
-                is_const: false,
             },
         ] {
             let mut ws = SymbolTable::new();
@@ -3700,7 +3699,6 @@ mod tests {
                     "Holder",
                     SymbolKind::Class {
                         parents: Vec::new(),
-                        is_mixin: false,
                     },
                 ),
                 make_symbol(
@@ -4054,7 +4052,6 @@ mod tests {
             params: Vec::new(),
             min_args: 0,
             imported: false,
-            is_const: false,
         };
         for (name, symbols) in [
             // A global variable.
@@ -4085,7 +4082,6 @@ mod tests {
                         params: Vec::new(),
                         min_args: 0,
                         imported: false,
-                        is_const: false,
                     },
                 )],
             ),
@@ -4220,7 +4216,6 @@ mod tests {
                 params: Vec::new(),
                 min_args: 0,
                 imported: false,
-                is_const: false,
             },
             SymbolKind::EnumValue {
                 enum_name: "MyEnum".into(),
@@ -4249,7 +4244,6 @@ mod tests {
                     params: Vec::new(),
                     min_args: 0,
                     imported: false,
-                    is_const: false,
                 },
             )],
         );
@@ -4302,7 +4296,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "MyClass",
-                SymbolKind::Class { parents: vec![], is_mixin: false },
+                SymbolKind::Class { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -4340,7 +4334,6 @@ mod tests {
                     params: vec![],
                     min_args: 0,
                     imported: false,
-                    is_const: false,
                 },
             )],
         );
@@ -4366,7 +4359,6 @@ mod tests {
                         params: vec![],
                         min_args: 0,
                         imported: false,
-                        is_const: false,
                     },
                 ),
             ],
@@ -4406,7 +4398,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "Deep::Ns::Thing",
-                SymbolKind::Class { parents: vec![], is_mixin: false },
+                SymbolKind::Class { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -4432,7 +4424,6 @@ mod tests {
                     params: vec![],
                     min_args: 0,
                     imported: false,
-                    is_const: false,
                 },
             )],
         );
@@ -4557,7 +4548,7 @@ mod tests {
         let fid = ws.allocate_file_id();
         ws.set_file_symbols(
             fid,
-            vec![make_symbol("mat3", SymbolKind::Class { parents: vec![], is_mixin: false })],
+            vec![make_symbol("mat3", SymbolKind::Class { parents: vec![] })],
         );
         let scope = GlobalScope::new(&ws, Some(&idx));
         assert!(!scope.external_ctor_converts("mat3", "mat4"));
@@ -4603,7 +4594,6 @@ mod tests {
                         params: vec![("v".into(), "int &out".into())],
                         min_args: 1,
                         imported: false,
-                        is_const: false,
                     },
                 ),
                 make_symbol(
@@ -4681,7 +4671,7 @@ mod tests {
             vec![
                 make_symbol(
                     "Editor::NetworkSerializable",
-                    SymbolKind::Class { parents: vec![], is_mixin: false },
+                    SymbolKind::Class { parents: vec![] },
                 ),
                 make_symbol(
                     "Editor::NetworkSerializable::ReadFromNetworkBuffer",
@@ -4690,14 +4680,12 @@ mod tests {
                         params: vec![("buf".into(), "MemoryBuffer@".into())],
                         min_args: 1,
                         imported: false,
-                        is_const: false,
                     },
                 ),
                 make_symbol(
                     "Editor::Child",
                     SymbolKind::Class {
                         parents: vec!["NetworkSerializable".into()],
-                        is_mixin: false,
                     },
                 ),
             ],
@@ -4718,8 +4706,8 @@ mod tests {
         ws.set_file_symbols(
             fid,
             vec![
-                make_symbol("ItemSpec", SymbolKind::Class { parents: vec![], is_mixin: false }),
-                make_symbol("Editor::ItemSpec", SymbolKind::Class { parents: vec![], is_mixin: false }),
+                make_symbol("ItemSpec", SymbolKind::Class { parents: vec![] }),
+                make_symbol("Editor::ItemSpec", SymbolKind::Class { parents: vec![] }),
                 make_symbol(
                     "Editor::ItemSpec::ReadFromNetworkBuffer",
                     SymbolKind::Function {
@@ -4727,14 +4715,12 @@ mod tests {
                         params: vec![("buf".into(), "MemoryBuffer@".into())],
                         min_args: 1,
                         imported: false,
-                        is_const: false,
                     },
                 ),
                 make_symbol(
                     "Editor::ItemSpecPriv",
                     SymbolKind::Class {
                         parents: vec!["ItemSpec".into()],
-                        is_mixin: false,
                     },
                 ),
             ],

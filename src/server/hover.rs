@@ -25,7 +25,7 @@ use crate::parser::ast::SourceFile;
 use crate::server::diagnostics::position_to_offset;
 use crate::server::navigation;
 use crate::server::scope_query;
-use crate::symbols::scope::{Symbol, SymbolKind};
+use crate::symbols::scope::{DeclModifiers, Symbol, SymbolKind};
 use crate::typecheck::access_position::access_position_at;
 use crate::typecheck::repr::TypeRepr;
 use crate::typecheck::GlobalScope;
@@ -1685,13 +1685,13 @@ mod tests {
     #[test]
     fn workspace_symbol_doc_renders_below_the_signature() {
         let sym = Symbol {
+            modifiers: DeclModifiers::default(),
             name: "greet".to_string(),
             kind: SymbolKind::Function {
                 return_type: "void".to_string(),
                 params: vec![("a".to_string(), "int".to_string())],
                 min_args: 1,
                 imported: false,
-                is_const: false,
             },
             span: crate::lexer::Span::new(0, 1),
             file_id: 0,
@@ -1714,13 +1714,13 @@ mod tests {
     #[test]
     fn workspace_import_alias_does_not_duplicate_its_definition() {
         let sig = |imported: bool| Symbol {
+            modifiers: DeclModifiers::default(),
             name: "Foo".to_string(),
             kind: SymbolKind::Function {
                 return_type: "void".to_string(),
                 params: vec![("a".to_string(), "int".to_string())],
                 min_args: 1,
                 imported,
-                is_const: false,
             },
             span: crate::lexer::Span::new(0, 1),
             file_id: 0,
@@ -1737,12 +1737,12 @@ mod tests {
 
         // A genuinely different imported signature IS a second overload.
         let other = Symbol {
+            modifiers: DeclModifiers::default(),
             kind: SymbolKind::Function {
                 return_type: "void".to_string(),
                 params: vec![("b".to_string(), "float".to_string())],
                 min_args: 1,
                 imported: true,
-                is_const: false,
             },
             ..sig(true)
         };
@@ -1755,6 +1755,7 @@ mod tests {
     #[test]
     fn workspace_variable_doc_renders_below_the_declaration() {
         let sym = Symbol {
+            modifiers: DeclModifiers::default(),
             name: "g_count".to_string(),
             kind: SymbolKind::Variable {
                 type_name: "int".to_string(),

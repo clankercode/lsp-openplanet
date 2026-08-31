@@ -278,7 +278,7 @@ mod tests {
     use super::*;
     use crate::lexer::tokenize_filtered;
     use crate::parser::Parser;
-    use crate::symbols::scope::{Symbol, SymbolKind};
+    use crate::symbols::scope::{DeclModifiers, Symbol, SymbolKind};
     use crate::symbols::SymbolTable;
 
     fn parse_type(source: &str) -> TypeExpr {
@@ -294,8 +294,9 @@ mod tests {
         ws.set_file_symbols(
             fid,
             vec![Symbol {
+                modifiers: DeclModifiers::default(),
                 name: name.to_string(),
-                kind: SymbolKind::Class { parents: vec![], is_mixin: false },
+                kind: SymbolKind::Class { parents: vec![] },
                 span: Span::new(0, 0),
                 file_id: fid,
                 doc: None,
@@ -688,8 +689,9 @@ mod tests {
         ws.set_file_symbols(
             fid,
             vec![Symbol {
+                modifiers: DeclModifiers::default(),
                 name: "Ns::Foo".to_string(),
-                kind: SymbolKind::Class { parents: vec![], is_mixin: false },
+                kind: SymbolKind::Class { parents: vec![] },
                 span: Span::new(0, 0),
                 file_id: fid,
                 doc: None,
@@ -800,6 +802,7 @@ mod tests {
             symbols
                 .iter()
                 .map(|(name, kind)| Symbol {
+                    modifiers: DeclModifiers::default(),
                     name: (*name).to_string(),
                     kind: kind.clone(),
                     span: Span::new(0, 0),
@@ -834,7 +837,7 @@ mod tests {
     /// subtlest cell of the hole open.
     fn type_shapes() -> Vec<(&'static str, SymbolKind)> {
         vec![
-            ("class", SymbolKind::Class { parents: vec![], is_mixin: false }),
+            ("class", SymbolKind::Class { parents: vec![] }),
             ("interface", SymbolKind::Interface { parents: vec![] }),
             ("enum", SymbolKind::Enum { values: vec![] }),
             (
@@ -960,7 +963,6 @@ mod tests {
                             params: vec![],
                             min_args: 0,
                             imported: false,
-                            is_const: false,
                         },
                     )],
                 ),

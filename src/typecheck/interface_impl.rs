@@ -241,7 +241,7 @@ fn is_workspace_mixin(qname: &str, scope: &GlobalScope) -> bool {
     scope
         .lookup_workspace(qname)
         .iter()
-        .any(|s| matches!(s.kind, SymbolKind::Class { is_mixin: true, .. }))
+        .any(|s| s.modifiers.is_mixin && matches!(s.kind, SymbolKind::Class { .. }))
 }
 
 /// Resolve a base-list name the way the class body sees it, preferring an
@@ -329,7 +329,6 @@ fn methods_of(owner: &str, scope: &GlobalScope) -> Vec<MethodSig> {
             params,
             min_args,
             imported: false,
-            is_const,
         } = &sym.kind
         else {
             continue;
@@ -345,7 +344,7 @@ fn methods_of(owner: &str, scope: &GlobalScope) -> Vec<MethodSig> {
             return_type: return_type.clone(),
             param_types: params.iter().map(|(_, t)| t.clone()).collect(),
             min_args: *min_args,
-            is_const: *is_const,
+            is_const: sym.modifiers.is_const,
         });
     }
     out
