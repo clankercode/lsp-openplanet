@@ -53,3 +53,5 @@ a bad rule. Fleet sweep must report EXPOSURE, not just a zero.
 If the engine is neutral, that is a result worth pinning too, with a tripwire
 rather than prose -- see B134's pattern and the "predict the count" entry in
 docs/verification-hazards.md.
+
+Decision 2026-09-01: serial typechecker/oracle lane after B160 because both touch checker.rs and funcdef oracle tests. Measure all requested primitive-width/sign variants first. If the engine is exact, instrument exposure and repair reference-data defects before tightening; if neutral, land a durable tripwire and evidence rather than a behaviour change.
