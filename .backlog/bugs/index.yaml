@@ -107,3 +107,4 @@ bugs:
     - file: B106-just-rtest-reports-exit-0-when.todo
     - file: B107-completion-after-a-workspace-n.todo
     - file: B108-render-no-matching-sig-renders.todo
+    - file: B109-argtypemismatch-renders-a-call.todo
