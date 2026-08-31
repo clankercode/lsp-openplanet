@@ -254,6 +254,28 @@ Two consequences worth knowing before you spend an afternoon on it:
    diagnostic proves analysis reached the last line. That is also how the
    shipped corpora were produced at all, given `load_plugin` never worked.
    Verify before relying on it.
+
+   **Verified statically, 2026-08-31 (lane-resolver), and it holds — the code
+   path cannot see the failure.** `fleet.rb_route` (`scripts/fleet_dogfood.py`)
+   wraps its whole body in `try/except Exception` and RETURNS an error dict; it
+   never raises. `probe_enum_corpus.py`'s `run_batch` then calls it for
+   `load_plugin` and **discards the return value entirely** — no assignment, no
+   check — before sleeping 3s and reading the log window. So a split payload,
+   a `Not implemented:` reply and a refused connection are all indistinguishable
+   from success to this harness, and the watcher is what does the work.
+
+   Two things that stay unverified, because neither can be settled from disk:
+   whether the watcher picks up a NEWLY CREATED plugin directory as opposed to a
+   modified file in an already-loaded one, and therefore whether a probe run
+   would actually produce verdicts today. The shipped corpora are the evidence
+   that it does.
+
+   **What makes trying it cheap is the shape of the failure, not confidence
+   that it works.** With the sentinel, a watcher that never fires yields no
+   diagnostics, so no name is ACCEPTED and every one comes back UNDETERMINED —
+   and `resolver.rs` reading UNDETERMINED as REJECTED is exactly why the
+   generator refuses to write such a corpus to its real path. The downside of
+   an attempt is a wasted minute, not a wrong row.
 2. The `unload_plugin` that follows a failed load is split the same way, so
    `holder.preserve()` fires — correctly — and **leaves the fixture installed**.
    That blocks every later probe from every lane until someone removes it by
