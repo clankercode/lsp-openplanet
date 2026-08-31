@@ -157,3 +157,4 @@ bugs:
     - file: B156-repr-rs-is-array-generic-base.todo
     - file: B157-nadeomember-r-discards-1618-me.todo
     - file: B158-nadeotype-d-carries-829-member.todo
+    - file: B159-cargo-fmt-drift-recurs-on-ever.todo

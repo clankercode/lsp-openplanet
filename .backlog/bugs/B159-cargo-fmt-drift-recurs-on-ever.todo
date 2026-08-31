@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T16:44:49Z"
+depends_on: []
+estimate_hours: 1
+id: B159
+priority: high
+status: pending
+tags: []
+title: 'cargo fmt drift recurs on every merge: three lanes have now landed unformatted files and each needed a central repair — nothing gates it'
+updated_at: "2026-08-31T16:44:49Z"
+---
+
+cargo fmt drift recurs on every merge: three lanes have now landed unformatted files and each needed a central repair — nothing gates it
