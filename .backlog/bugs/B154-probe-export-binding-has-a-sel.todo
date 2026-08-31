@@ -1,14 +1,18 @@
 ---
+claimed_at: "2026-08-31T16:28:55Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T16:28:07Z"
 depends_on: []
 estimate_hours: 1
 id: B154
 priority: high
-status: pending
+started_at: "2026-08-31T16:28:55Z"
+status: in_progress
 tags: []
 title: 'probe_export_binding has a selftest and no mutation harness anywhere: surfaced by a discovery check that now parses scripts/ instead of trusting a hardcoded list'
-updated_at: "2026-08-31T16:28:07Z"
+updated_at: "2026-08-31T16:28:55Z"
 ---
 
 probe_export_binding has a selftest and no mutation harness anywhere: surfaced by a discovery check that now parses scripts/ instead of trusting a hardcoded list
