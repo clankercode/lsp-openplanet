@@ -2181,6 +2181,64 @@ impl<'a> GlobalScope<'a> {
         out
     }
 
+    /// B116: the trailing-`const` qualifier of a METHOD declared directly
+    /// on the workspace class `class_name`. `None` when the pooled table
+    /// holds no such method on that class — which is also the answer for a
+    /// FIELD, for an unknown class, and for an ENGINE type, because the
+    /// lookup is against the workspace half of the merged view only.
+    ///
+    /// That provenance restriction is the point, not an accident. The
+    /// const-receiver rule reads this to decide whether to diagnose, and
+    /// the typedb carries no const-qualifier metadata at all
+    /// (`lookup_method_return`'s own comment says so) — so an external
+    /// receiver must come back `None` and stay unchecked rather than look
+    /// uniformly non-const and fire on every engine call. Measured on the
+    /// 151-plugin fleet: of 827 const-receiver call sites that consult
+    /// this, 807 are engine or builtin receivers this `None` excludes.
+    ///
+    /// Parents are deliberately NOT walked. `index_file_classes` records
+    /// only a class's OWN members, so the same-file rule has always been
+    /// own-class-only, and this is the surface that has to match it — an
+    /// inherited non-const method reached through a derived const receiver
+    /// is a separate false negative, identical on both sides of the file
+    /// boundary. Walking parents here would have changed exactly one
+    /// verdict across the fleet (`Editor::SetSkinSpec::WriteToNetworkBuffer`,
+    /// inherited from `NetworkSerializable`), which is its own question.
+    ///
+    /// `Some(true)` when ANY overload of the name is const: on a const
+    /// receiver the engine selects a const overload if one exists, so one
+    /// const declaration makes the call legal.
+    pub fn workspace_own_method_is_const(&self, class_name: &str, method: &str) -> Option<bool> {
+        let owner = self.normalize_workspace_class_name(class_name);
+        // The method as written, then — only if no method of that exact
+        // name exists — its virtual-property spelling. `index_file_classes`
+        // registers `get_V`/`set_V` under the property name `V` too and
+        // marks the property const from the accessor's own qualifier; this
+        // mirrors that, so the two surfaces agree on `p.V()`.
+        for candidates in [
+            vec![format!("{owner}::{method}")],
+            vec![
+                format!("{owner}::get_{method}"),
+                format!("{owner}::set_{method}"),
+            ],
+        ] {
+            let mut found = false;
+            let mut any_const = false;
+            for qualified in &candidates {
+                for s in self.lookup_workspace(qualified) {
+                    if let SymbolKind::Function { is_const, .. } = &s.kind {
+                        found = true;
+                        any_const |= *is_const;
+                    }
+                }
+            }
+            if found {
+                return Some(any_const);
+            }
+        }
+        None
+    }
+
     pub fn workspace_class_member(&self, class_name: &str, member: &str) -> Option<TypeRepr> {
         let getter = format!("get_{}", member);
         let setter = format!("set_{}", member);
