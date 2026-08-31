@@ -535,6 +535,7 @@ def reconcile(
     lines: list[str],
     expected: dict[str, str],
     filtered: bool = False,
+    libtest_args: list[str] | None = None,
     declared: dict[str, int] | None = None,
     load: str | None = None,
 ) -> tuple[int, str]:
@@ -570,6 +571,16 @@ def reconcile(
     )
     if filtered_out:
         filtered = True
+
+    # B162: how many tests the run actually EXECUTED, as distinct from how many
+    # binaries reported. Every other count here answers "did the suite finish?";
+    # this one answers "did anything run at all?", and they are different
+    # questions with different failure modes. `measured` is summed too so a
+    # bench-only selection is not miscounted as nothing.
+    measured = sum(
+        int(m["measured"]) for s in sections for m in s.summaries if m["measured"]
+    )
+    executed = passed + failed + ignored + measured
 
     # B106. Deliberately NOT gated on the exit code, and deliberately a hard
     # problem rather than a withheld marker: a run that could not write is not
@@ -616,6 +627,98 @@ def reconcile(
     report: list[str] = []
     report.append("")
     if not problems:
+        # B162: A RUN THAT EXECUTED NO TESTS IS NEVER A PASS.
+        #
+        # Found live: `just rtest b145` printed `ok` for all 38 binaries with
+        # `0 passed; 0 failed`, because cargo filters on test NAMES and no name
+        # contained "b145" — the lane had just written those tests. Nothing
+        # ran, and the output was indistinguishable from success.
+        #
+        # B106 already fixed HALF of this: `filtered_out` withholds the marker,
+        # so a subset can never be reported as a suite total. But it
+        # deliberately returned 0 ("a deliberately narrowed run is not a broken
+        # one"), which is right for a filter that MATCHES and wrong for one
+        # that matches nothing. This is the other half.
+        #
+        # Stated as "zero executed" rather than "a filter matched nothing"
+        # because the filtered path is NOT the only route here, which was
+        # measured rather than assumed:
+        #
+        #   * name filter matches no test  -> marker withheld, exit 0   (B162)
+        #   * every binary contains 0 tests -> `SUITE-VERIFIED: 0 passed;
+        #     1/1 binaries reported`, exit 0
+        #   * NO binaries enumerated at all -> `SUITE-VERIFIED: 0 passed;
+        #     0/0 binaries reported`, exit 0
+        #
+        # The last two are worse than the one reported, because they PRINT the
+        # marker every lane greps for and reports. A filter-shaped rule would
+        # have closed one route and left two open.
+        #
+        # SAFETY, and it is the point: this cannot fire on any run that
+        # executed at least one test, which is every real gate run. It is a
+        # no-op for the suite as anyone normally invokes it.
+        if executed == 0:
+            if filtered_out:
+                cause = (
+                    f"the filter matched no test NAME — libtest filtered out "
+                    f"{filtered_out} test(s) and ran none of them"
+                )
+                # The specific footgun, named when we can see it. A cargo
+                # TARGET selector among the libtest args is not a filter that
+                # missed: it is a flag that went to the wrong parser. Through
+                # `just rtest` there is no way to place it correctly, because
+                # the recipe forwards everything after its own `--` to libtest
+                # — and `--test` is ALSO a libtest flag, so it is swallowed and
+                # its VALUE silently becomes the name filter. That is how
+                # `just rtest --test b129_gold_manifest` came to filter on the
+                # string "b129_gold_manifest" and match nothing.
+                stray = [
+                    a
+                    for a in (libtest_args or [])
+                    if a in TARGET_SELECTORS
+                    or any(a.startswith(f"{t}=") for t in TARGET_SELECTORS)
+                ]
+                if stray:
+                    fix = (
+                        f"`{stray[0]}` is a CARGO flag, not a libtest one, and "
+                        f"everything here reached libtest. Selecting a BINARY "
+                        f"needs cargo: `just rrun cargo test {stray[0]} <name>`. "
+                        f"`just rtest <substring>` filters by test NAME."
+                    )
+                else:
+                    fix = (
+                        "check the spelling — `just rtest` filters by test NAME, "
+                        "and an integration test's name is its bare function "
+                        "name, NOT the file it lives in (`b129` matches nothing; "
+                        "the tests in b129_gold_manifest.rs are named "
+                        "`every_manifest_artifact_exists_on_disk` and so on). "
+                        "`just rrun cargo test -- --list` prints them; "
+                        "`just rrun cargo test --test <file>` runs one file."
+                    )
+            elif expected:
+                cause = (
+                    f"the {len(expected)} selected binary/binaries reported, and "
+                    f"contain no tests to run"
+                )
+                fix = "widen the selection, or check the target actually has tests."
+            else:
+                cause = "no test binaries were enumerated at all"
+                fix = (
+                    "the tree built nothing to test — check the build output "
+                    "above rather than this line."
+                )
+            report.append("==> NO TESTS RAN")
+            report.append(f"    {cause}.")
+            report.append(
+                "    This is NOT a passing suite and NOT a test failure: nothing "
+                "was executed,"
+            )
+            report.append(
+                "    so there is no evidence here either way. A total is withheld."
+            )
+            report.append(f"    {fix}")
+            return 1, "\n".join(report)
+
         # A deliberately narrowed run is not a broken one. Reporting it as a
         # failure is the same mislabelling the COMPLETE/INCOMPLETE split just
         # fixed one level up: it puts the word FAIL in front of a caller who
@@ -725,7 +828,7 @@ def save_full_output(lines: list[str], report: str) -> Path | None:
 
 
 def run_gate(extra: list[str]) -> int:
-    cargo_args, _libtest_args = split_cargo_args(extra)
+    cargo_args, libtest_args = split_cargo_args(extra)
     filtered = names_a_target(cargo_args)
 
     # B106, before anything expensive: a build box at 0 bytes free reports its
@@ -765,6 +868,7 @@ def run_gate(extra: list[str]) -> int:
         lines,
         expected,
         filtered=filtered,
+        libtest_args=libtest_args,
         declared=declared,
         load=watch.describe(),
     )
@@ -871,8 +975,110 @@ def run_selftest() -> int:
             f"a name-filtered run printed `{VERIFIED_MARKER}` — a total of zero "
             "over complete coverage would read as a passing suite"
         )
-    if gz_status != 0:
-        problems.append("a clean name-filtered run was reported as a failure")
+    # B162 REVISES B106 HERE. B106 withheld the marker and returned 0, on the
+    # reasoning that "a deliberately narrowed run is not a broken one". That is
+    # right for a filter that MATCHES and wrong for one that matches nothing:
+    # `just rtest b145` exited 0 over 38 binaries that ran no tests, right after
+    # the lane wrote them. This assertion is the inverse of the one it replaces.
+    if gz_status == 0:
+        problems.append(
+            "a filter that matched NO test name exited 0 — a run that executed "
+            "nothing reported itself as a success"
+        )
+    if "NO TESTS RAN" not in gz_report:
+        problems.append(
+            "a filter that matched nothing did not say so — the verdict must "
+            "name the filter, not read as a test failure"
+        )
+
+    # B162, the two routes the ticket did not know about, and the worse ones:
+    # both print the marker. Neither involves a filter, so a filter-shaped rule
+    # would have left them open.
+    empty_binary = [
+        f"     Running tests/one.rs ({one})",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; "
+        "0 filtered out; finished in 0.01s",
+    ]
+    eb_status, eb_report = reconcile(0, empty_binary, {one: "one"})
+    if eb_status == 0 or VERIFIED_MARKER in eb_report:
+        problems.append(
+            "a run whose binaries contain NO tests passed — "
+            f"`{VERIFIED_MARKER}: 0 passed` over complete coverage"
+        )
+    no_binaries_status, no_binaries_report = reconcile(0, [], {})
+    if no_binaries_status == 0 or VERIFIED_MARKER in no_binaries_report:
+        problems.append(
+            "a run that enumerated NO binaries passed — "
+            f"`{VERIFIED_MARKER}: 0 passed; 0/0 binaries reported`"
+        )
+
+    # B162: the verdict must tell the two misses apart, because the fixes are
+    # different and one of them is impossible to state correctly by guessing.
+    # A cargo TARGET selector that reached libtest is a MISPLACED FLAG, not a
+    # misspelled name — and through `just rtest` it cannot be placed correctly
+    # at all, so advice to "put it before the --" would send the reader in a
+    # circle.
+    stray_status, stray_report = reconcile(
+        0, green_zero, {one: "one"}, libtest_args=["--test", "b129_gold_manifest"]
+    )
+    if stray_status == 0:
+        problems.append("a misplaced cargo target flag exited 0")
+    # Keyed on the DISTINGUISHING claim, not on `--test`: both messages
+    # legitimately mention `just rrun cargo test --test` (it is how you run one
+    # file), so that substring cannot tell them apart. Keying on it caught this
+    # test being wrong rather than the code — kept as written for that reason.
+    flag_claim = "is a CARGO flag, not a libtest one"
+    if flag_claim not in stray_report:
+        problems.append(
+            "a misplaced `--test` was not named as a cargo flag — the verdict "
+            "must say the flag reached the wrong parser"
+        )
+    if "just rrun cargo test --test" not in stray_report:
+        problems.append(
+            "a misplaced `--test` was not pointed at `just rrun`, the only "
+            "spelling that works through this recipe"
+        )
+    plain_status, plain_report = reconcile(0, green_zero, {one: "one"}, libtest_args=["b145"])
+    if plain_status == 0:
+        problems.append("a plain name miss exited 0")
+    if flag_claim in plain_report:
+        problems.append(
+            "a plain name miss was told it had misplaced a flag — that "
+            "diagnosis belongs only to the stray-selector case"
+        )
+    if "bare function name" not in plain_report:
+        problems.append(
+            "a plain name miss did not explain that an integration test's name "
+            "is its function name, not its file — the exact mistake B162 was "
+            "reported on (`b145`, `b129`)"
+        )
+
+    # POSITIVE CONTROLS for the rule above, and they are the load-bearing half:
+    # "fail whenever a filter is present" and "fail whenever tests ran" would
+    # both satisfy the three assertions above while breaking every other lane's
+    # gate. Each of these executed at least one test and must still pass.
+    matched_filter = [
+        f"     Running tests/one.rs ({one})",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; "
+        "35 filtered out; finished in 0.01s",
+    ]
+    mf_status, _ = reconcile(0, matched_filter, {one: "one"})
+    if mf_status != 0:
+        problems.append(
+            "a filter that DID match was reported as a failure — the zero-test "
+            "rule is firing on runs that executed tests"
+        )
+    only_ignored = [
+        f"     Running tests/one.rs ({one})",
+        "test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; "
+        "35 filtered out; finished in 0.01s",
+    ]
+    oi_status, _ = reconcile(0, only_ignored, {one: "one"})
+    if oi_status != 0:
+        problems.append(
+            "a filter that matched only #[ignore]d tests was reported as a "
+            "failure — those names DID match, so the run is a subset, not a miss"
+        )
     # Positive control: the SAME shape with nothing filtered out must still
     # earn the marker, or the check above passes by rejecting everything.
     unfiltered = [
