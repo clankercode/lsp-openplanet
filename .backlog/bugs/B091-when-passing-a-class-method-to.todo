@@ -16,3 +16,5 @@ updated_at: "2026-08-31T09:56:41Z"
 ---
 
 When passing a class method to startnew or Meta::StartWithRunContext, it must be wraped in CoroutineFunc or similar (depending on args). please red/green this first and ensure we have text fixtures covering the various combinations.
+
+Lane decision (coordinator, 2026-08-31): SERIALISED WITH B102 in one lane, B102 first. Both are the same question -- does this function handle match the funcdef slot it is being passed into -- and both land in the funcdef-slot logic in src/typecheck/checker.rs. Run in parallel they would conflict at merge and each would review against a base the other invalidated. B102 also establishes the fixture-plugin shape and the probe protocol that B091 then reuses, so landing it first shrinks B091.
