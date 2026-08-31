@@ -112,6 +112,56 @@ MUTATIONS = [
     ("control: own/foreign error attribution stops discriminating",
      '    game_errors = [d for d in errs if d["file"].startswith(mine)]',
      "    game_errors = [d for d in errs]"),
+
+    # --- B147: a comparison must know its two inputs were different --------
+    # The measured incident: a before/after fleet sweep reported IDENTICAL
+    # while both halves ran the same stale binary, because the sync between
+    # them silently did not take effect and the ledger recorded nothing about
+    # which artefact produced it.
+    ("B147: the same-binary check is removed, so a comparison whose two "
+     "inputs never differed reports IDENTICAL (the recorded incident)",
+     '    if a["sha256"] == b["sha256"]:',
+     "    if False:"),
+    ("B147 OVER-CONDEMN: every comparison is refused, including a genuine "
+     "before/after, which makes the idiom unusable",
+     '    if a["sha256"] == b["sha256"]:',
+     "    if True:"),
+    ("B147: an unknown binary identity is accepted, so an old ledger with no "
+     "record silently passes as 'they differ'",
+     '        if not isinstance(side, dict) or not side.get("sha256"):',
+     "        if False:"),
+    ("B147 OVER-CONDEMN: every ledger is treated as recording no binary",
+     '        if not isinstance(side, dict) or not side.get("sha256"):',
+     "        if True:"),
+    ("B147: only the FIRST ledger is checked for a binary identity",
+     "    for label, side in ((label_a, a), (label_b, b)):",
+     "    for label, side in ((label_a, a),):"),
+    ("B147: the same-binary refusal stops naming the shared hash",
+     '            f"(sha256={a[\'sha256\']}).\\n"',
+     '            f".\\n"'),
+    ("B147: the refusal stops naming WHICH ledger is at fault",
+     '                f"{label} records no LSP binary hash, so there is no way to "',
+     '                f"a ledger records no LSP binary hash, so there is no way to "'),
+    ("B147: lsp_bin_identity fabricates a hash for an absent binary, so 'I "
+     "could not look' becomes 'I looked and they matched'",
+     "    digest = file_sha256(path)",
+     '    digest = file_sha256(path) or "0" * 64'),
+    ("B147: file_sha256 returns a constant, so every pair of sweeps looks "
+     "like it ran the same binary",
+     "    return h.hexdigest()\n\ndef lsp_bin_identity",
+     '    return "c" * 64\n\ndef lsp_bin_identity'),
+    ("B147: file_sha256 hashes only a prefix — two builds of one binary "
+     "differ late far more often than early",
+     '        for chunk in iter(lambda: fh.read(1 << 20), b""):\n            h.update(chunk)',
+     "        h.update(fh.read(4))"),
+    ("B147: save_state stops stamping the ledger with the binary identity, so "
+     "no comparison can ever know what produced it",
+     '    st["lsp_bin"] = lsp_bin_identity()',
+     "    pass"),
+    ("B147: save_state stamps a CONSTANT identity, so every ledger claims the "
+     "same binary and every comparison is refused",
+     '    st["lsp_bin"] = lsp_bin_identity()',
+     '    st["lsp_bin"] = {"path": "x", "sha256": "d" * 64}'),
 ]
 
 

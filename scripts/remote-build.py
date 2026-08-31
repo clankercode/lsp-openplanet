@@ -90,10 +90,18 @@ KNOWN_HOSTS = ("x-alpha", "x-tuf", "x-19")
 # it would be wrong more often than right.
 LOCAL_ONLY_FLAGS = (
     "--sync-back",
+    # B147. `--sync-back-must-change` is NOT covered by the `--sync-back`
+    # entry: the check is `==` or `flag=`, so a longer flag sharing a prefix
+    # falls straight through it and is handed to the remote shell, which
+    # answers `--sync-back-must-change: command not found`. Found while adding
+    # the flag; `--allow-unresolved` had the same gap since B132, from the
+    # ordinary cause -- the list is a second place to remember.
+    "--sync-back-must-change",
     "--no-sync",
     "--with-git",
     "--host",
     "--allow-low-disk",
+    "--allow-unresolved",
 )
 
 # Never sync these. `target` and the per-lane build caches dwarf the source
@@ -108,6 +116,13 @@ EXCLUDES = [
     "/.cache/",
     "*.swp",
 ]
+
+
+# B147. Distinct statuses so a caller can tell the two sync-back failures
+# apart without parsing prose. `2` stays the generic refusal; these are the
+# ones a before/after comparison script needs to branch on.
+SYNC_BACK_FAILED = 3      # asked for an artefact, did not get one
+SYNC_BACK_UNCHANGED = 4   # got one, and it is byte-identical to the old one
 
 
 def die(msg: str, code: int = 2) -> "NoReturn":  # type: ignore[valid-type]
@@ -516,6 +531,134 @@ def sync_back_missing_verdict(subpath: str, host: str, remote_path: str) -> str:
         f"a build artefact. Check the profile (`debug/` vs `release/`) and "
         f"that the run actually produced it -- a `cargo check` builds no "
         f"binary. Nothing was written locally."
+    )
+
+
+# Marker the remote existence probe prints its RESOLVED path behind, so the
+# path can be recovered from a login shell's motd/profile noise. Matched at the
+# start of a line and taken from the LAST match, because a `.bashrc` that echoes
+# is common and one that echoes this exact prefix is not.
+PROBE_PATH_MARK = "remote-build-resolved: "
+
+
+def sync_back_probe_script(rel_base: str, subpath: str) -> str:
+    """A remote script that PRINTS the path it resolved, then tests it.
+
+    B147, and it is the `remote_paths` rule failing in a THIRD direction. The
+    previous form was `test -e {shlex.quote(remote_path)}` where remote_path
+    began with the literal `$HOME`. `shlex.quote` wraps its argument in SINGLE
+    quotes, and no shell expands `$HOME` inside single quotes -- so the probe
+    asked whether a path with a literal dollar-sign in it existed. It never
+    does. Every `--sync-back` of an artefact that WAS on the remote was
+    reported missing, and the refusal then printed the same unexpanded string,
+    so the operator was shown a path that is not the path that was checked and
+    could not reproduce the failure by hand.
+
+    Both halves of the rule have to hold at once, in one string:
+
+    * `$HOME` must be expanded, so it must NOT be quoted;
+    * the caller's subpath must NOT be interpreted, so it MUST be quoted.
+
+    An unquoted `"$HOME"` concatenated with a `shlex.quote`d relative path is
+    exactly that, and it is why this cannot be written as one `shlex.quote` of
+    the whole thing. The quoting also matters for a second reason: the subpath
+    is operator input that reaches a remote shell, and `debug/x; rm -rf ~`
+    should be a path that does not exist, not a command.
+
+    The script prints before it tests, so the resolved path is available
+    whether or not the artefact is there -- the not-found message needs it
+    precisely in the case where the test failed.
+    """
+    rel = f"{rel_base}/target/{subpath}"
+    return (
+        f'p="$HOME"/{shlex.quote(rel)}\n'
+        f'printf {shlex.quote(PROBE_PATH_MARK + "%s")}"\\n" "$p"\n'
+        f'test -e "$p"\n'
+    )
+
+
+def parse_probe_path(out: str, fallback: str) -> str:
+    """Recover the resolved path the probe printed, ignoring login noise."""
+    for line in reversed(out.splitlines()):
+        if line.startswith(PROBE_PATH_MARK):
+            return line[len(PROBE_PATH_MARK):].strip()
+    return fallback
+
+
+def file_sha256(path: Path) -> str | None:
+    """Content hash of a local file, or None if it is not there.
+
+    None is a THIRD answer and not an error: "there was no previous artefact"
+    is a legitimate before-state, and it is the one case where an unchanged
+    hash cannot be a stale-artefact bug.
+    """
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def sync_back_not_fetched_verdict(subpath: str, dest: Path, status: int,
+                                  stale: str | None) -> str:
+    """The remote command FAILED, so `--sync-back` was not attempted (B147).
+
+    The old code spelled this `if status == 0 and a.sync_back:` and then said
+    nothing at all. The exit status was the COMMAND's, which is correct and is
+    not the point: the operator asked for an artefact, did not get one, and
+    still has the previous one sitting at the destination with a plausible
+    mtime. Every later step reads a file that exists and is wrong.
+
+    This is the stale-artefact incident's actual shape. A caller who checks the
+    status is fine either way; a caller who looks at the FILE needs to be told
+    the file is not what they asked for.
+    """
+    what = (f"The file already at that path is the PREVIOUS one "
+            f"(sha256={stale[:16]}...). It was not replaced."
+            if stale else "Nothing is at that path.")
+    return (
+        f"--sync-back {subpath!r} was NOT fetched: the remote command failed "
+        f"(exit {status}), so there is no new artefact to fetch.\n"
+        f"    {dest}\n"
+        f"{what}\n\n"
+        f"Anything downstream that reads that path is reading STALE state. "
+        f"This exits with the command's own status ({status}), not a separate "
+        f"one, because the command's failure is the thing to fix."
+    )
+
+
+def sync_back_unchanged_verdict(subpath: str, dest: Path, digest: str,
+                                host: str) -> str:
+    """`--sync-back-must-change` fetched a byte-identical artefact (B147).
+
+    The measured incident: a before/after fleet comparison reported IDENTICAL
+    while both halves ran the SAME binary, because the sync between them had
+    not taken effect. The comparison was perfectly honest -- two identical
+    inputs give an identical answer. Nothing told it the inputs were SUPPOSED
+    to differ.
+
+    That is the pipe-eats-the-status family one layer out: not a lost STATUS
+    but a lost EFFECT, with the downstream step reporting success on stale
+    state. A no-op sync and a genuine no-change are indistinguishable from the
+    artefact alone, so the caller who knows the difference must say so -- which
+    is what this flag is. Silence is the wrong default here for the same reason
+    it is everywhere else in this file, so the hash is PRINTED on every fetch
+    whether or not the flag is passed.
+    """
+    return (
+        f"--sync-back-must-change: the artefact fetched from {host} is "
+        f"BYTE-IDENTICAL to the one that was already there.\n"
+        f"    {dest}\n"
+        f"    sha256={digest}\n\n"
+        f"You asserted this build would produce a different artefact, and it "
+        f"did not. Either the remote did not rebuild (check that the source "
+        f"sync ran and that the command actually builds), or the change has no "
+        f"effect on this profile.\n\n"
+        f"This is refused rather than warned because the next step is a "
+        f"comparison, and comparing a binary against itself reports IDENTICAL "
+        f"-- an honest answer to a question you did not mean to ask."
     )
 
 
@@ -1121,6 +1264,182 @@ def run_selftest() -> int:
                 f"every status is one nobody reads"
             )
 
+    # --- B147: the sync-back existence probe must EXPAND $HOME --------------
+    # The measured defect: `test -e '$HOME/...'` returned 1 for an artefact
+    # that was demonstrably there, because shlex.quote single-quotes and no
+    # shell expands $HOME inside single quotes.
+    #
+    # These do not assert on the SHAPE of the script -- a substring check
+    # would pass on any string that happens to contain `"$HOME"`. They RUN it
+    # through a real bash with a known HOME and read back the path it
+    # resolved, which is the same oracle the remote uses.
+    probe_home = Path(tempfile.mkdtemp(prefix="rb-b147-"))
+    try:
+        def resolve(subpath: str, make: bool) -> tuple[int, str]:
+            script = sync_back_probe_script(".remote-builds/slug", subpath)
+            env = dict(os.environ, HOME=str(probe_home))
+            if make:
+                real = probe_home / ".remote-builds/slug/target" / subpath
+                real.parent.mkdir(parents=True, exist_ok=True)
+                real.write_text("artefact")
+            out = subprocess.run(["bash", "-c", script], capture_output=True,
+                                 text=True, env=env, timeout=30)
+            return out.returncode, parse_probe_path(
+                out.stdout + out.stderr, "<<unparsed>>")
+
+        want = str(probe_home / ".remote-builds/slug/target/debug/openplanet-lsp")
+        # PAIR, and it is the whole ticket: the artefact EXISTS, so the probe
+        # must say so. This is the half that was failing in production.
+        rc_present, path_present = resolve("debug/openplanet-lsp", make=True)
+        if rc_present != 0:
+            problems.append(
+                "the sync-back probe reported an artefact that EXISTS as "
+                "missing — this is the shipped B147 defect, $HOME reaching a "
+                "single-quoted context"
+            )
+        if path_present != want:
+            problems.append(
+                f"the sync-back probe resolved {path_present!r}, not {want!r} "
+                f"— the path it reports must be the path it tested"
+            )
+        if "$HOME" in path_present:
+            problems.append(
+                "the resolved sync-back path still contains a literal $HOME, "
+                "so the operator is shown a path they cannot paste into a "
+                "shell and cannot reproduce the failure with"
+            )
+        # PAIR: a genuinely absent artefact must still be reported absent, or
+        # the guard above is satisfied by a probe that always succeeds.
+        rc_absent, path_absent = resolve("debug/not-built", make=False)
+        if rc_absent == 0:
+            problems.append(
+                "the sync-back probe reported a MISSING artefact as present — "
+                "it would hand rsync a path that is not there and lose the "
+                "one thing it exists to say"
+            )
+        if not path_absent.startswith(str(probe_home)):
+            problems.append(
+                "the probe did not report a resolved path for a MISSING "
+                "artefact — that is exactly the case the not-found message "
+                "needs it for"
+            )
+        # The subpath is operator input reaching a remote shell. It must be a
+        # path that does not exist, not a command that runs.
+        canary = probe_home / "canary"
+        rc_evil, _ = resolve(f"debug/x; touch {canary}", make=False)
+        if canary.exists():
+            problems.append(
+                "a --sync-back subpath containing `;` EXECUTED on the remote "
+                "— the subpath must be quoted even though $HOME must not be"
+            )
+        if rc_evil == 0:
+            problems.append(
+                "a --sync-back subpath containing shell metacharacters was "
+                "reported as an existing artefact"
+            )
+    finally:
+        shutil.rmtree(probe_home, ignore_errors=True)
+
+    # Login shells are chatty. The marker exists so a `.bashrc` that echoes
+    # cannot be mistaken for the path.
+    noisy = ("Welcome to x-alpha\n"
+             f"{PROBE_PATH_MARK}/home/u/.remote-builds/s/target/debug/x\n")
+    if parse_probe_path(noisy, "FB") != "/home/u/.remote-builds/s/target/debug/x":
+        problems.append("parse_probe_path is defeated by login-shell noise")
+    if parse_probe_path("motd only\n", "FB") != "FB":
+        problems.append(
+            "parse_probe_path invented a path when the probe printed none — "
+            "it must fall back to the template rather than report nonsense"
+        )
+
+    # --- B147: a failed sync-back must be VISIBLE and non-zero --------------
+    # The recorded incident: a sweep ran twice on the same stale binary
+    # because the sync between them did not take effect and nothing said so.
+    for flag in ("--sync-back-must-change", "--allow-unresolved"):
+        if misplaced_flags(["cargo", "test", flag]) != [flag]:
+            problems.append(
+                f"{flag} placed after the action is not recognised as a "
+                f"misplaced flag, so it would be handed to the remote shell "
+                f"as `{flag}: command not found`"
+            )
+    if SYNC_BACK_FAILED == 0 or SYNC_BACK_UNCHANGED == 0:
+        problems.append(
+            "a sync-back failure status is 0, which is the whole defect: a "
+            "caller cannot distinguish it from a successful fetch"
+        )
+    if SYNC_BACK_FAILED == SYNC_BACK_UNCHANGED:
+        problems.append(
+            "'not fetched' and 'fetched but unchanged' share an exit status, "
+            "so a comparison script cannot branch on them"
+        )
+    nf = sync_back_not_fetched_verdict("debug/openplanet-lsp",
+                                       Path("/r/target/debug/openplanet-lsp"),
+                                       101, "a" * 64)
+    for want in ("NOT", "debug/openplanet-lsp", "/r/target/debug/openplanet-lsp",
+                 "101", "STALE", "PREVIOUS", "a" * 16):
+        if want not in nf:
+            problems.append(
+                f"the sync-back-not-fetched message omits {want!r} — a caller "
+                f"left holding the previous artefact has to be told so"
+            )
+    # PAIR: with no previous artefact there is nothing stale, and saying there
+    # is would be the over-condemn half of this guard.
+    nf_fresh = sync_back_not_fetched_verdict("debug/x", Path("/r/t/debug/x"),
+                                             1, None)
+    if "PREVIOUS" in nf_fresh:
+        problems.append(
+            "the not-fetched message claims a stale previous artefact when "
+            "there was no file there at all"
+        )
+
+    # --- B147: hashing, which is what makes a before/after comparison real --
+    hash_dir = Path(tempfile.mkdtemp(prefix="rb-b147h-"))
+    try:
+        missing = hash_dir / "nope"
+        if file_sha256(missing) is not None:
+            problems.append(
+                "file_sha256 invented a hash for a file that is not there — "
+                "'no previous artefact' must be distinguishable from 'the "
+                "previous artefact was identical'"
+            )
+        a_file = hash_dir / "a"
+        a_file.write_bytes(b"one")
+        h1 = file_sha256(a_file)
+        a_file.write_bytes(b"one")
+        if file_sha256(a_file) != h1:
+            problems.append("file_sha256 is not stable on identical content")
+        a_file.write_bytes(b"two")
+        if file_sha256(a_file) == h1:
+            problems.append(
+                "file_sha256 returned the same hash for different content, so "
+                "the unchanged-artefact guard cannot fire"
+            )
+        # It must read the WHOLE file, not a prefix: two build artefacts of a
+        # large binary differ late far more often than early.
+        big_a = hash_dir / "big_a"
+        big_b = hash_dir / "big_b"
+        big_a.write_bytes(b"x" * (4 << 20) + b"A")
+        big_b.write_bytes(b"x" * (4 << 20) + b"B")
+        if file_sha256(big_a) == file_sha256(big_b):
+            problems.append(
+                "file_sha256 misses a difference in the last byte of a 4 MiB "
+                "file — it is hashing a prefix, and two builds of one binary "
+                "differ late"
+            )
+    finally:
+        shutil.rmtree(hash_dir, ignore_errors=True)
+
+    unchanged = sync_back_unchanged_verdict("debug/openplanet-lsp",
+                                            Path("/r/target/debug/openplanet-lsp"),
+                                            "b" * 64, "x-alpha")
+    for want in ("BYTE-IDENTICAL", "debug/openplanet-lsp", "x-alpha",
+                 "b" * 64, "IDENTICAL"):
+        if want not in unchanged:
+            problems.append(
+                f"the unchanged-artefact message omits {want!r} — it has to "
+                f"name the hash and the comparison it is protecting"
+            )
+
     if problems:
         print("FAIL: remote-build self-test", file=sys.stderr)
         for problem in problems:
@@ -1165,6 +1484,9 @@ def main() -> int:
                     help="after a successful run, copy this path back from "
                          "the remote target dir. Relative to CARGO_TARGET_DIR, "
                          "NOT the source tree (e.g. debug/openplanet-lsp)")
+    ap.add_argument("--sync-back-must-change", action="store_true",
+                    help="refuse (exit 4) if the fetched artefact is "
+                         "byte-identical to the one already there (B147)")
     ap.add_argument("-v", "--verbose", action="store_true", help="show sync stats")
     ap.add_argument("--disk-floor", type=float, default=DEFAULT_DISK_FLOOR_GB,
                     metavar="GB",
@@ -1338,8 +1660,24 @@ def main() -> int:
         print(f"remote-build: exit {status} in {time.monotonic() - t0:.1f}s",
               file=sys.stderr)
 
-        if status == 0 and a.sync_back:
+        if a.sync_back:
             dest = root / "target" / a.sync_back
+            # B147. Hashed BEFORE anything else touches the destination: this
+            # is the only moment the previous artefact still exists, and both
+            # the not-fetched message and --sync-back-must-change need it.
+            before = file_sha256(dest)
+
+            # B147. This used to read `if status == 0 and a.sync_back:` and
+            # say NOTHING when it declined. The status was the command's,
+            # which is right; the silence was not. The operator asked for an
+            # artefact, did not get one, and was left with the previous one at
+            # the destination wearing a plausible mtime.
+            if status != 0:
+                print(f"remote-build: "
+                      f"{sync_back_not_fetched_verdict(a.sync_back, dest, status, before)}",
+                      file=sys.stderr)
+                return status
+
             dest.parent.mkdir(parents=True, exist_ok=True)
             # Measured failure this fixes, from lane-tooling hitting it in
             # anger: change_dir "/home/xertrov/$HOME/.remote-builds/..."
@@ -1350,15 +1688,39 @@ def main() -> int:
             # which names the transport and not the path, and that is the
             # whole defect -- an infrastructure-shaped error standing in for a
             # condition we can simply look up.
-            remote_path = f"{remote_target}/{a.sync_back}"
-            probe_rc, _ = capture_ssh(a.host, f"test -e {shlex.quote(remote_path)}")
+            #
+            # B147: and ask it in a spelling the remote shell will EXPAND. The
+            # probe reports the path it resolved, so the refusal names the
+            # real path rather than the template that produced it.
+            probe_rc, probe_out = capture_ssh(
+                a.host, sync_back_probe_script(rel_base, a.sync_back))
+            remote_path = parse_probe_path(
+                probe_out, f"{remote_target}/{a.sync_back}")
             if probe_rc != 0:
                 die(sync_back_missing_verdict(a.sync_back, a.host, remote_path))
             print(f"remote-build: fetching {a.sync_back}", file=sys.stderr)
             back = subprocess.run(["rsync", "-az", src, str(dest)]).returncode
             if back != 0:
-                die(f"sync-back failed (exit {back})", back)
-            print(f"remote-build: wrote {dest}", file=sys.stderr)
+                die(f"sync-back failed (exit {back})", back or SYNC_BACK_FAILED)
+            after = file_sha256(dest)
+            if after is None:
+                # rsync said 0 and there is no file. Nothing downstream can
+                # recover from this, and a green here would be the exact
+                # lost-EFFECT shape this ticket exists for.
+                die(f"sync-back reported success but nothing is at {dest}. "
+                    f"Treating a zero status with no artefact as a failure: "
+                    f"the next step would read a path that is not there, or "
+                    f"worse, one that is there and stale.", SYNC_BACK_FAILED)
+            # B147: printed on EVERY fetch, not only under the flag. A
+            # comparison run that records this line can tell afterwards
+            # whether its two inputs were ever different, which is the check
+            # the stale-artefact incident had no way to make.
+            print(f"remote-build: wrote {dest} "
+                  f"({dest.stat().st_size} bytes) sha256={after}",
+                  file=sys.stderr)
+            if a.sync_back_must_change and before is not None and before == after:
+                die(sync_back_unchanged_verdict(a.sync_back, dest, after,
+                                                a.host), SYNC_BACK_UNCHANGED)
 
         return status
 

@@ -4140,3 +4140,107 @@ the scanner silently matches nothing.
 counting the same population from an independent direction and asserting the two
 agree; a hand-picked number is a guess about the future that someone will
 eventually have to edit, and the edit is indistinguishable from the erosion.
+
+## Resolved: the stale-artefact incident, and what it cost to close (B147)
+
+The section above — *"A verification step whose INPUT silently did not
+update"* — is now closed. Closing it turned up two things worth writing down,
+neither of which was the thing the ticket named.
+
+### 1. The same `$HOME` rule failed in a THIRD direction
+
+`remote_paths` exists because ssh runs a shell (so `$HOME` expands) and rsync
+does not (so it must not appear). That rule had already been got wrong once per
+direction. It was then got wrong a third way, in the guard added to prevent the
+second:
+
+```python
+remote_path = f"{remote_target}/{a.sync_back}"          # begins "$HOME/..."
+probe_rc, _ = capture_ssh(a.host, f"test -e {shlex.quote(remote_path)}")
+```
+
+`shlex.quote` wraps its argument in **single** quotes, and no shell expands
+`$HOME` inside single quotes. So the probe asked whether a path with a literal
+dollar-sign in it existed. It never does. **Every `--sync-back` of an artefact
+that WAS on the remote was reported missing**, and the refusal then printed the
+same unexpanded string — so the operator was shown a path that is not the path
+that was checked, and could not reproduce the failure by hand. Measured on the
+real host: the binary was there, `test -e '$HOME/…'` returned 1, `test -e
+"$HOME/…"` returned 0.
+
+The general shape: **a correct rule stated as "which spelling goes where" does
+not survive contact with a function that changes the spelling.** `shlex.quote`
+is not a formatting choice, it is a semantic one, and the two halves of this
+path have OPPOSITE requirements — `$HOME` must be expanded, the caller's
+subpath must not be. That cannot be expressed by quoting the whole string
+either way. It is now one function, `sync_back_probe_script`, that concatenates
+an unquoted `"$HOME"` with a `shlex.quote`d relative path, and it is tested by
+being **run through a real bash with a known `HOME`** rather than by asserting
+on its shape. A substring check for `"$HOME"` would have passed the shipped
+bug's replacement just as happily.
+
+### 2. The status was never the problem; the SILENCE was
+
+The ticket said a failed `--sync-back` did not exit non-zero. Measured, every
+failure path already did — `die()` had closed that. The residual was this line:
+
+```python
+if status == 0 and a.sync_back:
+```
+
+When the remote command failed, sync-back was declined and **nothing was
+printed at all**. The exit status was the command's, which is correct and is
+beside the point: the operator asked for an artefact, did not get one, and was
+left with the previous one at the destination wearing a plausible mtime.
+Everything downstream then read a file that exists and is wrong.
+
+**A caller who checks the status is fine either way; a caller who looks at the
+FILE has to be told the file is not what they asked for.** This is the reason
+"it already exits non-zero" is not an answer to a stale-artefact bug. Reaching
+for the status is reaching for the wrong channel — the artefact is the channel
+that was consumed.
+
+### 3. Hash on every fetch, not only under the flag
+
+Two mechanisms now, and the split matters:
+
+* `remote-build.py --sync-back-must-change` refuses (**exit 4**) when the
+  fetched artefact is byte-identical to the one already there. It is opt-in
+  because a no-op sync and a genuine no-change are indistinguishable from the
+  artefact alone — only the caller knows which they meant.
+* The **sha256 is printed on every fetch regardless**. That is the half that
+  does not need anyone to have anticipated the failure: a run whose log records
+  the hash can be audited afterwards by someone who never passed the flag.
+  Exit 3 is "asked for an artefact, did not get one"; exit 4 is "got one, and
+  it is unchanged" — distinct so a comparison script can branch without parsing
+  prose.
+
+On the fleet side, `save_state` now stamps every ledger with the identity of
+the LSP binary that produced it, and `fleet_dogfood.py compare A B` refuses
+(exit 3) when the two ledgers share a hash **or when either does not record
+one**. The second condition is the point of the first: an old ledger with no
+record is *unknowable*, not *different*, and letting it through would restore
+the original defect with extra steps.
+
+The end-to-end mutation the ticket asked for was run rather than described:
+with `remote-build.py`'s rsync call replaced by `back = 0`, the fetch reports
+success, the artefact is untouched, and the comparison built on it now exits 3
+naming the shared hash instead of reporting IDENTICAL. The control — the same
+pipeline with the real rsync — proceeds and prints `binaries differ`.
+
+### 4. What the mutation run caught that review did not
+
+Sixteen new mutations on `remote-build.py` and twelve on `fleet_dogfood.py`.
+One guard was vacuous: the not-fetched message's check listed `STALE` and the
+exit status but never `PREVIOUS` or the stale hash, so deleting the sentence
+that names the stale artefact changed nothing. **The message under test was
+written in the same hour as the assertion about it, by someone who had just
+finished writing this batch's other entries about exactly this shape.** Knowing
+a hazard does not stop you writing it. Only the mutation run does.
+
+A second, free finding fell out of adding the flag: `LOCAL_ONLY_FLAGS` matches
+with `==` or `flag=`, so `--sync-back-must-change` is **not** covered by the
+`--sync-back` entry — a longer flag sharing a prefix falls straight through and
+is handed to the remote shell as `command not found`. `--allow-unresolved` had
+had that gap since B132, from the ordinary cause: the list is a second place to
+remember. Both are now in the list and both are asserted.

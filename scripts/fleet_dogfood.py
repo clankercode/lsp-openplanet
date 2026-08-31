@@ -18,7 +18,7 @@ Usage:
   fleet_dogfood.py list            # list candidate plugin dirs
 """
 from __future__ import annotations
-import json, os, re, shutil, socket, subprocess, sys, time
+import hashlib, json, os, re, shutil, socket, subprocess, sys, time
 from pathlib import Path
 
 # ---- paths ----------------------------------------------------------------
@@ -788,6 +788,122 @@ def run_lsp(pdir: Path) -> dict:
     except Exception as e:
         return {"exit": -1, "output": f"<lsp run failed: {e}>"}
 
+# ---- which binary did this sweep actually run? -------------------------------
+# B147. A before/after fleet comparison reported IDENTICAL while both halves
+# ran the SAME binary: the sync between them had silently not taken effect, and
+# the ledger recorded nothing about which artefact produced it. The comparison
+# was perfectly honest -- two identical inputs give an identical answer.
+# NOTHING TOLD IT THE INPUTS WERE SUPPOSED TO DIFFER.
+#
+# It was caught because a diagnostic count did not match a number seen an hour
+# earlier. That is luck, not process. A sweep that records the identity of the
+# binary it ran turns that into an assertion the comparison can make itself.
+#
+# The mtime and size are recorded alongside the hash for the operator, not for
+# the check -- the check uses the hash, because a rebuild that changes nothing
+# observable still moves the mtime, and two different builds can match on size.
+
+def file_sha256(path: Path) -> str | None:
+    """Content hash of a file, or None if it is not there."""
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def lsp_bin_identity(path: Path | None = None) -> dict:
+    """Provenance of the LSP binary this process would run.
+
+    Always returns a dict with a `sha256` key. When the binary is absent that
+    key is None, which is a THIRD answer and not an error -- and one the
+    comparison must refuse on rather than paper over, since an unknown input
+    makes the comparison meaningless in exactly the way this exists to stop.
+    """
+    path = LSP_BIN if path is None else path
+    digest = file_sha256(path)
+    st = path.stat() if path.is_file() else None
+    return {
+        "path": str(path),
+        "sha256": digest,
+        "size": st.st_size if st else None,
+        "mtime": (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))
+                  if st else None),
+    }
+
+def compare_binary_problems(a: dict, b: dict,
+                            label_a: str = "A", label_b: str = "B") -> list[str]:
+    """Refuse a before/after comparison whose two halves cannot be compared.
+
+    Refuses on exactly the conditions that make the MEASUREMENT meaningless,
+    and reports nothing else -- an unrelated difference between the two ledgers
+    is data, not a reason to stop.
+
+    Two conditions:
+
+    * one or both halves did not record a binary identity, or recorded a null
+      hash. "I could not look" is not "I looked and they differ";
+    * the two hashes are EQUAL. This is the measured incident. A no-op sync and
+      a genuine no-change produce the same ledger, so the comparison cannot
+      tell a fix from a fetch that never happened.
+    """
+    problems = []
+    for label, side in ((label_a, a), (label_b, b)):
+        if not isinstance(side, dict) or not side.get("sha256"):
+            problems.append(
+                f"{label} records no LSP binary hash, so there is no way to "
+                f"know which artefact produced it. A comparison of two sweeps "
+                f"is a claim about two BINARIES; without their identities it "
+                f"is a claim about two files of unknown provenance. Re-run the "
+                f"sweep with a version that records `lsp_bin`."
+            )
+    if problems:
+        return problems
+    if a["sha256"] == b["sha256"]:
+        problems.append(
+            f"{label_a} and {label_b} ran the SAME binary "
+            f"(sha256={a['sha256']}).\n"
+            f"    {label_a}: {a.get('path')}  {a.get('mtime')}\n"
+            f"    {label_b}: {b.get('path')}  {b.get('mtime')}\n"
+            f"Comparing their output would report IDENTICAL, and that answer "
+            f"would be about the binary rather than about your change. This is "
+            f"the measured failure: a sync-back that did not take effect left "
+            f"both sweeps on the same artefact. Check that the fetch actually "
+            f"ran -- `remote-build.py --sync-back ... --sync-back-must-change` "
+            f"refuses this at the source."
+        )
+    return problems
+
+def cmd_compare(path_a: Path, path_b: Path) -> int:
+    """`compare A.json B.json` -- gate two ledgers before believing a diff."""
+    try:
+        a = json.loads(path_a.read_text())
+        b = json.loads(path_b.read_text())
+    except Exception as e:
+        print(f"compare: cannot read a ledger: {e}")
+        return 2
+    problems = compare_binary_problems(a.get("lsp_bin", {}), b.get("lsp_bin", {}),
+                                       str(path_a), str(path_b))
+    if problems:
+        print("REFUSED: these two sweeps cannot be compared")
+        for pr in problems:
+            print(f"  - {pr}")
+        return 3
+    pa, pb = a.get("plugins", {}), b.get("plugins", {})
+    print(f"binaries differ: {a['lsp_bin']['sha256'][:16]} -> "
+          f"{b['lsp_bin']['sha256'][:16]}")
+    changed = 0
+    for name in sorted(set(pa) | set(pb)):
+        ca = (pa.get(name) or {}).get("lsp", {}).get("count")
+        cb = (pb.get(name) or {}).get("lsp", {}).get("count")
+        if ca != cb:
+            print(f"  {name:40} {ca} -> {cb}")
+            changed += 1
+    print(f"{changed} plugin(s) changed diagnostic count "
+          f"({len(set(pa) | set(pb))} compared)")
+    return 0
+
 def parse_lsp_count(output: str) -> int | None:
     m = re.search(r"(\d+) diagnostics?", output)
     return int(m.group(1)) if m else None
@@ -827,6 +943,12 @@ def load_state() -> dict:
     return {"plugins": {}}
 
 def save_state(st: dict):
+    # B147: stamped on every write, not once at startup. A ledger is only
+    # comparable if it says which binary produced it, and a sweep that is
+    # resumed after a rebuild must not keep claiming the first binary --
+    # re-stamping means a mid-sweep swap shows up as a hash that no longer
+    # matches the one the comparison was told about.
+    st["lsp_bin"] = lsp_bin_identity()
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(st, indent=2))
 
@@ -1208,6 +1330,155 @@ def run_selftest() -> int:
           "that never ran reads as one that ran clean",
           offenders, [])
 
+    # --- B147 END-TO-END: a sync that silently did not happen ---------------
+    # This is the ticket's own mutation, RUN rather than described. Two
+    # ledgers are produced around a "sync" that either takes effect or
+    # silently does not, through the real recorder and the real gate. The
+    # no-op half is the measured incident: before this, both ledgers were
+    # produced by the same binary and the comparison reported IDENTICAL.
+    #
+    # It is a PAIR because the interesting failure is not "the gate never
+    # fires" but "the gate fires on everything" -- a comparison that refuses a
+    # genuine before/after is exactly as useless as one that accepts a no-op.
+    import tempfile as _tf2
+    _e2e = Path(_tf2.mkdtemp(prefix="fleet-b147-e2e-"))
+    try:
+        _old_state2, _old_bin2 = STATE_FILE, LSP_BIN
+        try:
+            artefact = _e2e / "openplanet-lsp"
+            globals()["LSP_BIN"] = artefact
+
+            def ledger(name: str) -> dict:
+                globals()["STATE_FILE"] = _e2e / name
+                save_state({"plugins": {}})
+                return json.loads((_e2e / name).read_text())
+
+            artefact.write_bytes(b"binary-before")
+            before = ledger("before.json")
+
+            # (a) the sync TAKES EFFECT — the comparison must proceed.
+            artefact.write_bytes(b"binary-after-a-real-fix")
+            after_real = ledger("after-real.json")
+            check("B147 end-to-end: a real before/after is COMPARABLE — a gate "
+                  "that refuses this makes the whole idiom unusable",
+                  compare_binary_problems(before["lsp_bin"],
+                                          after_real["lsp_bin"]), [])
+
+            # (b) the sync SILENTLY NO-OPS — the artefact is untouched. The
+            # comparison must FAIL rather than report IDENTICAL.
+            artefact.write_bytes(b"binary-before")
+            after_noop = ledger("after-noop.json")
+            noop = compare_binary_problems(before["lsp_bin"],
+                                           after_noop["lsp_bin"],
+                                           "before.json", "after.json")
+            if not noop:
+                check("B147 end-to-end: a sync that silently did not happen "
+                      "left both ledgers on the SAME binary and the "
+                      "comparison proceeded — this is the recorded incident, "
+                      "a verification step whose INPUT did not update",
+                      noop, ["<a refusal>"])
+            elif "SAME binary" not in noop[0]:
+                check("B147 end-to-end: the refusal must say the two sweeps "
+                      "ran the same binary, not merely that something is off",
+                      noop, ["<names SAME binary>"])
+
+            # And the whole point: the two verdicts must DIFFER. Asserting
+            # each half separately is satisfied by a gate that is constant in
+            # a way neither assertion alone can see.
+            check("B147 end-to-end: the real sync and the no-op sync reach "
+                  "DIFFERENT verdicts",
+                  (bool(compare_binary_problems(before["lsp_bin"],
+                                                after_real["lsp_bin"])),
+                   bool(noop)),
+                  (False, True))
+        finally:
+            globals()["STATE_FILE"], globals()["LSP_BIN"] = _old_state2, _old_bin2
+    finally:
+        shutil.rmtree(_e2e, ignore_errors=True)
+
+    # --- B147: a before/after comparison must know its inputs differed ------
+    # The measured incident: both halves ran the same stale binary and the
+    # comparison reported IDENTICAL. Every case below is a PAIR -- a gate that
+    # refuses every comparison satisfies the refusal assertions just as well
+    # as a correct one, and is useless.
+    ident_a = {"path": "/r/target/release/openplanet-lsp", "sha256": "a" * 64,
+               "size": 10, "mtime": "2026-09-01 01:00:00"}
+    ident_b = dict(ident_a, sha256="b" * 64, mtime="2026-09-01 02:00:00")
+
+    check("B147: two DIFFERENT binaries compare fine — the gate must not "
+          "make the comparison unusable",
+          compare_binary_problems(ident_a, ident_b), [])
+
+    same = compare_binary_problems(ident_a, dict(ident_a))
+    if len(same) != 1 or "SAME binary" not in same[0]:
+        check("B147: two IDENTICAL binaries are refused — this is the whole "
+              "incident, a comparison whose two inputs were never different",
+              same, ["<a refusal naming SAME binary>"])
+    elif "a" * 64 not in same[0]:
+        check("B147: the refusal names the shared hash", same, ["<hash>"])
+
+    # "I could not look" is not "I looked and they differ". An old ledger with
+    # no record, and one whose binary was absent at sweep time, are both
+    # unknowable rather than equal.
+    for label, missing in (("no lsp_bin key", {}),
+                           ("null hash", dict(ident_a, sha256=None)),
+                           ("not a dict", None)):
+        got = compare_binary_problems(missing, ident_b)
+        if not got:
+            check(f"B147: a ledger with {label} is refused — an unknown input "
+                  f"makes the comparison meaningless, and silence would let it "
+                  f"proceed",
+                  got, ["<a refusal>"])
+        elif "no LSP binary hash" not in got[0]:
+            check(f"B147: the refusal for {label} says what is missing",
+                  got, ["<names the missing hash>"])
+    # PAIR for the side-symmetry: the SECOND ledger's absence must refuse too.
+    if not compare_binary_problems(ident_a, {}):
+        check("B147: only the FIRST ledger is checked for a binary hash",
+              [], ["<a refusal>"])
+
+    # The refusal must name WHICH side, or an operator with two ledgers cannot
+    # act on it.
+    named = compare_binary_problems({}, ident_b, "before.json", "after.json")
+    if not any("before.json" in g for g in named):
+        check("B147: the refusal names the offending ledger", named,
+              ["<mentions before.json>"])
+
+    # lsp_bin_identity always answers, and answers None for an absent binary
+    # rather than raising or inventing a hash.
+    import tempfile as _tf
+    _d = Path(_tf.mkdtemp(prefix="fleet-b147-"))
+    try:
+        absent = lsp_bin_identity(_d / "nope")
+        check("B147: an ABSENT binary yields a null hash, not an exception "
+              "and not a fabricated one",
+              (absent.get("sha256"), "sha256" in absent), (None, True))
+        real = _d / "bin"
+        real.write_bytes(b"one")
+        h1 = lsp_bin_identity(real)["sha256"]
+        real.write_bytes(b"two")
+        h2 = lsp_bin_identity(real)["sha256"]
+        if not h1 or h1 == h2:
+            check("B147: lsp_bin_identity distinguishes two different "
+                  "binaries — if it cannot, the whole gate is decorative",
+                  (h1, h2), ("<hash A>", "<different hash B>"))
+        # And the sweep must actually RECORD it: a recorder nothing calls is
+        # the same absence one layer down.
+        _old_state, _old_bin = STATE_FILE, LSP_BIN
+        try:
+            globals()["STATE_FILE"] = _d / "ledger.json"
+            globals()["LSP_BIN"] = real
+            save_state({"plugins": {}})
+            wrote = json.loads((_d / "ledger.json").read_text())
+        finally:
+            globals()["STATE_FILE"], globals()["LSP_BIN"] = _old_state, _old_bin
+        check("B147: save_state stamps the ledger with the binary identity — "
+              "a ledger that does not say which artefact produced it cannot "
+              "be compared with another",
+              wrote.get("lsp_bin", {}).get("sha256"), h2)
+    finally:
+        shutil.rmtree(_d, ignore_errors=True)
+
     for f in failures:
         print(f"  - {f}")
     if failures:
@@ -1242,6 +1513,11 @@ def main():
     elif args[0] == "sweep":
         limit = int(args[1]) if len(args) > 1 else None
         cmd_sweep(st, limit)
+    elif args[0] == "compare":
+        if len(args) != 3:
+            print("usage: fleet_dogfood.py compare BEFORE.json AFTER.json")
+            sys.exit(2)
+        sys.exit(cmd_compare(Path(args[1]), Path(args[2])))
     else:
         tgt = MY_PLUGINS / args[0]
         if not tgt.is_dir():
