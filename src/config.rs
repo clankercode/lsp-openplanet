@@ -2276,6 +2276,15 @@ mod tests {
         LspConfig::load(root, init)
     }
 
+    fn load_cfg_with_parent(
+        root: Option<&Path>,
+        parent: Option<&Path>,
+        init: Option<&serde_json::Value>,
+    ) -> LspConfig {
+        let _env = crate::testing::env_lock();
+        LspConfig::load_with_parent(root, parent, init)
+    }
+
     /// Private protocol between [`unused_callbacks_load_wiring_end_to_end`]
     /// and its child test. Set only on the spawned `Command`, never with
     /// `set_var`, so no sibling test can observe them (B032).
@@ -3600,7 +3609,7 @@ shortcut_match_enums = true
             "parent-root" => {
                 let parent = case.join("parent");
                 assert_eq!(
-                    LspConfig::load_with_parent(
+                    load_cfg_with_parent(
                         Some(&case.join("root-without-key")),
                         Some(&parent),
                         None,
@@ -3610,7 +3619,7 @@ shortcut_match_enums = true
                     "parent must override user when the root omits the key"
                 );
                 assert_eq!(
-                    LspConfig::load_with_parent(Some(&case.join("root")), Some(&parent), None)
+                    load_cfg_with_parent(Some(&case.join("root")), Some(&parent), None)
                         .unused_callbacks,
                     vec!["FromRoot"],
                     "root must override parent"
@@ -3801,7 +3810,7 @@ shortcut_match_enums = true
             "defines = [\"ROOT_Y\", \"-PARENT_DROPPED\"]\n",
         )
         .unwrap();
-        let cfg = LspConfig::load_with_parent(Some(&root), Some(&tmp), None);
+        let cfg = load_cfg_with_parent(Some(&root), Some(&tmp), None);
         assert!(cfg.defines.contains("PARENT_X"), "{:?}", cfg.defines);
         assert!(cfg.defines.contains("ROOT_Y"));
         assert!(!cfg.defines.contains("PARENT_DROPPED"));
@@ -5756,7 +5765,7 @@ shortcut_match_enums = true
         )
         .unwrap();
 
-        let set = LspConfig::load_with_parent(Some(&root), Some(&tmp), None).resolved_defines();
+        let set = load_cfg_with_parent(Some(&root), Some(&tmp), None).resolved_defines();
         assert_resolved(&set, "MP41", DefineOrigin::Target, true, true);
         assert_resolved(&set, "MP4", DefineOrigin::Target, true, true);
         assert!(
@@ -5770,8 +5779,7 @@ shortcut_match_enums = true
 
         // Init options are the top of the ladder and must win over both.
         let init = serde_json::json!({ "game_target": "TMNEXT" });
-        let set =
-            LspConfig::load_with_parent(Some(&root), Some(&tmp), Some(&init)).resolved_defines();
+        let set = load_cfg_with_parent(Some(&root), Some(&tmp), Some(&init)).resolved_defines();
         assert_resolved(&set, "TMNEXT", DefineOrigin::Target, true, true);
         assert!(resolved(&set, "MP41").is_none(), "{set:#?}");
     }

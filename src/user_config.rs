@@ -741,18 +741,44 @@ mod tests {
 
     #[test]
     fn user_config_path_follows_home() {
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", "/tmp/opl-home-probe");
+        let env = crate::testing::EnvVars::capture(&["HOME"]);
+        env.set("HOME", "/tmp/opl-home-probe");
         let path = user_config_path();
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
         assert_eq!(
             path,
             Some(PathBuf::from(
                 "/tmp/opl-home-probe/.config/openplanet-lsp/config.toml"
             ))
         );
+    }
+
+    /// B066: the HOME-mutating path test must contend on the same lock as
+    /// config readers. Otherwise it can replace HOME while another lib test
+    /// is loading its user-global config, and manual restoration is skipped
+    /// entirely if the path assertion panics.
+    #[test]
+    fn user_config_path_test_serializes_on_the_process_env_lock() {
+        let held = crate::testing::env_lock();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            user_config_path_follows_home();
+            done_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "the HOME-mutating test completed while the shared env lock was held"
+        );
+
+        drop(held);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the HOME-mutating test must proceed once the lock is released");
+        contender.join().unwrap();
     }
 }

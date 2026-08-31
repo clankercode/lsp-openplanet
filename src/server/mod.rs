@@ -2256,6 +2256,16 @@ mod tests {
     use tower_lsp::jsonrpc::Request;
     use tower_lsp::lsp_types::WorkspaceFolder;
 
+    fn test_service() -> (
+        std::sync::MutexGuard<'static, ()>,
+        LspService<Backend>,
+        tower_lsp::ClientSocket,
+    ) {
+        let env = crate::testing::env_lock();
+        let (service, socket) = LspService::new(Backend::new);
+        (env, service, socket)
+    }
+
     fn code_action_caps(
         data_support: Option<bool>,
         resolve_properties: Option<Vec<&str>>,
@@ -2533,7 +2543,7 @@ mod tests {
             ],
         );
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
@@ -2582,7 +2592,7 @@ mod tests {
             ],
         );
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
@@ -2634,7 +2644,7 @@ mod tests {
             &[("Main.as", main), ("Exports_Bodies.as", export)],
         );
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
@@ -2701,7 +2711,7 @@ mod tests {
             ],
         );
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
@@ -2758,7 +2768,7 @@ mod tests {
             ],
         );
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
@@ -2796,7 +2806,7 @@ mod tests {
             ],
         );
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
@@ -2843,7 +2853,7 @@ mod tests {
             ],
         );
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
@@ -2883,7 +2893,7 @@ mod tests {
             &[("Main.as", main), ("Shared.as", "void SharedFn() {}\n")],
         );
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&root, Some(vec![root.to_path_buf()])))
@@ -2921,7 +2931,7 @@ mod tests {
         fs::create_dir_all(&plugin).unwrap();
         write_info_toml(&plugin);
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
@@ -2947,7 +2957,7 @@ mod tests {
             write_info_toml(&p);
         }
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&parent, Some(vec![parent.to_path_buf()])))
@@ -2983,7 +2993,7 @@ mod tests {
             "plugin_roots": [manual.to_str().unwrap()]
         }));
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(params)
@@ -3003,7 +3013,7 @@ mod tests {
         // Zero-found fallback (t2): single root on the opened folder itself —
         // exactly the pre-discovery behavior for manifest-less workspaces.
         let folder = temp_tree("no-plugin");
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&folder, Some(vec![folder.to_path_buf()])))
@@ -3023,7 +3033,7 @@ mod tests {
         fs::create_dir_all(&plugin).unwrap();
         write_info_toml(&plugin);
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&parent, None))
@@ -3048,7 +3058,7 @@ mod tests {
         fs::write(&a_path, a_src).unwrap();
         fs::write(&b_path, "void helper() {}\n").unwrap();
 
-        let (service, _socket) = LspService::new(Backend::new);
+        let (_env, service, _socket) = test_service();
         let backend = service.inner();
         backend
             .initialize(init_params(&dir, Some(vec![dir.to_path_buf()])))
@@ -3129,7 +3139,7 @@ mod tests {
         let omitted_path = root.join("generated/Gen.as");
         fs::write(&omitted_path, "void GenCaller() { UsedOnlyByOmitted(); }\n").unwrap();
 
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&root, Some(vec![root.to_path_buf()])),
@@ -3312,7 +3322,7 @@ mod tests {
             "void GenCaller() {\n    Config c;\n    c.value = 1;\n    Register(c);\n}\n";
         fs::write(&omitted_path, uses_siblings).unwrap();
 
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&root, Some(vec![root.to_path_buf()])),
@@ -3421,7 +3431,7 @@ mod tests {
     /// published against it.
     async fn manifest_diagnostics_on_open(root: &Path, info_toml: &str) -> Vec<Diagnostic> {
         let uri = manifest_uri_of(root);
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(root, Some(vec![root.to_path_buf()])),
@@ -3587,7 +3597,7 @@ mod tests {
     async fn fixing_the_manifest_republishes_an_empty_set() {
         let root = manifest_tree("manifest-stale-clear", NO_VERSION);
         let uri = manifest_uri_of(&root);
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&root, Some(vec![root.to_path_buf()])),
@@ -3632,7 +3642,7 @@ mod tests {
         ] {
             let root = manifest_tree(&format!("manifest-close-{label}"), disk);
             let uri = manifest_uri_of(&root);
-            let (mut service, mut socket) = LspService::new(Backend::new);
+            let (_env, mut service, mut socket) = test_service();
             initialize_service(
                 &mut service,
                 init_params(&root, Some(vec![root.to_path_buf()])),
@@ -3686,7 +3696,7 @@ mod tests {
         let export = root.join("src/Ex.as");
         fs::write(&export, "void Exported() {}\n").unwrap();
         let export_uri = Url::from_file_path(&export).unwrap();
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&root, Some(vec![root.to_path_buf()])),
@@ -3757,7 +3767,7 @@ mod tests {
         symlink(root.join("info.toml"), &alias_path).unwrap();
         let alias_uri = Url::from_file_path(&alias_path).unwrap();
         let manifest_uri = manifest_uri_of(&root);
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&root, Some(vec![root.to_path_buf()])),
@@ -3870,7 +3880,7 @@ mod tests {
         let manifest_uri = manifest_uri_of(&root);
         let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
 
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&root, Some(vec![root.to_path_buf()])),
@@ -3908,7 +3918,7 @@ mod tests {
         let root = manifest_tree("manifest-not-on-sources", source);
         let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
 
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&root, Some(vec![root.to_path_buf()])),
@@ -3944,7 +3954,7 @@ mod tests {
         fs::write(root.join("src/Main.as"), "void Main() {}\n").unwrap();
         let main_uri = Url::from_file_path(root.join("src/Main.as")).unwrap();
 
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&root, Some(vec![root.to_path_buf()])),
@@ -3982,7 +3992,7 @@ mod tests {
             roots.push(root);
         }
 
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&parent, Some(vec![parent.to_path_buf()])),
@@ -4049,7 +4059,7 @@ mod tests {
         .unwrap();
 
         let uri = manifest_uri_of(&root);
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(&mut service, init_params(&root, Some(vec![root.clone()]))).await;
         let backend = service.inner();
         let published = capture_diagnostics_for(
@@ -4083,7 +4093,7 @@ mod tests {
     async fn manifest_diagnostics_are_published_on_initialized_without_opening_a_file() {
         let root = manifest_tree("manifest-on-initialized", NO_VERSION);
         let uri = manifest_uri_of(&root);
-        let (mut service, mut socket) = LspService::new(Backend::new);
+        let (_env, mut service, mut socket) = test_service();
         initialize_service(
             &mut service,
             init_params(&root, Some(vec![root.to_path_buf()])),
