@@ -45,12 +45,21 @@ MUTATIONS = [
      '        if d["sev"] == "ERR":'),
 
     # --- B097: a failed load must stop the batch --------------------------
-    ("B097: a failed load no longer stops the batch",
+    ("B097/B127: a failed or unhealthy build no longer stops the batch",
      "probe_enum_corpus.py",
-     '        if loaded.get("error"):\n'
-     '            raise SystemExit(f"the probe plugin was not loaded: {loaded[\'error\']}")',
-     '        if False:\n'
-     '            raise SystemExit(f"the probe plugin was not loaded: {loaded[\'error\']}")'),
+     '        if verdict["build_status"] in ("NOT-RUN", "BUILD-ERR"):',
+     '        if False:'),
+    ("B127: run_batch goes back to trusting the transport reply, which is "
+     "empty for a build whose dependency could not be resolved",
+     "probe_enum_corpus.py",
+     '        if verdict["build_status"] in ("NOT-RUN", "BUILD-ERR"):',
+     '        if loaded.get("error"):'),
+    ("B127 over-condemn: REJECTED treated as fatal, which would abort every "
+     "real run (this probe's sentinel is a DELIBERATE error, so REJECTED is "
+     "the normal outcome)",
+     "probe_enum_corpus.py",
+     '        if verdict["build_status"] in ("NOT-RUN", "BUILD-ERR"):',
+     '        if verdict["build_status"] != "CLEAN":'),
 
     # --- B123: the raw reader, and the build-health guard it enables ------
     ("B123: run_batch reverts to the severity-filtered reader, so the build "
@@ -58,14 +67,10 @@ MUTATIONS = [
      "probe_enum_corpus.py",
      "        window = fleet.read_log_window_raw(mark, PROBE_ID)",
      "        window = fleet.read_log_window(mark, PROBE_ID)"),
-    ("B123: a location-less build error no longer stops the run",
-     "probe_enum_corpus.py",
-     "        if build_errs:",
-     "        if False:"),
     ("B123: location-less build errors stop being collected at all",
-     "probe_enum_corpus.py",
-     "        build_errs = fleet.raw_build_errors(window, PROBE_ID)",
-     "        build_errs = []"),
+     "fleet_dogfood.py",
+     "    raw_errs = raw_build_errors(window, fid)",
+     "    raw_errs = []"),
     ("B123: build_slice stops distinguishing 'never started'",
      "fleet_dogfood.py",
      "    if start is None:\n        return []",

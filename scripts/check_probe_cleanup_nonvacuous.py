@@ -75,13 +75,9 @@ MUTATIONS = [
      "    read_log_window = read_log_window_fn or fleet.read_log_window_raw",
      "    read_log_window = read_log_window_fn or fleet.read_log_window"),
     ("B118 ch1: build_ran no longer gates the verdict",
-     "issue_repro_game.py",
-     '                if not rec["build_ran"]:\n'
-     '                    rec["build_status"] = "NOT-RUN"\n'
-     '                elif rec["game_errors"]',
-     '                if False:\n'
-     '                    rec["build_status"] = "NOT-RUN"\n'
-     '                elif rec["game_errors"]'),
+     "fleet_dogfood.py",
+     '    if not build_ran:\n        status = "NOT-RUN"',
+     '    if False:\n        status = "NOT-RUN"'),
     ("B118 ch1: build_slice returns lines even when the build never started",
      "fleet_dogfood.py",
      "    if start is None:\n        return []",
@@ -92,35 +88,41 @@ MUTATIONS = [
      "        and not _LOCATED_DIAG.search(l)",
      "        and True"),
     ("B118 ch2: location-less errors stop reaching a bucket at all",
-     "issue_repro_game.py",
-     '                rec["raw_build_errors"] = fleet.raw_build_errors(window, fid)',
-     '                rec["raw_build_errors"] = []'),
+     "fleet_dogfood.py",
+     "    raw_errs = raw_build_errors(window, fid)",
+     "    raw_errs = []"),
     ("B118 ch2: BUILD-ERR collapsed into REJECTED",
-     "issue_repro_game.py",
-     '                elif rec["raw_build_errors"] or load.get("error"):\n'
-     '                    rec["build_status"] = "BUILD-ERR"',
-     '                elif rec["raw_build_errors"] or load.get("error"):\n'
-     '                    rec["build_status"] = "REJECTED"'),
+     "fleet_dogfood.py",
+     '        status = "BUILD-ERR"\n    else:\n        status = "CLEAN"',
+     '        status = "REJECTED"\n    else:\n        status = "CLEAN"'),
     ("B118 ch3: `Script compilation failed!` no longer counted, so a failed "
      "compile that still logs `Loaded plugin` reads as CLEAN",
-     "issue_repro_game.py",
-     '                rec["build_failed"] = any(fleet.BUILD_FAILED in l for l in slice_)',
-     '                rec["build_failed"] = False'),
+     "fleet_dogfood.py",
+     "    build_failed = any(BUILD_FAILED in l for l in slice_)",
+     "    build_failed = False"),
     ("B118 ch3: `Loaded plugin` treated as SUFFICIENT for a clean build",
-     "issue_repro_game.py",
-     '                elif not rec["build_loaded"]:\n'
-     '                    rec["build_status"] = "BUILD-ERR"\n'
-     '                else:\n'
-     '                    rec["build_status"] = "CLEAN"',
-     '                else:\n'
-     '                    rec["build_status"] = "CLEAN"'),
+     "fleet_dogfood.py",
+     "    elif raw_errs or load_error or not build_loaded:",
+     "    elif raw_errs or load_error:"),
     # The CONTROL that proves the harness is wired at all -- this attribution
     # predates B118 and already worked; if breaking it does NOT go red, the
     # three cases above are measuring nothing either.
+    # --- B127: a success reply is not a report on the build --------------
+    ("B127: a clean transport reply certifies the build (the original defect: "
+     "`{'error':'', 'data':'Plugin loaded'}` comes back for a build whose "
+     "dependency could not be resolved)",
+     "fleet_dogfood.py",
+     "    elif raw_errs or load_error or not build_loaded:",
+     "    elif load_error:"),
+    ("B127 over-condemn: every build reported BUILD-ERR (a guard that fires on "
+     "everything passes a suite that only checks things get caught)",
+     "fleet_dogfood.py",
+     '    elif raw_errs or load_error or not build_loaded:\n',
+     '    elif True:\n'),
     ("B118 control: own/foreign error attribution stops discriminating",
-     "issue_repro_game.py",
-     '                    d for d in errs if d["file"].startswith(f"{fid}/")',
-     '                    d for d in errs'),
+     "fleet_dogfood.py",
+     "    game_errors = [d for d in errs if d[\"file\"].startswith(mine)]",
+     "    game_errors = [d for d in errs]"),
 ]
 
 def run(root: Path) -> int:

@@ -469,62 +469,20 @@ def probe(
                 sleep(2.5)  # let compile finish + log flush
                 window = read_log_window(mark, fid)
                 rec["load_response"] = load
-                rec["diagnostics"] = fleet.parse_game_diagnostics(window)
                 rec["raw_window"] = window[-4000:]
-                # Attribute errors to THIS probe. Openplanet.log is shared:
-                # other sessions load their own plugins into the same game, and
-                # the log window is a time slice, not a per-plugin channel.
-                # Counting a foreign plugin's ERR as ours turns a game ACCEPT
-                # into a false REJECT -- and REJECT is the direction we treat
-                # as solid evidence, so it would be encoded into a test as fact.
-                errs = [d for d in rec["diagnostics"] if d["sev"] == "ERR"]
-                rec["game_errors"] = [
-                    d for d in errs if d["file"].startswith(f"{fid}/")
-                ]
-                # Never silently drop the rest: an unattributable ERR means the
-                # window is ambiguous and the run should not be trusted.
-                rec["foreign_errors"] = [
-                    d for d in errs
-                    if not d["file"].startswith(f"{fid}/") and d["file"] != "?"
-                ]
-                rec["unattributed_errors"] = [d for d in errs if d["file"] == "?"]
-                rec["contended"] = bool(
-                    rec["foreign_errors"] or rec["unattributed_errors"]
-                )
-                # --- B118: did this build actually HAPPEN? ---------------
-                # Three false-green channels, all with the same polarity: on a
-                # question whose subject is acceptance, silence read as ACCEPT.
+                # B127: ONE place decides whether a build succeeded, and it is
+                # not the transport's reply. `load` is passed in because a
+                # transport error is still a build failure, but it is only ever
+                # additional evidence -- `{"error": "", "data": "Plugin
+                # loaded"}` comes back for a build whose dependency could not
+                # be resolved, so it can never be the whole answer.
                 #
-                #   1. the window dropped TRAC, so `Starting build` and
-                #      `Loaded plugin` were both invisible and "never ran"
-                #      looked exactly like "ran clean";
-                #   2. a location-less engine error matched no bucket at all;
-                #   3. `Loaded plugin` is logged even AFTER
-                #      `Script compilation failed!`, so its presence is
-                #      necessary and NOT sufficient.
-                slice_ = fleet.build_slice(window, fid)
-                rec["build_ran"] = bool(slice_)
-                rec["build_loaded"] = any(
-                    fleet.BUILD_LOADED % fid in l for l in slice_
-                )
-                rec["build_failed"] = any(fleet.BUILD_FAILED in l for l in slice_)
-                rec["raw_build_errors"] = fleet.raw_build_errors(window, fid)
-                # BUILD-ERR is kept DISTINCT from REJECTED on purpose. "The
-                # engine refused this construct" and "this build did not
-                # happen" are different answers, and collapsing them is what
-                # produced the original defect: a missing dependency was read
-                # as a verdict about the code under test.
-                if not rec["build_ran"]:
-                    rec["build_status"] = "NOT-RUN"
-                elif rec["game_errors"] or rec["build_failed"]:
-                    rec["build_status"] = "REJECTED"
-                elif rec["raw_build_errors"] or load.get("error"):
-                    rec["build_status"] = "BUILD-ERR"
-                elif not rec["build_loaded"]:
-                    rec["build_status"] = "BUILD-ERR"
-                else:
-                    rec["build_status"] = "CLEAN"
-                rec["compiled_clean"] = rec["build_status"] == "CLEAN"
+                # Attribution matters as much as the verdict: Openplanet.log is
+                # shared, so another session's ERR in the same window would
+                # turn a game ACCEPT into a false REJECT if counted as ours.
+                # `build_verdict` keeps foreign and unattributed errors in
+                # their own buckets and marks the window contended.
+                rec.update(fleet.build_verdict(window, fid, load))
             finally:
                 # Unload BEFORE the directory is removed. The reverse order
                 # deletes files the game still has open, so the removal fails
