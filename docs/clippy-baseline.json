@@ -1,0 +1,270 @@
+{
+  "_readme": "B083. Refresh with `just clippy-delta-record`, on master, after a deliberate lint change. The method block below is part of the measurement: numbers taken with a different command, toolchain or feature set are not comparable to these, and the gate refuses to compare them rather than reporting a difference that is not one.",
+  "method": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--all-targets",
+      "--message-format=json",
+      "-j2"
+    ],
+    "never": "-D warnings. It stops compilation at the first warning and truncates the diagnostic set: 129 raw / 39 fingerprints without it, 115 / 33 with it, measured on this tree 2026-08-31.",
+    "features": "default \u2014 no --features, --all-features or --no-default-features",
+    "profile": "dev (cargo clippy's default)",
+    "toolchain": {
+      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+      "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+      "clippy": "clippy 0.1.97 (2d8144b788 2026-07-07)"
+    },
+    "recorded_at": "2026-08-31T09:05:30+00:00",
+    "git_commit": "47d792026cf57fbd2205335e855915cacb7fafb1",
+    "workspace_units_checked": 28
+  },
+  "totals": {
+    "raw": 130,
+    "fingerprints": 40
+  },
+  "findings": [
+    {
+      "file": "src/cli/mod.rs",
+      "code": "clippy::field_reassign_with_default",
+      "message": "field assignment outside of initializer for an instance created with Default::default()",
+      "count": 2
+    },
+    {
+      "file": "src/cli/watch.rs",
+      "code": "clippy::redundant_closure",
+      "message": "redundant closure",
+      "count": 2
+    },
+    {
+      "file": "src/cli/watch.rs",
+      "code": "clippy::type_complexity",
+      "message": "very complex type used. Consider factoring parts into `type` definitions",
+      "count": 11
+    },
+    {
+      "file": "src/entrypoint.rs",
+      "code": "clippy::field_reassign_with_default",
+      "message": "field assignment outside of initializer for an instance created with Default::default()",
+      "count": 2
+    },
+    {
+      "file": "src/parser/mod.rs",
+      "code": "clippy::module_inception",
+      "message": "module has the same name as its containing module",
+      "count": 2
+    },
+    {
+      "file": "src/parser/parser.rs",
+      "code": "clippy::needless_return",
+      "message": "unneeded `return` statement",
+      "count": 2
+    },
+    {
+      "file": "src/preprocessor/filter.rs",
+      "code": "clippy::ptr_arg",
+      "message": "writing `&mut Vec` instead of `&mut [_]` involves a new object where a slice will do",
+      "count": 2
+    },
+    {
+      "file": "src/server/call_hierarchy.rs",
+      "code": "clippy::for_kv_map",
+      "message": "you seem to want to iterate on a map's values",
+      "count": 2
+    },
+    {
+      "file": "src/server/call_hierarchy.rs",
+      "code": "clippy::needless_borrow",
+      "message": "this expression creates a reference which is immediately dereferenced by the compiler",
+      "count": 4
+    },
+    {
+      "file": "src/server/code_actions/fixes/did_you_mean.rs",
+      "code": "clippy::needless_range_loop",
+      "message": "the loop variable `i` is used to index `a_chars`",
+      "count": 2
+    },
+    {
+      "file": "src/server/completion.rs",
+      "code": "clippy::needless_borrow",
+      "message": "this expression creates a reference which is immediately dereferenced by the compiler",
+      "count": 8
+    },
+    {
+      "file": "src/server/hover.rs",
+      "code": "clippy::int_plus_one",
+      "message": "unnecessary `>= y + 1` or `x - 1 >=`",
+      "count": 1
+    },
+    {
+      "file": "src/server/mod.rs",
+      "code": "clippy::needless_borrow",
+      "message": "this expression creates a reference which is immediately dereferenced by the compiler",
+      "count": 22
+    },
+    {
+      "file": "src/server/navigation.rs",
+      "code": "clippy::collapsible_match",
+      "message": "this `if` can be collapsed into the outer `match`",
+      "count": 2
+    },
+    {
+      "file": "src/server/navigation.rs",
+      "code": "clippy::needless_lifetimes",
+      "message": "the following explicit lifetimes could be elided: 'a",
+      "count": 4
+    },
+    {
+      "file": "src/server/rename.rs",
+      "code": "clippy::needless_borrow",
+      "message": "this expression creates a reference which is immediately dereferenced by the compiler",
+      "count": 1
+    },
+    {
+      "file": "src/server/scope_query.rs",
+      "code": "clippy::collapsible_match",
+      "message": "this `if` can be collapsed into the outer `match`",
+      "count": 2
+    },
+    {
+      "file": "src/server/signature.rs",
+      "code": "clippy::collapsible_match",
+      "message": "this `if` can be collapsed into the outer `match`",
+      "count": 4
+    },
+    {
+      "file": "src/server/symbols.rs",
+      "code": "unused_imports",
+      "message": "unused import: `crate::parser::ast::SourceFile`",
+      "count": 1
+    },
+    {
+      "file": "src/tui/ui.rs",
+      "code": "clippy::empty_line_after_doc_comments",
+      "message": "empty line after doc comment",
+      "count": 2
+    },
+    {
+      "file": "src/tui/ui.rs",
+      "code": "clippy::useless_format",
+      "message": "useless use of `format!`",
+      "count": 2
+    },
+    {
+      "file": "src/typecheck/call_site.rs",
+      "code": "unused_imports",
+      "message": "unused import: `super::repr::ParamMode`",
+      "count": 1
+    },
+    {
+      "file": "src/typecheck/checker.rs",
+      "code": "clippy::collapsible_match",
+      "message": "this `if` can be collapsed into the outer `match`",
+      "count": 4
+    },
+    {
+      "file": "src/typecheck/checker.rs",
+      "code": "clippy::needless_borrow",
+      "message": "this expression creates a reference which is immediately dereferenced by the compiler",
+      "count": 4
+    },
+    {
+      "file": "src/typecheck/checker.rs",
+      "code": "clippy::needless_return",
+      "message": "unneeded `return` statement",
+      "count": 8
+    },
+    {
+      "file": "src/typecheck/checker.rs",
+      "code": "clippy::question_mark",
+      "message": "this block may be rewritten with the `?` operator",
+      "count": 2
+    },
+    {
+      "file": "src/typecheck/checker.rs",
+      "code": "clippy::type_complexity",
+      "message": "very complex type used. Consider factoring parts into `type` definitions",
+      "count": 2
+    },
+    {
+      "file": "src/typecheck/global_scope.rs",
+      "code": "clippy::redundant_closure",
+      "message": "redundant closure",
+      "count": 6
+    },
+    {
+      "file": "src/typecheck/global_scope.rs",
+      "code": "clippy::type_complexity",
+      "message": "very complex type used. Consider factoring parts into `type` definitions",
+      "count": 2
+    },
+    {
+      "file": "src/typecheck/resolver.rs",
+      "code": "clippy::type_complexity",
+      "message": "very complex type used. Consider factoring parts into `type` definitions",
+      "count": 1
+    },
+    {
+      "file": "src/typedb/index.rs",
+      "code": "clippy::assertions_on_constants",
+      "message": "this assertion has a constant value",
+      "count": 1
+    },
+    {
+      "file": "src/typedb/index.rs",
+      "code": "clippy::derivable_impls",
+      "message": "this `impl` can be derived",
+      "count": 2
+    },
+    {
+      "file": "src/typedb/index.rs",
+      "code": "unused_imports",
+      "message": "unused import: `crate::testing::TempDir`",
+      "count": 1
+    },
+    {
+      "file": "src/update.rs",
+      "code": "clippy::needless_return",
+      "message": "unneeded `return` statement",
+      "count": 2
+    },
+    {
+      "file": "tests/cli_check_tests.rs",
+      "code": "unused_variables",
+      "message": "unused variable: `stderr`",
+      "count": 1
+    },
+    {
+      "file": "tests/integration_tests.rs",
+      "code": "clippy::unnecessary_map_or",
+      "message": "this `map_or` can be simplified",
+      "count": 2
+    },
+    {
+      "file": "tests/integration_tests.rs",
+      "code": "clippy::unnecessary_sort_by",
+      "message": "consider using `sort_by_key`",
+      "count": 3
+    },
+    {
+      "file": "tests/multi_root_lifecycle_tests.rs",
+      "code": "clippy::needless_borrow",
+      "message": "this expression creates a reference which is immediately dereferenced by the compiler",
+      "count": 4
+    },
+    {
+      "file": "tests/multi_root_tests.rs",
+      "code": "clippy::needless_borrow",
+      "message": "this expression creates a reference which is immediately dereferenced by the compiler",
+      "count": 3
+    },
+    {
+      "file": "tests/multi_root_tests.rs",
+      "code": "dead_code",
+      "message": "function `write_config` is never used",
+      "count": 1
+    }
+  ]
+}

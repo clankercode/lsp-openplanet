@@ -15,6 +15,13 @@ dated 2026-02-03), via `scripts/probe_enum_corpus.py`.
 | `b053-bare-enum-values.tsv` | 2989 | for a bare *value* name of a named enum (`Turbo`, `GlassSmash`), does the game accept it, reject it as unknown, or reject it as ambiguous? |
 | `b052-scope-provenance.tsv` | 233 | for each SCOPE an ACCEPTED b052 row depends on: did it exist on the probing machine, and did the ENGINE supply it or that machine's plugins? |
 
+`scripts/probe_export_binding.py` (B086) answers a different question — given a
+`[script] exports` stub and a body, does the engine BIND them — and writes no
+corpus yet, because it is blocked (see below). Its offline
+`--selftest` runs without a game and is worth reading as the shape a probe's
+oracle should have: every way a run can fail to measure is a distinct
+`AMBIGUOUS`, never a verdict.
+
 Both corpora are TSV with a `#`-comment header. The `game_message` column is
 the compiler's own text, unedited.
 
@@ -164,6 +171,64 @@ scope, and a prefix the sidecar has never seen is written `UNKNOWN` and the run
 exits non-zero. Defaulting an unseen prefix to `ENGINE` would be exactly the
 failure the file exists to prevent.
 
+
+## BLOCKED as of 2026-08-31: RemoteBuild cannot receive a `load_plugin` request
+
+Everything on this page needs `load_plugin`, and **`load_plugin` currently
+cannot be delivered at all**. Measured against Openplanet 1.29.14 with
+`RemoteBuild.op` 1.1.0 — and note it does **not** date from that update:
+`Openplanet-Old.log` caps at 64 too, so **`load_plugin` has never worked** and
+anything ever seen loaded was loaded at game start, not by the call:
+
+- RemoteBuild's `HandleClient` calls `Json::Parse` on **each raw socket read**,
+  and `Net::Socket::ReadRaw` returns at most **64** bytes per call. Every longer
+  request is split into fragments and each fragment fails to parse.
+- The threshold is exact and deterministic: **<=64 passes, >=65 splits**.
+  `Available()` reports the true size; `ReadRaw(n)` returns at most 64. (An
+  earlier 66/67 figure here was measured with a padded `get_status` and was off
+  by the framing bytes.)
+- A minimal `load_plugin` request is **72 bytes with an empty id**, so no
+  shorter plugin id fixes it.
+- The reply is `{"error":"Not implemented: ","data":""}` — the router's message
+  for an **unknown route**. That is the expensive part: it points the reader at
+  route spellings rather than at size.
+- `get_status` is 35 bytes and works, so `rb_alive()` returns True. Every probe
+  passes its liveness gate and then fails on the route that matters.
+
+Two consequences worth knowing before you spend an afternoon on it:
+
+1. `scripts/issue_repro_game.py` is blocked by this, and its `--selftest` is
+   offline-only, so it stays green.
+   `scripts/probe_enum_corpus.py` is believed **NOT** blocked, and this is worth
+   knowing before you rewrite it: it IGNORES `load_plugin`'s result, sleeps, and
+   reads the game log, so Openplanet's own file watcher is what compiles the
+   staged folder. B068's sentinel makes a silent non-compile impossible to
+   mistake for success — every name returns UNDETERMINED unless the sentinel
+   diagnostic proves analysis reached the last line. That is also how the
+   shipped corpora were produced at all, given `load_plugin` never worked.
+   Verify before relying on it.
+2. The `unload_plugin` that follows a failed load is split the same way, so
+   `holder.preserve()` fires — correctly — and **leaves the fixture installed**.
+   That blocks every later probe from every lane until someone removes it by
+   hand. Two such strays appeared in one afternoon.
+
+`scripts/probe_export_binding.py` preflights this and names it in one line
+rather than reporting a route error. Copy that preflight into any new probe.
+
+A fix would be in the RemoteBuild plugin itself (`HandleClient` must accumulate
+reads until `Json::Parse` succeeds), not in any client here.
+
+
+**Working alternative, no game restart needed:** `tm-control-mcp` is loaded and
+its socket reassembles correctly, with RemoteBuild parity plus `ListPlugins` /
+`GetPlugin`:
+
+    cd ~/src/openplanet/my-plugins/tm-control-mcp
+    python3 tools/call.py ControlPlugin '{"id":"<plugin>","action":"reload"}'
+
+It returns the compile log inline, attributed to the build you triggered, which
+also removes the read-the-shared-log-by-severity hazard. Prefer it over waiting
+for a RemoteBuild fix. Tracked as B097.
 ## Regenerating
 
 ```

@@ -1392,6 +1392,70 @@ The test passes, and would have passed either way.
   mechanical migration touches fixtures, the thing to hunt is not the tests
   that broke but the ones that now pass without testing anything.
 
+- **A gate reconciles at one level, and is blind one level down.** `just test`
+  (B078/B082) proves every expected test *binary* reported a summary. It
+  cannot see a test that vanishes **inside** a present, healthy,
+  summary-producing binary, nor a stale **bin dependency** — the
+  `CARGO_BIN_EXE_openplanet-lsp` a test spawns as a child, which is not a test
+  binary and so is not in the reconciled set at all. Both were live during the
+  false B074 revert on 2026-08-31, and `left: 13, right: 6` on the B061
+  fixture turned out to be the *pre-B061 binary* under a current harness, not
+  a source change. It cost a correct merge being reverted.
+
+  The mechanism is general: every lane here points `CARGO_TARGET_DIR` at a
+  shared cache and bisects in detached worktrees, so cargo's fingerprint can
+  read fresh over a tree that moved and skip the build. The only symptom
+  either blind spot produces is **a total that fails to rise as predicted** —
+  no error, no failed test, no missing binary. `just test-inventory` (B085)
+  closes both by comparing each binary's `--list` against the `#[test]` count
+  in the sources cargo's own dep-info says it was compiled from, and every
+  artifact's mtime — the spawned bin included — against those same sources.
+
+  The transferable half: **when a check reconciles a set, ask what lives one
+  level inside its members and one level outside its membership rule.** Both
+  are invisible to it by construction, and both fail toward looking clean.
+
+- **`-D warnings` makes clippy report FEWER lints, not more.** It turns the
+  first warning into an error, so compilation stops early and the diagnostic
+  set is truncated. Measured on this tree, rustc 1.97.0:
+  `cargo clippy --all-targets` reports **129** diagnostics / 39 fingerprints;
+  the same command with `-- -D warnings` reports **115** / 33. A gate built on
+  the stricter-looking flag silently permits the 14 it cannot see, and the
+  flag's name argues the opposite. `just clippy-delta` (B083) refuses to run
+  with it.
+
+  The general shape is Mechanism 1 wearing a reassuring label: **a flag that
+  makes a check stricter can make its INSTRUMENT blinder.** Anything that
+  aborts early — `-D`, `--fail-fast`, `set -e`, a first-error `exit` — narrows
+  the population before the measurement is complete.
+
+  Two more rules for a differential lint gate, both learned the same way:
+  compare **fingerprint identities with line numbers normalised out**, never
+  totals (equal totals collided by coincidence in this batch, and an unchanged
+  total with a swapped member has to fail); and keep the baseline's **method**
+  — exact command, toolchain versions, features, profile — in the same file as
+  its numbers, or the next reader compares 129 against 115 and concludes
+  something moved.
+
+- **A fixture comment asserting engine behaviour is a claim, not a
+  measurement — and everyone downstream reads it as a measurement.**
+  `tests/fixtures/.../60-exports-correct-pattern` paired a by-value `import`
+  stub with a `const string &in` body and called it the CORRECT pattern. It
+  had never been game-probed. A consumer calling that shape dies at runtime
+  with `Unbound function called`. Before anyone measured it, the fixture had
+  been cited as evidence twice — in a shipped source comment and in the
+  approval of B062's matching rule — and both conclusions were wrong
+  *because the fixture said so* (B086).
+
+  What caught it is the reusable part. The lane's first probe had only the
+  mismatched variant and a control naming a function that does not exist, and
+  **both failed identically** — an oracle that cannot discriminate, which it
+  would have been entitled to read as "the engine is strict" without having
+  measured anything. Adding the `exact` positive control made it a
+  measurement, because `exact` binds and the only difference from the failing
+  case is the parameter type. **A negative control alone proves nothing: it
+  cannot distinguish "the thing is false" from "the probe cannot see".**
+
 ---
 
 ## The scoping hazard: a narrowing chosen for one failure mode blinds you to another
