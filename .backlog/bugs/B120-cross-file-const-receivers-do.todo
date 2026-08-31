@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T13:39:48Z"
+depends_on: []
+estimate_hours: 1
+id: B120
+priority: high
+status: pending
+tags: []
+title: Cross-file const receivers do not get apply_receiver_const on the method return type, so downstream ConstViolation still misses cross-file
+updated_at: "2026-08-31T13:39:48Z"
+---
+
+Cross-file const receivers do not get apply_receiver_const on the method return type, so downstream ConstViolation still misses cross-file

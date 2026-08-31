@@ -118,3 +118,4 @@ bugs:
     - file: B117-member-visibility-is-set-by-th.todo
     - file: B118-issue-repro-game-probe-has-two.todo
     - file: B119-const-receiver-rule-is-own-cla.todo
+    - file: B120-cross-file-const-receivers-do.todo
