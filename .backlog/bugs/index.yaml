@@ -143,3 +143,4 @@ bugs:
     - file: B142-paraminfo-is-const-is-hardcode.todo
     - file: B143-max-s-plugin-dev-norms-mean-co.todo
     - file: B144-a-const-handle-parameter-t-con.todo
+    - file: B145-game-ground-truth-for-issue-re.todo

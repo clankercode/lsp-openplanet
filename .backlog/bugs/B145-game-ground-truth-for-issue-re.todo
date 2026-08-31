@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T15:38:19Z"
+depends_on: []
+estimate_hours: 1
+id: B145
+priority: high
+status: pending
+tags: []
+title: 'Game ground truth for issue-repro fixtures is generated but never recorded: issue_repro_game.py prints the engine''s verdict and messages, nothing commits them, so 64 fixtures carry zero committed engine evidence'
+updated_at: "2026-08-31T15:38:19Z"
+---
+
+Game ground truth for issue-repro fixtures is generated but never recorded: issue_repro_game.py prints the engine's verdict and messages, nothing commits them, so 64 fixtures carry zero committed engine evidence
