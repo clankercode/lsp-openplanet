@@ -1033,18 +1033,90 @@ async fn test_tower_lsp_goto_definition_on_an_interface_member() {
     }
 
     // `i.Go()` — an interface-typed receiver. `Go` starts at col 17.
-    let Some(GotoDefinitionResponse::Scalar(loc)) = goto(backend, &main_uri, 1, 18).await else {
-        panic!("goto_definition on `i.Go()` must resolve to the interface method");
+    //
+    // B104 CHANGED THIS CONTRACT at the protocol level: it used to be a
+    // `Scalar` naming only the interface method. The interface declaration
+    // is still the FIRST answer — that half is unchanged and still pinned —
+    // but `C`'s implementation now follows it, so the handler returns an
+    // `Array` and the editor opens a peek list.
+    let Some(GotoDefinitionResponse::Array(locs)) = goto(backend, &main_uri, 1, 18).await else {
+        panic!(
+            "goto_definition on `i.Go()` must offer the interface method and its implementations"
+        );
     };
-    assert_eq!(loc.uri, iface_uri, "must jump to the interface's file");
-    assert_eq!(loc.range.start.line, 0);
+    assert_eq!(locs.len(), 2, "interface declaration plus one implementer");
+    assert_eq!(locs[0].uri, iface_uri, "the declaration must lead");
+    assert_eq!(locs[0].range.start.line, 0);
+    assert_eq!(
+        locs[1].uri, main_uri,
+        "C::Go, the implementation, must follow it"
+    );
+    assert_eq!(locs[1].range.start.line, 0);
 
-    // `c.Go()` — the class-typed twin, in the requesting file.
+    // `c.Go()` — the class-typed twin, in the requesting file. Nothing
+    // extends `C`, so this stays a single precise target: B104 must not
+    // turn every call into a peek list.
     let Some(GotoDefinitionResponse::Scalar(loc)) = goto(backend, &main_uri, 2, 18).await else {
         panic!("goto_definition on `c.Go()` must resolve to the class method");
     };
     assert_eq!(loc.uri, main_uri, "must stay in the implementor's file");
     assert_eq!(loc.range.start.line, 0);
+}
+
+// B103: the public handler must preserve both targets of a compound virtual
+// property access. This pins not just navigation's Vec, but the protocol
+// response variant and its stable get-then-set order.
+#[tokio::test(flavor = "current_thread")]
+async fn test_tower_lsp_compound_virtual_property_returns_ordered_array() {
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+
+    #[allow(deprecated)]
+    backend
+        .initialize(InitializeParams::default())
+        .await
+        .expect("initialize should succeed");
+
+    let uri = Url::parse("file:///b103/main.as").unwrap();
+    let source = "class C {\n    uint get_ID() { return 1; }\n    void set_ID(uint value) {}\n}\nvoid f(C@ c) { c.ID += 1; }\n";
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "angelscript".to_string(),
+                version: 1,
+                text: source.to_string(),
+            },
+        })
+        .await;
+
+    let property_col = source.lines().nth(4).unwrap().find("c.ID").unwrap() as u32 + 2;
+    let response = backend
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: text_doc_position(&uri, 4, property_col),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .expect("goto_definition call must not error");
+
+    let Some(GotoDefinitionResponse::Array(locations)) = response else {
+        panic!("compound c.ID must return GotoDefinitionResponse::Array");
+    };
+    assert_eq!(
+        locations.len(),
+        2,
+        "compound access must expose two targets"
+    );
+    assert!(locations.iter().all(|location| location.uri == uri));
+    assert_eq!(
+        locations
+            .iter()
+            .map(|location| location.range.start.line)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "protocol order must be get_ID then set_ID"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,33 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Changed
+- **Go-to-definition offers every implementation, not one location**
+  (B104) — a method reached through an interface- or base-typed receiver
+  has more than one honest answer, so definition now returns all of them
+  and the editor opens a peek list. The declaration the receiver's static
+  type owns still comes FIRST (unchanged behaviour, now pinned), with
+  each workspace class that implements or overrides it after, in
+  workspace file order. Base classes work the same way as interfaces,
+  including transitively; a derived class that inherits the method
+  without redeclaring it is not listed, because it has no definition to
+  jump to. Overload sets follow the same principle: a call site whose
+  argument count narrows to one signature keeps its single precise
+  target, while one that cannot be narrowed lists every overload.
+
+### Fixed
+- **Go-to-definition on a virtual property** (B103) — `obj.ID`, where the
+  type declares only the accessor pair `get_ID` / `set_ID`, used to
+  resolve nothing. It now jumps to the accessor the position calls for:
+  a read goes to `get_ID`, a write (`obj.ID = x`) to `set_ID` — falling
+  back to the getter when the property is get-only — and a compound
+  assign (`obj.ID += 1`), which reads AND writes, offers both. Works for
+  accessors inherited from a base class, declared on an interface, and
+  for namespace-level properties (`Ns::Thing` → `Ns::get_Thing`). A real
+  field named `ID` still wins over any same-named accessor, and a
+  property's namespace is part of its identity, so an outer-scope
+  accessor never shadows a nearer declaration.
+
+### Changed
 - **Unused findings default to `info` and fold out of `check` output**
   (B090) — a normal run no longer lists every unused function/variable;
   the summary carries a per-kind hidden count instead

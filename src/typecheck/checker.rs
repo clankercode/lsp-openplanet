@@ -9,6 +9,7 @@
 //! member-access lookup, no real expression type inference beyond
 //! literals and identifier lookup. Those are later iterations.
 
+use super::access_position::AccessPosition;
 use super::builtins;
 use super::call_site::{self, ArgBind};
 use super::global_scope::{qualified_virtual_name, FuncdefSig, GlobalScope, OverloadSig};
@@ -4951,7 +4952,7 @@ impl<'a> Checker<'a> {
     /// store with `The property has no set accessor`. Only fires on the
     /// external typedb's proven read-only set — workspace fields, Nadeo
     /// props and unknown types stay silent.
-    fn check_readonly_prop_assign(&mut self, lhs: &Expr, compound: bool) {
+    fn check_readonly_prop_assign(&mut self, lhs: &Expr, position: AccessPosition) {
         let ExprKind::Member { object, member } = &lhs.kind else {
             return;
         };
@@ -4968,7 +4969,7 @@ impl<'a> Checker<'a> {
                 span: lhs.span,
                 kind: TypeDiagnosticKind::ReadOnlyProperty {
                     property: format!("{type_name}.{prop}"),
-                    compound,
+                    compound: position.is_compound(),
                 },
             });
         }
@@ -5343,7 +5344,7 @@ impl<'a> Checker<'a> {
                 // Get-only virtual property write (`iso4.tx = …` /
                 // `loc.tx += …`): the game rejects with
                 // `The property has no set accessor`.
-                self.check_readonly_prop_assign(lhs, !matches!(op, AssignOp::Assign));
+                self.check_readonly_prop_assign(lhs, AccessPosition::of_assign_op(*op));
                 TypeRepr::Error(String::new())
             }
             ExprKind::HandleAssign { lhs, rhs } => {

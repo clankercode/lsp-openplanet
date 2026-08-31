@@ -59,6 +59,17 @@ pub fn bind_arg_workspace(
     }
 }
 
+/// Whether a signature taking `min_args..=max_args` parameters accepts a
+/// call passing `argc` of them.
+///
+/// Factored out so callers holding pooled `Symbol`s rather than
+/// [`OverloadSig`]s — goto-definition deciding whether a call site narrows
+/// to one overload (B104) — test arity by the same rule
+/// [`unique_overload_for_argc`] uses, instead of restating it.
+pub fn arity_admits(min_args: usize, max_args: usize, argc: usize) -> bool {
+    argc >= min_args && argc <= max_args
+}
+
 /// Among overloads, return the unique signature whose arity accepts `argc`.
 ///
 /// Multi-match or zero-match → `None` (callers stay silent on types; arity
@@ -66,7 +77,7 @@ pub fn bind_arg_workspace(
 pub fn unique_overload_for_argc(overloads: &[OverloadSig], argc: usize) -> Option<&OverloadSig> {
     let mut matching = overloads
         .iter()
-        .filter(|sig| argc >= sig.min_args && argc <= sig.param_types.len());
+        .filter(|sig| arity_admits(sig.min_args, sig.param_types.len(), argc));
     let first = matching.next()?;
     if matching.next().is_some() {
         None

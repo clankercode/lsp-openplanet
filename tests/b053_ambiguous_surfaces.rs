@@ -132,7 +132,7 @@ fn goto_definition_does_not_jump_to_an_arbitrary_candidate() {
         let empty = HashMap::new();
         let files = WorkspaceFiles { files: &empty };
         assert!(
-            goto_definition(&analysis, None, pos_in(&source, name), &scope, &files).is_none(),
+            goto_definition(&analysis, None, pos_in(&source, name), &scope, &files).is_empty(),
             "`{name}` is ambiguous in-game; go-to-definition must not pick one \
              of its candidate enums"
         );

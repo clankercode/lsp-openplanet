@@ -13,6 +13,7 @@
 //!
 //! Full expression typing lives in [`checker`].
 
+pub mod access_position;
 pub mod builtins;
 pub mod call_site;
 pub mod checker;
