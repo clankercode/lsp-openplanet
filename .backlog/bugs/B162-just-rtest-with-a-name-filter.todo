@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T17:03:52Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T17:30:52Z"
 complexity: medium
 created_at: "2026-08-31T17:03:27Z"
 depends_on: []
+duration_minutes: 27.01301414345
 estimate_hours: 1
 id: B162
 priority: high
 started_at: "2026-08-31T17:03:52Z"
-status: in_progress
+status: done
 tags: []
 title: 'just rtest with a name filter reports ok on 0 passed and 0 failed: a filter that matches nothing is a wall of green for a run that executed nothing'
-updated_at: "2026-08-31T17:03:52Z"
+updated_at: "2026-08-31T17:30:52Z"
 ---
 
 just rtest with a name filter reports ok on 0 passed and 0 failed: a filter that matches nothing is a wall of green for a run that executed nothing
