@@ -177,13 +177,18 @@ pub fn injected_methods_named(name: &str) -> impl Iterator<Item = &'static Injec
 /// chain locally would be a THIRD implementation of an existing predicate —
 /// exactly the hazard B079 describes.
 ///
-/// The `is_external_type` gate is load-bearing and was missed on the first
-/// attempt. A workspace type SHADOWS an external one of the same name, so a
-/// plugin declaring `class CSmPlayer {}` would otherwise be offered the engine
-/// class's injected methods — `is_external_derived_from` resolves the name
-/// against the index whether or not the workspace shadows it, while
-/// `is_external_type` checks `workspace_type_shadows` first. Picking the
-/// predicate that ignored shadowing is itself an instance of B079.
+/// The shadow gate is load-bearing and was missed on the first attempt. A
+/// workspace type SHADOWS an external one of the same name, so a plugin
+/// declaring `class CSmPlayer {}` would otherwise be offered the engine
+/// class's injected methods. The old `is_external_derived_from` resolved the
+/// name against the index whether or not the workspace shadowed it, while
+/// `is_external_type` checked `workspace_type_shadows` first, and the two were
+/// indistinguishable at a call site — picking the shadow-blind one was itself
+/// an instance of B079.
+///
+/// B081 made that unpickable rather than merely documented: the gate is now
+/// `external_type_name`, whose `Some` IS the argument the derivation
+/// predicates take, so the guard cannot be separated from the use it guards.
 ///
 /// `Exact` matches by identity rather than by descent, mirroring the binary:
 /// Openplanet hard-codes a registration list, so a future Nadeo type deriving
@@ -193,21 +198,22 @@ pub fn injected_methods_for_receiver<'a>(
     scope: &'a GlobalScope<'a>,
     type_name: &'a str,
 ) -> impl Iterator<Item = &'static InjectedMethod> + 'a {
-    let external_receiver = scope.is_external_type(type_name);
+    let receiver = scope.external_type_name(type_name);
     INJECTED_METHODS.iter().filter(move |m| {
-        external_receiver
-            && match &m.receivers {
-                InjectedReceiver::EveryEngineClass => {
-                    scope.is_external_derived_from(type_name, "CMwNod")
-                }
-                InjectedReceiver::Exact(names) => names.iter().any(|n| {
-                    // Same external type, tolerating short vs qualified spellings:
-                    // the typedb parent chain is a tree, so mutual derivation can
-                    // only mean the two names resolve to one type.
-                    scope.is_external_derived_from(type_name, n)
-                        && scope.is_external_derived_from(n, type_name)
-                }),
+        let Some(receiver) = receiver else {
+            return false;
+        };
+        match &m.receivers {
+            InjectedReceiver::EveryEngineClass => {
+                scope.external_type_derives_from(receiver, "CMwNod")
             }
+            // Same external type, tolerating short vs qualified spellings.
+            // The mutual-derivation pair used to be open-coded here AND in
+            // `checker.rs`; it is one named predicate now.
+            InjectedReceiver::Exact(names) => {
+                names.iter().any(|n| scope.external_type_is(receiver, n))
+            }
+        }
     })
 }
 
