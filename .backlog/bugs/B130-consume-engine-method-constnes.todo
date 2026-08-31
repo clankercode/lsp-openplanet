@@ -68,3 +68,29 @@ than "all or nothing", not that it can skip the work.
 B121's `residual_fresh_handles_are_documented_not_fixed` is the test that pins
 the indistinguishable case. If this ticket finds a way to separate fresh handles
 from views, that test is designed to fail — which is the signal, not a break.
+
+
+## AMENDED by B137's game probe, 2026-09-01 — one claim in this ticket is superseded
+
+B130's report said consuming the Nadeo loader's hardcoded `false` would have
+fired "on every correctly-written const Nadeo call". **That population looks
+empty.** B137 probed the engine with all three Core controls passing:
+
+    const CMwNod@             n.MwAddRef()       REJECT
+    CMwNod@ (non-const)       n.MwAddRef()       ACCEPT   <- isolates constness
+    const CGameCtnBlock@      b.IsGhostBlock()   REJECT   (pure getter)
+    const CGameCtnMediaBlock@ b.GetKeysCount()   REJECT   (pure getter)
+    const CGameCtnChallenge@  c.MapName  (read)  REJECT
+
+So the old hardcoded `false` was **factually right on every shape probed** —
+consuming it would have produced TRUE positives, not false ones.
+
+**B130's conclusion is unchanged and the exclusion still stands**, for the reason
+that survives: *a value that is right by coincidence is not knowledge.* Five
+probed members do not license a claim about 3084, and the dump does not say.
+`None` is the honest state, and B137 made it representable.
+
+The probe also explains the fleet's zero Nadeo exposure as a **fact rather than a
+corpus accident**: a `const CMwNod@` receiver cannot be read through at all, so
+almost no correct code has one. That is why nobody writes it — and it means the
+payoff from ever resolving Nadeo constness is small.
