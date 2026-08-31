@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T15:48:12Z"
 depends_on: []
 estimate_hours: 1
 id: B148
 priority: high
+started_at: null
 status: pending
 tags: []
 title: b067 and b071 corpora are stamped 1.29.5 with build hash 1234ad9e, but the only logged session that date ran 1.29.14 build 6fd4200f — the stamp reads as copied from a sibling corpus, and both are the orphans with no generator
@@ -12,3 +14,69 @@ updated_at: "2026-08-31T15:48:12Z"
 ---
 
 b067 and b071 corpora are stamped 1.29.5 with build hash 1234ad9e, but the only logged session that date ran 1.29.14 build 6fd4200f — the stamp reads as copied from a sibling corpus, and both are the orphans with no generator
+
+
+## Surfaced by B129's manifest on its first real run, 2026-09-01
+
+The version column paid for itself immediately. `b067-class-position-scopes.tsv`
+(63 rows) and `b071-enum-conversion.tsv` (8 rows) stamp:
+
+    1.29.5 ... 2026-08-31    build hash 1234ad9e
+
+But the only session in `Openplanet.log` dated 2026-08-31 ran **1.29.14, build
+`6fd4200f`**. And `1234ad9e` matches **b052/b053's preamble**, not anything live.
+
+**That reads as a stamp copied from a sibling corpus rather than observed.**
+
+## Not asserted as proven — and the runner does not pick a side
+
+The log may have rotated, so the evidence is suggestive rather than conclusive.
+B129's runner surfaces it as a **discrepancy** and refuses to choose, which is
+correct: a regen tool that silently decides which of two version claims is right
+would be worse than one that reports both.
+
+## Why this pair specifically is the problem
+
+**These two are also the ORPHANS** — the only artifacts in the manifest declared
+`generator=NONE`. So nobody can re-derive the truth without rebuilding the probe
+from the method written in their preambles.
+
+That is the concrete case for machine-captured stamps rather than hand-written
+ones, and it is exactly the failure B129 exists to end: a human copies a header,
+the copy is plausible, and nothing can check it afterwards.
+
+## Deliverable, in order
+
+1. **Write the generators.** 63 rows and 8 rows, with the method already spelled
+   out in each preamble. Until these exist, every other question here is
+   unanswerable.
+2. **Re-run against the live engine** (1.29.14, `6fd4200f`) and let the stamp be
+   captured by the machine.
+3. **Diff the new rows against the committed ones.** This is the interesting
+   part: if they are identical, the old stamp was merely mislabelled and no
+   finding changes. **If they differ, some conclusion drawn from them since is
+   wrong**, and that has to be chased — `b067`'s discriminator is two message
+   spellings, so a difference could be as small as engine wording and as large as
+   a behaviour change.
+4. Register both in `docs/probes/MANIFEST.tsv` with `generator=` filled in, and
+   set the `dependents` column to whatever in-source prose restates them.
+
+## Do not shortcut step 3
+
+The temptation is to regenerate, see a clean file, and move on. **Diff it.** A
+corpus that regenerates to different content is the single most valuable signal
+this whole manifest exists to produce, and it will never be cheaper to look for
+than on the first regeneration.
+
+## Test axes
+
+- Each generator must have a positive control (a row the engine ACCEPTS) and a
+  negative (a row it REJECTS). B086's defect was controls of only one polarity.
+- Every row must say what shipped code it stands in for, per B141's
+  variant-table check, which now enforces this.
+- The generator must honour B068 (one name per compilation unit) and B077
+  (registration-before-copy sweep), and leave the game clean.
+- **Mutation:** a generator that emits an empty corpus, and one that marks every
+  row the same verdict, must both be caught. See the hazards catalogue — a run
+  gate written as "no failures" cannot distinguish "everything passed" from
+  "nothing ran".
