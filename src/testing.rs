@@ -156,7 +156,25 @@ impl TempDir {
     /// pid — or one run whose pid had been recycled — raced over the same
     /// directory.
     pub fn new(label: &str) -> Self {
-        let dir = Self::reserve(label);
+        Self::in_dir(std::env::temp_dir(), label)
+    }
+
+    /// Create a fresh directory under an explicit `parent`, and any of its
+    /// own missing parents.
+    ///
+    /// Exists because not every suite wants `/tmp` (B075). The B046 typedb
+    /// tests assemble a database pair below the repository's `target/` on
+    /// purpose, so that they depend on neither a home directory nor a
+    /// writable `/tmp`. That is a considered decision, and moving those
+    /// tests into `/tmp` just to reuse [`TempDir::new`] would reverse it.
+    /// This constructor keeps the placement and adds the guarantee the
+    /// placement was missing: [`Drop`] removes the directory, on the unwind
+    /// path as well as the normal one.
+    ///
+    /// `parent` is created if it does not exist, so a caller need not
+    /// pre-create `target/` on a tree that has never been built.
+    pub fn in_dir(parent: impl AsRef<Path>, label: &str) -> Self {
+        let dir = Self::reserve_in(parent, label);
         std::fs::create_dir_all(&dir.path)
             .unwrap_or_else(|e| panic!("failed to create temp dir {}: {e}", dir.path.display()));
         dir
@@ -166,8 +184,16 @@ impl TempDir {
     /// directory that does not exist. Dropping still attempts removal, so a
     /// test that later creates the path is covered too.
     pub fn reserve(label: &str) -> Self {
+        Self::reserve_in(std::env::temp_dir(), label)
+    }
+
+    /// The one place a guarded path is named, so `/tmp` and an explicit
+    /// parent cannot drift apart in how they suffix it.
+    fn reserve_in(parent: impl AsRef<Path>, label: &str) -> Self {
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("{label}-{}-{seq}", std::process::id()));
+        let path = parent
+            .as_ref()
+            .join(format!("{label}-{}-{seq}", std::process::id()));
         Self { path }
     }
 
@@ -434,6 +460,131 @@ mod tests {
         assert!(
             !leaked.exists(),
             "dropping the TempPath must remove the dir"
+        );
+    }
+
+    // ---- `in_dir`: the same guard, one directory over (B075) ----
+
+    /// The property that makes `in_dir` worth having: it puts the directory
+    /// where the caller asked, not in `/tmp`.
+    ///
+    /// This is the assertion that fails if `in_dir` ever ignores its `parent`
+    /// argument and falls back to [`std::env::temp_dir`] — which is exactly
+    /// the shortcut B075 was told not to take.
+    #[test]
+    fn in_dir_creates_under_the_given_parent() {
+        let parent = TempDir::new("oplsp-b075-selftest-parent");
+        let dir = TempDir::in_dir(parent.path(), "child");
+
+        assert_eq!(
+            dir.path().parent(),
+            Some(parent.path()),
+            "in_dir must place the directory under its `parent` argument"
+        );
+        assert!(dir.is_dir(), "in_dir must create the directory");
+    }
+
+    /// Negative control for the test above. If both constructors resolved to
+    /// the same place, `in_dir_creates_under_the_given_parent` would pass for
+    /// the wrong reason on any machine whose `TMPDIR` happened to match.
+    #[test]
+    fn new_still_creates_under_tmp_so_the_two_constructors_differ() {
+        let in_tmp = TempDir::new("oplsp-b075-selftest-tmp");
+        assert_eq!(in_tmp.path().parent(), Some(std::env::temp_dir().as_path()));
+
+        let parent = TempDir::new("oplsp-b075-selftest-elsewhere");
+        let elsewhere = TempDir::in_dir(parent.path(), "child");
+        assert_ne!(
+            elsewhere.path().parent(),
+            in_tmp.path().parent(),
+            "the two constructors must be distinguishable"
+        );
+    }
+
+    /// `target/` does not exist on a tree that has never been built, so the
+    /// constructor has to make it rather than fail.
+    #[test]
+    fn in_dir_creates_a_parent_that_does_not_exist_yet() {
+        let root = TempDir::reserve("oplsp-b075-selftest-missing-parent");
+        assert!(!root.exists(), "precondition: the parent must be absent");
+
+        let nested = root.join("a/b/target");
+        let dir = TempDir::in_dir(&nested, "child");
+        assert!(dir.is_dir(), "in_dir must create missing parents");
+        assert_eq!(dir.path().parent(), Some(nested.as_path()));
+    }
+
+    #[test]
+    fn in_dir_drop_removes_a_populated_directory() {
+        let parent = TempDir::new("oplsp-b075-selftest-drop");
+        let path;
+        {
+            let dir = TempDir::in_dir(parent.path(), "child");
+            std::fs::create_dir_all(dir.join("a/b/c")).unwrap();
+            std::fs::write(dir.join("a/b/c/f.txt"), "x").unwrap();
+            path = dir.to_path_buf();
+        }
+        assert!(!path.exists(), "Drop must remove the whole tree");
+        assert!(
+            parent.is_dir(),
+            "Drop must not remove the caller's parent directory"
+        );
+    }
+
+    /// The case a trailing `remove_dir_all` cannot cover, and the reason
+    /// B075 is a real leak rather than a tidy-up.
+    #[test]
+    fn in_dir_drop_runs_on_the_unwind_path() {
+        let parent = TempDir::new("oplsp-b075-selftest-unwind");
+        let parent_path = parent.to_path_buf();
+        let path = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&path);
+
+        let result = std::panic::catch_unwind(move || {
+            let dir = TempDir::in_dir(&parent_path, "child");
+            *sink.lock().unwrap() = Some(dir.to_path_buf());
+            panic!("deliberate: stands in for a failed assertion");
+        });
+
+        assert!(result.is_err(), "the closure must have panicked");
+        let leaked = path.lock().unwrap().clone().expect("dir was created");
+        assert!(
+            !leaked.exists(),
+            "a panicking test must not leave {} behind",
+            leaked.display()
+        );
+    }
+
+    #[test]
+    fn in_dir_labels_are_unique_per_call() {
+        let parent = TempDir::new("oplsp-b075-selftest-unique");
+        let a = TempDir::in_dir(parent.path(), "child");
+        let b = TempDir::in_dir(parent.path(), "child");
+        assert_ne!(a.path(), b.path());
+        assert!(a.is_dir() && b.is_dir());
+    }
+
+    /// The destructive half of the defect, now one directory over: the code
+    /// `in_dir` replaces called `remove_dir_all` on the way IN, so a second
+    /// run sharing the label wiped a live run's fixtures.
+    #[test]
+    fn in_dir_construction_never_removes_another_runs_directory() {
+        let parent = TempDir::new("oplsp-b075-selftest-concurrent");
+        let other_run = TempDir::in_dir(parent.path(), "child");
+        std::fs::write(other_run.join("fixture.txt"), "in use").unwrap();
+
+        let mine = TempDir::in_dir(parent.path(), "child");
+        assert_ne!(mine.path(), other_run.path());
+        assert!(
+            other_run.join("fixture.txt").exists(),
+            "constructing must not disturb {}",
+            other_run.display()
+        );
+
+        drop(mine);
+        assert!(
+            other_run.join("fixture.txt").exists(),
+            "dropping ours must be just as narrow"
         );
     }
 }
