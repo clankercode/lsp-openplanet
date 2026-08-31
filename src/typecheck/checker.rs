@@ -2527,6 +2527,17 @@ impl<'a> Checker<'a> {
         args: &[CallArg],
         span: Span,
     ) -> Option<TypeRepr> {
+        // GH #38 / B073: this runs BEFORE the workspace type constructor
+        // (`call_type`'s `has_type` branch below it), and `lookup_funcdef`
+        // falls through a workspace declaration to the typedb — so
+        // `CoroutineFunc()` against a plugin's own `class CoroutineFunc` was
+        // classified as Core funcdef construction and rejected for taking 0
+        // of 1 arguments. A false positive on a line the game accepts. The
+        // plugin's own declaration wins, and declining here hands the call
+        // to the type-constructor path that should have had it.
+        if self.scope.workspace_shadows_funcdef(qualified) {
+            return None;
+        }
         if self.scope.lookup_funcdef(qualified).is_none() {
             return None;
         }
@@ -11772,5 +11783,217 @@ void f() {
             "user-class WithRunContext must stay silent, got {:?}",
             diags
         );
+    }
+    // ── B073 / GH #38: a workspace type shadows an engine funcdef ───────────
+
+    /// Every POSITION a type name can be written in, as one source per row.
+    /// `{T}` is substituted with the type name; the body always reaches a
+    /// member the type does not have, so a correctly resolved receiver
+    /// produces exactly one `UndefinedMember`.
+    ///
+    /// The receiver is what is under test, not the member: if the declared
+    /// type resolves to the engine funcdef instead of the plugin's own type,
+    /// the member check goes neutral and the diagnostic vanishes. A LOST true
+    /// positive is the readable signal here; the ctor row below carries the
+    /// false-positive half.
+    const B073_POSITIONS: [(&str, &str); 6] = [
+        ("local", "void f() { {T}@ c; print(\"\" + c.zzzNoSuch); }\n"),
+        ("parameter", "void g({T}@ p) { print(\"\" + p.zzzNoSuch); }\n"),
+        (
+            "return type",
+            "{T}@ h() { return null; }\nvoid f() { print(\"\" + h().zzzNoSuch); }\n",
+        ),
+        (
+            "member field",
+            "class ZZZHolder { {T}@ fld; }\nvoid f() { ZZZHolder@ h; print(\"\" + h.fld.zzzNoSuch); }\n",
+        ),
+        (
+            "array element",
+            "void f() { array<{T}@> a; print(\"\" + a[0].zzzNoSuch); }\n",
+        ),
+        (
+            "array shorthand element",
+            "void f() { {T}@[] a; print(\"\" + a[0].zzzNoSuch); }\n",
+        ),
+    ];
+
+    /// B073 / GH #38: a plugin type named after a Core funcdef must behave in
+    /// every position exactly like a plugin type named after nothing.
+    ///
+    /// Each colliding row is paired with a NON-COLLIDING control of the same
+    /// shape in the same position, and the two are required to agree. That
+    /// pairing is what makes the sweep meaningful: it asserts a relation
+    /// between two runs rather than a hardcoded diagnostic list, so a row
+    /// cannot pass by both sides going silent for an unrelated reason — the
+    /// control would go silent too and the assert would still hold only if
+    /// the control's own floor (below) is met.
+    #[test]
+    fn a_plugin_type_named_after_an_engine_funcdef_behaves_the_same_in_every_position() {
+        let mut wrong: Vec<String> = Vec::new();
+        let mut control_diags = 0usize;
+
+        for (shape, decl) in [
+            ("class", "class {T} { int v; }\n"),
+            ("interface", "interface {T} { int Get(); }\n"),
+        ] {
+            for (position, body) in B073_POSITIONS {
+                let build = |name: &str| {
+                    format!("{}{}", decl.replace("{T}", name), body.replace("{T}", name))
+                };
+                let collided = check_with_typedb(&build("CoroutineFunc"));
+                let control = check_with_typedb(&build("ZZZWidget"));
+                control_diags += usize::from(!control.is_empty());
+
+                let render = |d: &[TypeDiagnostic]| {
+                    d.iter()
+                        .map(|x| format!("{:?}", x.kind).replace("ZZZWidget", "<T>"))
+                        .collect::<Vec<_>>()
+                };
+                let (a, b) = (render(&collided), render(&control));
+                let a: Vec<String> = a
+                    .iter()
+                    .map(|s| s.replace("CoroutineFunc", "<T>"))
+                    .collect();
+                if a != b {
+                    wrong.push(format!(
+                        "{shape} in {position} position:\n  named after a funcdef: {a:?}\
+                         \n  named after nothing:   {b:?}"
+                    ));
+                }
+            }
+        }
+
+        // Anti-vacuity: enough control rows must actually be diagnosing
+        // something, or "the two agree" is satisfied by two empty lists.
+        // The floor is one full pass over the positions, which the `class`
+        // rows supply — an `interface` has no members to miss, so those rows
+        // are legitimately silent on both sides and are not counted on.
+        assert!(
+            control_diags >= B073_POSITIONS.len(),
+            "only {control_diags} of the non-colliding control rows diagnosed \
+             anything — the comparison above would be vacuous"
+        );
+        assert!(
+            wrong.is_empty(),
+            "{} rows differ: {:#?}",
+            wrong.len(),
+            wrong
+        );
+    }
+
+    /// The false-positive half, which is the damaging direction: constructing
+    /// the plugin's own type was read as constructing the ENGINE funcdef, so
+    /// `CoroutineFunc()` was rejected for taking 0 of 1 arguments — a
+    /// declaration the game accepts.
+    #[test]
+    fn constructing_a_plugin_type_named_after_an_engine_funcdef_is_not_an_arity_error() {
+        for (name, decl) in [
+            ("CoroutineFunc", "class CoroutineFunc { int v; }\n"),
+            (
+                "CoroutineFuncUserdataString",
+                "class CoroutineFuncUserdataString { int v; }\n",
+            ),
+        ] {
+            let src = format!("{decl}void f() {{ {name}@ c = {name}(); }}\n");
+            let diags = check_with_typedb(&src);
+            assert!(
+                diags.is_empty(),
+                "`{name}()` constructs the plugin's own class, not the engine \
+                 funcdef: {diags:?}"
+            );
+        }
+
+        // The engine funcdef ctor still has to be checked when no plugin type
+        // shadows it, or the row above passes by the check being gone.
+        let diags = check_with_typedb("void f() { auto c = CoroutineFunc(); }\n");
+        assert!(
+            !diags.is_empty(),
+            "with nothing shadowing it, the engine `CoroutineFunc` funcdef ctor \
+             is still arity-checked"
+        );
+    }
+
+    /// The namespace axis at the checker level: the declaration is
+    /// `namespace Nz { class CoroutineFunc … }` and the reference inside it is
+    /// written BARE, so an exact-name guard misses it however many shapes it
+    /// enumerates. The diagnostic must name the qualified type, exactly as the
+    /// non-colliding control does.
+    #[test]
+    fn a_namespaced_plugin_type_named_after_an_engine_funcdef_keeps_its_qualifier() {
+        for (name, expected) in [
+            ("CoroutineFunc", "Nz::CoroutineFunc"),
+            ("ZZZWidget", "Nz::ZZZWidget"),
+        ] {
+            let src = format!(
+                "namespace Nz {{ class {name} {{ int v; }} \
+                 void f() {{ {name}@ c; print(\"\" + c.zzzNoSuch); }} }}\n"
+            );
+            let diags = check_with_typedb(&src);
+            let members: Vec<String> = diags
+                .iter()
+                .filter_map(|d| match &d.kind {
+                    TypeDiagnosticKind::UndefinedMember { object_type, .. } => {
+                        Some(object_type.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                members,
+                vec![expected.to_string()],
+                "`{name}` inside `namespace Nz`: {diags:?}"
+            );
+        }
+    }
+
+    /// The over-blocking edge, which is the direction a shadowing fix breaks
+    /// things in: with no plugin type of that name, the engine funcdef must
+    /// still construct, still bind a matching function, and still REJECT a
+    /// mismatched one. B060 paid four review rounds on exactly this edge.
+    #[test]
+    fn an_engine_funcdef_is_untouched_when_no_plugin_type_shadows_it() {
+        let clean = check_with_typedb("void W() {}\nvoid f() { startnew(CoroutineFunc(W)); }\n");
+        assert!(
+            clean.is_empty(),
+            "a matching function still binds the engine funcdef: {clean:?}"
+        );
+
+        let mismatched =
+            check_with_typedb("void W(int a) {}\nvoid f() { startnew(CoroutineFunc(W)); }\n");
+        assert!(
+            mismatched
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::ArgTypeMismatch { .. })),
+            "a mismatched signature is still rejected: {mismatched:?}"
+        );
+    }
+
+    /// The same edge one level along: a plugin type named after an engine
+    /// funcdef must behave at a CALL SLOT exactly like one named after
+    /// nothing — neither newly accepted nor newly rejected. Both the engine
+    /// slot (`startnew`) and a workspace slot whose parameter is written with
+    /// the colliding name are checked, because the two reach the funcdef
+    /// through different predicates.
+    #[test]
+    fn a_plugin_type_named_after_an_engine_funcdef_behaves_the_same_at_a_call_slot() {
+        for body in [
+            "void f() { {T}@ c; startnew(c); }\n",
+            "void g({T}@ p) {}\nvoid f() { {T}@ c; g(c); }\n",
+        ] {
+            let build =
+                |name: &str| format!("class {name} {{ int v; }}\n{}", body.replace("{T}", name));
+            let collided = check_with_typedb(&build("CoroutineFunc"));
+            let control = check_with_typedb(&build("ZZZWidget"));
+            let render = |d: &[TypeDiagnostic], name: &str| {
+                d.iter()
+                    .map(|x| format!("{:?}", x.kind).replace(name, "<T>"))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                render(&collided, "CoroutineFunc"),
+                render(&control, "ZZZWidget"),
+                "call-slot behaviour diverges for `{body}`"
+            );
+        }
     }
 }
