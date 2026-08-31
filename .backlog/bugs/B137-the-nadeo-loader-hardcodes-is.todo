@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T15:08:43Z"
 depends_on: []
 estimate_hours: 1
 id: B137
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'The Nadeo loader hardcodes is_const: false on every method, so false means UNKNOWN — the same bool-defaults-to-a-lie defect as B125/B131, surviving in the loader''s other half'
@@ -12,3 +14,68 @@ updated_at: "2026-08-31T15:08:43Z"
 ---
 
 The Nadeo loader hardcodes is_const: false on every method, so false means UNKNOWN — the same bool-defaults-to-a-lie defect as B125/B131, surviving in the loader's other half
+
+
+## Found by lane-enum during B130, 2026-09-01, by a RED TEST rather than a sweep
+
+## The defect
+
+The **Nadeo loader hardcodes `is_const: false` on every method**, with a comment
+saying "that dump carries no declaration text". So on the Nadeo half, `false`
+means **UNKNOWN**, not non-const.
+
+**This is the same `bool`-defaults-to-a-lie defect B125 and B131 fixed on the
+Core side, surviving in the loader's other half.** B131's audit could not see it:
+that audit checks the Core dump's field PRESENCE, not the Nadeo loader's
+hardcoded VALUES. A `MethodInfo` built with a literal `false` is invisible to a
+presence audit — see the sibling ticket.
+
+## How it was caught, and why nothing else could have caught it
+
+B130 consumed `is_const` for engine receivers. lane-enum's own B116 test
+`external_engine_receiver_never_fires` went red, and reading WHY it was red found
+this. Consuming the hardcoded `false` would have fired the const-receiver rule on
+**every correctly-written const Nadeo call.**
+
+**The fleet sweep could never have found it.** All 807 engine-receiver sites in
+the fleet are Core types — `string`, `Json::Value`, `Reflection::MwClassInfo`,
+`vec3`. The Nadeo population has **ZERO exposure** in the corpus, so a fleet zero
+there means nothing. This is the exposure hazard, landing on the lane that has
+been reporting it all night. Read that entry before designing this ticket's
+measurement.
+
+## The payoff is game-proven, which is what makes this worth doing
+
+    const CMwNod@ n; n.MwAddRef();   ->  engine REJECTS
+
+So these are **real errors we are choosing not to report because our data is
+absent** — a much sharper statement than B116's "no metadata", and it means
+fixing Nadeo constness has a demonstrated benefit rather than a speculative one.
+
+`scripts/probe_engine_const_receiver.py` already has the `nadeo-nonconst` row
+ready.
+
+## Deliverable
+
+Parse the Nadeo signature text for the trailing ` const`, the way B124/B125 did
+for Core's `decl`. **Check first whether the Nadeo dump carries usable signature
+text at all** — the loader comment says it does not, and that comment may be as
+stale as `lookup_method_return`'s was. Measure it; do not inherit it.
+
+If the text genuinely is absent, the honest fix is to make the ABSENCE
+REPRESENTABLE — `Option<bool>` rather than `bool` — so the rule can distinguish
+"known non-const" from "we do not know". That is B131's bool-vs-Option finding
+applied, and it is a legitimate outcome on its own.
+
+## Measurement design — the fleet is the WRONG oracle here
+
+**The game probe is the oracle, not the corpus.** Zero Nadeo exposure means a
+fleet sweep can only produce an uninterpretable zero. Use
+`scripts/probe_engine_const_receiver.py` and report per-construct engine
+verdicts with controls, the way B130 did:
+
+- A non-const Nadeo method on a const receiver -> must REJECT.
+- A const Nadeo method on a const receiver -> must ACCEPT. Without this row, a
+  rule that fires on everything passes.
+- A non-const Nadeo method on a NON-const receiver -> must ACCEPT.
+- The same three on Core types, as the control that the harness is wired at all.
