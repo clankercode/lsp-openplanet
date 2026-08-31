@@ -255,6 +255,9 @@ pub struct EnumInfo {
     pub name: String,
     pub namespace: Option<String>,
     pub values: Vec<(String, i64)>,
+    /// Per-value prose supplied by the type database. Most values have none;
+    /// absence is the normal fallback, not an empty synthetic description.
+    pub value_docs: HashMap<String, String>,
     pub source: TypeSource,
     /// B016: the engine dump declares this enum inline on a member and gives
     /// it no name of its own, so its qualified key is *synthesized* from the
@@ -1367,6 +1370,18 @@ impl TypeIndex {
         for en in &db.enums {
             let qname = Self::qualify(&en.ns, &en.name);
             let mut values: Vec<_> = en.values.iter().map(|(k, v)| (k.clone(), v.v)).collect();
+            let value_docs = en
+                .values
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .d
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|doc| !doc.is_empty())
+                        .map(|doc| (name.clone(), doc.to_string()))
+                })
+                .collect();
             sort_enum_values(&mut values);
             self.enums.insert(
                 qname,
@@ -1374,6 +1389,7 @@ impl TypeIndex {
                     name: en.name.clone(),
                     namespace: en.ns.clone(),
                     values,
+                    value_docs,
                     source: TypeSource::Core,
                     anonymous: false,
                 },
@@ -1700,6 +1716,7 @@ impl TypeIndex {
                     name: header_enum.name.clone(),
                     namespace: None,
                     values,
+                    value_docs: HashMap::new(),
                     source: TypeSource::Header,
                     anonymous: false,
                 });
@@ -1720,6 +1737,7 @@ impl TypeIndex {
             name,
             namespace,
             values,
+            value_docs: HashMap::new(),
             source: TypeSource::Nadeo,
             anonymous,
         });

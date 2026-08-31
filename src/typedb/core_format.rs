@@ -219,6 +219,8 @@ pub struct CoreEnum {
 #[derive(Debug, Deserialize)]
 pub struct EnumValue {
     pub v: i64,
+    #[serde(default)]
+    pub d: Option<String>,
 }
 
 impl CoreDatabase {
@@ -509,10 +511,9 @@ mod b131_dump_field_audit {
                 &[],
                 &["desc", "flags", "group"],
             ),
-            // `d` is the enum VALUE's doc string — 206 of 929 carry one, and
-            // we keep only `v`. Not added: nothing reads enum-value docs, and
-            // a populated field with no reader is the other half of B125.
-            ("EnumValue", enum_values, &[], &["d"]),
+            // B133: `d` is the enum VALUE's doc string. It is loaded together
+            // with its hover/completion consumers; neither half lands alone.
+            ("EnumValue", enum_values, &[], &[]),
         ]
     }
 

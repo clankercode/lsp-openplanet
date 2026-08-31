@@ -188,7 +188,9 @@ pub fn hover(
     // 4) External type database.
     if let Some(index) = scope.external() {
         // The direct map: a source spelling to its key, no scope test.
-        if let Some(md) = lookup_external(&qualified, index, index.source_name_key(&qualified)) {
+        if let Some(md) =
+            lookup_external(&qualified, index, index.source_name_key(&qualified), scope)
+        {
             return Some(markdown_hover(md));
         }
         // B070: B052's ancestor walk resolves a globally visible enum through
@@ -245,7 +247,7 @@ pub fn hover(
                 .accepts_enum(&qualified)
                 .and_then(|proof| scope.canonical_enum_key(&qualified, proof));
             let key = canonical.as_deref().unwrap_or(qualified.as_str());
-            if let Some(md) = lookup_external(&qualified, index, Some(key)) {
+            if let Some(md) = lookup_external(&qualified, index, Some(key), scope) {
                 return Some(markdown_hover(md));
             }
         }
@@ -515,6 +517,27 @@ fn with_doc(block: String, doc: Option<&String>) -> String {
         Some(doc) => format!("{}\n\n{}", block, doc),
         None => block,
     }
+}
+
+/// Render type-database prose as prose inside an LSP Markdown hover. The dump
+/// is not authored as Markdown; allowing `*`, `<tag>` or `[` through changes
+/// visible text into formatting/HTML rather than showing what the engine said.
+fn escape_markdown_prose(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '&' => escaped.push_str("&amp;"),
+            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '!'
+            | '|' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 // === workspace symbols ======================================================
@@ -992,7 +1015,50 @@ fn format_external_type(qualified: &str, ty: &TypeInfo) -> String {
 /// asks the RESOLVER's scope test — workspace OR index — instead of the
 /// index's. That is strictly wider, so no spelling stopped resolving; the
 /// corpus sweep in this module's tests pins that in both directions.
-fn lookup_external(qualified: &str, index: &TypeIndex, source_key: Option<&str>) -> Option<String> {
+fn lookup_external(
+    qualified: &str,
+    index: &TypeIndex,
+    source_key: Option<&str>,
+    scope: &GlobalScope<'_>,
+) -> Option<String> {
+    // B133: `source_name_key` indexes enum TYPES, not their values. Split the
+    // written path once. The direct map is the cheap canonical path; the
+    // resolver retry is B070's accepted ancestor spelling (`UI::VirtualKey`,
+    // or a workspace-declared `Foo::VirtualKey`). It is gated by
+    // `accepts_enum` before canonicalization, preserving the synthetic-prefix
+    // and suffix guards documented at the outer hover ladder.
+    if let Some((owner, value_name)) = qualified.rsplit_once("::") {
+        // A workspace enum owns the key before the typedb does. Step 3 above
+        // renders its valid values; reaching this fallback means the value is
+        // invalid (or otherwise unavailable), and the same-named Core enum
+        // must not leak a value/doc through the shadow.
+        if scope.workspace_enum_member_names(owner).is_some() {
+            return None;
+        }
+        let owner_key = index
+            .source_name_key(owner)
+            .map(str::to_string)
+            .or_else(|| {
+                scope.accepts_enum(owner).map(|proof| {
+                    scope
+                        .canonical_enum_key(owner, proof)
+                        .unwrap_or_else(|| owner.to_string())
+                })
+            });
+        if let Some(en) = owner_key
+            .as_deref()
+            .and_then(|key| index.lookup_source_enum(key))
+        {
+            if let Some((_, value)) = en.values.iter().find(|(name, _)| name == value_name) {
+                let declaration = fence(&format!("enum value {owner}::{value_name} = {value}"));
+                return Some(match en.value_docs.get(value_name) {
+                    Some(doc) => format!("{}\n\n{}", declaration, escape_markdown_prose(doc)),
+                    None => declaration,
+                });
+            }
+        }
+    }
+
     if let Some(ty) = source_key.and_then(|key| index.lookup_type(key)) {
         return Some(format_external_type(qualified, ty));
     }
@@ -2499,6 +2565,97 @@ mod tests {
         }));
         let ext = hover_external_md("void main() { E e; }", "E", 1, &idx);
         assert_eq!(ws, ext, "enum hover diverges between paths");
+    }
+
+    #[test]
+    fn hover_external_enum_value_shows_its_doc_without_interpreting_it_as_markdown() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "enums": [{"name": "E", "values": {
+                "Documented": {
+                    "v": 7,
+                    "d": "Use *literal* <value> and [brackets]."
+                }
+            }}]
+        }));
+        let md = hover_external_md("void main() { E::Documented; }", "Documented", 1, &idx);
+        assert!(
+            md.contains("E::Documented = 7"),
+            "missing value identity: {md:?}"
+        );
+        assert!(
+            md.contains(r"Use \*literal\* &lt;value&gt; and \[brackets\]."),
+            "typedb prose must not become markdown/HTML: {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_external_enum_value_without_a_doc_still_shows_the_value() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "enums": [{"name": "E", "values": {"Plain": {"v": 3}}}]
+        }));
+        let md = hover_external_md("void main() { E::Plain; }", "Plain", 1, &idx);
+        assert!(
+            md.contains("E::Plain = 3"),
+            "missing plain value hover: {md:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_enum_shadow_blocks_a_core_only_value_and_its_doc() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "enums": [{"name": "E", "values": {
+                "Documented": {"v": 7, "d": "Core value must stay hidden."}
+            }}]
+        }));
+        let hover = hover_external(
+            "enum E { Plain = 3 }\nvoid main() { E::Documented; }",
+            "Documented",
+            1,
+            &idx,
+        );
+        if let Some(hover) = hover {
+            let md = md_of(hover);
+            assert!(!md.contains("Core value must stay hidden."), "{md:?}");
+            assert!(!md.contains("E::Documented = 7"), "{md:?}");
+        }
+    }
+
+    #[test]
+    fn hover_documented_global_enum_value_through_a_real_ancestor_scope() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "functions": [{"ns": "UI", "name": "Dummy", "returntypedecl": "void"}],
+            "enums": [{"name": "E", "values": {
+                "Documented": {"v": 7, "d": "Ancestor spelling works."}
+            }}]
+        }));
+        let md = hover_external_md("void main() { UI::E::Documented; }", "Documented", 1, &idx);
+        assert!(
+            md.contains("UI::E::Documented = 7"),
+            "missing value: {md:?}"
+        );
+        assert!(
+            md.contains("Ancestor spelling works."),
+            "missing doc: {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_plain_global_enum_value_through_a_workspace_ancestor_scope() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "enums": [{"name": "E", "values": {"Plain": {"v": 3}}}]
+        }));
+        let md = hover_external_md(
+            "namespace Foo {}\nvoid main() { Foo::E::Plain; }",
+            "Plain",
+            1,
+            &idx,
+        );
+        assert!(md.contains("Foo::E::Plain = 3"), "missing value: {md:?}");
     }
 
     // === B054: interface members on the pool ==============================
