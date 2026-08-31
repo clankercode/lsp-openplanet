@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T17:17:42Z"
+depends_on: []
+estimate_hours: 1
+id: B165
+priority: high
+status: pending
+tags: []
+title: 'B110''s primitive funcdef axis is still unmeasured: a bare int handler at an int64 userdata slot, ~6 variants through an existing probe harness'
+updated_at: "2026-08-31T17:17:42Z"
+---
+
+B110's primitive funcdef axis is still unmeasured: a bare int handler at an int64 userdata slot, ~6 variants through an existing probe harness
