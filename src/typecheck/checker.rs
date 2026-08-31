@@ -256,7 +256,7 @@ pub enum TypeDiagnosticKind {
     UnreachableCode,
     /// GH #49: no implicit conversion exists between distinct math value
     /// types (`int3 size = map.Size;` — nat3 → int3). Game wording:
-    /// `Can't implicitly convert from 'const nat3' to 'int3'`.
+    /// `Can't implicitly convert from 'const nat3' to 'int3&'.`
     NoImplicitConversion {
         from: String,
         to: String,
@@ -477,7 +477,7 @@ impl TypeDiagnostic {
             }
             TypeDiagnosticKind::UnreachableCode => "Unreachable code".to_string(),
             TypeDiagnosticKind::NoImplicitConversion { from, to } => {
-                format!("Can't implicitly convert from '{from}' to '{to}'")
+                format!("Can't implicitly convert from '{from}' to '{to}&'.")
             }
             TypeDiagnosticKind::NoMatchingSignatures { text } => {
                 format!("No matching signatures to '{text}'")
