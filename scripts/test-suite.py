@@ -115,7 +115,8 @@ VERIFIED_MARKER = "SUITE-VERIFIED"
 
 SUMMARY = re.compile(
     r"^test result: \S+\. (?P<passed>\d+) passed; (?P<failed>\d+) failed; "
-    r"(?P<ignored>\d+) ignored"
+    r"(?P<ignored>\d+) ignored(?:; (?P<measured>\d+) measured"
+    r"; (?P<filtered>\d+) filtered out)?"
 )
 
 
@@ -452,6 +453,18 @@ def reconcile(
     passed = sum(int(m["passed"]) for s in sections for m in s.summaries)
     failed = sum(int(m["failed"]) for s in sections for m in s.summaries)
     ignored = sum(int(m["ignored"]) for s in sections for m in s.summaries)
+    # A libtest NAME filter is invisible to `names_a_target`, which only sees
+    # cargo's own target flags. `just rtest -- --test foo` is read by libtest
+    # as a name substring, matches nothing, and every binary still runs and
+    # still reports -- so coverage looks complete, `failed` is 0, and the
+    # marker prints a total of ZERO as a pass. A green zero is not a pass.
+    # libtest's own `filtered out` count is the honest signal that the run was
+    # a subset, so treat any nonzero total as exactly that.
+    filtered_out = sum(
+        int(m["filtered"]) for s in sections for m in s.summaries if m["filtered"]
+    )
+    if filtered_out:
+        filtered = True
 
     for section in started_without_summary:
         name = Path(section.path or "?").name
@@ -676,6 +689,38 @@ def run_selftest() -> int:
             f"a filtered run printed `{VERIFIED_MARKER}` — a subset would be "
             "reportable as a suite total"
         )
+    # The green zero. `just rtest -- --test b089_funcdef_call_site` sends
+    # `--test` to LIBTEST, which reads it as a name substring, matches nothing,
+    # and still runs and reports every binary. `filtered` is False here on
+    # purpose: this is the caller that did NOT know it had filtered, which is
+    # exactly the case that used to print `SUITE-VERIFIED: 0 passed` over full
+    # coverage. Detection must come from libtest's own `filtered out` count.
+    green_zero = [
+        f"     Running tests/one.rs ({one})",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; "
+        "37 filtered out; finished in 0.01s",
+    ]
+    gz_status, gz_report = reconcile(0, green_zero, {one: "one"})
+    if VERIFIED_MARKER in gz_report:
+        problems.append(
+            f"a name-filtered run printed `{VERIFIED_MARKER}` — a total of zero "
+            "over complete coverage would read as a passing suite"
+        )
+    if gz_status != 0:
+        problems.append("a clean name-filtered run was reported as a failure")
+    # Positive control: the SAME shape with nothing filtered out must still
+    # earn the marker, or the check above passes by rejecting everything.
+    unfiltered = [
+        f"     Running tests/one.rs ({one})",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; "
+        "0 filtered out; finished in 0.01s",
+    ]
+    if VERIFIED_MARKER not in reconcile(0, unfiltered, {one: "one"})[1]:
+        problems.append(
+            "an unfiltered clean run withheld the marker — the filtered-out "
+            "check rejects every run, so it proves nothing"
+        )
+
     if not names_a_target(["--test", "foo"]) or names_a_target(["-j2"]):
         problems.append("target-selector detection is wrong")
     if split_cargo_args(["-j2", "--", "--test-threads=2"]) != (

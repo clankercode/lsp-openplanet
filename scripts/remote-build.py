@@ -22,6 +22,21 @@ Each worktree gets its own remote directory and its own CARGO_TARGET_DIR, keyed
 by a hash of the local path, so parallel lanes never share a target dir and
 incremental rebuilds stay warm per lane.
 
+Flags go BEFORE the action, always:
+
+    remote-build.py --sync-back debug/openplanet-lsp run -- cargo build
+
+A flag placed after the action is not a flag, it is part of the remote command.
+
+FOOTGUN, because it fails GREEN. Arguments after `--` go to the libtest
+harness, not to cargo, so `just rtest -- --test b089_funcdef_call_site` is read
+as a test-NAME filter and matches nothing: the run reports `0 passed` and the
+gate prints a perfectly cheerful SUITE-VERIFIED line. A green zero is not a
+pass. To select a binary you want cargo's flag, before the `--`:
+
+    just rrun cargo test --test b089_funcdef_call_site
+    just rtest -- some_test_name        # name substring: works as expected
+
 `.git` is NOT synced by default. Nothing in the test suite reads repository git
 state, and copying it while a lane is mid-commit could send a torn index. Pass
 --with-git if you add something that needs it.
@@ -279,6 +294,11 @@ def main() -> int:
     remote_src = f"{base}/src"
     remote_target = f"{base}/target"
     rsync_dest = f"{rel_base}/src"
+    # rsync does NOT run a shell on the remote path, so `$HOME` would arrive
+    # literally and rsync would try to chdir into `/home/user/$HOME/...`.
+    # Every rsync-side path must therefore be relative to the remote home,
+    # which is rsync's own default cwd. Only the ssh-side paths may use $HOME.
+    rsync_target = f"{rel_base}/target"
 
     # argparse.REMAINDER keeps a leading "--"; drop it.
     rest = list(a.rest)
@@ -323,6 +343,17 @@ def main() -> int:
                     "`just rrun cargo test --lib`")
             inner = rest
 
+        # Flags belong BEFORE the action; anything after it is the remote
+        # command. Without this check a misplaced flag is shipped to the remote
+        # shell and comes back as `bash: --sync-back: command not found`, which
+        # names the wrong dimension entirely -- it reads as a broken remote
+        # rather than as a local argument-order mistake.
+        stray = [x for x in inner if x.startswith("--sync-back")]
+        if stray:
+            die(f"`{stray[0]}` came after the action, so it was treated as part "
+                f"of the remote command. Flags go first:\n"
+                f"  remote-build.py --sync-back SUBPATH {a.action} -- <cmd>")
+
         cmd = " ".join(shlex.quote(x) for x in inner)
         script = (
             f"set -o pipefail; cd {remote_src} && "
@@ -339,7 +370,7 @@ def main() -> int:
         if rc == 0 and a.sync_back:
             dest = root / "target" / a.sync_back
             dest.parent.mkdir(parents=True, exist_ok=True)
-            src = f"{a.host}:{remote_target}/{a.sync_back}"
+            src = f"{a.host}:{rsync_target}/{a.sync_back}"
             print(f"remote-build: fetching {a.sync_back}", file=sys.stderr)
             back = subprocess.run(["rsync", "-az", src, str(dest)]).returncode
             if back != 0:

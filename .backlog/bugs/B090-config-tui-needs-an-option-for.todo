@@ -1,14 +1,53 @@
 ---
+claimed_at: "2026-08-31T09:49:33Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T08:14:24Z"
 depends_on: []
 estimate_hours: 1
 id: B090
 priority: high
-status: pending
+started_at: "2026-08-31T09:49:33Z"
+status: in_progress
 tags: []
 title: config tui needs an option for setting serverity of unused/uncalled/etc functions/vars/etc. They should be info by default, not warning. In normal cli check run, we don't want to spam the log with lots of unused stuff. The info msgs should be hidden by default (showing only a summary) and then a cli flag lets you see them. This might not gel perfectly with existing design, so discuss with Max the new design first to make sure we get it working well, smoothyl, etc, and so it works well for me by default.
-updated_at: "2026-08-31T08:14:24Z"
+updated_at: "2026-08-31T09:49:33Z"
 ---
 
 config tui needs an option for setting serverity of unused/uncalled/etc functions/vars/etc. They should be info by default, not warning. In normal cli check run, we don't want to spam the log with lots of unused stuff. The info msgs should be hidden by default (showing only a summary) and then a cli flag lets you see them. This might not gel perfectly with existing design, so discuss with Max the new design first to make sure we get it working well, smoothyl, etc, and so it works well for me by default.
+
+
+---
+
+## Design decisions (Max + agent session, 2026-08-31)
+
+Assessment: ~60% pre-existing. UnusedLevel (ignore|hint|info|warn|error) +
+aliases, --unused/--no-unused, workspace/user config, and the config-TUI
+`unused` entry (user_config.rs SETTINGS) all exist; info/hint already never
+fail the run even under --warnings-as-errors.
+
+Remaining work + approved decisions:
+
+1. Default flip `UnusedLevel::Warn` -> `Info` (config.rs default; help,
+   README, CHANGELOG; test fallout).
+2. Fold **by severity, not by family**: one-shot plain/pretty output hides
+   ALL INFO and HINT diagnostics by default, whatever produced them.
+3. Reveal flag: `--show-info`. No config key for it (per-run choice).
+4. Trailer/summary: never claim "0 diagnostics" when items are hidden.
+   Shape: `1 error, 2 warnings in <root> (14 info hidden — --show-info to
+   list)`; with nothing visible: `0 errors/warnings (14 info hidden)`.
+   ADDITION (Max): the summary also shows counts of the various KINDS
+   within the severities that were generated (e.g. per-kind breakdown of
+   the hidden infos).
+5. Scope: one-shot CLI human output only. JSON stays complete (machine
+   contract), LSP server keeps publishing everything (editors render
+   info/hint faded natively), watch TUI untouched (its display lives
+   under GH #8).
+6. `hint` folds along with `info`.
+7. Single family-wide knob stays; per-kind severities are YAGNI
+   (unused_callbacks exemption list already covers "intentional").
+
+Known behavior change: CI lanes using --warnings-as-errors stop failing on
+unused once the default is info; --unused warn|error is the opt-back-in.
+Implementation in worktree .worktrees/b090.

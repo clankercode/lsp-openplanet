@@ -6,7 +6,6 @@
 //! truth** shared with signature help via [`crate::typecheck::global_scope::GlobalScope::callables_free`].
 
 use super::global_scope::OverloadSig;
-use super::repr::ParamMode;
 
 /// Result of binding one call argument to a parameter slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +86,7 @@ pub fn arity_ranges(overloads: &[OverloadSig]) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::repr::ParamMode;
 
     fn sig(names: &[&str], min: usize) -> OverloadSig {
         OverloadSig {
