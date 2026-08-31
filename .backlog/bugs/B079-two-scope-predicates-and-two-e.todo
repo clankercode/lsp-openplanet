@@ -156,3 +156,46 @@ That changes the urgency assessment recorded above. This ticket was filed as a
 latent shape with no known live defect. It still has none *outstanding*, but
 the rate is now three in a day across two files and two authors who both knew
 their areas well. The argument for acting is the rate, not any single instance.
+
+## Fifth instance (2026-08-31) — found INSIDE a commit that was trying to avoid this ticket
+
+lane-b057's reviewer caught a real defect in B063: a workspace type shadows an
+external one of the same name, so a plugin declaring `class CSmPlayer {}` was
+being offered the ENGINE class's injected methods.
+
+- `is_external_derived_from` resolves a name against the index whether or not
+  the workspace shadows it.
+- `is_external_type` already existed, already checks `workspace_type_shadows`
+  first, and was the right predicate.
+
+Nothing was missing. The correct predicate was sitting there, already written,
+already correct. The caller reached past it.
+
+**This sharpens the ticket, and the sharpening is the point.** The lane was
+actively reasoning about B079 while writing this code — it was being careful
+not to DUPLICATE a predicate. It never checked whether the predicate it CHOSE
+answered the question it was asking. So:
+
+> Avoiding the duplication half of B079 gives no protection against the
+> selection half.
+
+That splits the ticket into two failure modes that need different fixes:
+
+1. **Duplication** — the same rule written twice, drifting apart. Fixed by
+   consolidating, and detectable by an agreement test.
+2. **Selection** — several near-identical predicates, all correct, and the
+   caller picks the one whose edge cases do not match its question. NOT fixed
+   by consolidating (consolidation can even make it worse by adding another
+   plausible name), and an agreement test cannot see it, because both
+   predicates are behaving exactly as specified.
+
+Mode 2 is the more dangerous one and it is what four of the five instances
+actually are. A type system could catch it — that is what the title means by
+"the type system cannot tell" — but only if the predicates stop returning bare
+`bool`. Two predicates that both answer `bool` are interchangeable to the
+compiler and distinguishable only by their names, which is precisely the
+information a hurried caller does not read.
+
+Whoever takes this: the deliverable is not "merge the predicates". It is to
+make the wrong choice fail to compile, or to reduce the set so there is no
+choice left to get wrong. Say which, and why, before writing code.
