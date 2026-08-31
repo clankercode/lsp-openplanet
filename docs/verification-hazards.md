@@ -837,6 +837,52 @@ indistinguishable from "I am structurally incapable of seeing it".
   hypothesis, not specification" rule, applied one level up to the *diagnosis*
   rather than the fix.
 
+- **A correct measurement of the wrong thing.** Sequencing two lanes, I
+  measured where `is_external_derived_from` is called (`checker.rs` 2292, 2309,
+  **2999**, 3245) and where `funcdef_types_compatible` lives (2988-3005),
+  found that 2999 sits inside it, and serialised the tickets on that basis.
+  Every number was right. The conclusion was wrong, because **the premise that
+  made those coordinates relevant came from the ticket, not from
+  measurement**: B076 would not edit `funcdef_types_compatible` at all. That
+  predicate is already correct and would be *called*, not changed; the edits
+  belong ~1100 lines away in `check_var_decl_local` / `check_var_decl_global`.
+
+  So I verified the coordinates and not the assumption that made them matter.
+  **Measuring carefully inside a borrowed frame produces confident, checkable,
+  irrelevant numbers** — and they persuade more than a guess would, because
+  they carry file and line. Ask what would have to be true for this measurement
+  to answer the question, and check that too.
+
+- **Test the axis the title names AND a control on the axis it says works.**
+  B076 reads "parameter lists are compared; the return type is not". Measured
+  per position, the return type **is** compared — `func_matches_funcdef` checks
+  it first, and the constructor form proves both halves work today. What is
+  missing is a *call* to that predicate at three further positions, and **at
+  those positions the parameter check is missing too** — the very thing the
+  ticket reports as working.
+
+  That surfaced only because the lane added a **param-mismatch control at each
+  position** rather than testing the axis the title pointed at. Testing only
+  return types would have found three silent positions and concluded the return
+  check was unreached, leaving the parameter hole in place and invisible — a
+  ticket "fixed" with half its defect surviving.
+
+  **A ticket's claim about what already works is an untested assertion in the
+  same breath as its claim about what does not.** Both come from one reporter
+  and one misunderstanding. Control the working axis at every position you
+  probe: it costs one extra case, and it is where the surprise was.
+
+- **Once a commit has been reported as ready, never amend it — make a new
+  commit.** A lane amended a commit it had already handed over, twice, while
+  the coordinator was merging quickly. Both times the amended branch became a
+  *replacement* for merged work rather than a descendant, which would have
+  merged as a conflict or a duplicate; both were caught only by a base check.
+
+  **Amend is the one operation that makes a branch incompatible with what was
+  merged rather than merely stale**, because it rewrites the very commit the
+  merge already contains. Every other operation degrades gracefully into a
+  rebase.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
