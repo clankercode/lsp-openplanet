@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:43:15Z"
 depends_on: []
 estimate_hours: 1
 id: B134
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'GH #18 lead: a subset of enum value doc strings are migration hints (''Please use X instead'') — prose rather than structured metadata, but the only deprecation-shaped text in the dumps'
@@ -12,3 +14,43 @@ updated_at: "2026-08-31T14:43:15Z"
 ---
 
 GH #18 lead: a subset of enum value doc strings are migration hints ('Please use X instead') — prose rather than structured metadata, but the only deprecation-shaped text in the dumps
+
+
+## Lead, not a finding — lane-enum, 2026-09-01
+
+While auditing the typedb structs, a handful of the 206 enum-value `d` strings
+read as migration hints, e.g.:
+
+    "Please use Borders instead, as Border is ..."
+
+## Read this before acting on it
+
+**This is PROSE, not structured metadata, and it does NOT overturn GH #18.**
+GH #18's finding stands: the dumps carry no deprecation metadata. Matching on
+these strings would be a **heuristic** — pattern-matching English in a field
+whose format nobody promised and which can change between engine versions
+without notice.
+
+It is recorded because it is **the only deprecation-shaped text in the dumps**,
+and someone working on deprecation support deserves to know it exists before
+concluding there is nothing at all. That is the entire value of this ticket: it
+prevents a future search from coming up empty and being believed.
+
+## If anyone does act on it
+
+- **Measure the population first.** How many of the 206 actually match a
+  migration shape, across BOTH dump versions (1.29.5 and 1.29.14)? A handful
+  observed by eye is not a count.
+- Check whether the same value's prose is stable across versions. If the wording
+  drifts, a matcher is unmaintainable and that is the answer.
+- Any matcher must be **advisory** — a hint in hover, never a diagnostic. A false
+  deprecation warning on a symbol the engine still supports is worse than no
+  warning, and this repo has spent the night proving that a rule stricter than
+  the engine is the expensive kind of wrong.
+- Depends on B133: the strings are not loaded at all today.
+
+## Do not close this by implementing a matcher
+
+A perfectly reasonable outcome is: measure the population, find it too small or
+too unstable, and close this as **measured and rejected** with the numbers
+recorded. That is a result, and it is worth more than a heuristic nobody trusts.
