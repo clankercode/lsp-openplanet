@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T15:05:17Z"
+depends_on: []
+estimate_hours: 1
+id: B135
+priority: high
+status: pending
+tags: []
+title: 'Hover and navigation do not consume member visibility either: is_private/is_protected have zero readers in hover.rs and navigation.rs after B117 wired completion'
+updated_at: "2026-08-31T15:05:17Z"
+---
+
+Hover and navigation do not consume member visibility either: is_private/is_protected have zero readers in hover.rs and navigation.rs after B117 wired completion
