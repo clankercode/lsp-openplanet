@@ -142,6 +142,14 @@ probe-export-binding *ARGS:
 probe-export-binding-selftest:
     python3 scripts/probe_export_binding.py --selftest
 
+# Prove that selftest is non-vacuous (B154). It had none until B148's discovery
+# check parsed scripts/ instead of trusting a hardcoded list, and the first run
+# of this harness found FOUR vacuous guards: two reachable only through inputs
+# that were AMBIGUOUS for another reason, and two production paths a selftest
+# built entirely on injected windows can never see (B118).
+probe-export-binding-mutants:
+    python3 scripts/check_export_binding_nonvacuous.py
+
 # B119/B121: does receiver constness travel through a method's return value?
 # Needs the game. Offline half: `just probe-const-receiver-selftest`.
 probe-const-receiver *ARGS:
