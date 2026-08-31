@@ -433,3 +433,66 @@ hand-staged B052 test fixture. A plausible supplier, NOT a measured one. A
 `git log` over the B052 lane's history could settle it cheaply.
 
 Lane decision (coordinator, 2026-08-31): assigned to lane-tooling, and it GATES B096. B096 needs game probes to answer whether the engine binds an import to a namespaced body and accepts shared interface/enum/funcdef; lane-tooling has just MEASURED that probe_enum_corpus.py does not work either (the file-watcher theory is refuted -- a staged folder left 8s produces nothing, while tm-control-mcp loads it immediately). So every probing route is currently blocked or routed through tm-control-mcp, and B097 is the ticket that unblocks them. Do B097 first, then B096 with the restored probe.
+
+
+## RESOLVED — verified against the live game, 2026-08-31 23:00 (coordinator)
+
+Max fixed it himself. `Main.as`'s handler no longer hands each `ReadRaw` return
+straight to `Json::Parse`; it drains until the socket is empty, re-checking
+`Available()` each iteration, with the 64-byte cap documented in a comment at
+the loop:
+
+    // Net::Socket::ReadRaw returns at most 64 bytes per call regardless of the
+    // count asked for, while Available() reports the true figure.
+
+`RemoteBuild.op` was rebuilt at 20:30 and the running game has it loaded.
+
+### The green, measured against the running game — not read off the diff
+
+Three routes, one client, nothing else on the port:
+
+| request | bytes | reply |
+|---|---|---|
+| `get_status` padded | 160 | `{"error":"","data":"Alive"}` |
+| `load_plugin`, bogus id | 90 | `{"error":"Plugin not loaded\n","data":""}` |
+| `list_plugins` | 34 | `{"error":"Not implemented: list_plugins","data":""}` |
+
+**The middle row is the whole result and the third row is what proves it.**
+A 90-byte `load_plugin` reaching its real handler and returning a
+*route-specific* error is only possible if the entire payload arrived intact —
+a truncated one yields an empty route and the generic `Not implemented:`. The
+third row is the control: `list_plugins` genuinely is unimplemented, and it
+returns `Not implemented: list_plugins` **with the route name in it**, so the
+dispatcher parsed a complete payload there too. Two different failure texts
+from two different causes is the discrimination the old wire could not make.
+
+Before tonight every request over 64 bytes produced the empty-route
+`Not implemented:`, and `load_plugin`'s compact minimum is 72 bytes with an
+EMPTY id. So it had never once worked, and the fix is the first time this
+route has functioned in the plugin's history.
+
+### What this unblocks, and the one thing it does not
+
+- **B096 is unblocked.** Dispatched to lane-resolver.
+- Game probing generally is unblocked; the third contamination channel in the
+  table above now has a guard, namely the transport itself.
+- **B068 (one name per compilation unit) and B077 (registration-before-copy,
+  fail-closed sweep) still apply unchanged.** This closes one of three
+  channels. Do not read a working transport as a clean room.
+
+### A behaviour change that is easy to miss
+
+The THIRD CORRECTION above established that `probe_enum_corpus.py` was never
+actually blocked, because it discards `load_plugin`'s return value entirely and
+Openplanet's own file watcher compiles the staged folder. That reasoning was
+correct, and it now has a consequence: **the call it has always thrown away
+starts doing something.** A script whose behaviour depended on a route failing
+silently is a script to re-read before trusting, not after.
+
+### Still open, and it is Max's
+
+The fix is UNCOMMITTED in `~/src/tm-remote-build` (branch
+`fix/readraw-64-byte-short-read`) alongside modified `api.py`, `log.py` and an
+untracked `tests/`. `~/src/openplanet/my-plugins/tm-remote-build` holds the
+same `Main.as`, byte-identical. Nobody from this repo should commit it — the
+"do not touch that path" rule stands, and it stands for the fix too.
