@@ -1,0 +1,88 @@
+---
+complexity: medium
+created_at: "2026-08-31T15:58:52Z"
+depends_on: []
+estimate_hours: 1
+id: B150
+priority: high
+status: pending
+tags: []
+title: No matching signatures renders MwFastBuffer.Length as uint() — a zero-arg function, not a uint value
+updated_at: "2026-08-31T15:58:52Z"
+---
+# No matching signatures renders `.Length` as `uint()`
+
+Found 2026-09-01 via `./build.sh` on `tm-control-mcp`. Two errors, one spelling.
+
+## Live errors
+
+```
+src/DevMemoryTools.as:282:50: error: No matching signatures to 'Math::Min(uint, uint())'
+src/DevMemoryTools.as:295:53: error: No matching signatures to 'Math::Min(uint, uint())'
+```
+
+Call sites (DEV tool `DevGetPointers`):
+
+```angelscript
+auto anchored = editor.Challenge.AnchoredObjects; // MwFastBuffer<CGameCtnAnchoredObject*>
+uint take = Math::Min(uint(aoLimit), anchored.Length);
+
+auto blocks = editor.Challenge.Blocks;
+uint take = Math::Min(uint(blockLimit), blocks.Length);
+```
+
+`uint(aoLimit)` renders as `uint`. `anchored.Length` renders as `uint()`.
+
+That `uint()` is the defect. It is B108's zero-arg function-signature spelling (`return_type(params)`), not a uint value. `.Length` is a uint property/field on the buffer. The game treats it as a uint everywhere else in this plugin (`int(map.Blocks.Length)`, `for (uint i = 0; i < map.Blocks.Length; i++)`, `uint total = pmt.Items.Length`).
+
+## Discriminator in the same function
+
+Ten lines later, the Length is assigned to a uint local first:
+
+```angelscript
+uint total = pmt.Items.Length;
+uint take = Math::Min(uint(pmtItemsLimit), total); // silent
+```
+
+Same `Math::Min`, same `uint(...)` first arg. Only the direct `.Length` argument prints as `uint()`. The local does not.
+
+Also silent in this plugin: `Math::Min(limit, pmt.CustomSelectionCoords.Length)` (`src/McpTools.as:728`) and `Math::Min(len, 8)` on a uint local (`src/DevMemoryTools.as:582`). So this is not "Math::Min has no uint overload" as a general fact — the checker already accepts some uint Mins. Do not "fix" this by adding a uint `Math::Min`. The second argument is being named as a function.
+
+## Why this spelling
+
+`rendered_args` / `funcdef_binding_source_display` (B108): when `lookup_arg_function_sigs` finds exactly one signature, the argument prints as `return_type(params)`. A `uint Length()` / `uint get_Length()` method on the buffer becomes `uint()`.
+
+B060 already said a property READ is a value of the getter's return type, not a reference to the accessor, and made `lookup_arg_function_sigs` exact (no `X` → `get_X` widening). Member path still goes through `method_ref_sigs(object, member)`, which looks up a method named `Length` on the receiver. If the typedb (or template instantiation) exposes `Length` as a method, B108 will print `uint()` and the call looks like a missing `Math::Min` overload.
+
+## Expected
+
+A `.Length` read used as a value renders as `uint` (same as `uint(aoLimit)` and as the `uint total = ….Length` local). If `Math::Min(uint, uint)` then still fails, that is a different question and not this ticket.
+
+## Actual
+
+`.Length` renders as `uint()` — a function returning uint and taking no arguments.
+
+## Test plan (TDD, red first)
+
+Red: the two live lines, or a one-file plugin:
+
+```angelscript
+void Use(CGameCtnChallenge@ map) {
+    Math::Min(uint(20), map.AnchoredObjects.Length);
+    Math::Min(uint(20), map.Blocks.Length);
+}
+```
+
+The diagnostic text must not contain `uint()`. Variants:
+
+- `MwFastBuffer` `.Length` passed to any non-funcdef call (`Math::Min`, `tostring`, `Text::Format`)
+- assign to `uint` first, then pass the local — stays silent / still not `uint()`
+- `array<T>.Length` (script array) as a control
+- an actual method reference of type `uint()` still prints `uint()` (keep B108)
+- `uint get_Off(); Math::Min(uint(1), Off)` — B060 value, not `uint()`
+
+Game-probe the fixture before treating LSP silence as ground truth.
+
+## Related
+
+B060 (property read is a value), B108 (callables print their signature, which is why this shows up as `uint()` instead of `uint`), GH #47 (No matching signatures render). Live plugin: `~/src/openplanet/my-plugins/tm-control-mcp` `src/DevMemoryTools.as:282,295`.
