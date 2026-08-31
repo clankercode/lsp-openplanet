@@ -3124,3 +3124,51 @@ merely recording it, that `test-suite.py` has the zero-binary exit, green-zero
 refusal and per-binary reconciliation, and that a grep for Rust tests that
 self-skip on a missing fixture found zero. **A sweep that only records defects
 guarantees the next sweep re-derives the clean cases.**
+
+## The backup and the revert have to cover the same file set
+
+lane-enum saved file copies of **two** files, then ran `git checkout HEAD --` on
+**three**, silently discarding its `global_scope.rs` work. Recoverable only
+because the text was still in its session transcript.
+
+**`git checkout` reports success either way.** Nothing warns you that the set you
+protected is smaller than the set you are about to overwrite, because from git's
+point of view nothing went wrong.
+
+This is the "never let a stash be the only copy" hazard in a new costume, and the
+generalisation is worth stating on its own: **whenever a destructive command
+takes a file list, the protective step must take THE SAME LIST** — ideally in the
+same command, built from the same variable, so they cannot drift apart while you
+are editing one of them.
+
+The related family already in this catalogue: `git add -A` (stages more than you
+edited), `git reset --soft master` on a moved ref (stages other people's
+commits), and here `git checkout HEAD -- <list>` (reverts more than you backed
+up). All three are one command whose scope the author has not re-checked, all
+three apply cleanly, and none of them fails.
+
+## A value that is right by coincidence is not knowledge
+
+B130 excluded Nadeo engine receivers because the loader hardcoded
+`is_const: false`, and argued that consuming it would fire on every correct const
+Nadeo call. B137 then probed the engine and found **that population is empty** —
+`const CMwNod@` cannot be read through at all, so the hardcoded `false` was
+factually right on every shape tested.
+
+**The exclusion still stands, and the reason it stands is the point.** Five
+probed members do not license a claim about 3084, and the dump does not say. A
+`bool` that happens to match reality on the cases anyone has looked at is
+indistinguishable, in the type, from one that was measured — which is exactly the
+defect B125 and B131 fixed on the Core side.
+
+So the fix was not to flip the value; it was to make the ABSENCE REPRESENTABLE:
+`Option<bool>`, `Some` for Core, `None` for Nadeo. **And the type change did work
+no review could have done — two existing tests stopped compiling, forcing every
+reader to confront the third state.** A `bool` had been preventing that
+conversation.
+
+It also removed a proxy: the consumer had been branching on `TypeSource` to
+decide whether constness was trustworthy. Right answer, wrong reason, and quietly
+wrong the moment a Core method arrives without constness or a Nadeo one with it.
+**Read the datum's own "I do not know" rather than inferring it from where the
+datum came from.**
