@@ -127,3 +127,4 @@ bugs:
     - file: B126-a-write-through-a-call-c-get-x.todo
     - file: B127-remotebuild-replies-plugin-loa.todo
     - file: B128-fleet-read-log-window-has-no-p.todo
+    - file: B129-engine-derived-gold-artifacts.todo
