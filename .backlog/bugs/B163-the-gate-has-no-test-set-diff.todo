@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T17:11:24Z"
 depends_on: []
 estimate_hours: 1
 id: B163
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'the gate has no test-set diff: a reconciling suite total cannot see an even swap, and the ad-hoc log-scraping check is itself defeated by parallel-test interleaving'
@@ -12,3 +14,57 @@ updated_at: "2026-08-31T17:11:24Z"
 ---
 
 the gate has no test-set diff: a reconciling suite total cannot see an even swap, and the ad-hoc log-scraping check is itself defeated by parallel-test interleaving
+
+THE INCIDENT (lane-enum, B158, 2026-09-01). A test insertion landed between
+`#[test]` and an existing test. That silently disabled
+`hover_rejects_nadeo_class_storage_key` and double-registered one of the new
+tests. THE SUITE TOTAL RECONCILED EXACTLY -- +1 duplicate and -1 disabled
+cancelled -- so the delta arithmetic every lane in this batch relies on produced
+a clean, correct-looking green over a disabled test. Nothing in the suite could
+see it. `cargo clippy` caught it, via `dead_code` + `duplicate_macro_attributes`.
+
+WHY THE GATE CANNOT SEE IT. Counting cannot distinguish a set from its
+cardinality. Any even-numbered swap is invisible to a total, and the cheapest
+instance -- one disabled while one is added -- is also the likeliest, because it
+is exactly what a misplaced insertion produces by default.
+
+And the exactness is the hazard, not the miss: a total that came out NEAR the
+expected number would have been investigated. Coming out precisely right retired
+the question. This defect gets worse as arithmetic discipline improves. It
+defeats lanes that reconcile carefully and leaves sloppy ones untouched.
+
+WHAT TO BUILD. A test-SET diff in the gate tooling, reported alongside the
+SUITE-VERIFIED line: names added, names removed, against the merge base. A
+removal that the lane did not intend is the alarm; today nothing raises it.
+
+USE `--list`, NOT A PARSED RUN LOG. This is the load-bearing design decision and
+it comes from the ad-hoc check failing in exactly this way. lane-enum's first
+set diff reported 10 added, including a test in a file it never touched: a stderr
+warning from a parallel test had interleaved into an `... ok` line and defeated
+its `^test` anchor. The polarity is what makes it dangerous rather than merely
+ironic -- that interleave produced a phantom ADDITION, which is confusing; had it
+hit one of the lane's own lines it would have reported a test REMOVED, which is
+the alarm a lane would have believed and acted on.
+
+Each test binary's `--list` output is not interleaved with test-body output and
+needs no `--test-threads=1`, so it removes the interleaving exposure at the
+source instead of hardening a regex against it. Do not parse the run log.
+
+REQUIRED EVIDENCE, run not described:
+  - RED: reproduce the B158 shape on a scratch branch -- move a `#[test]` so one
+    test is disabled and one double-registered. The total must reconcile, and
+    the current gate must report green. Capture that.
+  - GREEN: the set diff names the removed test.
+  - AND THE INSTRUMENT MUST BE PROVEN ABLE TO SEE IT BEFORE ITS ZERO COUNTS:
+    feed it a known-disabled test and require it to say so. A set check that has
+    never reported a removal is in the same position as the suite total it is
+    meant to backstop. See docs/verification-hazards.md, "A control proves
+    nothing by not failing".
+  - POSITIVE CONTROL: an ordinary lane branch that only ADDS tests reports its
+    additions and zero removals, so the check is not simply always-alarming.
+
+Related: B162 (a filter matching nothing reports green) is the same loss reached
+from the other end -- that one keeps the assertion and removes the population,
+this one removes the assertion and keeps the population, and both then report a
+zero indistinguishable from a real one. Both belong to lane-tooling; do B162
+first, it is smaller and its positive-control discipline is the same.
