@@ -27,9 +27,22 @@ install: build
     @echo "installed {{install_dir}}/{{bin}}"
     @"{{install_dir}}/{{bin}}" --version
 
-# Full test suite (lib + integration + tui snaps)
-test:
-    cargo test --locked
+# Full test suite (lib + integration + tui snaps).
+#
+# B078: wraps `cargo test --locked` and reconciles the result before printing a
+# total — cargo's exit code is checked, and every test binary must have reported
+# a `test result:` line, against a SEPARATE enumeration. A binary killed
+# mid-run emits no summary and cargo then stops, so both the crashed binary and
+# every later one vanish from the count without a single failed test. Extra args
+# are forwarded: `just test -- --test-threads=2`.
+test *ARGS:
+    python3 scripts/test-suite.py {{ARGS}}
+
+# Proves the gate above can actually fail: runs the #[ignore]d canary in
+# tests/zz_crash_canary.rs, which aborts, and checks the gate rejects the run
+# because no summary was produced — not merely because cargo exited non-zero.
+test-selftest:
+    python3 scripts/test-suite.py --selftest
 
 # B045: same suite, but every test binary runs with HOME/USERPROFILE pointed at
 # an empty dir — a test that depends on this machine's Openplanet install or
