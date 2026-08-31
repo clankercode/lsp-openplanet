@@ -154,59 +154,69 @@ const PATHS: &[(&str, &str)] = &[
     ("argument passing", PATH_ARG),
 ];
 
-/// THE REGRESSION. Every const position must bind every other const
-/// position, through every funcdef path, in every legal mode, for every
-/// handle-shaped type — because `funcdef_types_compatible` peels `Const` and
-/// `Handle` off both sides and is deliberately neutral on const (B102).
+/// THE REGRESSION, narrowed by B152 to the claim that is B144's alone.
 ///
-/// Before the fix, any row whose function OR funcdef used a TRAILING const
-/// failed: 2 of the 4 positions on each side, so 12 of every 16 pairs.
+/// B144 shipped this as "every const position binds every OTHER position",
+/// because the comparison was const-NEUTRAL at the time (B102's stance).
+/// B152 measured the engine and made it const-EXACT, so the off-diagonal
+/// cells are now errors and they are tested — in both directions, with their
+/// engine verdicts — by `tests/b152_funcdef_const_exactness.rs`.
 ///
-/// This is a silence assertion over a large cross product, so it leans on
+/// What survives here is the part B152 does not test and B144 exists for:
+/// **each const position binds ITSELF**. That is not trivial and it is not
+/// duplicated. Before B144, `C@ const` at a `C@ const` funcdef FAILED — the
+/// trailing `const` was parsed into the type NAME, so the type was equal to
+/// nothing, itself included. Two of the four positions could not match their
+/// own spelling. A const-exactness rule layered on top of that parse would
+/// have been exact about a type it could not read.
+///
+/// So: the diagonal, across every funcdef path, every legal mode and both
+/// handle-shaped types. It leans on
 /// `anti_vacuity_the_harness_reports_on_this_shape` above and on
-/// `a_const_handle_is_not_a_wildcard` below — the first proves the harness
-/// speaks, the second proves this exact shape can still be rejected.
+/// `a_const_handle_is_not_a_wildcard` below.
 #[test]
-fn every_const_position_binds_every_other_at_a_funcdef_slot() {
+fn every_const_position_binds_itself_at_a_funcdef_slot() {
     let mut checked = 0usize;
     for (ty_label, decls) in HANDLE_TYPES {
-        for (fd_label, fd_pat) in CONST_POSITIONS {
-            for (fn_label, fn_pat) in CONST_POSITIONS {
-                for mode in MODES {
-                    for (path_label, path) in PATHS {
-                        let src =
-                            program(decls, &spell(fd_pat, "C"), &spell(fn_pat, "C"), mode, path);
-                        let msgs = errors(&src);
-                        assert!(
-                            msgs.is_empty(),
-                            "{ty_label}: funcdef `{fd_label}` / function `{fn_label}` \
-                             mode `{mode}` via {path_label} must bind:\n{msgs:#?}\n{src}"
-                        );
-                        checked += 1;
-                    }
+        for (label, pat) in CONST_POSITIONS {
+            for mode in MODES {
+                for (path_label, path) in PATHS {
+                    let src = program(decls, &spell(pat, "C"), &spell(pat, "C"), mode, path);
+                    let msgs = errors(&src);
+                    assert!(
+                        msgs.is_empty(),
+                        "{ty_label}: the `{label}` const position must bind its own                          spelling (mode `{mode}`, via {path_label}):\n{msgs:#?}\n{src}"
+                    );
+                    checked += 1;
                 }
             }
         }
     }
-    // A loop that ran zero times is a passing test. 2 types x 4 x 4 x 3 x 3.
-    assert_eq!(checked, 288, "the cross product did not run in full");
+    // A loop that ran zero times is a passing test. 2 types x 4 x 3 x 3.
+    assert_eq!(checked, 72, "the cross product did not run in full");
 }
 
-/// The REPORTED spelling, isolated so a failure names it rather than moving
-/// a total: `const C@ const &in` at a `const C@ &in` funcdef.
+/// THE REPORTED CASE, at the call path it was actually reported from.
+///
+/// B144 originally asserted this as `const C@ const &in` binding a
+/// `const C@ &in` funcdef, which was true only while the comparison was
+/// const-neutral — and the engine rejects that pair (measured, B144's own
+/// corpus). The real report was `arr.Sort(SortGhosts)` on a `Json::Value@[]`,
+/// where the slot's synthesised signature IS `const T@ const &in`, so this
+/// now pins the shape Max shipped against the slot he shipped it into.
 #[test]
 fn the_reported_spelling_binds() {
-    let src = program(
-        "class C { int v; }\n",
-        "const C@",
-        "const C@ const",
-        "&in",
-        PATH_ASSIGN,
-    );
+    let src = "class C { int v; }\n\
+               bool SortGhosts(const C@ const &in a, const C@ const &in b) { return true; }\n\
+               void Use() {\n\
+               \x20   C@[] arr;\n\
+               \x20   arr.Sort(SortGhosts);\n\
+               }\n";
     assert!(
-        errors(&src).is_empty(),
-        "`const C@ const &in` is what Max's SortGhosts declares: {:#?}",
-        errors(&src)
+        errors(src).is_empty(),
+        "`const C@ const &in` is what Max's SortGhosts declares, and the Sort \
+         slot is what it was passed to: {:#?}",
+        errors(src)
     );
 }
 
@@ -277,34 +287,39 @@ fn const_handles_do_not_excuse_arity_return_or_mode_mismatches() {
     }
 }
 
-/// A const handle in the RETURN position parses and compares the same way.
-/// The engine is exact here too (`C@ const` return at a `C@` funcdef is
-/// `Can't implicitly convert from '<function>@const'`, 2026-09-01,
-/// OP 1.29.14); this checker stays const-neutral, so both bind — and the
-/// ELEMENT type is still checked, which is the half that has to hold.
+/// A const handle in the RETURN position parses the same way.
+///
+/// B144 asserted all four return spellings bound a `C@` funcdef, which was
+/// const-neutrality talking. B152 made it exact — matching the engine, which
+/// rejects both `C@ const` and `const C@` at a `C@` slot — so what is pinned
+/// here is B144's own claim: each spelling binds ITSELF, which it could not
+/// do before the trailing `const` parsed. The element type is still checked,
+/// which is the half a wildcard would break.
 #[test]
-fn const_handle_return_types_are_neutral_but_the_type_is_still_checked() {
+fn const_handle_return_types_bind_themselves_and_the_type_is_still_checked() {
     let decls = "class C { int v; }\nclass D { int w; }\n";
     for ret in ["C@", "const C@", "C@ const", "const C@ const"] {
+        let src = format!(
+            "{decls}funcdef {ret} FD();\n\
+             {ret} Fn() {{ return null; }}\n\
+             void Use() {{ FD@ h = Fn; if (h is null) {{ }} }}\n"
+        );
+        assert!(
+            errors(&src).is_empty(),
+            "a `{ret}` return must bind a `{ret}` funcdef:\n{src}"
+        );
+    }
+    for ret in ["D@", "const D@", "D@ const", "const D@ const"] {
         let src = format!(
             "{decls}funcdef C@ FD();\n\
              {ret} Fn() {{ return null; }}\n\
              void Use() {{ FD@ h = Fn; if (h is null) {{ }} }}\n"
         );
         assert!(
-            errors(&src).is_empty(),
-            "a `{ret}` return must bind a `C@` funcdef:\n{src}"
+            !errors(&src).is_empty(),
+            "a `{ret}` return must NOT bind a `C@` funcdef:\n{src}"
         );
     }
-    let src = format!(
-        "{decls}funcdef C@ FD();\n\
-         D@ const Fn() {{ return null; }}\n\
-         void Use() {{ FD@ h = Fn; if (h is null) {{ }} }}\n"
-    );
-    assert!(
-        !errors(&src).is_empty(),
-        "a `D@ const` return must NOT bind a `C@` funcdef:\n{src}"
-    );
 }
 
 /// An array OF const handles is an array of the element type, so

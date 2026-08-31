@@ -3095,11 +3095,35 @@ impl<'a> Checker<'a> {
         if !matches!(bare, "T[]::less" | "T[]::less_nonconst") {
             return None;
         }
+        // B152: the engine's own spelling, measured rather than guessed. A
+        // deliberate mismatch makes the compiler print the comparator it
+        // wants, and it depends on whether the ELEMENT is a handle:
+        //
+        //     bool int[]::less(const int&in, const int&in)
+        //     bool Item@[]::less(const Item@const&in, const Item@const&in)
+        //     bool int[]::less_nonconst(int&in, int&in)
+        //
+        // Measured for `int`, `uint`, `string`, `vec3`, an enum and a value
+        // class on the plain side, and for `C@`, `I@`, `Json::Value@`,
+        // `int[]@` and `dictionary@` on the handle side — eleven element
+        // types in one run, `docs/probes/b144-const-handle-funcdef.tsv`
+        // (2026-09-01, OP 1.29.14).
+        //
+        // The `const` here is load-bearing only once the comparison is
+        // const-EXACT (B152); before that it was invisible, which is exactly
+        // why B144 left it alone rather than changing it blind.
         let elem_text = elem.display();
+        let param = if bare == "T[]::less_nonconst" {
+            elem_text
+        } else if matches!(elem, TypeRepr::Handle(_)) {
+            format!("const {elem_text} const")
+        } else {
+            format!("const {elem_text}")
+        };
         Some(FuncdefSig {
             qualified: bare.to_string(),
             return_type: "bool".to_string(),
-            param_types: vec![elem_text.clone(), elem_text],
+            param_types: vec![param.clone(), param],
             param_modes: vec![ParamMode::In, ParamMode::In],
         })
     }
@@ -3779,7 +3803,77 @@ impl<'a> Checker<'a> {
             })
     }
 
+    /// B152: the CONST SHAPE of a type — the thing a funcdef signature match
+    /// compares exactly, and the only axis this ticket tightens.
+    ///
+    /// AngelScript spells two independent qualifiers with one keyword. A
+    /// LEADING `const` makes the pointed-to OBJECT read-only; a TRAILING one
+    /// makes the HANDLE read-only; a value type has only the one position.
+    /// So a handle parameter has FOUR spellings, and the engine tells them
+    /// apart at a funcdef slot in both directions — measured over every
+    /// position, mode and the return type
+    /// (`docs/probes/b144-const-handle-funcdef.tsv`, OP 1.29.14).
+    ///
+    /// `is_handle` is carried but is NOT itself matched — see
+    /// [`Self::const_shapes_compatible`].
+    fn const_shape(ty: &TypeRepr) -> (bool, bool, bool) {
+        let mut outer_const = false;
+        let mut cur = ty;
+        while let TypeRepr::Const(inner) = cur {
+            outer_const = true;
+            cur = inner;
+        }
+        match cur {
+            TypeRepr::Handle(pointee) => {
+                let mut p = pointee.as_ref();
+                let mut pointee_const = false;
+                while let TypeRepr::Const(inner) = p {
+                    pointee_const = true;
+                    p = inner;
+                }
+                (true, pointee_const, outer_const)
+            }
+            _ => (false, false, outer_const),
+        }
+    }
+
+    /// B152: do two types agree on `const`?
+    ///
+    /// EXACT when both sides are handles, because that is the only case where
+    /// the two const positions are distinguishable and it is the case the
+    /// engine was measured on.
+    ///
+    /// DELIBERATELY WEAKER when either side is not a handle, and this is the
+    /// most important line in the change. The `@` is not reliable across the
+    /// seam: the Core database declares `CoroutineFuncUserdata`'s parameter
+    /// as `ref`, while every plugin that uses it writes `ref@` and the game
+    /// compiles them. An instrumented build — the neutral answer kept, a
+    /// marker printed wherever an exact rule would disagree — found **170
+    /// such sites across 30 plugins** in the corpus. Requiring the handle
+    /// wrapper to match would have turned all 170 into errors on shipped
+    /// code, and none of them is about `const` at all.
+    ///
+    /// So the handle axis stays exactly as loose as it was before this
+    /// ticket (`funcdef_types_compatible` peels it), and only the const axis
+    /// tightens. One axis, measured, at one site.
+    fn const_shapes_compatible(got: &TypeRepr, expected: &TypeRepr) -> bool {
+        let (g_handle, g_pointee, g_outer) = Self::const_shape(got);
+        let (e_handle, e_pointee, e_outer) = Self::const_shape(expected);
+        if g_handle && e_handle {
+            g_pointee == e_pointee && g_outer == e_outer
+        } else {
+            (g_pointee || g_outer) == (e_pointee || e_outer)
+        }
+    }
+
     fn funcdef_types_compatible(&self, got: &TypeRepr, expected: &TypeRepr) -> bool {
+        // B152: `const` is part of the signature, so it is compared BEFORE
+        // the peel below throws it away. The peel stays for everything else
+        // — the handle axis is deliberately untouched, see
+        // `const_shapes_compatible`.
+        if !Self::const_shapes_compatible(got, expected) {
+            return false;
+        }
         let got = Self::peel_const_handle(got);
         let expected = Self::peel_const_handle(expected);
         match (got, expected) {
@@ -3792,8 +3886,16 @@ impl<'a> Checker<'a> {
             // there is no seam for the engine to insert a numeric conversion
             // into and a `double()` cannot stand in for an `int()`.
             //
-            // REASONED, not probed — B097 blocks probing repo-wide — and the
-            // reasoning is corroborated rather than assumed. B027 measured
+            // REASONED, not probed — and NOTE THE DATE ON THAT EXCUSE. It
+            // read "B097 blocks probing repo-wide"; B097 is fixed, the game
+            // is reachable, and B144 has since measured the sibling `const`
+            // axis through exactly this predicate. So this arm is now
+            // CHEAPLY MEASURABLE AND STILL UNMEASURED, which is a different
+            // and more actionable state than the one this comment used to
+            // describe. See `b110_a_bare_int_handler_no_longer_binds_the_int64_userdata_slot`
+            // for the one pair that would settle it.
+            //
+            // The reasoning is corroborated rather than assumed. B027 measured
             // the sibling axis: any plain/`&in`/`&out`/`&inout` MODE mismatch
             // is `Can't create delegate` (OP 1.29.5, 2026-08-29), so
             // exactness is already the rule for how a parameter is passed;
@@ -12038,8 +12140,24 @@ void Main() {
     /// measured the sibling MODE axis as exact (`Can't create delegate`, OP
     /// 1.29.5); and 151 plugins write `int64`/`uint64`/`double` handlers and
     /// never `int`, which is what you would expect if only the exact type
-    /// binds. B097 blocks the probe that would settle it. Re-measure when it
-    /// is fixed — this test is the row to revisit.
+    /// binds.
+    ///
+    /// B152: **B097 IS FIXED AND THIS IS STILL UNMEASURED.** The note used to
+    /// read "B097 blocks the probe that would settle it. Re-measure when it is
+    /// fixed" — and it was left standing after B097 was fixed, which is how a
+    /// blocked-probe excuse outlives the block. B144 measured the neighbouring
+    /// `const` axis through this same predicate in one probe run, so the cost
+    /// of settling this is a handful of variants
+    /// (`scripts/probe_const_handle_funcdef.py` is the working model:
+    /// `void H(int v)` at `startnew(H, 1)`, against the
+    /// `CoroutineFuncUserdataInt64` slot, with a matching `int64` handler as
+    /// the ACCEPT control).
+    ///
+    /// Deliberately NOT taken here: it is a different axis from B152's, and a
+    /// contradiction would be a behaviour change arriving after this lane was
+    /// gated. Ticketed instead. What changed is only the honesty of the note —
+    /// "no oracle exists" became "an oracle exists and nobody has used it",
+    /// which is the state a future lane can act on.
     #[test]
     fn b110_a_bare_int_handler_no_longer_binds_the_int64_userdata_slot() {
         let diags = check_with_typedb("void H(int v) { }\nvoid Render() { startnew(H, 1); }");

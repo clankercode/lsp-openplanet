@@ -1779,6 +1779,20 @@ impl TypeIndex {
         self.funcdefs.get(qualified_name)
     }
 
+    /// Every funcdef the database declares, qualified-name order.
+    ///
+    /// B152: exists so a test can walk the WHOLE set rather than the handful
+    /// someone remembered to name. The `const` on a Core funcdef parameter
+    /// lives in `typeflags`, not in `typedecl`, and the checker reconstructs
+    /// it; a spot-check over three known funcdefs would keep passing while a
+    /// dump update introduced a fourth shape it gets wrong.
+    pub fn funcdefs(&self) -> Vec<(&str, &FuncdefInfo)> {
+        let mut out: Vec<(&str, &FuncdefInfo)> =
+            self.funcdefs.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        out.sort_by_key(|(k, _)| *k);
+        out
+    }
+
     /// The synthetic MODULE names the Nadeo loader keys its entries under
     /// (`Game`, `Scene`, `Audio`, …), sorted.
     ///

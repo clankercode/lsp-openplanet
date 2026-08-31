@@ -26,6 +26,20 @@ GitHub Release body to match this section (gh release edit).
   (a class belongs iff it exposes an `opIndex` returning the template
   parameter `T`), and an audit re-derives the set on every run and fails
   if the list drifts either way.
+- **A funcdef signature match is now exact about `const`** (B152) — the
+  engine distinguishes all four const positions a handle parameter can be
+  spelled with (`T@`, `const T@`, `T@ const`, `const T@ const`), in both
+  directions, at every parameter mode and in the return type; and
+  `array<T>::Sort`'s comparator is `const T@ const &in` for a handle
+  element type, `const T&in` for a value one, with `SortNonConst` the
+  mirror image at `T&in`. The checker was neutral about all of that, which
+  accepted callbacks the game rejects. Two supporting repairs were needed
+  first and are fixes in their own right: a Core funcdef parameter's
+  `const` lives in the database's `typeflags` bits rather than its type
+  text and was being dropped on load, and the `Sort` comparator's
+  synthesised signature carried no `const` at all. Across the 152-plugin
+  corpus this adds no diagnostic and removes none, measured against 7442
+  funcdef signature comparisons of which 674 are const-bearing.
 - **`Math::Min(uint(20), buf.Length)` no longer reports a missing
   overload** (B150) — a bare `obj.Name` is a property READ, not a method
   reference, whenever the class also exposes `get_Name`. The eight `Mw*`
