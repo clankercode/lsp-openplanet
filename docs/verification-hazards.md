@@ -2129,6 +2129,67 @@ which is more than can be said for "think harder about your silence tests".
 **Corollary for reviewers.** A red/green report saying "11 failed, 4 passed" is
 not fully good news. The 4 are the ones to ask about.
 
+## The parity tool reported PARITY-CLEAN for builds that never happened (B127)
+
+The B123 finding, followed to every consumer that had been deriving build
+health privately. Four were, and **measuring each one rather than migrating
+them all is what found the one that mattered.**
+
+| consumer | exposed? | why |
+|---|---|---|
+| `probe_enum_corpus.run_batch` | yes | its fatal guard read `load["error"]`, which is empty for a failed build, so a broken run looked *inconclusive* rather than *broken* |
+| `fleet_dogfood.probe_one` + `verdict` | **yes, worst** | see below |
+| `probe_export_binding.classify` | no | its affirmative answer is the consumer PRINTING a start token — a positive control |
+| `probe_export_binding` exporter | no | same, an `exporter ready` token |
+
+**The worst one was the tool that generates the parity findings.** `verdict()`
+computes `gerr == 0` from the diagnostic list, and an empty list satisfies that
+whether the build was clean or never ran. So a build that did not happen was
+reported `PARITY-CLEAN` — *the LSP and the game agree, both clean.* And with
+the LSP holding findings it reported `FP?`, **manufacturing false-positive
+evidence against the LSP out of a build that produced nothing.** That is the
+B118 polarity landing in the one place whose entire output is claims about
+where the LSP and the engine disagree.
+
+### Four values, three policies — which is why it could not be a boolean
+
+The same `build_verdict` serves three different callers precisely because
+`REJECTED` and `BUILD-ERR` are distinct:
+
+- `probe_enum_corpus` **expects** REJECTED every run — its sentinel is a
+  deliberate error — and treats only NOT-RUN/BUILD-ERR as fatal;
+- `probe_export_binding`'s exporter must be **CLEAN**, since every variant
+  lives in that one plugin;
+- `issue_repro_game` reports all four, because for it the verdict *is* the
+  answer.
+
+A boolean `build_ok` cannot express those three policies, and any single choice
+of where to draw its line would have been wrong for two of the callers. **When
+one predicate needs different thresholds per caller, that is evidence the
+predicate is under-modelled, not that the callers should compromise.**
+
+### A positive control is what makes a consumer exempt, and it is worth naming
+
+Two of the four consumers were never exposed, each because its affirmative
+answer requires a token the plugin has to *print*. That is the same structural
+exemption as `probe_enum_corpus`'s sentinel (B123): **ask what an oracle's
+silence means.** Where silence is the negative answer, no failure mode can
+impersonate success, and no migration is needed. Both exemptions are now stated
+in the code and pinned by a case, because "it is exempt" is exactly the claim
+that rots once the next reader has to re-derive it.
+
+### The empty-window trap is recurrent, not a one-off
+
+B118 was caught testing "the build never ran" with an EMPTY window, which lets
+a broken build-slicer look correct for free. Writing fresh fixtures for B127
+**reintroduced the same two gaps** — the empty window, and
+`Script compilation failed!` tested only alongside a located error that had
+already decided the verdict — and mutation testing caught both again.
+
+Knowing a hazard does not stop you writing it; only the mutation run does. The
+real log is shared and always carries other traffic, so the correct fixture for
+"our build is absent" is **another lane's build**, never nothing.
+
 ## A success reply from the transport is not a report on the build (B123)
 
 Follow-up to B118, and the more useful half of it. `probe_enum_corpus.run_batch`
@@ -2178,6 +2239,13 @@ filtered reader could drop the sentinel entirely and the failure would still be
 safe — noisy and wrong-looking, never a confident wrong row. Which is the test
 to apply to any oracle: *ask what its silence means.* If silence is the
 affirmative, every outage in the stack is indistinguishable from success.
+
+**Correction (B127):** I reported that this left `read_log_window` with no
+production callers, and B128 was filed on that. It was wrong —
+`fleet_dogfood.probe_one` was still calling it, and that site turned out to
+hold the worst instance of the very defect (see B127 below). A claim that a
+grep found "the last" of something is worth re-running before it is filed as a
+ticket; mine had matched a local variable of the same name.
 
 `run_batch` moved to the raw reader anyway, but for a different and much
 narrower reason than the ticket assumed: attribution never needed it (both

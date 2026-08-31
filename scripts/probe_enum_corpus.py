@@ -234,39 +234,38 @@ def run_batch(names: list[str], template: str) -> dict[str, str | None]:
         loaded = fleet.game_route(
             "load_plugin", {"id": PROBE_ID, "source": "user", "type": "folder"}, timeout=25
         )
-        if loaded.get("error"):
-            raise SystemExit(f"the probe plugin was not loaded: {loaded['error']}")
         time.sleep(3.0)
-        # B123. The RAW window, not the severity-filtered one.
-        #
-        # ATTRIBUTION does not need it and never did: `attribute` reads only
-        # `sev == "ERR"`, the filter keeps every line containing "ERR", so the
-        # two readers yield the SAME ERR set and the same verdicts. That
-        # equivalence is pinned by a test rather than asserted here, and it is
-        # why this migration cannot change a single corpus row.
-        #
-        # The BUILD-HEALTH check does need it, and cannot be written without
-        # it. `Starting build for` and `Loaded plugin` are both `[ TRAC]`, and
-        # the filter drops TRAC, so the build bracket is literally invisible in
-        # the filtered window -- `build_slice` returns zero lines from it.
+        # B123: the RAW window. ATTRIBUTION never needed it -- `attribute`
+        # reads only sev == "ERR" and the filter keeps every line containing
+        # "ERR", so both readers yield the same verdicts (pinned by a test).
+        # The BUILD-HEALTH check needs it and cannot exist without it:
+        # `Starting build for` and `Loaded plugin` are both `[ TRAC]`, so the
+        # build bracket is invisible in a filtered window.
         window = fleet.read_log_window_raw(mark, PROBE_ID)
-        # A location-less build error means NO name in this batch was
-        # analysed. The load check above cannot catch it: measured 2026-09-01,
-        # RemoteBuild answers `{"error": "", "data": "Plugin loaded"}` for a
-        # build whose dependency could not be found, so `loaded["error"]` is
-        # empty and the batch proceeds. The result is a full batch of
-        # UNDETERMINED -- exactly the "looks merely inconclusive rather than
-        # broken" outcome the load check was added to prevent, arriving
-        # through the one door it does not cover. B118 gave this the
-        # primitive; the polarity is the same as always, so stop loudly.
-        build_errs = fleet.raw_build_errors(window, PROBE_ID)
-        if build_errs:
-            raise SystemExit(
-                "the probe plugin's build failed with no source location, so "
-                f"no name in this batch was analysed: {build_errs[0]}"
+        # B127: ask whether the BUILD succeeded, not whether the request was
+        # delivered. `loaded` is handed in as extra evidence, never as the
+        # answer: RemoteBuild replies `{"error": "", "data": "Plugin loaded"}`
+        # for a plugin whose dependency could not be resolved, so the old
+        # `if loaded.get("error")` guard could not fire on the very case it
+        # was added for.
+        verdict = fleet.build_verdict(window, PROBE_ID, loaded)
+        # POLICY, and it is why four values beat a boolean: REJECTED is the
+        # NORMAL outcome here. This probe's whole method is to compile names
+        # the engine must refuse, and its sentinel is a deliberate error, so a
+        # run with no rejection would be the surprising one. Only "the build
+        # did not happen" is fatal.
+        if verdict["build_status"] in ("NOT-RUN", "BUILD-ERR"):
+            why = (
+                f"transport said {loaded.get('error')!r}"
+                if loaded.get("error")
+                else (verdict["raw_build_errors"] or ["no build appeared in the log"])[0]
             )
-        diags = fleet.parse_game_diagnostics(window)
-        return attribute(names, first_line, diags, sentinel_line)
+            raise SystemExit(
+                "the probe plugin was not loaded: its build is "
+                f"{verdict['build_status']}, so no name in this batch was "
+                f"analysed -- {why}"
+            )
+        return attribute(names, first_line, verdict["diagnostics"], sentinel_line)
     finally:
         fleet.game_route("unload_plugin", {"id": PROBE_ID}, timeout=15)
         time.sleep(0.5)
@@ -825,7 +824,17 @@ def run_selftest() -> int:
         # would leave this "offline" case reading the real Openplanet.log --
         # the same "a guard at one of N call sites" shape B118 found inside
         # `_forbid_game_access` itself.
-        fleet.read_log_window_raw = lambda *_a, **_k: ""
+        #
+        # B127: this must be a HEALTHY window, not "". The guard no longer
+        # trusts the transport reply, so it demands positive evidence that a
+        # build happened -- an empty window is now (correctly) NOT-RUN.
+        _healthy_win = (
+            f'[    ScriptEngine] [ TRAC] [00:00:00.0] [RemoteBuild]  '
+            f'Starting build for "{PROBE_ID}"\n'
+            f"[    ScriptEngine] [ TRAC] [00:00:00.1] [RemoteBuild]  "
+            f"Loaded plugin '{PROBE_ID}' (version 0.1.0)"
+        )
+        fleet.read_log_window_raw = lambda *_a, **_k: _healthy_win
         try:
             fleet.game_route = lambda route, data, **_k: (
                 {"error": "no transport could carry load_plugin", "data": ""}
@@ -838,6 +847,17 @@ def run_selftest() -> int:
                 failed_loudly = "not loaded" in str(exc)
             check("a failed load stops the batch instead of reporting "
                   "UNDETERMINED for every name", failed_loudly, True)
+            # B127 pair: the SAME healthy window with a clean transport reply
+            # must NOT stop the run. Without this, the check above passes for a
+            # guard that condemns every build.
+            fleet.game_route = lambda *_a, **_k: {"error": "", "data": "Plugin loaded"}
+            ran = True
+            try:
+                run_batch(["Meta::Zzz"], "TYPE")
+            except SystemExit:
+                ran = False
+            check("B127: a clean reply on a healthy build does not stop the run",
+                  ran, True)
             # Positive control: the SAME call with the load succeeding must NOT
             # raise. Without it the check above passes for a run_batch that
             # simply always raises, which would be no better.
@@ -966,7 +986,8 @@ def run_selftest() -> int:
             try:
                 run_batch(["Meta::Zzz"], "TYPE")
             except SystemExit as exc:
-                stopped = "no source location" in str(exc)
+                stopped = ("BUILD-ERR" in str(exc)
+                           and "dependency" in str(exc))
             check("B123: a location-less build error stops the run loudly",
                   stopped, True)
 
@@ -977,6 +998,28 @@ def run_selftest() -> int:
             except SystemExit:
                 survived = False
             check("B123: a healthy build does NOT stop the run", survived, True)
+
+            # B127: a FOREIGN plugin's compile error shares our window --
+            # Openplanet.log is one file and other sessions compile into it.
+            # It must not abort our run. This is what keeps the two error
+            # buckets partitioned: if a located diagnostic could leak into the
+            # location-less bucket, every foreign compile error in the same
+            # seconds would read as OUR build failing, and a corpus run would
+            # abort on somebody else's typo.
+            foreign_win = _log(
+                _start,
+                _eng("ERROR", "C:/users/steamuser/OpenplanetNext/Plugins/"
+                              "SomeOtherPlugin/Main.as (9, 2) :  ERR : "
+                              "Identifier 'Q' is not a data type"),
+                _loaded)
+            fleet.read_log_window_raw = lambda *_a, **_k: foreign_win
+            unaffected = True
+            try:
+                run_batch(["Meta::Zzz"], "TYPE")
+            except SystemExit:
+                unaffected = False
+            check("B127: a foreign plugin's error in our window does not abort "
+                  "the run", unaffected, True)
         finally:
             (fleet.OPN_PLUGINS, fleet.game_route, fleet.log_size,
              fleet.read_log_window, fleet.read_log_window_raw) = saved_b123

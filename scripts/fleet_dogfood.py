@@ -521,6 +521,94 @@ def raw_build_errors(window: str, fid: str) -> list[str]:
     ]
 
 
+BUILD_STATUSES = ("CLEAN", "REJECTED", "BUILD-ERR", "NOT-RUN")
+
+
+def build_verdict(window: str, fid: str, load: dict | None = None) -> dict:
+    """Did THIS build succeed? The one place that knows (B118 / B127).
+
+    Every probe needs this answer and each had been deriving it privately, so
+    each inherited a different subset of the same three false-green channels.
+
+    THE PROPOSITION THIS ANSWERS IS NOT THE ONE THE TRANSPORT ANSWERS. A reply
+    of `{"error": "", "data": "Plugin loaded"}` is truthful and says the plugin
+    WAS loaded; it is not a claim that the build succeeded. Measured
+    2026-09-01: a plugin whose dependency cannot be resolved gets exactly that
+    reply, while the engine logs `Couldn't find required plugin dependency` and
+    then `Loaded plugin` anyway. So a guard reading `load["error"]` as build
+    health never fires. The two were conflated for an honest reason -- before
+    B097 `load_plugin` had never once worked, so the reply was inert and
+    carried no information at all. It became load-bearing the day the transport
+    started working, and not one line of any consumer changed. **A value that
+    was decoration becoming meaningful is a contract change that no diff
+    records and no test fails on.**
+
+    FOUR VALUES, NOT A BOOLEAN, because the consumers need different policies
+    and a boolean cannot express them:
+
+      CLEAN     built and loaded, nothing attributed to it
+      REJECTED  the engine refused THIS code -- a verdict about the source
+      BUILD-ERR the build did not happen properly: a location-less engine
+                error, a transport error, or a build that started and never
+                loaded. NOT a verdict about the source.
+      NOT-RUN   no build for this id appears in the window at all
+
+    `REJECTED` and `BUILD-ERR` are deliberately distinct: collapsing them is
+    what produced B118, where a missing dependency read as a verdict about the
+    code under test. And the split is what lets each caller pick its own
+    policy -- `probe_enum_corpus` EXPECTS REJECTED every run, because its
+    sentinel is a deliberate error, while a `probe_export_binding` exporter
+    must be CLEAN or the whole run says nothing.
+
+    `load` is optional and only ever adds a failure; a caller that has no reply
+    to offer loses nothing else.
+    """
+    diagnostics = parse_game_diagnostics(window)
+    errs = [d for d in diagnostics if d["sev"] == "ERR"]
+    mine = f"{fid}/"
+    game_errors = [d for d in errs if d["file"].startswith(mine)]
+    # Never silently dropped: an unattributable ERR means the window is
+    # ambiguous and the run should not be trusted.
+    foreign_errors = [
+        d for d in errs if not d["file"].startswith(mine) and d["file"] != "?"
+    ]
+    unattributed_errors = [d for d in errs if d["file"] == "?"]
+
+    slice_ = build_slice(window, fid)
+    build_ran = bool(slice_)
+    build_loaded = any(BUILD_LOADED % fid in l for l in slice_)
+    build_failed = any(BUILD_FAILED in l for l in slice_)
+    raw_errs = raw_build_errors(window, fid)
+    load_error = bool((load or {}).get("error"))
+
+    if not build_ran:
+        status = "NOT-RUN"
+    elif game_errors or build_failed:
+        status = "REJECTED"
+    elif raw_errs or load_error or not build_loaded:
+        # `not build_loaded` belongs here, not with CLEAN: `Loaded plugin` is
+        # logged even AFTER `Script compilation failed!`, so its presence is
+        # necessary and not sufficient -- and its ABSENCE, with the build
+        # started, means the build never finished.
+        status = "BUILD-ERR"
+    else:
+        status = "CLEAN"
+
+    return {
+        "build_status": status,
+        "build_ran": build_ran,
+        "build_loaded": build_loaded,
+        "build_failed": build_failed,
+        "raw_build_errors": raw_errs,
+        "diagnostics": diagnostics,
+        "game_errors": game_errors,
+        "foreign_errors": foreign_errors,
+        "unattributed_errors": unattributed_errors,
+        "contended": bool(foreign_errors or unattributed_errors),
+        "compiled_clean": status == "CLEAN",
+    }
+
+
 def parse_game_diagnostics(window: str) -> list[dict]:
     """Extract `path (line, col) : SEV : msg` compile diagnostics from OP log."""
     diags = []
@@ -622,11 +710,19 @@ def process_plugin(pdir: Path, st: dict) -> dict:
                 # output we need without changing the plugin's installed state.
                 load = rb_route("load_plugin", {"id": fid, "source": "user", "type": "folder"}, timeout=15)
                 time.sleep(2.5)  # let compile finish + log flush
-                window = read_log_window(mark, fid)
+                # B123/B127: the RAW window. The filtered one drops `[ TRAC]`,
+                # and both build markers are TRAC, so this consumer could not
+                # see whether its build had happened -- while `verdict()` below
+                # reads an empty diagnostic list as PARITY-CLEAN. A reload of
+                # an already-installed plugin does emit the bracket (verified
+                # against Openplanet.log), so gating on it is safe here.
+                window = read_log_window_raw(mark, fid)
+                bv = build_verdict(window, fid, load)
                 rec["game"] = {
                     "staged_by_me": staged_by_me,
                     "load_response": load,
-                    "diagnostics": parse_game_diagnostics(window),
+                    "diagnostics": bv["diagnostics"],
+                    "build_status": bv["build_status"],
                     "raw_window": window[-6000:],
                 }
             finally:
@@ -650,16 +746,30 @@ def verdict(rec: dict) -> str:
     game = rec.get("game", {})
     if game.get("skipped"):
         return f"lsp={lspn} game=SKIP({game['skipped']})"
+    # B127. This must come BEFORE any counting. `gerr == 0` means "the game
+    # reported no errors", and an empty diagnostic list satisfies it whether
+    # the build was clean or never happened at all -- so a build that did not
+    # run would be reported as PARITY-CLEAN, and, worse, as `FP?` when the LSP
+    # had findings, manufacturing false-positive evidence AGAINST the LSP out
+    # of a build that produced nothing. Silence is this function's affirmative
+    # answer, which is the B118 polarity in the tool that generates the parity
+    # claims.
+    #
+    # REJECTED is NORMAL here: finding real compile errors is the point.
+    status = game.get("build_status")
+    if status in ("NOT-RUN", "BUILD-ERR"):
+        return f"lsp={lspn} game=NO-BUILD({status})"
+    unverified = "" if status else " build=?"  # record predates B127
     gd = game.get("diagnostics", [])
     gerr = sum(1 for d in gd if d["sev"] == "ERR")
     gwarn = sum(1 for d in gd if d["sev"] == "WARN")
     if lspn == 0 and gerr == 0:
-        return f"PARITY-CLEAN (lsp=0 game_err=0 warn={gwarn})"
+        return f"PARITY-CLEAN (lsp=0 game_err=0 warn={gwarn}){unverified}"
     if (lspn or 0) > 0 and gerr == 0:
-        return f"FP? lsp={lspn} game_err=0"
+        return f"FP? lsp={lspn} game_err=0{unverified}"
     if lspn == 0 and gerr > 0:
-        return f"FN? lsp=0 game_err={gerr} warn={gwarn}"
-    return f"BOTH lsp={lspn} game_err={gerr} warn={gwarn}"
+        return f"FN? lsp=0 game_err={gerr} warn={gwarn}{unverified}"
+    return f"BOTH lsp={lspn} game_err={gerr} warn={gwarn}{unverified}"
 
 def next_undone(st: dict) -> Path | None:
     done = set(st["plugins"].keys())
@@ -738,8 +848,132 @@ def print_rec(rec: dict):
     print(f"  VERDICT: {verdict(rec)}")
 
 # ---- main ---------------------------------------------------------------------
+def run_selftest() -> int:
+    """Offline checks for `build_verdict` and `verdict` (B118 / B123 / B127).
+
+    These two decide whether a build succeeded and whether a plugin shows
+    PARITY, and neither had a test of its own -- `build_verdict` was covered
+    only indirectly through two consumers, and `verdict` not at all, which is
+    how it kept reporting PARITY-CLEAN for builds that never happened.
+
+    Every case is a PAIR asserting the two halves DIFFER. A guard that
+    condemns every build satisfies a one-sided assertion just as well as a
+    correct one, and B118 found four such guards only by mutation.
+    """
+    failures: list[str] = []
+
+    def check(what, got, want):
+        if got != want:
+            failures.append(f"{what}\n    got  {got!r}\n    want {want!r}")
+
+    fid = "lsp-selftest-probe"
+
+    def eng(sev, msg):
+        return f"[    ScriptEngine] [{sev}] [00:00:00.000] [RemoteBuild]  {msg}"
+
+    plug = f"C:/users/steamuser/OpenplanetNext/Plugins/{fid}/Main.as"
+    start = eng(" TRAC", f'Starting build for "{fid}"')
+    loaded = eng(" TRAC", f"Loaded plugin '{fid}' (version 0.1.0)")
+    located = eng("ERROR", f"{plug} (3, 5) :  ERR : No matching symbol 'Nope'")
+    failed = eng("ERROR", "Script compilation failed!")
+    # Verbatim in shape from Openplanet.log, 2026-09-01. This is the B127 case.
+    locless = eng("ERROR", 'Couldn\'t find required plugin dependency "zzz" '
+                           f'while loading plugin "{fid}"')
+    foreign = eng("ERROR", "C:/users/steamuser/OpenplanetNext/Plugins/"
+                           "other-plugin/Main.as (1, 1) :  ERR : boom")
+    ok = {"error": "", "data": "Plugin loaded"}
+
+    clean = build_verdict("\n".join([start, loaded]), fid, ok)
+    check("a build that ran and loaded is CLEAN", clean["build_status"], "CLEAN")
+
+    # THE B127 HEADLINE. The transport reply is a clean success -- it is
+    # truthful, the plugin WAS loaded -- while the build could not resolve its
+    # dependency. Reading the reply as build health is the defect.
+    b127 = build_verdict("\n".join([start, locless, loaded]), fid, ok)
+    check("B127: a success reply does NOT certify a build whose dependency "
+          "could not be resolved", b127["build_status"], "BUILD-ERR")
+    check("B127: and it is not mistaken for a verdict about the source",
+          b127["build_status"] == "REJECTED", False)
+    check("B127: the pair discriminates -- same reply, different build",
+          b127["build_status"] != clean["build_status"], True)
+
+    for label, window, load, want in [
+        ("the engine refused the source", [start, located, failed, loaded], ok, "REJECTED"),
+        # NOT an empty window: Openplanet.log is shared and always carries
+        # other traffic, and an empty string lets a broken `build_slice` look
+        # correct for free. B118 was caught making exactly this mistake, and
+        # writing these fixtures fresh reintroduced it -- so the case is
+        # another lane's build, not nothing.
+        ("our build absent, another lane's present",
+         [eng(" TRAC", 'Starting build for "some-other-lane"'),
+          eng(" TRAC", "Loaded plugin 'some-other-lane' (version 2.0)")],
+         ok, "NOT-RUN"),
+        # `Script compilation failed!` as the ONLY signal. Paired with a
+        # located error it never decides anything, because `game_errors`
+        # already forces REJECTED -- the summary and its diagnostics can
+        # straddle a window boundary for real.
+        ("compilation failed, no located diagnostic in the window",
+         [start, failed, loaded], ok, "REJECTED"),
+        ("build started, never loaded", [start], ok, "BUILD-ERR"),
+        ("the transport itself failed", [start, loaded], {"error": "boom"}, "BUILD-ERR"),
+    ]:
+        got = build_verdict("\n".join(window), fid, load)
+        check(f"build_verdict: {label}", got["build_status"], want)
+        check(f"build_verdict: {label} differs from CLEAN",
+              got["build_status"] != clean["build_status"], True)
+
+    # Attribution is the control that proves the rest is wired: this already
+    # worked before B118, and if it stops, every case above measures nothing.
+    fgn = build_verdict("\n".join([start, foreign, loaded]), fid, ok)
+    check("a foreign plugin's error is not attributed to us", fgn["game_errors"], [])
+    check("a foreign plugin's error marks the window contended",
+          fgn["contended"], True)
+    check("and it does not become a verdict about our build",
+          fgn["build_status"], "CLEAN")
+    own = build_verdict("\n".join([start, located, loaded]), fid, ok)
+    check("our own error IS attributed to us", bool(own["game_errors"]), True)
+    check("foreign and own land differently",
+          (bool(fgn["game_errors"]), bool(own["game_errors"])), (False, True))
+
+    # --- verdict(): silence must not read as parity ------------------------
+    def v(lsp, game):
+        return verdict({"lsp": {"count": lsp}, "game": game})
+
+    check("a genuinely clean build reports parity",
+          v(0, {"diagnostics": [], "build_status": "CLEAN"}).startswith("PARITY-CLEAN"),
+          True)
+    for status in ("NOT-RUN", "BUILD-ERR"):
+        check(f"a {status} build is NOT reported as parity",
+              v(0, {"diagnostics": [], "build_status": status}),
+              f"lsp=0 game=NO-BUILD({status})")
+    # The worse half: with LSP findings, a build that never ran used to read as
+    # `FP?` -- false-positive evidence AGAINST the LSP, manufactured from a
+    # build that produced nothing.
+    check("a build that never ran does not manufacture FP? against the LSP",
+          "FP?" in v(3, {"diagnostics": [], "build_status": "NOT-RUN"}), False)
+    check("while a real clean build still can report FP?",
+          v(3, {"diagnostics": [], "build_status": "CLEAN"}).startswith("FP?"), True)
+    # A record written before B127 has no build_status. It is not evidence that
+    # the build ran, so it must not pass as verified.
+    check("a pre-B127 record is marked unverified rather than silently trusted",
+          v(0, {"diagnostics": []}).endswith("build=?"), True)
+    check("and a verified one carries no marker",
+          v(0, {"diagnostics": [], "build_status": "CLEAN"}).endswith("build=?"),
+          False)
+
+    for f in failures:
+        print(f"  - {f}")
+    if failures:
+        print(f"FAIL: {len(failures)} selftest check(s) failed")
+        return 1
+    print("PASS: a build that did not happen is never reported as clean.")
+    return 0
+
+
 def main():
     args = sys.argv[1:]
+    if args and args[0] == "--selftest":
+        sys.exit(run_selftest())
     st = load_state()
     if not args or args[0] == "next":
         tgt = next_undone(st)

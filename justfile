@@ -142,6 +142,19 @@ probe-export-binding *ARGS:
 probe-export-binding-selftest:
     python3 scripts/probe_export_binding.py --selftest
 
+# Offline checks for the two functions that decide whether a build succeeded
+# (`build_verdict`) and whether a plugin shows parity (`verdict`). Neither had
+# a test of its own, which is how `verdict` kept reporting PARITY-CLEAN for
+# builds that never happened (B127). No game needed.
+fleet-selftest:
+    python3 scripts/fleet_dogfood.py --selftest
+
+# Prove fleet-selftest is non-vacuous: restore each half of B118's, B123's and
+# B127's defects, including two OVER-CONDEMN mutations — a guard that calls
+# every build broken passes a suite that only checks broken builds get caught.
+fleet-verdict-mutants:
+    python3 scripts/check_fleet_verdict_nonvacuous.py
+
 # Prove probe-selftest is non-vacuous: restore each half of a defect the enum
 # probe's guards exist to prevent (B068's sentinel, B097's load check, B123's
 # build-health check) and require the selftest to go red for every one. B118

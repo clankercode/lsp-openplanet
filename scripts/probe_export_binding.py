@@ -378,6 +378,13 @@ def classify(variant: Variant, window: str, fid: str, load: dict) -> Result:
         return Result(variant, "COMPILE_ERR", diags[0]["msg"], diags, window)
     if load.get("error"):
         return Result(variant, "AMBIGUOUS", f"load failed: {load['error']}", [], window)
+    # B127 EXEMPTION, stated so it is not re-derived. A clean reply cannot
+    # certify a build here either -- but this oracle does not need it to. Its
+    # affirmative answer is the consumer PRINTING its start token below, a
+    # positive control in the same family as `probe_enum_corpus`'s sentinel. A
+    # build that failed for any reason never runs, never prints, and lands in
+    # the `not started` branch as AMBIGUOUS. Silence is the negative answer
+    # here, so no failure mode can impersonate BOUND or UNBOUND.
 
     started = f"{TOKEN} start {variant.id}" in window
     bound = f"{TOKEN} bound {variant.id} " in window
@@ -547,14 +554,24 @@ def run(variants: list[Variant], workdir: Path) -> list[Result]:
         exp_load = load_plugin(EXPORTER_ID)
         time.sleep(2.5)
         exp_window = read_raw_window(mark)
-        exp_errs = [
-            d
-            for d in fleet.parse_game_diagnostics(exp_window)
-            if d["sev"] == "ERR" and d["file"].startswith(f"{EXPORTER_ID}/")
-        ]
+        # B127: the exporter must have BUILT, not merely have been delivered.
+        # A reply of `{"error": "", "data": "Plugin loaded"}` comes back for a
+        # build whose dependency could not be resolved, so `exp_load["error"]`
+        # cannot carry this. A THIRD policy on the same four values: unlike
+        # `probe_enum_corpus` (where REJECTED is normal) or `issue_repro_game`
+        # (where it is the answer), the exporter must be CLEAN -- every variant
+        # lives in this one plugin, so anything less makes the whole run say
+        # nothing.
+        exp_verdict = fleet.build_verdict(exp_window, EXPORTER_ID, exp_load)
+        exp_errs = exp_verdict["game_errors"]
         try:
-            if exp_load.get("error") or exp_errs:
-                detail = exp_load.get("error") or exp_errs[0]["msg"]
+            if exp_verdict["build_status"] != "CLEAN":
+                detail = (
+                    exp_load.get("error")
+                    or (exp_errs[0]["msg"] if exp_errs else None)
+                    or (exp_verdict["raw_build_errors"] or
+                        [f"build is {exp_verdict['build_status']}"])[0]
+                )
                 # Every variant lives in this one plugin, so a broken exporter
                 # makes the whole run say nothing. Say that, rather than
                 # returning a table of UNBOUNDs that look like findings.
@@ -651,6 +668,14 @@ def run_selftest() -> int:
         "AMBIGUOUS",
     )
     case("RemoteBuild refused the load", start, "AMBIGUOUS", {"error": "boom"})
+    # B127: the realistic reply for a build whose dependency could not be
+    # resolved is a clean success. It must not turn a consumer that never ran
+    # into a measurement. This pins the exemption rather than asserting it.
+    case("a clean 'Plugin loaded' reply cannot make an unrun consumer look "
+         "measured", "unrelated log noise", "AMBIGUOUS",
+         {"error": "", "data": "Plugin loaded"})
+    case("nor can it turn a started-then-silent consumer into a verdict",
+         start, "AMBIGUOUS", {"error": "", "data": "Plugin loaded"})
     # The path shape matters: `fleet.parse_game_diagnostics` attributes a
     # diagnostic by matching `Plugins/<dir>/<file>.as`, so a synthetic window
     # without that prefix is attributed to "?" and would score AMBIGUOUS. A
