@@ -792,19 +792,43 @@ indistinguishable from "I am structurally incapable of seeing it".
   been accepted by anyone, including the person who wrote the gate.
 
   Forcing a rebuild took the binary from 52 tests to 54, and the merged tree
-  then went **red**: a genuine regression, bisected to one of the two merges by
-  running the single test at each merge commit in a detached worktree. That
-  merge was reverted and master returned to green.
+  then went **red**. **CORRECTION (same day): there was no regression, and the
+  merge I reverted was innocent.** The lane that owned it demonstrated the
+  failure being manufactured without its change present at all.
 
-  Two rules follow:
+  **There were TWO staleness modes and I found only one.** The green 2358 was a
+  stale *test binary*. The subsequent red was a stale **bin dependency**: the
+  test spawns `CARGO_BIN_EXE_openplanet-lsp` as a **child process**, so the
+  harness can be freshly built while the binary whose behaviour it measures is
+  not. Touching the test file rebuilt the harness and not the binary, and the
+  reported `left: 13, right: 6` was precisely the pre-fix warning count of a
+  change that *was* in the source and *was not* in the binary being run.
+
+  **And my bisect was uncontrolled.** The two passing runs used a fresh target
+  dir; the failing run used a warm one. I varied the commit and the build cache
+  **simultaneously** and attributed the difference entirely to the commit. A
+  bisect is a controlled experiment or it is nothing, and a shared warm
+  `CARGO_TARGET_DIR` is a variable — `git checkout` writes older mtimes, cargo's
+  fingerprint reads them as fresh, and the build is skipped.
+
+  Four rules follow, and the last two are the ones I actually needed:
 
   - **A total that drops, or fails to rise as predicted, is a defect signal
-    rather than noise.** It is the only symptom this class of staleness
-    produces.
+    rather than noise.** It is the only symptom the test-binary mode produces.
   - **Merge two branches separately, or predict the combined total exactly and
-    treat any deviation as blocking.** Merging two and gating once saves one
-    suite run and costs the ability to attribute a failure — and here it also
-    created the window in which a stale artifact could be believed.
+    treat any deviation as blocking.**
+  - **Bisect in a fresh target dir, or you are bisecting the cache.** Change
+    one variable. A warm shared cache is a variable.
+  - **When a test spawns a binary, rebuilding the test proves nothing about
+    the binary.** Ask what artifacts the assertion actually depends on —
+    harness, library, *and* any child process — and confirm each is current.
+    `touch`ing the test file is the most natural thing to do and it refreshes
+    exactly the one that was not the problem.
+
+  The cost of getting this wrong was a correct merge reverted on the strength
+  of an artifact, and a lane sent to rework something that was never broken.
+  **The revert was the confident action; the stale binary was invisible in
+  every output I looked at.**
 
 - **A ticket's preferred fix was already implemented, and inert.** B062 asked
   for "whole-file rooting: exempt declarations in a manifest `exports` file",
