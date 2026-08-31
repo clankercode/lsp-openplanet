@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-31T15:06:08Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T15:06:08Z"
 complexity: medium
 created_at: "2026-08-31T15:05:17Z"
 depends_on: []
+duration_minutes: 0.012610238783333333
 estimate_hours: 1
 id: B136
 priority: high
 started_at: "2026-08-31T15:06:08Z"
-status: in_progress
+status: done
 tags: []
 title: A leading const binds to the first @ in a type suffix chain, so const T@[]@ resolves to an array of handles-to-const instead of a handle to a const array — and renders to the same display string as the correct const array<T@>@ (FIXED IN B119, filed for findability)
 updated_at: "2026-08-31T15:06:08Z"
