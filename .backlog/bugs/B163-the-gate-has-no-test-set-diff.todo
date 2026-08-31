@@ -186,3 +186,50 @@ enumerate the binaries, list the tests per binary, read the baseline. Each needs
 its denominator on screen. The one that actually bit was the first, which is also
 the one least likely to be tested, because it reads as plumbing rather than
 logic.
+
+THE DISK MEASUREMENT SETTLES IT: the live merge-base build is not merely
+expensive, it is unaffordable, and its failure mode is the one that already burned
+this batch. Measured on x-alpha 2026-09-01: 458G total, 390G used, **45G free,
+90% full**. Six per-lane target dirs already account for ~82 GB
+(9.6 / 11 / 14 / 15 / 16 / 16). B106's floor is 10 GiB.
+
+A live merge-base build needs a SECOND target dir per lane -- reusing the lane's
+own thrashes the incremental cache between two different source trees, which is
+exactly why `remote-build.py` gives each worktree its own `CARGO_TARGET_DIR`. At
+~14 GB each, four concurrent lanes add ~56 GB against 45 GB free: over the B106
+floor and into 100%.
+
+That is the B106 incident verbatim -- x-alpha at 0 bytes, gates exiting 0 while
+builds failed with ENOSPC. The live-build option would buy a set diff by
+reintroducing a FALSE-GREEN ROUTE into every other gate on the box. Committed
+baseline is now a constraint, not a preference.
+
+TWO CORRECTIONS TO "REUSE CLIPPY'S SHAPE", both instances of this ticket's own
+general form:
+
+1. THE PURE SORTED LIST HAS AN EMPTY-BASELINE HOLE -- route 3 arriving in the
+   third population step. An empty or truncated baseline yields zero expected
+   names, so every test reads as ADDED, removals come out ZERO, and the diff
+   reconciles perfectly. The recursion this ticket exists to stop, in the step
+   that feels most like plumbing.
+
+   Fix keeps both properties: the FILE stays a pure sorted list (mergeable,
+   resolves by union), and the TOOL refuses an empty or implausibly-small
+   baseline and prints `baseline: N names / this tree: M names` on stdout.
+   Denominator on screen, no metadata in the file.
+
+2. CLIPPY'S REFUSAL-ON-MISMATCH DOES NOT TRANSFER AS-IS. Clippy carries toolchain
+   and command because lint FINDINGS vary by toolchain. Test NAMES do not -- but
+   they are not purely source-derived either. Measured: 10 `#[cfg(unix)]` tests
+   across `analysis_snapshot.rs`, `cli/typedb_cmd.rs`, `workspace/roots.rs`,
+   `cli_typedb_tests.rs`, `gitignore_discovery_tests.rs`. The real axis is
+   PLATFORM/FEATURES, not rustc version. Latent here since every gate runs Linux.
+
+   And guarding it the clippy way costs the thing that matters: an in-file
+   metadata header is a line EVERY RE-RECORD TOUCHES, i.e. a guaranteed conflict
+   on the concurrent-lane path. No in-file metadata. A platform guard, if wanted,
+   belongs in the tool's refusal and output where it costs no merge surface.
+
+NET: reuse the shape (committed, recorded on master, compared at gate time); skip
+the in-file metadata and the toolchain guard; add an emptiness refusal. Say so
+plainly in the commit rather than implying clippy was copied wholesale.
