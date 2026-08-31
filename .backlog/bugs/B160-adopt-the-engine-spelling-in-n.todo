@@ -75,3 +75,5 @@ full stop).** That header is corrected.
 Change the renderer, update the 15 assertions, and **invert the transform in
 B155's test** so it keeps checking the relationship rather than being deleted.
 The test is the durable asset here; the decision is one line.
+
+Decision 2026-09-01: serial typechecker/oracle lane before B165 because both touch funcdef/conversion diagnostics and checker tests. Max requested this batch, resolving the ticket's open product call in favour of adopting the measured engine spelling: target reference suffix plus trailing full stop. Preserve the corpus-derived relationship test by inverting its transform.
