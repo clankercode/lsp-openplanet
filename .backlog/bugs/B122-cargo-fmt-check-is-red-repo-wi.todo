@@ -1,17 +1,19 @@
 ---
-completed_at: null
+claimed_at: "2026-08-31T14:45:46Z"
+claimed_by: cli-user
+completed_at: "2026-08-31T14:48:02Z"
 complexity: medium
 created_at: "2026-08-31T13:55:40Z"
 depends_on: []
+duration_minutes: 2.2704093780833334
 estimate_hours: 1
 id: B122
 priority: high
-reason: 'HOLD until all WIP is merged, this session''s lanes AND the peer session''s. Set by Max 2026-09-01. Blocking: B119 (lane-unused), B121 (lane-enum), B123 (lane-resolver), and B113+B114 in peer session claude-xenon-side-u7o7. B114 is the critical one — a pooling change whose consumer ripple reaches checker.rs, which carries ~40 of the 77 fmt diffs. Re-check BOTH sessions immediately before running cargo fmt; two sessions draining at different moments is not a window.'
-started_at: null
-status: blocked
+started_at: "2026-08-31T14:45:46Z"
+status: done
 tags: []
 title: 'cargo fmt --check is red repo-wide on master: 77 diffs across five files, so any lane that runs cargo fmt makes its own diff unreviewable'
-updated_at: "2026-08-31T14:06:52Z"
+updated_at: "2026-08-31T14:48:02Z"
 ---
 
 cargo fmt --check is red repo-wide on master: 77 diffs across five files, so any lane that runs cargo fmt makes its own diff unreviewable
@@ -95,3 +97,56 @@ it wrong costs other people's review time rather than producing a test failure.
 That is the same shape as `git add -A` and `reset --soft master` in
 `docs/verification-hazards.md`: a clean-applying commit that sweeps in work the
 author did not do and defeats review rather than any gate.
+
+
+## DONE, 2026-09-01
+
+Run with **no lane in flight** and after the peer session's B113/B114 had landed
+— the hold condition Max set, both halves satisfied at the same moment and
+re-checked immediately before running rather than trusting an earlier all-clear.
+
+### The open question is settled
+
+**There is no `rustfmt.toml` or `.rustfmt.toml` in this repo.** So the diffs are
+default-rustfmt opinions against a project that has never expressed a different
+preference. That makes this *"the code is misformatted"*, not *"the formatter
+disagrees with a deliberate house style"* — which is the only reading that
+justifies rewriting eleven files.
+
+### Scope, as measured at the time of the run
+
+**89 diffs across 11 files**, not the 77 across 5 in the original report. It had
+grown as the batch landed work — another instance of a recorded number going
+stale, and the reason the run re-measured rather than quoting the ticket.
+
+### Behaviour-neutrality, verified three ways rather than asserted
+
+1. **Per-file token comparison.** Whitespace and trailing commas normalised out,
+   then hashed either side. What remains is two classes of change, both
+   semantically inert in Rust: trailing commas added or removed as argument
+   lists split or join, and `use` statements reordered within a group.
+   `src/typecheck/call_site.rs` is the clearest single example — a two-line
+   import swap.
+2. **Suite:** `SUITE-VERIFIED: 2920 passed; 0 failed; 12 ignored; 34/34`
+   binaries, x-alpha. **Identical either side.**
+3. **Clippy delta:** 130 raw / 39 fingerprints against baseline `6ea004ea`.
+   **Identical either side.** Worth noting because a reformat CAN change lint
+   output — `collapsible_if`, `needless_return` and friends are layout-sensitive
+   — so an unchanged fingerprint set is a real result, not a foregone one.
+
+### Blame
+
+`.git-blame-ignore-revs` created, carrying the reformat SHA and a comment saying
+only formatting-only commits may be listed, since a behaviour-changing commit in
+that file would make blame silently misattribute lines. Enable locally with:
+
+    git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+Verified: blame through the reformat still reaches the original author.
+
+### Not done, deliberately
+
+**`--check` was NOT added to a gate.** That is a separate decision with its own
+cost — it would fail every lane that has a formatting nit mid-work, which is most
+of them most of the time — and it should be made on its own merits rather than
+smuggled in behind a cleanup. File it if wanted.
