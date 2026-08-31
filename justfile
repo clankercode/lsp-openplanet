@@ -188,9 +188,51 @@ tui-showcase-shots:
     cp -f docs/images/tui-review/showcase-relaxed-hero.png docs/images/watch-demo.png
     @echo "hero → docs/images/watch-demo.png"
 
-# Clippy (all targets)
+# Clippy (all targets).
+#
+# RED ON MASTER (B083): 65 errors that belong to nobody, so this cannot tell
+# you whether YOUR change is clean. Use `just clippy-delta` for that. Note the
+# `-D warnings` here also TRUNCATES the diagnostic set — it stops compilation
+# at the first warning, reporting 115 diagnostics where the plain run reports
+# 129 — so a green run of this would still be hiding 14.
+#
+# Clippy, all targets, -D warnings. RED ON MASTER — see clippy-delta.
 clippy:
     cargo clippy --all-targets -- -D warnings
+
+# B083: did MY change add a clippy finding? A multiset difference of
+# (file, lint, message) fingerprints against docs/clippy-baseline.json, with
+# line numbers normalised out and NEVER `-D warnings`. Answers the question a
+# lane actually has, on a tree that is red for everyone.
+#
+# The clippy gate that works on a red tree: did I add a lint?
+clippy-delta *ARGS:
+    python3 scripts/clippy_delta.py {{ARGS}}
+
+# Refresh docs/clippy-baseline.json. Run this ON MASTER: a baseline recorded on
+# a lane branch blesses that lane's own lints. Records the method (command,
+# toolchain, features, profile, commit) beside the numbers, because numbers
+# without their method are not comparable to anything.
+#
+# Re-record the clippy baseline (master only).
+clippy-delta-record:
+    python3 scripts/clippy_delta.py --record
+
+# Offline proof the gate can fail: a new lint, one more of an existing lint,
+# and a swapped member at an unchanged total must all go red, and a baseline
+# it cannot legitimately compare against must be refused.
+#
+# Proves `just clippy-delta` can fail (synthetic, fast).
+clippy-delta-selftest:
+    python3 scripts/clippy_delta.py --selftest
+
+# The same, end to end: writes Rust that clippy really lints into the real
+# tree, requires the real gate to name it, restores, and verifies the restore.
+# Also neuters each guard in a throwaway copy.
+#
+# Proves `just clippy-delta` can fail (real lints, slower).
+clippy-delta-mutants:
+    python3 scripts/check_clippy_delta_nonvacuous.py
 
 # Format check
 fmt:
