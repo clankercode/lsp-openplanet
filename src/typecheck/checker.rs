@@ -3603,9 +3603,34 @@ impl<'a> Checker<'a> {
         let expected = Self::peel_const_handle(expected);
         match (got, expected) {
             (TypeRepr::Void, TypeRepr::Void) => true,
-            (TypeRepr::Primitive(a), TypeRepr::Primitive(b)) => {
-                a == b || is_convertible(got, expected)
-            }
+            // B110: EXACT, because a funcdef signature match is not a
+            // conversion site. `is_convertible` used to stand here beside
+            // `a == b`, which treated a function pointer's parameter and
+            // return types as if they were VALUES being converted. They are
+            // not: a delegate is called with the caller's types directly, so
+            // there is no seam for the engine to insert a numeric conversion
+            // into and a `double()` cannot stand in for an `int()`.
+            //
+            // REASONED, not probed — B097 blocks probing repo-wide — and the
+            // reasoning is corroborated rather than assumed. B027 measured
+            // the sibling axis: any plain/`&in`/`&out`/`&inout` MODE mismatch
+            // is `Can't create delegate` (OP 1.29.5, 2026-08-29), so
+            // exactness is already the rule for how a parameter is passed;
+            // this says it is also the rule for what type it is. See
+            // `tests/b110_funcdef_signature_exactness.rs` for the fleet
+            // measurement that decided it and for the one pair
+            // (`int` at an `int64` slot) that no shipped plugin exercises.
+            //
+            // Value conversions elsewhere are untouched and correct:
+            // `int x = someDouble;` really is a conversion, and
+            // `is_convertible` is still what answers that.
+            //
+            // Spelling-safe rather than spelling-sensitive: `int`/`int32` and
+            // `uint`/`uint32` fold onto one `PrimitiveType` in `from_name`,
+            // so comparing the parsed primitives does not false-positive on
+            // the typedb's `int32` against a source `int`. Pinned by
+            // `the_int32_spelling_is_the_same_type_as_int`.
+            (TypeRepr::Primitive(a), TypeRepr::Primitive(b)) => a == b,
             (
                 TypeRepr::Named(a) | TypeRepr::Funcdef(a),
                 TypeRepr::Named(b) | TypeRepr::Funcdef(b),
@@ -11443,6 +11468,113 @@ void Main() {
                 .any(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. })),
             "wrong-sig fn into the Multiline callback slot must be rejected, got {:?}",
             diags
+        );
+    }
+
+    /// B110: THE SHAPE 204 REAL CALL SITES USE, and the reason this ticket's
+    /// fleet delta came back at zero.
+    ///
+    /// `startnew(H, u)` resolves against nine overloads, of which the
+    /// `CoroutineFuncUserdata*` family differ only in the userdata type. Before
+    /// B110 a handler matched several of them at once through numeric
+    /// convertibility; now it matches exactly one. The call is silent either
+    /// way, because the one it matches is the right one — that is what the
+    /// instrumented sweep showed on 15 plugins and 408 flipped comparisons,
+    /// and this is that shape held still.
+    ///
+    /// The required silence, not an incidental one: if this went red, the
+    /// change would be a false error on `startnew(SetTimeLimit_Async, 120)`,
+    /// which `tm-simple-room-admin` ships.
+    #[test]
+    fn b110_startnew_userdata_handlers_still_bind_their_exact_slot() {
+        for (param, arg) in [
+            ("int64 v", "1"),
+            ("uint64 v", "uint64(1)"),
+            ("double v", "1.0"),
+            ("bool v", "true"),
+            ("const string &in v", "\"x\""),
+        ] {
+            let src = format!(
+                "void H({param}) {{ }}\nvoid Render() {{ startnew(H, {arg}); }}"
+            );
+            let diags = check_with_typedb(&src);
+            let bad: Vec<_> = diags
+                .iter()
+                .filter(|d| {
+                    matches!(
+                        d.kind,
+                        TypeDiagnosticKind::NoMatchingSignatures { .. }
+                            | TypeDiagnosticKind::ArgTypeMismatch { .. }
+                    )
+                })
+                .collect();
+            assert!(
+                bad.is_empty(),
+                "a handler whose userdata type EXACTLY matches a \
+                 CoroutineFuncUserdata* slot must still bind: {bad:?}\n{src}"
+            );
+        }
+    }
+
+    /// THE ONE ROW THAT IS REASONED RATHER THAN MEASURED, isolated so it is
+    /// visible and revisitable instead of buried in the lattice.
+    ///
+    /// A handler declared with a BARE `int` at the `int64` userdata slot is
+    /// accepted before this change and rejected after. No plugin in the
+    /// 151-plugin corpus writes it: the instrumented sweep never printed an
+    /// `int -> int64` pair, and the single apparent source-level hit was a
+    /// different plugin's `void DownloadTmxMapToLocal(ref@)`. So the fleet
+    /// gives no evidence either way for this pair — only for the four it does
+    /// exercise.
+    ///
+    /// What stands behind it: a delegate has no conversion seam; B027
+    /// measured the sibling MODE axis as exact (`Can't create delegate`, OP
+    /// 1.29.5); and 151 plugins write `int64`/`uint64`/`double` handlers and
+    /// never `int`, which is what you would expect if only the exact type
+    /// binds. B097 blocks the probe that would settle it. Re-measure when it
+    /// is fixed — this test is the row to revisit.
+    #[test]
+    fn b110_a_bare_int_handler_no_longer_binds_the_int64_userdata_slot() {
+        let diags = check_with_typedb(
+            "void H(int v) { }\nvoid Render() { startnew(H, 1); }",
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. })),
+            "void(int) is not void(int64) and the engine compares signatures \
+             rather than converting them: {diags:?}"
+        );
+    }
+
+    /// B102's TEMPLATE-MEMBER slot reaches the same predicate, with the
+    /// element type substituted per call site rather than looked up. An
+    /// `int[]` comparator must take `int`, not merely something an `int`
+    /// converts to.
+    ///
+    /// Both directions in one test, because the reject half alone is
+    /// satisfied by a rule that rejects every comparator.
+    #[test]
+    fn b110_array_sort_comparator_element_type_is_exact() {
+        let exact = check_with_typedb(
+            "bool Less(const int &in a, const int &in b) { return a < b; }\n\
+             void Render() { int[] xs = {3, 1}; xs.Sort(Less); }",
+        );
+        assert!(
+            exact
+                .iter()
+                .all(|d| !matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. })),
+            "an int comparator on an int[] must bind: {exact:?}"
+        );
+        let widened = check_with_typedb(
+            "bool Less(const int64 &in a, const int64 &in b) { return a < b; }\n\
+             void Render() { int[] xs = {3, 1}; xs.Sort(Less); }",
+        );
+        assert!(
+            widened
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. })),
+            "an int64 comparator is not an int comparator: {widened:?}"
         );
     }
 

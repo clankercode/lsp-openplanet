@@ -168,23 +168,32 @@ fn binding_rejects_void_return_against_value_funcdef() {
     );
 }
 
-/// KNOWN LIMITATION, pinned as a consistency property rather than as a
-/// verdict. `funcdef_types_compatible` accepts two primitives when
-/// `is_convertible` holds, so a `float` return binds a `uint` funcdef —
-/// and it does so at EVERY position, including the constructor, which
-/// already worked before this fix. Measured: both silent.
+/// THE LIMITATION THIS PINNED IS FIXED. B076 wrote "filed separately rather
+/// than changed here"; B110 is that ticket arriving, and this is the flip.
 ///
-/// So this is not the initializer gap B076 closed; it is a pre-existing
-/// looseness in the shared predicate. Whether the engine agrees is
-/// unresolved and needs a live REJECT to settle (the game is down, B068),
-/// and tightening it is the error-ADDING direction, which is the one not to
-/// guess at. Filed separately rather than changed here.
+/// It read: `funcdef_types_compatible` accepts two primitives when
+/// `is_convertible` holds, so a `float` return binds a `uint` funcdef, at
+/// every position including the constructor. B110 removed that — a funcdef
+/// signature match is not a conversion site, because a delegate is called
+/// with the caller's types directly and there is no seam for the engine to
+/// insert a numeric conversion into.
 ///
-/// What this test does pin: the two positions must not diverge. If a later
-/// change makes one of them stricter, that is a real inconsistency and this
-/// goes red.
+/// B076 declined to guess because it is the error-ADDING direction with no
+/// live engine to confirm against, and that was right at the time. B110 did
+/// not guess either: it measured the fleet first. 408 comparisons across 15
+/// of 151 plugins flip from accept to reject, every one of them at a
+/// `startnew` userdata slot that also holds an exactly-matching candidate, so
+/// the fleet delta is 361 errors before and 361 after, line-identical. The
+/// leniency is exercised constantly and relied upon nowhere. B097 still
+/// blocks the probe; `tests/b110_funcdef_signature_exactness.rs` carries the
+/// full argument and names the one pair the corpus does not exercise.
+///
+/// WHAT THIS TEST STILL PINS IS UNCHANGED, and it is the valuable half: the
+/// two positions must not diverge. It said "if a later change makes one of
+/// them stricter, that is a real inconsistency and this goes red" — B110 made
+/// BOTH stricter, so the property holds and only the verdict moved.
 #[test]
-fn primitive_convertible_return_is_accepted_at_both_positions() {
+fn primitive_convertible_return_is_rejected_at_both_positions() {
     let via_init = errors(
         r#"
         funcdef uint Maker();
@@ -206,9 +215,33 @@ fn primitive_convertible_return_is_accepted_at_both_positions() {
          return; init={via_init:?} ctor={via_ctor:?}"
     );
     assert!(
-        via_ctor.is_empty(),
-        "documented current behaviour is that both accept it; if this now \
-         rejects, the predicate was tightened and the comment is stale: {via_ctor:?}"
+        !via_ctor.is_empty(),
+        "a float() function does not bind a uint() funcdef: the engine \
+         compares signatures rather than converting them (B110): {via_ctor:?}"
+    );
+
+    // The control the old version did not need and this one does: an EXACT
+    // primitive return must still bind at both positions, or "rejects a
+    // convertible return" is satisfied by a predicate that rejects every
+    // primitive return.
+    let exact_init = errors(
+        r#"
+        funcdef uint Maker();
+        uint MakeUint() { return 1; }
+        void Use() { Maker@ b = MakeUint; }
+        "#,
+    );
+    let exact_ctor = errors(
+        r#"
+        funcdef uint Maker();
+        uint MakeUint() { return 1; }
+        void Use() { Maker@ b = Maker(MakeUint); }
+        "#,
+    );
+    assert!(
+        exact_init.is_empty() && exact_ctor.is_empty(),
+        "an exact uint() match must still bind at both positions; \
+         init={exact_init:?} ctor={exact_ctor:?}"
     );
 }
 
