@@ -4258,7 +4258,7 @@ Two mechanisms now, and the split matters:
   prose.
 
 On the fleet side, `save_state` now stamps every ledger with the identity of
-the LSP binary that produced it, and `fleet_dogfood.py compare A B` refuses
+the LSP binary that produced it, and `fleet_dogfood.py compare` refuses
 (exit 3) when the two ledgers share a hash **or when either does not record
 one**. The second condition is the point of the first: an old ledger with no
 record is *unknowable*, not *different*, and letting it through would restore
@@ -4286,6 +4286,121 @@ with `==` or `flag=`, so `--sync-back-must-change` is **not** covered by the
 is handed to the remote shell as `command not found`. `--allow-unresolved` had
 had that gap since B132, from the ordinary cause: the list is a second place to
 remember. Both are now in the list and both are asserted.
+
+## A different binary is not necessarily the claimed baseline (B164)
+
+B147 proved that a before/after comparison must not run the *same* binary
+twice. That guard was necessary and still insufficient. After master moved, a
+baseline build was accidentally launched from a lane worktree. The stale
+baseline and the fixed lane binary had different hashes, so `base != fixed`
+was perfectly true while the question being measured was false: the first
+binary was not current master.
+
+Every successful `remote-build.py --sync-back` now writes an adjacent
+`<artefact>.provenance.json` sidecar. It binds the fetched sha256 to the local
+source root, branch, full HEAD commit, and dirty-file count captured for the
+rsync. The live checkout is not the rsync source: it is first copied to a
+private staging tree, whose content manifest must equal the captured checkout
+manifest before the remote transfer and remain equal after it. This closes the
+endpoint race where the checkout is A for both snapshots but briefly B while
+rsync reads it. The commit, exact `git status --porcelain -z`, and a content
+manifest of every rsync-eligible file, symlink, and relevant untracked input are
+still sampled on both sides of the transfer. Any commit, branch, dirty-count,
+status, metadata, content, or staged-tree drift refuses before the remote
+command runs; excluded caches do not invalidate the snapshot. A `--no-sync` fetch
+deliberately receives an unknown commit: reusing a remote tree cannot prove
+that it contains the current local checkout.
+
+`fleet_dogfood.save_state` reads and validates that sidecar before carrying the
+commit into the ledger. Missing or malformed provenance, a sidecar hash that
+does not match the binary, or a dirty baseline remain UNKNOWN rather than being
+accepted. Validation is type-exact: schema is integer `1`, `source_synced` is
+boolean `true`, dirty count is a non-boolean non-negative integer, and source
+root/branch are present and well formed. Fleet comparison repeats those trust
+checks for both ledgers and for the identities sampled before and after every
+plugin invocation. It refuses an invocation-time change or any plugin identity
+that differs from the ledger's final stamp. Each invocation executes through an
+already-open `/proc/self/fd/<n>` inode whose hash must match the trusted before
+identity, so replacing the binary pathname after pinning cannot change the
+bytes run. Comparison requires full lowercase sha256 identities and refuses any
+populated `provenance_error`; only the baseline
+additionally must be clean and match the explicitly claimed commit. This
+matters because JSON `false`
+compares equal to Python integer zero. The comparison requires an explicit
+authoritative baseline hash:
+
+```sh
+baseline=$(git -C /path/to/master rev-parse HEAD)
+just fleet-compare "$baseline" before.json after.json
+```
+
+The caller supplies that hash because deriving it from the current directory
+would reproduce the original wrong-directory mistake. A stale refusal names
+both commits: the one stamped on the binary and the one the caller claimed.
+The post-change lane may be dirty; only the baseline must be the exact clean
+commit.
+
+The selftests preserve all three answers: the stale lane stamp is refused, the
+correct clean master stamp proceeds, and a dirty master stamp is refused. The
+mutation harnesses exercise both halves: the combined remote-build harness now
+catches 76/76 mutations and the fleet-verdict harness catches 59/59.
+
+## A per-worktree remote cache needs a per-worktree teardown (B167)
+
+The isolation that keeps concurrent lanes correct also keeps every completed
+lane's cache alive. On x-alpha, seven substantial remote trees occupied the
+shared filesystem; six mapped to extant local checkouts and one did not:
+`pool-d616b701`, 9.2 GiB. After the coordinator confirmed only that exact tree
+was orphaned, process cwd/fd/maps checks found no user and it was removed. Free
+space moved from 64 GiB (86% used) to 73 GiB (84% used). No other tree was
+touched, including the hundreds of tiny `r-*` / `wt-*` test directories.
+
+The durable workflow is now:
+
+1. Before/around local worktree teardown, run `just rinventory` and retain the
+   exact absolute local root plus remote slug. The inventory maps against
+   `git worktree list --porcelain`, reports size rather than age, labels an
+   unmatched tree `NO-LOCAL-MATCH`, and explicitly says that is **not proof of
+   orphanhood**. Unmatched trees under 1 MiB are omitted from display noise.
+2. Confirm the candidate with the coordinator. Mtime is never used as a stale
+   signal; an idle lane is still live.
+3. After the local worktree is removed, run
+   `just rreclaim /absolute/former/root slug-12345678`. This is a dry-run and
+   prints the exact resolved remote path.
+4. Run `just rreclaim-now ...` only after confirming that path. Reclaim requires
+   both keys to hash to each other, refuses a registered or extant local path,
+   and refuses a symlink/wrong remote parent. Normal build, sync, shell, clean,
+   and reclaim paths all hold the same crash-safe per-slug `flock` on the build
+   host. Both preview and execution require a non-symlinked cache root and an
+   exact canonical `$HOME/.remote-builds/<slug>` target. Under the locks,
+   execute re-reads the local Git worktree ledger and path existence, then
+   atomically occupies the absent former pathname with an exclusive regular-file
+   lease until remote deletion returns. Normal `git worktree add` and directory
+   recreation therefore cannot enter after the check. Reclaim then revalidates
+   the remote target, scans same-owner process cwd/fds/maps/cmdlines, treats
+   every failed FD resolution as an incomplete scan while the process exists,
+   atomically renames the identity-pinned slug to a private quarantine name,
+   and scans both the former and quarantined spellings again. If that second
+   scan is busy or incomplete, reclaim restores the original name and refuses;
+   otherwise it recursively deletes the quarantine relative to an
+   `O_NOFOLLOW`-opened cache-root FD. The rename closes the public-path race for
+   non-cooperating same-owner processes, while a parent or slug swap refuses
+   instead of redirecting deletion. There is also no unlocked gap in which a
+   cooperating build can start.
+
+The B106 floor was already textually before source-tree mkdir and rsync. B167
+made the whole first-use ordering executable: disk is measured before the host
+lock can create its directory, then rechecked under that lock immediately
+before `preflight_remote_tree` performs `mkdir -> sync`; the build exists only
+afterwards. Its injected test proves low disk never reaches either remote mkdir,
+the normal control reaches `disk -> lock -> disk -> mkdir -> sync -> build`,
+`--allow-low-disk` bypasses only the measurements, and `--no-sync` does not
+create the source tree. The mutation harness removes/reverses each branch so
+this cannot pass as a comment about the intended order. It also exercises
+source drift, canonical/symlink path escapes, busy and incomplete process scans
+(including late cwd acquisition and a late failed FD resolution), successful
+exact-target removal, and loss of the shared remote lock at each
+destructive/build entry point.
 
 ## The recorder you write to stop losing evidence loses evidence (B145)
 

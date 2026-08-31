@@ -52,11 +52,16 @@ state, and copying it while a lane is mid-commit could send a torn index. Pass
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 import fcntl
+import fnmatch
 import hashlib
+import json
 import os
+import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -102,6 +107,9 @@ LOCAL_ONLY_FLAGS = (
     "--host",
     "--allow-low-disk",
     "--allow-unresolved",
+    "--reclaim-root",
+    "--remote-slug",
+    "--execute-reclaim",
     # Found by the completeness guard below, not by a person: uncovered since
     # B106 added it. THREE omissions in one hand-maintained list, by three
     # different changes, is the list's problem and not any author's.
@@ -143,6 +151,7 @@ EXCLUDES = [
 # ones a before/after comparison script needs to branch on.
 SYNC_BACK_FAILED = 3      # asked for an artefact, did not get one
 SYNC_BACK_UNCHANGED = 4   # got one, and it is byte-identical to the old one
+PROVENANCE_SUFFIX = ".provenance.json"
 
 
 def flag_classification_problems(parser_flags, local_only, shared) -> list[str]:
@@ -223,6 +232,19 @@ def git_branch(root: Path) -> str:
         # A missing git, a detached worktree, anything at all: the banner must
         # never be the reason a build does not run.
         return "?"
+
+
+def git_commit(root: Path) -> str | None:
+    """Full producing commit for a synced source tree, or None if unknowable."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        commit = out.stdout.strip()
+        return commit if out.returncode == 0 and commit else None
+    except Exception:
+        return None
 
 
 # An unresolved git operation, by the sentinel git itself writes.
@@ -337,6 +359,145 @@ def dirty_count(root: Path) -> int | None:
         return None
 
 
+def rsync_source_manifest(root: Path, *, with_git: bool = False) -> str | None:
+    """Hash every source entry rsync can copy, including dirty/untracked bytes."""
+    root_only_excludes = {"target", ".worktrees", ".venv", "node_modules", ".cache"}
+    if not with_git:
+        root_only_excludes.add(".git")
+    digest = hashlib.sha256()
+
+    def excluded(rel: Path, *, is_dir: bool) -> bool:
+        parts = rel.parts
+        if parts and parts[0] in root_only_excludes:
+            return True
+        if is_dir and "__pycache__" in parts:
+            return True
+        return not is_dir and (
+            fnmatch.fnmatch(rel.name, "*.pyc")
+            or fnmatch.fnmatch(rel.name, "*.swp")
+        )
+
+    def add_entry(path: Path, rel: Path) -> None:
+        before = path.lstat()
+        rel_bytes = rel.as_posix().encode("utf-8", "surrogateescape")
+        digest.update(len(rel_bytes).to_bytes(8, "big"))
+        digest.update(rel_bytes)
+        digest.update(stat.S_IFMT(before.st_mode).to_bytes(8, "big"))
+        digest.update(stat.S_IMODE(before.st_mode).to_bytes(8, "big"))
+        if stat.S_ISLNK(before.st_mode):
+            target = os.readlink(path).encode("utf-8", "surrogateescape")
+            digest.update(len(target).to_bytes(8, "big"))
+            digest.update(target)
+            return
+        if stat.S_ISDIR(before.st_mode):
+            # Directory st_size is filesystem allocation metadata, not source
+            # content, and rsync cannot preserve it across the private stage.
+            return
+        if not stat.S_ISREG(before.st_mode):
+            digest.update(before.st_size.to_bytes(8, "big", signed=True))
+            return
+        digest.update(before.st_size.to_bytes(8, "big", signed=True))
+        digest.update(before.st_mtime_ns.to_bytes(8, "big", signed=True))
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino, opened.st_mode) != (
+                before.st_dev, before.st_ino, before.st_mode,
+            ):
+                raise OSError("source entry changed while hashing")
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            after = os.fstat(fd)
+            if (after.st_size, after.st_mtime_ns) != (
+                before.st_size, before.st_mtime_ns,
+            ):
+                raise OSError("source entry changed while hashing")
+        finally:
+            os.close(fd)
+
+    try:
+        def walk_error(error: OSError) -> None:
+            raise error
+
+        for current, dirnames, filenames in os.walk(
+            root, topdown=True, onerror=walk_error, followlinks=False,
+        ):
+            current_path = Path(current)
+            rel_dir = current_path.relative_to(root)
+            kept_dirs = []
+            for name in sorted(dirnames):
+                path = current_path / name
+                rel = rel_dir / name
+                if excluded(rel, is_dir=True):
+                    continue
+                if path.is_symlink():
+                    add_entry(path, rel)
+                else:
+                    add_entry(path, rel)
+                    kept_dirs.append(name)
+            dirnames[:] = kept_dirs
+            for name in sorted(filenames):
+                path = current_path / name
+                rel = rel_dir / name
+                if not excluded(rel, is_dir=False):
+                    add_entry(path, rel)
+    except (OSError, ValueError):
+        return None
+    return digest.hexdigest()
+
+
+def git_source_snapshot(root: Path, *, with_git: bool = False) -> dict | None:
+    """Commit plus exact porcelain state bracketing one source rsync."""
+    commit = git_commit(root)
+    branch = git_branch(root)
+    if commit is None or branch == "?":
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(root), "status",
+             "--porcelain=v1", "-z", "--untracked-files=all"],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    status = out.stdout
+    content_manifest = rsync_source_manifest(root, with_git=with_git)
+    if content_manifest is None:
+        return None
+    return {
+        "commit": commit,
+        "branch": branch,
+        "dirty_count": 0 if not status else max(1, status.count(b"\0")),
+        "status_sha256": hashlib.sha256(status).hexdigest(),
+        "content_manifest_sha256": content_manifest,
+    }
+
+
+def source_snapshot_drift(before: dict | None, after: dict | None) -> str | None:
+    """Why the mirrored source cannot be attributed to one stable snapshot."""
+    if before is None or after is None:
+        return "could not read source commit and working-tree state on both sides of rsync"
+    changed = [
+        key for key in (
+            "commit", "branch", "dirty_count", "status_sha256",
+            "content_manifest_sha256",
+        )
+        if before.get(key) != after.get(key)
+    ]
+    if changed:
+        return (
+            f"source changed while it was being mirrored ({', '.join(changed)}): "
+            f"before={before}, after={after}"
+        )
+    return None
+
+
 def unresolved_verdict(operation: str | None, unmerged: list[str]) -> str | None:
     """The refusal message, or None to proceed. Pure, so it is testable.
 
@@ -431,6 +592,75 @@ class RemoteLock:
         if self.fh:
             fcntl.flock(self.fh, fcntl.LOCK_UN)
             self.fh.close()
+
+
+REMOTE_LOCK_MARK = "__REMOTE_BUILD_LOCKED__"
+
+
+class RemoteHostLock:
+    """Crash-safe per-slug flock held on the build host.
+
+    The local lock coordinates agents on this machine. This one coordinates
+    every cooperating caller that can reach the shared host, and lives outside
+    the tree so reclaiming the tree cannot remove the lock protecting it.
+    """
+
+    def __init__(self, host: str, slug: str) -> None:
+        self.host = host
+        self.slug = slug
+        self.proc: subprocess.Popen | None = None
+
+    def __enter__(self) -> "RemoteHostLock":
+        lock_rel = f".remote-build-locks/{self.slug}.lock"
+        hold = f"printf '%s\\n' {shlex.quote(REMOTE_LOCK_MARK)}; cat >/dev/null"
+        script = (
+            'mkdir -p "$HOME/.remote-build-locks" && '
+            f'exec flock -x "$HOME"/{shlex.quote(lock_rel)} '
+            f'sh -c {shlex.quote(hold)}'
+        )
+        # One quoted remote command string avoids ssh re-splitting bash -lc's
+        # script into $0/$1 (the same rule documented in run_ssh below).
+        cmd = ssh_base(self.host) + [f"bash -lc {shlex.quote(script)}"]
+        self.proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        assert self.proc.stdout is not None
+        for line in self.proc.stdout:
+            if line.strip() == REMOTE_LOCK_MARK:
+                return self
+        rc = self.proc.wait()
+        raise RuntimeError(
+            f"could not acquire remote build lock for {self.host}:{self.slug} "
+            f"(ssh exit {rc})"
+        )
+
+    def __exit__(self, *_exc) -> None:
+        if not self.proc:
+            return
+        if self.proc.stdin:
+            self.proc.stdin.close()
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.terminate()
+            self.proc.wait(timeout=5)
+
+
+@contextmanager
+def preflighted_remote_host_lock(
+    host: str, slug: str, disk_check, *, lock_factory=None,
+):
+    """Measure disk before the host lock can mkdir, then enter that lock.
+
+    The caller still runs ``preflight_remote_tree`` inside this context. That
+    is the second disk measurement, under the lock and immediately before the
+    source/target mkdir and rsync.
+    """
+    lock_factory = lock_factory or RemoteHostLock
+    disk_check()
+    with lock_factory(host, slug):
+        yield
 
 
 def ssh_base(host: str) -> list[str]:
@@ -663,6 +893,45 @@ def file_sha256(path: Path) -> str | None:
     return h.hexdigest()
 
 
+def provenance_path(path: Path) -> Path:
+    return path.with_name(path.name + PROVENANCE_SUFFIX)
+
+
+def sync_back_provenance_record(
+    dest: Path, digest: str, root: Path, *, commit: str | None,
+    branch: str | None, source_dirty_count: int | None, source_synced: bool,
+    host: str, slug: str,
+) -> dict:
+    """Hash-bound source identity for one successfully fetched artefact."""
+    return {
+        "schema": 1,
+        "artifact_path": str(dest),
+        "artifact_sha256": digest,
+        "commit": commit if source_synced else None,
+        "source_root": str(root),
+        "source_branch": branch if source_synced else None,
+        "dirty_count": source_dirty_count if source_synced else None,
+        "source_synced": source_synced,
+        "remote_host": host,
+        "remote_slug": slug,
+    }
+
+
+def write_sync_back_provenance(dest: Path, record: dict) -> Path:
+    """Atomically replace the sidecar only after the artefact was fetched."""
+    sidecar = provenance_path(dest)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=sidecar.parent, prefix=sidecar.name + ".",
+        suffix=".tmp", delete=False,
+    ) as fh:
+        json.dump(record, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+        tmp = Path(fh.name)
+    tmp.replace(sidecar)
+    return sidecar
+
+
 def sync_back_not_fetched_verdict(subpath: str, dest: Path, status: int,
                                   stale: str | None) -> str:
     """The remote command FAILED, so `--sync-back` was not attempted (B147).
@@ -822,6 +1091,716 @@ def sync_up(host: str, root: Path, remote_src: str, with_git: bool, verbose: boo
         print(f"remote-build: synced in {time.monotonic() - t0:.1f}s", file=sys.stderr)
 
 
+@contextmanager
+def staged_source_tree(root: Path, with_git: bool):
+    """Yield a private rsync-shaped copy whose bytes this process owns."""
+    with tempfile.TemporaryDirectory(prefix="remote-build-source-") as tmp:
+        staged = Path(tmp) / "src"
+        staged.mkdir()
+        args = ["rsync", "-a", "--delete", "--delete-excluded"]
+        for pat in EXCLUDES:
+            args += ["--exclude", pat]
+        if not with_git:
+            args += ["--exclude", "/.git", "--exclude", "/.git/"]
+        args += [f"{root}/", f"{staged}/"]
+        rc = subprocess.run(args).returncode
+        if rc != 0:
+            die(f"could not stage one immutable source tree (rsync exit {rc})", rc)
+        yield staged
+
+
+def preflight_remote_disk(
+    *, host: str, rel_base: str, remote_target: str, floor_gb: float,
+    allow_low_disk: bool, free_bytes_fn=None,
+) -> None:
+    """Refuse low/unknown disk without making any remote mutation."""
+    if allow_low_disk:
+        return
+    free_bytes_fn = free_bytes_fn or remote_free_bytes
+    verdict = disk_floor_verdict(
+        free_bytes_fn(host, rel_base), floor_gb, host, remote_target,
+    )
+    if verdict:
+        die(verdict)
+
+
+def preflight_remote_tree(
+    *, host: str, rel_base: str, remote_src: str, remote_target: str,
+    rsync_dest: str, root: Path, floor_gb: float, allow_low_disk: bool,
+    no_sync: bool, with_git: bool, verbose: bool,
+    free_bytes_fn=None, mkdir_fn=None, sync_fn=None,
+) -> None:
+    """Check disk first, then (and only then) create and sync the tree."""
+    mkdir_fn = mkdir_fn or capture_ssh
+    sync_fn = sync_fn or sync_up
+    preflight_remote_disk(
+        host=host, rel_base=rel_base, remote_target=remote_target,
+        floor_gb=floor_gb, allow_low_disk=allow_low_disk,
+        free_bytes_fn=free_bytes_fn,
+    )
+
+    if no_sync:
+        return
+    rc, out = mkdir_fn(host, f"mkdir -p {remote_src} {remote_target}")
+    if rc != 0:
+        die(f"could not create the remote tree on {host} "
+            f"(mkdir exited {rc}):\n  {out}", rc)
+    sync_fn(host, root, rsync_dest, with_git, verbose)
+
+
+def sync_with_stable_source(
+    *, snapshot_fn=None, preflight_fn=None, stage_context_fn=None,
+    staged_manifest_fn=None, **kwargs,
+) -> dict | None:
+    """Mirror one staged source state and return its bound Git provenance."""
+    if snapshot_fn is None:
+        with_git = bool(kwargs["with_git"])
+        snapshot_fn = lambda source_root: git_source_snapshot(
+            source_root, with_git=with_git,
+        )
+    preflight_fn = preflight_fn or preflight_remote_tree
+    stage_context_fn = stage_context_fn or staged_source_tree
+    staged_manifest_fn = staged_manifest_fn or rsync_source_manifest
+    no_sync = bool(kwargs["no_sync"])
+    root = kwargs["root"]
+    if no_sync:
+        preflight_fn(**kwargs)
+        return None
+    before = snapshot_fn(root)
+    if before is None:
+        die(
+            "source identity changed during rsync, so the remote tree cannot "
+            "be attributed to one commit/state: could not read the pre-stage "
+            "source commit and working-tree state"
+        )
+    expected_manifest = before.get("content_manifest_sha256")
+    with stage_context_fn(root, bool(kwargs["with_git"])) as staged_root:
+        staged_before = staged_manifest_fn(
+            staged_root, with_git=bool(kwargs["with_git"]),
+        )
+        if staged_before != expected_manifest:
+            die(
+                "source identity changed while making the private staging "
+                "tree; refusing to attest or sync bytes outside the captured "
+                "source manifest"
+            )
+        staged_kwargs = dict(kwargs, root=staged_root)
+        preflight_fn(**staged_kwargs)
+        staged_after = staged_manifest_fn(
+            staged_root, with_git=bool(kwargs["with_git"]),
+        )
+        if staged_after != staged_before:
+            die(
+                "private staging-tree bytes changed during rsync; refusing "
+                "to attest the remote source"
+            )
+        after = snapshot_fn(root)
+    drift = source_snapshot_drift(before, after)
+    if drift:
+        die(
+            "source identity changed during rsync, so the remote tree cannot "
+            f"be attributed to one commit/state: {drift}"
+        )
+    return dict(before, content_manifest_sha256=staged_before)
+
+
+def git_worktree_paths(root: Path) -> set[Path]:
+    """Registered worktrees for this repository, from git's own ledger."""
+    out = subprocess.run(
+        ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        die("could not enumerate local git worktrees before remote inventory")
+    return {
+        Path(line.removeprefix("worktree "))
+        for line in out.stdout.splitlines()
+        if line.startswith("worktree ")
+    }
+
+
+def reclaim_request_problems(former_root: Path, requested_slug: str,
+                             registered: set[Path]) -> list[str]:
+    """Pure validation for the two-factor former-root + slug reclaim key."""
+    problems = []
+    if not former_root.is_absolute():
+        problems.append("--reclaim-root must be an absolute former worktree path")
+        return problems
+    if not re.fullmatch(r"[A-Za-z0-9._-]+-[0-9a-f]{8}", requested_slug or ""):
+        problems.append(
+            f"--remote-slug {requested_slug!r} is not a remote-build slug"
+        )
+        return problems
+    canonical_former = former_root.resolve(strict=False)
+    canonical_registered = {
+        path.resolve(strict=False) for path in registered
+    }
+    expected = slug_for(former_root)
+    if requested_slug != expected:
+        problems.append(
+            f"--remote-slug is {requested_slug!r}, but --reclaim-root "
+            f"{former_root} deterministically maps to {expected!r}. Refusing "
+            f"to guess which remote tree was intended."
+        )
+    if canonical_former in canonical_registered:
+        problems.append(
+            f"{former_root} is still a registered git worktree; use `just "
+            f"rclean` from that worktree instead"
+        )
+    if os.path.lexists(former_root):
+        problems.append(
+            f"{former_root} still exists locally. Reclaim is only for a "
+            f"worktree that has already been removed."
+        )
+    return problems
+
+
+def remote_inventory_script() -> str:
+    """List exact remote tree names and sizes; mtime is deliberately absent."""
+    return r'''root="$HOME/.remote-builds"
+[ -d "$root" ] || exit 0
+for d in "$root"/*; do
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    kib=$(du -sk -- "$d" 2>/dev/null | awk '{print $1}') || continue
+    printf '%s\t%s\n' "$kib" "${d##*/}"
+done | sort -nr
+'''
+
+
+def parse_remote_inventory(output: str) -> list[tuple[str, int]]:
+    rows = []
+    for line in output.splitlines():
+        fields = line.split("\t", 1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        rows.append((fields[1], int(fields[0])))
+    return rows
+
+
+def cmd_inventory(host: str, root: Path) -> int:
+    registered = git_worktree_paths(root)
+    local = {slug_for(path): path for path in registered}
+    rc, out = capture_ssh(host, remote_inventory_script())
+    if rc != 0:
+        print(out, file=sys.stderr)
+        return rc
+    print(f"remote-build inventory: {host}:~/{REMOTE_ROOT}")
+    print("STATE             GiB  REMOTE SLUG -> LOCAL WORKTREE")
+    remote_names = set()
+    for slug, kib in parse_remote_inventory(out):
+        remote_names.add(slug)
+        # B167 measured hundreds of empty r-*/wt-* test directories. Keep
+        # them visible to matching logic but out of the operator's inventory;
+        # they are not the multi-GiB target trees this command exists to map.
+        if kib < 1024 and slug not in local:
+            continue
+        if slug in local:
+            state, owner = "REGISTERED", str(local[slug])
+        else:
+            state = "NO-LOCAL-MATCH"
+            owner = "not proof of orphanhood; confirm with the coordinator"
+        print(f"{state:16} {kib / 1024 ** 2:5.1f}  {slug} -> {owner}")
+    for slug, path in sorted(local.items()):
+        if slug not in remote_names:
+            print(f"REMOTE-ABSENT      0.0  {slug} -> {path}")
+    print("(unmatched remote trees under 1 MiB omitted; no mtime-based stale "
+          "inference is made)")
+    return 0
+
+
+RECLAIM_PATH_MARK = "__REMOTE_BUILD_RECLAIM_PATH__="
+
+
+def validated_remote_reclaim_path(path: str, slug: str) -> str | None:
+    pure = PurePosix(path)
+    if (not pure.is_absolute() or pure.name != slug
+            or pure.parent.name != REMOTE_ROOT):
+        return None
+    return path
+
+
+def remote_reclaim_path_guard_script() -> str:
+    """Shell guard shared by preview and the final locked deletion."""
+    return r'''reclaim_path_safe() {
+    test -d "$cache_root" && test ! -L "$cache_root" || return 1
+    test -d "$target" && test ! -L "$target" || return 1
+    test "$target" = "$cache_root/$slug" || return 1
+    home_real=$(realpath -e -- "$home_root") || return 1
+    cache_real=$(realpath -e -- "$cache_root") || return 1
+    target_real=$(realpath -e -- "$target") || return 1
+    test "$cache_real" = "$home_real/.remote-builds" || return 1
+    test "$target_real" = "$cache_real/$slug" || return 1
+}
+reclaim_path_safe || {
+    printf 'refused: unsafe cache root or canonical target: %s\n' "$target"
+    exit 8
+}
+'''
+
+
+def remote_reclaim_probe_script(slug: str) -> str:
+    """Validate and print one canonical, non-symlinked cache target."""
+    return (
+        'home_root="$HOME"\n'
+        f'cache_root="$home_root"/{shlex.quote(REMOTE_ROOT)}\n'
+        f'slug={shlex.quote(slug)}\n'
+        'target="$cache_root/$slug"\n'
+        + remote_reclaim_path_guard_script()
+        + f'printf {shlex.quote(RECLAIM_PATH_MARK + "%s")}"\\n" "$target"\n'
+    )
+
+
+def resolve_remote_reclaim_path(host: str, slug: str) -> tuple[str | None, str]:
+    script = remote_reclaim_probe_script(slug)
+    rc, out = capture_ssh(host, script)
+    path = parse_probe_path(out.replace(RECLAIM_PATH_MARK, PROBE_PATH_MARK), "")
+    if rc != 0:
+        return None, out
+    if validated_remote_reclaim_path(path, slug) is None:
+        return None, f"remote resolved an unsafe reclaim path: {path!r}"
+    return path, out
+
+
+def fd_relative_reclaim_script(before_delete_script: str | None = None) -> str:
+    """Quarantine, rescan, then delete through an O_NOFOLLOW cache-root FD."""
+    hook = f"{before_delete_script}\n" if before_delete_script else ""
+    return hook + r'''quarantine_name=$(python3 - "$cache_root" "$slug" \
+    "$cache_root_identity" "$target_identity" <<'PY'
+import os
+import secrets
+import stat
+import sys
+
+cache_root, slug, expected_root, expected_target = sys.argv[1:]
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+def identity(info: os.stat_result) -> str:
+    return f"{info.st_dev}:{info.st_ino}"
+
+try:
+    root_fd = os.open(cache_root, flags)
+    try:
+        if identity(os.fstat(root_fd)) != expected_root:
+            raise RuntimeError("cache-root identity changed after scan")
+        target = os.stat(slug, dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(target.st_mode) or identity(target) != expected_target:
+            raise RuntimeError("target identity changed after scan")
+        for _ in range(32):
+            quarantine = f".reclaim-quarantine-{slug}-{secrets.token_hex(16)}"
+            try:
+                os.stat(quarantine, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                break
+        else:
+            raise RuntimeError("could not allocate a private quarantine name")
+        os.rename(
+            slug, quarantine, src_dir_fd=root_fd, dst_dir_fd=root_fd,
+        )
+        moved = os.stat(quarantine, dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(moved.st_mode) or identity(moved) != expected_target:
+            raise RuntimeError("quarantined target identity changed")
+        try:
+            os.stat(slug, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("original target still exists after quarantine")
+        print(quarantine)
+    finally:
+        os.close(root_fd)
+except Exception as error:
+    print(f"refused: target quarantine failed: {error}", file=sys.stderr)
+    raise SystemExit(8)
+PY
+)
+quarantine_rc=$?
+if [ "$quarantine_rc" -ne 0 ]; then
+    printf 'refused: target quarantine failed\n'
+    exit "$quarantine_rc"
+fi
+case "$quarantine_name" in
+    .reclaim-quarantine-"$slug"-[0-9a-f]*) ;;
+    *) printf 'refused: invalid quarantine name: %s\n' "$quarantine_name"; exit 8 ;;
+esac
+quarantine_target="$cache_root/$quarantine_name"
+
+# Renaming closes the public pathname to new entrants. Rescan both spellings:
+# existing cwd/fd references follow the inode to its quarantine name, while a
+# synthetic or concurrently disappearing /proc link can still show the old
+# spelling and must conservatively block deletion.
+busy=0
+unknown=0
+for proc in "$proc_root"/[0-9]*; do
+    owner=$(stat -c %u -- "$proc" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        [ -e "$proc" ] && { printf 'scan-unknown: %s owner\n' "$proc"; unknown=1; }
+        continue
+    fi
+    [ "$owner" = "$uid" ] || continue
+
+    if [ -L "$proc/cwd" ]; then
+        resolved=$(readlink -f -- "$proc/cwd" 2>/dev/null)
+        if [ $? -ne 0 ]; then
+            [ -e "$proc" ] && { printf 'scan-unknown: %s/cwd\n' "$proc"; unknown=1; }
+        else
+            case "$resolved" in
+                "$target"|"$target"/*|"$quarantine_target"|"$quarantine_target"/*)
+                    printf 'in-use: %s/cwd -> %s\n' "$proc" "$resolved"; busy=1 ;;
+            esac
+        fi
+    fi
+
+    if [ ! -r "$proc/fd" ]; then
+        [ -e "$proc" ] && { printf 'scan-unknown: %s/fd\n' "$proc"; unknown=1; }
+    else
+        for link in "$proc"/fd/*; do
+            [ -e "$link" ] || [ -L "$link" ] || continue
+            resolved=$(readlink -f -- "$link" 2>/dev/null)
+            if [ $? -ne 0 ]; then
+                [ -e "$proc" ] && {
+                    printf 'scan-unknown: %s\n' "$link"; unknown=1;
+                }
+                continue
+            fi
+            case "$resolved" in
+                "$target"|"$target"/*|"$quarantine_target"|"$quarantine_target"/*)
+                    printf 'in-use: %s -> %s\n' "$link" "$resolved"; busy=1 ;;
+            esac
+        done
+    fi
+
+    grep -Fq -- "$target/" "$proc/maps" 2>/dev/null
+    old_maps_rc=$?
+    grep -Fq -- "$quarantine_target/" "$proc/maps" 2>/dev/null
+    quarantine_maps_rc=$?
+    if [ "$old_maps_rc" -eq 0 ] || [ "$quarantine_maps_rc" -eq 0 ]; then
+        printf 'in-use: %s/maps\n' "$proc"; busy=1
+    elif { [ "$old_maps_rc" -ne 1 ] || [ "$quarantine_maps_rc" -ne 1 ]; } \
+            && [ -e "$proc" ]; then
+        printf 'scan-unknown: %s/maps\n' "$proc"; unknown=1
+    fi
+
+    cmdline=$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        [ -e "$proc" ] && { printf 'scan-unknown: %s/cmdline\n' "$proc"; unknown=1; }
+    else
+        case "$cmdline" in
+            *"$target"*|*"$quarantine_target"*)
+                printf 'in-use: %s/cmdline: %s\n' "$proc" "$cmdline"; busy=1 ;;
+        esac
+    fi
+done
+
+restore_quarantine() {
+    python3 - "$cache_root" "$slug" "$quarantine_name" \
+        "$cache_root_identity" "$target_identity" <<'PY'
+import os
+import stat
+import sys
+
+cache_root, slug, quarantine, expected_root, expected_target = sys.argv[1:]
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+def identity(info: os.stat_result) -> str:
+    return f"{info.st_dev}:{info.st_ino}"
+
+try:
+    root_fd = os.open(cache_root, flags)
+    try:
+        if identity(os.fstat(root_fd)) != expected_root:
+            raise RuntimeError("cache-root identity changed before restore")
+        moved = os.stat(quarantine, dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(moved.st_mode) or identity(moved) != expected_target:
+            raise RuntimeError("quarantined target identity changed before restore")
+        try:
+            os.stat(slug, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("original target pathname was reoccupied")
+        os.rename(
+            quarantine, slug, src_dir_fd=root_fd, dst_dir_fd=root_fd,
+        )
+    finally:
+        os.close(root_fd)
+except Exception as error:
+    print(f"refused: could not restore quarantined target: {error}")
+    raise SystemExit(8)
+PY
+}
+
+if [ "$unknown" -ne 0 ]; then
+    restore_quarantine || exit $?
+    printf 'refused: post-quarantine process scan was incomplete\n'
+    exit 5
+fi
+if [ "$busy" -ne 0 ]; then
+    restore_quarantine || exit $?
+    printf 'refused: target entered use during reclaim\n'
+    exit 4
+fi
+
+python3 - "$cache_root" "$slug" "$quarantine_name" \
+    "$cache_root_identity" "$target_identity" <<'PY'
+import os
+import stat
+import sys
+
+cache_root, slug, quarantine, expected_root, expected_target = sys.argv[1:]
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+def identity(info: os.stat_result) -> str:
+    return f"{info.st_dev}:{info.st_ino}"
+
+def remove_dir_at(
+    parent_fd: int, name: str, expected_identity: str | None = None,
+) -> None:
+    child_fd = os.open(name, flags, dir_fd=parent_fd)
+    opened = os.fstat(child_fd)
+    try:
+        if expected_identity is not None and identity(opened) != expected_identity:
+            raise RuntimeError(f"directory identity changed after scan: {name}")
+        with os.scandir(child_fd) as entries:
+            for entry in list(entries):
+                if entry.is_dir(follow_symlinks=False):
+                    remove_dir_at(child_fd, entry.name)
+                else:
+                    os.unlink(entry.name, dir_fd=child_fd)
+    finally:
+        os.close(child_fd)
+    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (
+        opened.st_dev, opened.st_ino,
+    ):
+        raise RuntimeError(f"directory identity changed before removal: {name}")
+    os.rmdir(name, dir_fd=parent_fd)
+
+try:
+    root_fd = os.open(cache_root, flags)
+    try:
+        if identity(os.fstat(root_fd)) != expected_root:
+            raise RuntimeError("cache-root identity changed after scan")
+        remove_dir_at(root_fd, quarantine, expected_target)
+        try:
+            os.stat(quarantine, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("quarantine still exists after fd-relative removal")
+        try:
+            os.stat(slug, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("original target was reoccupied during deletion")
+    finally:
+        os.close(root_fd)
+except Exception as error:
+    print(f"refused: fd-relative deletion failed: {error}")
+    raise SystemExit(8)
+PY
+delete_rc=$?
+[ "$delete_rc" -eq 0 ] || exit "$delete_rc"
+'''
+
+
+def remote_reclaim_script(
+    target: str, proc_root: str = "/proc", home_root: str | None = None,
+    before_delete_script: str | None = None,
+) -> str:
+    """One remote critical section: revalidate, scan, then delete exactly once."""
+    home_value = '"$HOME"' if home_root is None else shlex.quote(home_root)
+    return ("home_root=" + home_value + r'''
+cache_root="$home_root/.remote-builds"
+target=''' + shlex.quote(target) + "\nproc_root="
+            + shlex.quote(proc_root) + r'''
+uid=$(id -u) || exit 6
+slug=${target##*/}
+''' + remote_reclaim_path_guard_script() + r'''cache_root_identity=$(stat -c '%d:%i' -- "$cache_root") || {
+    printf 'refused: cannot pin cache-root identity: %s\n' "$cache_root"
+    exit 8
+}
+target_identity=$(stat -c '%d:%i' -- "$target") || {
+    printf 'refused: cannot pin target identity: %s\n' "$target"
+    exit 8
+}
+busy=0
+unknown=0
+for proc in "$proc_root"/[0-9]*; do
+    owner=$(stat -c %u -- "$proc" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        [ -e "$proc" ] && { printf 'scan-unknown: %s owner\n' "$proc"; unknown=1; }
+        continue
+    fi
+    [ "$owner" = "$uid" ] || continue
+
+    if [ -L "$proc/cwd" ]; then
+        resolved=$(readlink -f -- "$proc/cwd" 2>/dev/null)
+        if [ $? -ne 0 ]; then
+            [ -e "$proc" ] && { printf 'scan-unknown: %s/cwd\n' "$proc"; unknown=1; }
+        else
+            case "$resolved" in "$target"|"$target"/*)
+                printf 'in-use: %s/cwd -> %s\n' "$proc" "$resolved"; busy=1 ;;
+            esac
+        fi
+    fi
+
+    if [ ! -r "$proc/fd" ]; then
+        [ -e "$proc" ] && { printf 'scan-unknown: %s/fd\n' "$proc"; unknown=1; }
+    else
+        for link in "$proc"/fd/*; do
+            [ -e "$link" ] || [ -L "$link" ] || continue
+            resolved=$(readlink -f -- "$link" 2>/dev/null)
+            if [ $? -ne 0 ]; then
+                [ -e "$proc" ] && {
+                    printf 'scan-unknown: %s\n' "$link"; unknown=1;
+                }
+                continue
+            fi
+            case "$resolved" in "$target"|"$target"/*)
+                printf 'in-use: %s -> %s\n' "$link" "$resolved"; busy=1 ;;
+            esac
+        done
+    fi
+
+    grep -Fq -- "$target/" "$proc/maps" 2>/dev/null
+    grep_rc=$?
+    if [ "$grep_rc" -eq 0 ]; then
+        printf 'in-use: %s/maps\n' "$proc"; busy=1
+    elif [ "$grep_rc" -ne 1 ] && [ -e "$proc" ]; then
+        printf 'scan-unknown: %s/maps\n' "$proc"; unknown=1
+    fi
+
+    cmdline=$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        [ -e "$proc" ] && { printf 'scan-unknown: %s/cmdline\n' "$proc"; unknown=1; }
+    else
+        case "$cmdline" in *"$target"*)
+            printf 'in-use: %s/cmdline: %s\n' "$proc" "$cmdline"; busy=1 ;;
+        esac
+    fi
+done
+[ "$unknown" -eq 0 ] || { printf 'refused: process scan was incomplete\n'; exit 5; }
+[ "$busy" -eq 0 ] || { printf 'refused: target is in use\n'; exit 4; }
+''' + fd_relative_reclaim_script(before_delete_script) + r'''
+printf 'removed: %s\n' "$target"
+''')
+
+
+def reclaim_decision(execute: bool, busy: bool | None) -> str:
+    if not execute:
+        return "dry-run"
+    if busy is not False:
+        return "refuse-busy-or-unknown"
+    return "delete"
+
+
+@contextmanager
+def reclaim_path_lease(former_root: Path):
+    """Atomically occupy the absent former path across remote deletion."""
+    parent = former_root.parent
+    if not parent.is_dir():
+        die(
+            f"cannot safely lease former worktree path {former_root}: parent "
+            f"directory {parent} does not exist"
+        )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(former_root, flags, 0o600)
+    except FileExistsError:
+        die(
+            f"remote reclaim refused: {former_root} appeared before its "
+            "deletion lease could be acquired"
+        )
+    except OSError as error:
+        die(f"cannot lease former worktree path {former_root}: {error}")
+    opened = os.fstat(fd)
+    try:
+        os.write(fd, b"remote-build reclaim lease\n")
+        os.fsync(fd)
+        yield
+    finally:
+        try:
+            current = former_root.lstat()
+        except FileNotFoundError:
+            current = None
+        if current is not None and (
+            stat.S_ISREG(current.st_mode)
+            and (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+        ):
+            former_root.unlink()
+        elif current is not None:
+            print(
+                f"WARNING: reclaim lease path was replaced; preserving the "
+                f"replacement at {former_root}", file=sys.stderr,
+            )
+        os.close(fd)
+
+
+def cmd_reclaim(
+    host: str, root: Path, former_root_arg: str | None,
+    requested_slug: str | None, execute: bool, *, worktree_paths_fn=None,
+    lock_context_fn=None, lease_context_fn=None, resolve_fn=None, run_fn=None,
+) -> int:
+    worktree_paths_fn = worktree_paths_fn or git_worktree_paths
+    resolve_fn = resolve_fn or resolve_remote_reclaim_path
+    run_fn = run_fn or run_ssh
+    lease_context_fn = lease_context_fn or reclaim_path_lease
+
+    if lock_context_fn is None:
+        @contextmanager
+        def lock_context_fn(lock_host: str, lock_slug: str):
+            with RemoteLock(lock_slug), RemoteHostLock(lock_host, lock_slug):
+                yield
+
+    if not former_root_arg or not requested_slug:
+        die("reclaim requires BOTH --reclaim-root /absolute/former/worktree "
+            "and --remote-slug <name-hash>")
+    former_root = Path(former_root_arg)
+    problems = reclaim_request_problems(
+        former_root, requested_slug, worktree_paths_fn(root)
+    )
+    if problems:
+        die("remote reclaim refused:\n  - " + "\n  - ".join(problems))
+    with lock_context_fn(host, requested_slug):
+        if reclaim_decision(execute, None) == "dry-run":
+            target, detail = resolve_fn(host, requested_slug)
+            if target is None:
+                die(
+                    f"remote reclaim target is absent or unsafe on {host}:\n"
+                    f"{detail}"
+                )
+            print(f"remote-build reclaim target: {host}:{target}")
+            print("DRY-RUN: no files removed. Re-run with --execute-reclaim after "
+                  "the coordinator confirms this exact target.")
+            return 0
+        # The former path may be recreated or registered after the preview.
+        # Re-read local ownership under the shared locks before any execute,
+        # then atomically occupy that exact pathname until deletion finishes.
+        locked_problems = reclaim_request_problems(
+            former_root, requested_slug, worktree_paths_fn(root)
+        )
+        if locked_problems:
+            die(
+                "remote reclaim refused after locking:\n  - "
+                + "\n  - ".join(locked_problems)
+            )
+        with lease_context_fn(former_root):
+            target, detail = resolve_fn(host, requested_slug)
+            if target is None:
+                die(
+                    f"remote reclaim target is absent or unsafe on {host}:\n"
+                    f"{detail}"
+                )
+            print(f"remote-build reclaim target: {host}:{target}")
+            print(f"remote-build: removing confirmed orphan {host}:{target}")
+            # The lock is the same one held by normal build/sync/shell/clean
+            # paths, and the scan plus deletion are one SSH script under that
+            # lock. No cooperating build can enter between final scan and rm.
+            return run_fn(host, remote_reclaim_script(target))
+
+
 def doctor(host: str, root: Path) -> int:
     """Check the remote can actually do the job, and say what is missing."""
     slug = slug_for(root)
@@ -842,6 +1821,8 @@ def doctor(host: str, root: Path) -> int:
 
     checks = {
         "rsync": "command -v rsync",
+        "flock": "command -v flock",
+        "realpath": "command -v realpath",
         "cargo": "command -v cargo",
         "python3": "command -v python3",
         "just": "command -v just",
@@ -954,6 +1935,816 @@ def run_selftest() -> int:
     exact = disk_floor_verdict(10 * gib, 10, "h", "/p")
     if exact is not None:
         problems.append("exactly the floor was refused; the floor is a minimum")
+
+    # B167: the main build boundary must measure disk before RemoteHostLock's
+    # first-use mkdir, then measure again under the lock before tree mutation.
+    # This composes the outer lock boundary with preflight_remote_tree instead
+    # of proving either helper in isolation.
+    class FakeRemoteHostLock:
+        def __init__(self, _host: str, _slug: str) -> None:
+            pass
+
+        def __enter__(self):
+            events.append("lock")
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            events.append("unlock")
+
+    events: list[str] = []
+    with preflighted_remote_host_lock(
+        "h", "slug", lambda: events.append("disk-before-lock"),
+        lock_factory=FakeRemoteHostLock,
+    ):
+        preflight_remote_tree(
+            host="h", rel_base="r", remote_src="s", remote_target="t",
+            rsync_dest="d", root=Path("/tmp/root"), floor_gb=10,
+            allow_low_disk=False, no_sync=False, with_git=False, verbose=False,
+            free_bytes_fn=lambda _h, _r: events.append("disk-inside-lock") or 20 * gib,
+            mkdir_fn=lambda _h, _s: events.append("mkdir") or (0, ""),
+            sync_fn=lambda *_a: events.append("sync"),
+        )
+        events.append("build")
+    expected_events = [
+        "disk-before-lock", "lock", "disk-inside-lock", "mkdir", "sync",
+        "build", "unlock",
+    ]
+    if events != expected_events:
+        problems.append(
+            f"main remote mutation order was {events}, expected {expected_events}"
+        )
+
+    events.clear()
+    try:
+        with preflighted_remote_host_lock(
+            "h", "slug",
+            lambda: events.append("disk-before-lock") or die("low disk"),
+            lock_factory=FakeRemoteHostLock,
+        ):
+            events.append("body")
+    except SystemExit:
+        pass
+    if events != ["disk-before-lock"]:
+        problems.append(
+            f"low disk reached the host-lock mkdir boundary: {events}"
+        )
+
+    # B167: prove the operational ordering, not merely the prose above main.
+    # A low-disk refusal must happen before mkdir or rsync, and the positive
+    # control must reach them in that order.
+    events = []
+    try:
+        preflight_remote_tree(
+            host="h", rel_base=".remote-builds/s", remote_src="$HOME/x/src",
+            remote_target="$HOME/x/target", rsync_dest=".remote-builds/s/src",
+            root=Path("/tmp/root"), floor_gb=10, allow_low_disk=False,
+            no_sync=False, with_git=False, verbose=False,
+            free_bytes_fn=lambda _h, _r: events.append("disk") or gib,
+            mkdir_fn=lambda _h, _s: events.append("mkdir") or (0, ""),
+            sync_fn=lambda *_a: events.append("sync"),
+        )
+    except SystemExit:
+        pass
+    if events != ["disk"]:
+        problems.append(
+            f"low-disk preflight order was {events}, expected ['disk']; mkdir "
+            f"or sync ran before the refusal"
+        )
+    events.clear()
+    preflight_remote_tree(
+        host="h", rel_base=".remote-builds/s", remote_src="$HOME/x/src",
+        remote_target="$HOME/x/target", rsync_dest=".remote-builds/s/src",
+        root=Path("/tmp/root"), floor_gb=10, allow_low_disk=False,
+        no_sync=False, with_git=False, verbose=False,
+        free_bytes_fn=lambda _h, _r: events.append("disk") or 20 * gib,
+        mkdir_fn=lambda _h, _s: events.append("mkdir") or (0, ""),
+        sync_fn=lambda *_a: events.append("sync"),
+    )
+    events.append("build")
+    if events != ["disk", "mkdir", "sync", "build"]:
+        problems.append(
+            f"healthy operation order was {events}, expected disk, mkdir, "
+            f"sync, build"
+        )
+    events.clear()
+    preflight_remote_tree(
+        host="h", rel_base=".remote-builds/s", remote_src="$HOME/x/src",
+        remote_target="$HOME/x/target", rsync_dest=".remote-builds/s/src",
+        root=Path("/tmp/root"), floor_gb=10, allow_low_disk=True,
+        no_sync=False, with_git=False, verbose=False,
+        free_bytes_fn=lambda _h, _r: events.append("disk") or gib,
+        mkdir_fn=lambda _h, _s: events.append("mkdir") or (0, ""),
+        sync_fn=lambda *_a: events.append("sync"),
+    )
+    if events != ["mkdir", "sync"]:
+        problems.append(
+            f"--allow-low-disk did not bypass only the floor: {events}"
+        )
+    events.clear()
+    preflight_remote_tree(
+        host="h", rel_base=".remote-builds/s", remote_src="$HOME/x/src",
+        remote_target="$HOME/x/target", rsync_dest=".remote-builds/s/src",
+        root=Path("/tmp/root"), floor_gb=10, allow_low_disk=False,
+        no_sync=True, with_git=False, verbose=False,
+        free_bytes_fn=lambda _h, _r: events.append("disk") or 20 * gib,
+        mkdir_fn=lambda _h, _s: events.append("mkdir") or (0, ""),
+        sync_fn=lambda *_a: events.append("sync"),
+    )
+    if events != ["disk"]:
+        problems.append(f"--no-sync still mutated the remote tree: {events}")
+
+    # B164: commit/clean provenance brackets the rsync. A stamp captured only
+    # before the copy can claim a clean old commit while the files copied came
+    # from a newly dirty or advanced tree.
+    snap = {
+        "commit": "a" * 40, "branch": "master", "dirty_count": 0,
+        "status_sha256": "b" * 64,
+        "content_manifest_sha256": "e" * 64,
+    }
+    if source_snapshot_drift(snap, dict(snap)) is not None:
+        problems.append("an unchanged source snapshot was reported as drift")
+    for field, changed in (
+        ("commit", "c" * 40),
+        ("branch", "lane/wrong"),
+        ("dirty_count", 1),
+        ("status_sha256", "d" * 64),
+        ("content_manifest_sha256", "f" * 64),
+    ):
+        after = dict(snap, **{field: changed})
+        drift = source_snapshot_drift(snap, after)
+        if not drift or field not in drift:
+            problems.append(f"source drift in {field} was accepted: {drift!r}")
+    if source_snapshot_drift(None, snap) is None:
+        problems.append("an unreadable pre-rsync source snapshot was accepted")
+    snapshots = iter([snap, dict(snap, commit="c" * 40)])
+    try:
+        sync_with_stable_source(
+            host="h", rel_base="r", remote_src="s", remote_target="t",
+            rsync_dest="d", root=Path("/tmp/root"), floor_gb=10,
+            allow_low_disk=False, no_sync=False, with_git=False, verbose=False,
+            snapshot_fn=lambda _root: next(snapshots),
+            preflight_fn=lambda **_kwargs: None,
+            stage_context_fn=lambda _root, _with_git: nullcontext(
+                Path("/tmp/staged")
+            ),
+            staged_manifest_fn=lambda _root, **_kwargs: snap[
+                "content_manifest_sha256"
+            ],
+        )
+        problems.append("entry-point source sync accepted commit drift")
+    except SystemExit:
+        pass
+    snapshots = iter([snap, dict(snap)])
+    mirrored_roots = []
+    stable = sync_with_stable_source(
+        host="h", rel_base="r", remote_src="s", remote_target="t",
+        rsync_dest="d", root=Path("/tmp/root"), floor_gb=10,
+        allow_low_disk=False, no_sync=False, with_git=False, verbose=False,
+        snapshot_fn=lambda _root: next(snapshots),
+        preflight_fn=lambda **sync_kwargs: mirrored_roots.append(
+            sync_kwargs["root"]
+        ),
+        stage_context_fn=lambda _root, _with_git: nullcontext(
+            Path("/tmp/staged")
+        ),
+        staged_manifest_fn=lambda _root, **_kwargs: snap[
+            "content_manifest_sha256"
+        ],
+    )
+    if stable != snap:
+        problems.append("stable source sync did not return the producing snapshot")
+    if mirrored_roots != [Path("/tmp/staged")]:
+        problems.append(
+            f"remote sync did not consume the private staging tree: {mirrored_roots}"
+        )
+
+    # Equal endpoint snapshots do not prove what rsync read. A source can be A
+    # before, briefly B while copied, then A again (even with its mtime restored).
+    # The immutable staging tree itself must match the attested A manifest.
+    snapshots = iter([snap, dict(snap)])
+    try:
+        sync_with_stable_source(
+            host="h", rel_base="r", remote_src="s", remote_target="t",
+            rsync_dest="d", root=Path("/tmp/root"), floor_gb=10,
+            allow_low_disk=False, no_sync=False, with_git=False, verbose=False,
+            snapshot_fn=lambda _root: next(snapshots),
+            preflight_fn=lambda **_kwargs: None,
+            stage_context_fn=lambda _root, _with_git: nullcontext(
+                Path("/tmp/staged")
+            ),
+            staged_manifest_fn=lambda _root, **_kwargs: "f" * 64,
+        )
+        problems.append(
+            "source oscillation let rsync stage bytes outside the attested manifest"
+        )
+    except SystemExit:
+        pass
+    snapshots = iter([snap, dict(snap)])
+    staged_manifests = iter([
+        snap["content_manifest_sha256"],
+        "f" * 64,
+    ])
+    try:
+        sync_with_stable_source(
+            host="h", rel_base="r", remote_src="s", remote_target="t",
+            rsync_dest="d", root=Path("/tmp/root"), floor_gb=10,
+            allow_low_disk=False, no_sync=False, with_git=False, verbose=False,
+            snapshot_fn=lambda _root: next(snapshots),
+            preflight_fn=lambda **_kwargs: None,
+            stage_context_fn=lambda _root, _with_git: nullcontext(
+                Path("/tmp/staged")
+            ),
+            staged_manifest_fn=lambda _root, **_kwargs: next(staged_manifests),
+        )
+        problems.append("staging-tree drift during rsync was accepted")
+    except SystemExit:
+        pass
+
+    # Porcelain records that a path is dirty, not WHICH dirty bytes rsync saw.
+    # Keep equal-length edits so neither status text nor dirty count changes.
+    source_tmp = Path(tempfile.mkdtemp(prefix="b164-source-content-"))
+    try:
+        subprocess.run(["git", "init", "-q", str(source_tmp)], check=True)
+        subprocess.run(
+            ["git", "-C", str(source_tmp), "config", "user.email", "test@example.invalid"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source_tmp), "config", "user.name", "Test"],
+            check=True,
+        )
+        tracked = source_tmp / "tracked.txt"
+        tracked.write_text("clean\n")
+        (source_tmp / ".gitignore").write_text("/target/\n")
+        subprocess.run(
+            ["git", "-C", str(source_tmp), "add", "tracked.txt", ".gitignore"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source_tmp), "commit", "-qm", "fixture"],
+            check=True,
+        )
+
+        # Real A -> B -> A oscillation: the endpoint snapshots are byte-for-byte
+        # equal (including restored mtime), while the private stage contains B.
+        # This is the race an endpoint-only bracket cannot see.
+        original_stat = tracked.stat()
+
+        @contextmanager
+        def oscillating_stage(_root: Path, _with_git: bool):
+            tracked.write_text("other\n")
+            os.utime(
+                tracked,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            with staged_source_tree(source_tmp, False) as staged:
+                tracked.write_text("clean\n")
+                os.utime(
+                    tracked,
+                    ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                )
+                yield staged
+
+        oscillation_before = git_source_snapshot(source_tmp)
+        try:
+            sync_with_stable_source(
+                host="h", rel_base="r", remote_src="s", remote_target="t",
+                rsync_dest="d", root=source_tmp, floor_gb=10,
+                allow_low_disk=False, no_sync=False, with_git=False,
+                verbose=False, preflight_fn=lambda **_kwargs: None,
+                stage_context_fn=oscillating_stage,
+            )
+            problems.append("a real A-to-B-to-A source oscillation was accepted")
+        except SystemExit:
+            pass
+        oscillation_after = git_source_snapshot(source_tmp)
+        if oscillation_before != oscillation_after:
+            problems.append(
+                "A-to-B-to-A fixture did not restore identical endpoint snapshots"
+            )
+
+        tracked.write_text("dirty-a\n")
+        dirty_before = git_source_snapshot(source_tmp)
+        tracked.write_text("dirty-b\n")
+        dirty_after = git_source_snapshot(source_tmp)
+        if dirty_before is None or dirty_after is None:
+            problems.append("could not snapshot the dirty-content drift fixture")
+        else:
+            if dirty_before["status_sha256"] != dirty_after["status_sha256"]:
+                problems.append("dirty-content fixture changed porcelain metadata")
+            if source_snapshot_drift(dirty_before, dirty_after) is None:
+                problems.append(
+                    "dirty tracked bytes changed behind an unchanged porcelain entry"
+                )
+
+        untracked = source_tmp / "untracked.txt"
+        untracked.write_text("untracked-a\n")
+        untracked_before = git_source_snapshot(source_tmp)
+        untracked.write_text("untracked-b\n")
+        untracked_after = git_source_snapshot(source_tmp)
+        if source_snapshot_drift(untracked_before, untracked_after) is None:
+            problems.append("untracked rsync input content drift was accepted")
+
+        excluded = source_tmp / "target" / "ignored.bin"
+        excluded.parent.mkdir()
+        excluded.write_bytes(b"before")
+        excluded_before = git_source_snapshot(source_tmp)
+        excluded.write_bytes(b"after!")
+        excluded_after = git_source_snapshot(source_tmp)
+        if source_snapshot_drift(excluded_before, excluded_after) is not None:
+            problems.append("an excluded target/ change invalidated the source snapshot")
+    finally:
+        shutil.rmtree(source_tmp, ignore_errors=True)
+
+    # B167: reclaim is keyed by BOTH the former local root and the remote slug.
+    former = Path("/repo/.worktrees/pool")
+    former_slug = slug_for(former)
+    if reclaim_request_problems(former, former_slug, set()):
+        problems.append("a confirmed absent worktree reclaim was refused")
+    mismatched = reclaim_request_problems(former, "other-00000000", set())
+    if not mismatched or former_slug not in mismatched[0]:
+        problems.append("a mismatched reclaim slug was accepted or not named")
+    if not reclaim_request_problems(former, former_slug, {former}):
+        problems.append("a still-registered live worktree was reclaimable")
+    alternate_former = former.parent / "other" / ".." / former.name
+    if slug_for(alternate_former) != former_slug:
+        problems.append("alternate former-root spelling changed its remote slug")
+    if not reclaim_request_problems(alternate_former, former_slug, {former}):
+        problems.append(
+            "an alternate spelling made a registered missing worktree reclaimable"
+        )
+    if not reclaim_request_problems(former, former_slug, {alternate_former}):
+        problems.append(
+            "an alternate registered-path spelling made a worktree reclaimable"
+        )
+    registration_tmp = Path(tempfile.mkdtemp(prefix="b167-registered-race-"))
+    registered_former = registration_tmp / "gone"
+    registered_slug = slug_for(registered_former)
+    ownership_states = iter([set(), {registered_former}])
+    executed_reclaims = []
+    try:
+        try:
+            cmd_reclaim(
+                "h", Path("/repo"), str(registered_former), registered_slug,
+                True,
+                worktree_paths_fn=lambda _root: next(ownership_states),
+                lock_context_fn=lambda _host, _slug: nullcontext(),
+                resolve_fn=lambda _host, _slug: (
+                    f"/home/u/{REMOTE_ROOT}/{registered_slug}", "",
+                ),
+                run_fn=lambda *_args: executed_reclaims.append(True) or 0,
+            )
+            problems.append(
+                "reclaim executed after the missing former path became registered"
+            )
+        except SystemExit:
+            pass
+    finally:
+        shutil.rmtree(registration_tmp, ignore_errors=True)
+    if executed_reclaims:
+        problems.append("locked ownership revalidation ran after remote deletion")
+    recreated_tmp = Path(tempfile.mkdtemp(prefix="b167-recreated-worktree-"))
+    recreated_former = recreated_tmp / "gone"
+    recreated_slug = slug_for(recreated_former)
+
+    @contextmanager
+    def recreate_during_lock(_host: str, _slug: str):
+        recreated_former.mkdir()
+        yield
+
+    try:
+        try:
+            cmd_reclaim(
+                "h", Path("/repo"), str(recreated_former), recreated_slug, True,
+                worktree_paths_fn=lambda _root: set(),
+                lock_context_fn=recreate_during_lock,
+                resolve_fn=lambda _host, _slug: (
+                    f"/home/u/{REMOTE_ROOT}/{recreated_slug}", "",
+                ),
+                run_fn=lambda *_args: executed_reclaims.append(True) or 0,
+            )
+            problems.append(
+                "reclaim executed after the missing former path was recreated"
+            )
+        except SystemExit:
+            pass
+    finally:
+        shutil.rmtree(recreated_tmp, ignore_errors=True)
+    if executed_reclaims:
+        problems.append("recreated local worktree reached remote deletion")
+
+    postcheck_tmp = Path(tempfile.mkdtemp(prefix="b167-postcheck-race-"))
+    postcheck_former = postcheck_tmp / "gone"
+    postcheck_slug = slug_for(postcheck_former)
+    recreate_succeeded = []
+    deletion_lease_shapes = []
+
+    def recreate_after_revalidation(_host: str, _slug: str):
+        try:
+            postcheck_former.mkdir()
+            recreate_succeeded.append(True)
+        except FileExistsError:
+            recreate_succeeded.append(False)
+        return f"/home/u/{REMOTE_ROOT}/{postcheck_slug}", ""
+
+    try:
+        rc = cmd_reclaim(
+            "h", Path("/repo"), str(postcheck_former), postcheck_slug, True,
+            worktree_paths_fn=lambda _root: set(),
+            lock_context_fn=lambda _host, _slug: nullcontext(),
+            resolve_fn=recreate_after_revalidation,
+            run_fn=lambda *_args: deletion_lease_shapes.append(
+                (postcheck_former.is_file(), postcheck_former.is_dir())
+            ) or 0,
+        )
+        if rc != 0:
+            problems.append(f"leased reclaim positive control returned {rc}")
+    finally:
+        shutil.rmtree(postcheck_tmp, ignore_errors=True)
+    if recreate_succeeded != [False]:
+        problems.append(
+            "former worktree path could be recreated after locked revalidation"
+        )
+    if deletion_lease_shapes != [(True, False)]:
+        problems.append(
+            f"remote deletion did not hold an exact-path file lease: "
+            f"{deletion_lease_shapes}"
+        )
+    occupied_tmp = Path(tempfile.mkdtemp(prefix="b167-occupied-lease-"))
+    occupied = occupied_tmp / "occupied"
+    occupied.write_text("owner data")
+    entered_occupied_lease = []
+    try:
+        try:
+            with reclaim_path_lease(occupied):
+                entered_occupied_lease.append(True)
+        except SystemExit:
+            pass
+        if entered_occupied_lease or occupied.read_text() != "owner data":
+            problems.append(
+                "reclaim lease opened or modified an occupied pathname"
+            )
+    finally:
+        shutil.rmtree(occupied_tmp, ignore_errors=True)
+    if not reclaim_request_problems(Path("relative/pool"), former_slug, set()):
+        problems.append("a relative former-worktree path was reclaimable")
+    existing = Path(tempfile.mkdtemp(prefix="b167-existing-worktree-"))
+    try:
+        existing_slug = slug_for(existing)
+        if not reclaim_request_problems(existing, existing_slug, set()):
+            problems.append("an extant unregistered path was reclaimable")
+    finally:
+        shutil.rmtree(existing, ignore_errors=True)
+    exact_remote = f"/home/u/{REMOTE_ROOT}/{former_slug}"
+    if validated_remote_reclaim_path(exact_remote, former_slug) != exact_remote:
+        problems.append("the exact remote reclaim path was refused")
+    for unsafe in (f"/home/u/other/{former_slug}",
+                   f"relative/{REMOTE_ROOT}/{former_slug}",
+                   f"/home/u/{REMOTE_ROOT}/other-00000000"):
+        if validated_remote_reclaim_path(unsafe, former_slug) is not None:
+            problems.append(f"unsafe remote reclaim path accepted: {unsafe}")
+    if reclaim_decision(False, False) != "dry-run":
+        problems.append("reclaim no longer defaults to dry-run")
+    if reclaim_decision(True, True) == "delete":
+        problems.append("an in-use remote tree was approved for deletion")
+    if reclaim_decision(True, None) == "delete":
+        problems.append("an unknown process-usage result was approved for deletion")
+    if reclaim_decision(True, False) != "delete":
+        problems.append("a confirmed unused execute request cannot proceed")
+
+    # One script performs the final scan and delete. The live-cwd case must
+    # refuse and preserve the tree; after that process exits, the same script
+    # is the positive control and removes exactly the target.
+    reclaim_tmp = Path(tempfile.mkdtemp(prefix="b167-reclaim-race-"))
+    reclaim_target = reclaim_tmp / REMOTE_ROOT / "orphan-12345678"
+    reclaim_target.mkdir(parents=True)
+    fake_proc = reclaim_tmp / "fake-proc"
+    fake_pid = fake_proc / "123"
+    (fake_pid / "fd").mkdir(parents=True)
+    fake_cwd = fake_pid / "cwd"
+    fake_cwd.symlink_to(reclaim_target)
+    fake_maps = fake_pid / "maps"
+    fake_maps.write_text("")
+    (fake_pid / "cmdline").write_bytes(b"fake\0")
+
+    # A lexical $HOME/.remote-builds/slug path is not enough: if the cache
+    # root is a symlink, rm would follow its parent and delete outside the
+    # managed cache. The final critical section must independently refuse it.
+    symlink_home = reclaim_tmp / "symlink-home"
+    symlink_home.mkdir()
+    outside_cache = reclaim_tmp / "outside-cache"
+    escaped_target = outside_cache / "orphan-12345678"
+    escaped_target.mkdir(parents=True)
+    (symlink_home / REMOTE_ROOT).symlink_to(outside_cache, target_is_directory=True)
+    probe_env = dict(os.environ, HOME=str(symlink_home))
+    preview_symlink = subprocess.run(
+        ["bash"], input=remote_reclaim_probe_script("orphan-12345678"),
+        env=probe_env, text=True, capture_output=True, timeout=15,
+    )
+    if preview_symlink.returncode == 0:
+        problems.append("reclaim preview accepted a symlinked cache root")
+    safe_preview = subprocess.run(
+        ["bash"], input=remote_reclaim_probe_script("orphan-12345678"),
+        env=dict(os.environ, HOME=str(reclaim_tmp)), text=True,
+        capture_output=True, timeout=15,
+    )
+    if safe_preview.returncode != 0 or RECLAIM_PATH_MARK not in safe_preview.stdout:
+        problems.append(
+            f"reclaim preview refused the exact safe cache target: "
+            f"rc={safe_preview.returncode}, out={safe_preview.stdout!r}"
+        )
+    symlinked_parent = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(symlink_home / REMOTE_ROOT / "orphan-12345678"),
+            str(fake_proc),
+            str(symlink_home),
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if symlinked_parent.returncode == 0 or not escaped_target.exists():
+        problems.append("reclaim followed a symlinked cache root outside its tree")
+    if "unsafe cache root" not in symlinked_parent.stdout:
+        problems.append(
+            "symlinked cache-root refusal gave no safety evidence: "
+            f"{symlinked_parent.stdout!r}"
+        )
+
+    blocked = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(reclaim_target), str(fake_proc), str(reclaim_tmp),
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if blocked.returncode == 0 or not reclaim_target.exists():
+        problems.append(
+            "atomic reclaim deleted a target while a process cwd used it"
+        )
+    if "in-use" not in blocked.stdout:
+        problems.append(
+            f"busy reclaim did not name its process evidence: {blocked.stdout!r}"
+        )
+    fake_cwd.unlink()
+    fake_cwd.symlink_to(reclaim_tmp)
+    fake_maps.chmod(0)
+    unknown_scan = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(reclaim_target), str(fake_proc), str(reclaim_tmp),
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    fake_maps.chmod(0o600)
+    if unknown_scan.returncode == 0 or not reclaim_target.exists():
+        problems.append("an incomplete process scan was treated as unused")
+    if "scan-unknown" not in unknown_scan.stdout:
+        problems.append(
+            f"incomplete process scan gave no evidence: {unknown_scan.stdout!r}"
+        )
+
+    # An individual fd entry can disappear or become unreadable after the
+    # directory itself was readable. That race is unknown, not evidence that
+    # no process uses the target. A dangling fake link deterministically makes
+    # readlink -f fail while the same-owner process directory still exists.
+    unreadable_fd = fake_pid / "fd" / "9"
+    unreadable_fd.symlink_to(
+        reclaim_tmp / "missing-parent" / "missing-fd-target"
+    )
+    fd_unknown = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(reclaim_target), str(fake_proc), str(reclaim_tmp),
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if fd_unknown.returncode == 0 or not reclaim_target.exists():
+        problems.append("a failed same-owner fd read was treated as unused")
+    if str(unreadable_fd) not in fd_unknown.stdout or "scan-unknown" not in fd_unknown.stdout:
+        problems.append(
+            f"failed fd read gave no scan-unknown evidence: {fd_unknown.stdout!r}"
+        )
+    unreadable_fd.unlink()
+
+    # A same-owner process can enter the tree after the first /proc scan even
+    # though cooperating remote-build commands share the slug lock. The
+    # deletion must close that non-cooperating race before removing anything.
+    late_home = reclaim_tmp / "late-user-home"
+    late_target = late_home / REMOTE_ROOT / "orphan-12345678"
+    late_target.mkdir(parents=True)
+    late_sentinel = late_target / "late.txt"
+    late_sentinel.write_text("late user")
+    late_user_hook = (
+        f"rm -- {shlex.quote(str(fake_cwd))} && "
+        f"ln -s -- {shlex.quote(str(late_target))} "
+        f"{shlex.quote(str(fake_cwd))}"
+    )
+    late_user = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(late_target), str(fake_proc), str(late_home), late_user_hook,
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if late_user.returncode == 0 or not late_sentinel.exists():
+        problems.append(
+            "reclaim deleted a target acquired after the first process scan"
+        )
+    if "in-use" not in late_user.stdout:
+        problems.append(
+            "late process acquisition gave no in-use evidence: "
+            f"{late_user.stdout!r}"
+        )
+    fake_cwd.unlink()
+    fake_cwd.symlink_to(reclaim_tmp)
+
+    # Generalize the same seam to an unreadable late fd. Absence is only safe
+    # when the post-quarantine scan is complete as well as when it is idle.
+    late_unknown_home = reclaim_tmp / "late-unknown-home"
+    late_unknown_target = (
+        late_unknown_home / REMOTE_ROOT / "orphan-12345678"
+    )
+    late_unknown_target.mkdir(parents=True)
+    late_unknown_sentinel = late_unknown_target / "late-unknown.txt"
+    late_unknown_sentinel.write_text("late unknown")
+    late_unknown_link = fake_pid / "fd" / "10"
+    late_unknown_hook = (
+        f"ln -s -- {shlex.quote(str(reclaim_tmp / 'missing-late-parent' / 'fd'))} "
+        f"{shlex.quote(str(late_unknown_link))}"
+    )
+    late_unknown = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(late_unknown_target), str(fake_proc),
+            str(late_unknown_home), late_unknown_hook,
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if late_unknown.returncode == 0 or not late_unknown_sentinel.exists():
+        problems.append(
+            "reclaim deleted after its post-quarantine scan became incomplete"
+        )
+    if "scan-unknown" not in late_unknown.stdout:
+        problems.append(
+            "late incomplete scan gave no scan-unknown evidence: "
+            f"{late_unknown.stdout!r}"
+        )
+    late_unknown_link.unlink()
+
+    # Swap the validated parent after the /proc scan. String-path rm follows
+    # the new symlink; FD-relative deletion must refuse without touching it.
+    swap_home = reclaim_tmp / "swap-home"
+    swap_target = swap_home / REMOTE_ROOT / "orphan-12345678"
+    swap_target.mkdir(parents=True)
+    (swap_target / "inside.txt").write_text("inside")
+    outside_root = reclaim_tmp / "swap-outside"
+    outside_target = outside_root / "orphan-12345678"
+    outside_target.mkdir(parents=True)
+    outside_sentinel = outside_target / "outside.txt"
+    outside_sentinel.write_text("outside")
+    moved_root = swap_home / f"{REMOTE_ROOT}.original"
+    swap_hook = (
+        f"mv -- {shlex.quote(str(swap_home / REMOTE_ROOT))} "
+        f"{shlex.quote(str(moved_root))} && "
+        f"ln -s -- {shlex.quote(str(outside_root))} "
+        f"{shlex.quote(str(swap_home / REMOTE_ROOT))}"
+    )
+    parent_swapped = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(swap_target), str(fake_proc), str(swap_home), swap_hook,
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if parent_swapped.returncode == 0:
+        problems.append("reclaim accepted a cache-root swap after the process scan")
+    if not outside_sentinel.exists():
+        problems.append("reclaim followed a swapped cache parent into outside data")
+
+    # O_NOFOLLOW is independently significant even with identity checks: a
+    # symlink can point back to the same directory/inode that was scanned.
+    # Following it would still violate the canonical non-symlink root contract.
+    nofollow_home = reclaim_tmp / "nofollow-home"
+    nofollow_target = nofollow_home / REMOTE_ROOT / "orphan-12345678"
+    nofollow_target.mkdir(parents=True)
+    nofollow_sentinel = nofollow_target / "inside.txt"
+    nofollow_sentinel.write_text("inside")
+    nofollow_original_root = nofollow_home / f"{REMOTE_ROOT}.original"
+    same_identity_symlink_hook = (
+        f"mv -- {shlex.quote(str(nofollow_home / REMOTE_ROOT))} "
+        f"{shlex.quote(str(nofollow_original_root))} && "
+        f"ln -s -- {shlex.quote(str(nofollow_original_root))} "
+        f"{shlex.quote(str(nofollow_home / REMOTE_ROOT))}"
+    )
+    same_identity_symlinked = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(nofollow_target), str(fake_proc), str(nofollow_home),
+            same_identity_symlink_hook,
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if same_identity_symlinked.returncode == 0:
+        problems.append("reclaim followed a same-identity cache-root symlink")
+    if not nofollow_sentinel.exists():
+        problems.append("reclaim deleted through a same-identity root symlink")
+
+    # Replacing the validated cache root with another ordinary directory is
+    # just as unsafe as replacing it with a symlink. The deletion must remain
+    # bound to the exact directory identity that the process scan covered.
+    replaced_home = reclaim_tmp / "replaced-home"
+    replaced_target = replaced_home / REMOTE_ROOT / "orphan-12345678"
+    replaced_target.mkdir(parents=True)
+    replacement_sentinel = replaced_target / "original.txt"
+    replacement_sentinel.write_text("original")
+    replaced_original_root = replaced_home / f"{REMOTE_ROOT}.original"
+    replace_root_hook = (
+        f"mv -- {shlex.quote(str(replaced_home / REMOTE_ROOT))} "
+        f"{shlex.quote(str(replaced_original_root))} && "
+        f"mkdir -- {shlex.quote(str(replaced_home / REMOTE_ROOT))} && "
+        f"mv -- {shlex.quote(str(replaced_original_root / replaced_target.name))} "
+        f"{shlex.quote(str(replaced_target))}"
+    )
+    root_replaced = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(replaced_target), str(fake_proc), str(replaced_home),
+            replace_root_hook,
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if root_replaced.returncode == 0:
+        problems.append(
+            "reclaim accepted a real-directory cache-root replacement after "
+            "the process scan"
+        )
+    if not replacement_sentinel.exists():
+        problems.append("reclaim deleted through a replacement cache root")
+
+    # The leaf directory covered by the process scan is identity-sensitive as
+    # well: swapping only the slug must preserve the replacement tree.
+    leaf_home = reclaim_tmp / "leaf-swap-home"
+    leaf_target = leaf_home / REMOTE_ROOT / "orphan-12345678"
+    leaf_target.mkdir(parents=True)
+    (leaf_target / "original.txt").write_text("original")
+    moved_leaf = leaf_home / REMOTE_ROOT / "orphan-12345678.original"
+    leaf_replacement_sentinel = leaf_target / "replacement.txt"
+    replace_leaf_hook = (
+        f"mv -- {shlex.quote(str(leaf_target))} "
+        f"{shlex.quote(str(moved_leaf))} && "
+        f"mkdir -- {shlex.quote(str(leaf_target))} && "
+        f"printf replacement > {shlex.quote(str(leaf_replacement_sentinel))}"
+    )
+    leaf_replaced = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(leaf_target), str(fake_proc), str(leaf_home), replace_leaf_hook,
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if leaf_replaced.returncode == 0:
+        problems.append(
+            "reclaim accepted a slug-directory replacement after the process scan"
+        )
+    if not leaf_replacement_sentinel.exists():
+        problems.append("reclaim deleted a replacement slug directory")
+
+    removed = subprocess.run(
+        ["bash"],
+        input=remote_reclaim_script(
+            str(reclaim_target), str(fake_proc), str(reclaim_tmp),
+        ),
+        text=True, capture_output=True, timeout=15,
+    )
+    if removed.returncode != 0 or reclaim_target.exists():
+        problems.append(
+            f"confirmed-unused reclaim did not remove its exact target: "
+            f"rc={removed.returncode}, out={removed.stdout!r}, err={removed.stderr!r}"
+        )
+    shutil.rmtree(reclaim_tmp, ignore_errors=True)
+    own_source = Path(__file__).read_text()
+    for label, fragment in (
+        ("normal build", "with RemoteLock(slug), preflighted_remote_host_lock(\n"
+                         "        a.host, slug, disk_check_before_remote_mutation,"),
+        ("current-tree clean", "with RemoteLock(slug), RemoteHostLock(a.host, slug):\n"
+                               "            return run_ssh"),
+        ("orphan reclaim", "with RemoteLock(lock_slug), "
+                           "RemoteHostLock(lock_host, lock_slug):"),
+    ):
+        if fragment not in own_source:
+            problems.append(
+                f"{label} no longer holds the shared remote slug lock"
+            )
+    dry_args = build_parser().parse_args([
+        "--reclaim-root", str(former), "--remote-slug", former_slug, "reclaim",
+    ])
+    if dry_args.execute_reclaim:
+        problems.append("reclaim deletes by default instead of defaulting dry-run")
+    parsed_inventory = parse_remote_inventory(
+        "9437184\tpool-d616b701\nnoise\n12\twt-00000000\n"
+    )
+    if parsed_inventory != [("pool-d616b701", 9437184), ("wt-00000000", 12)]:
+        problems.append(f"remote inventory parsing is wrong: {parsed_inventory}")
 
     # df parsing, including the shapes that must NOT be read as a number.
     df = ("Filesystem     1024-blocks      Used Available Capacity Mounted on\n"
@@ -1488,6 +3279,43 @@ def run_selftest() -> int:
                 "file — it is hashing a prefix, and two builds of one binary "
                 "differ late"
             )
+
+        # B164: the fetched bytes carry the source checkout identity in a
+        # hash-bound adjacent sidecar. The sidecar is written atomically only
+        # after a successful fetch, so an old one cannot silently describe new
+        # bytes. --no-sync cannot make a provenance claim about reused remote
+        # state and deliberately records an unknown commit.
+        dest = hash_dir / "openplanet-lsp"
+        dest.write_bytes(b"built-from-master")
+        digest = file_sha256(dest)
+        assert digest is not None
+        record = sync_back_provenance_record(
+            dest, digest, Path("/checkout/master"), commit="a" * 40,
+            branch="master", source_dirty_count=0, source_synced=True,
+            host="x-alpha", slug="master-12345678",
+        )
+        sidecar = write_sync_back_provenance(dest, record)
+        wrote = json.loads(sidecar.read_text())
+        if wrote.get("commit") != "a" * 40 or wrote.get("dirty_count") != 0:
+            problems.append(
+                "the sync-back provenance sidecar omitted the producing "
+                "commit or clean-tree state"
+            )
+        if wrote.get("artifact_sha256") != digest:
+            problems.append(
+                "the sync-back provenance sidecar is not tied to the fetched "
+                "artefact hash"
+            )
+        unknown = sync_back_provenance_record(
+            dest, digest, Path("/checkout/lane"), commit="b" * 40,
+            branch="lane/x", source_dirty_count=0, source_synced=False,
+            host="x-alpha", slug="lane-87654321",
+        )
+        if unknown.get("commit") is not None or unknown.get("source_synced"):
+            problems.append(
+                "--no-sync stamped the current local commit onto reused "
+                "remote state whose provenance is unknowable"
+            )
     finally:
         shutil.rmtree(hash_dir, ignore_errors=True)
 
@@ -1578,9 +3406,9 @@ def run_selftest() -> int:
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         return 1
-    print("PASS: remote-build guards — $HOME spelling, disk floor, df parsing,\n"
-          "flag order, slug isolation and the unresolved-operation probe each\n"
-          "reject the bad case and accept the good one.")
+    print("PASS: remote-build guards — $HOME spelling, provenance, disk-first\n"
+          "preflight, safe reclaim, df parsing, flag order, slug isolation and\n"
+          "the unresolved-operation probe reject bad cases and accept controls.")
     return 0
 
 
@@ -1609,11 +3437,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "action",
         choices=["test", "check", "clippy", "build", "run", "doctor", "shell",
-                 "clean", "selftest"],
+                 "clean", "inventory", "reclaim", "selftest"],
         help="test/check/clippy/build run the obvious thing; "
         "run takes an arbitrary command after --; "
-        "doctor verifies the remote; shell opens one; clean removes the remote "
-        "tree; selftest proves this script's own guards can fail",
+        "doctor verifies the remote; shell opens one; clean removes the current "
+        "tree; inventory maps remote trees; reclaim safely targets a removed "
+        "worktree; selftest proves this script's own guards can fail",
     )
     ap.add_argument("rest", nargs=argparse.REMAINDER,
                     help="extra args, after --, passed to the remote command")
@@ -1646,6 +3475,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--allow-unresolved", action="store_true",
                     help="gate the tree even with an unresolved merge/rebase/"
                          "cherry-pick in progress (B132)")
+    ap.add_argument("--reclaim-root", default=None, metavar="ABS_PATH",
+                    help="absolute former local worktree path for reclaim")
+    ap.add_argument("--remote-slug", default=None, metavar="NAME_HASH",
+                    help="exact remote slug, which must match --reclaim-root")
+    ap.add_argument("--execute-reclaim", action="store_true",
+                    help="perform reclaim after validation (default: dry-run)")
     return ap
 
 
@@ -1670,6 +3505,11 @@ def main() -> int:
     root = local_root()
     if a.action == "doctor":
         return doctor(a.host, root)
+    if a.action == "inventory":
+        return cmd_inventory(a.host, root)
+    if a.action == "reclaim":
+        return cmd_reclaim(a.host, root, a.reclaim_root, a.remote_slug,
+                           a.execute_reclaim)
 
     slug = slug_for(root)
     # Two spellings of the same place, and they are not interchangeable. The
@@ -1690,11 +3530,19 @@ def main() -> int:
 
     if a.action == "clean":
         print(f"remote-build: removing {a.host}:{base}")
-        return run_ssh(a.host, f"rm -rf {base} && echo removed")
+        with RemoteLock(slug), RemoteHostLock(a.host, slug):
+            return run_ssh(a.host, f"rm -rf {base} && echo removed")
 
     if a.action == "shell":
-        os.execvp("ssh", ["ssh", "-t", a.host,
-                          f"cd {remote_src} 2>/dev/null || cd $HOME; exec bash -l"])
+        lock_rel = f".remote-build-locks/{slug}.lock"
+        inner = f"cd {remote_src} 2>/dev/null || cd $HOME; exec bash -l"
+        remote = (
+            'mkdir -p "$HOME/.remote-build-locks" && '
+            f'exec flock -x "$HOME"/{shlex.quote(lock_rel)} '
+            f'sh -c {shlex.quote(inner)}'
+        )
+        ssh = ssh_base(a.host)
+        os.execvp("ssh", [*ssh[:-1], "-t", a.host, remote])
 
     # B132, and deliberately BEFORE the lock and before any ssh: this is a
     # local read that costs nothing, and the condition it catches makes every
@@ -1712,7 +3560,17 @@ def main() -> int:
         if refusal:
             die(refusal)
 
-    with RemoteLock(slug):
+    source_snapshot: dict | None = None
+
+    def disk_check_before_remote_mutation() -> None:
+        preflight_remote_disk(
+            host=a.host, rel_base=rel_base, remote_target=remote_target,
+            floor_gb=a.disk_floor, allow_low_disk=a.allow_low_disk,
+        )
+
+    with RemoteLock(slug), preflighted_remote_host_lock(
+        a.host, slug, disk_check_before_remote_mutation,
+    ):
         rc, cores = capture_ssh(a.host, "nproc")
         remote_cores = int(cores) if rc == 0 and cores.isdigit() else 8
         # Cap the default: a 48-way link job can thrash memory, and leaving
@@ -1720,29 +3578,15 @@ def main() -> int:
         jobs = a.jobs if a.jobs else min(remote_cores, 24)
         tthreads = a.test_threads if a.test_threads else max(2, jobs // 2)
 
-        # B106, before anything expensive or destructive. A build box with no
-        # room does not fail as "no room": rsync, cargo and rustc each report
-        # it in their own dimension, and the one the operator reads is usually
-        # cargo's, which blames the code.
-        if not a.allow_low_disk:
-            verdict = disk_floor_verdict(
-                remote_free_bytes(a.host, rel_base), a.disk_floor, a.host,
-                remote_target,
-            )
-            if verdict:
-                die(verdict)
-
-        if not a.no_sync:
-            # This return status used to be discarded, AND `quiet=True` ate the
-            # message with it. MEASURED on a full filesystem: the remote said
-            # `mkdir: No space left on device` and the wrapper carried on to
-            # rsync as though the tree existed. B106 is about statuses that do
-            # not survive; this was one of them, in this file.
-            rc, out = capture_ssh(a.host, f"mkdir -p {remote_src} {remote_target}")
-            if rc != 0:
-                die(f"could not create the remote tree on {a.host} "
-                    f"(mkdir exited {rc}):\n  {out}", rc)
-            sync_up(a.host, root, rsync_dest, a.with_git, a.verbose)
+        # B106/B164/B167. One boundary owns the operational order and source
+        # identity: snapshot, disk floor, mkdir, rsync, matching snapshot. The
+        # command/build is constructed only after it returns.
+        source_snapshot = sync_with_stable_source(
+            host=a.host, rel_base=rel_base, remote_src=remote_src,
+            remote_target=remote_target, rsync_dest=rsync_dest, root=root,
+            floor_gb=a.disk_floor, allow_low_disk=a.allow_low_disk,
+            no_sync=a.no_sync, with_git=a.with_git, verbose=a.verbose,
+        )
 
         if a.action == "test":
             # `just test` self-throttles to -j2 for the sake of THIS desktop
@@ -1871,6 +3715,19 @@ def main() -> int:
             print(f"remote-build: wrote {dest} "
                   f"({dest.stat().st_size} bytes) sha256={after}",
                   file=sys.stderr)
+            record = sync_back_provenance_record(
+                dest, after, root,
+                commit=(source_snapshot or {}).get("commit"),
+                branch=(source_snapshot or {}).get("branch"),
+                source_dirty_count=(source_snapshot or {}).get("dirty_count"),
+                source_synced=not a.no_sync,
+                host=a.host,
+                slug=slug,
+            )
+            sidecar = write_sync_back_provenance(dest, record)
+            stamped = record.get("commit") or "UNKNOWN (--no-sync)"
+            print(f"remote-build: provenance {sidecar} commit={stamped} "
+                  f"dirty={record.get('dirty_count')}", file=sys.stderr)
             if a.sync_back_must_change and before is not None and before == after:
                 die(sync_back_unchanged_verdict(a.sync_back, dest, after,
                                                 a.host), SYNC_BACK_UNCHANGED)

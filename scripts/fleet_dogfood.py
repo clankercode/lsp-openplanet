@@ -44,6 +44,7 @@ NON_PLUGIN = {
 # Allow tests / one-off runs to redirect state away from the production ledger
 # via env var so a logic test can never clobber docs/plugin-fleet-ledger.json.
 STATE_FILE = Path(os.environ.get("FLEET_STATE_FILE", str(STATE_FILE)))
+PROVENANCE_SUFFIX = ".provenance.json"
 
 # ---- RemoteBuild minimal client --------------------------------------------
 def rb_route(route: str, data: dict, timeout=8) -> dict:
@@ -778,15 +779,52 @@ def parse_game_diagnostics(window: str) -> list[dict]:
     return diags
 
 # ---- LSP -------------------------------------------------------------------
-def run_lsp(pdir: Path) -> dict:
-    cmd = [str(LSP_BIN), "check", "--typedb-dir", str(TYPEDB),
-           "--plugins-dir", str(OPN_PLUGINS), str(pdir)]
+def run_lsp(pdir: Path, identity_fn=None, before_exec_fn=None) -> dict:
+    identity_fn = identity_fn or lsp_bin_identity
+    binary_before = identity_fn()
+    binary_fd = None
+    executed_sha256 = None
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        out = (p.stdout + p.stderr)
-        return {"exit": p.returncode, "output": out.strip()}
+        flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        binary_fd = os.open(LSP_BIN, flags)
+        executed_sha256 = fd_sha256(binary_fd)
+        if executed_sha256 != binary_before.get("sha256"):
+            result = {
+                "exit": -1,
+                "output": "<lsp run refused: binary changed before exec>",
+            }
+        else:
+            if before_exec_fn is not None:
+                before_exec_fn()
+            cmd = [f"/proc/self/fd/{binary_fd}", "check", "--typedb-dir",
+                   str(TYPEDB), "--plugins-dir", str(OPN_PLUGINS), str(pdir)]
+            p = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120,
+                pass_fds=(binary_fd,),
+            )
+            out = (p.stdout + p.stderr)
+            result = {"exit": p.returncode, "output": out.strip()}
     except Exception as e:
-        return {"exit": -1, "output": f"<lsp run failed: {e}>"}
+        result = {"exit": -1, "output": f"<lsp run failed: {e}>"}
+    finally:
+        if binary_fd is not None:
+            os.close(binary_fd)
+    result["executed_sha256"] = executed_sha256
+    result["binary_before"] = binary_before
+    result["binary_after"] = identity_fn()
+    return result
+
+
+def lsp_record(run: dict) -> dict:
+    """Persist the output together with the exact invocation's identity pair."""
+    return {
+        "exit": run["exit"],
+        "count": parse_lsp_count(run["output"]),
+        "output": run["output"],
+        "executed_sha256": run["executed_sha256"],
+        "binary_before": run["binary_before"],
+        "binary_after": run["binary_after"],
+    }
 
 # ---- which binary did this sweep actually run? -------------------------------
 # B147. A before/after fleet comparison reported IDENTICAL while both halves
@@ -813,6 +851,19 @@ def file_sha256(path: Path) -> str | None:
             h.update(chunk)
     return h.hexdigest()
 
+
+def fd_sha256(fd: int) -> str:
+    """Hash the already-open inode that `/proc/self/fd/<fd>` will execute."""
+    h = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(fd, 1 << 20, offset)
+        if not chunk:
+            return h.hexdigest()
+        h.update(chunk)
+        offset += len(chunk)
+
+
 def lsp_bin_identity(path: Path | None = None) -> dict:
     """Provenance of the LSP binary this process would run.
 
@@ -824,16 +875,245 @@ def lsp_bin_identity(path: Path | None = None) -> dict:
     path = LSP_BIN if path is None else path
     digest = file_sha256(path)
     st = path.stat() if path.is_file() else None
-    return {
+    identity = {
         "path": str(path),
         "sha256": digest,
         "size": st.st_size if st else None,
         "mtime": (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))
                   if st else None),
     }
+    provenance_path = path.with_name(path.name + PROVENANCE_SUFFIX)
+    identity.update({
+        "provenance_path": str(provenance_path),
+        "commit": None,
+        "dirty_count": None,
+        "source_root": None,
+        "source_branch": None,
+        "provenance_schema": None,
+        "source_synced": None,
+        "provenance_error": None,
+    })
+    if digest is None:
+        identity["provenance_error"] = "the LSP binary is absent"
+        return identity
+    try:
+        provenance = json.loads(provenance_path.read_text())
+    except FileNotFoundError:
+        identity["provenance_error"] = (
+            f"missing provenance sidecar {provenance_path}"
+        )
+        return identity
+    except Exception as e:
+        identity["provenance_error"] = (
+            f"cannot read provenance sidecar {provenance_path}: {e}"
+        )
+        return identity
+    if not isinstance(provenance, dict):
+        identity["provenance_error"] = (
+            f"provenance sidecar {provenance_path} is not a JSON object"
+        )
+        return identity
+    schema = provenance.get("schema")
+    if type(schema) is not int or schema != 1:
+        identity["provenance_error"] = (
+            f"provenance sidecar schema must be the integer 1, got {schema!r}"
+        )
+        return identity
+    stamped_hash = provenance.get("artifact_sha256")
+    if stamped_hash != digest:
+        identity["provenance_error"] = (
+            f"provenance sidecar hash {stamped_hash!r} does not match the "
+            f"binary sha256 {digest}"
+        )
+        return identity
+    source_synced = provenance.get("source_synced")
+    if source_synced is not True:
+        identity["provenance_error"] = (
+            f"provenance sidecar source_synced must be true, got "
+            f"{source_synced!r}"
+        )
+        return identity
+    commit = provenance.get("commit")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        identity["provenance_error"] = (
+            f"provenance sidecar records no full producing commit: {commit!r}"
+        )
+        return identity
+    dirty = provenance.get("dirty_count")
+    if type(dirty) is not int or dirty < 0:
+        identity["provenance_error"] = (
+            f"provenance sidecar dirty_count must be a non-negative integer, "
+            f"got {dirty!r}"
+        )
+        return identity
+    source_root = provenance.get("source_root")
+    if (not isinstance(source_root, str) or not source_root
+            or not Path(source_root).is_absolute()):
+        identity["provenance_error"] = (
+            f"provenance sidecar source_root must be a nonempty absolute path, "
+            f"got {source_root!r}"
+        )
+        return identity
+    source_branch = provenance.get("source_branch")
+    if not isinstance(source_branch, str) or not source_branch:
+        identity["provenance_error"] = (
+            f"provenance sidecar source_branch must be a nonempty string, got "
+            f"{source_branch!r}"
+        )
+        return identity
+    identity.update({
+        "commit": commit,
+        "dirty_count": dirty,
+        "source_root": source_root,
+        "source_branch": source_branch,
+        "provenance_schema": schema,
+        "source_synced": source_synced,
+    })
+    return identity
+
+
+def trusted_binary_problems(identity: dict, label: str) -> list[str]:
+    """Why a ledger identity is not the output of validated provenance."""
+    if not isinstance(identity, dict):
+        return [
+            f"{label} records no LSP binary hash or provenance object; "
+            f"re-run the sweep with a provenance-aware recorder."
+        ]
+    digest = identity.get("sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return [
+            f"{label} records no LSP binary hash as a full lowercase sha256 "
+            f"(got {digest!r}), so its binary identity is untrustworthy."
+        ]
+    if "provenance_error" not in identity or identity.get("provenance_error") is not None:
+        reason = identity.get("provenance_error", "missing provenance_error field")
+        return [f"{label} records untrusted binary provenance: {reason}"]
+    schema = identity.get("provenance_schema")
+    if type(schema) is not int or schema != 1:
+        return [
+            f"{label} records no validated provenance schema 1 "
+            f"(got {schema!r})."
+        ]
+    if identity.get("source_synced") is not True:
+        return [
+            f"{label} does not attest source_synced=true "
+            f"(got {identity.get('source_synced')!r})."
+        ]
+    commit = identity.get("commit")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        return [f"{label} records no full producing commit: {commit!r}."]
+    dirty = identity.get("dirty_count")
+    if type(dirty) is not int or dirty < 0:
+        return [
+            f"{label} records malformed dirty_count={dirty!r}; expected a "
+            f"non-negative integer."
+        ]
+    source_root = identity.get("source_root")
+    if (not isinstance(source_root, str) or not source_root
+            or not Path(source_root).is_absolute()):
+        return [f"{label} records an invalid source_root={source_root!r}."]
+    branch = identity.get("source_branch")
+    if not isinstance(branch, str) or not branch:
+        return [f"{label} records an invalid source_branch={branch!r}."]
+    return []
+
+
+def baseline_commit_problems(baseline: dict, expected_commit: str,
+                             label: str = "baseline") -> list[str]:
+    """Refuse a baseline that cannot be attributed to the claimed commit."""
+    if not re.fullmatch(r"[0-9a-f]{40,64}", expected_commit or ""):
+        return [
+            f"the expected baseline commit must be an explicit full git hash, "
+            f"not {expected_commit!r}. Resolve the authoritative baseline "
+            f"checkout/ref first (for example `git -C <master> rev-parse HEAD`)."
+        ]
+    stamped = baseline.get("commit") if isinstance(baseline, dict) else None
+    if not stamped:
+        reason = (baseline.get("provenance_error")
+                  if isinstance(baseline, dict) else None)
+        return [
+            f"{label} records no trustworthy producing commit"
+            f"{': ' + reason if reason else ''}. Expected baseline commit "
+            f"{expected_commit}; hashes alone cannot establish that provenance."
+        ]
+    if stamped != expected_commit:
+        return [
+            f"{label} was stamped with producing commit {stamped}, but the "
+            f"claimed baseline commit is {expected_commit}. This is the stale-"
+            f"baseline failure: a different binary hash does not prove the "
+            f"binary came from the authoritative baseline checkout."
+        ]
+    dirty = baseline.get("dirty_count")
+    if type(dirty) is not int or dirty != 0:
+        return [
+            f"{label} was stamped at commit {stamped} with dirty_count={dirty!r}. "
+            f"A dirty source tree is not the exact baseline commit it claims; "
+            f"rebuild from a clean authoritative baseline checkout."
+        ]
+    return []
+
+
+def binary_identity_key(identity: dict) -> tuple:
+    """Fields that make two trusted invocation identities the same input."""
+    return tuple(identity.get(key) for key in (
+        "path", "sha256", "commit", "dirty_count", "source_root",
+        "source_branch", "provenance_schema", "source_synced",
+        "provenance_error",
+    ))
+
+
+def ledger_binary_problems(ledger: dict, label: str) -> list[str]:
+    """Refuse a ledger unless every plugin ran one unchanged trusted binary."""
+    top = ledger.get("lsp_bin") if isinstance(ledger, dict) else None
+    problems = trusted_binary_problems(top, f"{label} final stamp")
+    if problems:
+        return problems
+    plugins = ledger.get("plugins")
+    if not isinstance(plugins, dict):
+        return [f"{label} has no plugin result map to bind to its binary stamp."]
+    top_key = binary_identity_key(top)
+    for name, rec in plugins.items():
+        lsp = rec.get("lsp") if isinstance(rec, dict) else None
+        if not isinstance(lsp, dict):
+            problems.append(
+                f"{label} plugin {name!r} records no per-invocation LSP "
+                "binary identity. Re-run the sweep."
+            )
+            continue
+        before = lsp.get("binary_before")
+        after = lsp.get("binary_after")
+        executed = lsp.get("executed_sha256")
+        invocation_problems = []
+        invocation_problems.extend(trusted_binary_problems(
+            before, f"{label} plugin {name!r} before"
+        ))
+        invocation_problems.extend(trusted_binary_problems(
+            after, f"{label} plugin {name!r} after"
+        ))
+        if invocation_problems:
+            problems.extend(invocation_problems)
+            continue
+        if executed != before.get("sha256"):
+            problems.append(
+                f"{label} plugin {name!r} executed sha256={executed!r}, but "
+                f"its before-invocation identity is {before['sha256']}."
+            )
+        if binary_identity_key(before) != binary_identity_key(after):
+            problems.append(
+                f"{label} plugin {name!r} saw the LSP binary change during "
+                f"its invocation ({before['sha256']} -> {after['sha256']})."
+            )
+        if binary_identity_key(before) != top_key:
+            problems.append(
+                f"{label} plugin {name!r} ran sha256={before['sha256']}, but "
+                f"the ledger's final stamp is sha256={top['sha256']}; this is "
+                "a mixed-binary sweep."
+            )
+    return problems
 
 def compare_binary_problems(a: dict, b: dict,
-                            label_a: str = "A", label_b: str = "B") -> list[str]:
+                            label_a: str = "A", label_b: str = "B",
+                            expected_baseline_commit: str | None = None) -> list[str]:
     """Refuse a before/after comparison whose two halves cannot be compared.
 
     Refuses on exactly the conditions that make the MEASUREMENT meaningless,
@@ -850,14 +1130,7 @@ def compare_binary_problems(a: dict, b: dict,
     """
     problems = []
     for label, side in ((label_a, a), (label_b, b)):
-        if not isinstance(side, dict) or not side.get("sha256"):
-            problems.append(
-                f"{label} records no LSP binary hash, so there is no way to "
-                f"know which artefact produced it. A comparison of two sweeps "
-                f"is a claim about two BINARIES; without their identities it "
-                f"is a claim about two files of unknown provenance. Re-run the "
-                f"sweep with a version that records `lsp_bin`."
-            )
+        problems.extend(trusted_binary_problems(side, label))
     if problems:
         return problems
     if a["sha256"] == b["sha256"]:
@@ -873,9 +1146,13 @@ def compare_binary_problems(a: dict, b: dict,
             f"ran -- `remote-build.py --sync-back ... --sync-back-must-change` "
             f"refuses this at the source."
         )
+    if expected_baseline_commit is not None:
+        problems.extend(baseline_commit_problems(
+            a, expected_baseline_commit, label_a
+        ))
     return problems
 
-def cmd_compare(path_a: Path, path_b: Path) -> int:
+def cmd_compare(path_a: Path, path_b: Path, expected_baseline_commit: str) -> int:
     """`compare A.json B.json` -- gate two ledgers before believing a diff."""
     try:
         a = json.loads(path_a.read_text())
@@ -883,8 +1160,14 @@ def cmd_compare(path_a: Path, path_b: Path) -> int:
     except Exception as e:
         print(f"compare: cannot read a ledger: {e}")
         return 2
-    problems = compare_binary_problems(a.get("lsp_bin", {}), b.get("lsp_bin", {}),
-                                       str(path_a), str(path_b))
+    problems = [
+        *ledger_binary_problems(a, str(path_a)),
+        *ledger_binary_problems(b, str(path_b)),
+        *compare_binary_problems(
+            a.get("lsp_bin", {}), b.get("lsp_bin", {}),
+            str(path_a), str(path_b), expected_baseline_commit,
+        ),
+    ]
     if problems:
         print("REFUSED: these two sweeps cannot be compared")
         for pr in problems:
@@ -987,8 +1270,7 @@ def process_plugin(pdir: Path, st: dict) -> dict:
 
     # 2. LSP dogfood (always; no install needed)
     lsp = run_lsp(pdir)
-    rec["lsp"] = {"exit": lsp["exit"], "count": parse_lsp_count(lsp["output"]),
-                  "output": lsp["output"]}
+    rec["lsp"] = lsp_record(lsp)
 
     # 3-5. game compile, unless .op-installed (skip staging per user rule)
     if ist["is_op"]:
@@ -1398,20 +1680,171 @@ def run_selftest() -> int:
                 save_state({"plugins": {}})
                 return json.loads((_e2e / name).read_text())
 
+            def stamp() -> None:
+                digest = file_sha256(artefact)
+                assert digest is not None
+                Path(str(artefact) + ".provenance.json").write_text(json.dumps({
+                    "schema": 1,
+                    "artifact_sha256": digest,
+                    "commit": "1" * 40,
+                    "dirty_count": 0,
+                    "source_synced": True,
+                    "source_root": str(_e2e),
+                    "source_branch": "master",
+                }))
+
             artefact.write_bytes(b"binary-before")
+            stamp()
             before = ledger("before.json")
 
             # (a) the sync TAKES EFFECT — the comparison must proceed.
             artefact.write_bytes(b"binary-after-a-real-fix")
+            stamp()
             after_real = ledger("after-real.json")
             check("B147 end-to-end: a real before/after is COMPARABLE — a gate "
                   "that refuses this makes the whole idiom unusable",
                   compare_binary_problems(before["lsp_bin"],
                                           after_real["lsp_bin"]), [])
 
+            # B164: the top-level stamp is only the identity at the LAST save.
+            # A two-plugin sweep that ran A then B must not be certified as an
+            # all-B baseline merely because B was current when the ledger closed.
+            mixed = json.loads(json.dumps(after_real))
+            recorded = lsp_record({
+                "exit": 0,
+                "output": "0 diagnostics in /plugin",
+                "executed_sha256": before["lsp_bin"]["sha256"],
+                "binary_before": before["lsp_bin"],
+                "binary_after": after_real["lsp_bin"],
+            })
+            check(
+                "B164: each plugin record carries the binary identities from "
+                "both sides of its LSP invocation",
+                (recorded.get("executed_sha256"),
+                 recorded.get("binary_before"), recorded.get("binary_after")),
+                (before["lsp_bin"]["sha256"],
+                 before["lsp_bin"], after_real["lsp_bin"]),
+            )
+            invocation_identities = iter([
+                before["lsp_bin"], after_real["lsp_bin"],
+            ])
+            sampled = run_lsp(
+                _e2e, identity_fn=lambda: next(invocation_identities),
+            )
+            check(
+                "B164: the real LSP invocation samples binary identity on "
+                "both sides of subprocess execution",
+                ("refused" in sampled.get("output", ""),
+                 sampled.get("executed_sha256"),
+                 sampled.get("binary_before"), sampled.get("binary_after")),
+                (True, after_real["lsp_bin"]["sha256"],
+                 before["lsp_bin"], after_real["lsp_bin"]),
+            )
+            mixed["plugins"] = {
+                "early": {"lsp": {
+                    "executed_sha256": before["lsp_bin"]["sha256"],
+                    "binary_before": before["lsp_bin"],
+                    "binary_after": before["lsp_bin"],
+                }},
+                "late": {"lsp": {
+                    "executed_sha256": after_real["lsp_bin"]["sha256"],
+                    "binary_before": after_real["lsp_bin"],
+                    "binary_after": after_real["lsp_bin"],
+                }},
+            }
+            stable = json.loads(json.dumps(before))
+            stable["plugins"] = {
+                name: {"lsp": {
+                    "executed_sha256": before["lsp_bin"]["sha256"],
+                    "binary_before": before["lsp_bin"],
+                    "binary_after": before["lsp_bin"],
+                }}
+                for name in ("early", "late")
+            }
+            mixed_path = _e2e / "mixed.json"
+            stable_path = _e2e / "stable.json"
+            mixed_path.write_text(json.dumps(mixed))
+            stable_path.write_text(json.dumps(stable))
+            if cmd_compare(
+                mixed_path, stable_path, after_real["lsp_bin"]["commit"],
+            ) == 0:
+                check(
+                    "B164: a two-plugin A-to-B sweep is refused even when its "
+                    "final top-level stamp says B",
+                    "COMPARABLE", "REFUSED",
+                )
+
+            crossing = json.loads(json.dumps(before))
+            crossing["plugins"] = {"crossing": {"lsp": {
+                "executed_sha256": before["lsp_bin"]["sha256"],
+                "binary_before": before["lsp_bin"],
+                "binary_after": after_real["lsp_bin"],
+            }}}
+            after_stable = json.loads(json.dumps(after_real))
+            after_stable["plugins"] = {"crossing": {"lsp": {
+                "executed_sha256": after_real["lsp_bin"]["sha256"],
+                "binary_before": after_real["lsp_bin"],
+                "binary_after": after_real["lsp_bin"],
+            }}}
+            crossing_path = _e2e / "crossing.json"
+            after_stable_path = _e2e / "after-stable.json"
+            crossing_path.write_text(json.dumps(crossing))
+            after_stable_path.write_text(json.dumps(after_stable))
+            if cmd_compare(
+                crossing_path, after_stable_path,
+                before["lsp_bin"]["commit"],
+            ) == 0:
+                check(
+                    "B164: a binary change during one plugin invocation is "
+                    "refused even when its before identity matches the ledger",
+                    "COMPARABLE", "REFUSED",
+                )
+
+            wrong_exec = json.loads(json.dumps(before))
+            wrong_exec["plugins"] = {"wrong-exec": {"lsp": {
+                "executed_sha256": after_real["lsp_bin"]["sha256"],
+                "binary_before": before["lsp_bin"],
+                "binary_after": before["lsp_bin"],
+            }}}
+            wrong_exec_path = _e2e / "wrong-exec.json"
+            wrong_exec_path.write_text(json.dumps(wrong_exec))
+            if cmd_compare(
+                wrong_exec_path, after_stable_path,
+                before["lsp_bin"]["commit"],
+            ) == 0:
+                check(
+                    "B164: executed inode hash must match the invocation's "
+                    "trusted before identity",
+                    "COMPARABLE", "REFUSED",
+                )
+
+            # Even an A -> B -> A pathname oscillation cannot change the bytes
+            # executed: the subprocess receives the already-open A inode.
+            artefact.write_text("#!/bin/sh\necho pinned-old-binary\n")
+            artefact.chmod(0o755)
+            stamp()
+            pinned_before = lsp_bin_identity()
+            replacement = _e2e / "replacement-lsp"
+            replacement.write_text("#!/bin/sh\necho replacement-binary\n")
+            replacement.chmod(0o755)
+
+            def swap_before_exec() -> None:
+                os.replace(replacement, artefact)
+                stamp()
+
+            pinned = run_lsp(_e2e, before_exec_fn=swap_before_exec)
+            check(
+                "B164: pathname replacement after pinning still executes the "
+                "already-open binary inode",
+                ("pinned-old-binary" in pinned["output"],
+                 pinned.get("executed_sha256")),
+                (True, pinned_before["sha256"]),
+            )
+
             # (b) the sync SILENTLY NO-OPS — the artefact is untouched. The
             # comparison must FAIL rather than report IDENTICAL.
             artefact.write_bytes(b"binary-before")
+            stamp()
             after_noop = ledger("after-noop.json")
             noop = compare_binary_problems(before["lsp_bin"],
                                            after_noop["lsp_bin"],
@@ -1447,12 +1880,92 @@ def run_selftest() -> int:
     # refuses every comparison satisfies the refusal assertions just as well
     # as a correct one, and is useless.
     ident_a = {"path": "/r/target/release/openplanet-lsp", "sha256": "a" * 64,
-               "size": 10, "mtime": "2026-09-01 01:00:00"}
+               "size": 10, "mtime": "2026-09-01 01:00:00",
+               "provenance_error": None, "provenance_schema": 1,
+               "source_synced": True, "commit": "1" * 40,
+               "dirty_count": 0, "source_root": "/r/source",
+               "source_branch": "master"}
     ident_b = dict(ident_a, sha256="b" * 64, mtime="2026-09-01 02:00:00")
 
     check("B147: two DIFFERENT binaries compare fine — the gate must not "
           "make the comparison unusable",
           compare_binary_problems(ident_a, ident_b), [])
+
+    # --- B164: a different binary can still be the WRONG baseline ----------
+    # This is the measured near-miss. Master moved, but the baseline build was
+    # accidentally launched from a lane checkout. Its bytes differed from the
+    # fixed binary, so B147's base != fixed guard accepted the comparison.
+    stale_base = dict(ident_a, commit="1" * 40, dirty_count=0)
+    fixed_lane = dict(ident_b, commit="2" * 40, dirty_count=3)
+    expected_master = "3" * 40
+    stale = compare_binary_problems(
+        stale_base, fixed_lane, "baseline.json", "fixed.json",
+        expected_baseline_commit=expected_master,
+    )
+    if not stale:
+        check("B164 RED: a baseline stamped with the lane commit is refused "
+              "when the caller explicitly claims current master — different "
+              "binary hashes are insufficient provenance",
+              stale, ["<a refusal naming stamped and expected commits>"])
+    elif "1" * 40 not in stale[0] or expected_master not in stale[0]:
+        check("B164: the stale-baseline refusal names both the stamped commit "
+              "and the expected authoritative baseline commit",
+              stale, ["<stamped and expected commits>"])
+
+    correct_base = dict(stale_base, commit=expected_master)
+    check("B164 positive control: the correctly stamped clean baseline still "
+          "proceeds against a different dirty lane binary",
+          compare_binary_problems(
+              correct_base, fixed_lane, "baseline.json", "fixed.json",
+              expected_baseline_commit=expected_master,
+          ), [])
+
+    untrusted_after = dict(
+        fixed_lane, provenance_error="missing provenance sidecar",
+        provenance_schema=None, source_synced=None, commit=None,
+    )
+    if not compare_binary_problems(
+        correct_base, untrusted_after, "baseline.json", "fixed.json",
+        expected_baseline_commit=expected_master,
+    ):
+        check("B164: missing/malformed AFTER provenance is refused too",
+              [], ["<a refusal naming fixed.json provenance>"])
+    poisoned_base = dict(
+        correct_base,
+        provenance_error="sidecar hash does not match binary",
+    )
+    if not compare_binary_problems(
+        poisoned_base, fixed_lane, "baseline.json", "fixed.json",
+        expected_baseline_commit=expected_master,
+    ):
+        check("B164: a populated provenance_error cannot be hidden by a commit",
+              [], ["<a refusal naming baseline.json provenance_error>"])
+    malformed_hash_after = dict(fixed_lane, sha256="not-a-sha256")
+    if not compare_binary_problems(
+        correct_base, malformed_hash_after, "baseline.json", "fixed.json",
+        expected_baseline_commit=expected_master,
+    ):
+        check("B164: a malformed nonempty after-binary hash is refused",
+              [], ["<a refusal naming fixed.json hash>"])
+    dirty_base = dict(correct_base, dirty_count=1)
+    dirty_refusal = compare_binary_problems(
+        dirty_base, fixed_lane, "baseline.json", "fixed.json",
+        expected_baseline_commit=expected_master,
+    )
+    if not dirty_refusal or "dirty_count=1" not in dirty_refusal[0]:
+        check("B164: a dirty baseline is not accepted as the exact commit it "
+              "names",
+              dirty_refusal, ["<refusal naming dirty_count=1>"])
+    false_dirty_base = dict(correct_base, dirty_count=False)
+    false_dirty_refusal = compare_binary_problems(
+        false_dirty_base, fixed_lane, "baseline.json", "fixed.json",
+        expected_baseline_commit=expected_master,
+    )
+    if (not false_dirty_refusal
+            or "dirty_count=False" not in false_dirty_refusal[0]):
+        check("B164: boolean false is not the integer clean count zero",
+              false_dirty_refusal,
+              ["<refusal naming dirty_count=False>"])
 
     same = compare_binary_problems(ident_a, dict(ident_a))
     if len(same) != 1 or "SAME binary" not in same[0]:
@@ -1485,7 +1998,7 @@ def run_selftest() -> int:
     # The refusal must name WHICH side, or an operator with two ledgers cannot
     # act on it.
     named = compare_binary_problems({}, ident_b, "before.json", "after.json")
-    if not any("before.json" in g for g in named):
+    if not named or "before.json" not in named[0]:
         check("B147: the refusal names the offending ledger", named,
               ["<mentions before.json>"])
 
@@ -1507,12 +2020,82 @@ def run_selftest() -> int:
             check("B147: lsp_bin_identity distinguishes two different "
                   "binaries — if it cannot, the whole gate is decorative",
                   (h1, h2), ("<hash A>", "<different hash B>"))
+        sidecar = real.with_name(real.name + PROVENANCE_SUFFIX)
+        valid_provenance = {
+            "schema": 1,
+            "artifact_sha256": h2,
+            "commit": "c" * 40,
+            "dirty_count": 0,
+            "source_root": "/authoritative/master",
+            "source_branch": "master",
+            "source_synced": True,
+        }
+        sidecar.write_text(json.dumps(valid_provenance))
+        stamped = lsp_bin_identity(real)
+        check("B164: lsp_bin_identity accepts a hash-bound provenance sidecar",
+              (stamped.get("commit"), stamped.get("dirty_count"),
+               stamped.get("provenance_error")),
+              ("c" * 40, 0, None))
+        missing = object()
+        malformed_provenance = (
+            ("false dirty_count", "dirty_count", False),
+            ("null dirty_count", "dirty_count", None),
+            ("string dirty_count", "dirty_count", "0"),
+            ("negative dirty_count", "dirty_count", -1),
+            ("false source_synced", "source_synced", False),
+            ("integer source_synced", "source_synced", 1),
+            ("missing source_synced", "source_synced", missing),
+            ("boolean schema", "schema", False),
+            ("boolean true schema", "schema", True),
+            ("string schema", "schema", "1"),
+            ("wrong schema", "schema", 2),
+            ("missing schema", "schema", missing),
+            ("relative source_root", "source_root", "lane/checkout"),
+            ("missing source_root", "source_root", missing),
+            ("empty source_branch", "source_branch", ""),
+            ("missing source_branch", "source_branch", missing),
+        )
+        for label, field, value in malformed_provenance:
+            record = dict(valid_provenance)
+            if value is missing:
+                record.pop(field)
+            else:
+                record[field] = value
+            sidecar.write_text(json.dumps(record))
+            malformed = lsp_bin_identity(real)
+            if (malformed.get("commit") is not None
+                    or field not in (malformed.get("provenance_error") or "")):
+                check(
+                    f"B164: {label} provenance is UNKNOWN and names {field}",
+                    (malformed.get("commit"), malformed.get("provenance_error")),
+                    (None, f"<reason naming {field}>")
+                )
+        sidecar.write_text(json.dumps({
+            "schema": 1,
+            "artifact_sha256": "d" * 64,
+            "commit": "c" * 40,
+            "dirty_count": 0,
+            "source_root": "/authoritative/master",
+            "source_branch": "master",
+            "source_synced": True,
+        }))
+        mismatched = lsp_bin_identity(real)
+        if mismatched.get("commit") is not None or not mismatched.get("provenance_error"):
+            check("B164: a sidecar for different bytes is UNKNOWN, not trusted",
+                  mismatched, {"commit": None, "provenance_error": "<reason>"})
+        sidecar.unlink()
+        missing_sidecar = lsp_bin_identity(real)
+        if missing_sidecar.get("commit") is not None or not missing_sidecar.get("provenance_error"):
+            check("B164: a binary without a sidecar has unknown provenance",
+                  missing_sidecar,
+                  {"commit": None, "provenance_error": "<missing sidecar>"})
         # And the sweep must actually RECORD it: a recorder nothing calls is
         # the same absence one layer down.
         _old_state, _old_bin = STATE_FILE, LSP_BIN
         try:
             globals()["STATE_FILE"] = _d / "ledger.json"
             globals()["LSP_BIN"] = real
+            sidecar.write_text(json.dumps(valid_provenance))
             save_state({"plugins": {}})
             wrote = json.loads((_d / "ledger.json").read_text())
         finally:
@@ -1521,6 +2104,8 @@ def run_selftest() -> int:
               "a ledger that does not say which artefact produced it cannot "
               "be compared with another",
               wrote.get("lsp_bin", {}).get("sha256"), h2)
+        check("B164: save_state carries the producing commit into the ledger",
+              wrote.get("lsp_bin", {}).get("commit"), "c" * 40)
     finally:
         shutil.rmtree(_d, ignore_errors=True)
 
@@ -1559,10 +2144,11 @@ def main():
         limit = int(args[1]) if len(args) > 1 else None
         cmd_sweep(st, limit)
     elif args[0] == "compare":
-        if len(args) != 3:
-            print("usage: fleet_dogfood.py compare BEFORE.json AFTER.json")
+        if len(args) != 5 or args[1] != "--baseline-commit":
+            print("usage: fleet_dogfood.py compare --baseline-commit COMMIT "
+                  "BEFORE.json AFTER.json")
             sys.exit(2)
-        sys.exit(cmd_compare(Path(args[1]), Path(args[2])))
+        sys.exit(cmd_compare(Path(args[3]), Path(args[4]), args[2]))
     else:
         tgt = MY_PLUGINS / args[0]
         if not tgt.is_dir():

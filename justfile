@@ -251,15 +251,20 @@ fleet-verdict-mutants:
     python3 scripts/check_fleet_verdict_nonvacuous.py
 
 # Gate a before/after fleet comparison on the two sweeps having actually run
-# DIFFERENT binaries (B147). The measured incident: a comparison reported
+# DIFFERENT binaries (B147), and on BEFORE having been built from the explicit
+# authoritative baseline commit (B164). Resolve BASELINE_COMMIT from the
+# baseline checkout/ref, never from whichever lane directory is convenient.
+# The measured incidents: a comparison reported
 # IDENTICAL while both halves ran the same stale artefact, because the
-# sync-back between them silently did not take effect. Exits 3 rather than
+# sync-back between them silently did not take effect; later, a different but
+# stale lane artefact was almost accepted as current master. Exits 3 rather than
 # printing a diff when the two ledgers share a binary hash, or when either
-# does not record one — "I could not look" is not "I looked and they differ".
+# does not record trustworthy provenance — "I could not look" is not "I looked
+# and it came from the claimed commit".
 #
 # Produce the two ledgers with FLEET_STATE_FILE=... on each sweep.
-fleet-compare BEFORE AFTER:
-    python3 scripts/fleet_dogfood.py compare {{BEFORE}} {{AFTER}}
+fleet-compare BASELINE_COMMIT BEFORE AFTER:
+    python3 scripts/fleet_dogfood.py compare --baseline-commit {{BASELINE_COMMIT}} {{BEFORE}} {{AFTER}}
 
 # Prove probe-selftest is non-vacuous: restore each half of a defect the enum
 # probe's guards exist to prevent (B068's sentinel, B097's load check, B123's
@@ -526,7 +531,8 @@ clean:
 # Run `just rdoctor` first on a new machine.
 # ---------------------------------------------------------------------------
 
-# Verify the remote host is usable (ssh, rsync, cargo, python3, just, versions)
+# Verify the remote host is usable (ssh, rsync, flock, realpath, cargo,
+# python3, just, versions)
 rdoctor:
     python3 scripts/remote-build.py doctor
 
@@ -551,6 +557,12 @@ rclippy *ARGS:
     python3 scripts/remote-build.py clippy -- {{ARGS}}
 
 # cargo build on the remote; add --sync-back debug/openplanet-lsp to fetch it.
+# Every successful fetch writes an adjacent `.provenance.json` sidecar with the
+# synced checkout's full commit, branch, dirty count and artefact hash (B164).
+# Commit, exact status, and rsync-eligible content are verified unchanged
+# across rsync.
+# `--no-sync` provenance is deliberately unknown: reused remote state cannot be
+# attributed to the current local checkout.
 # For a before/after comparison add --sync-back-must-change: it refuses (exit
 # 4) when the fetched artefact is byte-identical to the one already there,
 # which is the fetch-that-never-happened this batch measured (B147). The
@@ -566,6 +578,27 @@ rrun *ARGS:
 rshell:
     python3 scripts/remote-build.py shell
 
-# Remove this worktree's remote tree and build cache
+# Remove this worktree's remote tree and build cache under its shared host lock.
 rclean:
     python3 scripts/remote-build.py clean
+
+# Map substantial remote trees to git's currently registered local worktrees.
+# NO-LOCAL-MATCH is a review queue, not proof of staleness; confirm ownership
+# with the coordinator before reclaiming anything (B167).
+rinventory:
+    python3 scripts/remote-build.py inventory
+
+# Reclaim after a local worktree has already been removed. Both the exact former
+# absolute path and its matching remote slug are required. This recipe is a
+# dry-run; it prints the resolved remote target and removes nothing.
+rreclaim FORMER_ROOT REMOTE_SLUG:
+    python3 scripts/remote-build.py --reclaim-root "{{FORMER_ROOT}}" --remote-slug "{{REMOTE_SLUG}}" reclaim
+
+# Execute the same validated reclaim after coordinator confirmation. The tool
+# refuses an extant/registered local worktree, an unsafe remote path, and any
+# remote process whose cwd/fd/maps/cmdline still points beneath the target, or
+# any incomplete process scan. After the first scan, it atomically quarantines
+# the target name and rescans before FD-relative deletion. The whole operation
+# holds the same remote flock as ordinary builds.
+rreclaim-now FORMER_ROOT REMOTE_SLUG:
+    python3 scripts/remote-build.py --reclaim-root "{{FORMER_ROOT}}" --remote-slug "{{REMOTE_SLUG}}" --execute-reclaim reclaim
