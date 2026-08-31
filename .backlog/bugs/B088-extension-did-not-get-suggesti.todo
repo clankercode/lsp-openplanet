@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T08:02:11Z"
 depends_on: []
 estimate_hours: 1
 id: B088
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Extension: did not get suggestions for Meta::RunContext::* enum values'
@@ -12,3 +14,5 @@ updated_at: "2026-08-31T08:02:11Z"
 ---
 
 Extension: did not get suggestions for Meta::RunContext::* enum values
+
+need to red/green test and ensure we handle all this fine regardless of how deep it is
