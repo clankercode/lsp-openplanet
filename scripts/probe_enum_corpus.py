@@ -66,10 +66,15 @@ SENTINEL_TYPE = "ZZZB068SentinelNoSuchType"
 SENTINEL_VALUE = "ZZZB068SentinelNoSuchValue"
 SENTINEL_CALL = "ZZZB068SentinelNoSuchCallee"
 
-# `read_log_window` keeps every line containing "ERR" or "WARN", from any
-# plugin, and attribution matches on line NUMBER. Without pinning the file, an
+# The log window carries every plugin the game compiled in the same seconds,
+# and attribution matches on line NUMBER. Without pinning the file, an
 # unrelated plugin compiling in the same window can land an error on our
 # sentinel's line number and certify a unit that never ran.
+#
+# B123 moved `run_batch` from the severity-filtered reader to the raw one, so
+# the window is now wider still (it keeps `[ TRAC]` too) -- which makes this
+# file pin more load-bearing, not less, and is why the migration was gated on
+# a test proving both readers attribute identically.
 PROBE_FILE = f"{PROBE_ID}/Main.as"
 
 INFO = """[meta]
@@ -232,7 +237,35 @@ def run_batch(names: list[str], template: str) -> dict[str, str | None]:
         if loaded.get("error"):
             raise SystemExit(f"the probe plugin was not loaded: {loaded['error']}")
         time.sleep(3.0)
-        diags = fleet.parse_game_diagnostics(fleet.read_log_window(mark, PROBE_ID))
+        # B123. The RAW window, not the severity-filtered one.
+        #
+        # ATTRIBUTION does not need it and never did: `attribute` reads only
+        # `sev == "ERR"`, the filter keeps every line containing "ERR", so the
+        # two readers yield the SAME ERR set and the same verdicts. That
+        # equivalence is pinned by a test rather than asserted here, and it is
+        # why this migration cannot change a single corpus row.
+        #
+        # The BUILD-HEALTH check does need it, and cannot be written without
+        # it. `Starting build for` and `Loaded plugin` are both `[ TRAC]`, and
+        # the filter drops TRAC, so the build bracket is literally invisible in
+        # the filtered window -- `build_slice` returns zero lines from it.
+        window = fleet.read_log_window_raw(mark, PROBE_ID)
+        # A location-less build error means NO name in this batch was
+        # analysed. The load check above cannot catch it: measured 2026-09-01,
+        # RemoteBuild answers `{"error": "", "data": "Plugin loaded"}` for a
+        # build whose dependency could not be found, so `loaded["error"]` is
+        # empty and the batch proceeds. The result is a full batch of
+        # UNDETERMINED -- exactly the "looks merely inconclusive rather than
+        # broken" outcome the load check was added to prevent, arriving
+        # through the one door it does not cover. B118 gave this the
+        # primitive; the polarity is the same as always, so stop loudly.
+        build_errs = fleet.raw_build_errors(window, PROBE_ID)
+        if build_errs:
+            raise SystemExit(
+                "the probe plugin's build failed with no source location, so "
+                f"no name in this batch was analysed: {build_errs[0]}"
+            )
+        diags = fleet.parse_game_diagnostics(window)
         return attribute(names, first_line, diags, sentinel_line)
     finally:
         fleet.game_route("unload_plugin", {"id": PROBE_ID}, timeout=15)
@@ -615,7 +648,7 @@ def run_selftest() -> int:
 
     # ---- codex review of cde4122: four confirmed defects -----------------
 
-    # `read_log_window` keeps every line containing "ERR", from ANY plugin, and
+    # The log window carries errors from ANY plugin the game compiled, and
     # attribution matched on line NUMBER alone. Another plugin compiling in the
     # same window therefore lands an error on our sentinel's line number and
     # certifies a unit that never ran -- rebuilding the exact false-ACCEPT path
@@ -779,11 +812,20 @@ def run_selftest() -> int:
     # Driven entirely against stubs, with OPN_PLUGINS redirected at a temp dir,
     # because the real one is the game's live Plugins folder (B077).
     saved = (fleet.OPN_PLUGINS, fleet.game_route, fleet.log_size,
-             fleet.read_log_window)
+             fleet.read_log_window, fleet.read_log_window_raw)
     with tempfile.TemporaryDirectory(prefix="b097-load-") as tmp:
         fleet.OPN_PLUGINS = Path(tmp)
         fleet.log_size = lambda: 0
+        # `run_batch` waits 3s for a compile that is stubbed out here. Offline
+        # that wait buys nothing, and the mutation harness pays it once per
+        # mutation, so it is stubbed for the duration.
+        real_sleep, time.sleep = time.sleep, lambda _s: None
         fleet.read_log_window = lambda *_a, **_k: ""
+        # B123 switched `run_batch` to the raw door. Stubbing only the old one
+        # would leave this "offline" case reading the real Openplanet.log --
+        # the same "a guard at one of N call sites" shape B118 found inside
+        # `_forbid_game_access` itself.
+        fleet.read_log_window_raw = lambda *_a, **_k: ""
         try:
             fleet.game_route = lambda route, data, **_k: (
                 {"error": "no transport could carry load_plugin", "data": ""}
@@ -813,7 +855,132 @@ def run_selftest() -> int:
                   list(Path(tmp).iterdir()), [])
         finally:
             (fleet.OPN_PLUGINS, fleet.game_route, fleet.log_size,
-             fleet.read_log_window) = saved
+             fleet.read_log_window, fleet.read_log_window_raw) = saved
+            time.sleep = real_sleep
+
+    # --- B123: why this probe was EXEMPT, and what the migration cost ----
+    # This was the last consumer of the severity-filtered `read_log_window`,
+    # and the question was whether that made it blind to a build that never
+    # ran, the way `issue_repro_game.probe` was (B118).
+    #
+    # It did not, and the reason is structural rather than lucky. B118's oracle
+    # asked "did anything complain?", so silence WAS its affirmative answer.
+    # This one asks "did the SENTINEL complain?" -- a positive control that
+    # must be present before any silence counts. A build that never ran
+    # produces no sentinel, so every name degrades to UNDETERMINED, and the
+    # writers already refuse to emit a corpus containing one. Silence is the
+    # NEGATIVE answer here, which is the whole difference.
+    #
+    # These cases pin that, because "it is exempt" is the kind of claim that
+    # rots silently once the next reader has to re-derive it.
+    def _log(*lines):
+        return "\n".join(lines)
+
+    def _sev_filter(raw, folder):
+        """The severity filter, reproduced so the two readers can be compared
+        without touching the real log."""
+        out = []
+        for ln in raw.splitlines():
+            if "[ TRAC]" in ln or "phone-proxy" in ln or "User-Agent" in ln:
+                continue
+            if (("ScriptEngine" in ln) or (folder in ln)
+                    or ("ERR" in ln) or ("WARN" in ln)):
+                out.append(ln)
+        return "\n".join(out)
+
+    def _eng(sev, msg):
+        return f"[    ScriptEngine] [{sev}] [04:46:07.584] [RemoteBuild]  {msg}"
+
+    _PLUG = f"C:/users/steamuser/OpenplanetNext/Plugins/{PROBE_ID}/Main.as"
+    _start = _eng(" TRAC", f'Starting build for "{PROBE_ID}"')
+    _loaded = _eng(" TRAC", f"Loaded plugin '{PROBE_ID}' (version 0.1.0)")
+    _info = _eng(" TRAC", f"{_PLUG} (2, 5) : INFO : Compiling void Probe()")
+    _sentinel = _eng("ERROR", f"{_PLUG} (3, 7) :  ERR : Identifier "
+                              f"'{SENTINEL_TYPE}' is not a data type")
+    _locless = _eng("ERROR", 'Couldn\'t find required plugin dependency '
+                             f'"zzz" while loading plugin "{PROBE_ID}"')
+
+    healthy = _log(_start, _info, _sentinel, _loaded)
+
+    # (1) The migration is ROW-NEUTRAL. `attribute` reads only sev == "ERR",
+    # and the filter keeps every line containing "ERR", so both readers must
+    # yield the SAME verdicts. If this ever differs, the corpus changed meaning
+    # and the change is in the reader, not in the game.
+    via_raw = attribute(["Foo"], 2, fleet.parse_game_diagnostics(healthy), 3)
+    via_filtered = attribute(
+        ["Foo"], 2,
+        fleet.parse_game_diagnostics(_sev_filter(healthy, PROBE_ID)), 3)
+    check("B123: raw and filtered readers attribute IDENTICALLY",
+          via_raw, via_filtered)
+    check("and that shared verdict is the meaningful one (not both blank)",
+          via_raw, {"Foo": ""})
+
+    # (2) The EXEMPTION itself, measured as pairs. Each half is a window in
+    # which the build did not complete; all must be UNDETERMINED, and all must
+    # DIFFER from the healthy run -- a guard that returned None for everything
+    # would satisfy the first half alone.
+    for label, win in [
+        ("no window at all", ""),
+        ("build started, nothing else", _log(_start)),
+        ("a location-less error only", _log(_start, _locless, _loaded)),
+        ("compilation failed, no located diagnostic",
+         _log(_start, _eng("ERROR", "Script compilation failed!"), _loaded)),
+    ]:
+        for reader, rname in ((lambda w: w, "raw"),
+                              (lambda w: _sev_filter(w, PROBE_ID), "filtered")):
+            got = attribute(["Foo", "Bar"], 2,
+                            fleet.parse_game_diagnostics(reader(win)), 4)
+            check(f"B123 [{rname}] {label}: every name is UNDETERMINED",
+                  got, {"Foo": None, "Bar": None})
+            check(f"B123 [{rname}] {label}: and none is ACCEPTED",
+                  "" in got.values(), False)
+            check(f"B123 [{rname}] {label}: differs from the healthy run",
+                  got == {"Foo": "", "Bar": ""}, False)
+
+    # (3) The one thing the filtered reader genuinely CANNOT do, which is why
+    # `run_batch` moved: the build bracket is TRAC on both ends, so the
+    # filtered window cannot even locate the build.
+    check("B123: the build bracket is visible in the raw window",
+          len(fleet.build_slice(healthy, PROBE_ID)) > 0, True)
+    check("B123: and invisible in the filtered one -- the reason for the move",
+          fleet.build_slice(_sev_filter(healthy, PROBE_ID), PROBE_ID), [])
+
+    # (4) The new fatal guard, as a PAIR. A location-less build error must stop
+    # the run; a healthy build must not. Only measuring the first would pass
+    # for a `run_batch` that always raises.
+    saved_b123 = (fleet.OPN_PLUGINS, fleet.game_route, fleet.log_size,
+                  fleet.read_log_window, fleet.read_log_window_raw)
+    with tempfile.TemporaryDirectory(prefix="b123-") as tmp:
+        fleet.OPN_PLUGINS = Path(tmp)
+        fleet.log_size = lambda: 0
+        fleet.read_log_window = lambda *_a, **_k: ""
+        # RemoteBuild really does answer "Plugin loaded" for a build whose
+        # dependency was missing -- measured 2026-09-01 -- so the load check
+        # cannot see this and the stub reproduces that exact reply.
+        fleet.game_route = lambda *_a, **_k: {"error": "", "data": "Plugin loaded"}
+        real_sleep_b123, time.sleep = time.sleep, lambda _s: None
+        try:
+            fleet.read_log_window_raw = lambda *_a, **_k: _log(
+                _start, _locless, _loaded)
+            stopped = False
+            try:
+                run_batch(["Meta::Zzz"], "TYPE")
+            except SystemExit as exc:
+                stopped = "no source location" in str(exc)
+            check("B123: a location-less build error stops the run loudly",
+                  stopped, True)
+
+            fleet.read_log_window_raw = lambda *_a, **_k: healthy
+            survived = True
+            try:
+                run_batch(["Meta::Zzz"], "TYPE")
+            except SystemExit:
+                survived = False
+            check("B123: a healthy build does NOT stop the run", survived, True)
+        finally:
+            (fleet.OPN_PLUGINS, fleet.game_route, fleet.log_size,
+             fleet.read_log_window, fleet.read_log_window_raw) = saved_b123
+            time.sleep = real_sleep_b123
 
     # The one integration the synthetic fixtures cannot reach: the real log
     # format must actually produce the `file` value the filter demands. This
