@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T17:03:27Z"
 depends_on: []
 estimate_hours: 1
 id: B162
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'just rtest with a name filter reports ok on 0 passed and 0 failed: a filter that matches nothing is a wall of green for a run that executed nothing'
@@ -12,3 +14,47 @@ updated_at: "2026-08-31T17:03:27Z"
 ---
 
 just rtest with a name filter reports ok on 0 passed and 0 failed: a filter that matches nothing is a wall of green for a run that executed nothing
+
+Found by lane-resolver during B145: `just rtest b145` printed `ok` for every
+binary, with `0 passed; 0 failed` on each, because cargo filters on TEST NAMES
+and no test name contained the string "b145". The lane had just written the
+tests. Nothing ran, and the output was indistinguishable from success.
+
+This is the most dangerous shape a gate can have, because it fails in the
+direction of confidence and it fails SILENTLY at exactly the moment a lane is
+most inclined to believe it: right after writing the tests it wants to see pass.
+A lane that ran only this and reported green would have reported a green for
+zero executed assertions, in good faith.
+
+WHY IT IS NOT JUST CARGO BEING CARGO
+  Bare `cargo test FILTER` has always behaved this way and we cannot change that.
+  But `just rtest` is OUR wrapper, it already parses per-binary totals to produce
+  the SUITE-VERIFIED line, and it is the thing every lane in this batch is told
+  to run. The wrapper has the numbers in hand and chooses to print ok anyway.
+
+WHAT TO DO
+  When a name filter is supplied and the run executes ZERO tests across ALL
+  binaries, exit non-zero and say so in the words that name the cause — that the
+  filter matched no test name, not that the tests failed. Zero-in-one-binary is
+  normal and must stay quiet; zero across every binary with a filter present is
+  the bug. With no filter, zero total is already impossible and needs no rule.
+
+  Check whether `rcheck` / `rclippy` / `rclippy-delta` have the same shape when
+  given an argument, and whether the unfiltered path can ever reach zero (e.g. a
+  compile that produces no binaries). Do not assume the filtered path is the only
+  one — measure it.
+
+REQUIRED EVIDENCE, not a description of it
+  - RED: on current tooling, `just rtest <string-matching-nothing>` prints ok.
+    Capture it.
+  - GREEN: after the fix, the same invocation exits non-zero with a message
+    naming the filter.
+  - POSITIVE CONTROL: `just rtest b129` (a filter that DOES match) still passes
+    and still prints its real totals. Without this the fix could be "always fail
+    when a filter is given" and the red/green would look identical.
+  - And the unfiltered full run is unchanged: 0 diffs in the SUITE-VERIFIED line.
+
+Related doctrine already recorded in docs/verification-hazards.md: "A control
+proves nothing by not failing", and "A check that keeps passing while you loosen
+it is measuring something else". This is their tooling-level cousin and belongs
+in that document too once fixed.
