@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T15:44:28Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T16:18:42Z"
 complexity: medium
 created_at: "2026-08-31T15:43:23Z"
 depends_on: []
+duration_minutes: 34.23412067585
 estimate_hours: 1
 id: B146
 priority: high
 started_at: "2026-08-31T15:44:28Z"
-status: in_progress
+status: done
 tags: []
 title: Nadeo params are recorded as none of is_in/is_out/is_inout — a state AngelScript cannot represent — and 56 of 1387 ampersand-carrying arg strings are dropped entirely
-updated_at: "2026-08-31T15:44:28Z"
+updated_at: "2026-08-31T16:18:42Z"
 ---
 
 Nadeo params are recorded as none of is_in/is_out/is_inout — a state AngelScript cannot represent — and 56 of 1387 ampersand-carrying arg strings are dropped entirely
