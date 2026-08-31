@@ -9,11 +9,11 @@ priority: high
 started_at: null
 status: pending
 tags: []
-title: RemoteBuild payloads can be split across reads and parsed as separate messages, so a probe verdict taken beside another client may be silently wrong
+title: RemoteBuild parses each socket read as a whole request, so any payload over 66 bytes is unreachable and load_plugin cannot be delivered at all
 updated_at: "2026-08-31T08:57:40Z"
 ---
 
-# RemoteBuild payloads can be split across reads and parsed as separate messages, so a probe verdict taken beside another client may be silently wrong
+# RemoteBuild parses each socket read as a whole request, so any payload over 66 bytes is unreachable and load_plugin cannot be delivered at all
 
 ## Steps to Reproduce
 
@@ -112,3 +112,161 @@ launder it rather than check it.
 B068 (batched-unit channel), B077 (stranded-fixture channel), B080 (needs this
 recorded as provenance), B092 (a different unexplained-result ticket from the
 same day).
+
+## CORRECTION — THE ORIGINAL FRAMING OF THIS TICKET WAS WRONG (coordinator, 2026-08-31)
+
+I filed this as "concurrent clients corrupt each other's payloads". **That is
+not the mechanism.** Two lanes measured it independently and both refute it.
+The title has been changed to match the measurement; the analysis below
+supersedes the concurrency story above.
+
+**Concurrency is not required. It is not even a factor.** The real defect:
+
+- RemoteBuild's `HandleClient` calls `Json::Parse` on **each raw socket read**,
+  rather than accumulating until a complete message has arrived.
+- `Net::Socket::ReadRaw` returns at most ~64-66 bytes per call.
+- So ANY request longer than that is split, and **every fragment fails to
+  parse** — with a single client, on an idle port.
+
+**Threshold measured, exact and deterministic**, 3 trials each with a padded
+`get_status`: **66 bytes OK, 67 bytes FAIL**, everything above FAIL.
+
+**`load_plugin` is therefore unreachable at any id length.** Its shortest
+possible payload — compact, one-character id —
+
+    {"route":"load_plugin","data":{"id":"a","source":"user","type":"folder"}}
+
+is **72-73 bytes**. There is no plugin id short enough. Every game-probe path
+in this repo goes through it.
+
+I had actually predicted this and written the discriminating test into the
+original filing: "it should reproduce with a single client if the payload is
+big enough... that would turn 'concurrent clients corrupt each other' into 'the
+reader does not honour its own length prefix'." The test was run and the
+size theory won. **The prediction was recorded before the measurement, which is
+the only reason it counts for anything** — and the concurrency framing, which
+both I and the reporting session found intuitive, was simply wrong.
+
+## Why the failure is so expensive to diagnose
+
+The reply is `{"error":"Not implemented: ","data":""}` — **the router's message
+for an UNKNOWN ROUTE, with an EMPTY route name**, because neither fragment
+parsed. So the error points the reader at route SPELLINGS when the problem is
+SIZE. Two sessions independently lost time to that today.
+
+**`get_status` is 32-35 bytes and works.** So `rb_alive()` cheerfully returns
+Alive, every probe passes its liveness gate, and then fails on the route that
+matters. A liveness check that uses a short payload cannot detect this class of
+fault — it is a positive control that does not exercise the failing path.
+
+## THE DANGEROUS PART — read this before "fixing" anything
+
+**Today the harness fails CLOSED, and that is the only thing saving us.**
+B077's teardown guard sees the unload fail, calls `holder.preserve()`, and marks
+the run SKIP — so no verdict escapes.
+
+**If someone fixes `unload_plugin` without fixing `load_plugin`, the harness
+will start emitting confident ACCEPTs for plugins the game never compiled.**
+That is Mechanism 1 from the hazards doc — the probe cannot see what it was
+asked about — with the polarity that stops you looking, because everything
+would appear to work.
+
+**Whoever fixes this must fix `load_plugin` FIRST and verify against the game's
+own log that the payload arrived in ONE read.** Not that the call returned
+success. The log.
+
+## Second, separate defect — `fleet_dogfood.rb_route`
+
+It sleeps 0.2s, does a single `recv(65536)`, then `json.loads(raw[4:])`. So it
+ACKNOWLEDGES a 4-byte length header and then ignores the length. Responses ARE
+length-prefixed and can arrive as two frames, so the second frame's header lands
+inside the JSON text and it raises `Extra data: line 1 column 40 (char 39)`.
+
+Loud, so it never produced a wrong verdict — but it **masks the size defect
+behind a parse error**, and cost at least one lane real time being misread as an
+unimplemented route. A correct reader loops on the length prefix. One exists at
+`scripts/probe_export_binding.py:rb_route` (lane-tooling) and was deliberately
+NOT patched into the shared file mid-batch.
+
+Note the asymmetry worth keeping: REQUESTS are unframed (adding a length prefix
+breaks even short payloads — tested), while RESPONSES are length-prefixed. That
+asymmetry is real, not a misreading.
+
+## Probable cause of onset, and why the shipped corpora are still good
+
+The committed b052/b053 corpora were produced when this worked, and today's
+B068 re-probe of all 1334 ACCEPTED rows also completed successfully. **The
+Openplanet install on this machine was updated on disk at 15:10 today**
+(1.29.5 -> 1.29.14; established with the tm-tournament-station session while
+diagnosing an unrelated `Net::SecureSocket` removal). So the probe harness
+worked before that update and is broken after it.
+
+That timing matters twice over: it means **the corpora and the B068 re-probe
+predate the breakage and remain valid**, and it means the likely trigger is a
+behaviour change in `Net::Socket::ReadRaw` or in RemoteBuild.op between those
+builds, rather than anything in this repo's scripts.
+
+## Fix, and who may make it
+
+`HandleClient` must accumulate reads until `Json::Parse` succeeds (or a declared
+length is satisfied). The user's fork is at
+`~/src/openplanet/my-plugins/tm-remote-build`, same code as the installed `.op`.
+
+**Coordinator ruling: an agent may implement this in the fork ON A BRANCH, with
+the log-verified one-read check above. No agent installs it into the live game
+or touches the installed `.op` — that is Max's call.**
+
+## Related
+
+B068 (batched-unit channel), B077 (the fail-closed teardown that is currently
+containing this), B080 (its probe is blocked by this), B086 (cannot be freshly
+probed today because of this).
+
+## PROVENANCE OF THE EVIDENCE (recorded 2026-08-31, at lane-unused's insistence)
+
+Worth pinning, because a ticket this consequential will be re-read by someone
+deciding whether to trust it.
+
+**The decisive evidence is a real run, not reasoning.** lane-unused probed with
+an explicit coordinator grant at 18:48, staging
+`lsp-issue-repro-lsp-b087-probe-zz-control-must-reject` (marker pid 2366987).
+The harness staged, attempted `load_plugin`, and the load never reached the
+server. The capture below is **the game's own log**, from that run:
+
+    Bytes to read: 73
+    Read payload: {"route":"load_plugin","data":{"id":"a","source":"user","type":"
+    Bytes to read: 9
+    Read payload: folder"}}
+
+Two reads, two requests, two `{"error":"Not implemented: ","data":""}` responses
+with an EMPTY route name, because neither fragment parsed.
+
+lane-tooling then independently derived the exact threshold (66 OK / 67 FAIL,
+3 trials each with a padded `get_status`) and identified the mechanism in
+`HandleClient`. So this ticket rests on **two independent lanes: one live log
+capture and one controlled boundary measurement**, which is why the concurrency
+framing it was originally filed under could be discarded outright rather than
+held as an alternative.
+
+The fixture that run left behind was preserved by B077's fail-closed teardown
+(`sweep_stale` correctly refused it as a non-empty marked directory) and was
+removed by hand by the lane that owned it, after four checks: marker pid dead,
+exactly the three files it staged, byte-identical to source, and ZERO mentions
+of its symbols in the game log — i.e. it was never compiled. Plugins dir
+verified back to 44 entries.
+
+**That last check is the one worth copying.** "Never compiled" is not inferable
+from the filesystem; it took reading the game's log for the fixture's own
+symbols. A stranded fixture that WAS compiled is a contaminating installed
+plugin; one that never compiled is only litter. Different severities, and only
+the log distinguishes them.
+
+## Corrected attribution
+
+An earlier coordinator note on this ticket implied the staging came from an
+unexplained code path in the probe harness — some path that stages before
+deciding not to probe. **There is no such path.** The lane's "I never took the
+game port" statement predated the grant reaching it (messages between sessions
+are asynchronous, and it had composed that line before the grant landed); it
+then probed with permission and documented the run. Nothing about the harness's
+staging behaviour is unaccounted for.

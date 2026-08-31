@@ -1522,3 +1522,156 @@ Three consequences worth carrying:
 The re-probe is now `probe_enum_corpus.py --reprobe`, with controls at start,
 every 100 names, and end, and `UNDETERMINED` kept distinct from `ACCEPTED`, so
 the next person re-measures rather than re-argues.
+
+## Mechanism 4: the presentation dropped the rows, and the presentation looked fine
+
+Recorded 2026-08-31. Four instances in one afternoon, three of them caught, one
+of them mine and not caught until someone else measured it.
+
+**1. A `Counter` truncated to its twelve most common entries.** (lane-unused,
+self-caught.) Attributing 117 removed warnings, an intermediate read concluded
+the `shared` rule had NO live corpus witness — and it was wrong, because the
+shared removals were in the tail that `most_common(12)` dropped. The report
+would have said "fixture-only, no live instance" with complete confidence.
+
+The framing that lane insisted on is the right one and worth preserving: **it
+was a readability choice, not a shortcut.** "Do not take shortcuts" teaches
+nothing, because nobody thinks they are taking one. `most_common(12)` looked
+like tidy output right up to the moment the rows that mattered were the ones it
+dropped. The transferable question is not *did I cut corners* but **what does
+this presentation make invisible?** — and it applies to `head`, `tail`, `[:20]`,
+`most_common`, a truncated diff, and a summary table alike.
+
+What saved it: re-reading every one of the 117 declaration lines rather than
+trusting the aggregate. An aggregate is a lossy view of the data, and which
+rows it loses is chosen by the view, not by relevance.
+
+**2. `head -6` on a file-read listing** nearly reversed a ruling earlier in this
+batch — the first six reads were all test files; the full listing had three
+production reads.
+
+**3. `| tail -6` on a failing gate** destroyed the one piece of evidence that
+mattered. The verdict line names the failing binary; the tail did not include
+it, which is why B092 cannot say which binary failed. **When capturing a
+FAILURE, redirect the whole thing to a file. You do not know yet which line is
+the evidence** — that is what makes it a failure rather than a result.
+
+**4. A `grep -i oom` over the journal reported OOM kills that had not
+happened** — it was matching "r-oom-s" in an unrelated service's log line. A
+substring match on a three-letter token is not a search for that event. Mine,
+and I reported it before checking.
+
+## An error message that names the wrong dimension costs more than a silent failure
+
+B097. RemoteBuild parses each raw socket read as a complete request, and reads
+cap at ~64-66 bytes, so any payload over that splits and no fragment parses.
+The reply is:
+
+    {"error":"Not implemented: ","data":""}
+
+That is the router's UNKNOWN-ROUTE message, with an **empty** route name. So a
+size fault renders as a routing fault, and it points every reader at route
+spellings. Two independent sessions lost time to it on the same day, and one
+had already written it off as flakiness.
+
+**A liveness check that does not exercise the failing path is a positive control
+that controls nothing.** `get_status` is 32-35 bytes, so it fits, so
+`rb_alive()` returns Alive — every probe passes its gate and then dies on the
+route that matters. A health check must be representative of the work, not
+merely of the connection; a short one cannot detect a length fault by
+construction.
+
+## A system can be broken and safe, and fixing half of it removes the safety
+
+The most important line in the B097 reports, from two lanes independently:
+
+**Today the harness fails CLOSED.** B077's teardown sees the unload fail,
+preserves the fixture, and marks the run SKIP — so no verdict escapes. **Fix
+`unload_plugin` without fixing `load_plugin` and the harness begins emitting
+confident ACCEPTs for plugins the game never compiled.**
+
+That is Mechanism 1 with the polarity that stops you looking: everything would
+appear to start working. The repair that makes the symptom disappear is the one
+that converts a loud outage into a silent wrong answer.
+
+**Before repairing a broken pipeline, work out what is currently containing the
+damage, and make sure your fix does not remove the containment first.** Order
+the repair so the detecting half is fixed before the reporting half, and verify
+against the system's own log rather than against a success return.
+
+## A prediction recorded before the measurement is worth more than the same idea after
+
+I filed B097 as "concurrent clients corrupt each other's payloads" — the
+intuitive reading, and the one the reporting session had too. It was wrong.
+
+The only reason that cost nothing is that the filing also wrote down the
+discriminating test *and* what each outcome would mean: "it should reproduce
+with a single client if the payload is big enough... that would turn 'concurrent
+clients corrupt each other' into 'the reader does not honour its own length
+prefix'." lane-tooling ran it and measured 66 OK / 67 FAIL deterministically,
+single client, idle port.
+
+Two things this bought that a later realisation would not have:
+
+- **The concurrency story could be DISCARDED rather than kept as an
+  alternative.** A hypothesis with a pre-registered refutation condition is
+  falsifiable; the same hypothesis without one tends to survive as "well, both
+  could be happening".
+- It made the wrong framing cheap to admit, because admitting it was executing
+  the plan rather than abandoning one.
+
+State what would change your mind, in writing, at the moment you form the
+belief — not when it is challenged.
+
+## Shipped code can be stronger evidence than a probe
+
+lane-unused could not probe which `shared` forms the engine accepts (B097). It
+cited real declarations inside a published plugin instead — `shared class`,
+`shared interface`, `shared enum`, `shared funcdef`, `shared` function, each at
+file:line in Editor++ (siteid 377).
+
+**This is not a fallback. By this repo's own written standard it is better.**
+`docs/probes/README.md` warns that a probe's ACCEPT can be supplied by another
+installed plugin — and `shared` forms are exactly that risk. A shipped plugin's
+OWN declaration cannot leak from elsewhere, and a plugin that fails to compile
+does not ship. The probe would have produced the weaker of the two.
+
+Generalise: when the question is "does the engine accept X", a corpus of code
+that demonstrably runs is a population of measurements someone else already
+paid for. Look there before building an instrument. And when you do cite it,
+say which forms have a witness and which do not — the same lane recorded
+`shared abstract class` and `shared mixin class` as NOT MEASURED, with the
+reason, which is what stops the artefact being cited later for a composition
+nobody checked.
+
+## "It was never compiled" is not visible in the filesystem
+
+Clearing a stranded probe fixture, lane-unused ran four checks: marker PID dead,
+exactly the three files it staged, byte-identical to source, and **zero mentions
+of the fixture's symbols in the game's log.**
+
+The fourth is the one to copy. A stranded fixture that WAS compiled is a
+contaminating installed plugin — it declared names into the environment other
+probes then measured against. One that never compiled is only litter. Those are
+different severities requiring different follow-up, and nothing on disk
+distinguishes them; only the log does.
+
+## The same rule, at one of N call sites — now three times in one batch
+
+- **B076**: a correct check reached from ONE of four initializer positions.
+- **B073**: `awaitable` is hardcoded in `is_angelscript_builtin_type`, a second
+  path beside `lookup_funcdef` with the identical hole; guarding one left four
+  cells red.
+- **B098**: B056 fixed bare-name enum resolution in `resolve_unqualified`;
+  `external_enum_by_short_name` survived doing it, reachable for 436 names.
+
+Three is a pattern, not a coincidence. **When you fix a rule in a resolver, grep
+for every other function that answers the same question before believing it is
+closed.** The ticket names the site someone noticed; the codebase reaches the
+question from more places than the ticket names. B073's lane found its second
+site by testing the BEHAVIOUR rather than the function — that is the technique
+that generalises.
+
+Corollary already recorded but now reinforced: a helper reached from one of N
+positions is a check that exists at one of N positions, and it LOOKS from the
+call site like it exists everywhere.
