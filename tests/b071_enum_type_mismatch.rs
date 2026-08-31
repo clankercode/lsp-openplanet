@@ -16,14 +16,24 @@
 //! | enum -> `int` | ACCEPT | **silence** |
 //! | cross-enum ARITHMETIC | ACCEPT | **silence** |
 //!
-//! Engine wording, verbatim, and the messages below match it so a user
-//! searching an error string finds both tools:
+//! Engine wording. The messages below match it CLOSELY BUT NOT EXACTLY, and
+//! the difference is a recorded decision — see B155 and
+//! `tests/b155_engine_wording_divergence.rs`, which enforces that the gap is
+//! only ever the two marks named here.
+//!
+//! Measured from the game at 1.29.14 (B148 regeneration), the engine names an
+//! assignment target as a REFERENCE and ends with a full stop:
 //!
 //! ```text
-//! Can't implicitly convert from 'LocalOne' to 'LocalTwo'.
-//! Can't implicitly convert from 'int' to 'LocalOne'.
+//! Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.
+//! Can't implicitly convert from 'int' to 'LocalOne&'.
 //! No matching symbol 'LocalOne::NoSuchValueZZZ'
 //! ```
+//!
+//! Ours deliberately drops the `&` and the full stop, so the assertions in
+//! this file spell the target unsuffixed. (This block previously quoted a
+//! third spelling — `to 'LocalTwo'.` — that matched neither side, which is
+//! what B155 was opened on.)
 //!
 //! # Why the two silences live in the acceptance fixture
 //!

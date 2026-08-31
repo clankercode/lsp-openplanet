@@ -2125,12 +2125,20 @@ impl<'a> Checker<'a> {
     /// rules are unaltered and nothing about this function's logic follows
     /// from the difference.
     ///
-    /// **Our own diagnostic deliberately keeps the unsuffixed spelling.** The
-    /// `&` is an artifact of how the engine models assignment, not part of the
-    /// type the user wrote, and `to 'LocalTwo'` is what a reader is looking
-    /// for. That is a deliberate divergence from b071's "match the engine's
-    /// own text" guidance, recorded here rather than left for someone to
-    /// rediscover by diffing the corpus against `TypeDiagnostic::message`.
+    /// **Our own diagnostic deliberately keeps the unsuffixed spelling** (and
+    /// drops the engine's trailing full stop). The `&` is an artifact of how
+    /// the engine models assignment, not part of the type the user wrote, and
+    /// `to 'LocalTwo'` is what a reader is looking for. That is a deliberate
+    /// divergence from b071's "match the engine's own text" guidance.
+    ///
+    /// B155 made it CHECKED rather than merely recorded:
+    /// `tests/b155_engine_wording_divergence.rs` derives the engine's spelling
+    /// from the probe corpora (22 of 22 measured messages carry BOTH marks,
+    /// across b071 and b144) and asserts the difference is exactly "drop the
+    /// target's `&`, drop the trailing `.`" and nothing else. Flipping the
+    /// decision is a one-line change to the renderer above plus that file's
+    /// transform — the 15 exact-string assertions in `b071_enum_type_mismatch`
+    /// and `cli_check_tests` are the rest of the blast radius.
     ///
     /// The converse of the second is LEGAL — `int i = LocalOne::X;` compiles,
     /// because an enum value decays to `int`. That asymmetry is the trap: a
