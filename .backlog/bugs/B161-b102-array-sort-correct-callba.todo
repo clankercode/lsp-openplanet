@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-31T17:17:36Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T17:17:36Z"
 complexity: medium
 created_at: "2026-08-31T17:03:07Z"
 depends_on: []
+duration_minutes: 0.010002766183333333
 estimate_hours: 1
 id: B161
 priority: high
 started_at: "2026-08-31T17:17:36Z"
-status: in_progress
+status: done
 tags: []
 title: 'b102-array-sort-correct-callbacks does not compile: the engine rejects all three comparators the fixture calls correct, and the LSP is silent on every one'
 updated_at: "2026-08-31T17:17:36Z"
