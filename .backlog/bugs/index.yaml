@@ -123,3 +123,4 @@ bugs:
     - file: B122-cargo-fmt-check-is-red-repo-wi.todo
     - file: B123-probe-enum-corpus-py-still-con.todo
     - file: B124-lookup-method-return-s-externa.todo
+    - file: B125-coremethod-is-const-is-dead-0.todo
