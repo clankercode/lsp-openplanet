@@ -1,14 +1,18 @@
 ---
+claimed_at: "2026-08-31T12:18:00Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T11:59:10Z"
 depends_on: []
 estimate_hours: 1
 id: B109
 priority: high
-status: pending
+started_at: "2026-08-31T12:18:00Z"
+status: in_progress
 tags: []
 title: 'ArgTypeMismatch renders a callable argument as its return type too: the same flattening as B108, at checker.rs:2826'
-updated_at: "2026-08-31T11:59:10Z"
+updated_at: "2026-08-31T12:18:00Z"
 ---
 
 # ArgTypeMismatch renders a callable argument as its return type too: the same flattening as B108, at checker.rs:2826
