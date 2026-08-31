@@ -259,3 +259,68 @@ All four `IsSecure` reads are in `Transport_Test.as`. They therefore belong in
 the **18 that survive**, not the **6 that go**. Correct the counts before using
 them as an acceptance criterion - a fix measured against the wrong expected
 population would look wrong when it is right, or right when it is wrong.
+
+## Coordinator ruling (2026-08-31): the acceptance criterion is 24 -> 16, NOT 24 -> 18
+
+The lane was right and this ticket was wrong. **I verified both disputed rows
+at source myself rather than accepting the report**, in
+`~/src/openplanet/my-plugins/tm-tournament-station`:
+
+    src/Branding.as:150   UI::Texture@ get_Logo() { return g_Logo; }
+    src/Branding.as:155   void RenderMark(float height) { auto tex = Logo; ...
+
+    src/MatchGuard.as:229 uint get_MsInCurrent() { ... }
+    src/MatchGuard.as:238   if (requireSettled && MsInCurrent < SETTLE_MS) ...
+    src/MatchGuard.as:329   ... IsSafeForDirectiveTimed(_lastCtx, ..., MsInCurrent);
+
+`RenderMark`, `IsSafeToInterrupt` and `IsSafeForDirective` are production
+functions, not tests. Both accessors have genuine bare property-syntax reads
+inside their own namespace, so both MUST be credited. Hitting 18 would mean
+declining to credit two real production reads — failing this ticket's purpose
+in order to satisfy its arithmetic.
+
+**Why the ticket was wrong, which is the part worth keeping.** The expected
+population was assembled by searching for `get_X(` CALL syntax. That method
+cannot, by construction, see a property-syntax read — which is precisely the
+blindness this ticket exists to fix. **The acceptance criterion was derived
+with the very method the ticket was filed to replace**, so it was guaranteed to
+overcount the survivors by exactly the number of property-syntax reads, which
+is the population under test.
+
+This is the THIRD row misclassified the same way (`Transport::get_IsSecure` was
+the first, corrected earlier). Three instances from one derivation is not three
+mistakes; it is one broken method producing three outputs.
+
+The ticket's own warning — "confirm against the tree, do not assume the name
+alone decides it" — was correct and was simply not applied to these rows.
+
+## Discriminating evidence, verified by the coordinator
+
+The crossed pair splits on live code in BOTH directions, which is what proves
+the fix is namespace-qualified rather than bare-name-keyed:
+
+| short name | production reads | credited (goes) | survives |
+|---|---|---|---|
+| `Showing` | 3, all `Directives::` (`Main.as:399`, `Messages.as:66`, `Messages.as:93`) | `Directives::get_Showing` | `Messages::get_Showing` |
+| `PendingCount` | 2, all `Messages::` (`Main.as:406`, `Main.as:408`) | `Messages::get_PendingCount` | `Directives::get_PendingCount` |
+
+Same short name, opposite outcome, both ways. A bare-name-keyed fix gets one
+wrong whichever way it guesses, so passing this pair is not something an
+over-broad fix could do by luck.
+
+Note the coordinator nearly misread this: an initial `head -6` on the `Showing`
+reads returned only test files, which would have suggested no production read
+existed. That was a truncation limit, not a finding. Full listing gives 3
+production reads, all `Directives::`.
+
+## The other half of the fix, which this ticket's forms list omits
+
+Prefix placement was only half. `record_value_use_variants` built
+`format!("get_{}", name)`, yielding `get_Ns::P` for `Ns::P` — a name nothing
+can match. But a bare `P` inside `namespace Ns` records `get_P`, and `is_used`
+DELIBERATELY refuses to trust a bare tail as a suffix match (it requires two
+`::` segments), so it cannot reach `Ns::get_P` either. The recorder therefore
+also qualifies by each enclosing namespace depth. Over-marking rather than
+under-marking is this module's stated preference, and the boundary was measured
+rather than assumed: a LOCAL named `P` inside `namespace N` credits
+`N::get_P` on neither binary.
