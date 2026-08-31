@@ -1,0 +1,256 @@
+# Scope provenance for b052-qualified-enum-spellings.tsv.
+#
+# One row per leading SCOPE that an ACCEPTED row of that corpus depends on.
+# A consumer reads this to tell an ENVIRONMENT-DEPENDENT row from a stable
+# one WITHOUT re-probing. See docs/probes/README.md.
+#
+# pin     what the corpus's own `<prefix>::ZZZNoSuch` row proves about the
+#         scope, read from the MESSAGE FORM rather than the verdict (both
+#         forms are REJECTED). SCOPE / ABSENT / UNPINNED. Recomputed by
+#         `scripts/probe_enum_corpus.py --scope-provenance`; do not hand-edit.
+# origin  where the scope came from: ENGINE (every install has it) / HOST
+#         (this machine's plugin set) / ENGINE_UNMODELLED (the engine has it,
+#         neither shipped database records it) / UNKNOWN (unclassified).
+#         The compile probe CANNOT compute this; it is recorded, and carried
+#         forward across regenerations.
+# evidence  what supports the origin. Load-bearing: an origin with no evidence
+#         is the hand-maintained list this file replaced.
+#
+# UNPINNED is not a defect to tidy away, it is a measured gap in the corpus:
+# only 38 of the 233 scopes below carry a pin. A consumer that treated
+# an absent pin as "engine" would read a foreign plugin's row as an engine fact,
+# which is exactly the failure this file exists to stop.
+prefix	pin	origin	evidence
+Audio	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Auth	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CAdvertisingManager	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CAudioScriptManager	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CAudioScriptMusic	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CAudioSource	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CAudioSourceSurface	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CAudioZoneSource	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CControlSlider	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CFuncLight	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CFuncShaderLayerUV	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameActionModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameClientTrackingScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCommonItemEntityModelEdition	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnAnchoredObject	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnApp	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnBlock	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnBlockInfo	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnBlockInfoClip	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnBlockInfoVariant	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnBlockInfoVariantGround	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnBlockUnitInfo	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnCampaign	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnChallenge	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnCollector	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnEditorCommon	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnEditorScriptAnchoredObject	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnEditorScriptSpecialProperty	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnMacroBlockJunction	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnMediaBlockCameraCustom	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnMediaBlockCameraGame	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnMediaBlockEditorTriangles	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnMediaBlockGhostTM_SuperSKeyVal	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnMediaBlockOpponentVisibility_SuperSKeyVal	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnMediaClipViewer	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnNetServerInfo	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCtnZoneTransition	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameCursorBlock	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameDataFileManagerScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameDialogs	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameDialogsScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameDialogsScriptEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameDisplaySettingsWrapper	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorMainPlugin	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorMediaTrackerPluginAPI	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorMesh	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorModule	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorPlugin	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorPluginAPI	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorPluginCameraAPI	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorPluginMap	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorPluginMapMapType	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorPluginMapScriptEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorPluginModuleScriptEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameEditorSkinPluginAPI	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameGhostMgrScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameHighScore	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameHud3dMarkerConfig	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameItemModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManiaApp	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManiaAppPlaygroundScriptEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManiaAppScriptEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManiaPlanetScriptAPI	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManiaTitleControlScriptAPI	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManiaTitleEditionScriptAPI	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkAnimManager	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkControl	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkEntry	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkFrame	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkLabel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkQuad	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkScriptEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkScriptHandler	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkScriptHandler_ReadOnly	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManialinkTextEdit	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManiaplanetPlugin	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameManiaplanetPluginInterfaceEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameMasterServerRichPresenceManagerScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameMenu	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameMgrAction	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameModuleMenuBrowser	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameModulePlaygroundPlayerStateComponentModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameModulePlaygroundPlayerStateGaugeModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameModulePlaygroundPlayerStateListModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameModulePlaygroundSpeedMeterModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameModulePlaygroundTeamStateModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameNetPlayerInfo	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameNetServerInfo	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameObjectPhyModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGamePlayerInfo	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGamePlayerProfileChunk_GameSettings	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGamePlaygroundClientScriptAPI	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGamePlaygroundModuleServerScoresTable	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGamePlaygroundScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGamePlaygroundUIConfig	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGamePlaygroundUIConfigEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameRemoteBuffer	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScoreAndLeaderBoardManagerScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptChatContact	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptChatEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptChatHistoryEntry	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptChatManager	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptDebugger	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptHandlerPlaygroundInterface	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptMgrVehicle	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptNotificationsConsumer	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptNotificationsConsumerEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptNotificationsConsumerNotification	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptNotificationsProducer	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptNotificationsProducerEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptServerAdmin	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameScriptVehicle	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameServerPluginEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameServerScriptXmlRpcEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameStation	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameUILayer	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameUserManagerScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameUserPrivilegesManagerScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameUserProfileWrapper	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameUserVoiceChat	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameVideoScriptVideo	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGameVoiceChatConfigScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGxLightBall	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CGxLightFrustum	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CHmsCamera	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CHmsLightMapCache	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CHmsPrecalcRender	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CHmsSolidVisCst_TmCar::SPrestige	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CHmsViewport	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CHmsZone	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CHmsZoneOverlay	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CInputScriptEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CInputScriptManager	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CInputScriptPad	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CNetHttpResult	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CNetMasterServerDownload	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CNetMasterServerUserInfo	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CNetScriptHttpEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugBeamEmitterSubModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugBitmap	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugBitmapAddress	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugBitmapPack	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugBitmapRender	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugBitmapSampler	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugBulletPhyModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugCustomBeamModel	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugDecoratorTree	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugFileGen	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugFileImg	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugMaterialUserInst	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugShaderPass	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugSound	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugSoundMulti	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugTurret	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugVisualSprite	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CPlugWeather	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSmActionInstanceEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSmArenaRules	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSmArenaRulesEvent	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSmArenaRulesMode	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSmObject	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSmPlayerDriver	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSmScriptPlayer	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSystemConfig	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSystemConfigDisplay	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CSystemPlatformScript	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CTmRaceResultNod	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CTrackManiaNetworkServerInfo	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CWebServicesTaskResult_PlanetsTransaction_Bill	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+CXmlScriptParsingNodeJson	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Crypto	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Dev	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Discord	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Display	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Fids	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Foo	SCOPE	HOST	MEASURED: pinned SCOPE when this corpus was written and ABSENT on the 2026-08-31 re-probe, and no installed plugin declares it now - the scope came and went with a plugin
+Foo::Bar	SCOPE	HOST	MEASURED: pinned SCOPE when this corpus was written and ABSENT on the 2026-08-31 re-probe, and no installed plugin declares it now - the scope came and went with a plugin
+GameData	SCOPE	HOST	INFERRED: carried unchanged from PLUGIN_NAMESPACE_ARTEFACTS. Contested - UNEXPLAINED_ENGINE_SCOPES in the same file says GameData is an engine scope that neither database records, and no installed plugin declares it
+GmFunc	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+IO	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Icons	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Import	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Json	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+MLFeed	SCOPE	HOST	MEASURED: declared by installed plugin(s) MLFeedRaceData.op, MLHook.op; neither shipped database has it
+MLHook	UNPINNED	HOST	MEASURED: declared by installed plugin(s) MLHook.op; neither shipped database has it
+Math	SCOPE	ENGINE	MEASURED: also declared by installed plugin(s) better-totd-dev, but the shipped databases resolve every ACCEPTED row it qualifies, so the engine supplies it
+MathX	SCOPE	HOST	MEASURED: declared by installed plugin(s) Editor, ghosts-pp, ghosts-pp.op, map-together, test-draw-dev; neither shipped database has it
+Meta	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NGameLoadProgress	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NGameMediaBlockEntity_SuperSKeyVal	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NGmUnit	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NHmsLightMapCache	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugAdn	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugAnim	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugCurve	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugDyna	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugExpr	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugFilePreloader	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugImpostor	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugItemPlacement	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugModelKit	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NPlugPainterLayer	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NScenePathFinding	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NSceneSpectatorVis	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NSceneVehiclePhy_SStuntFigure	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NSceneVisEntFx	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NSceneWeather	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NSysCfgVision::SDeferred	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NSysPlatform	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NSystemConfig	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+NWebServicesPrestige	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Net	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Path	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Permissions	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Reflection	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Regex	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+SGamePlaygroundUIConfig	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+SQLite	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Settings	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+Tests	SCOPE	ENGINE	MEASURED: also declared by installed plugin(s) BindingsManager, Editor, EppLines, but the shipped databases resolve every ACCEPTED row it qualifies, so the engine supplies it
+Text	SCOPE	ENGINE	MEASURED: also declared by installed plugin(s) DownloadIndicator.op, but the shipped databases resolve every ACCEPTED row it qualifies, so the engine supplies it
+Time	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+UI	SCOPE	ENGINE	MEASURED: also declared by installed plugin(s) better-totd-dev, tournament-station, but the shipped databases resolve every ACCEPTED row it qualifies, so the engine supplies it
+UI::Font	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+UI::Plot	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+VehicleState	UNPINNED	HOST	INFERRED: two installed plugins declare dependencies = ["VehicleState"], but nothing under Plugins/ declares the namespace or a type of that name and this corpus has no pin - not measured, see B080
+XML	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+mat3	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+mat4	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+nvg	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
+string	SCOPE	ENGINE	MEASURED: also declared by installed plugin(s) Editor, but the shipped databases resolve every ACCEPTED row it qualifies, so the engine supplies it

@@ -322,6 +322,15 @@ mod tests {
             .collect()
     }
 
+    /// FROZEN BASELINE, no longer maintained (B080). The live exclusion set is
+    /// [`b052_environment_dependent_spellings`], derived from
+    /// `docs/probes/b052-scope-provenance.tsv`. This constant and
+    /// [`UNEXPLAINED_ENGINE_SCOPES`] are kept only as the byte-for-byte set the
+    /// hand-maintained lists produced on the day the sidecar was introduced, so
+    /// that `the_derived_exclusion_set_reproduces_the_hand_maintained_one` can
+    /// prove the switch changed nothing. Do not add to them; classify the scope
+    /// in the sidecar instead.
+    ///
     /// Spellings the game ACCEPTED that are NOT engine facts, and so must not
     /// be read as evidence about this crate. `docs/probes/README.md` explains
     /// the asymmetry: a game REJECT is solid evidence about the engine, but a
@@ -445,6 +454,11 @@ mod tests {
              touching this rule"
         );
 
+        // B080: which rows are the probing machine's rather than the engine's
+        // is now READ from the corpus's provenance sidecar, not hand-listed
+        // here. See `b052_environment_dependent_spellings`.
+        let excluded = b052_environment_dependent_spellings(&corpus, &b052_scope_provenance());
+
         let mut wrong: Vec<String> = Vec::new();
         for (spelling, verdict) in &corpus {
             if PARSER_GAP.contains(&spelling.as_str()) {
@@ -452,9 +466,7 @@ mod tests {
             }
             // An empty workspace has none of the probing machine's plugins,
             // so these must be rejected here even though the game took them.
-            let expected_resolves = if PLUGIN_NAMESPACE_ARTEFACTS.contains(&spelling.as_str())
-                || UNEXPLAINED_ENGINE_SCOPES.contains(&spelling.as_str())
-            {
+            let expected_resolves = if excluded.contains(spelling.as_str()) {
                 false
             } else {
                 verdict == "ACCEPTED"
@@ -1055,6 +1067,337 @@ mod tests {
             "{} cells wrong: {:#?}",
             wrong.len(),
             wrong
+        );
+    }
+    // ── B080: corpus provenance, read rather than hand-maintained ───────────
+
+    /// One scope's row in `docs/probes/b052-scope-provenance.tsv`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ScopeProvenance {
+        /// What the corpus's own `<prefix>::ZZZNoSuch` row proved about this
+        /// scope, from the MESSAGE FORM: `SCOPE`, `ABSENT`, or `UNPINNED` when
+        /// the corpus never asked.
+        pin: String,
+        /// Where the scope came from: `ENGINE`, `HOST`, `ENGINE_UNMODELLED` or
+        /// `UNKNOWN`. The compile probe cannot compute this; it is recorded.
+        origin: String,
+        /// What supports `origin`, opening `MEASURED:` or `INFERRED:`.
+        evidence: String,
+    }
+
+    /// The committed provenance sidecar, keyed by scope prefix.
+    fn b052_scope_provenance() -> std::collections::BTreeMap<String, ScopeProvenance> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/probes/b052-scope-provenance.tsv");
+        let text =
+            std::fs::read_to_string(&path).expect("the b052 provenance sidecar must be committed");
+        text.lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .filter(|l| !l.starts_with("prefix\t"))
+            .map(|l| {
+                let mut c = l.split('\t');
+                let prefix = c.next().expect("a prefix column").to_string();
+                let pin = c.next().expect("a pin column").to_string();
+                let origin = c.next().expect("an origin column").to_string();
+                let evidence = c.next().unwrap_or("").to_string();
+                (
+                    prefix,
+                    ScopeProvenance {
+                        pin,
+                        origin,
+                        evidence,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// `(prefix, tail)` for a qualified spelling; `("", name)` for a bare one.
+    fn split_scope_prefix(spelling: &str) -> (&str, &str) {
+        match spelling.rsplit_once("::") {
+            Some((head, tail)) => (head, tail),
+            None => ("", spelling),
+        }
+    }
+
+    /// True for a corpus row that exists to PIN a scope rather than to measure
+    /// a spelling — `Foo::ZZZNoSuch` and friends.
+    fn is_context_pin(spelling: &str) -> bool {
+        split_scope_prefix(spelling).1.starts_with("ZZZNoSuch")
+    }
+
+    /// Which scope a pin row's MESSAGE proves about, or `None` for a message
+    /// that is neither form. The Rust twin of `pin_form` in
+    /// `scripts/probe_enum_corpus.py`, deliberately re-implemented rather than
+    /// imported: the sidecar's `pin` column is what this checks, so reading it
+    /// with the writer's own code would check nothing.
+    fn pin_form(message: &str) -> Option<&'static str> {
+        if message.contains("is not a data type in namespace") {
+            return Some("SCOPE");
+        }
+        if message.starts_with("Namespace '") && message.contains("doesn't exist") {
+            return Some("ABSENT");
+        }
+        None
+    }
+
+    /// The spellings this crate must NOT resolve even though the game took
+    /// them, derived from the recorded provenance of the scope each one is
+    /// qualified by.
+    ///
+    /// Two origins land here and they mean different things, which is why the
+    /// sidecar keeps them apart:
+    ///
+    /// * `HOST` — the scope was the probing machine's, supplied by an
+    ///   installed plugin. The row is a valid measurement of THAT machine and
+    ///   says nothing about the engine. A workspace with none of those plugins
+    ///   must reject it, and does.
+    /// * `ENGINE_UNMODELLED` — the engine really does have the scope, but
+    ///   neither shipped database records it, so this crate cannot know. The
+    ///   row is environment-INDEPENDENT and still unresolvable here.
+    ///
+    /// Both are excluded from the corpus sweep; conflating them is what let a
+    /// list of twelve spellings carry three that its own file says are engine
+    /// facts.
+    fn b052_environment_dependent_spellings(
+        corpus: &[(String, String)],
+        provenance: &std::collections::BTreeMap<String, ScopeProvenance>,
+    ) -> std::collections::BTreeSet<String> {
+        corpus
+            .iter()
+            .filter(|(spelling, verdict)| verdict == "ACCEPTED" && !is_context_pin(spelling))
+            .filter(|(spelling, _)| {
+                let (prefix, _) = split_scope_prefix(spelling);
+                provenance
+                    .get(prefix)
+                    .is_some_and(|p| p.origin == "HOST" || p.origin == "ENGINE_UNMODELLED")
+            })
+            .map(|(spelling, _)| spelling.clone())
+            .collect()
+    }
+
+    /// B080, the switch itself: reading the exclusion set out of the corpus's
+    /// provenance sidecar reproduces the hand-maintained lists EXACTLY.
+    ///
+    /// The union is what the sweep has always used — a spelling in either
+    /// constant is excluded — so this is the assertion that the mechanism
+    /// change moved no test expectation. The two constants are frozen at the
+    /// values they held when the sidecar was introduced and are not maintained;
+    /// this test is the only thing that reads them.
+    ///
+    /// It cannot be satisfied by an empty sidecar or an empty corpus: the size
+    /// is pinned below, and a derivation that returned nothing would differ
+    /// from a 13-element baseline.
+    #[test]
+    fn the_derived_exclusion_set_reproduces_the_hand_maintained_one() {
+        let corpus = b052_probe_corpus();
+        let derived = b052_environment_dependent_spellings(&corpus, &b052_scope_provenance());
+
+        let frozen: std::collections::BTreeSet<String> = PLUGIN_NAMESPACE_ARTEFACTS
+            .iter()
+            .chain(UNEXPLAINED_ENGINE_SCOPES.iter())
+            .map(|s| (*s).to_string())
+            .collect();
+
+        assert_eq!(
+            derived, frozen,
+            "the derived exclusion set differs from the hand-maintained one — \
+             that is a FINDING about the sidecar's labels, not a test to adjust"
+        );
+        assert_eq!(derived.len(), 13, "anti-vacuity: the set is the known size");
+    }
+
+    /// The sidecar's `pin` column is a RESTATEMENT of rows in the corpus, so it
+    /// can be checked without a game — and must be, because a hand-edited pin
+    /// would silently relabel which scopes the corpus proved existed.
+    ///
+    /// Recomputed here from the message forms rather than trusted, and the
+    /// count of pins recomputed is asserted so a parser that stopped matching
+    /// anything cannot pass by agreeing with nothing.
+    #[test]
+    fn the_recorded_pins_match_the_corpuss_own_pin_rows() {
+        let corpus_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/probes/b052-qualified-enum-spellings.tsv");
+        let text = std::fs::read_to_string(&corpus_path).expect("the corpus must be committed");
+
+        let mut measured: std::collections::BTreeMap<String, &'static str> = Default::default();
+        for line in text.lines() {
+            if line.starts_with('#') || line.is_empty() || line.starts_with("spelling\t") {
+                continue;
+            }
+            let mut c = line.split('\t');
+            let spelling = c.next().expect("a spelling column");
+            let _verdict = c.next();
+            let message = c.next().unwrap_or("");
+            if !is_context_pin(spelling) {
+                continue;
+            }
+            let (prefix, _) = split_scope_prefix(spelling);
+            if prefix.is_empty() {
+                continue;
+            }
+            if let Some(form) = pin_form(message) {
+                measured.insert(prefix.to_string(), form);
+            }
+        }
+        assert_eq!(
+            measured.len(),
+            63,
+            "anti-vacuity: the corpus's pin rows must still be found"
+        );
+
+        let provenance = b052_scope_provenance();
+        let mut wrong: Vec<String> = Vec::new();
+        for (prefix, recorded) in &provenance {
+            let want = measured.get(prefix).copied().unwrap_or("UNPINNED");
+            if recorded.pin != want {
+                wrong.push(format!(
+                    "{prefix}: sidecar says {}, the corpus's own pin row says {want}",
+                    recorded.pin
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} scopes disagree: {:#?}",
+            wrong.len(),
+            wrong
+        );
+    }
+
+    /// Completeness and honesty of the sidecar, as three separate failures so
+    /// the message says which one happened.
+    ///
+    /// The UNPINNED count is asserted, not merely tolerated. Two of the scopes
+    /// the sidecar calls HOST have no pin row at all — `MLHook` and
+    /// `VehicleState` — so a consumer deriving provenance from the pins ALONE
+    /// would read both as engine facts. That gap is a property of the corpus,
+    /// and pinning the number is what makes closing it (by probing those
+    /// scopes) show up as a test change rather than as nothing.
+    #[test]
+    fn every_scope_an_accepted_row_depends_on_is_classified_with_evidence() {
+        let corpus = b052_probe_corpus();
+        let provenance = b052_scope_provenance();
+
+        let mut unclassified: Vec<String> = Vec::new();
+        for (spelling, verdict) in &corpus {
+            if verdict != "ACCEPTED" || is_context_pin(spelling) {
+                continue;
+            }
+            let (prefix, _) = split_scope_prefix(spelling);
+            if prefix.is_empty() {
+                continue;
+            }
+            match provenance.get(prefix) {
+                None => unclassified.push(format!("{prefix} (no sidecar row) via `{spelling}`")),
+                Some(p) if p.origin == "UNKNOWN" => {
+                    unclassified.push(format!("{prefix} (origin UNKNOWN) via `{spelling}`"))
+                }
+                Some(_) => {}
+            }
+        }
+        assert!(
+            unclassified.is_empty(),
+            "{} scope(s) an ACCEPTED row depends on are unclassified: {:#?}",
+            unclassified.len(),
+            &unclassified[..unclassified.len().min(20)]
+        );
+
+        let unevidenced: Vec<&String> = provenance
+            .iter()
+            .filter(|(_, p)| {
+                !p.evidence.starts_with("MEASURED:") && !p.evidence.starts_with("INFERRED:")
+            })
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            unevidenced.is_empty(),
+            "{} scope(s) claim an origin with no MEASURED:/INFERRED: evidence: {:?}",
+            unevidenced.len(),
+            unevidenced
+        );
+
+        assert_eq!(
+            provenance.len(),
+            233,
+            "anti-vacuity: the sidecar is populated"
+        );
+
+        let unpinned_hosts: Vec<&String> = provenance
+            .iter()
+            .filter(|(_, p)| p.origin == "HOST" && p.pin == "UNPINNED")
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            unpinned_hosts.len(),
+            2,
+            "the corpus pins only some of the scopes it depends on, and this is \
+             the measured size of that gap: {:?}",
+            unpinned_hosts
+        );
+
+        let inferred: Vec<&String> = provenance
+            .iter()
+            .filter(|(_, p)| p.evidence.starts_with("INFERRED:"))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            inferred.len(),
+            2,
+            "origins resting on reasoning rather than an instrument: {:?}",
+            inferred
+        );
+    }
+
+    /// The over-claiming guard. Calling a scope HOST wrongly EXCLUDES rows —
+    /// it quietly shrinks what the corpus is allowed to demand of this crate —
+    /// and nothing else in the suite would notice, because an excluded row is
+    /// simply not asserted.
+    ///
+    /// A scope the shipped databases declare cannot be the probing machine's:
+    /// every install has it. So a `HOST` label on such a scope is a
+    /// contradiction, stated here directly.
+    ///
+    /// The corpus sweep catches MOST of this by itself — excluding a row the
+    /// crate can resolve makes it expect a rejection that never comes — and
+    /// measured, mislabelling `UI` as HOST does redden it. What the sweep
+    /// cannot see is a HOST label on a database-declared scope whose rows the
+    /// crate happens to reject for some unrelated reason: the two would then
+    /// agree by accident. This asserts the invariant rather than the symptom.
+    #[test]
+    fn no_scope_the_engine_declares_is_labelled_host() {
+        let index = typedb_fixture_index();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        let provenance = b052_scope_provenance();
+        let hosts: Vec<&String> = provenance
+            .iter()
+            .filter(|(_, p)| p.origin == "HOST")
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            !hosts.is_empty(),
+            "anti-vacuity: there are HOST scopes to check"
+        );
+
+        let contradictions: Vec<&&String> = hosts
+            .iter()
+            .filter(|prefix| scope.scope_exists(prefix))
+            .collect();
+        assert!(
+            contradictions.is_empty(),
+            "{:?} are labelled HOST but the shipped databases declare them, so \
+             every install has them",
+            contradictions
+        );
+
+        // …and the check discriminates: a scope the databases DO declare is
+        // seen as such, so the emptiness above is a result rather than a
+        // predicate that always answers false.
+        assert!(
+            scope.scope_exists("UI"),
+            "the engine-scope test must be able to answer yes"
         );
     }
 }

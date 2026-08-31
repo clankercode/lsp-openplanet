@@ -779,6 +779,87 @@ def run_selftest() -> int:
         check("reader takes only data rows", sorted(rows), ["A::B", "C::D"])
         check("reader keeps the verdict column", rows["C::D"][1], "REJECTED")
 
+    # B080: the pin MESSAGE FORM is the whole discriminator between "this
+    # scope existed" and "it did not", and both forms are REJECTED, so a
+    # reader keying off the verdict learns nothing. Pinned against the two
+    # forms verbatim from the committed corpus.
+    check(
+        "the scope-exists form is read as SCOPE",
+        pin_form("Identifier 'ZZZNoSuch' is not a data type in namespace 'Foo' or parent"),
+        PIN_SCOPE,
+    )
+    check(
+        "the scope-absent form is read as ABSENT",
+        pin_form("Namespace 'Foo' doesn't exist."),
+        PIN_ABSENT,
+    )
+    check(
+        "an unrecognised message is None, never guessed at",
+        pin_form("Expected identifier"),
+        None,
+    )
+    check(
+        "a bare-namespace reject is not mistaken for the scope-exists form",
+        pin_form("Namespace 'Scene' doesn't exist."),
+        PIN_ABSENT,
+    )
+
+    # The pin is a fact about the PREFIX, and the message does not spell the
+    # prefix consistently -- `Meta::Plugin::ZZZNoSuch` answers "in namespace
+    # 'Plugin'" while `UI::Font::ZZZNoSuch` answers "in namespace 'UI::Font'".
+    # So the prefix comes from the SPELLING and the message supplies only the
+    # form. A reader that parsed the name out of the message would key two of
+    # the committed pins under the wrong scope.
+    pin_rows = {
+        "Meta::Plugin::ZZZNoSuchEnumName": [
+            "Meta::Plugin::ZZZNoSuchEnumName",
+            "REJECTED",
+            "Identifier 'ZZZNoSuchEnumName' is not a data type in namespace 'Plugin' or parent",
+        ],
+        "Scene::ZZZNoSuchEnumName": [
+            "Scene::ZZZNoSuchEnumName",
+            "REJECTED",
+            "Namespace 'Scene' doesn't exist.",
+        ],
+        "UI::VirtualKey": ["UI::VirtualKey", "ACCEPTED", ""],
+    }
+    check(
+        "the pin is keyed by the SPELLING's prefix, not by the message's",
+        corpus_scope_pins(pin_rows),
+        {"Meta::Plugin": PIN_SCOPE, "Scene": PIN_ABSENT},
+    )
+    check(
+        "only ACCEPTED non-pin rows contribute a scope needing provenance",
+        corpus_accepted_prefixes(pin_rows),
+        {"UI"},
+    )
+
+    # Carry-forward is the point of the regenerator. `origin` is the half the
+    # compile probe cannot compute, so a regeneration that re-derived it would
+    # be inventing it; a regeneration that dropped it would silently downgrade
+    # every classified scope to UNKNOWN.
+    with tempfile.TemporaryDirectory(prefix="b080-sidecar-") as tmp:
+        f = Path(tmp) / "prov.tsv"
+        f.write_text(
+            "# banner\nprefix\tpin\torigin\tevidence\n"
+            "MLFeed\tSCOPE\tHOST\tMLFeedRaceData.op\n"
+            "UI\tSCOPE\tENGINE\tCore namespace\n"
+        )
+        got = read_scope_provenance(f)
+        check(
+            "the sidecar reader keeps origin and evidence per prefix",
+            got,
+            {
+                "MLFeed": (PIN_SCOPE, "HOST", "MLFeedRaceData.op"),
+                "UI": (PIN_SCOPE, "ENGINE", "Core namespace"),
+            },
+        )
+        check(
+            "a missing sidecar reads as empty, not as an error",
+            read_scope_provenance(Path(tmp) / "nope.tsv"),
+            {},
+        )
+
     if failures:
         print(f"FAIL: {len(failures)} selftest check(s) failed", file=sys.stderr)
         for f in failures:
@@ -786,6 +867,222 @@ def run_selftest() -> int:
         return 1
     print("PASS: attribution never reports ACCEPTED on unproven silence.")
     return 0
+
+
+# ---- scope provenance (B080) ------------------------------------------------
+# A corpus records what the GAME said. It does not record which of those
+# verdicts were only true on the machine that ran it, and the compile probe
+# cannot compute that: `Foo::VirtualKey` and `UI::VirtualKey` are the same
+# shape to it, both namespace-qualified names that resolved.
+#
+# Half of the answer IS already in the corpus, in the `<prefix>::ZZZNoSuch`
+# pin rows -- and in their MESSAGE FORM, not their verdict. Both forms are a
+# REJECT, and only the wording separates them:
+#
+#     Identifier 'ZZZNoSuch' is not a data type in namespace 'P' or parent
+#         -> the compiler resolved the scope `P` and then failed inside it,
+#            which it can only do when `P` EXISTS.
+#     Namespace 'P' doesn't exist.
+#         -> it does not.
+#
+# The other half -- whether an existing scope came from the ENGINE or from the
+# probing machine's plugin set -- is not in the corpus and cannot be derived
+# from it. That half is RECORDED, with its evidence, in the sidecar this
+# section writes and regenerates.
+#
+# Regeneration is offline and recomputes ONLY the `pin` column. `origin` and
+# `evidence` are carried forward by prefix, so a re-probe on another machine
+# cannot silently relabel a scope; a prefix the sidecar has never seen is
+# written `UNKNOWN`, which the Rust consumer rejects. Defaulting an unseen
+# prefix to ENGINE would be the failure this whole ticket is about -- a
+# foreign plugin's row reading as an engine fact.
+
+SCOPE_PROVENANCE = {
+    "b052": {
+        "corpus": "docs/probes/b052-qualified-enum-spellings.tsv",
+        "sidecar": "docs/probes/b052-scope-provenance.tsv",
+    },
+}
+
+# Values of the `origin` column, and what a consumer must do with each.
+PROVENANCE_ORIGINS = {
+    # The engine supplies this scope on every install of this Openplanet
+    # version. Rows qualified by it are environment-INDEPENDENT.
+    "ENGINE",
+    # The probing machine's plugin set supplied it. Rows qualified by it are
+    # ENVIRONMENT-DEPENDENT: they are valid measurements of that machine and
+    # say nothing about the engine.
+    "HOST",
+    # The engine supplies it, but neither shipped database records it, so this
+    # crate cannot know it is a scope. Environment-independent, and still not
+    # something the crate can resolve.
+    "ENGINE_UNMODELLED",
+    # Not yet classified. Written for any prefix the sidecar has not seen
+    # before; a human has to decide which of the three it is.
+    "UNKNOWN",
+}
+
+PIN_SCOPE = "SCOPE"
+PIN_ABSENT = "ABSENT"
+PIN_UNPINNED = "UNPINNED"
+
+
+def pin_form(message: str) -> str | None:
+    """Which fact a pin row's MESSAGE carries about its leading scope.
+
+    `None` for a message that is neither form -- the caller must not guess,
+    because the two forms are the whole discriminator.
+    """
+    if "is not a data type in namespace" in message:
+        return PIN_SCOPE
+    if message.startswith("Namespace '") and "doesn't exist" in message:
+        return PIN_ABSENT
+    return None
+
+
+def _split_prefix(spelling: str) -> tuple[str, str]:
+    """`("UI::Font", "VirtualKey")`; `("", name)` for an unqualified name."""
+    head, sep, tail = spelling.rpartition("::")
+    return (head, tail) if sep else ("", spelling)
+
+
+def corpus_scope_pins(rows: dict[str, list[str]]) -> dict[str, str]:
+    """Every scope the corpus PINNED, and what its pin proved.
+
+    A pin row is one whose last segment is a fabricated name. Only the message
+    is read; the verdict is REJECTED for both forms and so discriminates
+    nothing.
+    """
+    pins: dict[str, str] = {}
+    for spelling, parts in rows.items():
+        prefix, tail = _split_prefix(spelling)
+        if not prefix or not tail.startswith("ZZZNoSuch"):
+            continue
+        form = pin_form(parts[2] if len(parts) > 2 else "")
+        if form is not None:
+            pins[prefix] = form
+    return pins
+
+
+def corpus_accepted_prefixes(rows: dict[str, list[str]]) -> set[str]:
+    """Leading scopes that some ACCEPTED, non-pin row depends on.
+
+    These are the rows whose verdict a scope's existence is load-bearing for.
+    A REJECTED row needs no entry: it is what an absent scope produces.
+    """
+    out: set[str] = set()
+    for spelling, parts in rows.items():
+        if len(parts) < 2 or parts[1] != "ACCEPTED":
+            continue
+        prefix, tail = _split_prefix(spelling)
+        if prefix and not tail.startswith("ZZZNoSuch"):
+            out.add(prefix)
+    return out
+
+
+def read_scope_provenance(path: Path) -> dict[str, tuple[str, str, str]]:
+    """`prefix -> (pin, origin, evidence)` from a sidecar, or `{}` if absent."""
+    if not path.exists():
+        return {}
+    out: dict[str, tuple[str, str, str]] = {}
+    for line in path.read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        parts = (line.split("\t") + ["", "", ""])[:4]
+        if parts[0] == "prefix":
+            continue
+        out[parts[0]] = (parts[1], parts[2], parts[3])
+    return out
+
+
+SCOPE_PROVENANCE_BANNER = """\
+# Scope provenance for {corpus}.
+#
+# One row per leading SCOPE that an ACCEPTED row of that corpus depends on.
+# A consumer reads this to tell an ENVIRONMENT-DEPENDENT row from a stable
+# one WITHOUT re-probing. See docs/probes/README.md.
+#
+# pin     what the corpus's own `<prefix>::ZZZNoSuch` row proves about the
+#         scope, read from the MESSAGE FORM rather than the verdict (both
+#         forms are REJECTED). SCOPE / ABSENT / UNPINNED. Recomputed by
+#         `scripts/probe_enum_corpus.py --scope-provenance`; do not hand-edit.
+# origin  where the scope came from: ENGINE (every install has it) / HOST
+#         (this machine's plugin set) / ENGINE_UNMODELLED (the engine has it,
+#         neither shipped database records it) / UNKNOWN (unclassified).
+#         The compile probe CANNOT compute this; it is recorded, and carried
+#         forward across regenerations.
+# evidence  what supports the origin. Load-bearing: an origin with no evidence
+#         is the hand-maintained list this file replaced.
+#
+# UNPINNED is not a defect to tidy away, it is a measured gap in the corpus:
+# only {pinned} of the {total} scopes below carry a pin. A consumer that treated
+# an absent pin as "engine" would read a foreign plugin's row as an engine fact,
+# which is exactly the failure this file exists to stop.
+prefix\tpin\torigin\tevidence
+"""
+
+
+def write_scope_provenance(which: str) -> int:
+    """Regenerate a provenance sidecar from its corpus. No game needed."""
+    cfg = SCOPE_PROVENANCE[which]
+    corpus = REPO / cfg["corpus"]
+    sidecar = REPO / cfg["sidecar"]
+    rows = _corpus_rows(corpus)
+    pins = corpus_scope_pins(rows)
+    prefixes = corpus_accepted_prefixes(rows)
+    previous = read_scope_provenance(sidecar)
+
+    # A scope pinned ABSENT cannot be qualifying an ACCEPTED row -- the two
+    # rows would be the same compiler contradicting itself in the same run.
+    # Asserted here rather than checked once by hand, because it is the
+    # cheapest test that the pin parsing above is reading the right column of
+    # the right rows.
+    contradictions = sorted(p for p in prefixes if pins.get(p) == PIN_ABSENT)
+    if contradictions:
+        sys.exit(
+            f"error: {len(contradictions)} scope(s) qualify an ACCEPTED row while "
+            f"their own pin says the namespace does not exist: {contradictions}. "
+            "Either the pin rows are being mis-parsed or the corpus is internally "
+            "inconsistent; do not write a sidecar over it."
+        )
+
+    lines: list[str] = []
+    unknown = 0
+    pinned = 0
+    unevidenced: list[str] = []
+    for prefix in sorted(prefixes):
+        pin = pins.get(prefix, PIN_UNPINNED)
+        pinned += pin != PIN_UNPINNED
+        _, origin, evidence = previous.get(prefix, ("", "UNKNOWN", ""))
+        if origin not in PROVENANCE_ORIGINS:
+            origin = "UNKNOWN"
+        unknown += origin == "UNKNOWN"
+        # An origin is a CLAIM about where a scope came from, and the whole
+        # point of this file is that such a claim used to live in a Rust
+        # constant with nothing behind it. Every claim states its own strength:
+        # `MEASURED:` means an instrument answered, `INFERRED:` means someone
+        # reasoned. UNKNOWN is the honest default and needs no evidence.
+        if origin != "UNKNOWN" and not evidence.startswith(("MEASURED:", "INFERRED:")):
+            unevidenced.append(f"{prefix} ({origin})")
+        lines.append(f"{prefix}\t{pin}\t{origin}\t{evidence}")
+
+    if unevidenced:
+        sys.exit(
+            f"error: {len(unevidenced)} scope(s) claim an origin with no "
+            f"`MEASURED:`/`INFERRED:` evidence: {unevidenced}. An origin with no "
+            "evidence is the hand-maintained list this file replaced."
+        )
+
+    banner = SCOPE_PROVENANCE_BANNER.format(
+        corpus=Path(cfg["corpus"]).name, pinned=pinned, total=len(prefixes)
+    )
+    sidecar.write_text(banner + "\n".join(lines) + "\n")
+    print(
+        f"{cfg['sidecar']}: {len(prefixes)} scopes, {pinned} pinned, "
+        f"{unknown} UNKNOWN origin",
+        file=sys.stderr,
+    )
+    return unknown
 
 
 # ---- re-probe (B068 work item 2) --------------------------------------------
@@ -997,6 +1294,13 @@ def main() -> None:
         "correctness one)",
     )
     ap.add_argument("--reprobe", choices=sorted(REPROBE_CORPORA), help="re-measure a committed corpus at batch=1 and diff")
+    ap.add_argument(
+        "--scope-provenance",
+        choices=sorted(SCOPE_PROVENANCE),
+        help="regenerate a corpus's scope-provenance sidecar and stop "
+        "(offline, no game): recomputes the `pin` column from the corpus's "
+        "own context-pin message forms and carries `origin` forward",
+    )
     ap.add_argument("--checkpoint", type=Path, help="resumable checkpoint for --reprobe")
     ap.add_argument(
         "--selftest",
@@ -1010,6 +1314,19 @@ def main() -> None:
 
     if a.selftest:
         sys.exit(run_selftest())
+
+    if a.scope_provenance:
+        unknown = write_scope_provenance(a.scope_provenance)
+        if unknown:
+            # An unclassified scope is not a cosmetic gap. The consumer reads
+            # `origin` to decide whether a row is a fact about the engine or
+            # about one machine, and UNKNOWN means nobody has decided.
+            sys.exit(
+                f"error: {unknown} scope(s) have origin UNKNOWN. Classify each "
+                "as ENGINE, HOST or ENGINE_UNMODELLED, with evidence, before "
+                "the corpus is used as evidence about the engine."
+            )
+        return
 
     if a.reprobe:
         ckpt = a.checkpoint or (REPO / "target" / f"reprobe-{a.reprobe}.jsonl")
