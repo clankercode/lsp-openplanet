@@ -177,6 +177,53 @@ impl VersionCatalog {
         &self.entries
     }
 
+    /// Resolve a `--openplanet-version` request to catalog entries.
+    ///
+    /// `None` → the installed entry alone, or no targets when nothing is
+    /// installed (the caller keeps its existing no-typedb path). A
+    /// comma-separated request resolves each element, deduplicated by
+    /// version with input order preserved. An element matching both the
+    /// installed dump and a recorded snapshot resolves to the installed
+    /// dump — what is on disk is always usable for its own version. An
+    /// element matching nothing is a hard error naming every known
+    /// version (Max, 2026-08-31: never silently substitute).
+    pub fn resolve_targets(&self, requested: Option<&str>) -> Result<Vec<&CatalogEntry>, String> {
+        let Some(requested) = requested else {
+            return Ok(self
+                .entries
+                .iter()
+                .filter(|e| matches!(e.source, EntrySource::Installed))
+                .collect());
+        };
+        let mut targets: Vec<&CatalogEntry> = Vec::new();
+        for element in requested.split(',') {
+            let element = element.trim();
+            let version = OpVersion::parse(element).ok_or_else(|| {
+                format!("invalid Openplanet version {element:?} (expected e.g. 1.29.14)")
+            })?;
+            let matched = self
+                .entries
+                .iter()
+                .filter(|e| e.version == version)
+                .max_by_key(|e| matches!(e.source, EntrySource::Installed));
+            let Some(entry) = matched else {
+                return Err(format!(
+                    "unknown Openplanet version {version}; known versions: {}",
+                    if self.entries.is_empty() {
+                        "none (no installed typedb found and no --typedb-versions-dir given)"
+                            .to_string()
+                    } else {
+                        self.known_versions().join(", ")
+                    }
+                ));
+            };
+            if !targets.iter().any(|t| t.version == entry.version) {
+                targets.push(entry);
+            }
+        }
+        Ok(targets)
+    }
+
     /// Sorted labels for error messages, the installed entry marked.
     pub fn known_versions(&self) -> Vec<String> {
         self.entries
@@ -329,6 +376,84 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cat.known_versions(), ["1.29.5", "1.29.9 (installed)"]);
+    }
+
+    /// Catalog with installed 1.29.9 and recorded 1.29.5 + 1.29.14.
+    fn full_catalog(tag: &str) -> (crate::testing::TempDir, VersionCatalog) {
+        let dir = tmp(tag);
+        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        write_snapshot(dir.path(), "1.29.14", "1.29.14 (next, Public, 6fd4200f)", "1.29.14");
+        write_snapshot(dir.path(), "install", "1.29.9 (next, Public, abcd1234)", "1.29.9");
+        let d = dir.path().join("install");
+        let cat = VersionCatalog::build(
+            Some((&d.join("OpenplanetCore.json"), &d.join("OpenplanetNext.json"))),
+            Some(dir.path()),
+        )
+        .unwrap();
+        (dir, cat)
+    }
+
+    #[test]
+    fn resolve_default_is_installed() {
+        let (_g, cat) = full_catalog("resolve-default");
+        let targets = cat.resolve_targets(None).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert!(matches!(targets[0].source, EntrySource::Installed));
+        assert_eq!(targets[0].label, "1.29.9");
+    }
+
+    #[test]
+    fn resolve_default_without_installed_is_empty() {
+        let dir = tmp("resolve-noinstall");
+        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        let cat = VersionCatalog::build(None, Some(dir.path())).unwrap();
+        assert!(cat.resolve_targets(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolve_matches_installed_before_recorded() {
+        let dir = tmp("resolve-prefer");
+        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        write_snapshot(dir.path(), "install", "1.29.5 (next, Public, 9999ffff)", "1.29.5");
+        let d = dir.path().join("install");
+        let cat = VersionCatalog::build(
+            Some((&d.join("OpenplanetCore.json"), &d.join("OpenplanetNext.json"))),
+            Some(dir.path()),
+        )
+        .unwrap();
+        let targets = cat.resolve_targets(Some("1.29.5")).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert!(
+            matches!(targets[0].source, EntrySource::Installed),
+            "installed dump wins for its own version"
+        );
+    }
+
+    #[test]
+    fn resolve_comma_list_dedups_preserving_order() {
+        let (_g, cat) = full_catalog("resolve-list");
+        let targets = cat
+            .resolve_targets(Some("1.29.14,1.29.5,1.29.14"))
+            .unwrap();
+        let labels: Vec<_> = targets.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["1.29.14", "1.29.5"], "input order, first wins");
+    }
+
+    #[test]
+    fn resolve_unknown_version_errors_naming_known() {
+        let (_g, cat) = full_catalog("resolve-unknown");
+        let err = cat.resolve_targets(Some("1.29.9999")).unwrap_err();
+        for known in ["1.29.5", "1.29.9", "1.29.14"] {
+            assert!(err.contains(known), "error must name {known}: {err}");
+        }
+        assert!(err.contains("1.29.9999"), "error names the request: {err}");
+    }
+
+    #[test]
+    fn resolve_rejects_malformed_version_string() {
+        let (_g, cat) = full_catalog("resolve-malformed");
+        let err = cat.resolve_targets(Some("banana")).unwrap_err();
+        assert!(err.contains("banana"), "{err}");
     }
 
     #[test]
