@@ -225,7 +225,7 @@ pub struct LspConfig {
     /// list. Resolved through the shared config ladder (B017) — empty
     /// when no config file sets the key.
     pub unused_callbacks: Vec<String>,
-    /// How unused-declaration findings are reported. Default warn.
+    /// How unused-declaration findings are reported. Default info (B090).
     /// Workspace `.openplanet-lsp.toml` wins over the user global; CLI
     /// `--unused` / `--no-unused` wins over both.
     pub unused: UnusedLevel,
@@ -2233,8 +2233,9 @@ fn parse_unused_toml(value: &toml::Value) -> Option<UnusedLevel> {
     match value {
         toml::Value::String(s) => UnusedLevel::parse(s),
         toml::Value::Boolean(false) => Some(UnusedLevel::Ignore),
-        // B090: `true` means "enabled at the default level" — info.
-        toml::Value::Boolean(true) => Some(UnusedLevel::Info),
+        // B090: `true` means "enabled at the default level" — spelled as
+        // the default itself (B149) so it tracks any future flip.
+        toml::Value::Boolean(true) => Some(UnusedLevel::default()),
         _ => None,
     }
 }
@@ -2245,7 +2246,12 @@ fn parse_unused_json(value: &serde_json::Value) -> Option<UnusedLevel> {
     }
     match value.as_bool() {
         Some(false) => Some(UnusedLevel::Ignore),
-        Some(true) => Some(UnusedLevel::Warn),
+        // B090: `true` means "enabled at the default level". B149: this
+        // surface was missed by that flip and still said `warn`, so
+        // `"unused": true` from an editor disagreed with `unused = true` in
+        // TOML and with the string token `"true"`. Spelled as the default
+        // itself so a future flip cannot leave one surface behind again.
+        Some(true) => Some(UnusedLevel::default()),
         None => None,
     }
 }
@@ -2383,6 +2389,195 @@ mod tests {
         }
         assert!(UnusedLevel::parse("banana").is_none());
         assert!(UnusedLevel::parse("").is_none());
+    }
+
+    /// B149 drift guard: every `SettingSpec` that DECLARES a default must
+    /// declare the one the tool actually resolves to when nothing is set.
+    ///
+    /// B090 flipped `unused` from `warn` to `info` in `LspConfig::default`
+    /// and left the config TUI declaring `warn`, so `openplanet-lsp config`
+    /// showed `warn (default)` for an unset key while a `check` run behaved
+    /// as `info` — the display contradicted the behaviour, which is worse
+    /// than either alone.
+    ///
+    /// Exhaustive BY CONSTRUCTION: the match's catch-all fails, so adding a
+    /// defaulted key without wiring it in here is a test failure rather than
+    /// a silent gap. A hand-maintained list of keys to check would have the
+    /// same drift problem this test exists to prevent.
+    #[test]
+    fn every_declared_spec_default_matches_the_real_resolved_default() {
+        use crate::user_config::{SettingKind, SETTINGS};
+        let real = LspConfig::default();
+        let mut checked = 0;
+        for spec in SETTINGS {
+            let (declared, actual): (String, String) = match spec.kind {
+                SettingKind::Enum { default, .. } => (
+                    default.to_string(),
+                    match spec.key {
+                        "unused" => real.unused.as_str().to_string(),
+                        "inactive_regions" => real.inactive_regions.as_str().to_string(),
+                        "errors" => real.errors.as_str().to_string(),
+                        "game_target" => real.game_target.clone(),
+                        "signature_mode" => real.signature_mode.as_str().to_string(),
+                        "default_mode" => match UserPrefs::default().default_mode {
+                            DefaultMode::Tui => "tui".to_string(),
+                            DefaultMode::Lsp => "lsp".to_string(),
+                        },
+                        other => panic!(
+                            "SETTINGS key `{other}` declares an Enum default that this \
+                             drift guard does not check — wire it in, or the TUI can \
+                             start lying about it the way `unused` did (B149)"
+                        ),
+                    },
+                ),
+                SettingKind::Bool { default } => (
+                    default.to_string(),
+                    match spec.key {
+                        // Lives on UserPrefs (CLI-entrypoint prefs), not
+                        // LspConfig — but it is the same unset-default the
+                        // TUI displays.
+                        "warnings_as_errors" => UserPrefs::default().warnings_as_errors.to_string(),
+                        "honor_gitignore" => real.honor_gitignore_enabled().to_string(),
+                        "shortcut_disable_default_namespaces" => {
+                            real.shortcut_disable_default_namespaces.to_string()
+                        }
+                        "shortcut_match_enums" => real.shortcut_match_enums.to_string(),
+                        other => panic!(
+                            "SETTINGS key `{other}` declares a Bool default that this \
+                             drift guard does not check (B149)"
+                        ),
+                    },
+                ),
+                SettingKind::Usize { default } => (
+                    default.to_string(),
+                    match spec.key {
+                        "define_matrix_max_combinations" => {
+                            real.define_matrix_max_combinations.to_string()
+                        }
+                        other => panic!(
+                            "SETTINGS key `{other}` declares a Usize default that this \
+                             drift guard does not check (B149)"
+                        ),
+                    },
+                ),
+                // No declared default to drift.
+                SettingKind::String
+                | SettingKind::Path
+                | SettingKind::StringList { .. }
+                | SettingKind::NestedStringList => continue,
+            };
+            assert_eq!(
+                declared, actual,
+                "SETTINGS declares `{}` default `{declared}`, but the tool \
+                 actually resolves to `{actual}`",
+                spec.key
+            );
+            checked += 1;
+        }
+        // The guard must have had something to check: an empty loop would
+        // pass while proving nothing.
+        assert!(
+            checked >= 10,
+            "expected the guard to cover every defaulted key, only saw {checked}"
+        );
+    }
+
+    /// B149: a spec's HELP text must not name a stale default either. The
+    /// `unused` help read "warn (default)" long after the behaviour changed,
+    /// and a user reads the help, not the struct field.
+    #[test]
+    fn no_spec_help_text_names_a_default_other_than_the_declared_one() {
+        use crate::user_config::{SettingKind, SETTINGS};
+        let mut checked = 0;
+        for spec in SETTINGS {
+            let SettingKind::Enum { default, .. } = spec.kind else {
+                continue;
+            };
+            let Some(idx) = spec.help.find("(default)") else {
+                continue;
+            };
+            // The token immediately before "(default)".
+            let named = spec.help[..idx]
+                .trim_end()
+                .rsplit([' ', ','])
+                .next()
+                .unwrap();
+            assert_eq!(
+                named, default,
+                "`{}` help says `{named} (default)` but declares `{default}`",
+                spec.key
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 1,
+            "the guard found no `(default)` help text to check — it cannot fire"
+        );
+    }
+
+    /// B090 stated the rule for `true`: "enabled at the DEFAULT level".
+    /// Every config surface must agree on what that level is. The TOML path
+    /// and the string token were flipped to `info`; the LSP
+    /// `initializationOptions` JSON path was missed and still said `warn`,
+    /// so the same intent spelled three ways gave two answers.
+    #[test]
+    fn unused_true_means_the_default_level_on_every_config_surface() {
+        let default_level = UnusedLevel::default();
+        assert_eq!(
+            default_level,
+            UnusedLevel::Info,
+            "premise: the default is info"
+        );
+
+        assert_eq!(
+            UnusedLevel::parse("true"),
+            Some(default_level),
+            "the string token `true` must mean the default level"
+        );
+        assert_eq!(
+            parse_unused_toml(&toml::Value::Boolean(true)),
+            Some(default_level),
+            "`unused = true` in TOML must mean the default level"
+        );
+        assert_eq!(
+            parse_unused_json(&serde_json::Value::Bool(true)),
+            Some(default_level),
+            "`\"unused\": true` in initializationOptions must mean the default \
+             level, the same as every other surface"
+        );
+
+        // And `false` still means ignore everywhere (the control: the two
+        // parsers agree on the other polarity too).
+        for (surface, got) in [
+            ("string", UnusedLevel::parse("false")),
+            ("toml", parse_unused_toml(&toml::Value::Boolean(false))),
+            ("json", parse_unused_json(&serde_json::Value::Bool(false))),
+        ] {
+            assert_eq!(got, Some(UnusedLevel::Ignore), "`false` via {surface}");
+        }
+    }
+
+    /// End-to-end through the real init-options seam, not just the parser:
+    /// `"unused": true` from an editor lands on the default level.
+    #[test]
+    fn init_options_unused_true_lands_on_the_default_level() {
+        // Start away from the default, so landing ON it is a real result
+        // rather than the value that was already there.
+        let mut config = LspConfig {
+            unused: UnusedLevel::Error,
+            ..LspConfig::default()
+        };
+        assert_ne!(
+            config.unused,
+            UnusedLevel::default(),
+            "premise: started off-default"
+        );
+        config.apply_init_options(&serde_json::json!({ "unused": true }));
+        assert_eq!(
+            config.unused,
+            UnusedLevel::default(),
+            "initializationOptions `unused: true` must resolve to the default level"
+        );
     }
 
     /// B090: unused findings default to INFO — quiet enough for a normal

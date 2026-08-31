@@ -13,6 +13,32 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Fixed
+- **`Math::Min(uint(20), buf.Length)` no longer reports a missing
+  overload** (B150) — a bare `obj.Name` is a property READ, not a method
+  reference, whenever the class also exposes `get_Name`. The eight `Mw*`
+  engine containers (`MwFastBuffer`, `MwFastArray`, `MwSArray`,
+  `MwStridedArray`, `MwNodPool`, `MwVirtualArray`, `MwArrayInPlaceDyn`)
+  ship BOTH `uint Length()` and `uint get_Length()`, so `buf.Length` was
+  taken for a callable: the call was rejected outright and the argument
+  rendered as `uint()`, a zero-arg signature. Script `array`, `string`
+  and `wstring` ship only the accessor and were never affected;
+  `vec2`/`vec3`/`vec4`/`quat` ship only the method, so `v.Length` is
+  still a genuine method reference and still renders `float()`. The type
+  itself was always right — every non-argument position (`uint n =
+  b.Length`, `int(b.Length)`, `b.Length > 3`, `for (…; i < b.Length;
+  …)`) was already silent.
+- **The config TUI no longer displays a stale default for `unused`**
+  (B149) — B090 made `info` the real default and left `openplanet-lsp
+  config` declaring `warn`, so the TUI showed `warn (default)` for an
+  unset key while a `check` run behaved as `info`. The same flip had
+  also missed the LSP `initializationOptions` path, where
+  `"unused": true` still meant `warn` while `unused = true` in
+  `.openplanet-lsp.toml` and the string token `"true"` both meant
+  `info` — one intent, three spellings, two answers. All three now
+  resolve to the default level, spelled as the default itself so a
+  future flip cannot leave a surface behind.
+
 ### Added
 - **`plugin_files_search_paths` is now a config key, with config-TUI
   support** (B143) — the search roots that `info.toml` `exports` /
