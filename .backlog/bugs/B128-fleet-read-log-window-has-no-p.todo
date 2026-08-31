@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T14:12:59Z"
+depends_on: []
+estimate_hours: 1
+id: B128
+priority: high
+status: pending
+tags: []
+title: fleet.read_log_window has no production callers left after B123 and should be removed or documented as test-only
+updated_at: "2026-08-31T14:12:59Z"
+---
+
+fleet.read_log_window has no production callers left after B123 and should be removed or documented as test-only
