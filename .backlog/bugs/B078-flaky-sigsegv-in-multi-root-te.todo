@@ -9,11 +9,11 @@ priority: medium
 started_at: null
 status: pending
 tags: []
-title: 'Flaky SIGSEGV in multi_root_tests: stack overflow at Backend::new to LspConfig::load, and a crashed binary silently lowers the suite total'
+title: 'Flaky SIGSEGV in multi_root_tests: deterministic execute fault at a fixed module offset, and a crashed binary silently lowers the suite total'
 updated_at: "2026-08-30T22:24:33Z"
 ---
 
-# Flaky SIGSEGV in multi_root_tests: stack overflow at Backend::new to LspConfig::load, and a crashed binary silently lowers the suite total
+# Flaky SIGSEGV in multi_root_tests: deterministic execute fault at a fixed module offset, and a crashed binary silently lowers the suite total
 
 ## Steps to Reproduce
 
