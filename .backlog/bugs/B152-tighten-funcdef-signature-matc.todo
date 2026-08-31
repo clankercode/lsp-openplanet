@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T16:11:40Z"
 depends_on: []
 estimate_hours: 1
 id: B152
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Tighten funcdef signature matching to the engine''s measured const exactness: the engine is exact on all four const positions in both directions, and array Sort wants const T@ const &in for handle element types'
@@ -12,3 +14,81 @@ updated_at: "2026-08-31T16:11:40Z"
 ---
 
 Tighten funcdef signature matching to the engine's measured const exactness: the engine is exact on all four const positions in both directions, and array Sort wants const T@ const &in for handle element types
+
+
+## Measured by lane-const during B144, 2026-09-01. Fully probed; risk polarity is the OPPOSITE of B144's.
+
+## What the engine actually does — measured, not assumed
+
+`docs/probes/b144-const-handle-funcdef.tsv`, OP 1.29.14, 51 single-construct
+plugins, all five controls fired.
+
+**The engine is EXACT on every const position, in BOTH directions.** It is not
+lenient about const handles at all. B144's premise — that the checker was too
+strict — was backwards: the checker was demanding a spelling the engine REJECTS.
+
+`array<T>::Sort`'s comparator carries **both** consts when the element type is a
+handle. The compiler prints its own signature when you deliberately mismatch:
+
+    Where 'less' is 'bool Json::Value@[]::less(const Json::Value@const&in, const Json::Value@const&in)'
+
+| element type | engine's `less` |
+|---|---|
+| `int`, `uint`, `string`, `vec3`, enum, value class | `const T&in` |
+| `C@`, `I@`, `Json::Value@`, `int[]@`, `dictionary@` | `const T@const&in` |
+| any element, `SortNonConst` | `less_nonconst(T&in, T&in)` |
+
+Per-construct results, all with controls:
+
+- `T@ const &in` fn at a `T@ &in` funcdef -> **REJECT** (all five handle kinds).
+- The reverse, `T@ &in` fn at a `T@ const &in` funcdef -> **REJECT**. Symmetric.
+- Leading `const` exact both ways — B110's stance confirmed by measurement.
+- By-value const handle exact both ways. `T@ const &out` is declarable but
+  unwritable (*"Expression is not an l-value"*). **`T@ const &inout` is not
+  declarable at all.** `int const &in` and `vec3 const &in` are PARSE ERRORS —
+  a trailing `const` is legal only after `@`.
+- Return type exact: both `C@ const` and `const C@` REJECT at a `C@` funcdef.
+
+## What B144 did, and what it deliberately did NOT do
+
+B144 fixed `TypeRepr::parse_type_string`, which had no rule for a trailing
+`const` and produced `Named("Json::Value@ const")` — a type carrying its own
+qualifiers in its name, equal to nothing. It restored **uniform const-neutrality**
+(B102's stance, left in place by B110); it did not make the comparison exact.
+
+**So the checker is currently const-NEUTRAL where the engine is const-EXACT.**
+That is a deliberate, safe, under-strict state: it accepts everything the engine
+accepts, plus some spellings the engine would reject.
+
+## This ticket closes that gap, and the risk runs the other way
+
+**B144 REMOVED errors. This ADDS them.** A wrong fix here produces false
+positives on shipped code — the expensive kind — where B144's worst case was
+leaving a false negative.
+
+It fires on all four const positions at once, **including the leading one B110
+guards**, so B110's tests are a constraint rather than a control here: they were
+written when the engine's answer was unmeasured, and they must be re-read against
+the corpus rather than assumed correct.
+
+On `array<T>::Sort` it additionally needs B102's per-call-site synthesis to emit
+`const T@ const &in` for handle element types, per the table above. Getting the
+synthesis right is most of the work.
+
+## Required before any fix
+
+1. **Its own fleet sweep**, with binaries hashed to prove they differ (B147), and
+   **exposure reported** — a zero here would be uninterpretable without knowing
+   how many sites use each const position.
+2. **Read every added diagnostic.** A new error on shipped, compiling code is a
+   false positive by definition, since the fleet compiles in the game.
+3. Three known false negatives are already pinned AS SUCH in
+   `tests/fixtures/issue-repros/b102-array-sort-correct-callbacks/Main.as`. They
+   should flip to errors when this lands — that is the test that proves the fix
+   did something.
+
+## Do not start this because the data exists now
+
+Same caution as B130: measurement licenses the work, it does not shorten it. The
+corpus tells you the target; it does not tell you the false-positive cost of
+hitting it.
