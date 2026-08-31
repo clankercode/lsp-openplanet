@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T15:49:59Z"
+depends_on: []
+estimate_hours: 1
+id: B149
+priority: high
+status: pending
+tags: []
+title: 'The config TUI declares unused with default warn, but B090 changed the actual default to info: a stale display default'
+updated_at: "2026-08-31T15:49:59Z"
+---
+
+The config TUI declares unused with default warn, but B090 changed the actual default to info: a stale display default
