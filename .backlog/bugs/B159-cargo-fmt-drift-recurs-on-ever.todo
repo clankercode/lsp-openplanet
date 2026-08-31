@@ -53,3 +53,20 @@ Second-order effect worth naming: unformatted files on master mean
 `cargo fmt --all` **re-dirties them in every other lane's worktree**, so one
 lane's omission shows up as spurious diff noise in everyone else's tree. That is
 why this was recurring rather than incidental.
+
+
+## Evidence from a discarded experiment, 2026-09-01
+
+lane-unused had built and validated a differential fmt gate before Max's ruling
+arrived, and deleted rather than landed it. **One measurement from it is worth
+keeping, because it SUPPORTS the ruling rather than the gate:**
+
+Replaying both central repair commits against their parents, **3 of 3 files that
+needed repair were detectable before landing.** So the drift was mechanically
+visible every time — which is precisely why a coordinator backstop works and why
+no judgement was required at the merge point.
+
+**And it is why a gate would have been the wrong tool.** All three lanes involved
+were diligent, and two had explicitly DECLINED to reformat another lane's files —
+the correct call each time. A `--check` gate would have fired on exactly those
+lanes, punishing the restraint that was right.
