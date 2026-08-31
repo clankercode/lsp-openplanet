@@ -9,11 +9,11 @@ priority: medium
 started_at: null
 status: pending
 tags: []
-title: 'A crashed test binary silently lowers the suite total: cargo exits 101 with zero test-result lines (the SIGSEGV is an external instruction-fetch fault, not a project defect)'
+title: 'Flaky SIGSEGV in multi_root_tests: NOT A DEFECT — an external instruction-fetch fault on a present executable page (counting hazard split to B082)'
 updated_at: "2026-08-30T22:24:33Z"
 ---
 
-# A crashed test binary silently lowers the suite total: cargo exits 101 with zero test-result lines (the SIGSEGV is an external instruction-fetch fault, not a project defect)
+# Flaky SIGSEGV in multi_root_tests: NOT A DEFECT — an external instruction-fetch fault on a present executable page (counting hazard split to B082)
 
 ## Steps to Reproduce
 
