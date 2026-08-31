@@ -3352,3 +3352,35 @@ its own expected signature by deliberately mismatching the call**, rather than
 inferring the rule from a table of accept/reject. Eleven element types, eleven
 verbatim signatures, one run — and it retired a "this is UNMEASURED" note that
 two source files had been restating since B102.
+
+## Make the compiler print its own answer instead of guessing what it wants
+
+B144 was filed on the model that the checker was too STRICT: it rejected
+`const Json::Value@ const &in` where the engine accepted it, so the fix would be
+to relax. The probe inverted that. **The engine is exact on every const position
+in both directions — what makes the shipped code compile is that its spelling is
+the one the engine WANTS.** The checker had been demanding
+`const Json::Value@ &in`, which the engine REJECTS.
+
+The technique that settled it is worth copying: **deliberately mismatch the call
+so the compiler prints the signature it was looking for.**
+
+    Where 'less' is 'bool Json::Value@[]::less(const Json::Value@const&in, const Json::Value@const&in)'
+
+One run, eleven element types, and the engine enumerated its own expectation —
+`const T&in` for value types, `const T@const&in` for handles. No inference, no
+model, no reading of AngelScript documentation that may not match this build.
+
+**Where an error message names the expected form, an intentional failure is a
+better instrument than a designed experiment**, because it makes the subject
+state its answer in its own words rather than answering the yes/no question you
+thought to ask. The same run also retired a standing UNMEASURED note and found
+that `T@ const &inout` is not declarable at all — neither of which was on the
+question list.
+
+**And note which way the correction ran.** Two independent things pointed at
+"too strict": a user reporting a false positive, and shipped code that compiles.
+Both were true, and the conclusion drawn from them was still backwards. A
+symmetric relaxation — the obvious fix — would have been wrong in both
+directions, and only asking the reverse question (`T@ &in` at a `T@ const &in`
+funcdef: also REJECT) exposed that.
