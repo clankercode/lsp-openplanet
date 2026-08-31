@@ -20,3 +20,5 @@ Note from B104: hover.rs:2252 asserts an override SHADOWS the declaration for cl
 
 ## Lane decision (2026-08-31, bl-fix-many batch B113-114)
 Serialized BEFORE B114 in one worktree (.worktrees/pool): B114's SymbolKind change ripples into hover.rs (16 consumer files), so parallel lanes would conflict there. This small hover fix lands first; B114's mechanical consumer updates then cover the new code too.
+
+LANDED (2026-09-01, merge 93de73a, gate SUITE-VERIFIED 2917/0/12 34-34 on x-alpha): hover on a virtual property access presents the get_/set_ accessor pair — both in one code block, getter first (the order the access performs them), labelled '(property get)' / '(property set)', deliberately NOT overload_block since '*2 overloads*' would claim a choice the site doesn't offer. Negative control keys on the member LOOKUP being empty, not the rendering returning None, so a real field named ID can never hover as get_ID. 21 tests, 15 observed red first; variants cover read/write/compound, getter-only, setter-only fallback, inherited from base, declared on interface, this-receiver, and real-field-beats-accessor on both read and write paths.
