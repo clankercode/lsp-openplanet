@@ -389,6 +389,7 @@ pub struct FunctionDecl {
     pub params: Vec<Param>,
     /// B087: the `shared` modifier — a cross-plugin export root. Only ever
     /// true for a file-scope function; `shared` is not a member modifier.
+    /// Evidence for the forms this flag can carry: see `EnumDecl::is_shared`.
     pub is_shared: bool,
     pub is_const: bool,
     pub is_override: bool,
@@ -405,6 +406,7 @@ pub struct FuncdefDecl {
     pub name: Ident,
     pub params: Vec<Param>,
     /// B087: the `shared` modifier — a cross-plugin export root.
+    /// Evidence for the forms this flag can carry: see `EnumDecl::is_shared`.
     pub is_shared: bool,
 }
 
@@ -453,6 +455,7 @@ pub struct InterfaceDecl {
     pub bases: Vec<TypeExpr>,
     pub methods: Vec<FunctionDecl>,
     /// B087: the `shared` modifier — a cross-plugin export root.
+    /// Evidence for the forms this flag can carry: see `EnumDecl::is_shared`.
     pub is_shared: bool,
 }
 
@@ -469,6 +472,41 @@ pub struct EnumDecl {
     pub name: Ident,
     pub values: Vec<EnumValue>,
     /// B087: the `shared` modifier — a cross-plugin export root.
+    ///
+    /// WHAT THE PRESENCE OF THIS FLAG DOES AND DOES NOT CLAIM. Recording the
+    /// modifier is not a statement that the engine accepts every form that
+    /// can carry it. `parse_item` ate `shared` and discarded it for
+    /// everything but `ClassDecl` long before B087, so all of these already
+    /// PARSED; B087 only stopped throwing the bit away. Nothing here widens
+    /// what the parser accepts.
+    ///
+    /// Evidence, stated per form so the next reader does not have to infer
+    /// it — each is a declaration inside Editor++ (siteid 377), a published
+    /// plugin that compiles and runs, which is stronger than a synthetic
+    /// probe: a probe's ACCEPT can be supplied by another installed plugin
+    /// (see docs/probes/README.md), whereas a shipped plugin's own
+    /// declaration cannot be.
+    ///
+    /// * `shared class`     — `Exports/Item_MovingItems_Shared.as:73`
+    /// * `shared interface` — `Editor/Shared_General.as:45`
+    /// * `shared enum`      — `Editor.as:574`
+    /// * `shared funcdef`   — `Components/common/UI_Components.as:63`
+    /// * `shared` function  — `FormatX.as:2`
+    /// * `shared` VARIABLE  — REJECTED by the game, and the parser rejects it
+    ///   too; game-probed, see `parse_func_or_var_item`.
+    ///
+    /// NOT MEASURED: `shared abstract class` / `shared mixin class`. The
+    /// composition has no witness in any fixture and was not probed — the
+    /// RemoteBuild harness could not run (see below). It is covered by a unit
+    /// test only, and rooting a form the engine might reject costs a missed
+    /// warning, never a false positive.
+    ///
+    /// Why it was not probed, 2026-08-31 (B097): RemoteBuild on OP 1.29.14 splits any
+    /// request payload at ~64 bytes and handles each chunk as a separate
+    /// request, so `load_plugin` — whose SHORTEST possible payload is 73
+    /// bytes — cannot be delivered at all. Every probe path in
+    /// `scripts/issue_repro_game.py` and `scripts/probe_enum_corpus.py` goes
+    /// through it.
     pub is_shared: bool,
 }
 
