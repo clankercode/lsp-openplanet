@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T16:58:32Z"
 depends_on: []
 estimate_hours: 1
 id: B160
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Adopt the engine spelling in NoImplicitConversion: 22 of 22 measured engine messages name the target as a reference and end with a full stop, our text does neither'
@@ -12,3 +14,64 @@ updated_at: "2026-08-31T16:58:32Z"
 ---
 
 Adopt the engine spelling in NoImplicitConversion: 22 of 22 measured engine messages name the target as a reference and end with a full stop, our text does neither
+
+
+## MAX'S CALL, not the lane's — measured by B155 and deliberately not decided there
+
+## The measurement
+
+Across both corpora carrying `NoImplicitConversion` (b071 enum targets, b144
+funcdef-handle targets): **22 of 22 measured engine messages name the target as a
+reference AND end with a full stop.** Zero exceptions.
+
+Counting only MEASURED columns — every unsuffixed spelling in those files lives
+in comment prose, never in a measurement.
+
+**There are TWO marks diverging, not one.** Chasing only the `&` would have fixed
+half a divergence:
+
+    engine (measured):  ... to 'VirtualKey&'.
+    ours:               ... to 'VirtualKey'
+
+## The case FOR adopting the engine spelling
+
+The CLI's own footer asks users to report differences from Openplanet's output,
+which makes exact-match close to a product commitment. And 22/22 uniformity means
+there is **no per-case judgement** — it is one mechanical change.
+
+## The case AGAINST, which is real
+
+`VirtualKey&` leaks how the engine models assignment and is **not something a
+user can write**. `to 'VirtualKey'` may genuinely read better to a human who is
+trying to fix their code rather than match a string.
+
+## Cost, fully costed by B155
+
+- **One renderer line**, plus the documented transform.
+- **15 exact-string assertions** are the known remainder: 12 in
+  `b071_enum_type_mismatch`, 3 in `cli_check_tests`. Plus one suffix-insensitive
+  `contains` in b110 that needs no change.
+- All three `NoImplicitConversion` construction sites are initialisation or
+  assignment positions (GH #49 math types, B071 enums, B144 funcdef binding), so
+  **there is no site where a target `&` would be wrong.**
+
+## Why this is cheap either way now
+
+B155 did not decide it — it **pinned** it. The engine's side is derived from the
+corpora (comment lines skipped), and a test converts each engine row by the
+documented transform (drop the trailing `.`, drop the target's `&`) and requires
+it to equal our text character-for-character. **If either side moves, it fails
+and NAMES the new difference** rather than leaving a comment to rot.
+
+That is the state the repo was previously missing. It had stated BOTH sides:
+`checker.rs` said the unsuffixed spelling was deliberate, while
+`b071_enum_type_mismatch.rs` said *"the engine's wording is part of the
+requirement, not an implementation detail"* — and quoted `to 'LocalTwo'.`, **a
+third spelling matching neither the engine (no `&`) nor our output (it has the
+full stop).** That header is corrected.
+
+## If adopted
+
+Change the renderer, update the 15 assertions, and **invert the transform in
+B155's test** so it keeps checking the relationship rather than being deleted.
+The test is the durable asset here; the decision is one line.
