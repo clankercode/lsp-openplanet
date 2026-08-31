@@ -883,6 +883,42 @@ indistinguishable from "I am structurally incapable of seeing it".
   merge already contains. Every other operation degrades gracefully into a
   rebase.
 
+- **A directory unheld at an instant is not a directory nobody is using.** I
+  pruned 85 build directories from a shared cache root, having first validated
+  the holding scan with a real positive control — I started a process inside a
+  target dir and confirmed the scan detected it, precisely because my first
+  run's "nothing is held" proved nothing. The scan was correct. It found one
+  directory genuinely held and protected it.
+
+  **It still collided with a lane's in-flight gate.** That lane's artifacts and
+  two of its target dirs vanished *between two of its commands*, because a gate
+  is a sequence — build, measure, compare — with gaps in which nothing holds an
+  open handle or a cwd. The scan measured a **moment**; the lane occupied an
+  **interval**.
+
+  So the control was necessary and not sufficient, which is the interesting
+  part: validating an instrument does not validate the *question* you asked it.
+  "Is anything holding this right now?" and "is anyone using this?" are
+  different questions, and only the first is answerable from `/proc`.
+
+  Worse, the failure would not have looked like a collision. A vanished target
+  dir surfaces as a build error or an inexplicable rebuild, so a lane would
+  reasonably suspect its own change. **Cross-lane destruction disguises itself
+  as local breakage.**
+
+  What was actually needed was to ask rather than to detect — the lane had
+  told me it was gating. For shared mutable state, **announce before you
+  reclaim**, or reclaim only what is provably finished (a merged branch's
+  dirs), never what is merely idle at the instant you looked. Note the lane
+  itself had refused to delete other lanes' directories for exactly this
+  reason, and deferred the decision to the coordinator; the coordinator then
+  made it with a better tool and a worse question.
+
+  Related: `du` reported 117.8 GB reclaimable where the actual free-space gain
+  was **39.4 GB** — `/home` is btrfs and reflink sharing counts shared blocks
+  once per reference. Measure the before and after of free space; never quote
+  `du`'s total as the reclaim.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
