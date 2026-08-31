@@ -3056,6 +3056,15 @@ impl<'a> Checker<'a> {
     /// stay neutral — the GH #47 FP guard — and `null` binds any funcdef
     /// handle.
     fn arg_fails_funcdef_slot(&self, fd: &FuncdefSig, arg: &Expr, arg_ty: &TypeRepr) -> bool {
+        // B091: a class method does not implicitly decay to a funcdef handle,
+        // so a bare method reference fails the slot NO MATTER WHAT its
+        // signature is — `startnew(this.Tick)` needs
+        // `startnew(CoroutineFunc(this.Tick))` even though `void()` is
+        // exactly what the slot wants. Ahead of the signature comparison
+        // below precisely because that comparison would say yes.
+        if self.arg_is_unwrapped_method_reference(arg) {
+            return true;
+        }
         let sigs = self.lookup_arg_function_sigs(arg, arg_ty);
         if !sigs.is_empty() {
             return !sigs.iter().any(|sig| self.func_matches_funcdef(sig, fd));
@@ -3354,32 +3363,7 @@ impl<'a> Checker<'a> {
                 out.extend(self.scope.lookup_function_overloads_exact(&qual));
             }
             ExprKind::Member { object, member } => {
-                // B025: a method reference (`this.M`, `c.M`, `g.M`,
-                // `arr[i].M`) is a callable — the funcdef ctor is the
-                // required method-to-funcdef conversion (methods do not
-                // implicitly decay like free functions) — so resolve the
-                // receiver's class and collect the method's overload
-                // signatures instead of trusting `arg_ty` (the member-access
-                // type is the method's return type).
-                if let Some(cls_name) = self
-                    .method_ref_receiver_type(object)
-                    .as_ref()
-                    .and_then(Self::base_type_name)
-                {
-                    let mut sigs = self.scope.lookup_method_overloads_exact_with_inheritance(
-                        &cls_name,
-                        member.text(self.source),
-                    );
-                    if sigs.is_empty() {
-                        // Engine-typed receivers (`r.Cancel` on
-                        // `Net::HttpRequest@`): bind the typedb's method
-                        // overloads the same way the member-access path does.
-                        sigs = self
-                            .scope
-                            .callables_method(&cls_name, member.text(self.source));
-                    }
-                    out.extend(sigs);
-                }
+                out.extend(self.method_ref_sigs(object, member));
             }
             _ => {}
         }
@@ -3389,6 +3373,80 @@ impl<'a> Checker<'a> {
             }
         }
         out
+    }
+
+    /// B025: the overload signatures a MEMBER ACCESS denotes when read as a
+    /// method reference (`this.M`, `c.M`, `g.M`, `arr[i].M`, `box.inner.M`).
+    ///
+    /// Empty when the member is not a method of the receiver's class — a
+    /// field read, a virtual property, an unresolvable receiver — which is
+    /// what makes it usable as the "is this a method reference?" predicate
+    /// [`Self::arg_is_unwrapped_method_reference`] needs. B091 needs the
+    /// question and B025 needs the answer, and they must not be able to
+    /// disagree, so there is one resolution and both read it.
+    fn method_ref_sigs(&self, object: &Expr, member: &Ident) -> Vec<OverloadSig> {
+        // Resolve the receiver's class and collect the method's overload
+        // signatures instead of trusting the member access's own type (that
+        // is the method's RETURN type).
+        let Some(cls_name) = self
+            .method_ref_receiver_type(object)
+            .as_ref()
+            .and_then(Self::base_type_name)
+        else {
+            return Vec::new();
+        };
+        let name = member.text(self.source);
+        let sigs = self
+            .scope
+            .lookup_method_overloads_exact_with_inheritance(&cls_name, name);
+        if !sigs.is_empty() {
+            return sigs;
+        }
+        // Engine-typed receivers (`r.Cancel` on `Net::HttpRequest@`): bind
+        // the typedb's method overloads the same way the member-access path
+        // does.
+        self.scope.callables_method(&cls_name, name)
+    }
+
+    /// B091: `arg` is a BARE class-method reference at a funcdef slot —
+    /// `startnew(this.Tick)` where the engine requires
+    /// `startnew(CoroutineFunc(this.Tick))`.
+    ///
+    /// A class method does not implicitly decay to a funcdef handle the way
+    /// a free function does; the funcdef CONSTRUCTOR is the required
+    /// method-to-funcdef conversion. That is not a new claim: it is the
+    /// premise B025 already stated in prose and relied on, measured by the
+    /// same RemoteBuild probe (2026-08-29, OP 1.29.5) that produced the
+    /// b025 fixture's legal/illegal halves — the ctor spellings there
+    /// compile and the engine's word for a bad one is `Can't create
+    /// delegate`. Every consumer of that premise so far read it in the
+    /// direction "a method reference IS callable, so do not reject the
+    /// ctor"; nothing read it in the direction "so a BARE one cannot bind".
+    /// The signature happened to match, so the slot check said yes.
+    ///
+    /// Deliberately keyed on "the member resolves to a METHOD", not on "the
+    /// argument is a member access": a funcdef-typed FIELD read (`h.cb`) is
+    /// a value and binds the slot exactly like a local would.
+    /// [`Self::method_ref_sigs`] draws that line, and it is the same line
+    /// B025 draws when it decides the expression is a callable at all.
+    ///
+    /// A BARE IDENTIFIER naming a method of the enclosing class
+    /// (`startnew(Tick)` inside the class) is left NEUTRAL. It is the same
+    /// language rule, but the identifier arm of
+    /// [`Self::lookup_arg_function_sigs`] merges class methods with
+    /// same-named free functions and namespace functions into one candidate
+    /// list, so rejecting on "a method is among the candidates" would reject
+    /// a legal free-function decay whenever a method shares its name. B097
+    /// blocks the probe that would settle whether the engine even accepts
+    /// that spelling, so the neutral behaviour is chosen by construction
+    /// rather than guessed at — the same call B102 made on const-ness.
+    fn arg_is_unwrapped_method_reference(&self, arg: &Expr) -> bool {
+        match &arg.kind {
+            ExprKind::Member { object, member } => {
+                !self.method_ref_sigs(object, member).is_empty()
+            }
+            _ => false,
+        }
     }
 
     fn func_matches_funcdef(&self, sig: &OverloadSig, fd: &FuncdefSig) -> bool {
@@ -11197,12 +11255,29 @@ void Main() {
         );
     }
 
-    /// B023 generalization (CLAUDE.md): a wrong-signature class METHOD
-    /// reference into the slot is rejection evidence too; the matching
-    /// method binds (CLAUDE.md both polarities).
+    /// B023 generalization (CLAUDE.md), **corrected by B091**: at a funcdef
+    /// slot a bare class-METHOD reference rejects whatever its signature is,
+    /// and the CONSTRUCTOR is what binds.
+    ///
+    /// This test used to assert the opposite second polarity — that
+    /// `this.OnFilter`, a method matching the slot exactly, binds silently —
+    /// and B091 turned it red. That half was never measured. B023's game
+    /// probe (2026-08-29, OP 1.29.5) verified seven REJECT and six legal
+    /// lines and not one of them is a bare method reference: its legal half
+    /// is free functions, ctor-wrapped functions and right-typed variables.
+    /// The assertion generalised the FREE-FUNCTION decay rule onto methods,
+    /// and methods are precisely where that rule does not hold — which
+    /// B025's own prose says, with the same probe behind it. The population
+    /// agrees: across 151 shipped plugins there are 235
+    /// `CoroutineFunc*(receiver.Method)` constructions and zero bare method
+    /// references at any funcdef slot.
+    ///
+    /// Split into two checks rather than counted over one, because a single
+    /// count of 2 over three rows cannot tell "both bare rows rejected" from
+    /// "one bare row and the wrapped row rejected".
     #[test]
     fn external_overload_set_method_reference_both_polarities() {
-        let diags = check_with_typedb(&format!(
+        let bare = check_with_typedb(&format!(
             "{}\n{}",
             B023_FNS,
             r###"
@@ -11221,14 +11296,42 @@ void Main() {
             }
             "###
         ));
-        let rejections = diags
+        let rejections = bare
             .iter()
             .filter(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. }))
             .count();
         assert_eq!(
-            rejections, 1,
-            "wrong-sig method reference must reject, matching method must bind, got {:?}",
-            diags
+            rejections, 2,
+            "a bare method reference cannot bind a funcdef slot whatever its \
+             signature: the constructor is the conversion. got {:?}",
+            bare
+        );
+
+        let wrapped = check_with_typedb(&format!(
+            "{}\n{}",
+            B023_FNS,
+            r###"
+            class Filter {
+                void OnFilter(UI::InputTextCallbackData@ data) { data.SelectAll(); }
+                void Wire() {
+                    string s = "test";
+                    UI::InputText("##1", s, UI::InputTextFlags::None,
+                                  UI::InputTextCallback(this.OnFilter));
+                }
+            }
+            void Render() {
+                Filter f;
+                f.Wire();
+            }
+            "###
+        ));
+        assert!(
+            !wrapped
+                .iter()
+                .any(|d| matches!(d.kind, TypeDiagnosticKind::NoMatchingSignatures { .. })),
+            "the ctor-wrapped matching method IS the legal form and must bind, \
+             got {:?}",
+            wrapped
         );
     }
 

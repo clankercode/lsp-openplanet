@@ -5438,3 +5438,150 @@ fn b102_a_funcdef_handle_of_the_wrong_shape_is_reported() {
          must be rejected like a bare function name: {errors:#?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// B091: a class METHOD does not implicitly decay to a funcdef handle.
+//
+// `startnew(this.Tick)` needs `startnew(CoroutineFunc(this.Tick))` even though
+// `void()` is exactly the signature the slot wants — the funcdef CONSTRUCTOR
+// is the method-to-funcdef conversion. That premise is not new here: B025
+// stated it in prose and relied on it, measured by the RemoteBuild probe of
+// 2026-08-29 (OP 1.29.5) that produced the b025 fixture's legal/illegal
+// halves. Every consumer so far read it in the direction "a method reference
+// IS a callable, so do not reject the constructor"; nothing read it in the
+// direction "so a BARE one cannot bind". The signature matched, and the slot
+// check said yes.
+//
+// FALSE-POSITIVE SURFACE, MEASURED (B060's treatment, since this direction
+// ADDS diagnostics). Release binaries built from master and from this branch
+// were run over all 151 plugins in `~/src/openplanet/my-plugins` plus the five
+// in-repo fixture plugins: 361 errors before, 361 after, byte-identical after
+// discarding one transient parse error that did not reproduce on a re-run.
+//
+// And the zero delta is NOT vacuous, which is the trap B102 called out. The
+// population this rule governs is heavily used across that corpus: 235
+// occurrences of `CoroutineFunc*(receiver.Method)` — the WRAPPED form — and
+// ZERO occurrences of a bare `startnew(receiver.Method)` or
+// `Meta::StartWithRunContext(ctx, receiver.Method)`. Every shipped plugin that
+// hands a method to a coroutine already wraps it. So the sweep says the rule
+// agrees with 151 plugins that compile in-game, rather than that its code path
+// is unreached.
+//
+// WHAT IS DELIBERATELY LEFT NEUTRAL: a bare identifier naming a method of the
+// enclosing class (`startnew(Tick)` inside the class). Same language rule, but
+// the identifier arm of `lookup_arg_function_sigs` merges class methods with
+// same-named free and namespace functions into one candidate list, so
+// rejecting on "a method is among the candidates" would reject a legal
+// free-function decay whenever a method shares its name. B097 blocks the probe
+// that would settle it, so the neutral behaviour is chosen by construction and
+// pinned as a required silence in the wrapped fixture.
+
+/// THE NEGATIVE CONTROL, first on purpose: a rule that rejected every
+/// function-shaped argument, or every member access, passes the sibling
+/// fixture on its own and fails only here.
+///
+/// Asserted over ALL diagnostics rather than errors alone — every declaration
+/// in the fixture is used, so it can hold that line, and a collateral WARNING
+/// from a future change to this path fails here instead of hiding behind an
+/// error-only filter.
+#[test]
+fn b091_wrapped_coroutine_method_references_stay_silent() {
+    let (_ok, stdout, _stderr) = run_issue_repro_typedb("b091-coroutine-method-wrapped");
+    let diagnostics: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains(": error:") || l.contains(": warning:"))
+        .collect();
+    assert!(
+        diagnostics.is_empty(),
+        "every method reference here is wrapped, every free function decays \
+         legally, and every member access that is not a method is a value: \
+         {diagnostics:#?}"
+    );
+}
+
+/// Each bare method reference must be reported. Asserted per LINE rather than
+/// as a count alone, so a failure names the row that regressed instead of
+/// moving a total.
+#[test]
+fn b091_bare_method_references_at_funcdef_slots_are_reported() {
+    let errors = repro_errors("b091-coroutine-method-unwrapped");
+    let joined = errors.join("\n");
+    for (line, what) in [
+        (44, "`this.M` at the plain CoroutineFunc slot"),
+        (45, "`this.M` at the CoroutineFuncUserdata slot"),
+        (46, "the bool userdata family"),
+        (47, "the int64 userdata family"),
+        (48, "the uint64 userdata family"),
+        (49, "the double userdata family"),
+        (50, "the string userdata family"),
+        (51, "Meta::StartWithRunContext, no userdata"),
+        (52, "Meta::StartWithRunContext, ref userdata"),
+        (65, "receiver is a local instance"),
+        (66, "receiver is a workspace global"),
+        (67, "receiver is an indexed array element"),
+        (69, "receiver is a member chain"),
+        (70, "Meta::StartWithRunContext, local receiver"),
+        (72, "a WORKSPACE funcdef parameter, one position over"),
+        (76, "a declaration initializer, engine funcdef"),
+        (77, "a declaration initializer, workspace funcdef"),
+        (78, "an assignment"),
+    ] {
+        assert!(
+            joined.contains(&format!("Main.as:{line}:")),
+            "no diagnostic on line {line} ({what}):\n{joined}"
+        );
+    }
+    // Every bind in the fixture is a listed row, so an extra error means the
+    // rule fired somewhere it should not have. Without this the per-line loop
+    // is satisfied by a rule that rejects everything.
+    //
+    // 20, not 19: line 78 carries the pre-existing `@=` handle/value error
+    // alongside the new conversion error, and line 83 is the pre-existing
+    // wrong-wrapper row pinned by the test below. Master reports exactly those
+    // two lines and nothing else here — measured, 2 errors before, 20 after.
+    assert_eq!(
+        errors.len(),
+        20,
+        "unexpected extra diagnostics beyond the listed rows:\n{joined}"
+    );
+}
+
+/// The declaration and assignment positions must name the SIGNATURE that was
+/// offered, not the member access's own type.
+///
+/// This is the message B076 already gives a mismatched free function at the
+/// same position, and it is the one worth pinning by text: `void()` is what
+/// the author wrote, `CoroutineFunc@` is what the slot needs, and the gap
+/// between them is the whole diagnostic.
+#[test]
+fn b091_the_declaration_position_names_the_offered_signature() {
+    let errors = repro_errors("b091-coroutine-method-unwrapped");
+    for (line, expected) in [
+        (76, "Can't implicitly convert from 'void()' to 'CoroutineFunc@'"),
+        (77, "Can't implicitly convert from 'void()' to 'Job@'"),
+        (78, "Can't implicitly convert from 'void()' to 'CoroutineFunc@'"),
+    ] {
+        assert!(
+            errors
+                .iter()
+                .any(|l| l.contains(&format!("Main.as:{line}:")) && l.contains(expected)),
+            "line {line} must read `{expected}`: {errors:#?}"
+        );
+    }
+}
+
+/// The "or similar (depending on args)" half of the ticket, pinned but NOT
+/// claimed: a correctly constructed delegate of the WRONG family at a userdata
+/// slot was already reported before this ticket — measured on a master build,
+/// not assumed. It is here so the two halves cannot drift apart, and so a
+/// future reader does not credit it to B091.
+#[test]
+fn b091_a_delegate_of_the_wrong_family_was_already_reported() {
+    let errors = repro_errors("b091-coroutine-method-unwrapped");
+    assert!(
+        errors.iter().any(|l| l.contains("Main.as:83:")
+            && l.contains("No matching signatures to 'startnew(CoroutineFunc, Worker)'")),
+        "a `CoroutineFunc` delegate at a `CoroutineFuncUserdata` slot must be \
+         rejected: {errors:#?}"
+    );
+}

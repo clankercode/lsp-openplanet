@@ -1,0 +1,7 @@
+[meta]
+name     = "Issue Repro B091 - unwrapped class methods at coroutine slots"
+author   = "clankercode"
+category = "Tests"
+version  = "0.1.0"
+
+[script]
