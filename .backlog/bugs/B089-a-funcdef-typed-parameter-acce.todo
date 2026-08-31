@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T08:04:42Z"
 depends_on: []
 estimate_hours: 1
 id: B089
 priority: high
+started_at: null
 status: pending
 tags: []
 title: A funcdef-typed parameter accepts a mismatched function at a workspace call site
@@ -24,3 +26,94 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Split out of B076 at the implementing lane's request (lane-b064, 2026-08-31).
+B076 closed FOUR declaration positions; this is a FIFTH position of a
+different class, deliberately left open rather than folded in.
+
+## The gap
+
+B076 made a funcdef handle check the bound function's return type and
+parameters at four **declaration/assignment** positions: local var decl, global
+var decl, class field initializer, and `HandleAssign`. A **workspace call
+site** passing a function name into a funcdef-typed parameter reaches the slot
+check for **neither** return type nor parameters.
+
+## Steps to Reproduce
+
+Two failing cases, already written and `#[ignore]`d in
+`tests/b076_funcdef_return_type.rs` (`position_argument_already_rejects_the_same_mismatch`
+and `position_workspace_call_with_differing_params`). Remove the `#[ignore]`
+to turn this ticket red:
+
+```angelscript
+funcdef void Maker();
+int MakeDistinct() { return 1; }   // return type differs
+void Take(Maker@ cb) {}
+void Use() { Take(MakeDistinct); }  // silent; should error
+```
+
+```angelscript
+funcdef void Maker();
+void MakeIt(int x) {}              // parameters differ
+void Take(Maker@ cb) {}
+void Use() { Take(MakeIt); }        // silent; should error
+```
+
+The second case exists to prove the hole is **positional, not type-kind
+specific** — it is not that return types are unchecked at call sites, it is
+that the slot check is not reached there at all.
+
+## Expected Behavior
+
+Both error. The engine rejects a function whose signature does not match the
+funcdef, wherever the binding happens; the position should not change the
+answer. `Maker@ cb = MakeDistinct;` (declaration position, closed by B076)
+already errors — so the LSP currently gives **two different answers for the
+same binding** depending on where it is written.
+
+## Actual Behavior
+
+Both silent.
+
+## Why this is its own ticket, not B076
+
+Closing it means running **B023's slot check over workspace call sites**, which
+is a scope decision with its own false-positive surface — every workspace call
+with a handle-ish argument goes through the new path, and B060 is the standing
+demonstration that widening the function-shaped rule over-fires (it rejected
+virtual-property reads as function-shaped and killed whole overload sets).
+
+The four positions B076 closed are all **declaration-shaped**: one known
+declared type, one initializer expression. A call site is **overload-shaped**:
+N candidates, and rejecting a candidate is not the same as rejecting the call.
+Different position class, different blast radius, different review.
+
+## Work
+
+Do NOT reuse B060's `arg_is_function_shaped` path without re-reading B060 —
+it is the site that over-fired. `funcdef_types_compatible` /
+`func_matches_funcdef` (`src/typecheck/checker.rs` ~2945-3005) are the
+predicates B076 built and are the right ones to call; the question is purely
+where to call them from on the call path, and how an overload set should
+behave when one candidate matches and another does not.
+
+## Test plan
+
+Un-ignore the two tests above (red first). Then generalise per repo CLAUDE.md —
+the same call-site position across: `T@` vs `const T@`, `&in`/`&out`/`&inout`
+funcdef params, a namespaced funcdef, a funcdef param on a **method** rather
+than a free function, and an overload set where one candidate's funcdef DOES
+match (must stay silent — this is the over-firing gate, and it must live in
+the same fixture as the errors).
+
+**Game-probe before trusting LSP silence.** Both cases above are predicted
+REJECT and the engine is the authority; a REJECT verdict is the trustworthy
+direction on this machine (see B068 — probe each fixture as its OWN
+compilation unit, never batched).
+
+## Related
+
+B076 (the four declaration positions; its `#[ignore]`d tests hold these cases),
+B023 (the function-shaped-arg slot rule this must extend), B060 (that rule
+over-firing — the false-positive precedent to check against).
