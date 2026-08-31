@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T16:03:54Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T16:28:07Z"
 complexity: medium
 created_at: "2026-08-31T15:48:12Z"
 depends_on: []
+duration_minutes: 24.221193846616668
 estimate_hours: 1
 id: B148
 priority: high
 started_at: "2026-08-31T16:03:54Z"
-status: in_progress
+status: done
 tags: []
 title: b067 and b071 corpora are stamped 1.29.5 with build hash 1234ad9e, but the only logged session that date ran 1.29.14 build 6fd4200f — the stamp reads as copied from a sibling corpus, and both are the orphans with no generator
-updated_at: "2026-08-31T16:03:54Z"
+updated_at: "2026-08-31T16:28:07Z"
 ---
 
 b067 and b071 corpora are stamped 1.29.5 with build hash 1234ad9e, but the only logged session that date ran 1.29.14 build 6fd4200f — the stamp reads as copied from a sibling corpus, and both are the orphans with no generator
