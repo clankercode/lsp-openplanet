@@ -42,6 +42,19 @@ pub enum SymbolKind {
     },
     Class {
         parents: Vec<String>,
+        /// B111: the `mixin` modifier. A mixin class's members are COPIED
+        /// into each class that includes it; the mixin is never
+        /// instantiated and never itself owes the interface it names, so
+        /// anything that applies a class-level REQUIREMENT has to be able
+        /// to tell one apart. Flagging a mixin for not implementing its
+        /// interface is a false ERROR on code that compiles — measured
+        /// against two shipped plugins (tm-buffer-time,
+        /// tm-cotd-buffer-time) in B101's corpus sweep.
+        ///
+        /// Threaded verbatim from `ClassDecl::is_mixin`. An interface
+        /// cannot be a mixin, which is why `Interface` carries no such
+        /// flag.
+        is_mixin: bool,
     },
     /// An interface declaration. Its methods are pooled as their own
     /// `I::method` symbols, exactly as a class's members are (B054) — this

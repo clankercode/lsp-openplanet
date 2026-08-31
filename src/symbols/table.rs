@@ -377,7 +377,11 @@ impl SymbolTable {
                     .collect();
                 out.push(Symbol {
                     name: class_name.clone(),
-                    kind: SymbolKind::Class { parents },
+                    kind: SymbolKind::Class {
+                        parents,
+                        // B111: a mixin never owes the interface it names.
+                        is_mixin: cls.is_mixin,
+                    },
                     span: cls.span,
                     file_id,
                     doc: None,
@@ -804,6 +808,90 @@ mod tests {
             }
             other => panic!("I::Count must be a Function symbol, got {:?}", other),
         }
+    }
+
+    // ── B111: the `mixin` modifier on a pooled class ─────────────────
+
+    /// `is_mixin` of the pooled class symbol named `name`.
+    fn pooled_is_mixin(src: &str, name: &str) -> bool {
+        let symbols = extract(src);
+        let sym = symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} must be pooled in `{src}`"));
+        match &sym.kind {
+            SymbolKind::Class { is_mixin, .. } => *is_mixin,
+            other => panic!("{name} must be a Class symbol, got {other:?}"),
+        }
+    }
+
+    /// The modifier the parser records must SURVIVE POOLING — B101 was
+    /// exactly the case where it did not, so this is asserted directly
+    /// rather than only through the consumer.
+    #[test]
+    fn a_mixin_class_is_pooled_as_a_mixin() {
+        assert!(pooled_is_mixin("mixin class X {}", "X"));
+        assert!(!pooled_is_mixin("class X {}", "X"));
+    }
+
+    /// Every spelling the modifier can appear in, and the neighbours it can
+    /// be written beside — `shared` and `abstract` are eaten by the same
+    /// modifier loop and are exactly what could swallow it.
+    #[test]
+    fn the_mixin_modifier_survives_every_spelling() {
+        for (src, want) in [
+            ("mixin class X {}", true),
+            ("shared mixin class X {}", true),
+            ("mixin abstract class X {}", true),
+            ("shared mixin abstract class X {}", true),
+            ("interface I {}\nmixin class X : I {}", true),
+            ("class B {}\ninterface I {}\nmixin class X : B, I {}", true),
+            ("class X {}", false),
+            ("shared class X {}", false),
+            ("abstract class X {}", false),
+            ("shared abstract class X {}", false),
+        ] {
+            assert_eq!(
+                pooled_is_mixin(src, "X"),
+                want,
+                "wrong is_mixin for `{src}`"
+            );
+        }
+    }
+
+    /// Inside a namespace, where the class pools under its long name.
+    #[test]
+    fn a_namespaced_mixin_is_pooled_as_a_mixin() {
+        assert!(pooled_is_mixin("namespace N { mixin class X {} }", "N::X"));
+        assert!(!pooled_is_mixin("namespace N { class X {} }", "N::X"));
+    }
+
+    /// A mixin's MEMBERS are pooled exactly as any class's are — the
+    /// modifier must not change what is stored under it, because the
+    /// including class relies on those members to satisfy its interface.
+    #[test]
+    fn a_mixins_members_are_pooled_like_any_classs() {
+        let symbols = extract("mixin class X { void M() {} int f; }");
+        assert!(
+            symbols.iter().any(|s| s.name == "X::M"),
+            "a mixin's method must still be pooled"
+        );
+        assert!(
+            symbols.iter().any(|s| s.name == "X::f"),
+            "a mixin's field must still be pooled"
+        );
+    }
+
+    /// An interface is never a mixin — the flag lives on `Class` only, so
+    /// this pins that an interface does not accidentally get one.
+    #[test]
+    fn an_interface_is_not_a_class_symbol() {
+        let symbols = extract("interface I {}");
+        let sym = symbols.iter().find(|s| s.name == "I").unwrap();
+        assert!(
+            matches!(sym.kind, SymbolKind::Interface { .. }),
+            "an interface must pool as Interface, not Class"
+        );
     }
 
     // ── B101: the trailing `const` on a pooled method ────────────────
