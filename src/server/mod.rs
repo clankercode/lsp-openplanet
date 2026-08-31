@@ -2692,6 +2692,9 @@ mod tests {
 
     // === B055: rename / references around a STRICT export file ==========
     //
+    // PRIMARY engine ground truth, registered in docs/probes/MANIFEST.tsv;
+    // `just regen-golds` reports it UNCHECKED (manual-re-verify) and
+    // UNSTAMPED, because no Openplanet version was recorded with it.
     // Ground truth, live RemoteBuild probe 2026-08-30 (a strict module
     // `module = "T"` with `exports = ["Exports_Bodies.as"]`):
     //

@@ -1,0 +1,68 @@
+# B129 GOLD MANIFEST - every engine-derived artifact committed to this repo.
+#
+# One row per artifact. `just regen-golds` reads THIS FILE, not a hand-copied
+# list, and `manifest_registration_tests` in tests/b129_gold_manifest.rs fails
+# if docs/probes/ holds a .tsv this file does not name (or vice versa), so a
+# new corpus cannot dodge the manifest by simply not being added to it.
+#
+# COLUMNS
+#   artifact        path from the repo root.
+#   kind            CORPUS   engine verdicts, regenerable by running a probe.
+#                   SIDECAR  derived from a corpus + the probing machine, not
+#                            itself a fresh engine measurement.
+#                   TYPEDB   the shipped Openplanet type dump.
+#                   PRIMARY  hand-transcribed engine ground truth living in a
+#                            source comment, with no output file to overwrite.
+#   question        THE QUESTION THIS ARTIFACT ANSWERS. Not decoration: B118
+#                   and B123 each had a right output with a wrong stated
+#                   reason, and a manifest carrying only artifact+generator
+#                   would regenerate both correctly while preserving the false
+#                   explanation forever. A regen that changes the answer
+#                   without changing the question is drift; one that changes
+#                   the question is a NEW ARTIFACT and wants a new row.
+#   generator       exact command, or NONE (no generator exists - a finding,
+#                   see below), or MANUAL (re-verified by a human).
+#   engine_version  Openplanet version the artifact was last produced against,
+#                   or UNKNOWN. The runner REFUSES to diff across versions
+#                   silently: three engine generations (1.29.5, 1.29.9,
+#                   1.29.14) are cited concurrently in this repo, so an
+#                   unqualified diff reports "changed" for artifacts that
+#                   merely moved generation.
+#   probe_date      date last produced.
+#   rows            expected data rows (excludes the `#` preamble AND the
+#                   column header), or `-`.
+#   diff            STRING     the artifact IS compiler message text, so a
+#                              string diff is exact, not a rendered
+#                              approximation. Not blind - there is no
+#                              structure under it to miss.
+#                   STRUCTURED parsed and compared field-wise.
+#                   MANUAL     no machine diff; the runner reports UNCHECKED.
+#   dependents      source sites that RESTATE this artifact's facts in prose,
+#                   `;`-separated, or `-`. Regenerating an artifact updates
+#                   NONE of these, so the runner lists them UNCHECKED whenever
+#                   the artifact's rows change. B094's "abstract does NOT
+#                   exempt" is stated in four files in four phrasings; that
+#                   fan-out, not staleness of a single file, is why in-source
+#                   tables stay manual.
+#
+# TWO ARTIFACTS HAVE NO GENERATOR. b067 (63 rows) and b071 (8 rows) are fully
+# stamped engine gold with a documented method in their own preambles and no
+# script anywhere in the repo. They are listed as NONE rather than omitted:
+# an artifact that cannot be regenerated is a FINDING, and the runner reports
+# it as one on every run.
+#
+artifact	kind	question	generator	engine_version	probe_date	rows	diff	dependents
+docs/probes/b052-qualified-enum-spellings.tsv	CORPUS	for a qualified TYPE spelling (Scene::ESceneCharVisNotice, UI::VirtualKey), does the game accept it, and if not what does it say?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b052-qualified-enum-spellings.tsv	1.29.5	2026-08-30	1901	STRING	src/typecheck/resolver.rs;src/typecheck/global_scope.rs
+docs/probes/b053-bare-enum-values.tsv	CORPUS	for a bare VALUE name of a named enum (Turbo, GlassSmash), does the game accept it, reject it as unknown, or reject it as ambiguous?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b053-bare-enum-values.tsv	1.29.5	2026-08-30	2989	STRING	src/typecheck/global_scope.rs;src/typedb/index.rs
+docs/probes/b052-scope-provenance.tsv	SIDECAR	for each SCOPE an ACCEPTED b052 row depends on: did it exist on the probing machine, and did the ENGINE supply it or that machine's plugins?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b052-scope-provenance.tsv	UNKNOWN	UNKNOWN	233	STRING	src/typecheck/global_scope.rs
+docs/probes/b067-class-position-scopes.tsv	CORPUS	in TYPE position, is <name> a scope? Paired discriminator: "Namespace 'X' doesn't exist." means NOT a scope; "Identifier 'ZZZNoSuchName' is not a data type in ..." means it IS.	NONE	1.29.5	2026-08-31	63	STRING	-
+docs/probes/b071-enum-conversion.tsv	CORPUS	which enum conversions and enum-member accesses does the live game accept, and what does this LSP report for the same case today?	NONE	1.29.5	2026-08-31	8	STRING	src/typecheck/checker.rs
+docs/probes/b086-export-stub-binding.tsv	CORPUS	given a [script] exports stub and a body, does the engine BIND them, and by what rule? Binding is a RUNTIME property, so the probe CALLS the import.	python3 scripts/probe_export_binding.py --tsv docs/probes/b086-export-stub-binding.tsv	1.29.14	2026-08-31	18	STRING	src/workspace/project.rs
+docs/probes/b096-namespaced-export-binding.tsv	CORPUS	does export-stub binding survive a NAMESPACE, and does the placement of body versus stub change the answer?	python3 scripts/probe_ns_binding.py --tsv docs/probes/b096-namespaced-export-binding.tsv	1.29.14	2026-08-31	6	STRING	src/workspace/project.rs
+docs/probes/b096-shared-modifiers.tsv	CORPUS	do shared interface / enum / funcdef / function compile, at top level and namespaced, in a shared_exports file and a plain one - and is shared semantically live?	python3 scripts/probe_shared_modifiers.py --tsv docs/probes/b096-shared-modifiers.tsv	1.29.14	2026-08-31	24	STRING	src/parser/ast.rs
+docs/probes/b117-member-visibility.tsv	CORPUS	at which ACCESS SITES does the engine allow a private or protected member - own class, derived class, unrelated class, across a file boundary?	python3 scripts/probe_member_visibility.py --tsv docs/probes/b117-member-visibility.tsv	UNKNOWN	2026-09-01	39	STRING	src/server/completion.rs;src/server/symbols.rs;src/server/hover.rs
+docs/probes/b119-const-receiver.tsv	CORPUS	for a CONST receiver, does the engine reject a non-const method that is INHERITED, and does const T@[]@ make its ELEMENTS const?	python3 scripts/probe_const_receiver.py --tsv docs/probes/b119-const-receiver.tsv	UNKNOWN	2026-09-01	23	STRING	src/parser/parser.rs;src/typecheck/checker.rs
+tests/fixtures/typedb	TYPEDB	what types, methods, properties and enums does this Openplanet build expose to a plugin?	just typedb-refresh-apply	1.29.5	2026-02-03	-	STRUCTURED	src/typedb/catalog.rs;src/typedb/core_format.rs;src/typedb/header_format.rs;src/typedb/index.rs
+src/typecheck/interface_impl.rs	PRIMARY	when a class fails to implement an interface method, what does the engine say - and is a same-name-different-SIGNATURE method reported differently from a MISSING one?	MANUAL	1.29.5	2026-08-31	-	MANUAL	src/symbols/scope.rs;src/symbols/table.rs;src/analysis/unused.rs
+src/config.rs	PRIMARY	which preprocessor symbols does a Wine run define - does it define BOTH WINDOWS and the Linux symbol?	MANUAL	UNKNOWN	2026-08-29	-	MANUAL	-
+src/server/mod.rs	PRIMARY	what does the engine do with a strict module declaration, measured live over RemoteBuild?	MANUAL	UNKNOWN	2026-08-30	-	MANUAL	-
