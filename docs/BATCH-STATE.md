@@ -43,11 +43,17 @@ defect — I'll report it, not fold it in. Now the tests."*
 
 **That defect is recorded nowhere.** It is not in the B102 diff, not in a
 ticket, and lane transcripts are not stored as separate files (`teams/` holds
-only 4K of metadata), so it may only exist in the coordinator's own transcript
-sidechain at
-`~/.claude-w/projects/-home-xertrov-src-lsp-openplanet/354de255-785a-4ed3-a7ae-3ab54095075e.jsonl`.
-Worth one grep before assuming it is gone. It was found while threading `elem`
-through the external-call arg-type checks, so it is likely in that area.
+only 4K of metadata), and **the coordinator's transcript was checked and
+holds nothing**: `"isSidechain":true` appears zero times in it, so a
+teammate's internal reasoning was never captured there — only the one-line
+idle notification quoted above. Do not spend time re-searching; it is gone.
+
+What is known about it: it was found while threading `elem` through the
+external-call arg-type checks for B102, the lane called it "confirmed and
+minimal", and it judged the defect separate enough not to fold into B102. That
+area is `check_external_call_arg_types` / `check_external_overload_set` /
+`walk_args_and_check_external_param_types` in `src/typecheck/checker.rs`.
+Re-deriving it from scratch is likely cheaper than hunting for the record.
 
 ## Open tickets (11)
 
