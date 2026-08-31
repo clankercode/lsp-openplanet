@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T16:28:55Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T16:44:22Z"
 complexity: medium
 created_at: "2026-08-31T16:02:56Z"
 depends_on: []
+duration_minutes: 15.455525829966668
 estimate_hours: 1
 id: B151
 priority: high
 started_at: "2026-08-31T16:28:55Z"
-status: in_progress
+status: done
 tags: []
 title: 'The gold manifest treats all engine artifacts alike, but only game-surface ones need retained per-version history: language-semantics corpora want one current version plus a drift report'
-updated_at: "2026-08-31T16:28:55Z"
+updated_at: "2026-08-31T16:44:22Z"
 ---
 
 The gold manifest treats all engine artifacts alike, but only game-surface ones need retained per-version history: language-semantics corpora want one current version plus a drift report
