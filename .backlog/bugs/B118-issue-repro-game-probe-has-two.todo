@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T13:39:48Z"
 depends_on: []
 estimate_hours: 1
 id: B118
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'issue_repro_game.probe has two false-green channels: a build that never ran reads identically to a clean one, and a location-less engine error is invisible to every error bucket'
@@ -12,3 +14,64 @@ updated_at: "2026-08-31T13:39:48Z"
 ---
 
 issue_repro_game.probe has two false-green channels: a build that never ran reads identically to a clean one, and a location-less engine error is invisible to every error bucket
+
+
+## Found by lane-resolver during B096 claim 2, 2026-08-31
+
+**Every probe lane inherits these.** They turn "the build never ran" into ACCEPT
+on questions whose entire subject is acceptance. That is the worst possible
+polarity: the failure mode is indistinguishable from the answer.
+
+Caught only because a fixture with a deliberately WRONG dependency id scored
+ACCEPT. Nothing else in the run looked wrong.
+
+## Channel 1 — `fleet.read_log_window` drops every `[ TRAC]` line
+
+`Loaded plugin '<id>'` is a TRAC line. With TRAC filtered out, `compiled_clean`
+degenerates to "no ERR attributed to me", and **a build that never ran reads
+identically to a clean one.**
+
+## Channel 2 — `fleet.parse_game_diagnostics` only matches located diagnostics
+
+The regex expects `path (line, col) : SEV : msg`. An engine error with no source
+location matches nothing, so it is invisible to `game_errors`, to
+`foreign_errors`, AND to `unattributed_errors` — which means `contended` stays
+False and no guard fires anywhere.
+
+The concrete miss: `Couldn't find required plugin dependency "..."` followed by
+`Loaded plugin` scored a clean ACCEPT.
+
+## Channel 3 — `Loaded plugin` is logged even after `Script compilation failed!`
+
+So the presence of `Loaded plugin` is **necessary but not sufficient**, and any
+guard that treats it as sufficient inherits the same false green. Do not fix
+channel 1 by simply un-filtering TRAC and testing for `Loaded plugin`.
+
+## The fix lane-resolver validated locally, and deliberately did not commit
+
+It modified NO shared harness file, so no other lane in flight was disturbed —
+correct call, and the reason this is a ticket rather than a merge:
+
+1. Unfiltered log window.
+2. **Build-bracketed** `raw_build_errors` — slice the window by the build's own
+   start/end markers rather than by severity.
+3. `BUILD-ERR` kept DISTINCT from `REJECT`. "The engine refused this construct"
+   and "this build did not happen" are different answers and collapsing them is
+   what produced the original defect.
+
+## Test axes
+
+The bug is a MISSING signal, so a red run cannot validate the test by itself —
+see the hazards catalogue on absences. Build positive controls that assert each
+channel can distinguish its pair:
+
+- A build that never ran vs. a build that ran clean. Must differ.
+- A located engine error vs. a location-less one. Both must reach a bucket.
+- A compile failure followed by `Loaded plugin` vs. a real clean load. Must
+  differ.
+- A foreign plugin's error in the same window vs. our own. Attribution must
+  hold, and this is the one that already works — keep it as the control that
+  proves the harness is wired at all.
+
+Each pair must be measured, not asserted. A guard that fires on both halves of a
+pair is as broken as one that fires on neither.
