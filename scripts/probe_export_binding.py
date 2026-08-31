@@ -439,7 +439,9 @@ def load_plugin_payload(fid: str) -> dict:
 
 
 def load_plugin(fid: str) -> dict:
-    return control_mcp("load", id=fid)
+    # B096: through the ROUTER, which since B097 prefers RemoteBuild again
+    # (measured live by `rb_reassembles`, not inferred from request size).
+    return fleet.game_route("load_plugin", load_plugin_payload(fid))
 
 
 def preflight_request_size(fid: str) -> str | None:
@@ -487,7 +489,7 @@ def preflight_request_size(fid: str) -> str | None:
 
 def unload_plugin(fid: str) -> dict:
     try:
-        return control_mcp("unload", id=fid)
+        return fleet.game_route("unload_plugin", {"id": fid})
     except Exception as exc:  # pragma: no cover - network teardown
         return {"error": f"unload_plugin raised: {exc}"}
 
@@ -511,13 +513,31 @@ def run(variants: list[Variant], workdir: Path) -> list[Result]:
     # Recorded rather than fatal, because the probe now goes through
     # tm-control-mcp — but printed every run, so the day it stops being true
     # is visible rather than inferred.
-    blocked = preflight_request_size(EXPORTER_ID)
-    print(
-        f"  RemoteBuild: {'UNUSABLE, routing via tm-control-mcp' if blocked else 'usable'}"
-    )
-    probe = control_mcp("getLogs", id="tm-control-mcp", maxLines=1)
-    if probe.get("error"):
-        sys.exit(f"tm-control-mcp is not answering either: {probe['error']}")
+    # B096: decide on a LIVE round trip, not on request size. B097 fixed the
+    # game-side read loop to drain on `Available()`, so a request larger than
+    # READ_CAP now arrives intact — but READ_CAP itself is unchanged, so the
+    # old size test could never notice and would have routed to a transport
+    # that is currently DOWN.
+    rb_ok = fleet.rb_reassembles()
+    print(f"  RemoteBuild: {'usable (reassembles >READ_CAP)' if rb_ok else 'UNUSABLE'}")
+    if not rb_ok:
+        # Only then does tm-control-mcp matter. Its liveness check used to be
+        # defeated by `control_mcp` reporting a refused connection as an empty
+        # SUCCESS; that is fixed in fleet_dogfood, so this now bails loudly.
+        probe = control_mcp("getLogs", id="tm-control-mcp", maxLines=1)
+        if probe.get("error"):
+            sys.exit(
+                "neither transport is usable: RemoteBuild does not reassemble "
+                f"and tm-control-mcp is not answering: {probe['error']}"
+            )
+        print("  routing via tm-control-mcp")
+    else:
+        # Recorded because it is a real trade, not a free win: tm-control-mcp
+        # returns the compile log INLINE attributed to the build it triggered,
+        # while RemoteBuild leaves us scraping the shared Openplanet.log by
+        # window. `classify` already treats a foreign plugin's error in the
+        # window as not-ours, but the attribution is weaker.
+        print("  NOTE: log attribution is by window, not inline (tm-control-mcp down)")
 
     exporter = write_exporter(workdir, variants)
     results: list[Result] = []

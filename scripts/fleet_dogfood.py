@@ -150,6 +150,38 @@ def rb_request_size(route: str, data: dict) -> int:
     return len(rb_encode(route, data))
 
 
+_RB_REASSEMBLES: bool | None = None
+
+
+def rb_reassembles(force: bool = False) -> bool:
+    """Does RemoteBuild reassemble a request LARGER than one `ReadRaw`?
+
+    B096. This is a LIVE round trip, cached per process, and it replaces an
+    arithmetic inference that B097 invalidated.
+
+    The old test was `request size <= READ_CAP`. That premise is still true —
+    `Net::Socket::ReadRaw` really does return at most 64 bytes per call — but
+    B097 fixed the game-side handler to DRAIN on `Available()` instead of
+    parsing each read, so size no longer decides whether a request arrives.
+    `game_route`'s docstring promised it would "start using RemoteBuild again
+    with no edit" the day the read loop was fixed; it could not, because the
+    quantity it branches on is not the quantity the fix changed.
+
+    The probe is `get_status` padded past READ_CAP, chosen because it has NO
+    side effect. A truncated payload yields the router's empty-route
+    `Not implemented:`; a reassembled one yields `Alive`. Two different texts
+    from two different causes, which is the discrimination the old wire could
+    not make.
+    """
+    global _RB_REASSEMBLES
+    if _RB_REASSEMBLES is not None and not force:
+        return _RB_REASSEMBLES
+    pad = "A" * (READ_CAP * 2)
+    reply = rb_route("get_status", {"p": pad})
+    _RB_REASSEMBLES = reply.get("data") == "Alive" and not reply.get("error")
+    return _RB_REASSEMBLES
+
+
 def rb_can_carry(route: str, data: dict) -> bool:
     """Can RemoteBuild receive this request AT ALL?
 
@@ -165,7 +197,10 @@ def rb_can_carry(route: str, data: dict) -> bool:
     positives and discriminates nothing. No route may be called unimplemented
     on that evidence.
     """
-    return rb_request_size(route, data) <= READ_CAP
+    if rb_request_size(route, data) <= READ_CAP:
+        return True
+    # B096: over the cap is no longer decisive — ask the wire, once.
+    return rb_reassembles()
 
 
 def measure_read_cap(trials: int = 1) -> int | None:
@@ -238,11 +273,30 @@ def control_mcp(action: str, timeout: float = 120.0, **fields) -> dict:
             envelope = json.loads(line)
         except json.JSONDecodeError:
             continue
+        # B096: a TRANSPORT failure is reported by the tool as a top-level
+        # `{"ok": false, "error": ...}` envelope with no `data` at all, and
+        # it exits non-zero. Both were ignored here, so
+        # `Could not reach TM Control MCP ... Connection refused` came back
+        # as `{"error": "", "data": {}}` — SUCCESS-SHAPED. That defeated the
+        # caller that exists precisely to catch it: probe_export_binding's
+        # preflight bails on `probe["error"]`, which was always empty, so a
+        # dead transport preflighted as healthy and every variant then came
+        # back AMBIGUOUS with an empty log window. Measured, not theorised:
+        # rc=4 with that envelope while the plugin was not listening.
+        if envelope.get("ok") is False:
+            return {"error": envelope.get("error") or "tm-control-mcp call failed",
+                    "data": "", "result": {}}
         result = envelope.get("data", {}).get("result", {})
         if result.get("success") is False:
             return {"error": result.get("error") or result.get("code") or "failed",
                     "data": "", "result": result}
         return {"error": "", "data": result, "result": result}
+    # No JSON line at all, or a non-zero exit with nothing parseable: that is
+    # a failure, not an empty success.
+    if proc.returncode != 0:
+        return {"error": f"tm-control-mcp exited {proc.returncode}: "
+                         f"{(proc.stderr or proc.stdout or '').strip()[:200]}",
+                "data": "", "result": {}}
     return {"error": f"no JSON reply from tm-control-mcp: "
                      f"{proc.stdout[-300:]}{proc.stderr[-300:]}", "data": ""}
 

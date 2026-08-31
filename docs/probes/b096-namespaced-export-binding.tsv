@@ -1,0 +1,12 @@
+# B096 claim 1 — does the engine bind an `import ... from` stub to a NAMESPACED body?
+# Probed 2026-08-31 against the live game (Openplanet 1.29.14) by
+# scripts/probe_ns_binding.py, which reuses B086's harness, oracle and controls
+# and swaps only the variant set. 6 variants, 0 ambiguous, both controls correct.
+# Transport: RemoteBuild directly, restored by B097 (tm-control-mcp was down).
+variant	body placement	stub placement	call	verdict
+exact-const-ref-in	plain global	namespace <module>	<module>::Fn	BOUND
+control-no-body	(none)	namespace <module>	<module>::Fn	UNBOUND
+lax-by-value-over-const-ref-in	plain global	namespace <module>	<module>::Fn	UNBOUND
+ns-body-other-namespace	namespace Editor	namespace <module>	<module>::Fn	UNBOUND
+ns-body-module-named	namespace <module>	namespace <module>	<module>::Fn	BOUND
+ns-both-eplusplus-shape	namespace Editor	namespace <module>::Editor	<module>::Editor::Fn	UNBOUND

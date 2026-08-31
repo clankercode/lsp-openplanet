@@ -815,3 +815,35 @@ suite reads without complaint. Two things can make a run indeterminate — a
 value that could not be probed, and an enum whose own type probe was
 indeterminate, which silently shrinks `global_enum_owners`, the column that
 decides the B053 verdict. Both are counted.
+
+## B096 claim 1 — a namespaced body DOES bind, when the namespace is the module's
+
+`b096-namespaced-export-binding.tsv`, 6 variants, 0 ambiguous, both of B086's
+controls correct and B086's `lax-by-value` row reproduced — so the harness was
+re-validated against a known result, not merely trusted.
+
+**The answer: the engine binds by the FULLY-QUALIFIED name, not by simple name.**
+
+    body in `namespace <module>`,  stub in `namespace <module>`   -> BOUND
+    body in `namespace Other`,     stub in `namespace <module>`   -> UNBOUND
+    body plain global,             stub in `namespace <module>`   -> BOUND
+
+So **B087's assumption holds for the shape that ships.** tm-editor-plus-plus
+declares its module as `Editor` AND puts its bodies in `namespace Editor`, so
+the body's namespace *is* the module namespace its export file already wraps
+the stubs in. Those exports are live, not dead.
+
+**The near-miss is worth more than the verdict.** The first run of this probe
+put the body in `namespace Editor` while the module was named something else,
+measured UNBOUND, and would have been reported as "four shipped plugins have 51
+dead exports each". The fixture did not match the plugins it was about. That is
+exactly B086's failure — a fixture asserting engine behaviour, cited as a
+measurement — and it was caught only by reading E++'s actual source to check
+the shape. **A probe's fixture is a claim about the code it generalises to, and
+that claim needs checking too.** Both variants are kept in the corpus so the
+two cases can never be conflated again.
+
+Consequence for the LSP: B087 roots a namespaced body from a namespaced stub by
+SIMPLE name, which over-approximates — it would also root the `UNBOUND` row.
+That is B062's deliberate direction (a missed warning, never a false positive),
+so it stays, but it is now measured rather than assumed.
