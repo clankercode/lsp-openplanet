@@ -993,21 +993,6 @@ impl TypeIndex {
         names
     }
 
-    /// Resolve a source-written type reference to its storage key.
-    ///
-    /// In addition to exact source names, this preserves B052's AngelScript
-    /// ancestor walk: `P::T` can name a globally visible enum `T` when `P` is
-    /// a real source scope. Synthetic Nadeo modules never pass that gate.
-    pub fn source_reference_key(&self, spelling: &str) -> Option<&str> {
-        if let Some(key) = self.source_name_key(spelling) {
-            return Some(key);
-        }
-        let (scope, name) = spelling.rsplit_once("::")?;
-        self.scope_exists(scope)
-            .then(|| self.global_enum_key(name))
-            .flatten()
-    }
-
     /// B053: the globally visible enums that carry the bare value name
     /// `value`, by enum name and sorted. Empty when nothing global carries
     /// it; TWO OR MORE is what the game rejects with `Found multiple

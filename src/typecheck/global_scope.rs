@@ -99,6 +99,21 @@ fn override_key(param_types: &[String]) -> String {
     key
 }
 
+/// B079: proof that a spelling was accepted as an enum by the checker.
+///
+/// The point is that it cannot be constructed any other way — the field is
+/// private, so only [`GlobalScope::accepts_enum`] can mint one. A caller
+/// holding it has necessarily run the acceptance test, so the B070 near-miss —
+/// calling the canonicalizer and reading its answer AS acceptance — stops
+/// being a discipline question and becomes a compile error.
+///
+/// A witness rather than a visibility keyword because this crate has `typedb`,
+/// `typecheck` and `server` as SIBLING top-level modules: `pub(crate)`
+/// restricts nothing between them, so types are the only mechanism that binds
+/// across them.
+#[derive(Debug, Clone, Copy)]
+pub struct Accepted(());
+
 impl<'a> GlobalScope<'a> {
     pub fn new(workspace: &'a SymbolTable, external: Option<&'a TypeIndex>) -> Self {
         Self {
@@ -412,7 +427,7 @@ impl<'a> GlobalScope<'a> {
     /// `has_enum` accepts the module-stripped spelling because the game does
     /// (B052), but type equality is by key, so a resolver that stops at
     /// "it resolves" would leave two spellings of one enum unequal.
-    pub fn canonical_enum_key(&self, qualified: &str) -> Option<String> {
+    fn canonical_enum_key_unchecked(&self, qualified: &str) -> Option<String> {
         if self.is_canonical_enum_key(qualified) {
             return None;
         }
@@ -439,6 +454,32 @@ impl<'a> GlobalScope<'a> {
         // The global-enum index excludes anonymous synthetic keys, so
         // acceptance is still never inferred from a matching tail alone.
         ext.global_enum_key(tail).map(|key| key.to_string())
+    }
+
+    /// Acceptance test for an enum spelling, returning proof on success.
+    ///
+    /// Same answer as [`Self::has_enum`]; the difference is that the `Some`
+    /// carries a token [`Accepted`] which [`Self::canonical_enum_key`]
+    /// demands.
+    pub fn accepts_enum(&self, qualified: &str) -> Option<Accepted> {
+        self.has_enum(qualified).then_some(Accepted(()))
+    }
+
+    /// The canonical index key for an ACCEPTED enum spelling.
+    ///
+    /// Requires an [`Accepted`] witness because this is a CANONICALIZER, not
+    /// an acceptance test, and it is deliberately wider than acceptance: it
+    /// still carries the trailing-suffix match `has_enum` dropped for B007.
+    /// Called on arbitrary text it answers for spellings the game rejects —
+    /// `Plot::Axis` matches the real key `UI::Plot::Axis`, which the game
+    /// refuses with `Namespace 'Plot' doesn't exist.` That is exactly what
+    /// hover did before B070, for 24 corpus spellings.
+    ///
+    /// Note `None` here means "already canonical", NOT "not found": a caller
+    /// reading it as absence loses precisely the inputs that needed no work.
+    /// Ten `Meta::*` spellings regressed that way during B079 Move 1.
+    pub fn canonical_enum_key(&self, qualified: &str, _proof: Accepted) -> Option<String> {
+        self.canonical_enum_key_unchecked(qualified)
     }
 
     /// True when `qualified` is a type's own key, exactly as stored — no
@@ -1269,7 +1310,14 @@ impl<'a> GlobalScope<'a> {
         if self.is_canonical_type_key(name) || self.is_canonical_enum_key(name) {
             return name.to_string();
         }
-        if let Some(key) = self.canonical_enum_key(name) {
+        // Deliberately the UNCHECKED variant. This is a canonicalizer calling
+        // a canonicalizer: its contract is "leave the input unchanged when
+        // nothing matches", so it does not need — and must not require —
+        // acceptance. Gating it on `has_enum` would change type-equality for
+        // the spellings where the two disagree (`Plot::Axis` matching the real
+        // key `UI::Plot::Axis`), which is a behaviour change this ticket has
+        // no business making.
+        if let Some(key) = self.canonical_enum_key_unchecked(name) {
             return key;
         }
         if let Some(resolved) = self.resolve_qualified_suffix(name) {
@@ -2032,7 +2080,7 @@ mod tests {
             !scope.has_enum(anonymous) && !scope.resolves(anonymous),
             "synthesized keys must not resolve from source"
         );
-        assert_eq!(scope.canonical_enum_key(anonymous), None);
+        assert_eq!(scope.canonical_enum_key_unchecked(anonymous), None);
         assert_eq!(
             scope.canonicalize_type_name(anonymous),
             anonymous,
@@ -2065,7 +2113,7 @@ mod tests {
              spellings of one enum compare unequal"
         );
         assert_eq!(
-            scope.canonical_enum_key("CGameCtnBlock::ECardinalDirections"),
+            scope.canonical_enum_key_unchecked("CGameCtnBlock::ECardinalDirections"),
             Some(named.to_string())
         );
     }
@@ -2480,7 +2528,7 @@ mod tests {
                     !scope.resolves(&qualified),
                     "`{qualified}` must not resolve as a type either"
                 );
-                assert_eq!(scope.canonical_enum_key(&qualified), None);
+                assert_eq!(scope.canonical_enum_key_unchecked(&qualified), None);
                 assert_eq!(scope.canonicalize_type_name(&qualified), qualified);
             }
         }
@@ -2520,7 +2568,7 @@ mod tests {
                     !scope.resolves(&qualified),
                     "`{qualified}` must not resolve"
                 );
-                assert_eq!(scope.canonical_enum_key(&qualified), None);
+                assert_eq!(scope.canonical_enum_key_unchecked(&qualified), None);
                 assert_eq!(scope.canonicalize_type_name(&qualified), qualified);
             }
         }
@@ -2583,7 +2631,7 @@ mod tests {
                 );
                 assert!(scope.resolves(&qualified), "`{qualified}` must resolve");
                 assert_eq!(
-                    scope.canonical_enum_key(&qualified),
+                    scope.canonical_enum_key_unchecked(&qualified),
                     Some(tail.to_string()),
                     "`{qualified}` canonicalizes to its global enum key"
                 );
