@@ -3642,6 +3642,41 @@ impl<'a> Checker<'a> {
             return Vec::new();
         };
         let name = member.text(self.source);
+
+        // B150: a BARE `obj.Name` is a PROPERTY READ, not a method
+        // reference, whenever the class also exposes `get_Name`. AngelScript
+        // resolves the member through the virtual property there, which is
+        // exactly B060's rule ("a property read is a value of the getter's
+        // return type") applied at the member-REFERENCE seam rather than
+        // only at the type seam.
+        //
+        // The shipped typedb makes this concrete and asymmetric. The eight
+        // `Mw*` engine containers register BOTH `uint Length() const` and
+        // `uint get_Length() const`; script `array` / `string` / `wstring`
+        // register only the accessor; `vec2`/`vec3`/`vec4`/`quat` register
+        // only the method. Because a real `Length` METHOD exists on the
+        // containers, this function used to hand B023 a callable, so
+        // `Math::Min(uint(20), buf.Length)` — which the game compiles — was
+        // rejected outright as "a function can never bind a non-funcdef
+        // parameter", and B108 then spelled the argument `uint()`. One cause,
+        // two symptoms: the false rejection and the misleading rendering.
+        //
+        // Keyed on the ACCESSOR existing, not on the member's name, so it
+        // covers workspace classes and any future engine type on the same
+        // footing. `vec3::Length` has no `get_Length`, so it stays a method
+        // reference and keeps B108's `float()` spelling. An explicit
+        // `obj.get_Length` cannot enter this arm either — there is no
+        // `get_get_Length` — so the accessor spelling is untouched.
+        let accessor = format!("get_{name}");
+        if !self
+            .scope
+            .lookup_method_overloads_exact_with_inheritance(&cls_name, &accessor)
+            .is_empty()
+            || !self.scope.callables_method(&cls_name, &accessor).is_empty()
+        {
+            return Vec::new();
+        }
+
         let sigs = self
             .scope
             .lookup_method_overloads_exact_with_inheritance(&cls_name, name);
@@ -15875,5 +15910,294 @@ mod b130_engine_const_receiver_tests {
             &idx,
         );
         assert_eq!(fired(&d), 1, "exactly one diagnostic expected: {:?}", d);
+    }
+}
+
+/// B150: a bare member access is a PROPERTY READ, not a method reference,
+/// whenever the receiver's class exposes a `get_<member>` accessor.
+///
+/// The eight `Mw*` engine containers register BOTH `uint Length() const` and
+/// `uint get_Length() const`; the script `array`, `string` and `wstring`
+/// register only `get_Length`; `vec2`/`vec3`/`vec4`/`quat` register only
+/// `Length()`. That asymmetry is in the shipped typedb, not in any loader.
+/// Because a real `Length` method exists on the containers, `method_ref_sigs`
+/// used to hand B023 a callable — so `Math::Min(uint(20), buf.Length)` was
+/// REJECTED outright, and B108 then spelled the argument `uint()`.
+#[cfg(test)]
+mod b150_container_length_property_tests {
+    use super::*;
+    use crate::lexer::tokenize_filtered;
+    use crate::parser::Parser;
+    use crate::symbols::SymbolTable;
+
+    /// Engine containers that ship BOTH the method and the accessor — every
+    /// one of them takes the same rule, so the fix cannot be special-cased
+    /// to the one container Max happened to hit. This is the complete set in
+    /// the shipped dump, enumerated from it rather than guessed: `MwRefBuffer`
+    /// belongs even though `repr.rs`'s `is_array_generic_base` omits it, and
+    /// `MwFastBufferCat` does NOT (it registers neither spelling), even
+    /// though that list includes it.
+    const BOTH_METHOD_AND_ACCESSOR: &[&str] = &[
+        "MwFastBuffer",
+        "MwFastArray",
+        "MwSArray",
+        "MwStridedArray",
+        "MwNodPool",
+        "MwVirtualArray",
+        "MwArrayInPlaceDyn",
+        "MwRefBuffer",
+    ];
+
+    fn typedb() -> crate::typedb::TypeIndex {
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        crate::typedb::TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
+    fn check(src: &str, idx: &crate::typedb::TypeIndex) -> Vec<TypeDiagnostic> {
+        let mut ws = SymbolTable::new();
+        let tokens = tokenize_filtered(src);
+        let mut parser = Parser::new(&tokens, src);
+        let file = parser.parse_file();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, src, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, Some(idx));
+        let mut checker = Checker::new(src, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    /// Every `No matching signatures` message the source produced.
+    fn no_match_texts(diags: &[TypeDiagnostic]) -> Vec<String> {
+        diags
+            .iter()
+            .filter_map(|d| match &d.kind {
+                TypeDiagnosticKind::NoMatchingSignatures { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Sanity: the fixture typedb really does carry the asymmetry this whole
+    /// ticket rests on. Without this, a green run below could mean "the rule
+    /// works" or "the fixture has no `Length` method to trip over", and those
+    /// are not the same result.
+    ///
+    /// Asserted on the CONSTRUCTED `OverloadSig` — its return type and its
+    /// parameter count — not on any rendered string (B136 / B144: a test that
+    /// compares types by their rendering cannot detect a structural defect).
+    /// This is also what rules out the B144-shaped explanation: `uint()` is
+    /// not a mis-parsed type STRING. `funcdef_binding_source_display` builds
+    /// it with `format!("{}({})", sig.return_type, sig.param_types.join(", "))`
+    /// from a sig that is structurally correct — return `uint`, zero params —
+    /// so `parse_type_string` is never on this path at all. The defect was
+    /// upstream of the rendering: the checker decided a property read was a
+    /// callable, and then rendered that decision faithfully.
+    #[test]
+    fn the_fixture_typedb_carries_the_method_and_accessor_asymmetry() {
+        let idx = typedb();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+        for container in BOTH_METHOD_AND_ACCESSOR {
+            let sigs = scope.callables_method(container, "Length");
+            assert_eq!(
+                sigs.len(),
+                1,
+                "{container} must ship exactly one real `Length()` method — \
+                 that is what makes this a bug and not a non-event"
+            );
+            // The exact shape B108 renders as `uint()`: zero params, uint
+            // return. Structural, so a rendering change cannot mask it.
+            assert_eq!(
+                sigs[0].param_types.len(),
+                0,
+                "{container}::Length must be the ZERO-ARG method whose \
+                 signature renders as `uint()`"
+            );
+            assert_eq!(
+                sigs[0].return_type, "uint",
+                "{container}::Length must return uint"
+            );
+            assert!(
+                !scope.callables_method(container, "get_Length").is_empty(),
+                "{container} must ship a `get_Length` accessor"
+            );
+        }
+        assert!(
+            scope.callables_method("array", "Length").is_empty(),
+            "script `array` must have NO `Length` method — it is the control"
+        );
+        assert!(
+            !scope.callables_method("array", "get_Length").is_empty(),
+            "script `array` must ship `get_Length`"
+        );
+        assert!(
+            !scope.callables_method("vec3", "Length").is_empty(),
+            "vec3 must ship a real `Length()` method"
+        );
+        assert!(
+            scope.callables_method("vec3", "get_Length").is_empty(),
+            "vec3 must have NO `get_Length` — it is the negative control that \
+             keeps B108 honest"
+        );
+    }
+
+    /// The ticket's live shape, generalised over every affected container and
+    /// over several call sites: a `.Length` read passed as an argument is a
+    /// uint VALUE, so nothing is rejected and nothing renders as `uint()`.
+    #[test]
+    fn a_container_length_argument_is_a_value_for_every_container_and_call() {
+        let idx = typedb();
+        for container in BOTH_METHOD_AND_ACCESSOR {
+            for call in [
+                "Math::Min(uint(20), b.Length)",
+                "Math::Max(uint(20), b.Length)",
+                "Math::Clamp(uint(1), uint(2), b.Length)",
+            ] {
+                let src = format!("void f({container}<int> b) {{ {call}; }}");
+                let texts = no_match_texts(&check(&src, &idx));
+                assert!(
+                    texts.is_empty(),
+                    "{src}\n  must not reject a uint property read, got {texts:?}"
+                );
+            }
+        }
+    }
+
+    /// The same read in every non-argument position it already worked in —
+    /// the no-regression rows. These were silent before B150 and must stay
+    /// silent, or the fix traded one false positive for another.
+    #[test]
+    fn a_container_length_read_stays_a_value_in_every_other_position() {
+        let idx = typedb();
+        for container in BOTH_METHOD_AND_ACCESSOR {
+            for body in [
+                "uint n = b.Length;",
+                "int n = int(b.Length);",
+                "uint n = uint(b.Length);",
+                "if (b.Length > 3) {}",
+                "for (uint i = 0; i < b.Length; i++) {}",
+                "uint n = b.Length + 1;",
+                "while (b.Length > 0) { break; }",
+            ] {
+                let src = format!("void f({container}<int> b) {{ {body} }}");
+                let texts = no_match_texts(&check(&src, &idx));
+                assert!(texts.is_empty(), "{src}\n  must stay silent, got {texts:?}");
+            }
+        }
+    }
+
+    /// Max's own discriminator, kept as a row: assigning to a `uint` local
+    /// first was already silent, and must remain so. If this ever fires, the
+    /// fix has broken the shape that PROVED the bug.
+    #[test]
+    fn the_assign_to_a_local_discriminator_stays_silent() {
+        let idx = typedb();
+        for container in BOTH_METHOD_AND_ACCESSOR {
+            let src = format!(
+                "void f({container}<int> b) {{ uint total = b.Length; \
+                 Math::Min(uint(20), total); }}"
+            );
+            assert!(
+                no_match_texts(&check(&src, &idx)).is_empty(),
+                "{src}\n  the discriminator must stay silent"
+            );
+        }
+    }
+
+    /// Control: containers that ship ONLY the accessor were never affected,
+    /// and still are not.
+    #[test]
+    fn accessor_only_containers_were_never_affected() {
+        let idx = typedb();
+        for src in [
+            "void f(array<int>@ a) { Math::Min(uint(20), a.Length); }",
+            "void f(string s) { Math::Min(uint(20), s.Length); }",
+            "void f(array<int>@ a) { for (uint i = 0; i < a.Length; i++) {} }",
+        ] {
+            assert!(
+                no_match_texts(&check(src, &idx)).is_empty(),
+                "{src}\n  accessor-only receivers must stay silent"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL, asserted on presence rather than absence: a class
+    /// with a real zero-arg method and NO accessor still yields a method
+    /// reference, still rejects, and still renders B108's `type()` spelling.
+    /// `vec2`/`vec3`/`vec4`/`quat` are shipped data, not a contrivance.
+    #[test]
+    fn a_genuine_zero_arg_method_reference_still_renders_its_signature() {
+        let idx = typedb();
+        for vec_ty in ["vec2", "vec3", "vec4", "quat"] {
+            let src = format!("void f({vec_ty} v) {{ Math::Min(1.0f, v.Length); }}");
+            let texts = no_match_texts(&check(&src, &idx));
+            assert_eq!(
+                texts.len(),
+                1,
+                "{src}\n  a genuine method reference must still be rejected, got {texts:?}"
+            );
+            assert!(
+                texts[0].contains("float()"),
+                "{src}\n  B108's signature spelling must survive, got {texts:?}"
+            );
+        }
+    }
+
+    /// The rule is about the ACCESSOR's existence, not about the typedb: a
+    /// workspace class with both spellings takes the property read, and one
+    /// with only the method still yields a method reference. Stated for a
+    /// non-`Length` name so nothing can be passing on the member's name.
+    #[test]
+    fn the_accessor_rule_is_the_same_for_workspace_classes() {
+        let idx = typedb();
+
+        let both = "class W { uint Size() { return 1; } uint get_Size() { return 2; } } \
+                    void f(W@ w) { Math::Min(uint(1), w.Size); }";
+        assert!(
+            no_match_texts(&check(both, &idx)).is_empty(),
+            "a workspace class exposing `get_Size` makes `w.Size` a property read"
+        );
+
+        let method_only = "class M { uint Size() { return 1; } } \
+                           void f(M@ m) { Math::Min(uint(1), m.Size); }";
+        let texts = no_match_texts(&check(method_only, &idx));
+        assert_eq!(
+            texts.len(),
+            1,
+            "with no accessor, `m.Size` is still a method reference, got {texts:?}"
+        );
+        assert!(
+            texts[0].contains("uint()"),
+            "and still renders its signature, got {texts:?}"
+        );
+    }
+
+    /// The accessor SPELLING is untouched: `b.get_Length` names the accessor
+    /// method itself, and whatever the checker made of that before B150 it
+    /// must still make of it — the rule keys on `get_<member>` existing, and
+    /// `get_get_Length` does not exist, so this arm can never be entered.
+    #[test]
+    fn an_explicit_accessor_reference_is_unchanged() {
+        let idx = typedb();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+        assert!(
+            scope
+                .callables_method("MwFastBuffer", "get_get_Length")
+                .is_empty(),
+            "premise: there is no accessor for the accessor, so the new rule \
+             cannot fire on this spelling"
+        );
+        let src = "void f(MwFastBuffer<int> b) { Math::Min(uint(20), b.get_Length); }";
+        assert!(
+            no_match_texts(&check(src, &idx)).is_empty(),
+            "the explicit accessor spelling keeps its pre-B150 behaviour"
+        );
     }
 }

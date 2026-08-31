@@ -329,10 +329,13 @@ pub const SETTINGS: &[SettingSpec] = &[
     },
     SettingSpec {
         key: "unused",
-        help: "Unused functions/vars/etc: ignore, hint, info, warn (default), or error",
+        help: "Unused functions/vars/etc: ignore, hint, info (default), warn, or error",
         kind: SettingKind::Enum {
             choices: &["ignore", "hint", "info", "warn", "error"],
-            default: "warn",
+            // B090 made `info` the real default; B149 caught this still
+            // declaring `warn`, so the TUI showed `warn (default)` for an
+            // unset key while `check` behaved as `info`.
+            default: "info",
         },
     },
     SettingSpec {
