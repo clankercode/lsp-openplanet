@@ -153,3 +153,36 @@ denominator and the number contradicts it.
 Which argues for writing the expected count down BEFORE the run rather than
 reconciling after. A number predicted in advance can be contradicted; a number
 explained afterwards almost never is.
+
+DESIGN STEER (coordinator, 2026-09-01): prefer a COMMITTED baseline mirroring
+`docs/clippy-baseline.json`, over a live merge-base build. Measure the merge-base
+build cost before committing to it -- if it is cheap the calculus changes -- and
+record which was chosen and why.
+
+The reason that decides it is not cost. A committed baseline makes a removed test
+appear as a DELETION IN THE GIT DIFF, in the change a reviewer is already reading.
+A live merge-base build produces the same finding into a gate log that nobody
+reads twice. lane-enum's disabled test would have been one deleted line sitting
+next to the commit that deleted it.
+
+That also disposes of the obvious objection -- "a lane can re-record the baseline
+and hide a removal" -- and disposes of it better than a refusal guard does:
+re-recording does not conceal the removal, it RENDERS it. The bypass leaves the
+clearest possible trace. Reuse `clippy_delta.py`'s refusal-on-mismatch for the
+staleness axis regardless, since that guard exists and is proven rather than
+designed tonight.
+
+FILE FORMAT IS LOAD-BEARING, not cosmetic. The baseline holds ~3077 names and
+every lane that adds a test touches it, so with four concurrent lanes it is a
+guaranteed conflict surface. Sorted, one name per line, no counts or metadata
+interleaved: a pure sorted list conflicts additively and resolves by union.
+Anything with a trailing total in it turns every concurrent addition into a
+manual adjudication, and that is how this gets reverted in a week for making
+merges painful.
+
+THE GENERAL FORM, carried from the three findings above: every step that produces
+a POPULATION is a place this bug can live, and a set diff has at least three --
+enumerate the binaries, list the tests per binary, read the baseline. Each needs
+its denominator on screen. The one that actually bit was the first, which is also
+the one least likely to be tested, because it reads as plumbing rather than
+logic.
