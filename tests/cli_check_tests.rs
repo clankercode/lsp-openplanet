@@ -1747,6 +1747,213 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
     }
 }
 
+/// B060: a virtual-property READ is a VALUE, not a function reference.
+/// `arg_is_function_shaped` resolved through `lookup_function_overloads`,
+/// whose `get_`/`set_` alternates made `Off` / `c.Amt` / `d.Weight`
+/// function-shaped, so they could not bind `Text::Format`'s `uint`/`float`
+/// slot and the whole overload set died with a bogus `No matching
+/// signatures`. Live in tm-dips-plus-plus (`src/DebugWindow.as:265,269,270`,
+/// `src/MainUI/Donations.as:24`) — the game compiles every one.
+///
+/// The fixture pins BOTH sides of the line, because a fix that silences more
+/// than it should is indistinguishable from a correct one until something
+/// pins the boundary. Counted by set comparison against a master binary
+/// rather than by adding up categories, because the categories overlap and
+/// an earlier version of this comment double-counted them: master reports
+/// 60 errors here, of which 34 are FALSE and this fix removes, and 26 are
+/// genuine and must survive. The branch adds 7 master misses — a funcdef
+/// handle into a `uint` slot from a plain global (`Main.as:118`), a `uint`
+/// property value into a delegate ctor (`126`), three where a workspace
+/// class or interface handle cannot bind a funcdef slot (`149`/`151`/`153`,
+/// the other three of that group master already catches), and a namespaced
+/// funcdef masked by a same-named global class (`Shadowing.as:116`/`117`).
+/// 26 + 7 = the 33 asserted below.
+///
+/// DELIBERATE SCOPE ADDITION, engine-verified — do not "fix" the two
+/// `Main.as:126`/`127` lines by silencing them. Game probe (OP 1.29.5, each
+/// fixture compiled as its own unit, never batched — see B068):
+///   `UintFn@ bad = UintFn(Off);`      ERR `No matching signatures to
+///                                          'UintFn(uint)'`
+///   `Text::Format("%d", handlerVar);` ERR `No matching signatures to
+///                                          'Text::Format(const string, Cb@&)'`
+///   `Text::Format("0x%04x", Off);`    CLEAN  (the FP this ticket removes)
+///   `startnew(Off);`                  ERR `No matching signatures to
+///                                          'startnew(uint)'`
+/// The engine types the property read as `uint` in every message —
+/// `UintFn(uint)`, `startnew(uint)`, never a function type. That IS this
+/// fix's semantics, reached from the other direction. Three of the four are
+/// REJECT-direction, the trustworthy direction on that machine; the lone
+/// ACCEPT is sound because nothing in it resolves through a foreign
+/// namespace (`get_Off` is declared in the fixture, `Text::Format` is core).
+/// The neighbouring case of every silenced line must keep erroring, notably
+/// `startnew(BadHandler)`, a funcdef-handle property of the WRONG signature
+/// sitting right beside the three right-signature ones this fix silences,
+/// and `Variants.as`' four real functions in the same slot shapes its
+/// property reads use.
+#[test]
+fn check_command_issue_repro_b060_property_getter_value_arg() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b060-property-getter-value-arg");
+    let errors: Vec<&str> = stdout.lines().filter(|l| l.contains("error:")).collect();
+    let expected = [
+        "Main.as:106", // B023: free fn into Text::Format's value slot
+        "Main.as:108", // B023: wrong-signature fn into a funcdef slot
+        "Main.as:112", // boundary: WRONG-sig funcdef property into startnew
+        "Main.as:113", // ... and its member form
+        "Main.as:116", // boundary: funcdef handle cannot bind a uint slot
+        "Main.as:117", // ... member form
+        "Main.as:118", // ... plain global form
+        // Scope additions, engine-verified — see the doc comment above.
+        "Main.as:126",    // B060 mirror: a uint property VALUE is not a delegate
+        "Main.as:127",    // ... same through startnew's CoroutineFunc slot
+        "Variants.as:74", // a real function in each slot shape the property
+        "Variants.as:75", // reads above sweep — uint64, const string&in,
+        "Variants.as:76", // a 2-overload set, and a bool-carrying set
+        "Variants.as:77",
+        // A global class shadows the bare name, but inside `Nq` the name
+        // means that namespace's own `void(int)` funcdef — which binds
+        // neither a `uint` slot nor `startnew`'s `void()`. Master misses
+        // both: it tested one name for shadowing and looked up another.
+        "Shadowing.as:116",
+        "Shadowing.as:117",
+        // Over-blocking guard: only a TYPE declaration shadows a TYPE name.
+        // An unrelated namespace VARIABLE of the same name — reached through
+        // the ladder (134-135) and through the tail table (148) — must not
+        // suppress these. Master gets all three right.
+        "Shadowing.as:134",
+        "Shadowing.as:135",
+        "Shadowing.as:148",
+        // Round 7: a CORE ENUM value reached by a relative qualified
+        // spelling (`Plot::Marker` inside `namespace UI`). Restricting the
+        // non-callable test to WORKSPACE classes left it unresolved and
+        // neutral, losing a diagnostic master reports.
+        "Shadowing.as:181",
+        // Round 8: the SAME shadowed values as `SUse` above, in the other
+        // slot. There a value slot must stay silent; here a funcdef slot
+        // must reject, because a value of a plugin class / interface /
+        // enum / typedef is not callable. `names_a_known_non_callable_type`
+        // asked raw `lookup_funcdef`, which falls through the workspace
+        // declaration to the Core funcdef of that name, so the four
+        // collisions looked possibly-callable and their rejections were
+        // lost. The four CONTROLS interleaved with them (207/209/211/213)
+        // are the load-bearing half: they error on master AND on the branch
+        // with or without the fix, which proves this block reaches the
+        // rejection path, so the four silences were lost diagnostics rather
+        // than a fixture that failed to compile.
+        "Shadowing.as:206", // class shadows Core `CoroutineFunc`
+        "Shadowing.as:207", // control: same shape, no collision
+        "Shadowing.as:208", // interface shadows `CoroutineFuncUserdata`
+        "Shadowing.as:209", // control
+        "Shadowing.as:210", // enum shadows `CoroutineFuncUserdataBool`
+        "Shadowing.as:211", // control
+        "Shadowing.as:212", // typedef shadows `CoroutineFuncUserdataInt64`
+        "Shadowing.as:213", // control
+        // A workspace class / interface handle can never bind a funcdef
+        // slot. Master catches only the property spelling, and only through
+        // the `get_` widening this ticket removes; the plain-global
+        // spelling it misses entirely.
+        "Main.as:148",
+        "Main.as:149",
+        "Main.as:150",
+        "Main.as:151",
+        "Main.as:152",
+        "Main.as:153",
+    ];
+    assert_eq!(
+        errors.len(),
+        expected.len(),
+        "expected exactly {} errors; stdout={stdout:?} stderr={stderr:?}",
+        expected.len()
+    );
+    for line in expected {
+        assert!(
+            errors.iter().any(|e| e.contains(line)),
+            "{line} must still be flagged; stdout={stdout:?}"
+        );
+    }
+    // Main.as: free-function getters (70-72), class getters through a handle
+    // (75-76), namespace-qualified and namespaced-class getters (80-81), a
+    // non-Format overload set (84-85), right-signature funcdef-handle
+    // properties into a funcdef slot (90-92), unchanged B023 legal forms
+    // (96-101). Variants.as: the value-type / receiver-form / getter-flavour
+    // sweep (36-37, 57-62, 65-71).
+    for line in [
+        "Main.as:64",
+        "Main.as:65",
+        "Main.as:66",
+        "Main.as:67",
+        "Main.as:70",
+        "Main.as:71",
+        "Main.as:72",
+        "Main.as:75",
+        "Main.as:76",
+        "Main.as:80",
+        "Main.as:81",
+        "Main.as:84",
+        "Main.as:85",
+        "Main.as:90",
+        "Main.as:91",
+        "Main.as:92",
+        "Main.as:96",
+        "Main.as:97",
+        "Main.as:99",
+        "Main.as:101",
+        "Variants.as:36",
+        "Variants.as:37",
+        "Variants.as:57",
+        "Variants.as:58",
+        "Variants.as:59",
+        "Variants.as:60",
+        "Variants.as:61",
+        "Variants.as:62",
+        "Variants.as:65",
+        "Variants.as:66",
+        "Variants.as:67",
+        "Variants.as:68",
+        "Variants.as:69",
+        "Variants.as:70",
+        "Variants.as:71",
+        // Shadowing.as: plugin declarations named after Core funcdefs —
+        // class, interface, enum, typedef, and a namespaced class written
+        // bare (66-67) — each read as a property and as a plain global, and
+        // each paired with a non-colliding control of the same shape so the
+        // gate distinguishes "shadowing works" from "this shape is never
+        // function-shaped". Master errors on 9 of these 18.
+        "Shadowing.as:66",
+        "Shadowing.as:67",
+        "Shadowing.as:73",
+        "Shadowing.as:74",
+        "Shadowing.as:75",
+        "Shadowing.as:76",
+        "Shadowing.as:78",
+        "Shadowing.as:79",
+        "Shadowing.as:80",
+        "Shadowing.as:81",
+        "Shadowing.as:83",
+        "Shadowing.as:84",
+        "Shadowing.as:85",
+        "Shadowing.as:86",
+        "Shadowing.as:88",
+        "Shadowing.as:89",
+        "Shadowing.as:90",
+        "Shadowing.as:91",
+        // Tail-visible shadowing: `Dep::CoroutineFuncUserdataString` is
+        // declared in ShadowingDep.as and written here unqualified, so the
+        // predicate has to consult the tail table as the resolver does.
+        "Shadowing.as:100",
+        "Shadowing.as:101",
+        // The other edge of the qualified-spelling rule: the written
+        // `UI::InputTextCallback` is the CORE funcdef and must beat the
+        // unrelated nested `Qz::UI::InputTextCallback`. Testing only
+        // WORKSPACE declarations for the written name invents an error here.
+        "Shadowing.as:168",
+    ] {
+        assert!(
+            !errors.iter().any(|e| e.contains(line)),
+            "property read / legal callable on {line} must stay silent; stdout={stdout:?}"
+        );
+    }
+}
+
 /// GH #49: AngelScript has no implicit nat3 -> int3 conversion — the game
 /// rejects both the implicit init and the int3(nat3) constructor form.
 /// Ground truth quoted in the issue (tm-editor-plus-plus). Fixed — must flag.

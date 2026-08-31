@@ -2581,15 +2581,108 @@ impl<'a> Checker<'a> {
         if !sigs.is_empty() {
             return !sigs.iter().any(|sig| self.func_matches_funcdef(sig, fd));
         }
-        // A funcdef-typed value (variable, ctor result) with no resolvable
-        // overloads compares by its own funcdef signature.
-        if let TypeRepr::Funcdef(n) = Self::peel_const_handle(arg_ty) {
-            if let Some(arg_fd) = self.scope.lookup_funcdef(n) {
-                return !self.func_matches_funcdef(&Self::funcdef_overload_sig(&arg_fd), fd);
-            }
+        // A funcdef-typed value (variable, property, ctor result) with no
+        // resolvable overloads compares by its own funcdef signature.
+        if let Some(arg_fd) = self.arg_value_funcdef(arg_ty) {
+            return !self.func_matches_funcdef(&Self::funcdef_overload_sig(&arg_fd), fd);
+        }
+        // A handle to a class or interface THIS WORKSPACE declares is
+        // provably not a callable, so it cannot bind a funcdef slot.
+        // `is_clearly_not_a_function` leaves every `Named` neutral to
+        // protect GH #47's guard for shapes the checker cannot see — but a
+        // type declared right here is not one of those. Without this,
+        // `startnew(SomeClassProperty)` goes silent: master caught it only
+        // through the `get_` widening B060 removes, and never caught the
+        // plain-global spelling at all.
+        if self.arg_is_known_non_callable(arg_ty) {
+            return true;
         }
         !matches!(Self::peel_const_handle(arg_ty), TypeRepr::Null)
             && self.is_clearly_not_a_function(arg_ty)
+    }
+
+    /// True when `arg_ty` names a type the checker KNOWS and that type is
+    /// not a funcdef — a class, interface or enum, from the workspace or the
+    /// typedb. Such a value can never be a function reference.
+    ///
+    /// Knowing the type is the whole point: `is_clearly_not_a_function`
+    /// leaves every `Named` neutral to protect GH #47's guard for shapes the
+    /// checker cannot see, and a name it can resolve is not one of those.
+    /// Restricting this to WORKSPACE classes (round 5) left a Core enum
+    /// property — `Plot::Marker` inside `namespace UI` — unresolved and
+    /// therefore neutral, losing a diagnostic master reports.
+    fn arg_is_known_non_callable(&self, arg_ty: &TypeRepr) -> bool {
+        let TypeRepr::Named(n) = Self::peel_const_handle(arg_ty) else {
+            return false;
+        };
+        let candidate = self.resolve_value_type_name(n);
+        self.scope.names_a_known_non_callable_type(&candidate)
+    }
+
+    /// The funcdef a VALUE-typed arg denotes, if any.
+    ///
+    /// `Cb@` reaches the checker as `Funcdef(Cb)` down the member path but
+    /// as `Named(Cb)` down the global/property path, and the two mean the
+    /// same thing. B060 made this matter: once the `X` -> `get_X` widening
+    /// stopped standing in for a property read, `startnew(BadHandler)`
+    /// (`BadCb@ get_BadHandler()`) had nothing left to compare against and
+    /// went silent on the `Named` side while still erroring on the member
+    /// side. Recognising both keeps the two paths on one answer.
+    fn arg_value_funcdef(&self, arg_ty: &TypeRepr) -> Option<FuncdefSig> {
+        match Self::peel_const_handle(arg_ty) {
+            TypeRepr::Funcdef(n) => self.scope.lookup_funcdef(n),
+            // GH #38 shadowing: `lookup_funcdef` falls through to the typedb
+            // when the workspace symbol of that name is not a funcdef, so a
+            // plugin class / interface / enum / `typedef` named after a Core
+            // funcdef would resolve to the ENGINE funcdef and its values
+            // would be rejected as function-shaped at an ordinary value
+            // slot. The plugin's own declaration wins.
+            //
+            // The ladder matters as much as the predicate: a value's type
+            // text is stored as WRITTEN, so a class declared
+            // `Nz::CoroutineFunc` reaches here as a bare `CoroutineFunc`
+            // from inside `namespace Nz` and an exact-name guard misses it.
+            TypeRepr::Named(n) => {
+                let candidate = self.resolve_value_type_name(n);
+                if self.scope.workspace_shadows_funcdef(&candidate) {
+                    return None;
+                }
+                self.scope.lookup_funcdef(&candidate)
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a value's written type name in lexical order — innermost
+    /// enclosing namespace outwards, then the name as written — and return
+    /// the ONE candidate the rest of the decision uses.
+    ///
+    /// Resolving once matters: testing `Ns::X` for shadowing and then
+    /// looking `X` up as a funcdef answers two questions about two different
+    /// declarations, which is how a global `class CoroutineFunc` could mask
+    /// a legitimate `Ns::CoroutineFunc` funcdef (review, round 3).
+    fn resolve_value_type_name(&self, name: &str) -> String {
+        // A QUALIFIED spelling resolves as written before any namespace
+        // fallback — `B::X` inside `namespace A` means `B::X`, and only then
+        // the relative `A::B::X`. This mirrors `resolver.rs`, and getting it
+        // backwards cuts both ways: omitting it let a same-tail `A::B::X`
+        // funcdef stand in for the global `B::X` class and swallow a real
+        // diagnostic (round 5), while testing only WORKSPACE declarations
+        // let a nested `A::UI::InputTextCallback` stand in for the CORE
+        // `UI::InputTextCallback` and invent one (round 6). The written name
+        // wins if it denotes a type the checker knows AT ALL — typedb
+        // included. A BARE name still takes the ladder first, because there
+        // the inner scope legitimately shadows the outer one.
+        if name.contains("::") && self.scope.names_a_known_type(name) {
+            return name.to_string();
+        }
+        for depth in (1..=self.namespace_stack.len()).rev() {
+            let candidate = format!("{}::{}", self.namespace_stack[..depth].join("::"), name);
+            if self.scope.names_a_known_type(&candidate) {
+                return candidate;
+            }
+        }
+        name.to_string()
     }
 
     /// A funcdef signature as an `OverloadSig` for the shared bind test.
@@ -2615,7 +2708,7 @@ impl<'a> Checker<'a> {
         if !self.lookup_arg_function_sigs(arg, arg_ty).is_empty() {
             return true;
         }
-        matches!(Self::peel_const_handle(arg_ty), TypeRepr::Funcdef(_))
+        self.arg_value_funcdef(arg_ty).is_some()
     }
 
     fn arg_binds_to_funcdef(&self, fd: &FuncdefSig, arg: &Expr, arg_ty: &TypeRepr) -> bool {
@@ -2732,6 +2825,16 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The function signatures `arg` can denote when read as a FUNCTION
+    /// REFERENCE.
+    ///
+    /// B060: every lookup here is EXACT — the `X` -> `get_X` / `set_X`
+    /// virtual-property widening must not apply. A property read (`Off`,
+    /// `c.Amt`, `Ns::Slot`) is a value of the accessor's RETURN type, not a
+    /// reference to the accessor; widening made it function-shaped, so it
+    /// could not bind a `uint`/`float` parameter and killed the whole
+    /// overload set (`Text::Format("0x%04x", Off)`). Writing `get_Off`
+    /// still resolves, because that IS the function's name.
     fn lookup_arg_function_sigs(&self, arg: &Expr, arg_ty: &TypeRepr) -> Vec<OverloadSig> {
         let mut out = Vec::new();
         match &arg.kind {
@@ -2755,21 +2858,21 @@ impl<'a> Checker<'a> {
                 if let Some(cls) = self.current_class() {
                     out.extend(
                         self.scope
-                            .lookup_method_overloads_with_inheritance(&cls.name, name),
+                            .lookup_method_overloads_exact_with_inheritance(&cls.name, name),
                     );
                 }
-                out.extend(self.scope.lookup_function_overloads(name));
+                out.extend(self.scope.lookup_function_overloads_exact(name));
                 for depth in (1..=self.namespace_stack.len()).rev() {
                     let ns = self.namespace_stack[..depth].join("::");
                     out.extend(
                         self.scope
-                            .lookup_function_overloads(&format!("{ns}::{name}")),
+                            .lookup_function_overloads_exact(&format!("{ns}::{name}")),
                     );
                 }
             }
             ExprKind::NamespaceAccess { path } => {
                 let qual = path.to_string(self.source);
-                out.extend(self.scope.lookup_function_overloads(&qual));
+                out.extend(self.scope.lookup_function_overloads_exact(&qual));
             }
             ExprKind::Member { object, member } => {
                 // B025: a method reference (`this.M`, `c.M`, `g.M`,
@@ -2784,7 +2887,7 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .and_then(Self::base_type_name)
                 {
-                    let mut sigs = self.scope.lookup_method_overloads_with_inheritance(
+                    let mut sigs = self.scope.lookup_method_overloads_exact_with_inheritance(
                         &cls_name,
                         member.text(self.source),
                     );
@@ -2803,7 +2906,7 @@ impl<'a> Checker<'a> {
         }
         if let TypeRepr::Funcdef(n) = Self::peel_const_handle(arg_ty) {
             if out.is_empty() {
-                out.extend(self.scope.lookup_function_overloads(n));
+                out.extend(self.scope.lookup_function_overloads_exact(n));
             }
         }
         out

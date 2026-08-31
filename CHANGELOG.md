@@ -194,6 +194,25 @@ GitHub Release body to match this section (gh release edit).
   index and its stamps are one value published in one step. `check --json`'s
   `typedb` block and the server's startup log are fixed by the same change.
 
+- **Reading a virtual property no longer breaks overload resolution (B060)** —
+  `Text::Format("0x%04x", Off)`, where `uint get_Off()` is a virtual-property
+  getter, was a false `No matching signatures to 'Text::Format(const string,
+  uint)'`. The B023 rule that a function-shaped argument cannot bind a
+  non-funcdef parameter asked a lookup that widens `X` to `get_X` / `set_X`,
+  so every property READ was classified as a reference to its own accessor.
+  A local or a `const` of the same type was accepted right beside it, which is
+  why the message read as a missing overload rather than as a property bug.
+
+  Property reads now bind value parameters in every form — bare identifier,
+  `obj.P`, `Ns::P`, inherited and `const` accessors, nested members, indexed
+  and factory-call receivers — while `get_X` written out is still a function
+  and still binds a funcdef slot, so B023 keeps rejecting genuine slot misuse.
+  A property whose value IS a funcdef handle now binds by its own signature
+  instead of its accessor's. On the repo's own fixtures this clears 14 false
+  errors in tm-editor-plus-plus (`Text::Format`, `Dev::Write`,
+  `UI::BeginTabItem`) and the 4 reported in tm-dips-plus-plus, with no
+  diagnostic added anywhere.
+
 - **Openplanet-injected engine methods no longer report as missing (B059)** —
   `player.GetCurrentEntityID()` on a `CSmPlayer@`, and
   `net.GetManialinkPages()` on the network types, compile in the game but were

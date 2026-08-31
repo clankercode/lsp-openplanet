@@ -1391,34 +1391,48 @@ impl<'a> GlobalScope<'a> {
     /// their signature data isn't wired through to the checker yet.
     pub fn lookup_function_overloads(&self, qualified: &str) -> Vec<OverloadSig> {
         let mut out = Vec::new();
-        let alt_names = workspace_function_property_candidates(qualified);
-        for name in &alt_names {
-            for s in self.lookup_workspace(name) {
-                if let SymbolKind::Function {
-                    return_type,
-                    params,
-                    min_args,
-                    ..
-                } = &s.kind
-                {
-                    out.push(OverloadSig {
-                        param_names: params.iter().map(|(name, _)| Some(name.clone())).collect(),
-                        param_types: params.iter().map(|(_, ty_text)| ty_text.clone()).collect(),
-                        // B027: workspace param text carries the source
-                        // `&out` decoration (the `Reference` type span
-                        // covers it) — derive the flag from it.
-                        param_out: params
-                            .iter()
-                            .map(|(_, ty_text)| ty_text.contains("&out"))
-                            .collect(),
-                        param_modes: params
-                            .iter()
-                            .map(|(_, ty_text)| param_mode_from_text(ty_text))
-                            .collect(),
-                        min_args: *min_args,
-                        return_type: return_type.clone(),
-                    });
-                }
+        for name in &workspace_function_property_candidates(qualified) {
+            out.extend(self.lookup_function_overloads_exact(name));
+        }
+        out
+    }
+
+    /// B060: [`Self::lookup_function_overloads`] WITHOUT the virtual-property
+    /// alternates — only functions literally named `qualified`.
+    ///
+    /// The `X` -> `get_X` / `set_X` widening is what makes a property READ
+    /// resolve to a value; a caller asking "is this expression a function
+    /// reference?" must not get that widening, or `Text::Format("%d", Off)`
+    /// classifies the `uint` property read `Off` as function-shaped and
+    /// every non-funcdef overload is rejected. `get_X` is a function when
+    /// WRITTEN `get_X`; `X` is a value.
+    pub fn lookup_function_overloads_exact(&self, qualified: &str) -> Vec<OverloadSig> {
+        let mut out = Vec::new();
+        for s in self.lookup_workspace(qualified) {
+            if let SymbolKind::Function {
+                return_type,
+                params,
+                min_args,
+                ..
+            } = &s.kind
+            {
+                out.push(OverloadSig {
+                    param_names: params.iter().map(|(name, _)| Some(name.clone())).collect(),
+                    param_types: params.iter().map(|(_, ty_text)| ty_text.clone()).collect(),
+                    // B027: workspace param text carries the source
+                    // `&out` decoration (the `Reference` type span
+                    // covers it) — derive the flag from it.
+                    param_out: params
+                        .iter()
+                        .map(|(_, ty_text)| ty_text.contains("&out"))
+                        .collect(),
+                    param_modes: params
+                        .iter()
+                        .map(|(_, ty_text)| param_mode_from_text(ty_text))
+                        .collect(),
+                    min_args: *min_args,
+                    return_type: return_type.clone(),
+                });
             }
         }
         out
@@ -1485,6 +1499,94 @@ impl<'a> GlobalScope<'a> {
         Vec::new()
     }
 
+    /// True when the checker knows `qualified` as a TYPE at all — a
+    /// workspace class / interface / enum / funcdef, or a typedb type, enum
+    /// or funcdef.
+    ///
+    /// Deliberately spans all three of [`Self::has_type`],
+    /// [`Self::has_enum`] and [`Self::workspace_declares_type`], because
+    /// each omits something the others carry: `has_type` excludes enums
+    /// entirely, `has_enum` carries the asymmetric Nadeo/Core source-name
+    /// rules that make a Core `UI::Plot::Marker` resolvable, and
+    /// `workspace_declares_type` carries workspace enums. Asking only one of
+    /// them is how a Core enum came to be treated as an unknown shape.
+    pub fn names_a_known_type(&self, qualified: &str) -> bool {
+        self.has_type(qualified)
+            || self.has_enum(qualified)
+            || self.workspace_declares_type(qualified)
+    }
+
+    /// True when `qualified` names a type the checker knows AND that type is
+    /// not a funcdef — a value of it can never be a function reference.
+    /// `false` for a name the checker does not know, which keeps GH #47's
+    /// guard for shapes it cannot see.
+    pub fn names_a_known_non_callable_type(&self, qualified: &str) -> bool {
+        if !self.names_a_known_type(qualified) {
+            return false;
+        }
+        // `lookup_funcdef` alone is not enough, and the reason is the very
+        // shadowing this ticket already fixed once: it falls through a
+        // workspace CLASS of that name to the Core funcdef, so a plugin's
+        // `class CoroutineFunc` read as a property looked "possibly
+        // callable" and its rejection was lost. The workspace declaration
+        // wins here exactly as it does everywhere else.
+        self.workspace_shadows_funcdef(qualified) || self.lookup_funcdef(qualified).is_none()
+    }
+
+    /// GH #38 shadowing, funcdef edition: true when the workspace declares
+    /// `name` as something that is NOT a real funcdef.
+    ///
+    /// [`Self::lookup_funcdef`] walks workspace symbols but only *returns*
+    /// on a real funcdef, then falls through to the typedb — so a plugin
+    /// class, interface, enum or `typedef` named after a Core funcdef
+    /// (`CoroutineFunc`, `CoroutineFuncUserdataBool`, ...) silently resolves
+    /// to the ENGINE funcdef. Callers deciding "is this value a callable?"
+    /// must ask this first: the plugin's own declaration wins, and a
+    /// `typedef` counts as shadowing even though it reuses
+    /// `SymbolKind::Funcdef`, because it is a type alias rather than a
+    /// callable signature.
+    /// The tail half matters as much as the exact one: the resolver already
+    /// finds an unqualified name through [`Self::lookup_workspace_tail`]
+    /// (see `resolve_unqualified`), so `namespace Dep { class CoroutineFunc }`
+    /// declared in another file shadows a bare `CoroutineFunc` too. Tail hits
+    /// that are really CLASS MEMBERS are skipped, exactly as
+    /// [`Self::has_global_ident`] skips them (GH #30).
+    pub fn workspace_shadows_funcdef(&self, name: &str) -> bool {
+        self.any_workspace_symbol(name, |kind| {
+            declares_type(kind)
+                && !matches!(
+                    kind,
+                    SymbolKind::Funcdef {
+                        is_typedef: false,
+                        ..
+                    }
+                )
+        })
+    }
+
+    /// True when the workspace declares `name` as a TYPE, by exact name or
+    /// through the tail table. The candidate test behind
+    /// [`Self::workspace_shadows_funcdef`], split out because resolving a
+    /// value's written type name needs the same "is this a type at all?"
+    /// question without the funcdef half.
+    pub fn workspace_declares_type(&self, name: &str) -> bool {
+        self.any_workspace_symbol(name, declares_type)
+    }
+
+    /// Exact-then-tail symbol scan for `name`, skipping tail hits that are
+    /// really CLASS MEMBERS exactly as [`Self::has_global_ident`] skips them
+    /// (GH #30).
+    fn any_workspace_symbol(&self, name: &str, pred: impl Fn(&SymbolKind) -> bool) -> bool {
+        if self.lookup_workspace(name).iter().any(|s| pred(&s.kind)) {
+            return true;
+        }
+        let suffix = format!("::{}", name);
+        self.lookup_workspace_tail(name)
+            .iter()
+            .filter(|s| !self.tail_prefix_is_class_member(&s.name, &suffix))
+            .any(|s| pred(&s.kind))
+    }
+
     /// True when `name` names a workspace interface symbol. The interface
     /// counterpart of [`Self::is_workspace_class`]; kept separate so
     /// callers that mean "a class, specifically" keep meaning that.
@@ -1513,6 +1615,32 @@ impl<'a> GlobalScope<'a> {
         class_name: &str,
         method: &str,
     ) -> Vec<OverloadSig> {
+        self.method_overloads_walk(class_name, method, Self::lookup_function_overloads)
+    }
+
+    /// B060: [`Self::lookup_method_overloads_with_inheritance`] WITHOUT the
+    /// virtual-property alternates — `C::Amt` no longer resolves through
+    /// `C::get_Amt`, so a property read on a receiver (`c.Amt`) is a value
+    /// rather than a method reference. See
+    /// [`Self::lookup_function_overloads_exact`].
+    pub fn lookup_method_overloads_exact_with_inheritance(
+        &self,
+        class_name: &str,
+        method: &str,
+    ) -> Vec<OverloadSig> {
+        self.method_overloads_walk(class_name, method, Self::lookup_function_overloads_exact)
+    }
+
+    /// Shared inheritance walk behind the two method-overload lookups: the
+    /// class itself first, then parents breadth-first, normalized in the
+    /// child's namespace context and cycle-guarded. `resolve` decides
+    /// whether `Class::method` widens to its `get_`/`set_` accessors.
+    fn method_overloads_walk(
+        &self,
+        class_name: &str,
+        method: &str,
+        resolve: fn(&Self, &str) -> Vec<OverloadSig>,
+    ) -> Vec<OverloadSig> {
         let mut out: Vec<OverloadSig> = Vec::new();
         let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1523,7 +1651,7 @@ impl<'a> GlobalScope<'a> {
                 continue;
             }
             let qualified = format!("{}::{}", name, method);
-            for sig in self.lookup_function_overloads(&qualified) {
+            for sig in resolve(self, &qualified) {
                 if claimed.insert(override_key(&sig.param_types)) {
                     out.push(sig);
                 }
@@ -1813,6 +1941,21 @@ fn workspace_function_property_candidates(name: &str) -> [String; 3] {
         qualified_virtual_name(name, "get_"),
         qualified_virtual_name(name, "set_"),
     ]
+}
+
+/// True when a symbol DECLARES A TYPE — the only kind of declaration that
+/// can shadow a type name. A variable or function that happens to share the
+/// name is a VALUE: `namespace Inner { int MaskedCb = 3; }` does not stop
+/// `MaskedCb` naming the global funcdef, and treating it as if it did
+/// silently swallows the diagnostics that depend on knowing the type.
+fn declares_type(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Class { .. }
+            | SymbolKind::Interface { .. }
+            | SymbolKind::Enum { .. }
+            | SymbolKind::Funcdef { .. }
+    )
 }
 
 fn qualified_virtual_name(name: &str, prefix: &str) -> String {
