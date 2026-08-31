@@ -340,6 +340,25 @@ pub struct VarDeclStmt {
     pub attributes: Vec<Attribute>,
     pub type_expr: TypeExpr,
     pub declarators: Vec<VarDeclarator>,
+    /// B115: the `private` modifier on a CLASS FIELD. The same node models a
+    /// local and a file-scope variable, and neither can carry visibility, so
+    /// those two spellings are always `false`: only the `ClassMember::Field`
+    /// path stamps this. `private` and `protected` are mutually exclusive —
+    /// the parser takes the first keyword it sees and never sets both.
+    ///
+    /// Before B115 the keyword was eaten by `parse_class_member` and dropped,
+    /// so the fact did not exist above the parser at all and no consumer could
+    /// filter on it. Methods already carried it (`FunctionDecl::is_private`);
+    /// fields did not. This is one layer BELOW B114, which is about the symbol
+    /// table failing to pool a modifier the parser did record.
+    pub is_private: bool,
+    /// B115: the `protected` modifier on a CLASS FIELD. See [`Self::is_private`]
+    /// for why locals and globals never set it. Kept as a SEPARATE flag rather
+    /// than folded into `is_private`, because the two keywords differ exactly
+    /// at a derived-class access site: `protected` is reachable there and
+    /// `private` is not. A consumer that only ever saw "not public" could not
+    /// make that distinction.
+    pub is_protected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -425,6 +444,16 @@ pub struct PropertyDecl {
     pub name: Ident,
     pub getter: Option<FunctionBody>,
     pub setter: Option<(Ident, FunctionBody)>,
+    /// B115: the `private` modifier on a class PROPERTY. A property is the
+    /// other state-shaped class member, and `private int p { get {...} }`
+    /// dropped its keyword the same way a plain field did — measured, not
+    /// assumed: the probe that established the field baseline parsed that
+    /// spelling with zero errors and a `PropertyDecl` carrying no visibility.
+    /// A top-level property (`Item::Property`) is always `false`.
+    pub is_private: bool,
+    /// B115: the `protected` modifier on a class PROPERTY. See
+    /// [`VarDeclStmt::is_protected`] for why this is a separate flag.
+    pub is_protected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
