@@ -28,3 +28,84 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+## CANCELLED AS INVALID, 2026-08-31 — the defect does not exist
+
+Filed by me (coordinator) on lane-unused's report during B108. Both of us were
+wrong, and the mechanism is worth more than the ticket was.
+
+### How it was filed
+
+The b025 fixture carries this comment:
+
+    // Before the fix the LSP typed these expressions as the method's return
+    // type and emitted
+    //   error: argument 1 of `CoroutineFunc`: expected `void ()`, got `void`
+
+**"Before the fix."** That is B025's own historical record of the bug B025
+FIXED. The lane read it as evidence of a live defect and reported it with
+enough confidence that I filed a ticket on its word without checking the code.
+Neither of us measured; we both reasoned from prose, and the prose was
+describing the past.
+
+### What the path actually does today — MEASURED
+
+Real diagnostics dumped from both funcdef fixtures:
+
+    b025 Main.as:49  argument 1 of `CoroutineFunc`:         expected `void ()`,    got `bool ()`
+    b025 Main.as:51  argument 1 of `CoroutineFuncUserdata`: expected `void (ref)`, got `void ()`
+    b025 Main.as:53  argument 1 of `CoroutineFunc`:         expected `void ()`,    got `string`
+
+Line 49 is a method reference returning bool and renders `bool ()` — the
+SIGNATURE, not the flattened `bool`. Line 51 likewise. Line 53 is a property
+read, whose type genuinely IS the fact about it. No flattening anywhere.
+
+Structure confirms the measurement rather than substituting for it:
+`check_funcdef_ctor_arg` guards with `clearly_not_fn || !sigs.is_empty()`, so
+when the argument resolves to any function `render_func_or_type` renders the
+signature, and the type display is reached only when the argument is provably
+NOT a callable — where its type is the correct answer.
+
+### The other three emission sites, checked because B108 taught us the title's
+### scope is not the defect's scope
+
+There are FOUR `ArgTypeMismatch` emission sites, not the one the ticket named.
+The other three (3818, 3860, 4190) are guarded to primitive-to-primitive or
+Named-to-Named pairs. A callable types as `Funcdef(_)` or as a return type;
+`TypeRepr::Void` is its own variant and not a `Primitive`, and a bare function
+name is `Funcdef`, not `Named` — so a callable cannot reach any of those three
+arms at all. The family does not flatten callables anywhere.
+
+My prediction when assigning this was "the same answer as B108, method
+references only". The real answer is narrower still: NO shape loses information
+on this path, because B025 already fixed the one that did. Expecting-is-not-
+measuring cut against the ticket EXISTING, not merely against its scope.
+
+### A real finding, deliberately NOT actioned
+
+There is a genuine cross-diagnostic spelling inconsistency:
+
+  * `ArgTypeMismatch` renders `void ()` WITH a space (`render_funcdef_sig`,
+    `render_func_or_type`)
+  * `NoMatchingSignatures` renders `void()` without (via
+    `funcdef_binding_source_display`, settled in B108)
+
+Each diagnostic is INTERNALLY consistent — on an `ArgTypeMismatch` line both
+`expected` and `got` use the same spelling, so nothing looks wrong to a reader.
+
+Leave it alone. This is user-facing wording in a repo that pins wording against
+game output, the ground truth for this particular message is OURS rather than
+the compiler's, and probing is blocked under B097. Changing it on our own
+aesthetic judgement is how a repo acquires a second spelling of the same idea —
+the exact hazard B108 avoided. If it is ever done it needs its own ticket with
+the ground truth attached.
+
+### Left behind
+
+A characterisation test pinning that `got` renders `bool ()` for a
+bool-returning method reference. It PASSES on master, which is normally the
+signature of a worthless test — but here "this is already correct" is precisely
+the claim, so the test converts a verbal claim into an executable one and stops
+a silent regression. That is the legitimate exception to the batch's
+passes-for-free rule: the assertion carries positive content and would fail if
+the rendering ever flattened.
