@@ -49,3 +49,5 @@ TWO PIECES OF WORK, and the second is the one that matters:
    shape and rots the same way.
 
 Do not simply change 2 to 1. A number with no provenance rots again in a week.
+
+Decision 2026-09-01: independent attribution/docs lane. Identify the exact change that removed Scrubber.as:299, verify HookHelper.as:49 remains the expected warning, then update every standing count with date, engine version, command/provenance, and attribution; a bare 2-to-1 edit is insufficient.
