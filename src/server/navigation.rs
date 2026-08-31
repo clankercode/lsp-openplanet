@@ -6,6 +6,32 @@
 //! checker's resolution surface ([`GlobalScope`]) built from the open
 //! documents.
 //!
+//! # B135: navigation does NOT filter on member visibility, deliberately
+//!
+//! B117 taught member COMPLETION to hide `private` and `protected` members at
+//! access sites where the engine refuses them. Goto-definition is deliberately
+//! NOT given the same treatment, and the absence of a filter here is a decision
+//! rather than an oversight — recorded so nobody "finishes the job" by adding
+//! one.
+//!
+//! A user navigating to a private member is READING code, not calling it, and
+//! the request is most valuable in exactly the case a filter would break: they
+//! could not use the member, and want to see its declaration to find out why.
+//! Refusing to resolve would answer a question they did not ask by withholding
+//! the one they did, and would leave them with no in-editor way to reach a
+//! declaration that is plainly in the workspace.
+//!
+//! The same reasoning covers workspace symbol search
+//! ([`lookup_workspace_symbols`] and friends): it is a code-READING tool over
+//! declarations that exist.
+//!
+//! Hover reaches the same conclusion by the same argument and goes one step
+//! further, ANNOTATING the signature with the keyword rather than suppressing
+//! it — see `hover::visibility_keyword`. The document outline likewise shows
+//! every member and annotates via `detail` — see `symbols::visibility_detail`.
+//! Completion is the only surface that hides, because it is the only one that
+//! PROPOSES code to write rather than describing code that exists.
+//!
 //! Rename and find-references used to live here as a workspace-wide token
 //! scan with no scope analysis. B049 moved both to
 //! [`crate::server::rename`], which classifies the symbol under the cursor
@@ -873,7 +899,7 @@ pub fn prefer_definition<'s>(candidates: &[&'s Symbol]) -> Option<&'s Symbol> {
 mod tests {
     use super::*;
 
-    fn build_single_file_workspace(
+    pub(super) fn build_single_file_workspace(
         uri_str: &str,
         source: &str,
     ) -> crate::server::test_support::TestWorkspace {
@@ -892,7 +918,7 @@ mod tests {
     /// point: it makes each of them a standing guard that the multi-target
     /// paths (B103 accessor pairs, B104 implementation lists) never leak
     /// into a site that resolves to a single definition.
-    fn goto_one(
+    pub(super) fn goto_one(
         analysis: &DocumentAnalysis,
         checked: Option<&CheckedFile<'_>>,
         position: Position,
@@ -2119,5 +2145,95 @@ mod tests {
             vec![1, 5, 2, 6],
             "getter + matching implementation must precede setter + matching implementation"
         );
+    }
+}
+
+// ── B135: goto-definition does NOT filter on visibility ─────────────────────
+//
+// The decision is argued in the module docs; these tests make it a pinned
+// behaviour rather than an absence. B117 taught member COMPLETION to hide
+// private and protected members at sites where the engine refuses them, and
+// the obvious-looking follow-up is to do the same here. It is wrong:
+// navigation is a code-READING tool, and the request is most valuable in
+// exactly the case a filter would break — the user cannot use the member and
+// wants to see its declaration to find out why.
+//
+// Without these tests, a later change that added a filter here would break
+// nothing and look like consistency.
+#[cfg(test)]
+mod b135_navigation_visibility_tests {
+    use super::tests::{build_single_file_workspace, goto_one};
+    use super::*;
+
+    fn resolves(src: &str, needle: &str, occurrence: usize) -> bool {
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let analysis = tw.analysis();
+        let files = tw.uri_map();
+        let ws_files = WorkspaceFiles { files: &files };
+        let scope = tw.scope();
+        let byte = {
+            let mut idx = 0usize;
+            let mut found = 0usize;
+            loop {
+                let Some(rel) = src[idx..].find(needle) else {
+                    panic!("needle `{needle}` #{occurrence} not found");
+                };
+                found += 1;
+                idx += rel;
+                if found == occurrence {
+                    break idx;
+                }
+                idx += needle.len();
+            }
+        };
+        let prefix = &src[..byte];
+        let line = prefix.matches('\n').count() as u32;
+        let col = prefix.rfind('\n').map_or(byte, |nl| byte - nl - 1) as u32;
+        // The checked view is what resolves a member on a typed receiver;
+        // without it every row below fails identically, which the public
+        // control caught on the first run.
+        let checked = tw.snapshot.checked_file(&tw.uri(), &scope);
+        goto_one(
+            analysis,
+            checked.as_ref(),
+            Position::new(line, col),
+            &scope,
+            &ws_files,
+        )
+        .is_some()
+    }
+
+    /// A private member resolves from an UNRELATED function — the site where
+    /// completion hides it. This is the whole decision in one row.
+    #[test]
+    fn a_private_member_still_resolves_from_an_unrelated_function() {
+        let src = "class C {\n    private int mem;\n}\nvoid f(C@ c) { c.mem = 1; }";
+        assert!(
+            resolves(src, "mem", 2),
+            "goto-definition must reach a private member: reading code is not calling it"
+        );
+    }
+
+    /// And from a DERIVED class, the site that distinguishes the keywords for
+    /// completion. Navigation makes no distinction at all, which is the point.
+    #[test]
+    fn private_and_protected_both_resolve_from_a_derived_class() {
+        for vis in ["private", "protected"] {
+            let src = format!(
+                "class C {{\n    {vis} int mem;\n}}\nclass D : C {{\n    void T(C@ c) {{ c.mem = 1; }}\n}}"
+            );
+            assert!(
+                resolves(&src, "mem", 2),
+                "`{vis}` must still resolve from a derived class"
+            );
+        }
+    }
+
+    /// The public control, so the rows above are about visibility rather than
+    /// about member resolution working at all.
+    #[test]
+    fn a_public_member_resolves_too() {
+        let src = "class C {\n    int mem;\n}\nvoid f(C@ c) { c.mem = 1; }";
+        assert!(resolves(src, "mem", 2), "the control must resolve");
     }
 }
