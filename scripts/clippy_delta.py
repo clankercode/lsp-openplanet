@@ -281,12 +281,25 @@ def evaluate(
             "re-record the baseline."
         )
 
+    # Method first, and it is DISQUALIFYING rather than one more finding. A
+    # recorded method that is not enforced is a comment.
+    #
+    # Measured on this tree: `--all-targets` yields 39 fingerprints and its
+    # absence yields 28, and all 11 of the difference are present only WITH it
+    # — two of them `unused_imports` that exist solely under `cfg(test)`
+    # (src/server/symbols.rs, src/typedb/index.rs). Difference an
+    # all-targets run against a baseline captured without it and you get 11
+    # ADDED lints attributed to a code change nobody made. The flag difference
+    # is invisible in a count, which is why the count is not what is checked.
+    method_problems: list[str] = []
     method = baseline.get("method", {})
     if method.get("command") != CLIPPY_CMD:
-        problems.append(
-            f"the baseline was recorded with {method.get('command')!r} and this "
-            f"gate runs {CLIPPY_CMD!r}. Different commands produce different "
-            "diagnostic sets; the difference below would be about the command."
+        method_problems.append(
+            f"METHOD MISMATCH — refusing to compare: the baseline was recorded "
+            f"with {' '.join(method.get('command') or ['(unrecorded)'])!r} and "
+            f"this gate runs {' '.join(CLIPPY_CMD)!r}. Different commands "
+            f"produce different diagnostic sets, so any difference would be "
+            f"about the flags, not about your change. Re-record on master."
         )
     recorded_toolchain = method.get("toolchain", {})
     if recorded_toolchain != current_toolchain:
@@ -296,7 +309,8 @@ def evaluate(
             if recorded_toolchain.get(k) != v
         ]
         text = (
-            "the baseline was recorded with a different toolchain — "
+            "METHOD MISMATCH — refusing to compare: the baseline was recorded "
+            "with a different toolchain — "
             + "; ".join(drift)
             + ". Lints are added and renamed between releases, so a difference "
             "here is not evidence about your change. Re-record on master with "
@@ -305,7 +319,13 @@ def evaluate(
         if allow_drift:
             print(f"WARNING: {text}", file=sys.stderr)
         else:
-            problems.append(text)
+            method_problems.append(text)
+
+    if method_problems:
+        # Return NOTHING to difference. Listing the additions alongside the
+        # refusal would put a plausible-looking delta in front of a reader who
+        # has just been told it is meaningless, and that is the half they act on.
+        return problems + method_problems, [], []
 
     base = baseline_counts(baseline)
     added = [(fp, current[fp] - base.get(fp, 0)) for fp in current if current[fp] > base.get(fp, 0)]
@@ -345,6 +365,22 @@ def report(
         for (f, code, message), delta in sorted(removed, key=lambda kv: kv[0]):
             lines.append(f"  - [{code}] {f} (-{delta}): {message[:70]}")
     lines.append("")
+
+    refused = any(p.startswith("METHOD MISMATCH") for p in problems)
+    if refused:
+        lines.append(
+            "REFUSED: this baseline and this run were not produced the same way, "
+            "so they are not comparable."
+        )
+        for problem in problems:
+            lines.append(f"  {problem}")
+        lines.append("")
+        lines.append(
+            "No difference is shown, deliberately. A delta across two methods\n"
+            "looks exactly like a delta across two code states, and the numbers\n"
+            "are just as plausible. See B083."
+        )
+        return "\n".join(lines)
 
     if problems:
         lines.append("FAIL: this tree adds clippy findings the baseline does not have.")
@@ -481,11 +517,33 @@ def run_selftest() -> int:
         failures.append("MISSED: a toolchain mismatch was accepted")
     else:
         print("  caught: a toolchain mismatch")
-    cmd_problems, _, _ = evaluate(_base({A: 20, B: 6}, command=["cargo", "clippy"]), healthy, 26, TC)
-    if not any("different commands" in p or "runs " in p for p in cmd_problems):
+    # A baseline captured with a different command must be REFUSED, and must
+    # not also emit a delta: the real case (`--all-targets` present vs absent)
+    # differs by 11 fingerprints on this tree, all in the added direction, so a
+    # gate that differenced anyway would hand the reader 11 phantom additions.
+    wrong_cmd = _base({A: 20, B: 6}, command=["cargo", "clippy"])
+    cmd_problems, cmd_added, cmd_removed = evaluate(
+        wrong_cmd, Counter({A: 20, B: 6, C: 1}), 26, TC
+    )
+    if not any(p.startswith("METHOD MISMATCH") for p in cmd_problems):
         failures.append("MISSED: a baseline recorded with a different command was accepted")
+    elif cmd_added or cmd_removed:
+        failures.append(
+            "MISSED: a method mismatch still produced a delta — the reader is "
+            "handed plausible numbers alongside the warning that they are "
+            "meaningless, and the numbers are the half people act on"
+        )
+    elif "REFUSED" not in report(cmd_problems, cmd_added, cmd_removed, Counter({A: 20}), wrong_cmd, None):
+        failures.append("a method mismatch was not headlined as a refusal")
     else:
-        print("  caught: a baseline recorded with a different command")
+        print("  caught: a different command — refused, with no delta shown")
+    tc_refuse_problems, tc_added, _ = evaluate(
+        baseline, Counter({A: 20, B: 6, C: 1}), 26, {"rustc": "OTHER", "cargo": "c", "clippy": "cl"}
+    )
+    if tc_added:
+        failures.append("MISSED: a toolchain mismatch still produced a delta")
+    else:
+        print("  caught: a toolchain mismatch — refused, with no delta shown")
 
     # `-D warnings` must be refused, not obeyed. Checked by calling the real
     # guard, so deleting it fails here.
@@ -547,6 +605,15 @@ def main() -> int:
     )
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     parser.add_argument(
+        "--command-override",
+        help=(
+            "comma-separated clippy command, for RECORDING a baseline by a "
+            "deliberately different method. Only the non-vacuity harness uses "
+            "this, to prove the method check refuses such a baseline; it is "
+            "never how a real baseline is captured."
+        ),
+    )
+    parser.add_argument(
         "--allow-toolchain-drift",
         action="store_true",
         help="warn instead of failing when the toolchain differs from the baseline's",
@@ -555,6 +622,12 @@ def main() -> int:
 
     if args.selftest:
         return run_selftest()
+
+    global CLIPPY_CMD
+    if args.command_override:
+        if not args.record:
+            sys.exit("--command-override is only meaningful with --record")
+        CLIPPY_CMD = args.command_override.split(",")
 
     counts, units = run_clippy()
 

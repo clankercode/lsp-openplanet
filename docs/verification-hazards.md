@@ -1457,6 +1457,17 @@ The test passes, and would have passed either way.
   its numbers, or the next reader compares 129 against 115 and concludes
   something moved.
 
+  **A recorded method that is not enforced is a comment.** Measured on this
+  tree: `cargo clippy --all-targets` yields 39 fingerprints, and dropping
+  `--all-targets` yields 28. All 11 of the difference exist only WITH the flag,
+  and two of them are `unused_imports` that exist only under `cfg(test)`
+  (`src/server/symbols.rs`, `src/typedb/index.rs`). Difference an all-targets
+  run against a baseline captured without it and you are handed **11 added
+  lints attributed to a code change nobody made** — and nothing in either
+  number says which capture was which. So the gate REFUSES to compare across
+  methods and shows no delta at all, rather than printing a warning above a
+  plausible-looking list. The reader acts on the list.
+
 - **A fixture comment asserting engine behaviour is a claim, not a
   measurement — and everyone downstream reads it as a measurement.**
   `tests/fixtures/.../60-exports-correct-pattern` paired a by-value `import`
