@@ -324,6 +324,27 @@ project docs) or pass environment overrides used by the CLI.
 Background update probes run about once per day and can surface an editor
 notification when a newer release is available.
 
+**Restart after an upgrade.** A language server started before an upgrade goes
+on answering from the old binary until the editor happens to restart it, which
+can be hours. So the server stats its own executable path every 30s and reacts
+when the file there is replaced — by a self-update, a package manager, or a
+manual install. It acts only when nothing is in flight, and exactly once per
+replacement, never repeatedly.
+
+What it does is the client's choice, via `initializationOptions`:
+
+| `on_binary_replaced` | Behaviour |
+|----------------------|-----------|
+| `"exit"` _(default)_ | Exit cleanly once idle. Editors that respawn a stopped server (VS Code's `LanguageClient`, with bounded retries) come straight back up on the new binary. |
+| `"notify"` | Send an `openplanet/serverBinaryReplaced` notification and keep serving, leaving the restart entirely to the client. Only useful if your client implements that method. |
+| `"off"` | Do nothing. Keeps a long-lived process on the binary it started with. |
+
+The notification carries `path`, `runningVersion` (the *stale* version still
+serving) and the `previous` / `current` file stamps. Note that an install
+scheme which upgrades by repointing a **symlink** at a new immutable file (Nix,
+and other content-addressed stores) is not detected: the path the server can
+see is already symlink-resolved and its file never changes.
+
 ## CLI
 
 ```text
