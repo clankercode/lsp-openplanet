@@ -8,11 +8,12 @@ depends_on: []
 estimate_hours: 1
 id: B109
 priority: high
+reason: 'Invalid: the defect does not exist. The ticket was filed on a misread of the b025 fixture comment, which opens ''Before the fix'' and is B025''s own historical record of the bug B025 FIXED. Measured today: a bool-returning method reference renders ''bool ()'' -- the signature, not the flattened ''bool''. All four ArgTypeMismatch emission sites checked, not just the one named: the other three are guarded to primitive-primitive or Named-Named pairs, and a callable types as Funcdef or Void, neither of which can reach them. The family does not flatten callables anywhere. Full record in the ticket body, including a real cross-diagnostic spelling inconsistency (void () vs void()) deliberately NOT actioned -- each diagnostic is internally consistent, the wording is ours rather than the game''s, and probing is blocked under B097.'
 started_at: "2026-08-31T12:18:00Z"
-status: in_progress
+status: rejected
 tags: []
 title: 'ArgTypeMismatch renders a callable argument as its return type too: the same flattening as B108, at checker.rs:2826'
-updated_at: "2026-08-31T12:18:00Z"
+updated_at: "2026-08-31T12:22:46Z"
 ---
 
 # ArgTypeMismatch renders a callable argument as its return type too: the same flattening as B108, at checker.rs:2826

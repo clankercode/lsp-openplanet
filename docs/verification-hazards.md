@@ -2443,3 +2443,55 @@ this document keeps returning to.
 lines you expect to change and why, rather than granting blanket permission.
 A blanket grant cannot distinguish the churn you predicted from the churn that
 means you were wrong.
+
+## A comment that says "before the fix" is a record of the past, not a report
+
+B109 was filed, assigned, and cancelled without a line of code changing. The
+whole ticket existed because two of us read a historical note as a live defect.
+
+The b025 fixture carries:
+
+    // Before the fix the LSP typed these expressions as the method's return
+    // type and emitted
+    //   error: argument 1 of `CoroutineFunc`: expected `void ()`, got `void`
+
+That is B025's own record of the bug **B025 fixed**. A lane cited it as evidence
+of a live flattening on the `ArgTypeMismatch` path; I filed a ticket on that
+report without checking the code; the next lane measured and found the path
+correct. Two people reasoned from prose, and the prose was describing the past.
+
+**Why this comment shape is a trap specifically.** A good bug-fix comment quotes
+the OLD, WRONG output — that is what makes it useful, because it lets a future
+reader recognise the defect if it returns. So the most valuable comments in the
+codebase are exactly the ones that contain a verbatim rendering of broken
+behaviour, sitting in the file, indistinguishable at a glance from a
+description of what the code does now. The two-word tense marker is the only
+thing separating them, and it is easy to skim past when the quoted error looks
+like the thing you are hunting.
+
+**The measurement that settled it**, and it took minutes: dump the real
+diagnostics from the fixture.
+
+    b025:49  expected `void ()`     got `bool ()`   <- method ref, SIGNATURE
+    b025:51  expected `void (ref)`  got `void ()`   <- method ref, SIGNATURE
+    b025:53  expected `void ()`     got `string`    <- property read; type IS the fact
+
+**Rules.**
+
+- A comment is evidence about the code only if you have checked its tense. When
+  quoting one as a defect report, quote the sentence BEFORE the error text too —
+  that is where "before the fix", "used to", and "previously" live.
+- Prefer running the thing over reading about it. The fixture that carried the
+  misleading comment would have produced the true answer in one command.
+- When writing such a comment, put the tense where it cannot be skimmed past:
+  lead with `FIXED IN B025:` rather than burying "before the fix" in prose above
+  a verbatim error string.
+
+**A second-order note on how it propagated.** The lane reported it with enough
+confidence that I filed on its word alone. Neither of us was reckless
+individually — a lane reporting an incidental finding is behaving correctly, and
+a coordinator filing a reported finding is too. But confidence is not evidence,
+and it survives being passed between people while the evidence does not. A
+report worth filing on is one that says what was MEASURED; "I noticed X" is a
+lead. This document's other entries all end with a measurement, and this ticket
+is what the file looks like when one is missing.
