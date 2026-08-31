@@ -482,6 +482,40 @@ impl<'a> GlobalScope<'a> {
         self.canonical_enum_key_unchecked(qualified)
     }
 
+    /// B071: the declared member names of the enum spelled `qualified`, for
+    /// a spelling this scope ACCEPTS.
+    ///
+    /// Deliberately separate from [`Self::has_enum`], and the split carries
+    /// the whole safety property. Acceptance answers *does the game resolve
+    /// this spelling*; this answers *and then which members does it have*.
+    /// The two are not the same question, and a caller that conflated them
+    /// would report every member of an enum it can name but cannot enumerate
+    /// as misspelt.
+    ///
+    /// So `None` means **the member list is not knowable**, never "this enum
+    /// has no members" — an anonymous member enum (B016) is the live case:
+    /// `lookup_source_enum` refuses its synthetic key, so acceptance already
+    /// says no and nothing downstream may judge its members. Callers must
+    /// treat `None` as *stay silent*.
+    pub fn enum_member_names(&self, qualified: &str) -> Option<Vec<String>> {
+        let proof = self.accepts_enum(qualified)?;
+        // `canonical_enum_key` returns `None` for an already-canonical
+        // spelling, which is the common case here — reading that as "not
+        // found" would drop every workspace enum.
+        let key = self
+            .canonical_enum_key(qualified, proof)
+            .unwrap_or_else(|| qualified.to_string());
+        // Workspace first: a plugin's own declaration outranks an engine
+        // enum of the same name, exactly as it does for `has_enum`.
+        for symbol in self.lookup_workspace(&key) {
+            if let SymbolKind::Enum { values } = &symbol.kind {
+                return Some(values.iter().map(|(name, _)| name.clone()).collect());
+            }
+        }
+        let info = self.external?.lookup_source_enum(&key)?;
+        Some(info.values.iter().map(|(name, _)| name.clone()).collect())
+    }
+
     /// True when `qualified` is a type's own key, exactly as stored — no
     /// module-stripped spelling (B056). Callers that need a canonical name,
     /// rather than "does this resolve", ask this.

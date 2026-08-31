@@ -1492,6 +1492,7 @@ impl<'a> Checker<'a> {
                     if let Some(init) = &d.init {
                         let init_ty = self.expr_type(init);
                         self.check_funcdef_binding(&ty, init, &init_ty);
+                        self.check_enum_conversion(&ty, init, &init_ty);
                     }
                 }
             }
@@ -1786,6 +1787,7 @@ impl<'a> Checker<'a> {
             if let Some(init) = &d.init {
                 let init_ty = self.expr_type(init);
                 self.check_funcdef_binding(&ty, init, &init_ty);
+                self.check_enum_conversion(&ty, init, &init_ty);
             }
         }
     }
@@ -1812,6 +1814,7 @@ impl<'a> Checker<'a> {
                     let init_ty = self.expr_type(init);
                     self.check_init_conversion(&declared_ty, init, &init_ty);
                     self.check_funcdef_binding(&declared_ty, init, &init_ty);
+                    self.check_enum_conversion(&declared_ty, init, &init_ty);
                 }
                 declared_ty.clone()
             };
@@ -1880,6 +1883,126 @@ impl<'a> Checker<'a> {
                 kind: TypeDiagnosticKind::FloatTruncation { literal },
             });
         }
+    }
+
+    /// B071: type a qualified enum-value reference (`LocalOne::X`,
+    /// `VirtualKey::A`, `UI::Plot::Marker::Circle`) as its ENUM, and report a
+    /// member the enum never declared.
+    ///
+    /// Before this, `E::V` typed as `Error` whatever `V` was, and that single
+    /// fact is why the whole ticket was silent in both directions at once: an
+    /// undeclared member looked exactly like a declared one, and an
+    /// enum-typed initializer looked like an untypeable expression, so every
+    /// conversion check downstream bailed on the `Error` before it could
+    /// compare anything.
+    ///
+    /// Scoped to RESOLVING the reference. It deliberately does not decide
+    /// whether the enum may be assigned to whatever it is being assigned to —
+    /// that is [`Self::check_enum_conversion`] — and keeping the two apart is
+    /// what keeps cross-enum ARITHMETIC legal. `Binary` discards its operand
+    /// types, so two different enums in one expression never reach a
+    /// comparison; live probe says `LocalOne::X + LocalTwo::Y` compiles
+    /// (both decay to `int`), so a rule that fired on "two enum types in one
+    /// expression" would be reporting an error on code the game accepts.
+    fn enum_member_type(&mut self, qual: &str, span: Span) -> TypeRepr {
+        let Some((prefix, member)) = qual.rsplit_once("::") else {
+            return TypeRepr::Error(String::new());
+        };
+        // Innermost enclosing namespace first, matching the value-use walk
+        // just above: inside `namespace N`, a written `Inner::X` names
+        // `N::Inner::X`.
+        for depth in (0..=self.namespace_stack.len()).rev() {
+            let spelling = if depth == 0 {
+                prefix.to_string()
+            } else {
+                format!("{}::{}", self.namespace_stack[..depth].join("::"), prefix)
+            };
+            // `None` is "cannot enumerate the members", never "has none" —
+            // an anonymous engine enum (B016) lands there and must stay
+            // silent rather than have all of its members called misspelt.
+            let Some(members) = self.scope.enum_member_names(&spelling) else {
+                continue;
+            };
+            if members.iter().any(|m| m == member) {
+                return TypeRepr::Named(spelling);
+            }
+            // Near-name hint, exactly like the namespace-member path: purely
+            // additive, and it never gates the diagnostic.
+            let hint = members
+                .iter()
+                .filter(|m| edit_distance(m, member) <= 2)
+                .min_by_key(|m| edit_distance(m, member))
+                .map(|m| format!("{spelling}::{m}"));
+            self.diagnostics.push(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::NoMatchingSymbol {
+                    qualified: qual.to_string(),
+                    hint,
+                },
+            });
+            return TypeRepr::Error(String::new());
+        }
+        TypeRepr::Error(String::new())
+    }
+
+    /// B071: assignment / initialisation compatibility for ENUM targets, at
+    /// every position a value is bound to a declared type.
+    ///
+    /// A SIBLING of [`Self::check_init_conversion`], not an extension of it.
+    /// That method is reached from exactly one of the four initializer
+    /// positions — `check_var_decl_local`; globals, class fields and
+    /// assignments never see it — and that asymmetry is precisely what B076
+    /// turned out to be, one ticket earlier. This is called from all four
+    /// plus plain assignment, and the `position_*` tests in
+    /// `tests/b071_enum_type_mismatch.rs` are the fence that keeps it so.
+    ///
+    /// Two rules, each measured rather than reasoned (RemoteBuild probe, one
+    /// compilation unit per fixture — never batched, B068):
+    ///
+    /// * enum -> a DIFFERENT enum is rejected:
+    ///   `Can't implicitly convert from 'LocalOne' to 'LocalTwo'.`
+    /// * `int` -> enum is rejected:
+    ///   `Can't implicitly convert from 'int' to 'LocalOne'.`
+    ///
+    /// The converse of the second is LEGAL — `int i = LocalOne::X;` compiles,
+    /// because an enum value decays to `int`. That asymmetry is the trap: a
+    /// rule phrased as "enums and ints are interchangeable" gets one of the
+    /// two backwards whichever way it guesses. Nothing here looks at a
+    /// non-enum target, so the legal direction is silent by construction and
+    /// not by a carve-out that a later edit could drop.
+    fn check_enum_conversion(&mut self, declared: &TypeRepr, init: &Expr, init_ty: &TypeRepr) {
+        let target = declared.unwrap_const();
+        let source = init_ty.unwrap_const();
+        let TypeRepr::Named(target_n) = target else {
+            return;
+        };
+        if !self.scope.has_enum(target_n) {
+            return;
+        }
+        let from = match source {
+            // A different enum. `named_types_equivalent` canonicalizes, so
+            // the two accepted spellings of ONE enum — `VirtualKey` and the
+            // ancestor walk's `UI::VirtualKey` (B052) — compare equal and
+            // stay silent.
+            TypeRepr::Named(source_n)
+                if self.scope.has_enum(source_n)
+                    && !self.named_types_equivalent(source_n, target_n) =>
+            {
+                source_n.clone()
+            }
+            // An integer. Floats and bools are deliberately left alone: no
+            // probe covers them, and this ticket's measured population is
+            // the integer family.
+            TypeRepr::Primitive(p) if is_integer(*p) => source.display(),
+            _ => return,
+        };
+        self.diagnostics.push(TypeDiagnostic {
+            span: init.span,
+            kind: TypeDiagnosticKind::NoImplicitConversion {
+                from,
+                to: target_n.clone(),
+            },
+        });
     }
 
     /// GH #49 constructor form: the int/nat vector families have NO
@@ -3670,6 +3793,24 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Named(resolved);
                 }
+                // B071: the workspace's own declaration outranks an engine
+                // enum that merely shares this SHORT name — the same rule
+                // `workspace_shadows_funcdef` already applies one fallback
+                // above, and for the same reason.
+                //
+                // Fleet-measured, not anticipated: `tm-editor-plus-plus`
+                // declares `enum Axis` and writes `Axis(c)`, and the
+                // short-name rescue below handed back the Core enum
+                // `UI::Plot::Axis`. Nothing compared the two until enum
+                // conversions were checked, at which point the plugin's enum
+                // was reported incompatible with itself — the only false
+                // positive the enum work produced across 151 real plugins,
+                // and the mismatch report was right about the types it was
+                // given. The wrong half was here.
+                if self.scope.workspace_declares_type(&name) {
+                    self.walk_args(args);
+                    return TypeRepr::Named(name);
+                }
                 if let Some(enum_name) = self.scope.external_enum_by_short_name(&name) {
                     self.walk_args(args);
                     return TypeRepr::Named(enum_name);
@@ -4509,7 +4650,14 @@ impl<'a> Checker<'a> {
                     });
                 }
                 let lhs_ty = self.expr_type(lhs);
-                let _ = self.expr_type(rhs);
+                let rhs_ty = self.expr_type(rhs);
+                // B071, the fifth position. Plain `=` only: a compound
+                // assign is `a = a OP b`, whose right side has already
+                // decayed to `int` through `Binary`, and no probe covers
+                // what the engine then does with an enum slot.
+                if matches!(op, AssignOp::Assign) {
+                    self.check_enum_conversion(&lhs_ty, rhs, &rhs_ty);
+                }
                 if matches!(lhs_ty, TypeRepr::Const(_)) {
                     self.diagnostics.push(TypeDiagnostic {
                         span: lhs.span,
@@ -4670,7 +4818,7 @@ impl<'a> Checker<'a> {
                             break;
                         }
                     }
-                    TypeRepr::Error(String::new())
+                    self.enum_member_type(&qual, expr.span)
                 }
             }
             ExprKind::Lambda { params, body } => {
