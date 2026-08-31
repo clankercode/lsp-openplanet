@@ -134,3 +134,92 @@ hand-measured table that gets auto-regenerated silently loses the human judgemen
 that produced it, and several of ours encode a deliberate SCOPE decision rather
 than a raw observation. Enumerating them at least makes them answer to the drift
 report. **I will measure the inventory before committing to that.**
+
+
+## INVENTORY — measured by lane-unused, 2026-09-01, before building anything
+
+### A. Committed engine-derived corpora: 10 files, 5304 data rows
+
+| gap | count |
+|---|---|
+| absent from `docs/probes/README.md`'s table | 3 (`b067` 63 rows, `b071` 8, `b096-namespaced-export-binding` 6) |
+| no in-file engine version stamp | 5 (`b052-scope-provenance`, `b086`, `b096-shared-modifiers`, `b117`, `b119`) |
+| **no generator script anywhere in the repo** | **2 — `b067` (63 rows), `b071` (8 rows)** |
+| record their own generator command | **0** |
+
+**The load-bearing gap: the artifact -> generator edge exists nowhere
+machine-readable.** Only `probe_enum_corpus.py` names an output file, `--tsv` has
+no default in any script, and two scripts have no `--tsv` at all. `b067` and
+`b071` are fully stamped engine gold with a documented method in their preambles
+and **no script** — reproducing them means a human re-reading the preamble and
+rebuilding the probe by hand. That is this ticket's premise, confirmed.
+
+typedb already has the complete pattern (`typedb-status` / `diff` / `refresh` /
+`refresh-apply` / `typedb-guard` inside `just test`). **Deliverable (c) is
+effectively done — it should be MANIFESTED, not re-scripted.**
+
+### B. In-source claims: 31 files, 63 dated engine claims
+
+- 12 files cite a corpus or generator; **19 cite none.**
+- **40 of 63 dated claims carry no Openplanet version** on the same line (upper
+  bound — some inherit one from a module header). **34 of the 40 are in
+  `checker.rs` alone.**
+- **Three engine versions are cited concurrently:** 1.29.5 (18 files), 1.29.14
+  (9), 1.29.9 (1).
+
+### C. Primary in-source ground truth DOES exist — a correction the lane made against itself
+
+A pipe-table detector found 9 tables and the lane was heading toward reporting
+"0 of 9 are primary engine ground truth". That was an **artifact of the
+detector** — it only matched markdown pipe tables. Re-run over fenced
+doc-comment blocks it found `src/typecheck/interface_impl.rs:8`: five compile
+attempts with the engine's exact error strings, six prose bullets of measured
+behaviour, and a deliberate `NOT MEASURED` gap left neutral by construction. Its
+own text says *"GROUND TRUTH is the measured table at the top of this module."*
+No TSV, no script. Two more of the same kind: `config.rs:964` (Wine `WINDOWS`
+predefines) and `server/mod.rs:2695` (strict module) — both dated, neither
+versioned.
+
+**Had the 9-table number been reported, it would have been a clean answer to the
+design question derived from a detector that could not see the counterexample.**
+
+### D. The structure that decides the design question
+
+**One measurement, many restatements.** B094's *"`abstract` does NOT exempt"* is
+stated in **four** files — `interface_impl.rs`, `symbols/scope.rs`,
+`symbols/table.rs`, `analysis/unused.rs` — in four different phrasings.
+**Regenerating a corpus updates none of them.**
+
+## DESIGN DECISION — v1 enumerates in-source tables manually, and the REASON has changed
+
+The coordinator's lean holds, but the justification it was based on does not, and
+that changes the design:
+
+- The dominant reason is **not** "auto-regeneration loses human judgement". It is
+  that **most in-source engine prose is a RESTATEMENT, not a source** —
+  auto-regeneration is not even well-defined for it: there is no output file to
+  overwrite, and one fact is spread across four files.
+- **Therefore the manifest needs a DEPENDENCY EDGE** (corpus -> restating source
+  sites), not merely a manual flag. When a corpus regenerates and a row changes,
+  the runner marks the dependent sites **UNCHECKED**. That is the
+  question-column refinement applied to fan-out.
+- One genuine migration candidate exists: `interface_impl.rs`'s block is
+  structurally a probe corpus (engine accept/reject plus exact messages) with a
+  generator-shaped method already written out in prose. **Do NOT migrate it in
+  v1** — it needs a real re-probe, and it was measured at 1.29.5 while the engine
+  has since moved to 1.29.14. Manifest it as PRIMARY / manual-re-verify so a run
+  reports it UNCHECKED.
+
+## Two further refinements the inventory forced
+
+1. **The version column must be PER-ARTIFACT, and the runner must refuse silent
+   cross-version comparison.** A regen run happens at one version; the repo
+   already holds claims from two engine generations, and 40 dated claims cannot
+   be placed on that axis at all. Without this, drift reports "changed" for
+   artifacts that merely moved generation.
+2. **On rendered-vs-structural diffing:** for the corpora, the diff is
+   string-level **because the artifact is string-level** — engine verdicts ARE
+   message text, and `b067`'s discriminator is literally two message spellings.
+   The structural blindness B136 exposed lives at the CONSUMER (parser /
+   `TypeRepr`), not in the corpus. State that per-artifact rather than claiming
+   structural diffing where none is possible.
