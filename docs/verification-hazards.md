@@ -629,6 +629,65 @@ indistinguishable from "I am structurally incapable of seeing it".
     reason. **When the failure mode is "nothing goes red", the fix has to be
     the thing that makes something go red.**
 
+- **When a total matches your prediction, check that it matches for the
+  predicted reason.** A lane predicted its branch would total 2341 — master's
+  2352 minus 11, since an `#[ignore]`d canary adds no passing test. It came
+  back **2352**. The lane refused to report the match until it understood it:
+  a merge had landed underneath, so the branch already contained the 11, and
+  canary-adds-zero made the totals correctly equal. Right number, and right for
+  a different reason than the one that would have been cited.
+
+  This is the third member of the equal-totals family and the most general.
+  The first was equal totals over **stale** content; the second was equal
+  totals colliding by **arithmetic coincidence**; this is a total agreeing with
+  a **prediction whose derivation had silently changed underneath it**. A
+  prediction that comes true is evidence only if the mechanism you predicted is
+  the mechanism that operated — otherwise it is a coincidence wearing a
+  confirmation's clothes, and it is *more* dangerous than a mismatch, because a
+  mismatch prompts investigation and a match ends it.
+
+- **A positive control must fail for the reason you are guarding against, and
+  `panic` is the wrong failure.** Building the crashed-binary gate, the canary
+  had to **abort**, not panic. libtest *catches* a panic, marks the test FAILED
+  and still prints a `test result:` summary — so the count stays complete and
+  the failure is plainly visible. Only an aborted process leaves no summary and
+  disappears from the total silently. **A panicking canary would have proved the
+  wrong thing entirely** while looking like a rigorous control.
+
+  Generalise it: a control that fails *somehow* is not a control. It has to
+  fail through the exact mechanism the guard exists to catch, and the two are
+  easy to conflate precisely when the guard is about silence, because almost
+  any failure is louder than the one you care about.
+
+- **The check already existed — on the gate people ran second.** The
+  crashed-binary reconciliation was already implemented in the project's
+  hermetic test runner (`ran = bool(summaries)`). It could not substitute for
+  the new one: it runs each binary directly under an isolated HOME, so it
+  covers neither doctests nor the ordinary `cargo test` path every lane
+  actually gated on.
+
+  So the hazard was never that nobody had thought of the check. It was that
+  **the check lived on the secondary gate while the primary one went
+  unprotected** — and a safeguard's coverage is determined by which command
+  people habitually run, not by whether the safeguard exists somewhere in the
+  repository. When you find a good check, the next question is which entry
+  point lacks it.
+
+- **"My change is inert" and "the gate can be skipped" are different claims,
+  and only the first is yours to make.** The coordinator told a lane its gate
+  could carry if the delta since its base were docs-only. The lane measured and
+  refused: its base was old, and master had since taken **~1,500 lines of Rust
+  across nine files from five other lanes**. Its own change touched no Rust at
+  all — and that is exactly the distinction. **The gate's job after a rebase is
+  to establish that the rebased TIP is green**, and the tip contains everyone
+  else's work. Carrying it forward would mean asserting something about code the
+  lane had never run.
+
+  The coordinator's rule was sound but its precondition is narrow: a gate
+  carries only when nothing compilable changed **since that gate's own base** —
+  not since some more recent point, and never merely because the change under
+  test is inert.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
