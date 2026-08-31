@@ -13,6 +13,19 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Fixed
+- **Go-to-definition on a virtual property** (B103) — `obj.ID`, where the
+  type declares only the accessor pair `get_ID` / `set_ID`, used to
+  resolve nothing. It now jumps to the accessor the position calls for:
+  a read goes to `get_ID`, a write (`obj.ID = x`) to `set_ID` — falling
+  back to the getter when the property is get-only — and a compound
+  assign (`obj.ID += 1`), which reads AND writes, offers both. Works for
+  accessors inherited from a base class, declared on an interface, and
+  for namespace-level properties (`Ns::Thing` → `Ns::get_Thing`). A real
+  field named `ID` still wins over any same-named accessor, and a
+  property's namespace is part of its identity, so an outer-scope
+  accessor never shadows a nearer declaration.
+
 ### Changed
 - **Unused findings default to `info` and fold out of `check` output**
   (B090) — a normal run no longer lists every unused function/variable;

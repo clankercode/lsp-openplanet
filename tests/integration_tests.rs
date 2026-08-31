@@ -1047,6 +1047,62 @@ async fn test_tower_lsp_goto_definition_on_an_interface_member() {
     assert_eq!(loc.range.start.line, 0);
 }
 
+// B103: the public handler must preserve both targets of a compound virtual
+// property access. This pins not just navigation's Vec, but the protocol
+// response variant and its stable get-then-set order.
+#[tokio::test(flavor = "current_thread")]
+async fn test_tower_lsp_compound_virtual_property_returns_ordered_array() {
+    let (service, _socket) = LspService::new(Backend::new);
+    let backend: &Backend = service.inner();
+
+    #[allow(deprecated)]
+    backend
+        .initialize(InitializeParams::default())
+        .await
+        .expect("initialize should succeed");
+
+    let uri = Url::parse("file:///b103/main.as").unwrap();
+    let source = "class C {\n    uint get_ID() { return 1; }\n    void set_ID(uint value) {}\n}\nvoid f(C@ c) { c.ID += 1; }\n";
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "angelscript".to_string(),
+                version: 1,
+                text: source.to_string(),
+            },
+        })
+        .await;
+
+    let property_col = source.lines().nth(4).unwrap().find("c.ID").unwrap() as u32 + 2;
+    let response = backend
+        .goto_definition(GotoDefinitionParams {
+            text_document_position_params: text_doc_position(&uri, 4, property_col),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        })
+        .await
+        .expect("goto_definition call must not error");
+
+    let Some(GotoDefinitionResponse::Array(locations)) = response else {
+        panic!("compound c.ID must return GotoDefinitionResponse::Array");
+    };
+    assert_eq!(
+        locations.len(),
+        2,
+        "compound access must expose two targets"
+    );
+    assert!(locations.iter().all(|location| location.uri == uri));
+    assert_eq!(
+        locations
+            .iter()
+            .map(|location| location.range.start.line)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "protocol order must be get_ID then set_ID"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AC14 smoke test: exercise `textDocument/signatureHelp` through the real
 // tower-lsp `Backend`. Proves the handler wires workspace overload resolution

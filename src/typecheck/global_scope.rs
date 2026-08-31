@@ -6,6 +6,7 @@
 //! whether a referenced name is known. It does NOT own either data source —
 //! callers build one on demand by borrowing both.
 
+use super::access_position::AccessPosition;
 use super::repr::{param_mode_from_text, ParamMode, TypeRepr};
 use crate::symbols::scope::{Symbol, SymbolKind};
 use crate::symbols::SymbolTable;
@@ -1808,6 +1809,64 @@ impl<'a> GlobalScope<'a> {
             }
             for parent in self.workspace_class_parents(&name) {
                 queue.push_back(self.normalize_workspace_class_name_in_context(&parent, &name));
+            }
+        }
+        out
+    }
+
+    /// Virtual-property accessor symbols for `member` on `class_name`,
+    /// walking the inheritance chain exactly as
+    /// [`Self::lookup_member_symbols_with_inheritance`] does (which is what
+    /// makes inherited and interface-declared accessors resolve).
+    ///
+    /// AngelScript exposes a `get_X`/`set_X` pair as a property `X`, so an
+    /// access matching NO declared member may still be a real reference —
+    /// to the accessors. Which ones is decided by `position`: a read wants
+    /// `get_X`, a write wants `set_X`, and a compound assign genuinely
+    /// touches both (B103).
+    ///
+    /// Returned nearest-declaration-first in `get_` before `set_` order —
+    /// the order the access performs them in. At most one symbol per
+    /// accessor name. Empty when the chain declares neither, which is the
+    /// caller's cue that the name is simply unknown.
+    ///
+    /// This is deliberately NOT folded into
+    /// [`Self::lookup_member_symbols_with_inheritance`]: a real member
+    /// spelled `X` must always win over an accessor pair, so callers try
+    /// the exact lookup first and only widen when it comes back empty.
+    pub fn lookup_virtual_property_accessor_symbols(
+        &self,
+        class_name: &str,
+        member: &str,
+        position: AccessPosition,
+    ) -> Vec<&Symbol> {
+        let mut names: Vec<String> = Vec::new();
+        if position.reads() {
+            names.push(format!("get_{}", member));
+        }
+        if position.writes() {
+            names.push(format!("set_{}", member));
+        }
+        // A write to a get-only property is a mistake the checker reports
+        // on its own; navigation still has somewhere useful to go, because
+        // the getter is where the property is declared.
+        if position == AccessPosition::Write {
+            names.push(format!("get_{}", member));
+        }
+        let mut out: Vec<&Symbol> = Vec::new();
+        for name in &names {
+            let found = self
+                .lookup_member_symbols_with_inheritance(class_name, name)
+                .into_iter()
+                .find(|s| matches!(s.kind, SymbolKind::Function { .. }));
+            if let Some(sym) = found {
+                if !out.iter().any(|s| std::ptr::eq(*s, sym)) {
+                    out.push(sym);
+                }
+            }
+            // The fallback getter is only wanted when the setter missed.
+            if position == AccessPosition::Write && !out.is_empty() {
+                break;
             }
         }
         out

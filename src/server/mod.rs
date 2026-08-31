@@ -1611,10 +1611,18 @@ impl LanguageServer for Backend {
         // B054: `receiver.member` resolution needs the checker's recorded
         // expression types, the same view hover consumes.
         let checked = snapshot.checked_file(uri, &scope);
-        Ok(
-            navigation::goto_definition(&analysis, checked.as_ref(), pos, &scope, &workspace_files)
-                .map(GotoDefinitionResponse::Scalar),
-        )
+        // A gesture can have several legitimate answers (B103: a compound
+        // assign to a virtual property touches both accessors), so the
+        // list shape decides the response variant. A single target still
+        // goes back as `Scalar`, which is what editors jump straight to;
+        // `Array` is what opens a peek list.
+        let mut targets =
+            navigation::goto_definition(&analysis, checked.as_ref(), pos, &scope, &workspace_files);
+        Ok(match targets.len() {
+            0 => None,
+            1 => Some(GotoDefinitionResponse::Scalar(targets.remove(0))),
+            _ => Some(GotoDefinitionResponse::Array(targets)),
+        })
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {

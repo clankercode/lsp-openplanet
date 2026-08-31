@@ -23,7 +23,9 @@ use crate::analysis::DocumentAnalysis;
 use crate::analysis_snapshot::CheckedFile;
 use crate::lexer::TokenKind;
 use crate::server::diagnostics::{position_to_offset, span_to_range};
-use crate::symbols::scope::Symbol;
+use crate::symbols::scope::{Symbol, SymbolKind};
+use crate::typecheck::access_position::{access_position_at, AccessPosition};
+use crate::typecheck::global_scope::qualified_virtual_name;
 use crate::typecheck::repr::TypeRepr;
 use crate::typecheck::GlobalScope;
 
@@ -78,16 +80,23 @@ pub fn name_at_position(analysis: &DocumentAnalysis, position: Position) -> Opti
 ///    enclosing class's inheritance chain (own class first, then
 ///    superclasses breadth-first).
 ///
-/// Returns `None` if the cursor is not on an identifier, no matching symbol
-/// exists, or the owning file is not in `files`.
+/// Returns an EMPTY vec if the cursor is not on an identifier, no matching
+/// symbol exists, or the owning file is not in `files`.
+///
+/// The result is a list rather than a single location because one gesture
+/// can legitimately have several answers: a compound assign to a virtual
+/// property touches both of its accessors (B103). Callers that need the
+/// single best answer take the first — the list is ordered best-first.
 pub fn goto_definition(
     analysis: &DocumentAnalysis,
     checked: Option<&CheckedFile<'_>>,
     position: Position,
     scope: &GlobalScope<'_>,
     files: &WorkspaceFiles,
-) -> Option<Location> {
-    let (tok_idx, tok_span, qual) = ident_index_at(analysis, position)?;
+) -> Vec<Location> {
+    let Some((tok_idx, tok_span, qual)) = ident_index_at(analysis, position) else {
+        return Vec::new();
+    };
     let source = analysis.masked_source();
     // 0) `receiver.member`: the member belongs to the receiver's type, so
     //    resolve it THERE and nowhere else. Once the receiver's type is
@@ -100,17 +109,54 @@ pub fn goto_definition(
     if is_member_access(analysis, tok_idx) && !qual.contains("::") {
         if let Some(owner) = receiver_type_name(analysis, checked, tok_idx, tok_span.start) {
             let members = scope.lookup_member_symbols_with_inheritance(&owner, &qual);
-            return prefer_definition(&members).and_then(|sym| symbol_location(sym, files));
+            if !members.is_empty() {
+                return prefer_definition(&members)
+                    .and_then(|sym| symbol_location(sym, files))
+                    .into_iter()
+                    .collect();
+            }
+            // B103: no member is spelled `qual`, but the type may still
+            // declare it as a VIRTUAL PROPERTY — a `get_`/`set_` pair. The
+            // exact lookup above runs first so a real field named `ID`
+            // always beats an accessor named for it.
+            let position = access_position_at(&analysis.file, tok_span);
+            return scope
+                .lookup_virtual_property_accessor_symbols(&owner, &qual, position)
+                .into_iter()
+                .filter_map(|sym| symbol_location(sym, files))
+                .collect();
+        }
+    }
+    // B103, the namespace/global half. Each lexical namespace level is an
+    // exact scope: first its real `Thing`, then its `get_Thing`/`set_Thing`
+    // pair. Only after both miss do we move outward. Explicitly-qualified
+    // names have one level and never degrade to a root or unrelated tail.
+    //
+    // Guarded to non-member sites — a member access whose receiver type is
+    // unknown must not go hunting for a same-named global accessor, which
+    // is the over-reach B054 removed from this ladder.
+    if !is_member_access(analysis, tok_idx) {
+        let position = access_position_at(&analysis.file, tok_span);
+        if let Some(symbols) =
+            lookup_workspace_property_site(scope, analysis, &qual, tok_span.start, position)
+        {
+            return symbols
+                .into_iter()
+                .filter_map(|sym| symbol_location(sym, files))
+                .collect();
+        }
+        if qual.contains("::") {
+            return Vec::new();
         }
     }
     if let Some(sym) = lookup_workspace_symbol(scope, analysis, &qual, tok_span.start) {
-        return symbol_location(sym, files);
+        return symbol_location(sym, files).into_iter().collect();
     }
 
     // Member fallback: only for unqualified names (no `::` — `Ns::F` never
     // resolves as a member) inside a method of some class.
     if qual.contains("::") {
-        return None;
+        return Vec::new();
     }
     let is_this_access = is_this_member_access(analysis, tok_idx);
     // Implicit-`this` call: a call callee with no receiver (`Func()`), i.e.
@@ -119,18 +165,18 @@ pub fn goto_definition(
     let is_implicit_this_call =
         is_call_callee(analysis, tok_idx) && !is_member_access(analysis, tok_idx);
     if !is_this_access && !is_implicit_this_call {
-        return None;
+        return Vec::new();
     }
     let file = &analysis.file;
     let offset = tok_span.start;
-    let enclosing = enclosing_class_name(file, source, offset)?;
+    let Some(enclosing) = enclosing_class_name(file, source, offset) else {
+        return Vec::new();
+    };
     let members = scope.lookup_member_symbols_with_inheritance(&enclosing, &qual);
-    let sym = prefer_definition(&members)?;
-    let (uri, def_analysis) = files.get(sym.file_id)?;
-    Some(Location {
-        uri: uri.clone(),
-        range: span_to_range(def_analysis.masked_source(), sym.span),
-    })
+    prefer_definition(&members)
+        .and_then(|sym| symbol_location(sym, files))
+        .into_iter()
+        .collect()
 }
 
 // === receiver.member support (shared with hover) ======================
@@ -442,6 +488,102 @@ pub fn lookup_workspace_symbols<'a>(
     Vec::new()
 }
 
+/// Resolve a workspace-level property site through exact lexical scopes.
+///
+/// At every level, an ordinary declaration wins over virtual accessors. A
+/// name (bare or partially qualified) walks nearest namespace to outer
+/// namespace and finally its root spelling. The use of
+/// [`GlobalScope::lookup_workspace`] is deliberate: `lookup_reference`
+/// widens an exact miss to root/tail matches, which is invalid for a virtual
+/// property whose namespace is part of its identity.
+///
+/// `None` means there was no exact ordinary declaration or accessor at any
+/// valid level. Callers may retain conventional fallback for a bare name;
+/// qualified names must treat that miss as final.
+fn lookup_workspace_property_site<'a>(
+    scope: &'a GlobalScope<'_>,
+    analysis: &DocumentAnalysis,
+    name: &str,
+    use_offset: u32,
+    position: AccessPosition,
+) -> Option<Vec<&'a Symbol>> {
+    let explicitly_qualified = name.contains("::");
+    let mut candidates = Vec::new();
+    let source = analysis.masked_source();
+    let namespace = enclosing_namespace_path(&analysis.file, source, use_offset);
+    for depth in (1..=namespace.len()).rev() {
+        candidates.push(format!("{}::{name}", namespace[..depth].join("::")));
+    }
+    candidates.push(name.to_owned());
+
+    for qualified in candidates {
+        let ordinary = scope.lookup_workspace(&qualified);
+        if let Some(symbol) = prefer_definition(&ordinary) {
+            return Some(vec![symbol]);
+        }
+        let has_property = ["get_", "set_"].into_iter().any(|prefix| {
+            lookup_exact_workspace_function(scope, &qualified_virtual_name(&qualified, prefix))
+                .is_some()
+        });
+        if !has_property {
+            continue;
+        }
+        let accessors = lookup_exact_workspace_property_accessors(scope, &qualified, position);
+        // A property at this lexical level owns the spelling even when the
+        // requested access mode has no usable accessor (for example, reading
+        // a setter-only property). Do not widen that miss to an outer scope.
+        return Some(accessors);
+    }
+    explicitly_qualified.then(Vec::new)
+}
+
+/// Select an exact workspace FUNCTION, preferring a definition over an import.
+/// Variables, types, namespaces, and other symbols that merely use an
+/// accessor-shaped name do not create virtual properties.
+fn lookup_exact_workspace_function<'a>(
+    scope: &'a GlobalScope<'_>,
+    qualified: &str,
+) -> Option<&'a Symbol> {
+    let functions: Vec<&Symbol> = scope
+        .lookup_workspace(qualified)
+        .into_iter()
+        .filter(|symbol| matches!(symbol.kind, SymbolKind::Function { .. }))
+        .collect();
+    prefer_definition(&functions)
+}
+
+/// Exact accessor lookup for one already-qualified property candidate.
+/// Getter/setter ordering and write fallback mirror the member-access seam.
+fn lookup_exact_workspace_property_accessors<'a>(
+    scope: &'a GlobalScope<'_>,
+    qualified: &str,
+    position: AccessPosition,
+) -> Vec<&'a Symbol> {
+    let mut prefixes: Vec<&str> = Vec::new();
+    if position.reads() {
+        prefixes.push("get_");
+    }
+    if position.writes() {
+        prefixes.push("set_");
+    }
+    if position == AccessPosition::Write {
+        prefixes.push("get_");
+    }
+    let mut out: Vec<&Symbol> = Vec::new();
+    for prefix in prefixes {
+        let accessor = qualified_virtual_name(qualified, prefix);
+        if let Some(sym) = lookup_exact_workspace_function(scope, &accessor) {
+            if !out.iter().any(|s| std::ptr::eq(*s, sym)) {
+                out.push(sym);
+            }
+        }
+        if position == AccessPosition::Write && !out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
 /// Pick the best candidate from a `lookup_reference` result: a real
 /// definition if any exists, else the first import-site alias.
 pub fn prefer_definition<'s>(candidates: &[&'s Symbol]) -> Option<&'s Symbol> {
@@ -466,6 +608,29 @@ mod tests {
 
     fn pos(line: u32, character: u32) -> Position {
         Position { line, character }
+    }
+
+    /// [`goto_definition`] for a site that must have exactly ONE answer.
+    ///
+    /// Same arguments as the real entry point, so the tests below read as
+    /// they did when it returned an `Option`. The `<= 1` assertion is the
+    /// point: it makes each of them a standing guard that the multi-target
+    /// paths (B103 accessor pairs, B104 implementation lists) never leak
+    /// into a site that resolves to a single definition.
+    fn goto_one(
+        analysis: &DocumentAnalysis,
+        checked: Option<&CheckedFile<'_>>,
+        position: Position,
+        scope: &GlobalScope<'_>,
+        files: &WorkspaceFiles,
+    ) -> Option<Location> {
+        let all = goto_definition(analysis, checked, position, scope, files);
+        assert!(
+            all.len() <= 1,
+            "expected a single definition target, got {}: {all:?}",
+            all.len()
+        );
+        all.into_iter().next()
     }
 
     #[test]
@@ -499,7 +664,7 @@ mod tests {
 
         // Cursor on `target` inside main (line 3: `    void main() { target; greet(); }`).
         let col = src.lines().nth(3).unwrap().find("target").unwrap() as u32;
-        let loc = goto_definition(analysis, None, pos(3, col + 2), &scope, &ws_files);
+        let loc = goto_one(analysis, None, pos(3, col + 2), &scope, &ws_files);
         assert!(loc.is_some(), "variable in namespace did not resolve");
         let loc = loc.unwrap();
         assert_eq!(loc.uri, tw.uri());
@@ -507,7 +672,7 @@ mod tests {
 
         // Cursor on `greet` inside main.
         let col = src.lines().nth(3).unwrap().find("greet").unwrap() as u32;
-        let loc = goto_definition(analysis, None, pos(3, col + 2), &scope, &ws_files);
+        let loc = goto_one(analysis, None, pos(3, col + 2), &scope, &ws_files);
         assert!(loc.is_some(), "function in namespace did not resolve");
         let loc = loc.unwrap();
         assert_eq!(loc.range.start.line, 2, "should point at `void greet` line");
@@ -549,7 +714,7 @@ mod tests {
             let scope = GlobalScope::new(tw.snapshot.symbols(), Some(&idx));
             let col = src.find(needle).expect("needle") as u32;
             // Must not panic, and must not invent a location.
-            let loc = goto_definition(analysis, None, pos(0, col + 1), &scope, &ws_files);
+            let loc = goto_one(analysis, None, pos(0, col + 1), &scope, &ws_files);
             assert!(
                 loc.is_none(),
                 "an injected method has no source declaration to jump to, got {loc:?} for {needle}"
@@ -565,7 +730,7 @@ mod tests {
         let files = tw.uri_map();
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
-        let loc = goto_definition(analysis, None, pos(1, 26), &scope, &ws_files).unwrap();
+        let loc = goto_one(analysis, None, pos(1, 26), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, tw.uri());
         // Points at the declaration (line 0), not the use.
         assert_eq!(loc.range.start.line, 0);
@@ -597,7 +762,7 @@ mod tests {
         let scope = crate::typecheck::GlobalScope::new(snap.symbols(), None);
         let analysis = &snap.files()[0].analysis;
         // Cursor on the `DoThing` call site (line 1, char 14).
-        let loc = goto_definition(analysis, None, pos(1, 14), &scope, &ws_files).unwrap();
+        let loc = goto_one(analysis, None, pos(1, 14), &scope, &ws_files).unwrap();
         assert_eq!(
             loc.uri, files[&1].0,
             "must jump to the definition file, not the importing file"
@@ -615,7 +780,7 @@ mod tests {
         let files = tw.uri_map();
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
-        let loc = goto_definition(analysis, None, pos(1, 14), &scope, &ws_files).unwrap();
+        let loc = goto_one(analysis, None, pos(1, 14), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, tw.uri());
         assert_eq!(loc.range.start.line, 0);
     }
@@ -631,7 +796,7 @@ mod tests {
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
         // `Func` spans chars 32..36 on line 1.
-        let loc = goto_definition(analysis, None, pos(1, 33), &scope, &ws_files).unwrap();
+        let loc = goto_one(analysis, None, pos(1, 33), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, tw.uri());
         // Line 0 is `class A { ... }` — the parent declaration.
         assert_eq!(loc.range.start.line, 0);
@@ -647,7 +812,7 @@ mod tests {
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
         // `Func` starts at char 27 on line 1.
-        let loc = goto_definition(analysis, None, pos(1, 29), &scope, &ws_files).unwrap();
+        let loc = goto_one(analysis, None, pos(1, 29), &scope, &ws_files).unwrap();
         assert_eq!(loc.range.start.line, 0);
     }
 
@@ -661,7 +826,7 @@ mod tests {
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
         // `Own` (the call site) spans chars 46..49 on line 1.
-        let loc = goto_definition(analysis, None, pos(1, 47), &scope, &ws_files).unwrap();
+        let loc = goto_one(analysis, None, pos(1, 47), &scope, &ws_files).unwrap();
         // `Own` is declared on B (line 1).
         assert_eq!(loc.range.start.line, 1);
     }
@@ -678,7 +843,7 @@ mod tests {
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
         // Bare `Func;` expression starts at char 41 on line 1.
-        let loc = goto_definition(analysis, None, pos(1, 43), &scope, &ws_files);
+        let loc = goto_one(analysis, None, pos(1, 43), &scope, &ws_files);
         // `int Func = 1;` declares no global symbol; the member fallback must
         // not fire for a non-call, non-this use of a shadowing local name.
         // (If locals were ever indexed, this must point at the local decl.)
@@ -711,7 +876,7 @@ mod tests {
         let scope = crate::typecheck::GlobalScope::new(snap.symbols(), None);
         let analysis = &snap.files()[0].analysis;
         // `Func` spans chars 32..36 on line 0 of child.as.
-        let loc = goto_definition(analysis, None, pos(0, 33), &scope, &ws_files).unwrap();
+        let loc = goto_one(analysis, None, pos(0, 33), &scope, &ws_files).unwrap();
         assert_eq!(loc.uri, files[&1].0, "must jump to parent.as");
         assert_eq!(loc.range.start.line, 0);
     }
@@ -732,7 +897,7 @@ mod tests {
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
         let col = src.lines().nth(2).unwrap().find("other.Func").unwrap() as u32 + 7;
-        let loc = goto_definition(analysis, None, pos(2, col), &scope, &ws_files);
+        let loc = goto_one(analysis, None, pos(2, col), &scope, &ws_files);
         assert!(
             loc.is_none(),
             "receiver call must not resolve against the enclosing class, got {loc:?}"
@@ -751,13 +916,15 @@ mod tests {
     /// Build a workspace, run goto-definition at the character `needle`
     /// starts on plus `offset`, with the checker's recorded types wired in
     /// exactly as the `textDocument/definition` handler wires them.
-    fn goto_at(
+    ///
+    /// Returns EVERY target, in the order navigation offers them.
+    fn goto_all(
         tw: &crate::server::test_support::TestWorkspace,
         file: usize,
         line: usize,
         needle: &str,
         offset: u32,
-    ) -> Option<Location> {
+    ) -> Vec<Location> {
         let files = tw.uri_map();
         let ws_files = WorkspaceFiles { files: &files };
         let scope = tw.scope();
@@ -772,6 +939,33 @@ mod tests {
             &scope,
             &ws_files,
         )
+    }
+
+    /// [`goto_all`] for a site that must have exactly ONE answer.
+    ///
+    /// The `<= 1` assertion is deliberate: it makes every precise-
+    /// navigation test below a standing guard that the multi-target paths
+    /// (B103 accessors, B104 implementations) never leak into a call site
+    /// that resolves to a single definition.
+    fn goto_at(
+        tw: &crate::server::test_support::TestWorkspace,
+        file: usize,
+        line: usize,
+        needle: &str,
+        offset: u32,
+    ) -> Option<Location> {
+        let all = goto_all(tw, file, line, needle, offset);
+        assert!(
+            all.len() <= 1,
+            "expected a single definition target, got {}: {all:?}",
+            all.len()
+        );
+        all.into_iter().next()
+    }
+
+    /// Line numbers of every target, for order-sensitive assertions.
+    fn lines_of(locs: &[Location]) -> Vec<u32> {
+        locs.iter().map(|l| l.range.start.line).collect()
     }
 
     #[test]
@@ -888,6 +1082,406 @@ mod tests {
         assert_eq!(
             loc.range.start.line, 1,
             "must land on I::Go (line 1), not the free function (line 0)"
+        );
+    }
+
+    // === B103: virtual-property accessors (`obj.ID` -> get_ID/set_ID) =====
+    //
+    // AngelScript exposes a `get_X`/`set_X` pair as a property `X`. Before
+    // B103 goto-definition had no accessor step at all, so `obj.ID`
+    // resolved nothing whenever the class declared only the accessors.
+    // Which accessor a site means depends on the position it is written
+    // in, which is the checker's existing read/write rule
+    // (`check_readonly_prop_assign`'s `compound` flag), reused here rather
+    // than re-derived from the token stream.
+
+    #[test]
+    fn goto_definition_virtual_property_read_resolves_to_the_getter() {
+        let src = "class C { uint get_ID() { return 1; } }\nvoid f(C@ c) { uint x = c.ID; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 1, "c.ID", 2).expect("c.ID must resolve to C::get_ID");
+        assert_eq!(loc.range.start.line, 0, "must land on get_ID");
+    }
+
+    #[test]
+    fn goto_definition_virtual_property_write_resolves_to_the_setter() {
+        let src = "class C {\n    uint get_ID() { return 1; }\n    void set_ID(uint v) {}\n}\nvoid f(C@ c) { c.ID = 5; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 4, "c.ID", 2).expect("c.ID = 5 must resolve to C::set_ID");
+        assert_eq!(
+            loc.range.start.line, 2,
+            "a write position must land on set_ID (line 2), not get_ID (line 1)"
+        );
+    }
+
+    #[test]
+    fn goto_definition_virtual_property_write_without_a_setter_falls_back_to_the_getter() {
+        // Get-only property: the write is a mistake the checker reports
+        // separately, but the getter is still where the property is
+        // declared, so navigation must not go silent.
+        let src = "class C { uint get_ID() { return 1; } }\nvoid f(C@ c) { c.ID = 5; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 1, "c.ID", 2).expect("must fall back to the getter");
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_virtual_property_compound_assign_offers_both_accessors() {
+        // `+=` is `a = a OP b`: it reads AND writes, so both accessors are
+        // real targets. Order is pinned — getter first, the order the
+        // access performs them in.
+        let src = "class C {\n    uint get_ID() { return 1; }\n    void set_ID(uint v) {}\n}\nvoid f(C@ c) { c.ID += 1; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 4, "c.ID", 2);
+        assert_eq!(
+            lines_of(&locs),
+            vec![1, 2],
+            "a compound assign must offer get_ID then set_ID, got {locs:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_virtual_property_comparison_is_a_read_not_a_write() {
+        // `c.ID == 5` contains an `=` character but is a READ. A token-level
+        // scan for a following `=` gets this wrong; the AST does not.
+        let src = "class C {\n    uint get_ID() { return 1; }\n    void set_ID(uint v) {}\n}\nvoid f(C@ c) { if (c.ID == 5) {} }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 4, "c.ID", 2).expect("a comparison must resolve");
+        assert_eq!(
+            loc.range.start.line, 1,
+            "`c.ID == 5` reads the property, so it must land on get_ID"
+        );
+    }
+
+    #[test]
+    fn goto_definition_virtual_property_indexed_write_is_a_read_of_the_property() {
+        // `c.Items[0] = v` WRITES the element and READS the property to
+        // reach it — the assignment's LHS is the index, not the member.
+        let src = "class C {\n    array<uint>@ get_Items() { return null; }\n}\nvoid f(C@ c) { c.Items[0] = 5; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 3, "c.Items", 2).expect("must resolve to the getter");
+        assert_eq!(loc.range.start.line, 1);
+    }
+
+    /// Receiver-shape variants (repo convention): the accessor step must not
+    /// depend on how the receiver is spelled.
+    #[test]
+    fn goto_definition_virtual_property_through_receiver_type_variants() {
+        for decl in [
+            "C@ c",
+            "C c",
+            "C@ &in c",
+            "const C@ c",
+            "C &in c",
+            "const C &in c",
+        ] {
+            let src = format!(
+                "class C {{ uint get_ID() {{ return 1; }} }}\nvoid f({decl}) {{ uint x = c.ID; }}\n"
+            );
+            let tw = build_single_file_workspace("file:///t/a.as", &src);
+            let loc = goto_at(&tw, 0, 1, "c.ID", 2)
+                .unwrap_or_else(|| panic!("`{decl}` receiver must resolve c.ID"));
+            assert_eq!(loc.range.start.line, 0, "for receiver `{decl}`");
+        }
+    }
+
+    #[test]
+    fn goto_definition_virtual_property_inherited_from_a_base_class() {
+        let src = "class A { uint get_ID() { return 1; } }\nclass B : A {}\nvoid f(B@ b) { uint x = b.ID; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "b.ID", 2).expect("inherited accessor must resolve");
+        assert_eq!(loc.range.start.line, 0, "must land on A::get_ID");
+    }
+
+    #[test]
+    fn goto_definition_virtual_property_declared_on_an_interface() {
+        let src = "interface I { uint get_ID(); }\nvoid f(I@ i) { uint x = i.ID; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 1, "i.ID", 2).expect("interface accessor must resolve");
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_virtual_property_across_files() {
+        let tw = crate::server::test_support::TestWorkspace::files(&[
+            ("use", "void f(C@ c) { uint x = c.ID; }\n"),
+            ("decl", "class C { uint get_ID() { return 1; } }\n"),
+        ]);
+        let loc = goto_all(&tw, 0, 0, "c.ID", 2);
+        assert_eq!(loc.len(), 1, "expected one target, got {loc:?}");
+        assert_eq!(loc[0].uri, tw.uri_of(1), "must jump to decl.as");
+    }
+
+    #[test]
+    fn goto_definition_namespace_level_virtual_property_read() {
+        let src =
+            "namespace Ns { uint get_Thing() { return 1; } }\nvoid f() { uint x = Ns::Thing; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc =
+            goto_at(&tw, 0, 1, "Ns::Thing", 4).expect("Ns::Thing must resolve to Ns::get_Thing");
+        assert_eq!(loc.range.start.line, 0);
+    }
+
+    #[test]
+    fn goto_definition_namespace_level_virtual_property_write() {
+        let src = "namespace Ns {\n    uint get_Thing() { return 1; }\n    void set_Thing(uint v) {}\n}\nvoid f() { Ns::Thing = 5; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 4, "Ns::Thing", 4).expect("must resolve");
+        assert_eq!(
+            loc.range.start.line, 2,
+            "a write must land on Ns::set_Thing (line 2)"
+        );
+    }
+
+    #[test]
+    fn goto_definition_namespace_level_virtual_property_compound_assign_offers_both() {
+        let src = "namespace Ns {\n    uint get_Thing() { return 1; }\n    void set_Thing(uint v) {}\n}\nvoid f() { Ns::Thing += 1; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 4, "Ns::Thing", 4);
+        assert_eq!(
+            lines_of(&locs),
+            vec![1, 2],
+            "must offer Ns::get_Thing then Ns::set_Thing, got {locs:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_qualified_virtual_property_ignores_global_and_unrelated_collisions() {
+        // Neither a root declaration nor an unrelated namespace tail is a
+        // candidate for the explicitly-qualified `Ns::Thing` spelling.
+        let src = "uint Thing;\nnamespace Other { uint get_Thing() { return 9; } }\nnamespace Ns { uint get_Thing() { return 1; } }\nvoid f() { uint x = Ns::Thing; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 3, "Ns::Thing", 4).expect("Ns::Thing must resolve");
+        assert_eq!(
+            loc.range.start.line, 2,
+            "the exact Ns::get_Thing accessor must beat root Thing and Other::get_Thing"
+        );
+    }
+
+    #[test]
+    fn goto_definition_qualified_virtual_property_never_uses_an_unrelated_tail() {
+        let src = "namespace Ns {}\nnamespace Other { uint get_Thing() { return 9; } }\nvoid f() { uint x = Ns::Thing; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 2, "Ns::Thing", 4);
+        assert!(
+            locs.is_empty(),
+            "absent Ns::Thing/Ns::get_Thing must not land on Other::get_Thing: {locs:?}"
+        );
+    }
+
+    #[test]
+    fn goto_definition_relative_qualified_property_uses_the_nearest_namespace_prefix() {
+        let src = "namespace Inner {\n    uint get_Thing() { return 0; }\n}\nnamespace Outer {\n    namespace Inner {\n        uint get_Thing() { return 1; }\n    }\n    namespace Deep {\n        namespace Inner {\n            uint get_Thing() { return 2; }\n        }\n        void f() { uint x = Inner::Thing; }\n    }\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc =
+            goto_at(&tw, 0, 11, "Inner::Thing", 7).expect("relative Inner::Thing must resolve");
+        assert_eq!(
+            loc.range.start.line, 9,
+            "Outer::Deep::Inner must beat Outer::Inner and root Inner"
+        );
+    }
+
+    #[test]
+    fn goto_definition_relative_qualified_real_field_beats_conflicting_root_symbols() {
+        let src = "namespace Inner {\n    uint Thing;\n    uint get_Thing() { return 0; }\n}\nnamespace Outer {\n    namespace Inner {\n        uint Thing;\n        uint get_Thing() { return 1; }\n    }\n    void f() { uint x = Inner::Thing; }\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 9, "Inner::Thing", 7);
+        assert_eq!(locs.len(), 1, "a real field has one target: {locs:?}");
+        assert_eq!(
+            locs[0].range.start.line, 6,
+            "Outer::Inner::Thing must beat both its accessor and root Inner::Thing"
+        );
+    }
+
+    #[test]
+    fn goto_definition_namespace_property_rejects_non_function_accessor_shapes() {
+        for source in [
+            "namespace Ns { uint get_Thing; uint set_Thing; }\nvoid f() { uint x = Ns::Thing; }\n",
+            "namespace Ns { class get_Thing {} class set_Thing {} }\nvoid f() { uint x = Ns::Thing; }\n",
+        ] {
+            let tw = build_single_file_workspace("file:///t/a.as", source);
+            let locs = goto_all(&tw, 0, 1, "Ns::Thing", 4);
+            assert!(
+                locs.is_empty(),
+                "only functions can define a virtual property, got {locs:?} for {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn goto_definition_namespace_property_write_ignores_non_function_setter() {
+        let src = "namespace Ns {\n    uint get_Thing() { return 1; }\n    uint set_Thing;\n}\nvoid f() { Ns::Thing = 2; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 4, "Ns::Thing", 4)
+            .expect("write with an invalid setter must fall back to the getter");
+        assert_eq!(
+            loc.range.start.line, 1,
+            "the set_Thing variable is not an accessor function"
+        );
+    }
+
+    #[test]
+    fn goto_definition_bare_virtual_property_uses_the_nearest_lexical_namespace() {
+        let src = "uint get_Thing() { return 0; }\nnamespace Outer {\n    uint get_Thing() { return 1; }\n    namespace Inner {\n        uint get_Thing() { return 2; }\n        void f() { uint x = Thing; }\n    }\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 5, "= Thing", 2).expect("bare Thing must resolve");
+        assert_eq!(
+            loc.range.start.line, 4,
+            "the nearest Inner accessor must beat Outer and root accessors"
+        );
+    }
+
+    #[test]
+    fn goto_definition_bare_virtual_property_ignores_a_root_accessor_in_a_namespace() {
+        let src = "uint get_Thing() { return 0; }\nnamespace Ns {\n    uint get_Thing() { return 1; }\n    void f() { uint x = Thing; }\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 3, "= Thing", 2).expect("bare Thing must resolve");
+        assert_eq!(
+            loc.range.start.line, 2,
+            "Ns::get_Thing must beat the root get_Thing"
+        );
+    }
+
+    #[test]
+    fn goto_definition_namespace_real_field_precedes_its_accessors() {
+        let src = "namespace Ns {\n    uint Thing;\n    uint get_Thing() { return 1; }\n    void set_Thing(uint value) {}\n}\nvoid f() { Ns::Thing += 1; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 5, "Ns::Thing", 4);
+        assert_eq!(locs.len(), 1, "a real field has one target: {locs:?}");
+        assert_eq!(locs[0].range.start.line, 1, "the exact real field must win");
+    }
+
+    #[test]
+    fn goto_definition_classifies_virtual_property_access_in_omitted_initializers() {
+        let src = "namespace Ns {\n    uint get_Thing() { return 1; }\n    void set_Thing(uint value) {}\n}\nuint global = (Ns::Thing = 4);\nnamespace Outer {\n    class Holder { uint field = (Ns::Thing += 1); }\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+
+        let write = goto_all(&tw, 0, 4, "Ns::Thing", 4);
+        assert_eq!(
+            lines_of(&write),
+            vec![2],
+            "a global initializer write must navigate to set_Thing"
+        );
+
+        let compound = goto_all(&tw, 0, 6, "Ns::Thing", 4);
+        assert_eq!(
+            lines_of(&compound),
+            vec![1, 2],
+            "a class field initializer compound access must offer get then set"
+        );
+    }
+
+    #[test]
+    fn goto_definition_classifies_virtual_property_write_in_free_function_default() {
+        let src = "namespace Ns {\n    uint get_Thing() { return 1; }\n    void set_Thing(uint value) {}\n}\nvoid f(uint value = (Ns::Thing = 4)) {}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 4, "Ns::Thing", 4);
+        assert_eq!(
+            lines_of(&locs),
+            vec![2],
+            "a write in a free-function default must navigate only to set_Thing"
+        );
+    }
+
+    #[test]
+    fn goto_definition_classifies_virtual_property_compound_in_class_method_default() {
+        let src = "namespace Ns {\n    uint get_Thing() { return 1; }\n    void set_Thing(uint value) {}\n}\nclass Holder {\n    void f(uint value = (Ns::Thing += 1)) {}\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 5, "Ns::Thing", 4);
+        assert_eq!(
+            lines_of(&locs),
+            vec![1, 2],
+            "a compound class-method default must offer get_Thing then set_Thing"
+        );
+    }
+
+    #[test]
+    fn goto_definition_classifies_virtual_property_access_in_property_bodies() {
+        let src = "namespace Ns {\n    uint get_Thing() { return 1; }\n    void set_Thing(uint value) {}\n}\nnamespace Outer {\n    namespace Inner {\n        class Holder {\n            uint Value {\n                get { Ns::Thing += 1; return 0; }\n                set { Ns::Thing = value; }\n            }\n        }\n    }\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+
+        let compound = goto_all(&tw, 0, 8, "Ns::Thing", 4);
+        assert_eq!(
+            lines_of(&compound),
+            vec![1, 2],
+            "a property getter compound access must offer get then set"
+        );
+
+        let write = goto_all(&tw, 0, 9, "Ns::Thing", 4);
+        assert_eq!(
+            lines_of(&write),
+            vec![2],
+            "a property setter-body write must navigate to set_Thing"
+        );
+    }
+
+    #[test]
+    fn goto_definition_bare_virtual_property_written_inside_its_own_namespace() {
+        // The write half of the bare-name case: `Thing = 5` inside
+        // `namespace Ns` parses as a plain identifier, not a
+        // `NamespaceAccess`, so the classifier has to recognise that shape
+        // too or the write silently resolves to the getter.
+        let src = "namespace Ns {\n    uint get_Thing() { return 1; }\n    void set_Thing(uint v) {}\n    void f() { Thing = 5; }\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 3, "Thing", 0).expect("bare property write must resolve");
+        assert_eq!(
+            loc.range.start.line, 2,
+            "must land on Ns::set_Thing (line 2), not the getter"
+        );
+    }
+
+    #[test]
+    fn goto_definition_bare_virtual_property_inside_its_own_namespace() {
+        // Written bare inside `namespace Ns`, the property still resolves
+        // through the namespace ladder to `Ns::get_Thing`.
+        let src = "namespace Ns {\n    uint get_Thing() { return 1; }\n    void f() { uint x = Thing; }\n}\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let loc = goto_at(&tw, 0, 2, "= Thing", 2).expect("bare property must resolve");
+        assert_eq!(loc.range.start.line, 1);
+    }
+
+    /// NEGATIVE CONTROL: a REAL field must keep navigating to the field.
+    /// A same-named accessor on another class exists precisely so that a
+    /// bare-name accessor fallback would be caught landing on it.
+    #[test]
+    fn goto_definition_a_real_field_wins_over_a_same_named_accessor() {
+        let src = "class Other { uint get_ID() { return 9; } }\nclass C { uint ID; }\nvoid f(C@ c) { uint x = c.ID; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 2, "c.ID", 2);
+        assert_eq!(
+            locs.len(),
+            1,
+            "a real field has ONE definition, got {locs:?}"
+        );
+        assert_eq!(
+            locs[0].range.start.line, 1,
+            "must land on C's field (line 1), never Other::get_ID (line 0)"
+        );
+    }
+
+    /// The same control in a write position: writing a real field must not
+    /// start hunting for a setter.
+    #[test]
+    fn goto_definition_a_real_field_written_to_still_resolves_to_the_field() {
+        let src = "class Other { void set_ID(uint v) {} }\nclass C { uint ID; }\nvoid f(C@ c) { c.ID = 5; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 2, "c.ID", 2);
+        assert_eq!(locs.len(), 1, "expected the field only, got {locs:?}");
+        assert_eq!(locs[0].range.start.line, 1);
+    }
+
+    #[test]
+    fn goto_definition_unknown_virtual_property_resolves_nothing() {
+        // No `get_Nope`/`set_Nope` anywhere: the accessor step must not
+        // invent a target, and must not fall through to a same-named
+        // global.
+        let src = "uint get_Nope() { return 0; }\nclass C { uint get_ID() { return 1; } }\nvoid f(C@ c) { uint x = c.Nope; }\n";
+        let tw = build_single_file_workspace("file:///t/a.as", src);
+        let locs = goto_all(&tw, 0, 2, "c.Nope", 2);
+        assert!(
+            locs.is_empty(),
+            "a property the class does not declare must not fall through to the \
+             same-named free accessor, got {locs:?}"
         );
     }
 }

@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod error;
 pub mod parser;
+pub mod walk;
 
 pub use ast::SourceFile;
 pub use error::ParseError;
