@@ -59,6 +59,37 @@ MUTATIONS = [
      "    if gitdir is None:\n        return None",
      '    if gitdir is None:\n        return "merge"\n    return "merge"'),
 
+    # --- B140: --sync-back resolves under the target dir -------------------
+    ("B140: a source path is no longer refused, so rsync answers with "
+     "`Broken pipe (32)` instead of naming the mistake",
+     "    head = PurePosix(subpath).parts[0]\n    if head in SOURCE_TREE_DIRS:",
+     "    head = PurePosix(subpath).parts[0]\n    if False:"),
+    ("B140: an absolute --sync-back is accepted, which relocates the "
+     "destination out of target/ and can write over the source tree",
+     "    if PurePosix(subpath).is_absolute():",
+     "    if False:"),
+    ("B140: `..` traversal is accepted",
+     '    if ".." in PurePosix(subpath).parts:',
+     "    if False:"),
+    ("B140 OVER-CONDEMN: every --sync-back path refused, which makes the flag "
+     "unusable for the artefact paths it exists to fetch",
+     "    if subpath is None:\n        return None",
+     '    if subpath is None:\n        return None\n    return "refused"'),
+    ("B140: the not-found message stops naming the path rsync could not fetch",
+     '        f"--sync-back {subpath!r} does not exist on {host}:\\n"\n'
+     '        f"    {remote_path}\\n\\n"',
+     '        f"sync-back failed\\n"'),
+
+    # --- B139: ssh's own status must not read as a verdict -----------------
+    ("B139: exit 255 loses its note, so ssh's own failure status reads as a "
+     "result from the remote command",
+     "    if rc == 255:",
+     "    if False:"),
+    ("B139 OVER-CONDEMN: every exit status gets the ssh note, which makes a "
+     "note nobody reads",
+     "    if rc == 255:",
+     "    if True:"),
+
     # --- worktree scope: the property that keeps the guard from being an
     # outage. Resolving the gitdir by hand attributes the main checkout's
     # merge to every lane.
