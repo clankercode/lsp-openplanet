@@ -179,7 +179,18 @@ pub struct ParamInfo {
     /// `typeflags` bit 3 (value 4): the parameter is const-qualified. Kept so
     /// the no-`decl` rendering path (the Nadeo half, and any Core entry that
     /// omits `decl`) can still show `const T &in` rather than `T &in` (B033).
-    pub is_const: bool,
+    /// B142: the parameter's `const` qualifier — `None` when the source
+    /// database does not say, which is a third state and not a synonym for
+    /// `false`.
+    ///
+    /// Core sets it from real `typeflags` data (bit 2). The Nadeo loader used
+    /// to hardcode `false` here, asserting "not const" about parameters no
+    /// dump has ever described: measured, 0 of the 1387 Nadeo arg strings
+    /// contain `const` at all, so there was nothing behind the claim. Same
+    /// `bool`-defaults-to-a-lie shape as B125, B131 and B137, and the third
+    /// loader-side instance found by hand — which is why B138's audit now
+    /// looks for the fourth.
+    pub is_const: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -1215,7 +1226,7 @@ impl TypeIndex {
                         is_in: a.typeflags & 0b1 != 0,
                         is_out: a.typeflags & 0b10 != 0,
                         is_inout: a.typeflags & 0b11 == 0b11,
-                        is_const: a.typeflags & 0b100 != 0,
+                        is_const: Some(a.typeflags & 0b100 != 0),
                     })
                     .collect(),
                 decl: func.decl.clone(),
@@ -1247,7 +1258,7 @@ impl TypeIndex {
                                 is_in: a.typeflags & 0b1 != 0,
                                 is_out: a.typeflags & 0b10 != 0,
                                 is_inout: a.typeflags & 0b11 == 0b11,
-                                is_const: a.typeflags & 0b100 != 0,
+                                is_const: Some(a.typeflags & 0b100 != 0),
                             })
                             .collect(),
                         // B125: derived from `decl`, not from a `const`
@@ -1334,7 +1345,7 @@ impl TypeIndex {
                             is_in: a.typeflags & 0b1 != 0,
                             is_out: a.typeflags & 0b10 != 0,
                             is_inout: a.typeflags & 0b11 == 0b11,
-                            is_const: a.typeflags & 0b100 != 0,
+                            is_const: Some(a.typeflags & 0b100 != 0),
                         })
                         .collect(),
                     decl: fd.decl.clone(),
@@ -1405,7 +1416,9 @@ impl TypeIndex {
                                         is_in: false,
                                         is_out: false,
                                         is_inout: false,
-                                        // B137: this comment used to say the
+                                        // B142: UNKNOWN, not `false`.
+                                        //
+                                        // The comment here used to say the
                                         // Nadeo dump "carries `const` in the
                                         // signature text, not in flags". That
                                         // is measurably false — 0 of the 1387
@@ -1413,20 +1426,9 @@ impl TypeIndex {
                                         // and the whole file holds just 5
                                         // occurrences of the substring, all
                                         // inside description prose. There is
-                                        // no signature text to read it from.
-                                        //
-                                        // So this `false` is the same
-                                        // not-a-measurement that
-                                        // `MethodInfo::is_const` carried until
-                                        // this ticket. It is left as a `bool`
-                                        // only because its blast radius is one
-                                        // reader (`hover.rs`, which prefixes
-                                        // `const` on a rendered parameter) and
-                                        // widening the type is its own change
-                                        // with its own consumer to re-check —
-                                        // see the follow-up ticket. Core sets
-                                        // this from real `typeflags` data.
-                                        is_const: false,
+                                        // no signature text to read it from,
+                                        // so there is nothing to assert.
+                                        is_const: None,
                                     })
                                     .collect(),
                                 // B137: UNKNOWN, not `false`. Measured across
@@ -5832,6 +5834,93 @@ mod b137_nadeo_constness_is_unknown {
         );
     }
 
+    /// B142: parameter constness is Core-only too. Core reads real
+    /// `typeflags` bits; the Nadeo dump has no signature text to read, so
+    /// its params are UNKNOWN rather than "not const".
+    #[test]
+    fn core_params_state_their_constness_and_nadeo_params_do_not() {
+        let idx = fixtures();
+        let mut core_known = 0usize;
+        let mut nadeo_unknown = 0usize;
+        for info in idx.types.values() {
+            for m in &info.methods {
+                for p in &m.params {
+                    match info.source {
+                        TypeSource::Core => {
+                            assert!(
+                                p.is_const.is_some(),
+                                "Core reads param constness from `typeflags`, so it \
+                                 must always have an answer: {}::{}",
+                                info.name,
+                                m.name
+                            );
+                            core_known += 1;
+                        }
+                        _ => {
+                            assert_eq!(
+                                p.is_const, None,
+                                "0 of 1387 Nadeo arg strings carry `const`, so this \
+                                 must be UNKNOWN rather than `false`: {}::{}",
+                                info.name, m.name
+                            );
+                            nadeo_unknown += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(core_known > 800, "only {core_known} Core params audited");
+        assert!(
+            nadeo_unknown > 900,
+            "only {nadeo_unknown} Nadeo params audited"
+        );
+    }
+
+    /// The measurement behind that `None`, pinned so nobody reinstates the
+    /// claim the old comment made.
+    #[test]
+    fn no_nadeo_arg_string_carries_a_const_qualifier() {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let raw = std::fs::read_to_string(&p).expect("fixture must exist");
+        let db: serde_json::Value = serde_json::from_str(&raw).expect("parses");
+        let mut with_args = 0usize;
+        let mut with_const = 0usize;
+        let mut with_amp = 0usize;
+        for (_, nsv) in db["ns"].as_object().expect("ns") {
+            for (_, t) in nsv.as_object().expect("types") {
+                for m in t["m"].as_array().into_iter().flatten() {
+                    // NON-EMPTY only. 1618 members carry an `a` key; 231 of
+                    // those are `""` (a no-arg method). The measured figure
+                    // reported throughout B137/B142 is the 1387 with actual
+                    // argument text, and matching it here keeps the pin and
+                    // the claim the same number.
+                    if let Some(a) = m["a"].as_str().filter(|a| !a.is_empty()) {
+                        with_args += 1;
+                        if a.contains("const") {
+                            with_const += 1;
+                        }
+                        if a.contains('&') {
+                            with_amp += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(with_args, 1387, "Nadeo arg-string count changed");
+        assert_eq!(
+            with_const, 0,
+            "a Nadeo arg string now carries `const` — it may be parseable the \
+             way Core's `typeflags` are; re-measure before leaving this `None`"
+        );
+        // Recorded, not fixed: the loader drops this `&` entirely and reports
+        // every Nadeo param as none of in/out/inout. Tracked separately.
+        assert_eq!(
+            with_amp, 56,
+            "count of Nadeo args carrying a bare `&` changed"
+        );
+    }
+
     /// The drift report keeps all THREE states distinct. Folding `None` in
     /// with `Some(false)` would reintroduce in the report the exact
     /// conflation the loader change removed.
@@ -5857,6 +5946,253 @@ mod b137_nadeo_constness_is_unknown {
         assert!(
             nfacts.iter().any(|f| f.contains("const:unknown")),
             "a Nadeo method's constness is unknown and must say so: {nfacts:?}"
+        );
+    }
+}
+
+// ── B138: what does a loader ASSERT that the dump never told it? ────────────
+//
+// B131 audits the Core dump's field PRESENCE. It is structurally blind to a
+// `MethodInfo` built with a literal `false`, which is where all of tonight's
+// found-by-hand defects lived: Core `is_const` (B125), Nadeo `is_const`
+// (B137), and Nadeo `ParamInfo::is_const` (B142). Three by hand is a pattern;
+// the fourth should be found by a machine.
+//
+// The distinction this audit is built on, and the reason it is not just a
+// grep: a literal's TYPE decides whether it is a finding.
+//
+//   `None`   says "absent". An `Option` default is honest — the caller can
+//            see there is no answer and decline. Allowed silently.
+//   `false`  ASSERTS "not so", to every caller, forever. When the dump never
+//            said, that is a claim nobody made. A finding by default.
+//   empty    `String::new()` / `Vec::new()` asserts "there are none", which is
+//            the same kind of claim about a collection.
+//
+// So every bool/empty literal in a loader must be listed below WITH A REASON,
+// or fixed. Adding one and not listing it fails this test.
+//
+// It reads the directory at test time rather than a hand-copied file list, so
+// a NEW loader file is covered automatically. B131's first draft covered 7 of
+// 11 structs from a hand-copied list, which is the blind spot being avoided.
+#[cfg(test)]
+mod b138_loader_literal_audit {
+    /// `(field, literal, occurrences, why it is not a lie)`.
+    ///
+    /// Every row is a claim the loader makes on the dump's behalf. Reviewing
+    /// this table is reviewing those claims; that is the point of making them
+    /// enumerate themselves.
+    const JUSTIFIED: &[(&str, &str, usize, &str)] = &[
+        (
+            "writable",
+            "true",
+            3,
+            "Core explicit props are real fields; Nadeo exposes no accessor \
+             info and assumes writable deliberately, since only Core's proven \
+             get-only set hard-errors",
+        ),
+        (
+            "writable",
+            "false",
+            1,
+            "synthesized get-only virtual property — reached only inside the \
+             `!has_set` branch, so it is DERIVED from the dump, not assumed",
+        ),
+        (
+            "anonymous",
+            "false",
+            2,
+            "a named enum, in both the Core and Header paths; the anonymous \
+             ones are built elsewhere with `true` (B046)",
+        ),
+        (
+            "return_type",
+            "String::new()",
+            1,
+            "the Nadeo dump identifies return types by numeric id, not text — \
+             empty is the honest rendering of `we have no string for this`, \
+             and `MethodInfo::return_type` is a String rather than an Option",
+        ),
+        (
+            "ctor_conversions",
+            "Vec::new()",
+            1,
+            "the Nadeo dump carries no `behaviors`, and engine classes are \
+             reference types with no constructor conversions (GH #54)",
+        ),
+        // The remaining three are NOT justified — they are the open finding
+        // this audit exists to surface, kept here so the test states the
+        // count rather than tolerating it silently. See the follow-up ticket:
+        // every Nadeo param is recorded as none of in/out/inout, a state
+        // AngelScript has no way to represent, and 56 of 1387 Nadeo arg
+        // strings carry a `&` the loader drops on the floor. `is_out` is not
+        // cosmetic — it feeds `param_out` and thus arg-type checking.
+        (
+            "is_in",
+            "false",
+            1,
+            "OPEN FINDING, tracked: Nadeo param direction is unknown, not `in`",
+        ),
+        (
+            "is_out",
+            "false",
+            1,
+            "OPEN FINDING, tracked: feeds `param_out` -> arg-type checking",
+        ),
+        (
+            "is_inout",
+            "false",
+            1,
+            "OPEN FINDING, tracked: 56 of 1387 Nadeo args carry a dropped `&`",
+        ),
+    ];
+
+    /// Literals that state an absence rather than assert a fact.
+    fn is_absence(lit: &str) -> bool {
+        lit == "None"
+    }
+
+    /// Every `.rs` under `src/typedb/`, so a new loader file is audited
+    /// without anyone remembering to add it.
+    fn loader_sources() -> Vec<(String, String)> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/typedb");
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("src/typedb must exist") {
+            let path = entry.expect("readable entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("utf-8 filename")
+                .to_string();
+            out.push((
+                name,
+                std::fs::read_to_string(&path).expect("readable source"),
+            ));
+        }
+        out.sort();
+        assert!(!out.is_empty(), "no loader sources found to audit");
+        out
+    }
+
+    /// `field: <literal>,` in PRODUCTION code — everything before the file's
+    /// first `#[cfg(test)]`.
+    fn production_literals(src: &str) -> Vec<(String, String)> {
+        let end = src.find("#[cfg(test)]").unwrap_or(src.len());
+        let mut out = Vec::new();
+        for line in src[..end].lines() {
+            let t = line.trim();
+            if t.starts_with("//") {
+                continue;
+            }
+            let Some((field, rest)) = t.split_once(": ") else {
+                continue;
+            };
+            if !field
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                || field.is_empty()
+            {
+                continue;
+            }
+            // Strip a trailing line comment BEFORE the comma: the real
+            // source writes `String::new(), // Nadeo format uses type IDs`,
+            // and without this the scanner silently skips it. Caught by the
+            // expected table disagreeing, which is the second direction this
+            // audit checks working on the audit itself.
+            let rest = rest.split("//").next().unwrap_or(rest);
+            let value = rest.trim().trim_end_matches(',').trim();
+            // `Some(false)` is caught too, and that is not pedantry. Wrapping
+            // a literal in `Some` makes the type three-valued while leaving
+            // the VALUE just as unfounded — it says "the database told us
+            // false", which is the exact claim B125, B137 and B142 each had
+            // to retract. Making a field `Option` is only half the fix; the
+            // other half is writing `None` when nothing is known.
+            //
+            // Found by this audit failing to catch its own red check: with
+            // B142's `None` reverted to `Some(false)` the first version
+            // passed, which would have made every future occurrence invisible.
+            if matches!(
+                value,
+                "false"
+                    | "true"
+                    | "None"
+                    | "String::new()"
+                    | "Vec::new()"
+                    | "vec![]"
+                    | "Some(false)"
+                    | "Some(true)"
+                    | "Some(String::new())"
+                    | "Some(Vec::new())"
+            ) {
+                out.push((field.to_string(), value.to_string()));
+            }
+        }
+        out
+    }
+
+    /// The assumption the production/test split rests on, asserted rather
+    /// than trusted: nothing but test modules follows the first
+    /// `#[cfg(test)]`, so cutting there cannot hide a loader.
+    #[test]
+    fn no_production_item_follows_the_first_test_module() {
+        for (name, src) in loader_sources() {
+            let Some(cut) = src.find("#[cfg(test)]") else {
+                continue;
+            };
+            for line in src[cut..].lines() {
+                assert!(
+                    !(line.starts_with("pub fn ")
+                        || line.starts_with("fn ")
+                        || line.starts_with("impl ")
+                        || line.starts_with("pub struct ")),
+                    "{name}: a top-level item appears after the first \
+                     `#[cfg(test)]`, so the audit's production cut would skip \
+                     it: {line}"
+                );
+            }
+        }
+    }
+
+    /// THE AUDIT. Every bool/empty literal a loader writes must be justified
+    /// above; `None` needs no justification because it claims nothing.
+    #[test]
+    fn every_asserted_literal_in_a_loader_is_justified() {
+        let mut found: std::collections::BTreeMap<(String, String), usize> =
+            std::collections::BTreeMap::new();
+        let mut absences = 0usize;
+        for (_name, src) in loader_sources() {
+            for (field, value) in production_literals(&src) {
+                if is_absence(&value) {
+                    absences += 1;
+                    continue;
+                }
+                *found.entry((field, value)).or_insert(0) += 1;
+            }
+        }
+        // Non-vacuity: an audit that scanned nothing passes trivially.
+        assert!(
+            found.len() >= 5,
+            "only {} distinct asserted literals found — the scanner has \
+             drifted from the source",
+            found.len()
+        );
+        assert!(
+            absences > 0,
+            "no `None` initialisers seen; scanner is wrong"
+        );
+
+        let expected: std::collections::BTreeMap<(String, String), usize> = JUSTIFIED
+            .iter()
+            .map(|(f, v, n, _)| ((f.to_string(), v.to_string()), *n))
+            .collect();
+        assert_eq!(
+            found, expected,
+            "a loader asserts something the JUSTIFIED table does not account \
+             for. A `bool` literal claims a fact to every caller; if the dump \
+             never said it, either fix it or add a row saying why it is true. \
+             `None` needs no row — it claims nothing."
         );
     }
 }
