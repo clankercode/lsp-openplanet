@@ -256,3 +256,46 @@ fmt-fix:
 # Clean build artifacts
 clean:
     cargo clean
+
+# ---------------------------------------------------------------------------
+# Remote builds (scripts/remote-build.py)
+#
+# Offload compilation and tests to a build box so this machine stays
+# responsive. Defaults to x-alpha (48 cores) — override with $LSP_REMOTE_HOST
+# or --host. Works from a lane worktree as well as master; each worktree gets
+# its own remote tree and target dir, so lanes never share a build cache.
+#
+# Run `just rdoctor` first on a new machine.
+# ---------------------------------------------------------------------------
+
+# Verify the remote host is usable (ssh, rsync, cargo, python3, just, versions)
+rdoctor:
+    python3 scripts/remote-build.py doctor
+
+# Full gated suite on the remote — the same `just test` gate, run over there
+rtest *ARGS:
+    python3 scripts/remote-build.py test -- {{ARGS}}
+
+# cargo check --all-targets on the remote
+rcheck *ARGS:
+    python3 scripts/remote-build.py check -- {{ARGS}}
+
+# cargo clippy --all-targets on the remote
+rclippy *ARGS:
+    python3 scripts/remote-build.py clippy -- {{ARGS}}
+
+# cargo build on the remote; add --sync-back debug/openplanet-lsp to fetch it
+rbuild *ARGS:
+    python3 scripts/remote-build.py build -- {{ARGS}}
+
+# Arbitrary command in the synced remote tree, e.g. `just rrun cargo test --lib`
+rrun *ARGS:
+    python3 scripts/remote-build.py run -- {{ARGS}}
+
+# Interactive shell in the remote tree, for poking at a failure
+rshell:
+    python3 scripts/remote-build.py shell
+
+# Remove this worktree's remote tree and build cache
+rclean:
+    python3 scripts/remote-build.py clean
