@@ -103,3 +103,4 @@ bugs:
     - file: B102-array-t-sort-sortnonconst-call.todo
     - file: B103-go-to-definition-on-virtual-pr.todo
     - file: B104-go-to-definition-on-interface.todo
+    - file: B105-lsp-server-should-notice-its-b.todo

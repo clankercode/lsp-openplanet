@@ -1,0 +1,62 @@
+---
+complexity: medium
+created_at: "2026-08-31T10:18:14Z"
+depends_on: []
+estimate_hours: 2
+id: B105
+priority: medium
+status: pending
+tags: []
+title: LSP server should notice its binary was replaced (self-update/new install) and restart itself
+updated_at: "2026-08-31T10:18:14Z"
+---
+## Expected Behavior
+
+A long-running `openplanet-lsp` in LSP mode notices when the executable
+it was launched from has been replaced on disk (self-update, package
+manager, manual install) and restarts so the editor gets the new version
+without a manual reload. Diagnostics stop being served by a stale binary
+hours after an upgrade.
+
+## Actual Behavior
+
+Nothing watches the binary. After an update the old process keeps
+serving until the editor restarts it by chance. (Same stale-server shape
+as the GH #18 motivating incident, where answers came from a process
+older than what was on disk.)
+
+## Design decisions to settle (discuss before/while implementing)
+
+- **Detection:** poll `std::env::current_exe()` metadata (mtime/len, and
+  inode on unix) on a slow timer (~30s) vs filesystem watch. Polling is
+  probably enough and avoids watcher platform quirks. Windows caveat: a
+  running exe is replaced by rename-swap, so compare by PATH metadata,
+  not by open-file identity; on unix the path may point at a NEW inode
+  while /proc/self/exe still holds the old one — that difference IS the
+  signal.
+- **Restart mechanism:** LSP has no server-initiated restart. Options:
+  (a) exit cleanly after finishing in-flight work — VS Code's
+  LanguageClient auto-respawns an exited server (bounded retries);
+  (b) custom notification to our extension (../lsp-openplanet-ext) so it
+  restarts the client deliberately — more control, needs ext work;
+  (c) exec-replace ourselves (unix only, loses Windows).
+  Rec: (b) as primary with (a) as fallback when the custom capability
+  isn't acknowledged by the client.
+- **Grace:** only restart when idle (no in-flight requests, no dirty
+  overlay state that would be lost); log the old→new version stamps.
+- **Loop safety:** if the replacement binary dies immediately, do not
+  ping-pong — the extension side should back off (VS Code's built-in
+  crash counter may already cover this).
+- **Scope:** LSP mode only. `check`/TUI runs are short-lived; `--watch`
+  TUI could get the same treatment later but is not this ticket.
+
+## Test cases
+
+- Metadata-change detection unit-testable behind a seam (fake exe path +
+  temp file swap) — B032-style: no HOME/env mutation in-process.
+- Replaced binary + idle server → restart signal emitted exactly once.
+- Replaced binary + in-flight request → signal deferred until idle.
+- Unchanged binary → no signal over many polls (negative control).
+- Related plumbing: src/update.rs (self-update already knows how the
+  swap is performed — reuse its knowledge of the swap shape rather than
+  guessing).
