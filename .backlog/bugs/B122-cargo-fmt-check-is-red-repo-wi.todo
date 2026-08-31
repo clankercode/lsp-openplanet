@@ -57,3 +57,40 @@ Check whether the repo has a `rustfmt.toml` and whether the 77 diffs are
 default-rustfmt opinions or a config the project deliberately does not follow.
 "The formatter disagrees" and "the code is misformatted" are different findings,
 and only the second justifies rewriting five files.
+
+
+## HOLD CONDITION — set by Max, 2026-09-01
+
+**Do not run `cargo fmt` until ALL work in flight is merged, including the other
+session's.** Not just this session's lanes.
+
+At the time of writing that means:
+
+| holder | tickets | status |
+|---|---|---|
+| lane-unused | B119 | in flight |
+| lane-enum | B121 | in flight |
+| lane-resolver | B123 | in flight |
+| **peer session `claude-xenon-side-u7o7`** | **B113, B114** | **in flight** |
+
+**B114 is the one that makes this non-negotiable.** It is a pooling change with
+a consumer ripple that reaches `checker.rs`, `hover.rs`, `completion.rs` and
+`code_actions/`, and it is being reworked pre-merge to thread field and property
+visibility. `src/typecheck/checker.rs` carries roughly 40 of the 77 fmt diffs
+and is the most-contended file in the batch. A reformat landing while B114 is
+open produces a conflict in every one of those files, in territory neither side
+meaningfully edited, and the person resolving it cannot tell a real edit from a
+whitespace one.
+
+The peer session has been asked to tell us when its lanes are fully merged.
+**Both conditions must hold — this session's lanes drained AND the peer's — and
+they must hold at the same time.** Two sessions draining at different moments is
+not a window; re-check both immediately before running it.
+
+## Why this ordering is the whole ticket
+
+The formatting itself is trivial. The ONLY difficulty is scheduling, and getting
+it wrong costs other people's review time rather than producing a test failure.
+That is the same shape as `git add -A` and `reset --soft master` in
+`docs/verification-hazards.md`: a clean-applying commit that sweeps in work the
+author did not do and defeats review rather than any gate.
