@@ -14,6 +14,7 @@ dated 2026-02-03), via `scripts/probe_enum_corpus.py`.
 | `b052-qualified-enum-spellings.tsv` | 1901 | for a qualified *type* spelling (`Scene::ESceneCharVisNotice`, `UI::VirtualKey`, `CGameMenu::EMenuOrder`), does the game accept it, and if not, what does it say? |
 | `b053-bare-enum-values.tsv` | 2989 | for a bare *value* name of a named enum (`Turbo`, `GlassSmash`), does the game accept it, reject it as unknown, or reject it as ambiguous? |
 | `b086-export-stub-binding.tsv` | 18 | given a `[script] exports` stub and a body, does the engine BIND them? Produced 2026-08-31 against **Openplanet 1.29.14** by `scripts/probe_export_binding.py`, driving the game through `tm-control-mcp`. 18 variants, 0 ambiguous. |
+| `b096-shared-modifiers.tsv` | 24 | do `shared interface` / `shared enum` / `shared funcdef` / `shared` function compile, at top level and namespaced, in a `shared_exports` file and in a plain one — and is `shared` semantically live? Produced 2026-08-31 against **Openplanet 1.29.14** by `scripts/probe_shared_modifiers.py` over RemoteBuild. 16 variants, 5 controls, 2 ambiguous. |
 
 The B086 corpus answers a question the other two do not, and needs a different
 instrument for it: binding is a RUNTIME property, so the probe has to CALL the
@@ -847,3 +848,96 @@ Consequence for the LSP: B087 roots a namespaced body from a namespaced stub by
 SIMPLE name, which over-approximates — it would also root the `UNBOUND` row.
 That is B062's deliberate direction (a missed warning, never a false positive),
 so it stays, but it is now measured rather than assumed.
+
+## B096 claim 2 — the engine accepts all four `shared` forms, and `shared` is LIVE
+
+`b096-shared-modifiers.tsv`, 24 rows, produced 2026-08-31 against **Openplanet
+1.29.14** by `scripts/probe_shared_modifiers.py`. 16 measured variants, 5
+controls (all correct), 1 discriminator pair, 2 rows honestly AMBIGUOUS.
+
+**The answer: ACCEPT, uniformly.** `shared interface`, `shared enum`,
+`shared funcdef` and a `shared` function all compile and load — at top level
+and inside a `namespace`, in a file listed under `[script] shared_exports`
+and in an ordinary plugin file in no export list at all. So B087 records
+`is_shared` for forms the game really does accept; nothing to fix.
+
+**But "it compiles" is a weaker claim than "the engine implements it", and 16
+uniform ACCEPTs is also the shape a modifier the parser SKIPS would produce.**
+A pair differing only in the keyword settles it:
+
+    shared enum BlockPlacementType { ZZZMismatch }  -> REJECT
+           enum BlockPlacementType { ZZZMismatch }  -> ACCEPT
+
+    Shared type 'BlockPlacementType' doesn't match the declaration in
+    module 'Editor'
+
+So `shared` is semantically live and engine-wide **by fully-qualified name,
+with no `dependencies` entry required** — the type is visible across modules
+that never declared any relationship. That makes a name collision with any
+loaded plugin a REJECT that is *not* about the modifier, which is a
+contamination channel unique to this claim; the corpus already contains
+`IInputChange` and `CheckpointIxTime` declared shared in more than one plugin.
+Every name and module in the fixtures is uniquely suffixed for that reason.
+
+### Fixture fidelity: `shared` ships in TWO contexts, and only one is obvious
+
+Reading the installed corpus BEFORE writing fixtures (the claim-1 lesson)
+found that shipped `shared` declarations live both in `shared_exports` files
+*and* in ordinary files that are in no export list:
+
+- **in `shared_exports`** — `ai-api/AiApi_Interfaces.as`,
+  `map-together/Export_Shared.as`, `dips++-dev/Ex/Shared.as`,
+  `Editor/Editor/Shared_General.as`, `Editor/Exports/Callbacks_Shared.as`;
+- **in no export list** — `Editor/FormatX.as` (`shared string Vec2`),
+  `Editor/MathX.as` (`shared float Max`), `Editor/UI/UI_Util.as`,
+  `Editor/Editor.as:591` (`shared enum EditorAction`), and
+  `EppLines/Exports_Shared.as`, whose `shared_exports` line is **commented
+  out** ("shared exports disabled until contract frozen") while the file still
+  carries `shared interface IGeomLeased`.
+
+A fixture covering only one context would have misreported the other. Both are
+probed, every row names the shipped code it stands in for, and both are kept.
+
+### Two false-green channels in the shared probe harness
+
+Found by this run, and they affect `issue_repro_game.probe` generally — so
+they are not local to this ticket. Both were caught only because a fixture
+whose dependency id was wrong was scored **ACCEPT**:
+
+1. **`fleet.read_log_window` drops every `[ TRAC]` line, and
+   `Loaded plugin '<id>'` is a TRAC line.** So `compiled_clean` means "no ERR
+   attributed to me" — absence of evidence, not proof the build ran. A build
+   that never happened reads exactly like a clean one. This probe injects an
+   UNFILTERED window through the `read_log_window_fn` seam and requires the
+   positive `Starting build for "<fid>"` / `Loaded plugin '<fid>'` bracket.
+
+2. **`fleet.parse_game_diagnostics` only matches
+   `path (line, col) : SEV : msg`, so engine errors with NO source location
+   are invisible to it** — invisible to `game_errors`, to `foreign_errors`
+   AND to `unattributed_errors`, so `contended` stays False too. Measured:
+
+       [ERROR] Couldn't find required plugin dependency "ghosts-pp" while
+               loading plugin "<fid>"
+       [ TRAC] Loaded plugin '<fid>' (version 0.1.0)
+
+   Under the inherited oracle that scores a clean ACCEPT. `raw_build_errors`
+   reads the bracketed slice directly and reports `BUILD-ERR`, deliberately a
+   distinct verdict from `REJECT`: "your dependency is missing" must never be
+   readable as "the engine rejects this form".
+
+**`Loaded plugin` is logged even after `Script compilation failed!`** — so it
+is necessary but not sufficient, and an oracle keying on it alone is a third
+false green. This probe checks attributed errors first.
+
+### The one thing path attribution cannot score
+
+Two rows are AMBIGUOUS, correctly. When a fixture depends on `Editor`, the
+dependency's `shared_exports` file is compiled INTO the probe's unit, so a
+collision raises errors carrying **`Editor`'s** source path:
+
+    Plugins/Editor/Editor/Shared_General.as (125, 13) : ERR : Name conflict.
+
+Path-based attribution counts those as *foreign*, though the probe's own code
+caused them. It fails SAFE — AMBIGUOUS, never a wrong verdict — but those rows
+cannot be scored, which is why the decisive discriminator uses **no dependency
+at all**. It does not need one: shared types are engine-wide already.
