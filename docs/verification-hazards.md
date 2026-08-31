@@ -3677,6 +3677,49 @@ Both were caught the same way: by a change that made the subject decidable, and
 by re-reading the test against the new measurement instead of trusting that it
 was green.
 
+### Which tests to re-check — this is a search, not a warning to be careful
+
+"Be careful" is useless here. The pattern gives a **selector**, and it is worth
+stating as one, because it turns a vague worry into a finite list you can
+actually walk:
+
+> **Any test written before its axis was measured is a candidate. When a
+> measurement lands, re-read every test that names the thing just measured —
+> and re-read it against the measurement, not against whether it is green.**
+
+The reasoning that makes this a search rather than a mood: a test can only
+encode what its author was in a position to know. When the axis was unmeasured,
+the author had a belief and no oracle, and the two honest options — assert the
+belief, or do not assert — both leave something that outlives the uncertainty.
+An asserted belief becomes a false pin the day the measurement contradicts it,
+which at least goes RED and gets noticed. An unasserted one becomes a green
+test with a confident name, which never does. **The second failure mode is the
+common one precisely because it is the more conscientious choice at the time.**
+
+So the greenness of such a test carries no information about the axis: it was
+green before the measurement, and it will be green after, whichever way the
+measurement went. Both instances here passed unchanged through a commit that
+INVERTED the behaviour they were named for.
+
+Practical form of the search, in the order that pays:
+
+1. `grep` the tests for the name of the axis you just measured — not for the
+   ticket number, which the older tests cannot contain.
+2. For each hit, ask "what input would make this fail?" and check that such an
+   input is actually in the test. Both of these had none: one asserted a
+   different input than its name, the other's guard skipped every row that
+   differed on the axis.
+3. Anywhere the prose says UNMEASURED, UNKNOWN, "by construction", "neutral by
+   default", or cites a blocked probe, treat the nearby assertions as
+   provisional and re-derive them. That prose is the author telling you exactly
+   where they had no oracle. In this codebase it is a small, searchable set,
+   and it found both of these.
+
+Retiring such a note is worth doing on its own, separately from any behaviour
+change: B144 measured an axis and left three source files still asserting it was
+unmeasurable, which is how a stale "we cannot know this" survives the day it
+stopped being true.
+
 ## A fixture the engine had never actually judged, because it failed at declaration
 
 `b102-array-sort-mismatched-callbacks` existed to pin twelve wrong `array::Sort`
