@@ -90,3 +90,4 @@ bugs:
     - file: B089-a-funcdef-typed-parameter-acce.todo
     - file: B090-config-tui-needs-an-option-for.todo
     - file: B091-when-passing-a-class-method-to.todo
+    - file: B092-just-test-reported-incomplete.todo
