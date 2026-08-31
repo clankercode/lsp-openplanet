@@ -1,0 +1,215 @@
+---
+complexity: medium
+created_at: "2026-08-31T04:51:12Z"
+depends_on: []
+estimate_hours: 2
+id: B085
+priority: high
+status: pending
+tags:
+    - testing
+    - tooling
+    - gates
+title: 'The suite gate is binary-level: a test vanishing inside a healthy binary, or a stale bin dependency a test spawns, are both invisible'
+updated_at: "2026-08-31T04:51:12Z"
+---
+## Summary
+
+`scripts/test-suite.py` reconciles at **binary** level: every expected binary
+produced a summary. That is the right check for a crashed binary (B082) and it
+cannot see the failure that produced the false B074 revert on 2026-08-31 — a
+test that goes missing **inside** a present, healthy, summary-producing binary,
+or a stale bin **dependency** that a test spawns as a child process.
+
+Both were live at once during that merge. The only symptom either produces is a
+total that fails to rise as predicted, which is why the coordinator's prediction
+caught it and the gate did not.
+
+## The two blind spots
+
+**1. Content staleness inside a healthy binary.** `cli_check_tests` reported a
+clean summary while carrying 52 issue-repro tests against 54 in source. Nothing
+in a binary-level reconciliation can notice.
+
+**2. A stale bin dependency.** Many tests spawn `CARGO_BIN_EXE_openplanet-lsp`
+as a child process. The harness can be current while the binary it measures is
+not, and then the assertion is about old code. Demonstrated, same fixture, same
+tree, only the two files B061 touched varying:
+
+| `openplanet-lsp` built from | `warning:` lines on the B061 fixture |
+|---|---|
+| `8214488`, fresh | 6 |
+| `5942a75^1` (pre-B061) | 13 |
+
+`left: 13, right: 6` — the exact reported failure — is the signature of blind
+spot 2, not of any source change.
+
+## Where staleness comes from here
+
+Bisecting in a detached worktree pointed at a warm shared `CARGO_TARGET_DIR`.
+`git checkout` writes older mtimes, cargo's fingerprints can read as fresh, and
+the build is skipped. This is normal practice in this repo right now — every
+lane sets `CARGO_TARGET_DIR` to a shared cache path — so it will recur.
+
+## Proposed check
+
+Per target, compare the built binary's `--list` count against the
+`#[test]` / `#[tokio::test]` count in its source, and compare every artifact's
+mtime against the newest `.rs` under `src/` and `tests/`.
+
+Measured on master `22defe8`: **25 binaries checked, 0 flagged.** On the same
+tree it reports `cli_check_tests binary=117 source=117`, so it would have said
+`117 vs 114` for the 52-vs-54 case that got through.
+
+**Caveat for whoever implements it.** The prototype's literal-stripper had the
+same `b'"'` char-literal bug that B074's Rust twin had, and reported a false
+`2043 vs 2023` on the lib target until it was fixed. Any source-counting check
+needs char literals, lifetimes, and byte raw strings handled, and needs its own
+control proving it does not silently under-read. `src/testing.rs`'s
+`env_enforcement::strip_literals` is a worked version with four such controls.
+
+## Working prototype
+
+Verified against master `22defe8` (0 flagged) and against branch
+`b074-rework` (0 flagged). Lift it into `scripts/test-suite.py` as a phase, or
+keep it standalone and call it from the `test` recipe.
+
+```python
+#!/usr/bin/env python3
+"""Per-binary content check: does each built test binary contain the tests its
+source declares, and is every built artifact newer than the sources?
+
+`scripts/test-suite.py` reconciles at BINARY level — every expected binary
+reported a summary. A test that vanishes INSIDE a present, healthy,
+summary-producing binary is invisible to it, and so is a stale bin DEPENDENCY
+that a test spawns as a child process (`CARGO_BIN_EXE_*`). Both hid the false
+B061 regression report on 2026-08-31.
+
+Two checks:
+  content — per target, `--list` count vs `#[test]`/`#[tokio::test]` in source.
+  freshness — every artifact's mtime vs the newest `.rs` under src/ and tests/.
+"""
+import json, os, re, subprocess, sys, pathlib
+
+root = pathlib.Path(subprocess.run(
+    ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
+).stdout.strip())
+
+ATTR = re.compile(r"^[ \t]*#\[(?:tokio::)?test[(\]]", re.M)
+IDENT = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
+
+
+def strip_literals(src: str) -> str:
+    """Blank comments and string literals, preserving newlines. A fixture that
+    quotes `#[test]` inside a raw string is prose, not a test."""
+    out, i, n = [], 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == "\n":
+            out.append("\n"); i += 1
+        elif c == "/" and src.startswith("//", i):
+            while i < n and src[i] != "\n":
+                i += 1
+        elif c == "/" and src.startswith("/*", i):
+            i += 2
+            while i + 1 < n and not src.startswith("*/", i):
+                out.append("\n" if src[i] == "\n" else " "); i += 1
+            i = min(i + 2, n)
+        elif (c == "r" or (c == "b" and src[i + 1:i + 2] == "r")) and (
+            i == 0 or src[i - 1] not in IDENT
+        ):
+            r = i if c == "r" else i + 1
+            j = r + 1
+            while j < n and src[j] == "#":
+                j += 1
+            if j < n and src[j] == '"':
+                close = '"' + "#" * (j - r - 1)
+                end = src.find(close, j + 1)
+                end = n if end < 0 else end + len(close)
+                out.append("\n" * src.count("\n", i, end))
+                i = end
+            else:
+                out.append(c); i += 1
+        elif c == "'":
+            # char literal vs lifetime: only the closing quote tells them
+            # apart. `b'"'` read as a string start is what blinded the Rust
+            # twin of this stripper on seven files.
+            if src[i + 1:i + 2] == "\\":
+                k = i + 2
+                while k < n and src[k] not in ("'", "\n"):
+                    k += 1
+                end = k if src[k:k + 1] == "'" else None
+            else:
+                end = i + 2 if src[i + 2:i + 3] == "'" else None
+            if end is None:
+                out.append(c); i += 1          # lifetime
+            else:
+                i = end + 1                     # char literal, blanked
+        elif c == '"':
+            i += 1
+            while i < n and src[i] != '"':
+                if src[i] == "\\":
+                    i += 1
+                elif src[i] == "\n":
+                    out.append("\n")
+                i += 1
+            i += 1
+        else:
+            out.append(c); i += 1
+    return "".join(out)
+
+
+def source_count(paths):
+    return sum(len(ATTR.findall(strip_literals(p.read_text(errors="replace")))) for p in paths)
+
+
+out = subprocess.run(
+    ["cargo", "test", "--no-run", "--message-format=json", "-j2"],
+    capture_output=True, text=True, cwd=root,
+)
+if out.returncode != 0:
+    sys.exit(f"build failed:\n{out.stderr[-2000:]}")
+
+targets = {}
+for line in out.stdout.splitlines():
+    try:
+        msg = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if msg.get("reason") != "compiler-artifact" or not msg.get("executable"):
+        continue
+    t = msg["target"]
+    targets[(t["name"], t["src_path"])] = msg["executable"]
+
+sources = [p for d in ("src", "tests") for p in (root / d).rglob("*.rs")]
+newest = max(sources, key=lambda p: p.stat().st_mtime)
+newest_mtime = newest.stat().st_mtime
+
+bad = 0
+print(f"newest source: {newest.relative_to(root)}\n")
+for (name, src_path), exe in sorted(targets.items()):
+    p = pathlib.Path(src_path)
+    is_lib = p.name == "lib.rs"
+    srcs = [q for q in sources if q.is_relative_to(root / "src")] if is_lib else [p]
+    n_src = source_count(srcs)
+    listed = subprocess.run([exe, "--list"], capture_output=True, text=True)
+    n_bin = sum(1 for l in listed.stdout.splitlines() if l.endswith(": test"))
+    stale = os.stat(exe).st_mtime < newest_mtime
+    flags = []
+    if n_bin != n_src:
+        flags.append("CONTENT MISMATCH")
+    if stale:
+        flags.append("OLDER THAN SOURCE")
+    if flags:
+        bad += 1
+    print(f"{name:<34} binary={n_bin:<5} source={n_src:<5} {' '.join(flags)}")
+
+print(f"\n{len(targets)} binaries checked, {bad} flagged")
+sys.exit(1 if bad else 0)
+```
+
+## Provenance
+
+Found by lane-b065-b066 while investigating the B074 revert. The check is
+proposed rather than implemented because `scripts/test-suite.py` belongs to the
+B082 lane and widening B074 into it is not mine to do.

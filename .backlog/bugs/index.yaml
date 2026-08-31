@@ -83,3 +83,4 @@ bugs:
     - file: B082-a-crashed-test-binary-silently.todo
     - file: B083-just-clippy-is-red-on-master-6.todo
     - file: B084-a-called-global-function-is-re.todo
+    - file: B085-the-suite-gate-is-binary-level.todo
