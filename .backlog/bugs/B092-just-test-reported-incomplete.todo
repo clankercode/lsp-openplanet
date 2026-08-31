@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-31T10:09:25Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T10:09:25Z"
 complexity: medium
 created_at: "2026-08-31T08:45:07Z"
 depends_on: []
+duration_minutes: 0.0011972675
 estimate_hours: 1
 id: B092
 priority: high
 started_at: "2026-08-31T10:09:25Z"
-status: in_progress
+status: done
 tags: []
 title: just test reported INCOMPLETE RUN once and passed on an immediate re-run of the identical tree
 updated_at: "2026-08-31T10:09:25Z"
