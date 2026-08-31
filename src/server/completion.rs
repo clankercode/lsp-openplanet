@@ -510,7 +510,10 @@ fn complete_identifier(
             if sym.name.contains("::") {
                 continue;
             }
-            items.push(make_item(&sym.name, workspace_symbol_completion_kind(&sym.kind)));
+            items.push(make_item(
+                &sym.name,
+                workspace_symbol_completion_kind(&sym.kind),
+            ));
         }
     }
 
@@ -2135,10 +2138,7 @@ mod b099_namespace_member_kinds {
         members: &[(String, CompletionItemKind)],
         label: &str,
     ) -> Option<CompletionItemKind> {
-        members
-            .iter()
-            .find(|(l, _)| l == label)
-            .map(|(_, k)| *k)
+        members.iter().find(|(l, _)| l == label).map(|(_, k)| *k)
     }
 
     /// THE REPORT. `UI::` is the one Core scope that yields every member
@@ -2244,14 +2244,44 @@ mod b099_namespace_member_kinds {
                 // Named rather than kind-filtered, so this control does not
                 // depend on the very field under test.
                 [
-                    "ButtonFlags", "ChildFlags", "Col", "ColorEditFlags", "ComboFlags", "Cond",
-                    "DrawList", "FocusedFlags", "Font", "HoveredFlags", "InputBlocking",
-                    "InputFlags", "InputTextCallback", "InputTextCallbackData", "InputTextFlags",
-                    "ItemFlags", "Key", "ListClipper", "MouseButton", "MouseCursor",
-                    "NodTreeMemberCallback", "Plot", "SelectableFlags", "SeparatorFlags",
-                    "SliderFlags", "SortDirection", "StyleVar", "TabBarFlags", "TabItemFlags",
-                    "TableBgTarget", "TableColumnFlags", "TableColumnSortSpecs", "TableFlags",
-                    "TableRowFlags", "TableSortSpecs", "Texture", "TreeNodeFlags", "WindowFlags",
+                    "ButtonFlags",
+                    "ChildFlags",
+                    "Col",
+                    "ColorEditFlags",
+                    "ComboFlags",
+                    "Cond",
+                    "DrawList",
+                    "FocusedFlags",
+                    "Font",
+                    "HoveredFlags",
+                    "InputBlocking",
+                    "InputFlags",
+                    "InputTextCallback",
+                    "InputTextCallbackData",
+                    "InputTextFlags",
+                    "ItemFlags",
+                    "Key",
+                    "ListClipper",
+                    "MouseButton",
+                    "MouseCursor",
+                    "NodTreeMemberCallback",
+                    "Plot",
+                    "SelectableFlags",
+                    "SeparatorFlags",
+                    "SliderFlags",
+                    "SortDirection",
+                    "StyleVar",
+                    "TabBarFlags",
+                    "TabItemFlags",
+                    "TableBgTarget",
+                    "TableColumnFlags",
+                    "TableColumnSortSpecs",
+                    "TableFlags",
+                    "TableRowFlags",
+                    "TableSortSpecs",
+                    "Texture",
+                    "TreeNodeFlags",
+                    "WindowFlags",
                 ]
                 .contains(&l.as_str())
             })
@@ -2424,10 +2454,7 @@ mod b107_workspace_namespace_members {
         .collect()
     }
 
-    fn kind_of(
-        items: &[(String, CompletionItemKind)],
-        label: &str,
-    ) -> Option<CompletionItemKind> {
+    fn kind_of(items: &[(String, CompletionItemKind)], label: &str) -> Option<CompletionItemKind> {
         items.iter().find(|(l, _)| l == label).map(|(_, k)| *k)
     }
 
@@ -2537,8 +2564,14 @@ mod b107_workspace_namespace_members {
             ),
         ];
         let items = complete_after(&files, 1, "Split::", Some(&real_index()));
-        assert_eq!(kind_of(&items, "FromOne"), Some(CompletionItemKind::FUNCTION));
-        assert_eq!(kind_of(&items, "FromTwo"), Some(CompletionItemKind::FUNCTION));
+        assert_eq!(
+            kind_of(&items, "FromOne"),
+            Some(CompletionItemKind::FUNCTION)
+        );
+        assert_eq!(
+            kind_of(&items, "FromTwo"),
+            Some(CompletionItemKind::FUNCTION)
+        );
     }
 
     /// THE COLLISION, both directions. A plugin adding to `namespace UI`
@@ -2593,8 +2626,16 @@ mod b107_workspace_namespace_members {
             "the workspace declaration shadows the engine enum"
         );
         // Not vacuous: the engine really does call this an enum.
-        let engine_only = complete_after(&[("empty.as", "void f() { UI:: }")], 0, "UI::", Some(&real_index()));
-        assert_eq!(kind_of(&engine_only, "Cond"), Some(CompletionItemKind::ENUM));
+        let engine_only = complete_after(
+            &[("empty.as", "void f() { UI:: }")],
+            0,
+            "UI::",
+            Some(&real_index()),
+        );
+        assert_eq!(
+            kind_of(&engine_only, "Cond"),
+            Some(CompletionItemKind::ENUM)
+        );
     }
 
     /// The GH #58 closure fence gates a DIAGNOSTIC, not a suggestion.
@@ -2717,11 +2758,9 @@ mod b107_workspace_namespace_members {
         let consts: Vec<bool> = ["Q::Plain", "Q::Qualified"]
             .iter()
             .map(|name| {
-                ws.snapshot
-                    .symbols()
-                    .lookup(name)
-                    .iter()
-                    .any(|sym| sym.modifiers.is_const && matches!(sym.kind, SymbolKind::Function { .. }))
+                ws.snapshot.symbols().lookup(name).iter().any(|sym| {
+                    sym.modifiers.is_const && matches!(sym.kind, SymbolKind::Function { .. })
+                })
             })
             .collect();
         assert_eq!(

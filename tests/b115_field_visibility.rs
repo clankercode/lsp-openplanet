@@ -154,7 +154,10 @@ fn a_private_field_records_private() {
 /// one, because it would report `protected` as `(true, false)`.
 #[test]
 fn a_protected_field_records_protected_and_not_private() {
-    assert_eq!(field_vis("class C { protected int b; }", "C", "b"), PROTECTED);
+    assert_eq!(
+        field_vis("class C { protected int b; }", "C", "b"),
+        PROTECTED
+    );
 }
 
 /// The default, pinned rather than assumed. A bare field is public: BOTH flags
@@ -346,7 +349,11 @@ fn one_keyword_covers_every_declarator_it_introduces() {
     let src = "class C { private int a, b, c; }";
     let items = parse_clean(src);
     let decl = field(&items, "C", "a", src);
-    assert_eq!(decl.declarators.len(), 3, "expected one decl of three names");
+    assert_eq!(
+        decl.declarators.len(),
+        3,
+        "expected one decl of three names"
+    );
     assert_eq!((decl.is_private, decl.is_protected), PRIVATE);
     // Reached by any of its names, it is the same node with the same flags.
     for name in ["a", "b", "c"] {

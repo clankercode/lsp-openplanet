@@ -1869,14 +1869,22 @@ mod tests {
                 !out.contains("msg-info-a") && !out.contains("msg-hint-a"),
                 "{fmt:?} must fold info/hint: {out}"
             );
-            for visible in ["msg-error-a", "msg-warn-a", "msg-missing-a", "msg-unknown-a"] {
+            for visible in [
+                "msg-error-a",
+                "msg-warn-a",
+                "msg-missing-a",
+                "msg-unknown-a",
+            ] {
                 assert!(out.contains(visible), "{fmt:?} keeps {visible}: {out}");
             }
             assert!(
                 out.contains("1 info + 1 hint hidden"),
                 "{fmt:?} trailer counts hidden: {out}"
             );
-            assert!(out.contains("--show-info"), "{fmt:?} names the reveal flag: {out}");
+            assert!(
+                out.contains("--show-info"),
+                "{fmt:?} names the reveal flag: {out}"
+            );
         }
 
         let json = format_check_report_with(&report, false, CheckFormat::Json);
@@ -1905,20 +1913,19 @@ mod tests {
     #[test]
     fn hidden_note_counts_kinds() {
         use tower_lsp::lsp_types::{Diagnostic, NumberOrString};
-        let item = |sev: DiagnosticSeverity,
-                    code: Option<&str>,
-                    kind: Option<&str>,
-                    msg: &str| CliDiagnostic {
-            path: PathBuf::from("/tmp/plugin/src/Main.as"),
-            combos: Vec::new(),
-            versions: Vec::new(),
-            diagnostic: Diagnostic {
-                severity: Some(sev),
-                code: code.map(|c| NumberOrString::String(c.to_string())),
-                data: kind.map(|k| serde_json::json!({ "unusedKind": k })),
-                message: msg.to_string(),
-                ..Default::default()
-            },
+        let item = |sev: DiagnosticSeverity, code: Option<&str>, kind: Option<&str>, msg: &str| {
+            CliDiagnostic {
+                path: PathBuf::from("/tmp/plugin/src/Main.as"),
+                combos: Vec::new(),
+                versions: Vec::new(),
+                diagnostic: Diagnostic {
+                    severity: Some(sev),
+                    code: code.map(|c| NumberOrString::String(c.to_string())),
+                    data: kind.map(|k| serde_json::json!({ "unusedKind": k })),
+                    message: msg.to_string(),
+                    ..Default::default()
+                },
+            }
         };
         let report = CheckReport {
             root: PathBuf::from("/tmp/plugin"),
@@ -1941,7 +1948,12 @@ mod tests {
                     Some("function"),
                     "a function `F` is never used",
                 ),
-                item(DiagnosticSeverity::INFORMATION, Some("manifest"), None, "meta note"),
+                item(
+                    DiagnosticSeverity::INFORMATION,
+                    Some("manifest"),
+                    None,
+                    "meta note",
+                ),
                 item(DiagnosticSeverity::HINT, None, None, "faded thing"),
             ],
             type_database_loaded: false,

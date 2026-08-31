@@ -809,7 +809,11 @@ mod tests {
     #[test]
     fn a_const_requirement_is_unmet_across_every_parameter_shape() {
         for (iface, klass, want) in [
-            ("void M(int a) const;", "void M(int a) {}", "void I::M(int) const"),
+            (
+                "void M(int a) const;",
+                "void M(int a) {}",
+                "void I::M(int) const",
+            ),
             (
                 "void M(const string &in s) const;",
                 "void M(const string &in s) {}",
@@ -835,7 +839,11 @@ mod tests {
                 "void M(int a = 1) {}",
                 "void I::M(int) const",
             ),
-            ("int M() const;", "int M() { return 1; }", "int I::M() const"),
+            (
+                "int M() const;",
+                "int M() { return 1; }",
+                "int I::M() const",
+            ),
         ] {
             let src = format!("interface I {{ {iface} }}\nclass C : I {{ {klass} }}\n");
             assert_eq!(missing(&src), vec![want], "for `{iface}` vs `{klass}`");
@@ -867,7 +875,9 @@ mod tests {
     #[test]
     fn a_namespaced_const_requirement_is_checked() {
         assert_eq!(
-            missing("namespace N { interface I { void M() const; } class C : I { void M() {} } }\n"),
+            missing(
+                "namespace N { interface I { void M() const; } class C : I { void M() {} } }\n"
+            ),
             vec!["void N::I::M() const"]
         );
     }
@@ -910,24 +920,20 @@ mod tests {
     /// overload pair; the non-const sibling must not un-satisfy it.
     #[test]
     fn a_const_overload_beside_a_non_const_one_satisfies() {
-        assert!(
-            missing(
-                "interface I { void M() const; }\n\
+        assert!(missing(
+            "interface I { void M() const; }\n\
                  class C : I { void M() {} void M() const {} }\n"
-            )
-            .is_empty()
-        );
+        )
+        .is_empty());
     }
 
     /// An INHERITED const method satisfies a const requirement.
     #[test]
     fn an_inherited_const_method_satisfies_a_const_requirement() {
-        assert!(
-            missing(
-                "interface I { void M() const; }\nclass B { void M() const {} }\nclass C : B, I {}\n"
-            )
-            .is_empty()
-        );
+        assert!(missing(
+            "interface I { void M() const; }\nclass B { void M() const {} }\nclass C : B, I {}\n"
+        )
+        .is_empty());
     }
 
     /// Bail 4 outranks the const difference: when a parameter type cannot
@@ -1099,7 +1105,10 @@ mod tests {
             // const requirement (B101) on the mixin route
             "interface I { void M() const; }\nmixin class X : I {}\n",
         ] {
-            assert!(missing(src).is_empty(), "mixin must not be checked: `{src}`");
+            assert!(
+                missing(src).is_empty(),
+                "mixin must not be checked: `{src}`"
+            );
         }
     }
 
@@ -1170,8 +1179,7 @@ mod tests {
     #[test]
     fn an_including_class_naming_only_the_mixin_is_a_known_missed_error() {
         assert!(
-            missing("interface I { void M(); }\nmixin class X : I {}\nclass C : X {}\n")
-                .is_empty(),
+            missing("interface I { void M(); }\nmixin class X : I {}\nclass C : X {}\n").is_empty(),
             "deliberate: the requirement does not propagate through a mixin base today"
         );
     }

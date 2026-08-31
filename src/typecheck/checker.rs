@@ -1096,8 +1096,7 @@ impl<'a> Checker<'a> {
     /// the call spelling from the property spelling remains a separate,
     /// separately measurable improvement.
     fn inherited_method_is_const(&self, class: &str, method: &str) -> Option<bool> {
-        let mut visited: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
         visited.insert(class.to_string());
         let mut queue: std::collections::VecDeque<String> =
             self.class_parents_for_const(class).into_iter().collect();
@@ -1112,10 +1111,7 @@ impl<'a> Checker<'a> {
             if !visited.insert(ancestor.clone()) {
                 continue;
             }
-            if let Some(is_const) = self
-                .scope
-                .workspace_own_method_is_const(&ancestor, method)
-            {
+            if let Some(is_const) = self.scope.workspace_own_method_is_const(&ancestor, method) {
                 return Some(is_const);
             }
             for p in self.class_parents_for_const(&ancestor) {
@@ -2571,7 +2567,10 @@ impl<'a> Checker<'a> {
         // argument list), which yields no value in AngelScript — silence is
         // all that's owed here. The call site is where the return type
         // matters; see `injected_method_return`.
-        if self.injected_method(external_receiver, &member_name).is_some() {
+        if self
+            .injected_method(external_receiver, &member_name)
+            .is_some()
+        {
             return TypeRepr::Error(String::new());
         }
         self.diagnostics.push(TypeDiagnostic {
@@ -2614,9 +2613,9 @@ impl<'a> Checker<'a> {
             builtins::InjectedReceiver::EveryEngineClass => {
                 self.scope.external_type_derives_from(receiver, "CMwNod")
             }
-            builtins::InjectedReceiver::Exact(names) => {
-                names.iter().any(|n| self.scope.external_type_is(receiver, n))
-            }
+            builtins::InjectedReceiver::Exact(names) => names
+                .iter()
+                .any(|n| self.scope.external_type_is(receiver, n)),
         })
     }
 
@@ -2804,7 +2803,13 @@ impl<'a> Checker<'a> {
                 if !external.is_empty() {
                     let ranges = call_site::arity_ranges(&external);
                     self.check_arity_against_ranges(display_name, &ranges, args.len(), callee_span);
-                    self.check_external_call_arg_types(display_name, qualified, args, &external, None);
+                    self.check_external_call_arg_types(
+                        display_name,
+                        qualified,
+                        args,
+                        &external,
+                        None,
+                    );
                 } else if let Some(ranges) =
                     self.scope.lookup_external_function_arity_ranges(qualified)
                 {
@@ -2830,12 +2835,7 @@ impl<'a> Checker<'a> {
                 // primitive check above discards everything that is not a
                 // primitive — a funcdef-typed parameter fell straight through
                 // it.
-                self.report_workspace_funcdef_slot_failure(
-                    qualified,
-                    args,
-                    &arg_tys,
-                    &overloads,
-                );
+                self.report_workspace_funcdef_slot_failure(qualified, args, &arg_tys, &overloads);
                 fallback_ret
             }
             _ => {
@@ -2848,12 +2848,7 @@ impl<'a> Checker<'a> {
                 // candidate is rejected by a funcdef slot", which is a
                 // different question from whether any candidate wins on
                 // primitive conversions.
-                self.report_workspace_funcdef_slot_failure(
-                    qualified,
-                    args,
-                    &arg_tys,
-                    &overloads,
-                );
+                self.report_workspace_funcdef_slot_failure(qualified, args, &arg_tys, &overloads);
                 match resolve_overload(&overloads, &arg_tys) {
                     OverloadMatch::Unique(sig) => {
                         // A unique winner means every primitive arg either
@@ -3652,9 +3647,7 @@ impl<'a> Checker<'a> {
     /// rather than guessed at — the same call B102 made on const-ness.
     fn arg_is_unwrapped_method_reference(&self, arg: &Expr) -> bool {
         match &arg.kind {
-            ExprKind::Member { object, member } => {
-                !self.method_ref_sigs(object, member).is_empty()
-            }
+            ExprKind::Member { object, member } => !self.method_ref_sigs(object, member).is_empty(),
             _ => false,
         }
     }
@@ -3889,8 +3882,10 @@ impl<'a> Checker<'a> {
                         .unwrap_or(false)
                         && arg_bool_literals[i]
                     {
-                        let text =
-                            render_no_matching_sig(qualified_name, &self.rendered_args(args, &arg_tys));
+                        let text = render_no_matching_sig(
+                            qualified_name,
+                            &self.rendered_args(args, &arg_tys),
+                        );
                         self.diagnostics.push(TypeDiagnostic {
                             span: arg.value.span,
                             kind: TypeDiagnosticKind::NoMatchingSignatures { text },
@@ -4415,12 +4410,9 @@ impl<'a> Checker<'a> {
                     // arm that swallows it, and behind everything else, so
                     // the only calls it intercepts are the ones that were
                     // reaching that arm.
-                    if let Some(t) = self.try_workspace_overload_set_call(
-                        &name,
-                        &qualified,
-                        args,
-                        callee.span,
-                    ) {
+                    if let Some(t) =
+                        self.try_workspace_overload_set_call(&name, &qualified, args, callee.span)
+                    {
                         return t;
                     }
                     if self.scope.has_global_ident(&qualified) {
@@ -4907,8 +4899,7 @@ impl<'a> Checker<'a> {
                     .is_some();
                 if receiver_const
                     && !own_declares
-                    && self.inherited_method_is_const(&type_name, &member_name)
-                        == Some(false)
+                    && self.inherited_method_is_const(&type_name, &member_name) == Some(false)
                 {
                     self.diagnostics.push(TypeDiagnostic {
                         span: callee.span,
@@ -11859,9 +11850,7 @@ void Main() {
             ("bool v", "true"),
             ("const string &in v", "\"x\""),
         ] {
-            let src = format!(
-                "void H({param}) {{ }}\nvoid Render() {{ startnew(H, {arg}); }}"
-            );
+            let src = format!("void H({param}) {{ }}\nvoid Render() {{ startnew(H, {arg}); }}");
             let diags = check_with_typedb(&src);
             let bad: Vec<_> = diags
                 .iter()
@@ -11900,9 +11889,7 @@ void Main() {
     /// is fixed — this test is the row to revisit.
     #[test]
     fn b110_a_bare_int_handler_no_longer_binds_the_int64_userdata_slot() {
-        let diags = check_with_typedb(
-            "void H(int v) { }\nvoid Render() { startnew(H, 1); }",
-        );
+        let diags = check_with_typedb("void H(int v) { }\nvoid Render() { startnew(H, 1); }");
         assert!(
             diags
                 .iter()
@@ -13622,8 +13609,16 @@ void f() {
         let scope = GlobalScope::new(&ws, Some(&index));
         let (accepted, rejected) = b052_bare_verdicts();
 
-        assert_eq!(rejected.len(), 436, "the corpus's bare REJECTED set changed size");
-        assert_eq!(accepted.len(), 62, "the corpus's bare ACCEPTED set changed size");
+        assert_eq!(
+            rejected.len(),
+            436,
+            "the corpus's bare REJECTED set changed size"
+        );
+        assert_eq!(
+            accepted.len(),
+            62,
+            "the corpus's bare ACCEPTED set changed size"
+        );
 
         let mut wrongly_silent = Vec::new();
         for name in &rejected {
@@ -13681,7 +13676,10 @@ void f() {
         let mut diagnosed_somewhere = 0usize;
         for name in rejected.iter() {
             let call = check_against(&scope, &format!("void zzzf() {{ {name}(1); }}\n"));
-            let value = check_against(&scope, &format!("void zzzf() {{ print(\"\" + {name}); }}\n"));
+            let value = check_against(
+                &scope,
+                &format!("void zzzf() {{ print(\"\" + {name}); }}\n"),
+            );
             diagnosed_somewhere += usize::from(!call.is_empty() || !value.is_empty());
             if call.is_empty() != value.is_empty() {
                 disagree.push(format!(
@@ -13716,9 +13714,17 @@ void f() {
 
         // (shape, the bare spelling the game refuses, the qualified spelling it takes)
         for (shape, bare, qualified) in [
-            ("a Core enum nested in a namespace", "Axis", "UI::Plot::Axis"),
+            (
+                "a Core enum nested in a namespace",
+                "Axis",
+                "UI::Plot::Axis",
+            ),
             ("a Core enum in a one-level namespace", "Cond", "UI::Cond"),
-            ("a Core enum under a nested namespace", "Align", "nvg::Align"),
+            (
+                "a Core enum under a nested namespace",
+                "Align",
+                "nvg::Align",
+            ),
             (
                 "a Nadeo enum under a class scope",
                 "EMenuOrder",
@@ -13790,14 +13796,14 @@ void f() {
     /// The shipped type-DB fixtures, loaded once per test that needs them.
     fn typedb_fixture_index_checker() -> crate::typedb::TypeIndex {
         use crate::typedb::TypeIndex;
-        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
         TypeIndex::load(
             &base.join("OpenplanetCore.json"),
             &base.join("OpenplanetNext.json"),
         )
         .expect("typedb fixtures must load")
     }
-
 }
 
 // ── B116: NonConstMethodOnConstReceiver across a file boundary ──────────────
@@ -13822,7 +13828,11 @@ mod b116_cross_file_const_receiver_tests {
     /// Check `main` against a workspace that also holds every `sibling`
     /// under its own file id. Diagnostics are those of `main` only, so a
     /// sibling's own body can never contribute to the count.
-    fn check_ws(main: &str, siblings: &[&str], typedb: Option<&crate::typedb::TypeIndex>) -> Vec<TypeDiagnostic> {
+    fn check_ws(
+        main: &str,
+        siblings: &[&str],
+        typedb: Option<&crate::typedb::TypeIndex>,
+    ) -> Vec<TypeDiagnostic> {
         let mut ws = SymbolTable::new();
         for sibling in siblings {
             let tokens = tokenize_filtered(sibling);
@@ -13860,7 +13870,8 @@ mod b116_cross_file_const_receiver_tests {
 
     /// The class the cross-file cases reach for. `Mutate` is non-const,
     /// `Peek` is const, `x` is a plain field.
-    const SIBLING_C: &str = "class C { int x; void Mutate() {} bool Peek() const { return true; } }";
+    const SIBLING_C: &str =
+        "class C { int x; void Mutate() {} bool Peek() const { return true; } }";
 
     /// Same-file spelling of `SIBLING_C`, so each case can be stated as a
     /// pair without duplicating the class body.
@@ -13967,7 +13978,12 @@ mod b116_cross_file_const_receiver_tests {
     #[test]
     fn cross_file_field_read_on_const_receiver_is_silent() {
         let diags = check_ws("void f(const C@ c) { int y = c.x; }", &[SIBLING_C], None);
-        assert_eq!(fired(&diags), 0, "field read must be silent, got {:?}", diags);
+        assert_eq!(
+            fired(&diags),
+            0,
+            "field read must be silent, got {:?}",
+            diags
+        );
     }
 
     /// An INHERITED method reached through a derived const receiver.
@@ -14062,9 +14078,15 @@ mod b116_cross_file_const_receiver_tests {
     /// exactly the case that would regress if that fallback were dropped.
     #[test]
     fn cross_file_virtual_property_accessors_follow_their_qualifier() {
-        let sib = "class P { int _v; int get_V() const { return _v; } void set_V(int v) { _v = v; } }";
+        let sib =
+            "class P { int _v; int get_V() const { return _v; } void set_V(int v) { _v = v; } }";
         let read = check_ws("void f(const P@ p) { int y = p.get_V(); }", &[sib], None);
-        assert_eq!(fired(&read), 0, "const getter must be silent, got {:?}", read);
+        assert_eq!(
+            fired(&read),
+            0,
+            "const getter must be silent, got {:?}",
+            read
+        );
         let write = check_ws("void f(const P@ p) { p.set_V(1); }", &[sib], None);
         assert_eq!(
             fired(&write),
@@ -14090,9 +14112,27 @@ mod b116_cross_file_const_receiver_tests {
 
         for (class, receiver, call, want, label) in [
             (accessor, "P", "p.V()", 0, "stripped const getter"),
-            (collision, "C", "c.M()", 0, "direct/accessor const collision"),
-            (setter_collision, "S", "s.M()", 0, "direct/setter const collision"),
-            (no_const_match, "N", "n.M()", 1, "direct/accessor all non-const"),
+            (
+                collision,
+                "C",
+                "c.M()",
+                0,
+                "direct/accessor const collision",
+            ),
+            (
+                setter_collision,
+                "S",
+                "s.M()",
+                0,
+                "direct/setter const collision",
+            ),
+            (
+                no_const_match,
+                "N",
+                "n.M()",
+                1,
+                "direct/accessor all non-const",
+            ),
         ] {
             let var = receiver.to_ascii_lowercase();
             let body = format!("void f(const {receiver}@ {var}) {{ {call}; }}");
@@ -14121,7 +14161,8 @@ mod b116_cross_file_const_receiver_tests {
     #[test]
     fn external_engine_receiver_never_fires() {
         use crate::typedb::TypeIndex;
-        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
         let idx = TypeIndex::load(
             &base.join("OpenplanetCore.json"),
             &base.join("OpenplanetNext.json"),
@@ -14751,7 +14792,6 @@ mod b121_return_aliasing_tests {
     }
 }
 
-
 // ── B119: const receivers, inheritance, and where `const` binds ─────────────
 //
 // Two defects, measured against the live game compiler and fixed together
@@ -14840,10 +14880,7 @@ mod b119_inherited_const_receiver_tests {
     /// fix to one is not a fix to the other.
     fn both_ways(decls: &[&str], body: &str) -> (usize, usize) {
         let same = format!("{} {}", decls.join(" "), body);
-        (
-            fired(&check_ws(&same, &[])),
-            fired(&check_ws(body, decls)),
-        )
+        (fired(&check_ws(&same, &[])), fired(&check_ws(body, decls)))
     }
 
     // ── part 2: where a leading `const` binds ────────────────────────────
@@ -14920,10 +14957,7 @@ mod b119_inherited_const_receiver_tests {
 
         // (spelling, the tree the parser built BEFORE B119)
         let rebound = [
-            (
-                "const C@[]@",
-                handle(array(handle(konst(named())))),
-            ),
+            ("const C@[]@", handle(array(handle(konst(named()))))),
             ("const C@[]", array(handle(konst(named())))),
         ];
         for (spelling, before) in rebound {
@@ -15137,7 +15171,10 @@ mod b119_inherited_const_receiver_tests {
     #[test]
     fn an_inherited_const_method_stays_silent_at_every_depth() {
         for decls in [
-            vec!["class A { bool Peek() const { return true; } }", "class D : A {}"],
+            vec![
+                "class A { bool Peek() const { return true; } }",
+                "class D : A {}",
+            ],
             vec![
                 "class A { bool Peek() const { return true; } }",
                 "class B : A {}",
@@ -15185,7 +15222,11 @@ mod b119_inherited_const_receiver_tests {
             ],
             "void f(const D@ d) { d.Mutate(); }",
         );
-        assert_eq!((same, cross), (0, 0), "the override is const, so this is legal");
+        assert_eq!(
+            (same, cross),
+            (0, 0),
+            "the override is const, so this is legal"
+        );
     }
 
     /// And the other direction: a non-const override of a const base method
@@ -15236,7 +15277,11 @@ mod b119_inherited_const_receiver_tests {
             ],
             "void f(const D@ d) { d.Mutate(); }",
         );
-        assert_eq!((same, cross), (1, 1), "one diagnostic, not one per declaration");
+        assert_eq!(
+            (same, cross),
+            (1, 1),
+            "one diagnostic, not one per declaration"
+        );
     }
 
     /// An inherited FIELD read is not a method call.
@@ -15257,7 +15302,11 @@ mod b119_inherited_const_receiver_tests {
     #[test]
     fn an_unknown_receiver_type_is_never_diagnosed() {
         let d = check_ws("void f(const CSomeEngineThing@ c) { c.Whatever(); }", &[]);
-        assert_eq!(fired(&d), 0, "no const metadata means no verdict, got {d:?}");
+        assert_eq!(
+            fired(&d),
+            0,
+            "no const metadata means no verdict, got {d:?}"
+        );
     }
 
     /// A cycle in the class graph is invalid AngelScript, but the walk must

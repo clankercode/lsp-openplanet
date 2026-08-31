@@ -151,7 +151,8 @@ fn arity_outside_every_candidate_is_rejected_in_all_three_spellings() {
 fn the_arity_message_is_the_shared_one() {
     let msgs = errors(ARITY_BARE);
     assert!(
-        msgs.iter().any(|m| m.contains("expects") && m.contains("Both")),
+        msgs.iter()
+            .any(|m| m.contains("expects") && m.contains("Both")),
         "the shared arity wording must name the callee: {msgs:?}"
     );
 }

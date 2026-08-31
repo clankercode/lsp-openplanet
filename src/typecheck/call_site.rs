@@ -96,8 +96,8 @@ pub fn arity_ranges(overloads: &[OverloadSig]) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::repr::ParamMode;
+    use super::*;
 
     fn sig(names: &[&str], min: usize) -> OverloadSig {
         OverloadSig {

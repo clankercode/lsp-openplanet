@@ -5432,8 +5432,9 @@ fn b102_mismatched_sort_callbacks_are_reported() {
 fn b102_a_funcdef_handle_of_the_wrong_shape_is_reported() {
     let errors = repro_errors("b102-array-sort-mismatched-callbacks");
     assert!(
-        errors.iter().any(|l| l.contains("Main.as:48:")
-            && l.contains("array::Sort(StringLess@)")),
+        errors
+            .iter()
+            .any(|l| l.contains("Main.as:48:") && l.contains("array::Sort(StringLess@)")),
         "a funcdef handle whose signature does not match the element type \
          must be rejected like a bare function name: {errors:#?}"
     );
@@ -5557,9 +5558,15 @@ fn b091_bare_method_references_at_funcdef_slots_are_reported() {
 fn b091_the_declaration_position_names_the_offered_signature() {
     let errors = repro_errors("b091-coroutine-method-unwrapped");
     for (line, expected) in [
-        (76, "Can't implicitly convert from 'void()' to 'CoroutineFunc@'"),
+        (
+            76,
+            "Can't implicitly convert from 'void()' to 'CoroutineFunc@'",
+        ),
         (77, "Can't implicitly convert from 'void()' to 'Job@'"),
-        (78, "Can't implicitly convert from 'void()' to 'CoroutineFunc@'"),
+        (
+            78,
+            "Can't implicitly convert from 'void()' to 'CoroutineFunc@'",
+        ),
     ] {
         assert!(
             errors
@@ -5678,14 +5685,26 @@ fn check_b108_a_callable_argument_prints_as_its_signature() {
     let joined = errors.join("\n");
     for (line, expected, what) in [
         (44, "startnew(void())", "no-userdata coroutine slot"),
-        (46, "startnew(void(bool), const bool)", "bool userdata family"),
+        (
+            46,
+            "startnew(void(bool), const bool)",
+            "bool userdata family",
+        ),
         // `int64`, not `int`: `OnInt` is declared `void OnInt(int64 i)`. The
         // first expectation here said `void(int)` and the RENDERER was
         // right — it reproduces the DECLARED parameter type, which is the
         // whole point of the fix.
-        (47, "startnew(void(int64), const int)", "int64 userdata family"),
+        (
+            47,
+            "startnew(void(int64), const int)",
+            "int64 userdata family",
+        ),
         (48, "startnew(void(uint64), uint)", "uint64 userdata family"),
-        (49, "startnew(void(double), const float)", "double userdata family"),
+        (
+            49,
+            "startnew(void(double), const float)",
+            "double userdata family",
+        ),
         // Spelled WITH the space, exactly as the declaration writes it
         // (`const string &in s`). Measured; the first guess omitted it.
         (
@@ -5695,7 +5714,11 @@ fn check_b108_a_callable_argument_prints_as_its_signature() {
         ),
         // A handle parameter, and a NON-literal second argument (`this`),
         // which stays unqualified where the literals take `const`.
-        (45, "startnew(void(ref@), Worker)", "handle param, receiver userdata"),
+        (
+            45,
+            "startnew(void(ref@), Worker)",
+            "handle param, receiver userdata",
+        ),
     ] {
         assert!(
             errors
@@ -5766,8 +5789,9 @@ fn check_b109_argtypemismatch_renders_a_callable_as_its_signature() {
     let errors = repro_errors("b025-this-method-funcdef-ctor");
     let joined = errors.join("\n");
     assert!(
-        errors.iter().any(|l| l.contains("Main.as:49:")
-            && l.contains("expected `void ()`, got `bool ()`")),
+        errors
+            .iter()
+            .any(|l| l.contains("Main.as:49:") && l.contains("expected `void ()`, got `bool ()`")),
         "a bool-returning method reference must render as `bool ()`, not `bool`:\n{joined}"
     );
     // The other side of the same guard: a non-callable argument keeps its

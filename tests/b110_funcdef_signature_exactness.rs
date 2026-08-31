@@ -123,7 +123,13 @@ fn anti_vacuity_the_harness_reports_on_this_shape() {
 /// They are generated from one table rather than written out per position
 /// because the whole point of the ticket is that ONE predicate serves all of
 /// them: a position that drifted would be the defect, not a variation.
-fn positions(fd_sig: &str, fn_sig: &str, fd_ret: &str, fn_ret: &str, body: &str) -> Vec<(&'static str, String)> {
+fn positions(
+    fd_sig: &str,
+    fn_sig: &str,
+    fd_ret: &str,
+    fn_ret: &str,
+    body: &str,
+) -> Vec<(&'static str, String)> {
     vec![
         (
             "argument of a workspace function",
@@ -199,7 +205,8 @@ fn every_parameter_type_pair_is_exact_at_every_position() {
         for &got in NUMERICS {
             let fd_sig = format!("{slot} v");
             let fn_sig = format!("{got} v");
-            for (position, src) in positions(&fd_sig, &fn_sig, "void", "void", "if (v == 0) return;")
+            for (position, src) in
+                positions(&fd_sig, &fn_sig, "void", "void", "if (v == 0) return;")
             {
                 let msgs = errors(&src);
                 if slot == got {
@@ -234,7 +241,10 @@ fn a_later_parameter_is_compared_too() {
         );
         let msgs = errors(&src);
         if got == "int" {
-            assert!(msgs.is_empty(), "exact match on both params: {msgs:?}\n{src}");
+            assert!(
+                msgs.is_empty(),
+                "exact match on both params: {msgs:?}\n{src}"
+            );
         } else {
             assert!(
                 !msgs.is_empty(),
@@ -252,7 +262,14 @@ fn a_later_parameter_is_compared_too() {
 fn non_numeric_primitives_are_unaffected() {
     for &slot in &["bool", "string"] {
         for (position, src) in positions("", "", slot, slot, "return {};") {
-            let src = src.replace("return {};", if slot == "bool" { "return true;" } else { "return \"\";" });
+            let src = src.replace(
+                "return {};",
+                if slot == "bool" {
+                    "return true;"
+                } else {
+                    "return \"\";"
+                },
+            );
             let msgs = errors(&src);
             assert!(
                 msgs.is_empty(),
@@ -321,7 +338,8 @@ fn const_is_still_peeled_before_the_exactness_test() {
         let const_only = msgs
             .iter()
             .any(|m| m.contains("No matching signatures") || m.contains("implicitly convert"));
-        if fd.replace("const ", "").replace(" &in", "") == f.replace("const ", "").replace(" &in", "")
+        if fd.replace("const ", "").replace(" &in", "")
+            == f.replace("const ", "").replace(" &in", "")
             && fd.contains("&in") == f.contains("&in")
         {
             assert!(

@@ -175,7 +175,10 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::{Mutex, OnceLock};
         static DBS: OnceLock<Mutex<HashMap<&'static str, &'static TypeIndex>>> = OnceLock::new();
-        let mut map = DBS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+        let mut map = DBS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
         map.entry(version).or_insert_with(|| {
             let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/typedb-versions")
@@ -239,10 +242,7 @@ mod tests {
 
     /// Every descriptor the family offers for `source`, paired with the
     /// qualified name it answers.
-    fn offers(
-        source: &str,
-        idx: Option<&TypeIndex>,
-    ) -> Vec<(String, FixDescriptor)> {
+    fn offers(source: &str, idx: Option<&TypeIndex>) -> Vec<(String, FixDescriptor)> {
         with_ctx(source, idx, |ctx| {
             findings(ctx)
                 .iter()
@@ -345,8 +345,8 @@ mod tests {
             with_ctx(source, idx, |ctx| {
                 let found = findings(ctx);
                 assert_eq!(found.len(), 1, "one finding for {source:?}, got {found:?}");
-                let hint = hint_of(&found[0])
-                    .unwrap_or_else(|| panic!("expected a hint for {source:?}"));
+                let hint =
+                    hint_of(&found[0]).unwrap_or_else(|| panic!("expected a hint for {source:?}"));
                 assert_eq!(hint.name(), want_hint, "for {source:?}");
                 assert_eq!(hint.is_exact(), want_exact, "hint class for {source:?}");
             });
@@ -469,10 +469,7 @@ mod tests {
         let source = "void F() { Draw :: GetWidth(); }";
         let idx = Some(typedb("1.29.5"));
         assert_eq!(offers(source, idx).len(), 1);
-        assert_eq!(
-            round_trip(source, idx),
-            "void F() { Display::GetWidth(); }"
-        );
+        assert_eq!(round_trip(source, idx), "void F() { Display::GetWidth(); }");
     }
 
     /// Only the diagnosed span moves: a same-named local, an argument and a
@@ -539,19 +536,13 @@ mod tests {
     /// silently retarget a call.
     #[test]
     fn only_the_curated_relocation_is_preferred_and_auto_applicable() {
-        let relocation = offers(
-            "void F() { Draw::GetWidth(); }",
-            Some(typedb("1.29.5")),
-        );
+        let relocation = offers("void F() { Draw::GetWidth(); }", Some(typedb("1.29.5")));
         assert_eq!(relocation.len(), 1);
         assert_eq!(relocation[0].1.kind, CodeActionKind::QUICKFIX);
         assert!(relocation[0].1.is_preferred);
         assert!(relocation[0].1.auto_applicable);
 
-        let guess = offers(
-            "void F() { Display::GetWidht(); }",
-            Some(typedb("1.29.5")),
-        );
+        let guess = offers("void F() { Display::GetWidht(); }", Some(typedb("1.29.5")));
         assert_eq!(guess.len(), 1);
         assert_eq!(guess[0].1.kind, CodeActionKind::QUICKFIX);
         assert!(!guess[0].1.is_preferred, "a guess must not lead the menu");

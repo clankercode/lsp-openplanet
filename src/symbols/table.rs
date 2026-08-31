@@ -887,10 +887,7 @@ mod tests {
                 );
                 assert_eq!(*min_args, 1, "the defaulted parameter is optional");
                 assert!(!imported);
-                assert!(
-                    !sym.modifiers.is_const,
-                    "no trailing `const` was written"
-                );
+                assert!(!sym.modifiers.is_const, "no trailing `const` was written");
             }
             other => panic!("I::Count must be a Function symbol, got {:?}", other),
         }
@@ -1058,7 +1055,10 @@ mod tests {
         }
         for tail in ["", "override", "final", "override final"] {
             let src = format!("class C {{ void M() {tail} {{}} }}");
-            assert!(!pooled_is_const(&src, "C::M"), "const invented for `{tail}`");
+            assert!(
+                !pooled_is_const(&src, "C::M"),
+                "const invented for `{tail}`"
+            );
         }
     }
 
@@ -1071,7 +1071,10 @@ mod tests {
             "`const string M()` is a const RETURN, not a const method"
         );
         assert!(
-            pooled_is_const("class C { const string M() const { return \"\"; } }", "C::M"),
+            pooled_is_const(
+                "class C { const string M() const { return \"\"; } }",
+                "C::M"
+            ),
             "both at once: the trailing one is the qualifier"
         );
     }
@@ -1079,7 +1082,10 @@ mod tests {
     /// A private or protected method keeps its constness.
     #[test]
     fn access_modifiers_do_not_lose_constness() {
-        assert!(pooled_is_const("class C { private void M() const {} }", "C::M"));
+        assert!(pooled_is_const(
+            "class C { private void M() const {} }",
+            "C::M"
+        ));
         assert!(pooled_is_const(
             "class C { protected void M() const {} }",
             "C::M"
@@ -1122,10 +1128,7 @@ mod tests {
     #[test]
     fn free_functions_and_import_aliases_are_not_const() {
         assert!(!pooled_is_const("void F() {}", "F"));
-        assert!(!pooled_is_const(
-            "import void F() from \"Plugin\";",
-            "F"
-        ));
+        assert!(!pooled_is_const("import void F() from \"Plugin\";", "F"));
     }
 
     // ── B114: every declaration modifier reaches the pool ─────────────
@@ -1157,11 +1160,7 @@ mod tests {
             ("class", "shared class X {}", "class X {}"),
             ("interface", "shared interface X {}", "interface X {}"),
             ("enum", "shared enum X { A }", "enum X { A }"),
-            (
-                "funcdef",
-                "shared funcdef void X();",
-                "funcdef void X();",
-            ),
+            ("funcdef", "shared funcdef void X();", "funcdef void X();"),
             ("function", "shared void X() {}", "void X() {}"),
         ] {
             assert!(
@@ -1228,16 +1227,12 @@ mod tests {
                 (|m: DeclModifiers| m.is_override) as fn(DeclModifiers) -> bool,
             ),
             ("final", "class C { void M() final {} }", |m| m.is_final),
-            (
-                "private",
-                "class C { private void M() {} }",
-                |m| m.is_private,
-            ),
-            (
-                "protected",
-                "class C { protected void M() {} }",
-                |m| m.is_protected,
-            ),
+            ("private", "class C { private void M() {} }", |m| {
+                m.is_private
+            }),
+            ("protected", "class C { protected void M() {} }", |m| {
+                m.is_protected
+            }),
         ] {
             assert!(read(pooled_modifiers(src, "C::M")), "{name} lost: `{src}`");
             assert!(
@@ -1253,7 +1248,10 @@ mod tests {
     /// let one swallow the next.
     #[test]
     fn method_modifiers_do_not_leak_into_each_other() {
-        let m = pooled_modifiers("class C { private void M() const override final {} }", "C::M");
+        let m = pooled_modifiers(
+            "class C { private void M() const override final {} }",
+            "C::M",
+        );
         assert!(m.is_private, "private lost");
         assert!(m.is_const, "const lost");
         assert!(m.is_override, "override lost");
@@ -1263,7 +1261,11 @@ mod tests {
         assert!(!m.is_mixin && !m.is_abstract, "a method is not a class");
 
         let plain = pooled_modifiers("class C { void M() {} }", "C::M");
-        assert_eq!(plain, DeclModifiers::default(), "a plain method declares nothing");
+        assert_eq!(
+            plain,
+            DeclModifiers::default(),
+            "a plain method declares nothing"
+        );
     }
 
     /// `private` and `protected` are mutually exclusive in the parser — it
@@ -1296,7 +1298,10 @@ mod tests {
     fn constructor_and_destructor_visibility_is_pooled() {
         let symbols = extract("class C { private C() {} }");
         let ctor = symbols.iter().find(|s| s.name == "C::C").unwrap();
-        assert!(ctor.modifiers.is_private, "a private constructor is private");
+        assert!(
+            ctor.modifiers.is_private,
+            "a private constructor is private"
+        );
         assert!(!ctor.modifiers.is_const, "a constructor is never const");
     }
 
@@ -1319,10 +1324,7 @@ mod tests {
     #[test]
     fn pooled_modifiers_survive_across_a_file_boundary() {
         let mut table = SymbolTable::new();
-        for src in [
-            "shared class Far { void M() const {} }",
-            "void Near() { }",
-        ] {
+        for src in ["shared class Far { void M() const {} }", "void Near() { }"] {
             let fid = table.allocate_file_id();
             let tokens = lexer::tokenize_filtered(src);
             let mut parser = Parser::new(&tokens, src);
@@ -1397,21 +1399,18 @@ mod tests {
     /// layer up.
     #[test]
     fn a_private_property_pools_its_visibility() {
-        let m = pooled_modifiers(
-            "class C { private int p { get { return 1; } } }",
-            "C::p",
-        );
+        let m = pooled_modifiers("class C { private int p { get { return 1; } } }", "C::p");
         assert!(m.is_private, "a private property must pool as private");
         assert!(!m.is_protected, "and not as protected");
     }
 
     #[test]
     fn a_protected_property_pools_its_visibility() {
-        let m = pooled_modifiers(
-            "class C { protected int p { get { return 1; } } }",
-            "C::p",
+        let m = pooled_modifiers("class C { protected int p { get { return 1; } } }", "C::p");
+        assert!(
+            m.is_protected,
+            "a protected property must pool as protected"
         );
-        assert!(m.is_protected, "a protected property must pool as protected");
         assert!(!m.is_private, "and not as private");
     }
 

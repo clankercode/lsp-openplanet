@@ -236,7 +236,11 @@ fn interface_params(ctx: &FixContext<'_>, parsed: &ParsedSignature) -> Option<Ve
         // independent of how the message is spelled, which is what the
         // comparison always meant to be.
         let canonical: Vec<String> = params.iter().map(|(_, t)| canonical_type(t)).collect();
-        let want: Vec<String> = parsed.param_types.iter().map(|t| canonical_type(t)).collect();
+        let want: Vec<String> = parsed
+            .param_types
+            .iter()
+            .map(|t| canonical_type(t))
+            .collect();
         if canonical != want {
             continue;
         }
@@ -464,11 +468,17 @@ mod tests {
                 "void Log(const string &in message) const {",
             ),
             ("void M(int &out a) const;", "void M(int &out a) const {"),
-            ("void M(int &inout a) const;", "void M(int &inout a) const {"),
+            (
+                "void M(int &inout a) const;",
+                "void M(int &inout a) const {",
+            ),
             ("int M(int a) const;", "int M(int a) const {"),
         ] {
             let out = fixed(&format!("interface I {{ {iface} }}\nclass C : I {{}}\n"));
-            assert!(out.contains(want), "for `{iface}` expected `{want}` in:\n{out}");
+            assert!(
+                out.contains(want),
+                "for `{iface}` expected `{want}` in:\n{out}"
+            );
         }
     }
 
@@ -482,8 +492,14 @@ mod tests {
     #[test]
     fn the_action_survives_any_source_spelling_of_a_parameter() {
         for (decl, want) in [
-            ("void M(const string &in s);", "Implement `void I::M(const string&in)`"),
-            ("void M(const string&in s);", "Implement `void I::M(const string&in)`"),
+            (
+                "void M(const string &in s);",
+                "Implement `void I::M(const string&in)`",
+            ),
+            (
+                "void M(const string&in s);",
+                "Implement `void I::M(const string&in)`",
+            ),
             (
                 "void M(const  string   &   in  s);",
                 "Implement `void I::M(const string&in)`",
@@ -495,8 +511,7 @@ mod tests {
             ("void M(Thing @ t);", "Implement `void I::M(Thing@)`"),
             ("void M(int a);", "Implement `void I::M(int)`"),
         ] {
-            let source =
-                format!("class Thing {{}}\ninterface I {{ {decl} }}\nclass C : I {{}}\n");
+            let source = format!("class Thing {{}}\ninterface I {{ {decl} }}\nclass C : I {{}}\n");
             assert_eq!(titles(&source), vec![want.to_string()], "for `{decl}`");
         }
     }
