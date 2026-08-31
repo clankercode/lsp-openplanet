@@ -160,8 +160,8 @@ MUTATIONS = [
      '    "--sync-back-must-change",',
      '    "--sync-back-zzz",'),
     ("B147: --allow-unresolved is dropped from the local-only flag list",
-     '    "--allow-unresolved",\n    # Found by',
-     '    "--allow-unresolved-zzz",\n    # Found by'),
+     '    "--allow-unresolved",\n    "--reclaim-root",',
+     '    "--allow-unresolved-zzz",\n    "--reclaim-root",'),
     ("B147: --disk-floor is dropped from the local-only flag list — the third "
      "omission, and the one the completeness guard found rather than a person",
      '    "--disk-floor",\n)',
@@ -210,6 +210,36 @@ MUTATIONS = [
     ("B147: the unchanged-artefact message stops naming the hash",
      '        f"    sha256={digest}\\n\\n"',
      '        f"\\n\\n"'),
+
+    # --- B164: sync-back must stamp commit provenance ----------------------
+    ("B164: the sidecar drops the producing commit",
+     '        "commit": commit if source_synced else None,',
+     '        "commit": None,'),
+    ("B164: the sidecar is no longer tied to the fetched artefact hash",
+     '        "artifact_sha256": digest,',
+     '        "artifact_sha256": "0" * 64,'),
+    ("B164: --no-sync falsely stamps the current checkout commit onto reused "
+     "remote state",
+     '        "commit": commit if source_synced else None,',
+     '        "commit": commit,'),
+    ("B164: the sidecar drops the clean/dirty source state",
+     '        "dirty_count": source_dirty_count if source_synced else None,',
+     '        "dirty_count": None,'),
+    ("B164: source commit/status drift across rsync is accepted",
+     "    drift = source_snapshot_drift(before, after)",
+     "    drift = None"),
+    ("B164: working-tree content drift is omitted from the snapshot check",
+     '            "content_manifest_sha256",\n        )',
+     '            # content manifest omitted\n        )'),
+    ("B164: remote rsync reads the mutable checkout instead of the private stage",
+     "        staged_kwargs = dict(kwargs, root=staged_root)",
+     "        staged_kwargs = kwargs"),
+    ("B164: staged bytes outside the captured source manifest are accepted",
+     "        if staged_before != expected_manifest:",
+     "        if False:"),
+    ("B164: private staging-tree drift during remote rsync is accepted",
+     "        if staged_after != staged_before:",
+     "        if False:"),
 
     # --- B167: disk order and safe orphan reclaim --------------------------
     ("B167: the disk-floor preflight is skipped, so mkdir/sync run on a full "

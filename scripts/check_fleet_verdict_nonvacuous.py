@@ -138,28 +138,25 @@ MUTATIONS = [
      "    if True:"),
     ("B147: an unknown binary identity is accepted, so an old ledger with no "
      "record silently passes as 'they differ'",
-     '        if not isinstance(side, dict) or not side.get("sha256"):',
-     "        if False:"),
+     "    if not isinstance(identity, dict):",
+     "    if False:"),
     ("B147 OVER-CONDEMN: every ledger is treated as recording no binary",
-     '        if not isinstance(side, dict) or not side.get("sha256"):',
-     "        if True:"),
+     "    if not isinstance(identity, dict):",
+     "    if True:"),
     ("B147: only the FIRST ledger is checked for a binary identity",
      "    for label, side in ((label_a, a), (label_b, b)):",
      "    for label, side in ((label_a, a),):"),
     ("B147: the same-binary refusal stops naming the shared hash",
      '            f"(sha256={a[\'sha256\']}).\\n"',
      '            f".\\n"'),
-    ("B147: the refusal stops naming WHICH ledger is at fault",
-     '                f"{label} records no LSP binary hash, so there is no way to "',
-     '                f"a ledger records no LSP binary hash, so there is no way to "'),
     ("B147: lsp_bin_identity fabricates a hash for an absent binary, so 'I "
      "could not look' becomes 'I looked and they matched'",
      "    digest = file_sha256(path)",
      '    digest = file_sha256(path) or "0" * 64'),
     ("B147: file_sha256 returns a constant, so every pair of sweeps looks "
      "like it ran the same binary",
-     "    return h.hexdigest()\n\ndef lsp_bin_identity",
-     '    return "c" * 64\n\ndef lsp_bin_identity'),
+     "    return h.hexdigest()\n\n\ndef fd_sha256",
+     '    return "c" * 64\n\n\ndef fd_sha256'),
     ("B147: file_sha256 hashes only a prefix — two builds of one binary "
      "differ late far more often than early",
      '        for chunk in iter(lambda: fh.read(1 << 20), b""):\n            h.update(chunk)',
@@ -172,6 +169,91 @@ MUTATIONS = [
      "same binary and every comparison is refused",
      '    st["lsp_bin"] = lsp_bin_identity()',
      '    st["lsp_bin"] = {"path": "x", "sha256": "d" * 64}'),
+
+    # --- B164: different hashes do not prove the baseline commit -----------
+    ("B164: malformed nonempty binary hashes are accepted",
+     '    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):',
+     "    if not digest:"),
+    ("B164: a populated provenance_error is ignored",
+     '    if "provenance_error" not in identity or identity.get("provenance_error") is not None:',
+     "    if False:"),
+    ("B164: only the baseline ledger needs trusted provenance",
+     "        problems.extend(trusted_binary_problems(side, label))",
+     "        if label == label_a:\n            problems.extend(trusted_binary_problems(side, label))"),
+    ("B164: the claimed baseline commit check is removed, so a stale lane "
+     "baseline with different bytes is accepted",
+     "    if expected_baseline_commit is not None:\n"
+     "        problems.extend(baseline_commit_problems(\n"
+     "            a, expected_baseline_commit, label_a\n"
+     "        ))",
+     "    if False:\n        problems.extend([])"),
+    ("B164 OVER-CONDEMN: every baseline is rejected, including the clean "
+     "authoritative commit positive control",
+     "    if stamped != expected_commit:",
+     "    if True:"),
+    ("B164: a missing provenance sidecar is treated as trustworthy",
+     '        identity["provenance_error"] = (\n'
+     '            f"missing provenance sidecar {provenance_path}"\n'
+     '        )\n        return identity',
+     '        identity["commit"] = "c" * 40\n        return identity'),
+    ("B164: a sidecar for different bytes is accepted",
+     "    if stamped_hash != digest:",
+     "    if False:"),
+    ("B164: schema validation uses isinstance, so JSON true is accepted "
+     "as integer schema 1",
+     '    schema = provenance.get("schema")\n'
+     "    if type(schema) is not int or schema != 1:",
+     '    schema = provenance.get("schema")\n'
+     "    if not isinstance(schema, int) or schema != 1:"),
+    ("B164: source_synced uses truthiness, so integer 1 is accepted as the "
+     "exact boolean attestation",
+     "    if source_synced is not True:",
+     "    if not source_synced:"),
+    ("B164: dirty_count loses exact integer validation, so booleans, nulls, "
+     "and strings can be stamped into a trusted identity",
+     '    dirty = provenance.get("dirty_count")\n'
+     "    if type(dirty) is not int or dirty < 0:",
+     '    dirty = provenance.get("dirty_count")\n'
+     "    if isinstance(dirty, int) and dirty < 0:"),
+    ("B164: a dirty baseline is accepted as the exact commit it names",
+     "    if type(dirty) is not int or dirty != 0:",
+     "    if False:"),
+    ("B164: the stale-baseline refusal stops naming the stamped commit",
+     '            f"{label} was stamped with producing commit {stamped}, but the "',
+     '            f"{label} was stamped with a different producing commit, but the "'),
+    ("B164: save_state stops carrying the producing commit from the sidecar",
+     '        "commit": commit,\n        "dirty_count": dirty,',
+     '        "commit": None,\n        "dirty_count": dirty,'),
+    ("B164: LSP invocation reuses its before identity as the after sample",
+     '    result["binary_after"] = identity_fn()',
+     '    result["binary_after"] = binary_before'),
+    ("B164: LSP invocation executes a pathname that can be replaced after pinning",
+     '            cmd = [f"/proc/self/fd/{binary_fd}", "check", "--typedb-dir",',
+     '            cmd = [str(LSP_BIN), "check", "--typedb-dir",'),
+    ("B164: LSP invocation accepts an opened inode outside its before identity",
+     '        if executed_sha256 != binary_before.get("sha256"):',
+     '        if False:'),
+    ("B164: plugin records drop the hash of the inode actually executed",
+     '        "executed_sha256": run["executed_sha256"],',
+     '        "executed_sha256": None,'),
+    ("B164: plugin records replace the before-invocation identity with after",
+     '        "binary_before": run["binary_before"],',
+     '        "binary_before": run["binary_after"],'),
+    ("B164: plugin records replace the after-invocation identity with before",
+     '        "binary_after": run["binary_after"],',
+     '        "binary_after": run["binary_before"],'),
+    ("B164: comparison skips every per-plugin binary identity check",
+     '    top = ledger.get("lsp_bin") if isinstance(ledger, dict) else None',
+     '    return []\n    top = ledger.get("lsp_bin") if isinstance(ledger, dict) else None'),
+    ("B164: a binary change during one plugin invocation is accepted",
+     "        if binary_identity_key(before) != binary_identity_key(after):",
+     "        if False:"),
+    ("B164: an earlier plugin may differ from the ledger final stamp",
+     "        if binary_identity_key(before) != top_key:",
+     "        if False:"),
+    ("B164: comparison ignores a mismatch in the inode actually executed",
+     '        if executed != before.get("sha256"):',
+     '        if False:'),
 ]
 
 

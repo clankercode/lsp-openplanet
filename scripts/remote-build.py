@@ -52,13 +52,16 @@ state, and copying it while a lane is mid-commit could send a torn index. Pass
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
+import fnmatch
 import hashlib
+import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -148,6 +151,7 @@ EXCLUDES = [
 # ones a before/after comparison script needs to branch on.
 SYNC_BACK_FAILED = 3      # asked for an artefact, did not get one
 SYNC_BACK_UNCHANGED = 4   # got one, and it is byte-identical to the old one
+PROVENANCE_SUFFIX = ".provenance.json"
 
 
 def flag_classification_problems(parser_flags, local_only, shared) -> list[str]:
@@ -228,6 +232,19 @@ def git_branch(root: Path) -> str:
         # A missing git, a detached worktree, anything at all: the banner must
         # never be the reason a build does not run.
         return "?"
+
+
+def git_commit(root: Path) -> str | None:
+    """Full producing commit for a synced source tree, or None if unknowable."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        commit = out.stdout.strip()
+        return commit if out.returncode == 0 and commit else None
+    except Exception:
+        return None
 
 
 # An unresolved git operation, by the sentinel git itself writes.
@@ -340,6 +357,145 @@ def dirty_count(root: Path) -> int | None:
         return sum(1 for l in out.stdout.splitlines() if l.strip())
     except Exception:
         return None
+
+
+def rsync_source_manifest(root: Path, *, with_git: bool = False) -> str | None:
+    """Hash every source entry rsync can copy, including dirty/untracked bytes."""
+    root_only_excludes = {"target", ".worktrees", ".venv", "node_modules", ".cache"}
+    if not with_git:
+        root_only_excludes.add(".git")
+    digest = hashlib.sha256()
+
+    def excluded(rel: Path, *, is_dir: bool) -> bool:
+        parts = rel.parts
+        if parts and parts[0] in root_only_excludes:
+            return True
+        if is_dir and "__pycache__" in parts:
+            return True
+        return not is_dir and (
+            fnmatch.fnmatch(rel.name, "*.pyc")
+            or fnmatch.fnmatch(rel.name, "*.swp")
+        )
+
+    def add_entry(path: Path, rel: Path) -> None:
+        before = path.lstat()
+        rel_bytes = rel.as_posix().encode("utf-8", "surrogateescape")
+        digest.update(len(rel_bytes).to_bytes(8, "big"))
+        digest.update(rel_bytes)
+        digest.update(stat.S_IFMT(before.st_mode).to_bytes(8, "big"))
+        digest.update(stat.S_IMODE(before.st_mode).to_bytes(8, "big"))
+        if stat.S_ISLNK(before.st_mode):
+            target = os.readlink(path).encode("utf-8", "surrogateescape")
+            digest.update(len(target).to_bytes(8, "big"))
+            digest.update(target)
+            return
+        if stat.S_ISDIR(before.st_mode):
+            # Directory st_size is filesystem allocation metadata, not source
+            # content, and rsync cannot preserve it across the private stage.
+            return
+        if not stat.S_ISREG(before.st_mode):
+            digest.update(before.st_size.to_bytes(8, "big", signed=True))
+            return
+        digest.update(before.st_size.to_bytes(8, "big", signed=True))
+        digest.update(before.st_mtime_ns.to_bytes(8, "big", signed=True))
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino, opened.st_mode) != (
+                before.st_dev, before.st_ino, before.st_mode,
+            ):
+                raise OSError("source entry changed while hashing")
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            after = os.fstat(fd)
+            if (after.st_size, after.st_mtime_ns) != (
+                before.st_size, before.st_mtime_ns,
+            ):
+                raise OSError("source entry changed while hashing")
+        finally:
+            os.close(fd)
+
+    try:
+        def walk_error(error: OSError) -> None:
+            raise error
+
+        for current, dirnames, filenames in os.walk(
+            root, topdown=True, onerror=walk_error, followlinks=False,
+        ):
+            current_path = Path(current)
+            rel_dir = current_path.relative_to(root)
+            kept_dirs = []
+            for name in sorted(dirnames):
+                path = current_path / name
+                rel = rel_dir / name
+                if excluded(rel, is_dir=True):
+                    continue
+                if path.is_symlink():
+                    add_entry(path, rel)
+                else:
+                    add_entry(path, rel)
+                    kept_dirs.append(name)
+            dirnames[:] = kept_dirs
+            for name in sorted(filenames):
+                path = current_path / name
+                rel = rel_dir / name
+                if not excluded(rel, is_dir=False):
+                    add_entry(path, rel)
+    except (OSError, ValueError):
+        return None
+    return digest.hexdigest()
+
+
+def git_source_snapshot(root: Path, *, with_git: bool = False) -> dict | None:
+    """Commit plus exact porcelain state bracketing one source rsync."""
+    commit = git_commit(root)
+    branch = git_branch(root)
+    if commit is None or branch == "?":
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(root), "status",
+             "--porcelain=v1", "-z", "--untracked-files=all"],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    status = out.stdout
+    content_manifest = rsync_source_manifest(root, with_git=with_git)
+    if content_manifest is None:
+        return None
+    return {
+        "commit": commit,
+        "branch": branch,
+        "dirty_count": 0 if not status else max(1, status.count(b"\0")),
+        "status_sha256": hashlib.sha256(status).hexdigest(),
+        "content_manifest_sha256": content_manifest,
+    }
+
+
+def source_snapshot_drift(before: dict | None, after: dict | None) -> str | None:
+    """Why the mirrored source cannot be attributed to one stable snapshot."""
+    if before is None or after is None:
+        return "could not read source commit and working-tree state on both sides of rsync"
+    changed = [
+        key for key in (
+            "commit", "branch", "dirty_count", "status_sha256",
+            "content_manifest_sha256",
+        )
+        if before.get(key) != after.get(key)
+    ]
+    if changed:
+        return (
+            f"source changed while it was being mirrored ({', '.join(changed)}): "
+            f"before={before}, after={after}"
+        )
+    return None
 
 
 def unresolved_verdict(operation: str | None, unmerged: list[str]) -> str | None:
@@ -737,6 +893,45 @@ def file_sha256(path: Path) -> str | None:
     return h.hexdigest()
 
 
+def provenance_path(path: Path) -> Path:
+    return path.with_name(path.name + PROVENANCE_SUFFIX)
+
+
+def sync_back_provenance_record(
+    dest: Path, digest: str, root: Path, *, commit: str | None,
+    branch: str | None, source_dirty_count: int | None, source_synced: bool,
+    host: str, slug: str,
+) -> dict:
+    """Hash-bound source identity for one successfully fetched artefact."""
+    return {
+        "schema": 1,
+        "artifact_path": str(dest),
+        "artifact_sha256": digest,
+        "commit": commit if source_synced else None,
+        "source_root": str(root),
+        "source_branch": branch if source_synced else None,
+        "dirty_count": source_dirty_count if source_synced else None,
+        "source_synced": source_synced,
+        "remote_host": host,
+        "remote_slug": slug,
+    }
+
+
+def write_sync_back_provenance(dest: Path, record: dict) -> Path:
+    """Atomically replace the sidecar only after the artefact was fetched."""
+    sidecar = provenance_path(dest)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=sidecar.parent, prefix=sidecar.name + ".",
+        suffix=".tmp", delete=False,
+    ) as fh:
+        json.dump(record, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+        tmp = Path(fh.name)
+    tmp.replace(sidecar)
+    return sidecar
+
+
 def sync_back_not_fetched_verdict(subpath: str, dest: Path, status: int,
                                   stale: str | None) -> str:
     """The remote command FAILED, so `--sync-back` was not attempted (B147).
@@ -896,6 +1091,24 @@ def sync_up(host: str, root: Path, remote_src: str, with_git: bool, verbose: boo
         print(f"remote-build: synced in {time.monotonic() - t0:.1f}s", file=sys.stderr)
 
 
+@contextmanager
+def staged_source_tree(root: Path, with_git: bool):
+    """Yield a private rsync-shaped copy whose bytes this process owns."""
+    with tempfile.TemporaryDirectory(prefix="remote-build-source-") as tmp:
+        staged = Path(tmp) / "src"
+        staged.mkdir()
+        args = ["rsync", "-a", "--delete", "--delete-excluded"]
+        for pat in EXCLUDES:
+            args += ["--exclude", pat]
+        if not with_git:
+            args += ["--exclude", "/.git", "--exclude", "/.git/"]
+        args += [f"{root}/", f"{staged}/"]
+        rc = subprocess.run(args).returncode
+        if rc != 0:
+            die(f"could not stage one immutable source tree (rsync exit {rc})", rc)
+        yield staged
+
+
 def preflight_remote_disk(
     *, host: str, rel_base: str, remote_target: str, floor_gb: float,
     allow_low_disk: bool, free_bytes_fn=None,
@@ -933,6 +1146,62 @@ def preflight_remote_tree(
         die(f"could not create the remote tree on {host} "
             f"(mkdir exited {rc}):\n  {out}", rc)
     sync_fn(host, root, rsync_dest, with_git, verbose)
+
+
+def sync_with_stable_source(
+    *, snapshot_fn=None, preflight_fn=None, stage_context_fn=None,
+    staged_manifest_fn=None, **kwargs,
+) -> dict | None:
+    """Mirror one staged source state and return its bound Git provenance."""
+    if snapshot_fn is None:
+        with_git = bool(kwargs["with_git"])
+        snapshot_fn = lambda source_root: git_source_snapshot(
+            source_root, with_git=with_git,
+        )
+    preflight_fn = preflight_fn or preflight_remote_tree
+    stage_context_fn = stage_context_fn or staged_source_tree
+    staged_manifest_fn = staged_manifest_fn or rsync_source_manifest
+    no_sync = bool(kwargs["no_sync"])
+    root = kwargs["root"]
+    if no_sync:
+        preflight_fn(**kwargs)
+        return None
+    before = snapshot_fn(root)
+    if before is None:
+        die(
+            "source identity changed during rsync, so the remote tree cannot "
+            "be attributed to one commit/state: could not read the pre-stage "
+            "source commit and working-tree state"
+        )
+    expected_manifest = before.get("content_manifest_sha256")
+    with stage_context_fn(root, bool(kwargs["with_git"])) as staged_root:
+        staged_before = staged_manifest_fn(
+            staged_root, with_git=bool(kwargs["with_git"]),
+        )
+        if staged_before != expected_manifest:
+            die(
+                "source identity changed while making the private staging "
+                "tree; refusing to attest or sync bytes outside the captured "
+                "source manifest"
+            )
+        staged_kwargs = dict(kwargs, root=staged_root)
+        preflight_fn(**staged_kwargs)
+        staged_after = staged_manifest_fn(
+            staged_root, with_git=bool(kwargs["with_git"]),
+        )
+        if staged_after != staged_before:
+            die(
+                "private staging-tree bytes changed during rsync; refusing "
+                "to attest the remote source"
+            )
+        after = snapshot_fn(root)
+    drift = source_snapshot_drift(before, after)
+    if drift:
+        die(
+            "source identity changed during rsync, so the remote tree cannot "
+            f"be attributed to one commit/state: {drift}"
+        )
+    return dict(before, content_manifest_sha256=staged_before)
 
 
 def git_worktree_paths(root: Path) -> set[Path]:
@@ -1783,6 +2052,209 @@ def run_selftest() -> int:
     )
     if events != ["disk"]:
         problems.append(f"--no-sync still mutated the remote tree: {events}")
+
+    # B164: commit/clean provenance brackets the rsync. A stamp captured only
+    # before the copy can claim a clean old commit while the files copied came
+    # from a newly dirty or advanced tree.
+    snap = {
+        "commit": "a" * 40, "branch": "master", "dirty_count": 0,
+        "status_sha256": "b" * 64,
+        "content_manifest_sha256": "e" * 64,
+    }
+    if source_snapshot_drift(snap, dict(snap)) is not None:
+        problems.append("an unchanged source snapshot was reported as drift")
+    for field, changed in (
+        ("commit", "c" * 40),
+        ("branch", "lane/wrong"),
+        ("dirty_count", 1),
+        ("status_sha256", "d" * 64),
+        ("content_manifest_sha256", "f" * 64),
+    ):
+        after = dict(snap, **{field: changed})
+        drift = source_snapshot_drift(snap, after)
+        if not drift or field not in drift:
+            problems.append(f"source drift in {field} was accepted: {drift!r}")
+    if source_snapshot_drift(None, snap) is None:
+        problems.append("an unreadable pre-rsync source snapshot was accepted")
+    snapshots = iter([snap, dict(snap, commit="c" * 40)])
+    try:
+        sync_with_stable_source(
+            host="h", rel_base="r", remote_src="s", remote_target="t",
+            rsync_dest="d", root=Path("/tmp/root"), floor_gb=10,
+            allow_low_disk=False, no_sync=False, with_git=False, verbose=False,
+            snapshot_fn=lambda _root: next(snapshots),
+            preflight_fn=lambda **_kwargs: None,
+            stage_context_fn=lambda _root, _with_git: nullcontext(
+                Path("/tmp/staged")
+            ),
+            staged_manifest_fn=lambda _root, **_kwargs: snap[
+                "content_manifest_sha256"
+            ],
+        )
+        problems.append("entry-point source sync accepted commit drift")
+    except SystemExit:
+        pass
+    snapshots = iter([snap, dict(snap)])
+    mirrored_roots = []
+    stable = sync_with_stable_source(
+        host="h", rel_base="r", remote_src="s", remote_target="t",
+        rsync_dest="d", root=Path("/tmp/root"), floor_gb=10,
+        allow_low_disk=False, no_sync=False, with_git=False, verbose=False,
+        snapshot_fn=lambda _root: next(snapshots),
+        preflight_fn=lambda **sync_kwargs: mirrored_roots.append(
+            sync_kwargs["root"]
+        ),
+        stage_context_fn=lambda _root, _with_git: nullcontext(
+            Path("/tmp/staged")
+        ),
+        staged_manifest_fn=lambda _root, **_kwargs: snap[
+            "content_manifest_sha256"
+        ],
+    )
+    if stable != snap:
+        problems.append("stable source sync did not return the producing snapshot")
+    if mirrored_roots != [Path("/tmp/staged")]:
+        problems.append(
+            f"remote sync did not consume the private staging tree: {mirrored_roots}"
+        )
+
+    # Equal endpoint snapshots do not prove what rsync read. A source can be A
+    # before, briefly B while copied, then A again (even with its mtime restored).
+    # The immutable staging tree itself must match the attested A manifest.
+    snapshots = iter([snap, dict(snap)])
+    try:
+        sync_with_stable_source(
+            host="h", rel_base="r", remote_src="s", remote_target="t",
+            rsync_dest="d", root=Path("/tmp/root"), floor_gb=10,
+            allow_low_disk=False, no_sync=False, with_git=False, verbose=False,
+            snapshot_fn=lambda _root: next(snapshots),
+            preflight_fn=lambda **_kwargs: None,
+            stage_context_fn=lambda _root, _with_git: nullcontext(
+                Path("/tmp/staged")
+            ),
+            staged_manifest_fn=lambda _root, **_kwargs: "f" * 64,
+        )
+        problems.append(
+            "source oscillation let rsync stage bytes outside the attested manifest"
+        )
+    except SystemExit:
+        pass
+    snapshots = iter([snap, dict(snap)])
+    staged_manifests = iter([
+        snap["content_manifest_sha256"],
+        "f" * 64,
+    ])
+    try:
+        sync_with_stable_source(
+            host="h", rel_base="r", remote_src="s", remote_target="t",
+            rsync_dest="d", root=Path("/tmp/root"), floor_gb=10,
+            allow_low_disk=False, no_sync=False, with_git=False, verbose=False,
+            snapshot_fn=lambda _root: next(snapshots),
+            preflight_fn=lambda **_kwargs: None,
+            stage_context_fn=lambda _root, _with_git: nullcontext(
+                Path("/tmp/staged")
+            ),
+            staged_manifest_fn=lambda _root, **_kwargs: next(staged_manifests),
+        )
+        problems.append("staging-tree drift during rsync was accepted")
+    except SystemExit:
+        pass
+
+    # Porcelain records that a path is dirty, not WHICH dirty bytes rsync saw.
+    # Keep equal-length edits so neither status text nor dirty count changes.
+    source_tmp = Path(tempfile.mkdtemp(prefix="b164-source-content-"))
+    try:
+        subprocess.run(["git", "init", "-q", str(source_tmp)], check=True)
+        subprocess.run(
+            ["git", "-C", str(source_tmp), "config", "user.email", "test@example.invalid"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source_tmp), "config", "user.name", "Test"],
+            check=True,
+        )
+        tracked = source_tmp / "tracked.txt"
+        tracked.write_text("clean\n")
+        (source_tmp / ".gitignore").write_text("/target/\n")
+        subprocess.run(
+            ["git", "-C", str(source_tmp), "add", "tracked.txt", ".gitignore"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source_tmp), "commit", "-qm", "fixture"],
+            check=True,
+        )
+
+        # Real A -> B -> A oscillation: the endpoint snapshots are byte-for-byte
+        # equal (including restored mtime), while the private stage contains B.
+        # This is the race an endpoint-only bracket cannot see.
+        original_stat = tracked.stat()
+
+        @contextmanager
+        def oscillating_stage(_root: Path, _with_git: bool):
+            tracked.write_text("other\n")
+            os.utime(
+                tracked,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            with staged_source_tree(source_tmp, False) as staged:
+                tracked.write_text("clean\n")
+                os.utime(
+                    tracked,
+                    ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                )
+                yield staged
+
+        oscillation_before = git_source_snapshot(source_tmp)
+        try:
+            sync_with_stable_source(
+                host="h", rel_base="r", remote_src="s", remote_target="t",
+                rsync_dest="d", root=source_tmp, floor_gb=10,
+                allow_low_disk=False, no_sync=False, with_git=False,
+                verbose=False, preflight_fn=lambda **_kwargs: None,
+                stage_context_fn=oscillating_stage,
+            )
+            problems.append("a real A-to-B-to-A source oscillation was accepted")
+        except SystemExit:
+            pass
+        oscillation_after = git_source_snapshot(source_tmp)
+        if oscillation_before != oscillation_after:
+            problems.append(
+                "A-to-B-to-A fixture did not restore identical endpoint snapshots"
+            )
+
+        tracked.write_text("dirty-a\n")
+        dirty_before = git_source_snapshot(source_tmp)
+        tracked.write_text("dirty-b\n")
+        dirty_after = git_source_snapshot(source_tmp)
+        if dirty_before is None or dirty_after is None:
+            problems.append("could not snapshot the dirty-content drift fixture")
+        else:
+            if dirty_before["status_sha256"] != dirty_after["status_sha256"]:
+                problems.append("dirty-content fixture changed porcelain metadata")
+            if source_snapshot_drift(dirty_before, dirty_after) is None:
+                problems.append(
+                    "dirty tracked bytes changed behind an unchanged porcelain entry"
+                )
+
+        untracked = source_tmp / "untracked.txt"
+        untracked.write_text("untracked-a\n")
+        untracked_before = git_source_snapshot(source_tmp)
+        untracked.write_text("untracked-b\n")
+        untracked_after = git_source_snapshot(source_tmp)
+        if source_snapshot_drift(untracked_before, untracked_after) is None:
+            problems.append("untracked rsync input content drift was accepted")
+
+        excluded = source_tmp / "target" / "ignored.bin"
+        excluded.parent.mkdir()
+        excluded.write_bytes(b"before")
+        excluded_before = git_source_snapshot(source_tmp)
+        excluded.write_bytes(b"after!")
+        excluded_after = git_source_snapshot(source_tmp)
+        if source_snapshot_drift(excluded_before, excluded_after) is not None:
+            problems.append("an excluded target/ change invalidated the source snapshot")
+    finally:
+        shutil.rmtree(source_tmp, ignore_errors=True)
 
     # B167: reclaim is keyed by BOTH the former local root and the remote slug.
     former = Path("/repo/.worktrees/pool")
@@ -2807,6 +3279,43 @@ def run_selftest() -> int:
                 "file — it is hashing a prefix, and two builds of one binary "
                 "differ late"
             )
+
+        # B164: the fetched bytes carry the source checkout identity in a
+        # hash-bound adjacent sidecar. The sidecar is written atomically only
+        # after a successful fetch, so an old one cannot silently describe new
+        # bytes. --no-sync cannot make a provenance claim about reused remote
+        # state and deliberately records an unknown commit.
+        dest = hash_dir / "openplanet-lsp"
+        dest.write_bytes(b"built-from-master")
+        digest = file_sha256(dest)
+        assert digest is not None
+        record = sync_back_provenance_record(
+            dest, digest, Path("/checkout/master"), commit="a" * 40,
+            branch="master", source_dirty_count=0, source_synced=True,
+            host="x-alpha", slug="master-12345678",
+        )
+        sidecar = write_sync_back_provenance(dest, record)
+        wrote = json.loads(sidecar.read_text())
+        if wrote.get("commit") != "a" * 40 or wrote.get("dirty_count") != 0:
+            problems.append(
+                "the sync-back provenance sidecar omitted the producing "
+                "commit or clean-tree state"
+            )
+        if wrote.get("artifact_sha256") != digest:
+            problems.append(
+                "the sync-back provenance sidecar is not tied to the fetched "
+                "artefact hash"
+            )
+        unknown = sync_back_provenance_record(
+            dest, digest, Path("/checkout/lane"), commit="b" * 40,
+            branch="lane/x", source_dirty_count=0, source_synced=False,
+            host="x-alpha", slug="lane-87654321",
+        )
+        if unknown.get("commit") is not None or unknown.get("source_synced"):
+            problems.append(
+                "--no-sync stamped the current local commit onto reused "
+                "remote state whose provenance is unknowable"
+            )
     finally:
         shutil.rmtree(hash_dir, ignore_errors=True)
 
@@ -3051,6 +3560,8 @@ def main() -> int:
         if refusal:
             die(refusal)
 
+    source_snapshot: dict | None = None
+
     def disk_check_before_remote_mutation() -> None:
         preflight_remote_disk(
             host=a.host, rel_base=rel_base, remote_target=remote_target,
@@ -3067,11 +3578,10 @@ def main() -> int:
         jobs = a.jobs if a.jobs else min(remote_cores, 24)
         tthreads = a.test_threads if a.test_threads else max(2, jobs // 2)
 
-        # B106/B167. This one boundary owns the operational order: disk floor,
-        # then mkdir, then rsync. The command/build is constructed and invoked
-        # only after it returns. Its injected selftest proves a low-disk result
-        # reaches neither mutating operation, plus the healthy positive path.
-        preflight_remote_tree(
+        # B106/B164/B167. One boundary owns the operational order and source
+        # identity: snapshot, disk floor, mkdir, rsync, matching snapshot. The
+        # command/build is constructed only after it returns.
+        source_snapshot = sync_with_stable_source(
             host=a.host, rel_base=rel_base, remote_src=remote_src,
             remote_target=remote_target, rsync_dest=rsync_dest, root=root,
             floor_gb=a.disk_floor, allow_low_disk=a.allow_low_disk,
@@ -3205,6 +3715,19 @@ def main() -> int:
             print(f"remote-build: wrote {dest} "
                   f"({dest.stat().st_size} bytes) sha256={after}",
                   file=sys.stderr)
+            record = sync_back_provenance_record(
+                dest, after, root,
+                commit=(source_snapshot or {}).get("commit"),
+                branch=(source_snapshot or {}).get("branch"),
+                source_dirty_count=(source_snapshot or {}).get("dirty_count"),
+                source_synced=not a.no_sync,
+                host=a.host,
+                slug=slug,
+            )
+            sidecar = write_sync_back_provenance(dest, record)
+            stamped = record.get("commit") or "UNKNOWN (--no-sync)"
+            print(f"remote-build: provenance {sidecar} commit={stamped} "
+                  f"dirty={record.get('dirty_count')}", file=sys.stderr)
             if a.sync_back_must_change and before is not None and before == after:
                 die(sync_back_unchanged_verdict(a.sync_back, dest, after,
                                                 a.host), SYNC_BACK_UNCHANGED)
