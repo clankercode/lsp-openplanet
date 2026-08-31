@@ -304,7 +304,7 @@ fn binding_rejects_both_return_and_params_differing() {
 /// PREDICTED GREEN: argument position already routes through
 /// `func_matches_funcdef`, which compares return types.
 #[test]
-#[ignore = "B076 follow-up: a workspace call never reaches the funcdef-slot \
+#[ignore = "B089: a workspace call never reaches the funcdef-slot \
             check at all. Different position class from the four declaration \
             sites this ticket closed, and closing it means running B023's \
             slot check over workspace call sites, which is a scope decision \
@@ -327,7 +327,7 @@ fn position_argument_already_rejects_the_same_mismatch() {
 /// constructor form, so if this is silent too, the answer is "at all" and the
 /// argument-position gap is wider than B076's title.
 #[test]
-#[ignore = "B076 follow-up: same gap as the test above, parameter side — \
+#[ignore = "B089: same gap as the test above, parameter side — \
             proves the workspace-call hole is not specific to return types."]
 fn position_workspace_call_with_differing_params() {
     assert_rejected(
