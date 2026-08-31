@@ -50,10 +50,12 @@ full under "Which rows are the probing machine's?" below.
   a lexer gap rather than a resolution one.
 
   Those 13 are no longer hand-listed. They are DERIVED from
-  `b052-scope-provenance.tsv` (B080), which splits them by reason: **9** whose
-  scope was a foreign plugin's (`Foo`, `Foo::Bar`, `MathX`, `MLFeed`, `MLHook`,
-  `VehicleState`) and **4** whose scope the engine really has while neither
-  shipped database records it (all four `GameData::*`). The hand-maintained
+  `b052-scope-provenance.tsv` (B080), which splits them by reason: **5** whose
+  scope a NAMED installed plugin declares (`MathX`, `MLFeed`, `MLHook`), **4**
+  whose scope was not the engine's and whose supplier is not identified (`Foo`,
+  `Foo::Bar`, `VehicleState`), and **4** whose scope the engine really has while
+  neither shipped database records it (all four `GameData::*`). The
+  hand-maintained
   lists had that split wrong — they called three of the four `GameData` rows
   plugin artefacts while the same file's prose called `GameData` an engine
   scope — which is the drift that motivated the sidecar.
@@ -104,19 +106,64 @@ scope prefix:
 |---|---|
 | `prefix` | a leading scope some ACCEPTED row depends on |
 | `pin` | `SCOPE` / `ABSENT` / `UNPINNED` — **recomputed** from the corpus's own pin rows by `scripts/probe_enum_corpus.py --scope-provenance`; do not hand-edit |
-| `origin` | `ENGINE` / `HOST` / `ENGINE_UNMODELLED` / `UNKNOWN` — recorded, and carried forward across regenerations |
-| `evidence` | what supports `origin`, opening `MEASURED:` (an instrument answered) or `INFERRED:` (someone reasoned) |
+| `origin` | `ENGINE` / `HOST_PLUGIN` / `HOST_FIXTURE` / `HOST_UNATTRIBUTED` / `ENGINE_UNMODELLED` / `UNKNOWN` — recorded, and carried forward across regenerations |
+| `evidence` | what supports `origin`, opening `MEASURED:` (an instrument answered) or `INFERRED:` (someone reasoned). No row currently needs `INFERRED:`, and a test holds that |
 
 A consumer reads it as:
 
-- `HOST` → **environment-dependent.** A valid measurement of that machine,
-  saying nothing about the engine.
+- `ENGINE` → environment-independent.
 - `ENGINE_UNMODELLED` → environment-INdependent; the engine has the scope but
   neither shipped database records it, so this crate cannot resolve the row
-  either. Kept separate from `HOST` because conflating them is how a list of
-  twelve spellings came to carry three that the same file calls engine facts.
-- `ENGINE` → environment-independent.
+  either. Kept separate from the host cases because conflating them is how a
+  list of twelve spellings came to carry three that the same file calls engine
+  facts.
+- `HOST_*` → **environment-dependent.** A valid measurement of that session,
+  saying nothing about the engine.
 - `UNKNOWN` → nobody has classified it. The generator exits non-zero.
+
+### Three host channels, and why they are not one value
+
+A probe compile can reach a scope the engine does not have by three routes,
+and they do not behave the same on RE-MEASUREMENT:
+
+| origin | supplier | re-measurable? |
+|---|---|---|
+| `HOST_PLUGIN` | an installed plugin, NAMED in the evidence | yes — install it and the row returns |
+| `HOST_FIXTURE` | the probe run's own fixture | yes — stage it and the row returns |
+| `HOST_UNATTRIBUTED` | not the engine, supplier not identified | unknown |
+
+`HOST_FIXTURE` is **provably empty** for these corpora: `build_source` emits no
+`namespace` in either template, checked by `probe_enum_corpus.py --selftest`
+rather than asserted in prose. That negative is what lets `Foo` be attributed
+away from the fixture — and what leaves the remaining two routes
+indistinguishable, which is why `Foo` is `HOST_UNATTRIBUTED` rather than
+`HOST_PLUGIN`.
+
+The third route is the one worth naming out loud: **another client sharing the
+RemoteBuild port**, whose staged fixture is an installed plugin declaring the
+names your run is asking about. A verdict cannot distinguish it, and unlike the
+other two it cannot be reproduced. Spelling all three `HOST` would say a row is
+environment-dependent while hiding whether anyone could ever check it again.
+
+### These verdicts require EXCLUSIVE port access
+
+Not a scheduling nicety. The RemoteBuild plugin's read loop has been observed
+splitting one request across two socket reads and parsing each half as its own
+payload while a second client was active. Two failure modes, and the second is
+much worse:
+
+- a contaminated **fixture** leaves the transaction intact and only makes an
+  ACCEPT untrustworthy — which is what the whole "a REJECT is evidence, an
+  ACCEPT may not be" rule above is for;
+- a mangled **payload** can have the game answer a question nobody asked, and a
+  truncated script is still a script, so it can compile. The result is a clean,
+  plausible, WRONG verdict with nothing in the output marking it as damaged.
+
+B068's sentinel proves analysis reached the end of a unit; B077's guard proves
+no fixture was stranded. Neither watches this door. **The corpus cannot express
+whether a row was measured under exclusive access**, so that claim belongs in
+the commit that writes the row, and a re-measured row is only as good as the
+operator's word that nothing else held the port.
 
 ### `UNPINNED` is a measured gap, not a tidying job
 
@@ -137,8 +184,8 @@ Not review. Four tests, each mutation-checked:
 
 | a wrong label | what goes red |
 |---|---|
-| a `HOST` scope labelled `ENGINE` | `every_probed_type_spelling_matches_the_games_verdict` — the row stays asserted, and the crate rejects it |
-| an `ENGINE` scope labelled `HOST` | the same sweep (the row is excluded but the crate resolves it) **and** `no_scope_the_engine_declares_is_labelled_host` |
+| a `HOST_*` scope labelled `ENGINE` | `every_probed_type_spelling_matches_the_games_verdict` — the row stays asserted, and the crate rejects it |
+| an `ENGINE` scope labelled `HOST_*` | the same sweep (the row is excluded but the crate resolves it) **and** `no_scope_the_engine_declares_is_labelled_host` |
 | a hand-edited `pin` cell | `the_recorded_pins_match_the_corpuss_own_pin_rows`, which recomputes them from the corpus |
 | a new or unevidenced scope | `every_scope_an_accepted_row_depends_on_is_classified_with_evidence` |
 
@@ -497,13 +544,45 @@ namespace-absent form now; `MathX` produces the same form in both runs. The
 namespace, not the verdict logic, is what changed.
 
 `build_source` declares no namespace anywhere, so `Foo` was never supplied by
-the probe fixture — it came from the game's own loaded plugin set. A plugin
-declaring `namespace Foo` was installed when the corpus was generated and is
-not installed now. That is precisely the plugin-namespace effect documented
-above, and precisely why those three spellings are already the first three
-entries of `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which forces them to
-"must not resolve" whatever the corpus says. **No test expectation and no
-documented conclusion moves.**
+the probe fixture. Those three spellings are excluded from what this crate is
+asked to resolve — recorded in `b052-scope-provenance.tsv`, which is where that
+decision lives now. **No test expectation and no documented conclusion moves.**
+
+### Two claims here, and only one of them is proven (corrected 2026-08-31, B080)
+
+An earlier revision of this paragraph — merged, and merged *because* it proved
+rather than asserted — went on to say `Foo` "came from the game's own loaded
+plugin set" and that "a plugin declaring `namespace Foo` was installed when the
+corpus was generated". The first half of that is proven. The second is an
+attribution the same evidence does not carry, and it is demoted.
+
+**PROVEN, and it stands.** `Foo` existed as a namespace when the corpus was
+generated and does not exist now. The message forms establish it directly: the
+is-a-scope form cannot be produced when the namespace is absent, `Foo` gave that
+form then and the namespace-absent form now, and `MathX` gives the same form in
+both runs as the control.
+
+**NOT PROVEN, and demoted.** That an *installed plugin* supplied it. What is
+actually established is only that the engine did not and this repo's probe
+templates did not — the templates emit no `namespace` in either form, and no
+committed repo fixture declares one either. An installed plugin, a hand-staged
+fixture, and **another client's staged probe** are indistinguishable from
+anything recorded. That third one stopped being hypothetical when B097's
+investigation showed this port has had two clients; for a scope literally named
+`Foo::Bar`, it is the obvious candidate. So the sidecar records `Foo` and
+`Foo::Bar` as `HOST_UNATTRIBUTED`, not `HOST_PLUGIN`.
+
+**B068's conclusion is untouched, and read the demotion as narrowing the
+attribution rather than weakening the result.** Those rows are still not
+batching fabrications, and the pins are why: a fabricated ACCEPT means the
+namespace never existed, in which case `Foo::ZZZNoSuch` in that same run would
+have answered `Namespace 'Foo' doesn't exist.` It answered the is-a-scope form,
+and a REJECT cannot be fabricated by an abort. **Zero rows fabricated stands.**
+Only *whose* namespace it was loses strength.
+
+The general shape, since it caught two readers including the one who wrote it:
+**the message form is evidence about a namespace's EXISTENCE, not about its
+SUPPLIER.** One instrument, two questions, and it only answers the first.
 
 The whole twelve-entry artefact list splits along the same line, which is what
 identifies the mechanism rather than merely asserting it: the three `Foo::*`

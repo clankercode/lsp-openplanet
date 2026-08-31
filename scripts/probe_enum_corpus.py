@@ -779,6 +779,21 @@ def run_selftest() -> int:
         check("reader takes only data rows", sorted(rows), ["A::B", "C::D"])
         check("reader keeps the verdict column", rows["C::D"][1], "REJECTED")
 
+    # B080: `HOST_FIXTURE` is provably empty for these corpora, and this is
+    # the measurement behind that claim rather than a reading of the code.
+    # Neither template emits a `namespace`, so no scope in either corpus can
+    # have come from the probe's own fixture — which is what lets `Foo` be
+    # attributed away from the fixture, and what leaves the remaining
+    # suppliers (an installed plugin, another client's staged probe)
+    # indistinguishable.
+    for template in ("TYPE", "VALUE"):
+        src, _, _ = build_source(["Foo::Bar"], template)
+        check(
+            f"the {template} probe fixture declares no namespace of its own",
+            "namespace" in src,
+            False,
+        )
+
     # B080: the pin MESSAGE FORM is the whole discriminator between "this
     # scope existed" and "it did not", and both forms are REJECTED, so a
     # reader keying off the verdict learns nothing. Pinned against the two
@@ -905,22 +920,49 @@ SCOPE_PROVENANCE = {
 }
 
 # Values of the `origin` column, and what a consumer must do with each.
+#
+# The three HOST_* values are one distinction, not three: a scope the PROBING
+# SESSION supplied rather than the engine. They are kept apart because a
+# probe compile can be reached by three different suppliers and they do not
+# behave the same on re-measurement:
+#
+#   installed plugin  -> reproducible; install the plugin and the row returns
+#   the run's own fixture -> reproducible; stage the fixture and it returns
+#   another client's staged probe -> NOT reproducible. Pure contamination,
+#                        and invisible in the verdict.
+#
+# A format that spells all three `HOST` cannot say which, so it cannot say
+# whether a row is re-measurable at all.
 PROVENANCE_ORIGINS = {
     # The engine supplies this scope on every install of this Openplanet
     # version. Rows qualified by it are environment-INDEPENDENT.
     "ENGINE",
-    # The probing machine's plugin set supplied it. Rows qualified by it are
-    # ENVIRONMENT-DEPENDENT: they are valid measurements of that machine and
-    # say nothing about the engine.
-    "HOST",
+    # An installed plugin declares it, and the evidence NAMES that plugin.
+    # Environment-dependent and reproducible.
+    "HOST_PLUGIN",
+    # The probe run's own fixture declared it. Environment-dependent and
+    # reproducible. Provably EMPTY for these corpora — `build_source` emits no
+    # `namespace` in either template, which `run_selftest` checks rather than
+    # asserts in prose — and defined anyway so the question is answered rather
+    # than unasked.
+    "HOST_FIXTURE",
+    # Not the engine, and the supplier was NOT identified. The three cases
+    # above are indistinguishable from a verdict alone, and "another client's
+    # staged probe" is one of them, so this is where a scope sits until an
+    # instrument separates them. Environment-dependent; re-measurability
+    # unknown.
+    "HOST_UNATTRIBUTED",
     # The engine supplies it, but neither shipped database records it, so this
     # crate cannot know it is a scope. Environment-independent, and still not
     # something the crate can resolve.
     "ENGINE_UNMODELLED",
     # Not yet classified. Written for any prefix the sidecar has not seen
-    # before; a human has to decide which of the three it is.
+    # before; a human has to decide which of the above it is.
     "UNKNOWN",
 }
+
+# Origins whose rows a consumer must NOT read as evidence about the engine.
+ENVIRONMENT_DEPENDENT_ORIGINS = {"HOST_PLUGIN", "HOST_FIXTURE", "HOST_UNATTRIBUTED"}
 
 PIN_SCOPE = "SCOPE"
 PIN_ABSENT = "ABSENT"
@@ -1018,6 +1060,20 @@ SCOPE_PROVENANCE_BANNER = """\
 # only {pinned} of the {total} scopes below carry a pin. A consumer that treated
 # an absent pin as "engine" would read a foreign plugin's row as an engine fact,
 # which is exactly the failure this file exists to stop.
+#
+# METHOD PRECONDITION: these verdicts require EXCLUSIVE access to the game's
+# RemoteBuild port. Two clients on the port is not merely a scheduling problem.
+# The plugin's read loop has been observed splitting one request across two
+# socket reads and parsing each half as a payload, so a request can be answered
+# as a question nobody asked -- and a truncated script is still a script, so it
+# can compile. A contaminated FIXTURE leaves the transaction intact and only
+# makes an ACCEPT untrustworthy; a mangled PAYLOAD returns a clean, plausible,
+# wrong verdict with nothing in the output marking it as damaged. Neither B068's
+# sentinel nor B077's cleanup guard watches that door.
+#
+# The corpus cannot express whether a row was measured under exclusive access.
+# Until it can, a re-measured row is only as good as the operator's word that
+# nothing else held the port, and that belongs in the commit that changes it.
 prefix\tpin\torigin\tevidence
 """
 

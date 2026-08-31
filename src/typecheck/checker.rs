@@ -12107,6 +12107,23 @@ void f() {
     /// slot (`startnew`) and a workspace slot whose parameter is written with
     /// the colliding name are checked, because the two reach the funcdef
     /// through different predicates.
+    ///
+    /// IF YOU LANDED HERE FROM A FAILURE, this is what it means. Two more
+    /// sites ask `lookup_funcdef` without the GH #38 shadowing guard that
+    /// [`Self::try_funcdef_ctor`] carries — [`Self::funcdef_name_of`] and
+    /// [`Self::slot_funcdef`] — and they are UNGUARDED DELIBERATELY. Measured
+    /// when B073 landed: with a plugin type named after a Core funcdef, both
+    /// produce output identical to the non-colliding control, so a guard there
+    /// could not fire. A guard that cannot fire is worse than none, because at
+    /// review time it is indistinguishable from one that can, and it tells the
+    /// next reader an axis is covered when nothing is checking it.
+    ///
+    /// This test is the substitute for those guards. It goes red the moment
+    /// either site becomes reachable-and-shadowing, which forces that call to
+    /// be made deliberately instead of discovered. So a failure here is not a
+    /// broken assertion to relax — it is the news that the reachability
+    /// argument above has expired, and the fix is to guard the site that
+    /// changed.
     #[test]
     fn a_plugin_type_named_after_an_engine_funcdef_behaves_the_same_at_a_call_slot() {
         for body in [
