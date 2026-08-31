@@ -490,7 +490,7 @@ mod tests {
     use super::*;
     use crate::lexer::Span;
     use crate::server::diagnostics::DIAGNOSTIC_SOURCE;
-    use crate::symbols::scope::{Symbol, SymbolKind};
+    use crate::symbols::scope::{DeclModifiers, Symbol, SymbolKind};
     use crate::typecheck::{TypeDiagnostic, TypeDiagnosticKind};
     use std::collections::HashMap;
 
@@ -523,10 +523,10 @@ mod tests {
         let symbols = names
             .iter()
             .map(|name| Symbol {
+                modifiers: DeclModifiers::default(),
                 name: (*name).to_string(),
                 kind: SymbolKind::Class {
                     parents: Vec::new(),
-                    is_mixin: false,
                 },
                 span: Span { start: 0, end: 0 },
                 file_id: fid,

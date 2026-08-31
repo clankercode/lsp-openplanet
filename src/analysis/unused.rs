@@ -31,6 +31,7 @@ use std::path::Path;
 
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::symbols::scope::{Symbol, SymbolKind};
+use crate::symbols::table::SymbolTable;
 use crate::typecheck::checker::Checker;
 use crate::typecheck::GlobalScope;
 
@@ -444,55 +445,40 @@ fn matches_an_exported_signature(
 /// reachable by definition, exactly as a manifest-exported body is (B062),
 /// and reporting it unused is the same category of error.
 ///
-/// Read off the AST rather than the symbol table because the modifier is a
-/// property of the DECLARATION and the pooled `Symbol` does not carry it.
-/// Until now the parser ate `shared` in `parse_item` and threw it away for
-/// everything but `ClassDecl`, so the flag could not be consulted even in
-/// principle — that was half of this bug.
+/// Read from the POOL (B114). This used to be a per-file AST walk, because
+/// `shared` was dropped at pooling and the modifier could not be consulted
+/// even in principle — B087 had to re-derive it, and that walk was one of
+/// the three sidecars B114 named as a second source of truth waiting to
+/// drift from the first. `Symbol::modifiers` now carries it, so the same
+/// question is asked once, of one place.
+///
+/// Deliberately scoped to ONE file's symbols even though the pool spans all
+/// of them: `shared` roots the DECLARATION, not the workspace, and the
+/// caller applies these roots only to that same file's symbols. A query that
+/// dropped the `file_id` filter would hand a file a same-named root from
+/// another one — and since both declarations can start at byte 0, the span
+/// half below would not catch it either. Pinned by
+/// `a_same_named_shared_declaration_in_another_file_does_not_exempt_this_one`.
 ///
 /// Returns the span as well as the name because a name alone is not enough
 /// to decide membership: `namespace Foo { void Dead() {} }` beside a
 /// `shared class Foo` pools `Foo::Dead` under the same owner spelling, and
 /// exempting by prefix alone would silently drop that finding. This is the
 /// same owner-name-AND-span discipline B054 established for interface
-/// methods; the namespace member's span lies outside the class's.
+/// methods; the namespace member's span lies outside the class's. The
+/// pooled span is the DECLARATION's span — `cls.span`, `iface.span`,
+/// `en.span`, `fd.span`, `func.span` at the five extraction sites — the very
+/// spans the AST walk used to push, so the containment test is unchanged.
 fn shared_declaration_roots(
-    source: &str,
-    file: &crate::parser::ast::SourceFile,
+    symbols: &SymbolTable,
+    file_id: usize,
 ) -> Vec<(String, crate::lexer::Span)> {
-    use crate::parser::ast::Item;
-    fn walk(
-        source: &str,
-        items: &[Item],
-        namespace: Option<&str>,
-        out: &mut Vec<(String, crate::lexer::Span)>,
-    ) {
-        let qualify = |name: &str| match namespace {
-            Some(ns) => format!("{}::{}", ns, name),
-            None => name.to_string(),
-        };
-        for item in items {
-            match item {
-                Item::Class(d) if d.is_shared => out.push((qualify(d.name.text(source)), d.span)),
-                Item::Interface(d) if d.is_shared => {
-                    out.push((qualify(d.name.text(source)), d.span))
-                }
-                Item::Enum(d) if d.is_shared => out.push((qualify(d.name.text(source)), d.span)),
-                Item::Funcdef(d) if d.is_shared => out.push((qualify(d.name.text(source)), d.span)),
-                Item::Function(d) if d.is_shared => {
-                    out.push((qualify(d.name.text(source)), d.span))
-                }
-                Item::Namespace(ns) => {
-                    let inner = qualify(ns.name.text(source));
-                    walk(source, &ns.items, Some(&inner), out);
-                }
-                _ => {}
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(source, &file.items, None, &mut out);
-    out
+    symbols
+        .file_symbols(file_id)
+        .iter()
+        .filter(|sym| sym.modifiers.is_shared)
+        .map(|sym| (sym.name.clone(), sym.span))
+        .collect()
 }
 
 /// True when `sym` IS a `shared` declaration, or a member declared inside
@@ -590,7 +576,8 @@ fn unused_declarations_filtered(
                 })
             };
             // B087: `shared` declarations are the cross-plugin surface.
-            let shared_roots = shared_declaration_roots(source, &file.analysis.file);
+            // B114: read from the pool, scoped to this file's symbols.
+            let shared_roots = shared_declaration_roots(symbols, file_id);
             for sym in symbols.file_symbols(file_id) {
                 if declared_by_an_interface(sym) {
                     continue;
@@ -2062,6 +2049,54 @@ mod shared_declarations_are_roots {
             ("b.as", "void TrulyDead() {}\nvoid Main() {}\n"),
         ]);
         assert_eq!(out, vec!["TrulyDead"]);
+    }
+
+    /// …and a SAME-NAMED shared declaration in another file must not exempt
+    /// this one (B114).
+    ///
+    /// Sharper than the test above, and aimed at one specific mistake. The
+    /// roots are now read from the POOL, which is cross-file, so a query
+    /// that forgot to filter by `file_id` would hand this file a root named
+    /// `Foo` from the other file. Both declarations start at byte 0, so the
+    /// span-containment half of `is_shared_or_inside_shared` would be
+    /// satisfied too, and the dead `Foo` here would go silently unreported.
+    /// Name collision plus span overlap is the combination that defeats both
+    /// halves at once, which no other fixture in this family produces.
+    ///
+    /// MEASURED, and the first attempt at it was VACUOUS — worth recording,
+    /// because it passed for exactly the reason this repo warns about. The
+    /// obvious fixture (both files starting `class Foo` at byte 0) cannot
+    /// fail: `cls.span` begins at the `class` keyword, i.e. AFTER `shared `,
+    /// so the shared root's span starts 7 bytes LATER than the plain one's
+    /// and never contains it. The leak was invisible by luck. With the
+    /// padding below, swapping `file_symbols(file_id)` for `all_symbols()`
+    /// drops `Foo` from the findings — measured `["Pad"]` against the
+    /// correct `["Foo", "Pad"]`.
+    #[test]
+    fn a_same_named_shared_declaration_in_another_file_does_not_exempt_this_one() {
+        // The byte ranges are load-bearing, so they are constructed, not
+        // hoped for: a.as's shared `Foo` is padded to span a WIDE range,
+        // and b.as's `Foo` is offset by a leading declaration so that it
+        // begins after a.as's starts and ends before a.as's ends. Its span
+        // is therefore genuinely CONTAINED in the other file's root, which
+        // is what makes the span half of `is_shared_or_inside_shared`
+        // unable to save us and leaves the `file_id` filter as the only
+        // thing standing between this fixture and a dropped finding.
+        let out = report(&[
+            (
+                "a.as",
+                "shared class Foo { void G1() {} void G2() {} void G3() {} \
+                 void G4() {} void G5() {} void G6() {} }\n",
+            ),
+            (
+                "b.as",
+                "void Pad() {}\nclass Foo { void Go() {} }\nvoid Main() {}\n",
+            ),
+        ]);
+        assert!(
+            out.contains(&"Foo".to_string()),
+            "the NON-shared `Foo` in b.as must still be reported: {out:?}"
+        );
     }
 
     /// A file with no `shared` anywhere behaves exactly as before.

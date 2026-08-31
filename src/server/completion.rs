@@ -2721,7 +2721,7 @@ mod b107_workspace_namespace_members {
                     .symbols()
                     .lookup(name)
                     .iter()
-                    .any(|sym| matches!(sym.kind, SymbolKind::Function { is_const: true, .. }))
+                    .any(|sym| sym.modifiers.is_const && matches!(sym.kind, SymbolKind::Function { .. }))
             })
             .collect();
         assert_eq!(

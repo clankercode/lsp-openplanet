@@ -28,6 +28,29 @@ GitHub Release body to match this section (gh release edit).
   target, while one that cannot be narrowed lists every overload.
 
 ### Fixed
+- **Hover on a virtual property shows the accessors** (B113) — hovering
+  `ID` in `obj.ID`, where the type declares only `get_ID` / `set_ID`,
+  used to report the inferred type (or, at a `Ns::Thing` site, nothing at
+  all). It now presents the accessor the position calls for, in one code
+  block labelled `(property get)` / `(property set)`: a read shows the
+  getter, a write the setter, and a compound assign (`obj.ID += 1`) both,
+  getter first. Covers accessors inherited from a base class, declared on
+  an interface, reached through `this`, and namespace-level or global
+  properties. A real field or method named `ID` still wins over any
+  same-named accessor pair. Hovering a class field now reads
+  `(field) int C::Speed` instead of mislabelling it `(local)`.
+- **Declaration modifiers survive into the symbol pool** (B114) — a
+  symbol recorded what it *is* but not what it was *declared as*, so
+  `shared`, `abstract`, `override`, `final`, `private` and `protected`
+  were dropped when symbols were pooled and had to be re-derived by
+  walking one file's syntax tree — which by construction cannot see a
+  declaration in another file. They are now carried on the pooled symbol,
+  for methods, fields and properties alike, and the two workarounds that
+  existed to compensate are gone, so there is a single source of truth
+  rather than answers that can disagree. Mostly invisible on its own; it
+  is what lets const-correctness be checked uniformly wherever a class was
+  declared, and it is the prerequisite for filtering `private` members out
+  of completion.
 - **Go-to-definition on a virtual property** (B103) — `obj.ID`, where the
   type declares only the accessor pair `get_ID` / `set_ID`, used to
   resolve nothing. It now jumps to the accessor the position calls for:

@@ -215,12 +215,10 @@ fn interface_params(ctx: &FixContext<'_>, parsed: &ParsedSignature) -> Option<Ve
     let key = format!("{}::{}", parsed.interface, parsed.method);
     let mut hit = None;
     for sym in ctx.workspace.lookup(&key) {
-        let SymbolKind::Function {
-            params, is_const, ..
-        } = &sym.kind
-        else {
+        let SymbolKind::Function { params, .. } = &sym.kind else {
             continue;
         };
+        let is_const = &sym.modifiers.is_const;
         // B101: constness is part of what selects the overload — an
         // interface may declare both `M()` and `M() const`.
         if *is_const != parsed.is_const {

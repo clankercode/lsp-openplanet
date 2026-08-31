@@ -2207,36 +2207,55 @@ impl<'a> GlobalScope<'a> {
     ///
     /// `Some(true)` when ANY overload of the name is const: on a const
     /// receiver the engine selects a const overload if one exists, so one
-    /// const declaration makes the call legal.
+    /// const declaration makes the call legal. Virtual-property accessors
+    /// contribute under their stripped spelling too, and are aggregated with
+    /// a directly named method; this is the retired sidecar's name-keyed
+    /// behavior. B116 intentionally shares this answer across files, keeping
+    /// its cross-file verdict aligned with the same-file rule.
+    ///
+    /// That aggregation PRESERVES A KNOWN FALSE NEGATIVE, recorded here so
+    /// it does not read as intent. For
+    /// `class C { void M() {} int get_M() const {} }`, the call `c.M()` on a
+    /// const receiver invokes the DIRECT, non-const `M()` — the game rejects
+    /// it — but the const `get_M` makes this name-keyed answer `Some(true)`
+    /// and nothing is diagnosed. The accessor is the property `c.M`, not the
+    /// call `c.M()`, so strictly the two spellings should not pool their
+    /// constness at a call site.
+    ///
+    /// It is kept because `file_const_methods` behaved exactly this way —
+    /// one set keyed by name, holding both spellings — and B114 is a
+    /// RETIREMENT: the pool must answer what the sidecar answered, or the
+    /// refactor is smuggling a behaviour change into a diagnostic that fires
+    /// on shipped plugins. Splitting the call spelling from the property
+    /// spelling is a real improvement and a separate, measurable one.
+    /// Pinned by `b114_accessor_names_and_direct_collisions_preserve_name_keyed_constness`,
+    /// which states the collision cases explicitly rather than leaving them
+    /// to be rediscovered.
     pub fn workspace_own_method_is_const(&self, class_name: &str, method: &str) -> Option<bool> {
         let owner = self.normalize_workspace_class_name(class_name);
-        // The method as written, then — only if no method of that exact
-        // name exists — its virtual-property spelling. `index_file_classes`
-        // registers `get_V`/`set_V` under the property name `V` too and
-        // marks the property const from the accessor's own qualifier; this
-        // mirrors that, so the two surfaces agree on `p.V()`.
-        for candidates in [
-            vec![format!("{owner}::{method}")],
-            vec![
-                format!("{owner}::get_{method}"),
-                format!("{owner}::set_{method}"),
-            ],
-        ] {
-            let mut found = false;
-            let mut any_const = false;
-            for qualified in &candidates {
-                for s in self.lookup_workspace(qualified) {
-                    if let SymbolKind::Function { is_const, .. } = &s.kind {
-                        found = true;
-                        any_const |= *is_const;
-                    }
+        // `index_file_classes` inserted a const `get_V`/`set_V` under `V`
+        // even when a direct `V` existed. Keep all three spellings in one
+        // candidate set: name-keyed constness is true iff any declaration is
+        // const, not whichever spelling happens to be found first.
+        let candidates = [
+            format!("{owner}::{method}"),
+            format!("{owner}::get_{method}"),
+            format!("{owner}::set_{method}"),
+        ];
+        let mut found = false;
+        let mut any_const = false;
+        for qualified in &candidates {
+            for s in self.lookup_workspace(qualified) {
+                // B114: the qualifier moved from `SymbolKind::Function`
+                // onto `Symbol::modifiers`, so there is ONE home for every
+                // declaration modifier rather than one per kind.
+                if matches!(s.kind, SymbolKind::Function { .. }) {
+                    found = true;
+                    any_const |= s.modifiers.is_const;
                 }
             }
-            if found {
-                return Some(any_const);
-            }
         }
-        None
+        found.then_some(any_const)
     }
 
     pub fn workspace_class_member(&self, class_name: &str, member: &str) -> Option<TypeRepr> {
@@ -2435,7 +2454,7 @@ pub(crate) fn qualified_virtual_name(name: &str, prefix: &str) -> String {
 mod tests {
     use super::*;
     use crate::lexer::Span;
-    use crate::symbols::scope::Symbol;
+    use crate::symbols::scope::{DeclModifiers, Symbol};
 
     fn empty_span() -> Span {
         Span::new(0, 0)
@@ -2443,6 +2462,7 @@ mod tests {
 
     fn make_symbol(name: &str, kind: SymbolKind) -> Symbol {
         Symbol {
+            modifiers: DeclModifiers::default(),
             name: name.to_string(),
             kind,
             span: empty_span(),
@@ -2494,7 +2514,6 @@ mod tests {
                 "CSmPlayer",
                 SymbolKind::Class {
                     parents: Vec::new(),
-                    is_mixin: false,
                 },
             )],
         );
@@ -3616,7 +3635,6 @@ mod tests {
                 params: Vec::new(),
                 min_args: 0,
                 imported: false,
-                is_const: false,
             },
         ] {
             let mut ws = SymbolTable::new();
@@ -3700,7 +3718,6 @@ mod tests {
                     "Holder",
                     SymbolKind::Class {
                         parents: Vec::new(),
-                        is_mixin: false,
                     },
                 ),
                 make_symbol(
@@ -4054,7 +4071,6 @@ mod tests {
             params: Vec::new(),
             min_args: 0,
             imported: false,
-            is_const: false,
         };
         for (name, symbols) in [
             // A global variable.
@@ -4085,7 +4101,6 @@ mod tests {
                         params: Vec::new(),
                         min_args: 0,
                         imported: false,
-                        is_const: false,
                     },
                 )],
             ),
@@ -4220,7 +4235,6 @@ mod tests {
                 params: Vec::new(),
                 min_args: 0,
                 imported: false,
-                is_const: false,
             },
             SymbolKind::EnumValue {
                 enum_name: "MyEnum".into(),
@@ -4249,7 +4263,6 @@ mod tests {
                     params: Vec::new(),
                     min_args: 0,
                     imported: false,
-                    is_const: false,
                 },
             )],
         );
@@ -4302,7 +4315,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "MyClass",
-                SymbolKind::Class { parents: vec![], is_mixin: false },
+                SymbolKind::Class { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -4340,7 +4353,6 @@ mod tests {
                     params: vec![],
                     min_args: 0,
                     imported: false,
-                    is_const: false,
                 },
             )],
         );
@@ -4366,7 +4378,6 @@ mod tests {
                         params: vec![],
                         min_args: 0,
                         imported: false,
-                        is_const: false,
                     },
                 ),
             ],
@@ -4406,7 +4417,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "Deep::Ns::Thing",
-                SymbolKind::Class { parents: vec![], is_mixin: false },
+                SymbolKind::Class { parents: vec![] },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -4432,7 +4443,6 @@ mod tests {
                     params: vec![],
                     min_args: 0,
                     imported: false,
-                    is_const: false,
                 },
             )],
         );
@@ -4557,7 +4567,7 @@ mod tests {
         let fid = ws.allocate_file_id();
         ws.set_file_symbols(
             fid,
-            vec![make_symbol("mat3", SymbolKind::Class { parents: vec![], is_mixin: false })],
+            vec![make_symbol("mat3", SymbolKind::Class { parents: vec![] })],
         );
         let scope = GlobalScope::new(&ws, Some(&idx));
         assert!(!scope.external_ctor_converts("mat3", "mat4"));
@@ -4603,7 +4613,6 @@ mod tests {
                         params: vec![("v".into(), "int &out".into())],
                         min_args: 1,
                         imported: false,
-                        is_const: false,
                     },
                 ),
                 make_symbol(
@@ -4681,7 +4690,7 @@ mod tests {
             vec![
                 make_symbol(
                     "Editor::NetworkSerializable",
-                    SymbolKind::Class { parents: vec![], is_mixin: false },
+                    SymbolKind::Class { parents: vec![] },
                 ),
                 make_symbol(
                     "Editor::NetworkSerializable::ReadFromNetworkBuffer",
@@ -4690,14 +4699,12 @@ mod tests {
                         params: vec![("buf".into(), "MemoryBuffer@".into())],
                         min_args: 1,
                         imported: false,
-                        is_const: false,
                     },
                 ),
                 make_symbol(
                     "Editor::Child",
                     SymbolKind::Class {
                         parents: vec!["NetworkSerializable".into()],
-                        is_mixin: false,
                     },
                 ),
             ],
@@ -4718,8 +4725,8 @@ mod tests {
         ws.set_file_symbols(
             fid,
             vec![
-                make_symbol("ItemSpec", SymbolKind::Class { parents: vec![], is_mixin: false }),
-                make_symbol("Editor::ItemSpec", SymbolKind::Class { parents: vec![], is_mixin: false }),
+                make_symbol("ItemSpec", SymbolKind::Class { parents: vec![] }),
+                make_symbol("Editor::ItemSpec", SymbolKind::Class { parents: vec![] }),
                 make_symbol(
                     "Editor::ItemSpec::ReadFromNetworkBuffer",
                     SymbolKind::Function {
@@ -4727,14 +4734,12 @@ mod tests {
                         params: vec![("buf".into(), "MemoryBuffer@".into())],
                         min_args: 1,
                         imported: false,
-                        is_const: false,
                     },
                 ),
                 make_symbol(
                     "Editor::ItemSpecPriv",
                     SymbolKind::Class {
                         parents: vec!["ItemSpec".into()],
-                        is_mixin: false,
                     },
                 ),
             ],

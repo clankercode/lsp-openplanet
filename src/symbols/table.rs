@@ -1,7 +1,64 @@
 use std::collections::{BTreeMap, HashMap};
 
-use super::scope::{Symbol, SymbolKind};
+use super::scope::{DeclModifiers, Symbol, SymbolKind};
 use crate::parser::ast;
+
+/// B114: the modifiers a FUNCTION-shaped declaration was written with.
+/// Covers class methods, constructors, destructors, interface methods and
+/// free functions — the parser fills the same `FunctionDecl` for all of
+/// them, so one helper keeps them from drifting apart.
+fn fn_modifiers(f: &ast::FunctionDecl) -> DeclModifiers {
+    DeclModifiers {
+        is_shared: f.is_shared,
+        is_const: f.is_const,
+        is_override: f.is_override,
+        is_final: f.is_final,
+        is_private: f.is_private,
+        is_protected: f.is_protected,
+        ..DeclModifiers::default()
+    }
+}
+
+/// B114: the modifiers a CLASS declaration was written with.
+fn class_modifiers(c: &ast::ClassDecl) -> DeclModifiers {
+    DeclModifiers {
+        is_shared: c.is_shared,
+        is_mixin: c.is_mixin,
+        is_abstract: c.is_abstract,
+        ..DeclModifiers::default()
+    }
+}
+
+/// B114 + B115: the modifiers a STATE-shaped declaration was written with —
+/// a class field (`VarDeclStmt`) or a class property (`PropertyDecl`).
+///
+/// Visibility is the only modifier either can carry. Before B115 the parser
+/// ate `private` / `protected` on these and dropped them, so pooling them was
+/// impossible and this arm hardcoded a default; B115 records them, and this
+/// is what carries them the rest of the way to the pool.
+///
+/// Also used for the FILE-SCOPE spellings (`Item::VarDecl`,
+/// `Item::Property`), where the language permits no visibility at all and the
+/// parser therefore always reports false. Threading them anyway costs
+/// nothing, cannot be wrong, and means the pool follows the parser if that
+/// ever changes — rather than a second place that has to be remembered.
+/// Pinned by `locals_and_file_scope_variables_declare_no_visibility`.
+fn state_modifiers(is_private: bool, is_protected: bool) -> DeclModifiers {
+    DeclModifiers {
+        is_private,
+        is_protected,
+        ..DeclModifiers::default()
+    }
+}
+
+/// B114: `shared` is the only modifier an interface, enum or funcdef can
+/// carry.
+fn shared_only(is_shared: bool) -> DeclModifiers {
+    DeclModifiers {
+        is_shared,
+        ..DeclModifiers::default()
+    }
+}
 
 /// Extract a base-class name from a `TypeExpr`. Strips `Handle`, `Const`,
 /// `Reference` wrappers and pulls the underlying `QualifiedName` if present.
@@ -376,11 +433,11 @@ impl SymbolTable {
                     .filter_map(|b| base_class_name(source, b))
                     .collect();
                 out.push(Symbol {
+                    modifiers: class_modifiers(cls),
                     name: class_name.clone(),
                     kind: SymbolKind::Class {
                         parents,
                         // B111: a mixin never owes the interface it names.
-                        is_mixin: cls.is_mixin,
                     },
                     span: cls.span,
                     file_id,
@@ -400,6 +457,10 @@ impl SymbolTable {
                             for decl in &var.declarators {
                                 let mname = format!("{}::{}", class_name, decl.name.text(source));
                                 out.push(Symbol {
+                                    // B115 records a field's visibility; B114
+                                    // carries it to the pool, which is the
+                                    // only source completion can filter on.
+                                    modifiers: state_modifiers(var.is_private, var.is_protected),
                                     name: mname,
                                     kind: SymbolKind::Variable {
                                         type_name: type_text.clone(),
@@ -415,6 +476,7 @@ impl SymbolTable {
                             let (params, min_args) = extract_params(source, &func.params);
                             let return_type = func.return_type.span.text(source).to_string();
                             out.push(Symbol {
+                                modifiers: fn_modifiers(func),
                                 name: mname,
                                 kind: SymbolKind::Function {
                                     return_type,
@@ -424,7 +486,6 @@ impl SymbolTable {
                                     // B101: the trailing `const`. The engine
                                     // treats `void M() const` and `void M()`
                                     // as different signatures.
-                                    is_const: func.is_const,
                                 },
                                 span: func.span,
                                 file_id,
@@ -442,6 +503,7 @@ impl SymbolTable {
                             // gets a Named(simple) that downstream lookups
                             // can reason about.
                             out.push(Symbol {
+                                modifiers: fn_modifiers(func),
                                 name: mname,
                                 kind: SymbolKind::Function {
                                     return_type: simple_class.clone(),
@@ -449,7 +511,6 @@ impl SymbolTable {
                                     min_args,
                                     imported: false,
                                     // A constructor cannot be const.
-                                    is_const: false,
                                 },
                                 span: func.span,
                                 file_id,
@@ -463,6 +524,7 @@ impl SymbolTable {
                             let mname = format!("{}::{}", class_name, func.name.text(source));
                             let (params, min_args) = extract_params(source, &func.params);
                             out.push(Symbol {
+                                modifiers: fn_modifiers(func),
                                 name: mname,
                                 kind: SymbolKind::Function {
                                     return_type: String::new(),
@@ -470,7 +532,6 @@ impl SymbolTable {
                                     min_args,
                                     imported: false,
                                     // A destructor cannot be const.
-                                    is_const: false,
                                 },
                                 span: func.span,
                                 file_id,
@@ -481,6 +542,10 @@ impl SymbolTable {
                             let mname = format!("{}::{}", class_name, prop.name.text(source));
                             let type_text = prop.type_expr.span.text(source).to_string();
                             out.push(Symbol {
+                                // The other STATE-shaped member. B115 fixed
+                                // both, so pooling only fields would rebuild
+                                // the half-blind asymmetry one layer up.
+                                modifiers: state_modifiers(prop.is_private, prop.is_protected),
                                 name: mname,
                                 kind: SymbolKind::Variable {
                                     type_name: type_text,
@@ -506,6 +571,7 @@ impl SymbolTable {
                     .filter_map(|b| base_class_name(source, b))
                     .collect();
                 out.push(Symbol {
+                    modifiers: shared_only(iface.is_shared),
                     name: iface_name.clone(),
                     kind: SymbolKind::Interface { parents },
                     span: iface.span,
@@ -515,6 +581,10 @@ impl SymbolTable {
                 for method in &iface.methods {
                     let (params, min_args) = extract_params(source, &method.params);
                     out.push(Symbol {
+                        // The METHOD's own modifiers — `void M() const;` is
+                        // a const requirement. `shared` belongs to the
+                        // interface declaration, not to each method.
+                        modifiers: fn_modifiers(method),
                         name: format!("{}::{}", iface_name, method.name.text(source)),
                         kind: SymbolKind::Function {
                             return_type: method.return_type.span.text(source).to_string(),
@@ -523,7 +593,6 @@ impl SymbolTable {
                             imported: false,
                             // B101: `void M() const;` in an interface is a
                             // const REQUIREMENT, not decoration.
-                            is_const: method.is_const,
                         },
                         span: method.span,
                         file_id,
@@ -535,6 +604,7 @@ impl SymbolTable {
                 let enum_name = qualify(en.name.text(source));
                 let values = enum_values(source, en);
                 out.push(Symbol {
+                    modifiers: shared_only(en.is_shared),
                     name: enum_name.clone(),
                     kind: SymbolKind::Enum {
                         values: values.clone(),
@@ -546,6 +616,11 @@ impl SymbolTable {
                 // Also register each enum value
                 for (val, (_, value)) in en.values.iter().zip(&values) {
                     out.push(Symbol {
+                        // An enum VALUE carries no modifier of its own; it
+                        // is covered by its enum's declaration span, which
+                        // is how membership of a `shared` entity is
+                        // decided (see `is_shared_or_inside_shared`).
+                        modifiers: DeclModifiers::default(),
                         name: format!("{}::{}", enum_name, val.name.text(source)),
                         kind: SymbolKind::EnumValue {
                             enum_name: enum_name.clone(),
@@ -560,6 +635,7 @@ impl SymbolTable {
             ast::Item::Namespace(ns) => {
                 let ns_name = qualify(ns.name.text(source));
                 out.push(Symbol {
+                    modifiers: DeclModifiers::default(),
                     name: ns_name.clone(),
                     kind: SymbolKind::Namespace,
                     span: ns.span,
@@ -577,6 +653,7 @@ impl SymbolTable {
                 // `GlobalScope::lookup_funcdef` can compare delegate args.
                 let (params, _) = extract_params(source, &fd.params);
                 out.push(Symbol {
+                    modifiers: shared_only(fd.is_shared),
                     name,
                     kind: SymbolKind::Funcdef {
                         return_type: fd.return_type.span.text(source).to_string(),
@@ -591,6 +668,7 @@ impl SymbolTable {
             ast::Item::Typedef(td) => {
                 let name = qualify(td.name.text(source));
                 out.push(Symbol {
+                    modifiers: DeclModifiers::default(),
                     name,
                     // A typedef is a first-class type name. The current
                     // symbol surface already represents user-defined
@@ -613,13 +691,13 @@ impl SymbolTable {
                 let name = qualify(func.name.text(source));
                 let (params, min_args) = extract_params(source, &func.params);
                 out.push(Symbol {
+                    modifiers: fn_modifiers(func),
                     name,
                     kind: SymbolKind::Function {
                         return_type: func.return_type.span.text(source).to_string(),
                         params,
                         min_args,
                         imported: false,
-                        is_const: func.is_const,
                     },
                     span: func.span,
                     file_id,
@@ -635,6 +713,7 @@ impl SymbolTable {
                     let qualified_name = qualify(name.text(source));
                     let (params, min_args) = extract_params(source, params);
                     out.push(Symbol {
+                        modifiers: DeclModifiers::default(),
                         name: qualified_name,
                         kind: SymbolKind::Function {
                             return_type: return_type.span.text(source).to_string(),
@@ -645,7 +724,6 @@ impl SymbolTable {
                             // real definition when one exists in the workspace.
                             imported: true,
                             // `import` declares a free function.
-                            is_const: false,
                         },
                         span: import.span,
                         file_id,
@@ -663,6 +741,10 @@ impl SymbolTable {
                 for decl in &var.declarators {
                     let name = qualify(decl.name.text(source));
                     out.push(Symbol {
+                        // Structurally always false — a file-scope variable
+                        // cannot carry visibility — but threaded rather than
+                        // hardcoded so the pool follows the parser.
+                        modifiers: state_modifiers(var.is_private, var.is_protected),
                         name,
                         kind: SymbolKind::Variable {
                             type_name: type_text.clone(),
@@ -677,6 +759,8 @@ impl SymbolTable {
                 let name = qualify(prop.name.text(source));
                 let type_text = prop.type_expr.span.text(source).to_string();
                 out.push(Symbol {
+                    // As above: always false at file scope, threaded anyway.
+                    modifiers: state_modifiers(prop.is_private, prop.is_protected),
                     name,
                     kind: SymbolKind::Variable {
                         type_name: type_text,
@@ -792,7 +876,6 @@ mod tests {
                 params,
                 min_args,
                 imported,
-                is_const,
             } => {
                 assert_eq!(return_type, "int");
                 assert_eq!(
@@ -804,7 +887,10 @@ mod tests {
                 );
                 assert_eq!(*min_args, 1, "the defaulted parameter is optional");
                 assert!(!imported);
-                assert!(!is_const, "no trailing `const` was written");
+                assert!(
+                    !sym.modifiers.is_const,
+                    "no trailing `const` was written"
+                );
             }
             other => panic!("I::Count must be a Function symbol, got {:?}", other),
         }
@@ -820,7 +906,7 @@ mod tests {
             .find(|s| s.name == name)
             .unwrap_or_else(|| panic!("{name} must be pooled in `{src}`"));
         match &sym.kind {
-            SymbolKind::Class { is_mixin, .. } => *is_mixin,
+            SymbolKind::Class { .. } => sym.modifiers.is_mixin,
             other => panic!("{name} must be a Class symbol, got {other:?}"),
         }
     }
@@ -903,10 +989,12 @@ mod tests {
             .iter()
             .find(|s| s.name == name)
             .unwrap_or_else(|| panic!("{name} must be pooled in `{src}`"));
-        match &sym.kind {
-            SymbolKind::Function { is_const, .. } => *is_const,
-            other => panic!("{name} must be a Function symbol, got {other:?}"),
-        }
+        assert!(
+            matches!(sym.kind, SymbolKind::Function { .. }),
+            "{name} must be a Function symbol, got {:?}",
+            sym.kind
+        );
+        sym.modifiers.is_const
     }
 
     /// A class method's trailing `const` survives into the pool, and its
@@ -1011,8 +1099,8 @@ mod tests {
         assert_eq!(ctor_dtor.len(), 2, "constructor and destructor both pooled");
         for sym in ctor_dtor {
             match &sym.kind {
-                SymbolKind::Function { is_const, .. } => {
-                    assert!(!is_const, "a ctor/dtor can never be const")
+                SymbolKind::Function { .. } => {
+                    assert!(!sym.modifiers.is_const, "a ctor/dtor can never be const")
                 }
                 other => panic!("expected a Function symbol, got {other:?}"),
             }
@@ -1038,6 +1126,339 @@ mod tests {
             "import void F() from \"Plugin\";",
             "F"
         ));
+    }
+
+    // ── B114: every declaration modifier reaches the pool ─────────────
+    //
+    // B101 and B111 each added ONE modifier, one ticket at a time, and each
+    // was found by the false output it caused rather than by anyone noticing
+    // a field was missing. B114 pools the rest at once. These assert the
+    // pooled bit DIRECTLY rather than only through a consumer, which is what
+    // B111 established: a consumer test passes for free if the consumer
+    // never asks.
+
+    /// The modifiers of the pooled symbol named `name`.
+    fn pooled_modifiers(src: &str, name: &str) -> DeclModifiers {
+        let symbols = extract(src);
+        symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} must be pooled in `{src}`"))
+            .modifiers
+    }
+
+    /// `shared` is the modifier with the widest reach — five declaration
+    /// kinds carry it, and B087 had to walk the AST for it because the pool
+    /// dropped it from all five. Both directions per kind: lost and
+    /// invented are equally wrong.
+    #[test]
+    fn the_shared_modifier_is_pooled_for_every_declaration_kind() {
+        for (kind, shared, plain) in [
+            ("class", "shared class X {}", "class X {}"),
+            ("interface", "shared interface X {}", "interface X {}"),
+            ("enum", "shared enum X { A }", "enum X { A }"),
+            (
+                "funcdef",
+                "shared funcdef void X();",
+                "funcdef void X();",
+            ),
+            ("function", "shared void X() {}", "void X() {}"),
+        ] {
+            assert!(
+                pooled_modifiers(shared, "X").is_shared,
+                "shared lost for a {kind}: `{shared}`"
+            );
+            assert!(
+                !pooled_modifiers(plain, "X").is_shared,
+                "shared invented for a {kind}: `{plain}`"
+            );
+        }
+    }
+
+    /// `shared` beside the neighbours the same modifier loop eats, and
+    /// inside a namespace where the symbol pools under its long name.
+    #[test]
+    fn the_shared_modifier_survives_its_neighbours() {
+        for (src, name) in [
+            ("shared abstract class X {}", "X"),
+            ("shared mixin class X {}", "X"),
+            ("shared mixin abstract class X {}", "X"),
+            ("namespace N { shared class X {} }", "N::X"),
+            ("namespace N { shared void X() {} }", "N::X"),
+            ("namespace N { shared enum X { A } }", "N::X"),
+        ] {
+            assert!(
+                pooled_modifiers(src, name).is_shared,
+                "shared lost for `{src}`"
+            );
+        }
+    }
+
+    /// `abstract`, on a class.
+    ///
+    /// Carried for UNIFORMITY only. B094 measured that `abstract` does NOT
+    /// exempt a class from implementing the interface it names, and
+    /// `an_abstract_class_is_not_exempt` pins that behaviour; pooling the
+    /// bit does not license changing it.
+    #[test]
+    fn the_abstract_modifier_is_pooled() {
+        for (src, want) in [
+            ("abstract class X {}", true),
+            ("shared abstract class X {}", true),
+            ("mixin abstract class X {}", true),
+            ("class X {}", false),
+            ("shared class X {}", false),
+            ("mixin class X {}", false),
+        ] {
+            assert_eq!(
+                pooled_modifiers(src, "X").is_abstract,
+                want,
+                "wrong is_abstract for `{src}`"
+            );
+        }
+    }
+
+    /// The four method modifiers, each on its own, both directions.
+    #[test]
+    fn every_method_modifier_is_pooled() {
+        for (name, src, read) in [
+            (
+                "override",
+                "class C { void M() override {} }",
+                (|m: DeclModifiers| m.is_override) as fn(DeclModifiers) -> bool,
+            ),
+            ("final", "class C { void M() final {} }", |m| m.is_final),
+            (
+                "private",
+                "class C { private void M() {} }",
+                |m| m.is_private,
+            ),
+            (
+                "protected",
+                "class C { protected void M() {} }",
+                |m| m.is_protected,
+            ),
+        ] {
+            assert!(read(pooled_modifiers(src, "C::M")), "{name} lost: `{src}`");
+            assert!(
+                !read(pooled_modifiers("class C { void M() {} }", "C::M")),
+                "{name} invented for a plain method"
+            );
+        }
+    }
+
+    /// The modifiers are INDEPENDENT: one written must not set another, and
+    /// several written together must all survive. `const`, `override` and
+    /// `final` share one trailing modifier loop, which is exactly what could
+    /// let one swallow the next.
+    #[test]
+    fn method_modifiers_do_not_leak_into_each_other() {
+        let m = pooled_modifiers("class C { private void M() const override final {} }", "C::M");
+        assert!(m.is_private, "private lost");
+        assert!(m.is_const, "const lost");
+        assert!(m.is_override, "override lost");
+        assert!(m.is_final, "final lost");
+        assert!(!m.is_protected, "protected invented");
+        assert!(!m.is_shared, "shared invented");
+        assert!(!m.is_mixin && !m.is_abstract, "a method is not a class");
+
+        let plain = pooled_modifiers("class C { void M() {} }", "C::M");
+        assert_eq!(plain, DeclModifiers::default(), "a plain method declares nothing");
+    }
+
+    /// `private` and `protected` are mutually exclusive in the parser — it
+    /// only looks for `protected` when `private` was absent — so pin that
+    /// each excludes the other rather than both landing true.
+    #[test]
+    fn private_and_protected_are_exclusive() {
+        let private = pooled_modifiers("class C { private void M() {} }", "C::M");
+        assert!(private.is_private && !private.is_protected);
+        let protected = pooled_modifiers("class C { protected void M() {} }", "C::M");
+        assert!(protected.is_protected && !protected.is_private);
+    }
+
+    /// An interface method carries the same modifiers a class method does.
+    #[test]
+    fn interface_method_modifiers_are_pooled() {
+        assert!(pooled_modifiers("interface I { void M() const; }", "I::M").is_const);
+        assert_eq!(
+            pooled_modifiers("interface I { void M(); }", "I::M"),
+            DeclModifiers::default(),
+            "a plain interface method declares nothing"
+        );
+    }
+
+    /// A visibility modifier written before a CONSTRUCTOR or DESTRUCTOR
+    /// reaches the pool too — the parser eats it before it knows which
+    /// member kind follows, and threads it into the synthesized
+    /// `FunctionDecl`.
+    #[test]
+    fn constructor_and_destructor_visibility_is_pooled() {
+        let symbols = extract("class C { private C() {} }");
+        let ctor = symbols.iter().find(|s| s.name == "C::C").unwrap();
+        assert!(ctor.modifiers.is_private, "a private constructor is private");
+        assert!(!ctor.modifiers.is_const, "a constructor is never const");
+    }
+
+    /// A symbol nothing declared — an `import` alias — carries no modifiers
+    /// at all. All-false here is the honest answer, not a dropped one.
+    #[test]
+    fn an_import_alias_declares_no_modifiers() {
+        assert_eq!(
+            pooled_modifiers("import void F() from \"Plugin\";", "F"),
+            DeclModifiers::default()
+        );
+    }
+
+    /// THE POINT OF THE TICKET: a modifier survives for a symbol declared in
+    /// a DIFFERENT file from the consumer asking about it.
+    ///
+    /// This is what no AST sidecar could ever answer — a sidecar is built
+    /// per document, while the pool is the cross-file surface — and it is
+    /// the property every sidecar retirement rests on.
+    #[test]
+    fn pooled_modifiers_survive_across_a_file_boundary() {
+        let mut table = SymbolTable::new();
+        for src in [
+            "shared class Far { void M() const {} }",
+            "void Near() { }",
+        ] {
+            let fid = table.allocate_file_id();
+            let tokens = lexer::tokenize_filtered(src);
+            let mut parser = Parser::new(&tokens, src);
+            let file = parser.parse_file();
+            table.set_file_symbols(fid, SymbolTable::extract_symbols(fid, src, &file));
+        }
+        let far = table.lookup("Far");
+        assert_eq!(far.len(), 1, "the far class must be pooled once");
+        assert!(
+            far[0].modifiers.is_shared,
+            "`shared` must survive for a class declared in another file"
+        );
+        let method = table.lookup("Far::M");
+        assert_eq!(method.len(), 1, "the far method must be pooled once");
+        assert!(
+            method[0].modifiers.is_const,
+            "`const` must survive for a method declared in another file"
+        );
+    }
+
+    // ── Visibility on the STATE-shaped members (B115 + B114) ──────────
+    //
+    // These replace a tripwire that could never fire. It asserted the
+    // pooled value was `false` for a private field and told the reader
+    // "if this now passes, the parser was fixed — pin the true value
+    // instead". But the value it read was hardcoded to `false` by the
+    // field arm of this very module, not produced by the parser, so B115
+    // landing changed nothing the test could observe: it would have stayed
+    // green while reporting "still broken" forever.
+    //
+    // The lesson generalises past this test. An assertion is only a
+    // tripwire if the thing it reads is the thing that would change. Read
+    // through a layer that hardcodes the answer and it measures the
+    // hardcode, not the subject — a self-referential probe, and one that
+    // fails toward looking correct.
+    //
+    // B115 gave `VarDeclStmt` and `PropertyDecl` real `is_private` /
+    // `is_protected` fields, so the true values are pinned here instead.
+
+    /// A private FIELD pools its visibility.
+    #[test]
+    fn a_private_field_pools_its_visibility() {
+        let m = pooled_modifiers("class C { private int x; }", "C::x");
+        assert!(m.is_private, "a private field must pool as private");
+        assert!(!m.is_protected, "and not as protected");
+    }
+
+    /// A protected FIELD pools its visibility. Kept separate from
+    /// `private` because the two differ exactly at a derived-class access
+    /// site, which a single "not public" bit could not express.
+    #[test]
+    fn a_protected_field_pools_its_visibility() {
+        let m = pooled_modifiers("class C { protected int x; }", "C::x");
+        assert!(m.is_protected, "a protected field must pool as protected");
+        assert!(!m.is_private, "and not as private");
+    }
+
+    /// The positive control: without a keyword, a field declares neither.
+    /// Without this, "pools its visibility" is satisfiable by always
+    /// answering true.
+    #[test]
+    fn a_plain_field_declares_no_visibility() {
+        let m = pooled_modifiers("class C { int x; }", "C::x");
+        assert!(
+            !m.is_private && !m.is_protected,
+            "a plain field declares no visibility, got {m:?}"
+        );
+    }
+
+    /// A PROPERTY is the other state-shaped member, and B115 fixed both.
+    /// Pooling only fields would rebuild the half-blind asymmetry one
+    /// layer up.
+    #[test]
+    fn a_private_property_pools_its_visibility() {
+        let m = pooled_modifiers(
+            "class C { private int p { get { return 1; } } }",
+            "C::p",
+        );
+        assert!(m.is_private, "a private property must pool as private");
+        assert!(!m.is_protected, "and not as protected");
+    }
+
+    #[test]
+    fn a_protected_property_pools_its_visibility() {
+        let m = pooled_modifiers(
+            "class C { protected int p { get { return 1; } } }",
+            "C::p",
+        );
+        assert!(m.is_protected, "a protected property must pool as protected");
+        assert!(!m.is_private, "and not as private");
+    }
+
+    #[test]
+    fn a_plain_property_declares_no_visibility() {
+        let m = pooled_modifiers("class C { int p { get { return 1; } } }", "C::p");
+        assert!(
+            !m.is_private && !m.is_protected,
+            "a plain property declares no visibility, got {m:?}"
+        );
+    }
+
+    /// Every state-shaped member beside its method twin, in ONE fixture, so
+    /// silence and reporting are measured against the same run — the shape
+    /// B087's family uses. A fix that stamps everything private passes each
+    /// positive above and fails here.
+    #[test]
+    fn visibility_is_pooled_for_fields_properties_and_methods_alike() {
+        let src = "class C { private int f; protected int g; int h; \
+                   private int p { get { return 1; } } \
+                   private void M() {} protected void N() {} void O() {} }";
+        for (name, private, protected) in [
+            ("C::f", true, false),
+            ("C::g", false, true),
+            ("C::h", false, false),
+            ("C::p", true, false),
+            ("C::M", true, false),
+            ("C::N", false, true),
+            ("C::O", false, false),
+        ] {
+            let m = pooled_modifiers(src, name);
+            assert_eq!(m.is_private, private, "wrong is_private for {name}");
+            assert_eq!(m.is_protected, protected, "wrong is_protected for {name}");
+        }
+    }
+
+    /// A LOCAL and a FILE-SCOPE variable share `VarDeclStmt` with a class
+    /// field but cannot carry visibility in the language, so the parser
+    /// leaves both flags false. Pinned so pooling never invents a
+    /// visibility for them.
+    #[test]
+    fn locals_and_file_scope_variables_declare_no_visibility() {
+        let m = pooled_modifiers("int g = 1;\nvoid f() { int l = 2; }", "g");
+        assert!(
+            !m.is_private && !m.is_protected,
+            "a file-scope variable declares no visibility, got {m:?}"
+        );
     }
 
     /// Parameter-mode variants, per CLAUDE.md: `&in` / `&out` / `&inout`,
@@ -1123,13 +1544,13 @@ mod tests {
         table.set_file_symbols(
             fid,
             vec![Symbol {
+                modifiers: DeclModifiers::default(),
                 name: "Main".to_string(),
                 kind: SymbolKind::Function {
                     return_type: "void".into(),
                     params: vec![],
                     min_args: 0,
                     imported: false,
-                    is_const: false,
                 },
                 span: Span::new(0, 4),
                 file_id: fid,
