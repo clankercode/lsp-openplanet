@@ -1,14 +1,18 @@
 ---
+claimed_at: "2026-08-31T10:22:20Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T10:18:14Z"
 depends_on: []
 estimate_hours: 2
 id: B105
 priority: medium
-status: pending
+started_at: "2026-08-31T10:22:20Z"
+status: in_progress
 tags: []
 title: LSP server should notice its binary was replaced (self-update/new install) and restart itself
-updated_at: "2026-08-31T10:18:14Z"
+updated_at: "2026-08-31T10:22:20Z"
 ---
 ## Expected Behavior
 
