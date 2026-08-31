@@ -4932,3 +4932,70 @@ fn check_command_issue_repro_b061_property_read_credits_accessor() {
         );
     }
 }
+
+/// B062: a body the plugin exports to consumers is reachable by definition,
+/// even though nothing inside the plugin calls it.
+///
+/// The ticket assumed the manifest-named exports file holds the
+/// implementations, and preferred rooting the whole FILE. Both are wrong for
+/// strict `[script] exports`, and the repo's own `60-exports-correct-pattern`
+/// fixture says so: that file carries ONLY `import <sig> from "Mod";`
+/// declarations and compiles into CONSUMERS, never into this plugin. Whole-file
+/// exemption already existed and is a no-op here, because the file holds stubs
+/// while the bodies live elsewhere. So the stubs are read as a root set and
+/// matched against ordinary declarations.
+///
+/// Matched by SIMPLE name and overlapping arity, not by parameter type: the
+/// fixture above pairs an `import ... (string a, string b)` stub with a
+/// `(const string &in a, const string &in b)` body and calls that correct, so
+/// comparing types would invent a precision the engine does not have and
+/// resurrect the warning this removes.
+///
+/// Three survivors are the gates, all in the SAME FILE as the rooted bodies so
+/// that "exempt the file" cannot pass: an unexported global, an unused class,
+/// and a class MEMBER sharing an exported stub's name — a stub names a global
+/// function, never a method.
+///
+/// 6 warnings before, 3 after.
+#[test]
+fn check_command_issue_repro_b062_manifest_exports_root_unused() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b062-manifest-exports-root-unused");
+    let warnings: Vec<&str> = stdout.lines().filter(|l| l.contains("warning:")).collect();
+
+    let expected = [
+        "Exports.as:19", // TrulyDead — no stub names it
+        "Exports.as:23", // class Holder — unused
+        "Exports.as:24", // Holder::SendEvent — a MEMBER, not the exported global
+    ];
+    assert_eq!(
+        warnings.len(),
+        expected.len(),
+        "expected exactly {} warnings; stdout={stdout:?} stderr={stderr:?}",
+        expected.len()
+    );
+    for line in expected {
+        assert!(
+            warnings.iter().any(|w| w.contains(line)),
+            "`{line}` must still warn — silencing it is over-rooting; stdout={stdout:?}"
+        );
+    }
+
+    let rooted = [
+        ("Exports.as:3", "SendEvent — exported global body"),
+        ("Exports.as:7", "IsConnected — zero-arg exported body"),
+        (
+            "Exports.as:9",
+            "Tally — stub arity range overlaps the body's",
+        ),
+        (
+            "Exports.as:13",
+            "Helper — reachable only from an exported body; transitivity is already free",
+        ),
+    ];
+    for (line, why) in rooted {
+        assert!(
+            !warnings.iter().any(|w| w.contains(line)),
+            "`{line}` must not warn ({why}); stdout={stdout:?}"
+        );
+    }
+}
