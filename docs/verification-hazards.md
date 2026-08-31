@@ -3423,3 +3423,44 @@ pinning the measured population (Core has exactly one `&inout` param).
 **When replacing a bit test with a typed enum, enumerate which bit patterns the
 old test accepted before deciding which variants the new one should.** A name
 like `is_out` describes the intent, not the mask, and the mask is what shipped.
+
+## A regenerator can destroy the one thing it cannot regenerate
+
+B148 wrote generators for two orphan corpora. Its first version correctly
+protected `b071`'s `lsp_today` column and a retained INVALID row — **and then
+overwrote the file's 80-line preamble with an 18-line machine header.**
+
+What went with it: a CONFOUND-FOUND-AND-CLEARED section, the anti-vacuity
+reasoning behind `lsp_today`, a READING THIS TABLE guide, and a 151-plugin
+false-positive sweep. **None of it is derivable from any game.** The rows could be
+regenerated forever; the reasoning about why those rows are the right rows could
+not be regenerated at all.
+
+This is precisely the loss B129 reasoned about when it decided hand-measured
+content stays manual — **committed inside the tooling built to prevent it.**
+
+**The tell was the diffstat: 104 changed lines where the data had moved by 3.**
+That ratio is the check, and it is cheap: a regenerator's diff should be
+proportional to the drift it found. When it is not, it rewrote something it was
+not asked to.
+
+The fix generalises past prose: **anything in a generated artifact that the
+generator did not measure must be carried forward verbatim**, sentinel-split from
+the generated region, and the generator must be verified IDEMPOTENT across two
+runs. The selftest now asserts the named sections survive **by content, not by
+line count** — a count check passes when a section is replaced by a
+same-length one.
+
+## A test that depends on the repo being broken stops being testable when it is fixed
+
+B129's selftest exercised its no-generator branch using a REAL orphan artifact.
+B148 then wrote generators for both orphans, and the selftest correctly went red:
+its fixture had ceased to exist because the defect it depended on had been fixed.
+
+**A guard anchored to a live defect has a shelf life, and it expires on success.**
+It now uses a synthetic row.
+
+Worth watching for wherever a test reaches into real repo state to find its
+subject: the greener the repo gets, the fewer such subjects remain, and the test
+degrades from "verifies the branch" to "cannot run" — with a red that reads like
+a regression rather than like a fixture that has run out.
