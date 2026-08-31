@@ -14,6 +14,18 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Fixed
+- **`MwRefBuffer<T>` indexes to `T`, and `MwFastBufferCat<T>` no longer
+  pretends to** (B156) — the array-generic list had drifted from the
+  shipped typedb in both directions at once. `MwRefBuffer` registers
+  `T& opIndex(uint)` and both `Length` spellings just like its seven
+  siblings, but was missing, so `buf[i]` yielded no element type and
+  `buf.Length` was not recognised. `MwFastBufferCat` was listed and
+  registers no methods at all — only a constructor and a destructor — so
+  `cat[i]` was confidently typed as `T` for a class the engine cannot
+  index. Membership is now decided by the dump rather than by judgement
+  (a class belongs iff it exposes an `opIndex` returning the template
+  parameter `T`), and an audit re-derives the set on every run and fails
+  if the list drifts either way.
 - **`Math::Min(uint(20), buf.Length)` no longer reports a missing
   overload** (B150) — a bare `obj.Name` is a property READ, not a method
   reference, whenever the class also exposes `get_Name`. The eight `Mw*`

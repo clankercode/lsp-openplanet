@@ -302,19 +302,37 @@ pub fn param_mode_from_text(text: &str) -> ParamMode {
 /// the Nadeo engine container generics (`MwFastArray<CControlBase@>` etc.)
 /// exposed on engine classes. Indexing yields the element type and
 /// `Length` / `IsEmpty` are the array accessors (GH #50).
+///
+/// B156: membership is decided by the dump, not by judgement — a class
+/// belongs iff it exposes an `opIndex` returning the template parameter `T`,
+/// which is this doc's own "indexing yields the element type" read off the
+/// data. `b156_array_generic_list_audit` re-derives the set on every run and
+/// fails if [`ARRAY_GENERIC_BASES`] drifts from it in either direction.
+/// The set itself, as a named value rather than a `matches!` arm, so the
+/// B156 audit below can compare THE VALUE THE CHECKER USES against the dump.
+/// A source-parsed or hand-copied list could drift from the one in force;
+/// this one cannot.
+pub(crate) const ARRAY_GENERIC_BASES: &[&str] = &[
+    "array",
+    "MwArrayInPlaceDyn",
+    "MwFastArray",
+    "MwFastBuffer",
+    "MwNodPool",
+    // B156: the dump registers `T& opIndex(uint)` here, same as its
+    // siblings. It was missing, so indexing an `MwRefBuffer<T>` yielded no
+    // element type at all.
+    "MwRefBuffer",
+    "MwSArray",
+    "MwStridedArray",
+    "MwVirtualArray",
+    // B156: `MwFastBufferCat` was here and is NOT a container — the dump
+    // gives it no methods whatsoever, only a constructor and a destructor.
+    // Listing it meant `cat[0]` was confidently typed as `T` for a class the
+    // engine cannot index at all.
+];
+
 fn is_array_generic_base(base: &str) -> bool {
-    matches!(
-        base,
-        "array"
-            | "MwFastArray"
-            | "MwFastBuffer"
-            | "MwFastBufferCat"
-            | "MwSArray"
-            | "MwArrayInPlaceDyn"
-            | "MwNodPool"
-            | "MwStridedArray"
-            | "MwVirtualArray"
-    )
+    ARRAY_GENERIC_BASES.contains(&base)
 }
 
 fn parse_type_string_inner(s: &str) -> TypeRepr {
@@ -754,6 +772,82 @@ mod tests {
         );
     }
 
+    /// B156: every base in the list indexes to its element type and reads as
+    /// array-like. Driven off `ARRAY_GENERIC_BASES` itself, so a base added to
+    /// the list can never escape this behavioural check the way `MwRefBuffer`
+    /// escaped being in the list at all.
+    #[test]
+    fn every_listed_array_generic_indexes_to_its_element_type() {
+        for base in ARRAY_GENERIC_BASES {
+            let t = TypeRepr::parse_type_string(&format!("{base}<int>"));
+            assert!(
+                t.is_array_like(),
+                "`{base}<int>` must read as array-like, got {t:?}"
+            );
+            assert_eq!(
+                t.array_element_type(),
+                Some(&TypeRepr::Primitive(PrimitiveType::Int)),
+                "`{base}<int>` must index to int"
+            );
+            // And through a handle, which is how engine members arrive.
+            let h = TypeRepr::parse_type_string(&format!("const {base}<int>@"));
+            assert!(
+                h.is_array_like(),
+                "`const {base}<int>@` must read as array-like"
+            );
+        }
+        assert!(
+            ARRAY_GENERIC_BASES.len() >= 9,
+            "the loop must have had something to check, saw {}",
+            ARRAY_GENERIC_BASES.len()
+        );
+    }
+
+    /// B156, the specific correction: `MwRefBuffer` is an element-typed
+    /// container in the dump and was missing from the list, so indexing it
+    /// yielded nothing.
+    #[test]
+    fn mw_ref_buffer_is_an_array_generic() {
+        let t = TypeRepr::parse_type_string("MwRefBuffer<CGameCtnBlock@>");
+        assert!(t.is_array_like(), "MwRefBuffer must read as array-like");
+        assert_eq!(
+            t.array_element_type(),
+            Some(&TypeRepr::Handle(Box::new(TypeRepr::Named(
+                "CGameCtnBlock".into()
+            )))),
+            "MwRefBuffer<T> must index to T"
+        );
+    }
+
+    /// B156, the other direction: `MwFastBufferCat` registers NO methods in
+    /// the dump — no `opIndex`, no `Length` — so it is not a container and
+    /// must not be treated as one. Asserted as a real absence, alongside
+    /// shapes that were never array-like, so the row cannot pass merely
+    /// because nothing is array-like.
+    #[test]
+    fn non_container_generics_are_not_array_like() {
+        for spelling in [
+            "MwFastBufferCat<int>",
+            "dictionary<int>",
+            "NotAContainer<int>",
+            "vec3",
+        ] {
+            let t = TypeRepr::parse_type_string(spelling);
+            assert!(
+                !t.is_array_like(),
+                "`{spelling}` must not read as array-like"
+            );
+            assert_eq!(
+                t.array_element_type(),
+                None,
+                "`{spelling}` must not yield an element type"
+            );
+        }
+        // Control: the assertion above is capable of failing — a real
+        // container in the same loop shape does read as array-like.
+        assert!(TypeRepr::parse_type_string("MwFastBuffer<int>").is_array_like());
+    }
+
     #[test]
     fn array_element_type_accessor() {
         let arr = TypeRepr::Array(Box::new(TypeRepr::Primitive(PrimitiveType::Int)));
@@ -869,5 +963,110 @@ mod tests {
         }
         .is_error());
         assert!(!TypeRepr::Primitive(PrimitiveType::Int).is_error());
+    }
+}
+
+// ── B156: is the array-generic list what the shipped dump actually says? ────
+//
+// `ARRAY_GENERIC_BASES` was a hand-written literal, and it had drifted in BOTH
+// directions at once: it omitted `MwRefBuffer` (which the dump registers with
+// `T& opIndex(uint)` and both `Length` spellings) and included
+// `MwFastBufferCat` (which the dump registers with NO methods at all — only a
+// constructor and a destructor, so it can be neither indexed nor measured).
+//
+// The list is consumed by a PURE function with no access to a loaded
+// `TypeIndex`, so it cannot be derived at run time without plumbing the index
+// through `TypeRepr`. It stays a literal — but a CHECKED one: this audit
+// derives the set from the dump on every run and fails if the two disagree,
+// which is the difference between a hardcoded value and a hardcoded value
+// nobody is watching. Five hardcoded-vs-dump disagreements have been found in
+// the typedb layer in one night (B125, B131, B137, B142, B146); this is the
+// sixth, and the audit is what stops it being the last one found by accident.
+//
+// The derivation rule is the list's OWN documented contract — "indexing yields
+// the element type" — read off the dump as "a class with an `opIndex` whose
+// return type is the template parameter `T`". Deliberately not "has a
+// `Length`": `vec2`/`vec3`/`vec4`/`quat` have `Length` and are not containers,
+// and `MwFastBufferCat` has neither, so `Length` would derive the wrong set.
+#[cfg(test)]
+mod b156_array_generic_list_audit {
+    use super::ARRAY_GENERIC_BASES;
+    use std::collections::BTreeSet;
+
+    fn core_dump() -> serde_json::Value {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        serde_json::from_str(&std::fs::read_to_string(p).expect("fixture must exist"))
+            .expect("fixture must parse")
+    }
+
+    /// Classes the dump says are element-typed containers: they expose an
+    /// `opIndex` returning the template parameter `T`. Read off the dump, not
+    /// copied from anywhere.
+    fn containers_per_the_dump(db: &serde_json::Value) -> BTreeSet<String> {
+        db["classes"]
+            .as_array()
+            .expect("classes array")
+            .iter()
+            .filter(|c| {
+                c["methods"]
+                    .as_array()
+                    .map(|ms| {
+                        ms.iter().any(|m| {
+                            m["name"].as_str() == Some("opIndex")
+                                && m["returntypedecl"].as_str() == Some("T")
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .filter_map(|c| c["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The audit's own premise, asserted rather than assumed: the dump really
+    /// does distinguish these classes this way. Without this, an empty or
+    /// broken derivation would make the comparison below pass by matching
+    /// nothing against nothing.
+    #[test]
+    fn the_dump_really_does_mark_containers_by_their_opindex() {
+        let db = core_dump();
+        let derived = containers_per_the_dump(&db);
+        assert!(
+            derived.len() >= 9,
+            "the derivation found only {} containers — it is broken, not the \
+             list: {derived:?}",
+            derived.len()
+        );
+        // Positive: the script array is one, and it is the case every
+        // consumer of this list was originally written for.
+        assert!(derived.contains("array"), "derived={derived:?}");
+        // Negative: types that carry `Length` but are NOT containers must
+        // stay out, which is what rules out "has a Length" as the rule.
+        for not_a_container in ["vec2", "vec3", "vec4", "quat", "string", "wstring"] {
+            assert!(
+                !derived.contains(not_a_container),
+                "`{not_a_container}` is not an element-typed container, but the \
+                 derivation claimed it: {derived:?}"
+            );
+        }
+    }
+
+    /// The audit proper: the literal the checker consumes must be exactly the
+    /// set the dump describes, in both directions.
+    #[test]
+    fn the_array_generic_list_matches_the_shipped_dump() {
+        let db = core_dump();
+        let derived = containers_per_the_dump(&db);
+        let declared: BTreeSet<String> =
+            ARRAY_GENERIC_BASES.iter().map(|s| s.to_string()).collect();
+
+        let missing: Vec<_> = derived.difference(&declared).collect();
+        let extra: Vec<_> = declared.difference(&derived).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "ARRAY_GENERIC_BASES disagrees with the shipped dump.\n  \
+             missing (dump says container, list omits): {missing:?}\n  \
+             extra (list claims container, dump does not): {extra:?}"
+        );
     }
 }
