@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T14:43:15Z"
+depends_on: []
+estimate_hours: 1
+id: B132
+priority: high
+status: pending
+tags: []
+title: 'remote-build.py gates a dirty working tree without noticing: an unresolved merge or half-written edit is rsynced as source, so conflict markers arrive at the compiler as syntax errors'
+updated_at: "2026-08-31T14:43:15Z"
+---
+
+remote-build.py gates a dirty working tree without noticing: an unresolved merge or half-written edit is rsynced as source, so conflict markers arrive at the compiler as syntax errors
