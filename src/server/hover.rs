@@ -188,7 +188,9 @@ pub fn hover(
     // 4) External type database.
     if let Some(index) = scope.external() {
         // The direct map: a source spelling to its key, no scope test.
-        if let Some(md) = lookup_external(&qualified, index, index.source_name_key(&qualified)) {
+        if let Some(md) =
+            lookup_external(&qualified, index, index.source_name_key(&qualified), scope)
+        {
             return Some(markdown_hover(md));
         }
         // B070: B052's ancestor walk resolves a globally visible enum through
@@ -245,7 +247,7 @@ pub fn hover(
                 .accepts_enum(&qualified)
                 .and_then(|proof| scope.canonical_enum_key(&qualified, proof));
             let key = canonical.as_deref().unwrap_or(qualified.as_str());
-            if let Some(md) = lookup_external(&qualified, index, Some(key)) {
+            if let Some(md) = lookup_external(&qualified, index, Some(key), scope) {
                 return Some(markdown_hover(md));
             }
         }
@@ -1013,13 +1015,31 @@ fn format_external_type(qualified: &str, ty: &TypeInfo) -> String {
 /// asks the RESOLVER's scope test — workspace OR index — instead of the
 /// index's. That is strictly wider, so no spelling stopped resolving; the
 /// corpus sweep in this module's tests pins that in both directions.
-fn lookup_external(qualified: &str, index: &TypeIndex, source_key: Option<&str>) -> Option<String> {
+fn lookup_external(
+    qualified: &str,
+    index: &TypeIndex,
+    source_key: Option<&str>,
+    scope: &GlobalScope<'_>,
+) -> Option<String> {
     // B133: `source_name_key` indexes enum TYPES, not their values. Split the
-    // written path once and resolve the owner through the same source-spelling
-    // map used below, so synthetic storage prefixes remain rejected.
+    // written path once. The direct map is the cheap canonical path; the
+    // resolver retry is B070's accepted ancestor spelling (`UI::VirtualKey`,
+    // or a workspace-declared `Foo::VirtualKey`). It is gated by
+    // `accepts_enum` before canonicalization, preserving the synthetic-prefix
+    // and suffix guards documented at the outer hover ladder.
     if let Some((owner, value_name)) = qualified.rsplit_once("::") {
-        if let Some(en) = index
+        let owner_key = index
             .source_name_key(owner)
+            .map(str::to_string)
+            .or_else(|| {
+                scope.accepts_enum(owner).map(|proof| {
+                    scope
+                        .canonical_enum_key(owner, proof)
+                        .unwrap_or_else(|| owner.to_string())
+                })
+            });
+        if let Some(en) = owner_key
+            .as_deref()
             .and_then(|key| index.lookup_source_enum(key))
         {
             if let Some((_, value)) = en.values.iter().find(|(name, _)| name == value_name) {
@@ -2573,6 +2593,41 @@ mod tests {
             md.contains("E::Plain = 3"),
             "missing plain value hover: {md:?}"
         );
+    }
+
+    #[test]
+    fn hover_documented_global_enum_value_through_a_real_ancestor_scope() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "functions": [{"ns": "UI", "name": "Dummy", "returntypedecl": "void"}],
+            "enums": [{"name": "E", "values": {
+                "Documented": {"v": 7, "d": "Ancestor spelling works."}
+            }}]
+        }));
+        let md = hover_external_md("void main() { UI::E::Documented; }", "Documented", 1, &idx);
+        assert!(
+            md.contains("UI::E::Documented = 7"),
+            "missing value: {md:?}"
+        );
+        assert!(
+            md.contains("Ancestor spelling works."),
+            "missing doc: {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_plain_global_enum_value_through_a_workspace_ancestor_scope() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "enums": [{"name": "E", "values": {"Plain": {"v": 3}}}]
+        }));
+        let md = hover_external_md(
+            "namespace Foo {}\nvoid main() { Foo::E::Plain; }",
+            "Plain",
+            1,
+            &idx,
+        );
+        assert!(md.contains("Foo::E::Plain = 3"), "missing value: {md:?}");
     }
 
     // === B054: interface members on the pool ==============================
