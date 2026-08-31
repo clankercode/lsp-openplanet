@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T09:14:49Z"
 depends_on: []
 estimate_hours: 1
 id: B099
 priority: high
+started_at: null
 status: pending
 tags: []
 title: complete_namespace_members labels every namespace member as FUNCTION, including nested namespaces and types
@@ -24,3 +26,52 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by lane-unused while fixing B088 (merged 2026-08-31). **Reported rather
+than silently fixed**, on coordinator instruction, because the correct fix
+changes behaviour for cases B088 did not touch.
+
+## Defect
+
+`complete_namespace_members` (`src/server/completion.rs:89`) emits EVERY member
+it returns as `CompletionItemKind::FUNCTION` — nested namespaces and types
+included. An editor therefore shows a namespace and a class with a function
+icon.
+
+Enum values are correct (`ENUM_MEMBER`) — B088 added those through a separate
+path that knows what it is emitting.
+
+## Why it was not fixed in B088
+
+`TypeIndex::source_scope_members` returns **bare names with no kind**, so the
+caller has nothing to key on. Fixing it properly means changing that function's
+return type to carry a kind per member — which is a visible change to namespace
+and type completion, i.e. exactly the cases B088 left alone. Widening a ticket
+to cover them would have mixed a measured fix with an unmeasured one.
+
+A code comment at the site records this, so the next reader finds the reason
+rather than the symptom.
+
+## Work
+
+Change `source_scope_members` to return `(name, kind)` — it already
+distinguishes its three sources internally (`source_names`, `functions`,
+`scopes`), so the information exists at the point of collection and is
+discarded on the way out. That is the whole defect: a lossy return type.
+
+## Test plan
+
+Assert the KIND, not just the presence, for each member class a real scope
+yields: a nested namespace, a class, an enum type, a funcdef, and a function.
+Generalise per CLAUDE.md — a Core namespace, a Nadeo class scope, and a
+workspace namespace reach `source_scope_members` by different routes.
+
+Include a control that the SET of names is unchanged, so a kind-carrying
+refactor cannot quietly drop or add a member. That is the B080 lesson: when a
+refactor changes a type, prove the values are the same before believing the
+change was mechanical.
+
+## Related
+
+B088 (which added correct `ENUM_MEMBER` kinds and surfaced this), B069 (an
+earlier completion defect where the wrong thing was offered).
