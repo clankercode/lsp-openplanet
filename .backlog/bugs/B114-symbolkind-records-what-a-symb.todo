@@ -1,0 +1,26 @@
+---
+complexity: medium
+created_at: "2026-08-31T12:44:57Z"
+depends_on: []
+estimate_hours: 1
+id: B114
+priority: high
+status: pending
+tags: []
+title: 'SymbolKind records what a symbol IS, not what it was DECLARED AS: every modifier is dropped at pooling, and three AST sidecars exist to work around it'
+updated_at: "2026-08-31T12:44:57Z"
+---
+
+# SymbolKind records what a symbol IS, not what it was DECLARED AS: every modifier is dropped at pooling, and three AST sidecars exist to work around it
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior
