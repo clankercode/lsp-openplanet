@@ -1,0 +1,65 @@
+---
+complexity: medium
+created_at: "2026-08-31T10:17:38Z"
+depends_on: []
+estimate_hours: 2
+id: B104
+priority: medium
+status: pending
+tags: []
+title: Go to definition on interface/overridden methods should offer all implementations, not one location
+updated_at: "2026-08-31T10:17:38Z"
+---
+## Expected Behavior
+
+Go-to-definition on a method with multiple plausible targets returns ALL
+of them (LSP `GotoDefinitionResponse::Array` — editors show a peek list):
+
+- `i.Go()` on an interface-typed receiver → the interface's declaration
+  PLUS every workspace class implementing that interface, at each
+  class's `Go` definition.
+- A base-class method overridden in derived classes, called through a
+  base-typed receiver → base definition plus overrides.
+- Free-function / method OVERLOAD sets where the call site cannot be
+  narrowed to one signature → every overload ("anything that has
+  overloads like this or implementations or whatever should work like
+  this" — Max).
+
+## Actual Behavior
+
+Definition returns a single location. For interface methods this is
+deliberately pinned today: `src/server/navigation.rs:778`
+(`goto_definition_interface_method_on_an_interface_typed_receiver`)
+asserts "must land on the interface declaration, not the class
+implementation" — that contract changes to "interface declaration FIRST,
+implementations after it" and the test updates with it.
+
+## Design notes
+
+- Ordering: the declaration the receiver's static type owns comes first
+  (what today's behavior returns), implementations/overrides after —
+  deterministic order (workspace file order) so tests can pin it.
+- Implementations are found from the workspace symbol table's
+  inheritance records (the checker already walks base/interface chains
+  for member resolution — reuse that, not a textual search).
+- Only the dependency-closure-complete workspace is authoritative for
+  "every implementer" (same fence as GH #58 / workspace
+  NoMatchingSymbol); with an incomplete closure still list what is
+  known — extra locations are suggestions, not diagnostics, so the
+  authority fence can be looser here.
+- Consider also wiring `textDocument/implementation` (the dedicated LSP
+  request) with the implementations-only list while in there; definition
+  returning the union is the ticket's bar because that is the gesture
+  people actually use.
+
+## Generalize (repo convention)
+
+- interface with one implementer / several implementers / zero (interface
+  location only).
+- diamond: class implements two interfaces sharing a method name.
+- override chains: base virtual + two derived overrides.
+- overloaded free functions: unresolvable call site lists all overloads;
+  a RESOLVABLE call site keeps the single precise target (negative
+  control — do not regress precise navigation).
+- accessor pair from the get_/set_ ticket, once both land: interface
+  declares `get_ID`, classes implement it.
