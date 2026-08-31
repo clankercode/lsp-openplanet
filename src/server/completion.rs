@@ -150,7 +150,15 @@ fn complete_namespace_members(
             return info
                 .values
                 .iter()
-                .map(|(name, _)| make_item(name, CompletionItemKind::ENUM_MEMBER))
+                .map(|(name, _)| {
+                    let mut item = make_item(name, CompletionItemKind::ENUM_MEMBER);
+                    item.documentation = info
+                        .value_docs
+                        .get(name)
+                        .cloned()
+                        .map(Documentation::String);
+                    item
+                })
                 .collect();
         }
     }

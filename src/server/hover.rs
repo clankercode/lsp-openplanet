@@ -517,6 +517,27 @@ fn with_doc(block: String, doc: Option<&String>) -> String {
     }
 }
 
+/// Render type-database prose as prose inside an LSP Markdown hover. The dump
+/// is not authored as Markdown; allowing `*`, `<tag>` or `[` through changes
+/// visible text into formatting/HTML rather than showing what the engine said.
+fn escape_markdown_prose(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '&' => escaped.push_str("&amp;"),
+            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '!'
+            | '|' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 // === workspace symbols ======================================================
 
 /// Parameters of a workspace function symbol. The symbol table stores
@@ -993,6 +1014,24 @@ fn format_external_type(qualified: &str, ty: &TypeInfo) -> String {
 /// index's. That is strictly wider, so no spelling stopped resolving; the
 /// corpus sweep in this module's tests pins that in both directions.
 fn lookup_external(qualified: &str, index: &TypeIndex, source_key: Option<&str>) -> Option<String> {
+    // B133: `source_name_key` indexes enum TYPES, not their values. Split the
+    // written path once and resolve the owner through the same source-spelling
+    // map used below, so synthetic storage prefixes remain rejected.
+    if let Some((owner, value_name)) = qualified.rsplit_once("::") {
+        if let Some(en) = index
+            .source_name_key(owner)
+            .and_then(|key| index.lookup_source_enum(key))
+        {
+            if let Some((_, value)) = en.values.iter().find(|(name, _)| name == value_name) {
+                let declaration = fence(&format!("enum value {owner}::{value_name} = {value}"));
+                return Some(match en.value_docs.get(value_name) {
+                    Some(doc) => format!("{}\n\n{}", declaration, escape_markdown_prose(doc)),
+                    None => declaration,
+                });
+            }
+        }
+    }
+
     if let Some(ty) = source_key.and_then(|key| index.lookup_type(key)) {
         return Some(format_external_type(qualified, ty));
     }
