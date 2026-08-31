@@ -4909,6 +4909,61 @@ impl<'a> Checker<'a> {
                         },
                     });
                 }
+                // B130: the same rule, on ENGINE receivers.
+                //
+                // B116 excluded this whole population by provenance, arguing
+                // partly that no const-qualifier metadata existed. B124 showed
+                // that was stale and B125 made it arrive, so the exclusion is
+                // now a choice rather than a constraint — and both halves of
+                // that choice were measured before it was made.
+                //
+                // FALSE POSITIVES, on the 151-plugin fleet: 807 unique engine
+                // receiver call sites, and the typedb calls all 807 of them
+                // CONST. Zero would-fire, and — the stronger half — zero
+                // UNKNOWN, so the typedb has an answer at every single site.
+                // The feared surface is measured at zero rather than argued
+                // down. (B116's "807 would fire" was an artefact of a gate
+                // reading "not known const" as "non-const"; with the real
+                // qualifier none of them do.)
+                //
+                // CORRECTNESS, which the fleet cannot answer because shipped
+                // plugins compile and so cannot contain a true positive:
+                // asked of the engine directly, `scripts/probe_engine_const_receiver.py`,
+                // three controls passing. The engine REJECTS a non-const
+                // engine method on a const receiver —
+                //   `MemoryBuffer::Seek`  -> "No matching signatures to
+                //                            'MemoryBuffer::Seek(const int) const'"
+                //   `Json::Value::Add`    -> "No matching signatures to
+                //                            'Value::Add(Json::Value@&) const'"
+                //   `const string &in` += -> "Illegal operation on 'const string&'"
+                // — and still ACCEPTS a const one on all three, so this is the
+                // engine's own rule rather than a tightening chosen here.
+                //
+                // `Some(true)` covers the overload case: `Json::Value::Get`
+                // and `opIndex` each ship a const and a non-const overload,
+                // the engine selects the const one on a const receiver, and
+                // the fleet's 63 `Get` sites correctly stay silent.
+                //
+                // NO CONST PROPAGATION here, deliberately. B121 measured
+                // exactly that at 10 false positives across 7 plugins —
+                // engine methods returning a FRESH value, not a view — and
+                // its shape proxy removes only 7 of them. Diagnosing the call
+                // and propagating from it are separate questions with
+                // separate evidence; this arm answers only the first.
+                if receiver_const
+                    && self
+                        .scope
+                        .external_method_is_const(&type_name, &member_name)
+                        == Some(false)
+                {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: callee.span,
+                        kind: TypeDiagnosticKind::NonConstMethodOnConstReceiver {
+                            method: member_name.clone(),
+                            object_type: type_name.clone(),
+                        },
+                    });
+                }
                 if let Some(t) = self.scope.lookup_method_return(&type_name, &member_name) {
                     // EXTERNAL types are not const-checked here. The reason
                     // is NOT that the metadata is missing — that claim used
@@ -14153,13 +14208,34 @@ mod b116_cross_file_const_receiver_tests {
         }
     }
 
-    /// THE FALSE-POSITIVE GUARD, and the reason B116 is its own ticket.
-    /// An ENGINE type has no const-qualifier metadata in the typedb —
-    /// `lookup_method_return`'s own comment concedes it — so widening the
-    /// gate must not let the rule reach external receivers. Everything
-    /// the engine offers would look non-const and fire.
+    /// THE FALSE-POSITIVE GUARD, narrowed by B130 to the population it is
+    /// still true of: NADEO receivers.
+    ///
+    /// B116 wrote this as "engine receivers never fire (no const metadata)".
+    /// Both halves of that have since been measured and only one survived.
+    /// The metadata claim was stale (B124): Core carries constness in its
+    /// `decl` suffix, B125 made it arrive, and B130 consumes it — so a
+    /// non-const CORE method on a const receiver now correctly fires, which
+    /// the engine itself confirms.
+    ///
+    /// The NADEO half still holds, for a sharper reason than "no metadata".
+    /// The engine enforces the rule there too — probed live,
+    /// `const CMwNod@ n; n.MwAddRef()` gives "No matching signatures to
+    /// 'CMwNod::MwAddRef() const'" — but the Nadeo LOADER hardcodes
+    /// `is_const: false` on every method because that dump carries no
+    /// declaration text. So `false` means UNKNOWN there, and firing on it
+    /// would flag every correctly-written const Nadeo call. The rule is
+    /// right and our data is absent, which is a false-positive surface, not
+    /// a licence.
+    ///
+    /// (The original third row, `const MwFastBuffer<uint>@`, was removed
+    /// rather than re-pointed: probed live it fails with "Object handle is
+    /// not supported for this type" — a value type cannot be held by handle,
+    /// so the shape never compiled and the row was never evidence about
+    /// constness at all. Core coverage lives in
+    /// `b130_engine_const_receiver_tests` on shapes the game accepts.)
     #[test]
-    fn external_engine_receiver_never_fires() {
+    fn nadeo_engine_receiver_never_fires() {
         use crate::typedb::TypeIndex;
         let base =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
@@ -14171,13 +14247,13 @@ mod b116_cross_file_const_receiver_tests {
         for src in [
             "void f(const CTrackMania@ app) { app.BackToMainMenu(); }",
             "void f(const CMwNod@ n) { n.MwAddRef(); }",
-            "void f(const MwFastBuffer<uint>@ b) { b.Add(1); }",
         ] {
             let diags = check_ws(src, &[], Some(&idx));
             assert_eq!(
                 fired(&diags),
                 0,
-                "engine receiver must never fire (no const metadata): {src} -> {:?}",
+                "Nadeo receiver must not fire — `is_const` is hardcoded false \
+                 there, so it means UNKNOWN: {src} -> {:?}",
                 diags
             );
         }
@@ -15358,5 +15434,251 @@ mod b119_inherited_const_receiver_tests {
             (1, 1),
             "the walk finds it two levels up when the receiver really is const"
         );
+    }
+}
+
+// ── B130: the const-receiver rule reaches ENGINE receivers ──────────────────
+//
+// The last exclusion B116 put in place, removed only after both halves were
+// measured: the false-positive surface on the fleet (807 sites, all const,
+// none unknown, zero would-fire) and the correctness question against the game
+// itself (`scripts/probe_engine_const_receiver.py`, three controls passing).
+//
+// The engine's own verdicts are pinned below as test expectations, so the
+// rule's behaviour is anchored to what the compiler does rather than to what
+// this checker was written to believe.
+#[cfg(test)]
+mod b130_engine_const_receiver_tests {
+    use super::*;
+    use crate::lexer::tokenize_filtered;
+    use crate::parser::Parser;
+    use crate::symbols::SymbolTable;
+
+    fn typedb() -> crate::typedb::TypeIndex {
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        crate::typedb::TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
+    fn check(src: &str, idx: &crate::typedb::TypeIndex) -> Vec<TypeDiagnostic> {
+        let tokens = tokenize_filtered(src);
+        let mut parser = Parser::new(&tokens, src);
+        let file = parser.parse_file();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, src, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, Some(idx));
+        let mut checker = Checker::new(src, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    fn fired(diags: &[TypeDiagnostic]) -> usize {
+        diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .count()
+    }
+
+    fn violations(diags: &[TypeDiagnostic]) -> usize {
+        diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::ConstViolation { .. }
+                        | TypeDiagnosticKind::ReadOnlyReference
+                )
+            })
+            .count()
+    }
+
+    /// THE GAME'S VERDICTS, transcribed. Each row was submitted to the live
+    /// engine by `scripts/probe_engine_const_receiver.py` with three passing
+    /// controls (`ctl-valid` ACCEPT, `ctl-bogus` REJECT, `ctl-own-nonconst`
+    /// REJECT), and the engine's answer is what `want_fire` records.
+    ///
+    /// `MemoryBuffer::Seek` -> REJECT, "No matching signatures to
+    ///     'MemoryBuffer::Seek(const int) const'"
+    /// `MemoryBuffer::GetSize` -> ACCEPT
+    /// `Json::Value::Add` -> REJECT, "No matching signatures to
+    ///     'Value::Add(Json::Value@&) const'"
+    /// `Json::Value::GetType` -> ACCEPT
+    /// `string::ToLower` -> ACCEPT
+    const ENGINE_ROWS: &[(&str, &str, bool)] = &[
+        (
+            "non-const engine method through a const handle",
+            "void f(const MemoryBuffer@ b) { b.Seek(0); }",
+            true,
+        ),
+        (
+            "const engine method through a const handle",
+            "void f(const MemoryBuffer@ b) { b.GetSize(); }",
+            false,
+        ),
+        (
+            "non-const engine method, second type family",
+            "void f(const Json::Value@ j) { j.Add(Json::Value()); }",
+            true,
+        ),
+        (
+            "const engine method, second type family",
+            "void f(const Json::Value@ j) { j.GetType(); }",
+            false,
+        ),
+        (
+            "const engine method on a const value receiver",
+            "void f(const string &in s) { string t = s.ToLower(); }",
+            false,
+        ),
+        (
+            "non-const engine method on a NON-const receiver is fine",
+            "void f(MemoryBuffer@ b) { b.Seek(0); }",
+            false,
+        ),
+    ];
+
+    #[test]
+    fn engine_receivers_follow_the_engines_own_verdicts() {
+        let idx = typedb();
+        for (label, src, want) in ENGINE_ROWS {
+            let d = check(src, &idx);
+            assert_eq!(
+                fired(&d) > 0,
+                *want,
+                "`{label}`: expected fire={want}\n  {src}\n  got {:?}",
+                d
+            );
+        }
+    }
+
+    /// NON-VACUITY, both polarities with exact counts. The table above would
+    /// pass with the rule deleted if every row expected `false`, and would
+    /// pass with it hardwired on if every row expected `true`.
+    #[test]
+    fn the_two_polarities_produce_exactly_one_and_zero() {
+        let idx = typedb();
+        let fires = check("void f(const MemoryBuffer@ b) { b.Seek(0); }", &idx);
+        assert_eq!(fired(&fires), 1, "{:?}", fires);
+        let silent = check("void f(const MemoryBuffer@ b) { b.GetSize(); }", &idx);
+        assert_eq!(fired(&silent), 0, "{:?}", silent);
+    }
+
+    /// An overload set carrying BOTH a const and a non-const member stays
+    /// silent: the engine selects the const overload on a const receiver.
+    /// `Json::Value::Get` and `opIndex` are exactly that shape in the shipped
+    /// dump, and the fleet reaches `Get` 63 times — every one correctly quiet.
+    #[test]
+    fn a_const_overload_makes_the_call_legal() {
+        let idx = typedb();
+        for src in [
+            "void f(const Json::Value@ j) { j.Get(\"k\"); }",
+            "void f(const Json::Value@ j) { auto x = j[\"k\"]; }",
+        ] {
+            let d = check(src, &idx);
+            assert_eq!(fired(&d), 0, "{src} -> {:?}", d);
+        }
+    }
+
+    /// THE LINE THIS TICKET DOES NOT CROSS. Diagnosing the call and
+    /// propagating constness out of its return value are separate questions
+    /// with separate evidence. B121 measured propagation on engine returns at
+    /// 10 false positives across 7 plugins — engine methods returning a FRESH
+    /// value rather than a view — and its shape proxy removes only 7.
+    ///
+    /// So the fleet's own false-positive shapes must stay clean even now that
+    /// the call check reaches engine receivers.
+    #[test]
+    fn engine_returns_still_propagate_no_constness() {
+        let idx = typedb();
+        for src in [
+            "string f(const string &in raw) { auto r = raw.Replace(\"a\", \"b\"); r = r.Replace(\"c\", \"d\"); return r; }",
+            "void f(const string &in term) { auto parts = term.Split(\" \"); parts[0] = \"x\"; }",
+            "void f(const string &in s) { auto x = s.ToLower(); x = \"y\"; }",
+        ] {
+            let d = check(src, &idx);
+            assert_eq!(
+                violations(&d),
+                0,
+                "B121's fleet false positives must stay silent: {src} -> {:?}",
+                d
+            );
+        }
+    }
+
+    /// A workspace class that SHADOWS an engine name is not an engine type,
+    /// and its own constness must decide. `external_method_is_const` returns
+    /// `None` for a shadowed name, so the workspace arms stay the authority.
+    #[test]
+    fn a_workspace_class_shadowing_an_engine_name_is_not_engine_checked() {
+        let idx = typedb();
+        // Workspace `MemoryBuffer` declares `Seek` as CONST — engine says
+        // non-const. The workspace declaration must win, and stay silent.
+        let d = check(
+            "class MemoryBuffer { void Seek(int p) const {} } \
+             void f(const MemoryBuffer@ b) { b.Seek(0); }",
+            &idx,
+        );
+        assert_eq!(fired(&d), 0, "workspace shadow must decide: {:?}", d);
+    }
+
+    /// THE NADEO EXCLUSION, and the reason it is not "no metadata".
+    ///
+    /// The engine enforces const receivers for Nadeo types exactly as for
+    /// Core — probed live, `const CMwNod@ n; n.MwAddRef()` gives
+    /// "No matching signatures to 'CMwNod::MwAddRef() const'". So these are
+    /// real errors we are choosing not to report.
+    ///
+    /// We choose that because the Nadeo LOADER hardcodes `is_const: false` on
+    /// every method it builds (that dump carries no declaration text), so
+    /// `false` there means UNKNOWN. Consuming it would fire on every
+    /// correctly-written const Nadeo call — the same `bool`-defaults-to-a-lie
+    /// defect B125 and B131 fixed on the Core side, surviving in the loader's
+    /// other half.
+    ///
+    /// The fleet cannot police this: all 807 engine-receiver sites across 152
+    /// plugins are Core types, so the Nadeo population has zero exposure
+    /// there and a zero measured on it would mean nothing. This test is what
+    /// holds the line instead.
+    #[test]
+    fn nadeo_receivers_are_excluded_because_their_constness_is_unknown() {
+        let idx = typedb();
+        for src in [
+            "void f(const CMwNod@ n) { n.MwAddRef(); }",
+            "void f(const CTrackMania@ app) { app.BackToMainMenu(); }",
+        ] {
+            let d = check(src, &idx);
+            assert_eq!(
+                fired(&d),
+                0,
+                "Nadeo `is_const` is hardcoded false = UNKNOWN: {src} -> {:?}",
+                d
+            );
+        }
+    }
+
+    /// One diagnostic, not two. The engine arm sits downstream of the
+    /// workspace own-class and inherited arms, and a receiver that is an
+    /// engine type reaches none of them — but the count is asserted rather
+    /// than assumed, because a double emit at one span is invisible through
+    /// the CLI, which dedups by span+kind.
+    #[test]
+    fn an_engine_receiver_fires_exactly_once() {
+        let idx = typedb();
+        let d = check(
+            "void f(const Json::Value@ j) { j.Add(Json::Value()); }",
+            &idx,
+        );
+        assert_eq!(fired(&d), 1, "exactly one diagnostic expected: {:?}", d);
     }
 }
