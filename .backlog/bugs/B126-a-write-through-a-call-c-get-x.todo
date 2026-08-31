@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T15:24:01Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T15:38:19Z"
 complexity: medium
 created_at: "2026-08-31T14:11:35Z"
 depends_on: []
+duration_minutes: 14.302738593933334
 estimate_hours: 1
 id: B126
 priority: high
 started_at: "2026-08-31T15:24:01Z"
-status: in_progress
+status: done
 tags: []
 title: 'A write through a call (c.Get().x = 1) emits NonConstMethodOnConstReceiver twice at the same span: the callee is walked twice for assignment-target typing'
-updated_at: "2026-08-31T15:24:01Z"
+updated_at: "2026-08-31T15:38:19Z"
 ---
 
 A write through a call (c.Get().x = 1) emits NonConstMethodOnConstReceiver twice at the same span: the callee is walked twice for assignment-target typing
