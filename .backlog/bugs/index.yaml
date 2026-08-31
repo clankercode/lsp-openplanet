@@ -138,3 +138,4 @@ bugs:
     - file: B137-the-nadeo-loader-hardcodes-is.todo
     - file: B138-b131-s-struct-audit-checks-dum.todo
     - file: B139-sweep-every-gate-for-a-missing.todo
+    - file: B140-remote-build-py-sync-back-reso.todo
