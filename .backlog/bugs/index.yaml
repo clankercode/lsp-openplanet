@@ -168,3 +168,4 @@ bugs:
     - file: B167-x-alpha-is-at-90-percent-disk.todo
     - file: B168-b153-s-nadeo-field-audit-has-t.todo
     - file: B169-rebase-head-is-not-an-unresolv.todo
+    - file: B170-vs-code-contextual-quick-actio.todo

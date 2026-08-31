@@ -1,0 +1,66 @@
+---
+complexity: medium
+created_at: "2026-08-31T18:08:02Z"
+depends_on: []
+estimate_hours: 4
+id: B170
+priority: medium
+status: pending
+tags: []
+title: 'VS Code: contextual quick actions on #if defines to enable or disable branches'
+updated_at: "2026-08-31T18:08:02Z"
+---
+Requested 2026-09-01 by Max. Follow-up to B031, B034, and B050.
+
+## Symptom
+
+With code such as:
+
+    #if DEV
+    void DebugOnly() {}
+    #endif
+
+VS Code fades the body and reports `inactive code: the current preprocessor defines switch this branch off`, but the diagnostic has no quick fix. Turning the branch on still requires leaving the code, opening Manage Defines or settings, and entering `DEV` manually. The same friction applies when inspecting any `#if` or `#elif` define that should be toggled off or back on.
+
+## Existing boundary
+
+- B031 emits the LSP-only `inactive-region` diagnostic over the dead BODY, with the directive deliberately left unfaded.
+- B034/B050 already own define persistence and resolved-state semantics in the VS Code extension: minimal `NAME` / `-NAME` overrides, workspace-first scope, resolved origins, platform-family safeguards, and one config refresh per edit. Reuse that path; do not build a second define editor or duplicate precedence logic in the server.
+- Defaults and changes to which defines are active by default are out of scope. This item is only about contextual editor actions.
+
+## Desired behavior
+
+1. On an `inactive-region` diagnostic caused by a simple `#if DEV` arm, offer a preferred quick fix such as `Enable define DEV`. Invoking it adds the minimal workspace override through the existing extension define machinery, refreshes configuration once, and makes that arm active.
+2. On a define identifier in any `#if` / `#elif` directive, offer a literal state action based on the resolved set: `Enable define NAME` when off and `Disable define NAME` when on. This also makes actions available for live branches, which have no inactive diagnostic.
+3. Preserve expression meaning in the labels. For `#if !DEV`, enabling `DEV` may disable the arm; for compound expressions such as `A && B` or `A || B`, toggling one symbol may not activate the arm. Offer per-symbol enable/disable actions, but do not claim `Activate this branch` unless the action is proven sufficient for that arm.
+4. Case remains exact (`dev` and `DEV` are different), and derived defines are overridden minimally rather than copied into user settings. Workspace is the default scope, matching B034; no-workspace behavior remains User scope.
+5. The action must be safe when the client does not implement the extension command: no bogus text edit, server crash, or settings mutation attempted server-side.
+
+## Implementation seam
+
+A define toggle changes VS Code configuration, so model the LSP code action as a command understood by the extension, not as a source-file `WorkspaceEdit`. Add an argument-taking extension command/helper such as `{ name, on }` that reuses `applyDefineEdit`, resolved-define introspection, scope selection/defaulting, validation, platform-family safeguards, and the existing single-write refresh path.
+
+The current `inactive-region` diagnostic covers only the body and carries no guard provenance. Preserve enough preprocessor metadata to associate an inactive arm with its directive/condition, or recover it structurally from the raw document. Do not parse the English diagnostic message. Directive-token actions must work independently of diagnostics so active arms are covered too.
+
+## TDD / red-green acceptance
+
+Server tests:
+- `#if DEV` with DEV off: the dead-body diagnostic offers `Enable define DEV` carrying exact command arguments; after DEV is on, the directive token offers `Disable define DEV`.
+- mirror `#if !DEV`, both taken and untaken `#else` arms, and `#elif` chains.
+- compound `A && B`, `A || B`, and parentheses expose actions for each identifier without falsely promising the whole branch will activate.
+- nested directives associate each inactive body with the nearest controlling arm and do not duplicate the same action from overlapping inactive regions.
+- whitespace/comments, CRLF, UTF-16 positions after non-BMP text, repeated occurrences of one define, and case-distinct `dev` / `DEV`.
+- code-action kind filtering, unrelated/foreign diagnostics, stale diagnostics, and a client without command support remain safe.
+
+Extension tests:
+- `{ name: DEV, on: true }` and `{ name: DEV, on: false }` reuse the minimal override rules for derived-on, derived-off, explicit, negated, duplicate, and contradictory entries.
+- workspace and no-workspace scope behavior matches the existing commands; cancellation writes nothing.
+- one invocation performs one settings write/config refresh, and any platform-selector warning behavior remains identical to Manage Defines.
+- command registration/manifest declarations and argument validation are covered.
+
+Integration proof:
+- start with `#if DEV` inactive in VS Code, invoke the quick fix, observe the settings override and the inactive diagnostic disappear after the normal config update; invoke the directive action again and observe the branch become inactive.
+
+## Related
+
+B031 (inactive-region diagnostics), B034 (VS Code defines UI and pure edit helpers), B050 (resolved define introspection), server `src/server/diagnostics.rs` and `src/server/code_actions/`, extension `packages/vscode-ext/src/defines.ts` and `definesCommands.ts`.
