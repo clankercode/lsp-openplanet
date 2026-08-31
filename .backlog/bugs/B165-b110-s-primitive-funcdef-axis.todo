@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T17:17:42Z"
 depends_on: []
 estimate_hours: 1
 id: B165
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'B110''s primitive funcdef axis is still unmeasured: a bare int handler at an int64 userdata slot, ~6 variants through an existing probe harness'
@@ -12,3 +14,42 @@ updated_at: "2026-08-31T17:17:42Z"
 ---
 
 B110's primitive funcdef axis is still unmeasured: a bare int handler at an int64 userdata slot, ~6 variants through an existing probe harness
+
+LEFT DELIBERATELY UNMEASURED BY B152, with the falsehood around it corrected.
+
+lane-const ran its own selector (grep the no-oracle PROSE, not ticket numbers)
+against the merged tree and found three stale notes. It retired two and stopped
+at this one, on the correct ground that retiring it needs NEW EVIDENCE on an axis
+B152 did not measure -- and a contradiction discovered there would be a behaviour
+change arriving after the gates had already run.
+
+What it did instead was correct only the false half. The notes in
+`src/typecheck/checker.rs` (in `funcdef_types_compatible`, and in the test that
+names itself "the row to revisit") claimed no oracle existed. An oracle does
+exist, it is cheap, and nobody has used it. The prose now says that.
+
+THE AXIS: B110's PRIMITIVE case -- a bare `int` handler bound at an `int64`
+userdata slot. The checker is currently neutral about it. Whether the engine is
+neutral has never been measured.
+
+THE MEASUREMENT: roughly 6 variants through the existing harness in
+`scripts/probe_const_handle_funcdef.py`. B144 measured the neighbouring const
+axis in a single run, so the cost is known and small.
+
+Generalise the variants rather than probing only the one pair, per repo policy:
+int/int64 in both directions, uint/uint64, and the signed/unsigned crossings at
+equal width. The interesting answers are the asymmetric ones -- a narrower
+handler at a wider slot is a different question from the reverse, and the
+signed/unsigned crossing is a third.
+
+IF THE ENGINE TURNS OUT TO BE EXACT HERE, the fix inherits B152's inverted risk
+polarity: it ADDS errors to real plugins. Measure first with an instrumented
+build that keeps the neutral answer and prints a marker where the exact rule
+would disagree, then repair whatever reference-data defects that surfaces BEFORE
+tightening -- B152's 214 disagreements were all reference-data rot and none were
+user code, and writing the rule first would have made that indistinguishable from
+a bad rule. Fleet sweep must report EXPOSURE, not just a zero.
+
+If the engine is neutral, that is a result worth pinning too, with a tripwire
+rather than prose -- see B134's pattern and the "predict the count" entry in
+docs/verification-hazards.md.
