@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T15:34:59Z"
 depends_on: []
 estimate_hours: 1
 id: B144
 priority: high
+started_at: null
 status: pending
 tags: []
 title: A const handle parameter (T@ const &in) is treated as incompatible with T@ &in in funcdef signature matching, so array::Sort and every funcdef conversion reject shipped code the engine compiles
@@ -12,3 +14,105 @@ updated_at: "2026-08-31T15:34:59Z"
 ---
 
 A const handle parameter (T@ const &in) is treated as incompatible with T@ &in in funcdef signature matching, so array::Sort and every funcdef conversion reject shipped code the engine compiles
+
+
+## Reported by Max, 2026-09-01, against a shipped plugin that compiles in the game
+
+    ~/src/openplanet/my-plugins/tm-ghosts-plus-plus
+    src/Interface.as:641:31: error: No matching signatures to 'array::Sort(SortGhosts)'
+
+The declaration at `src/Interface.as:616`:
+
+    bool SortGhosts(const Json::Value@ const &in a, const Json::Value@ const &in b)
+
+called on a `Json::Value@[]`. **This is the only error the checker reports for
+that plugin** (plus 2 signed/unsigned warnings and 118 hidden info).
+
+## Minimal repro — the discriminator is the TRAILING `const`
+
+    bool CmpA(const Json::Value@ const &in a, const Json::Value@ const &in b) { return true; }
+    bool CmpB(const Json::Value@ &in a,       const Json::Value@ &in b)       { return true; }
+    bool CmpC(Json::Value@ const &in a,       Json::Value@ const &in b)       { return true; }
+
+    Json::Value@[] arr;
+    arr.Sort(CmpA);   // ERROR
+    arr.Sort(CmpB);   // ok
+    arr.Sort(CmpC);   // ERROR
+
+`CmpB` — the only one WITHOUT a trailing `const` — is the only one accepted.
+Note the two `const`s mean different things: the leading one is *handle to const
+object*, the trailing one is *const handle*. Only the trailing one triggers this.
+
+## It is FAR more general than `array::Sort`
+
+Every funcdef path rejects it, so this is not a template-member-funcdef bug:
+
+    argument 1 of `Less`: expected `bool (const Json::Value@ &in, const Json::Value@ &in)`,
+                          got `bool (const Json::Value@ const &in, const Json::Value@ const &in)`
+    argument 1 of `LessC`: expected `bool (const C@ &in, const C@ &in)`,
+                           got `bool (const C@ const &in, const C@ const &in)`
+    Can't implicitly convert from 'bool(const Json::Value@ const &in, ...)' to 'Less@'
+    No matching signatures to 'array::Sort(CmpC)'
+
+Confirmed for an engine type (`Json::Value@`) and a workspace class (`C@`), via
+explicit funcdef construction, implicit handle assignment, and the template
+member. **The parser handles the syntax fine** — the rendered signature above
+shows `const Json::Value@ const &in` round-tripping correctly. The defect is in
+signature COMPATIBILITY, not parsing.
+
+## The engine is the authority and it has NOT been probed yet
+
+Max reports this as a false positive and the plugin ships and compiles, which is
+strong evidence — but it is not a measurement, and this batch has spent a night
+proving the difference. **Probe before fixing.** The game is up, RemoteBuild
+works (B097), and `scripts/probe_const_receiver.py` /
+`probe_engine_const_receiver.py` are the models.
+
+The question to put to the engine, per construct:
+
+- Does a function with `T@ const &in` params bind to a funcdef declaring
+  `T@ &in`? (the reported case — expect ACCEPT)
+- Does it bind the other way — `T@ &in` function to a `T@ const &in` funcdef?
+  **Ask this too.** If the engine is asymmetric, a symmetric fix is wrong.
+- Is the leading `const` (`const T@` vs `T@`) still exact, as B110 established?
+  **This is the control that stops the fix widening into B110's territory** — do
+  not relax handle-to-const alongside const-handle without measuring both.
+- The same three for `&out`, `&inout` and by-value, and for a return type.
+
+## Likely location, unverified
+
+B110 made `funcdef_types_compatible` exact by dropping an `is_convertible`
+fallback on the primitive arm, and B102 synthesises the template member
+funcdef's signature per call site. The rendered strings above show both sides
+computed correctly, so the suspect is the comparison — specifically whether
+`ParamMode`/`TypeRepr` carries the const-handle bit and whether the comparison
+should ignore it.
+
+**Do not fix by loosening the comparison generally.** B110 exists because it was
+too loose, and the B110 tests are the regression guard: if a fix makes any B110
+case pass that should fail, the fix is wrong.
+
+## Test axes — generalise, per repo CLAUDE.md
+
+Cross every combination rather than fixing the reported spelling:
+
+- Param modes: `&in`, `&out`, `&inout`, by value.
+- Const positions, all four: `T@`, `const T@`, `T@ const`, `const T@ const`.
+- Element/param types: engine handle (`Json::Value@`), workspace class handle
+  (`C@`), interface handle, primitive (`int`), value class, enum, `array<T>@`,
+  `dictionary@`.
+- Call paths: explicit funcdef construction `Less(f)`, implicit assignment
+  `Less@ h = f;`, passing as an argument, and the template member
+  (`array<T>::Sort`, 2-arg and 3-arg forms, `SortAsc`/`SortDesc`).
+- Return types as well as parameters.
+- **Negative controls that must still FAIL:** wrong arity, wrong return type,
+  wrong element type, and B110's exactness cases. A fix that makes everything
+  match passes a suite that only checks things start working.
+
+## Related fixtures that already exist
+
+`tests/fixtures/issue-repros/b102-array-sort-correct-callbacks/` and
+`.../b102-array-sort-mismatched-callbacks/` were built for exactly this family.
+**Neither covers a const handle**, which is why this survived. Add the const
+positions to both — the correct one gains rows that must bind, the mismatched one
+keeps the rows that must not.
