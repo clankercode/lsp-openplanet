@@ -1,0 +1,26 @@
+---
+complexity: medium
+created_at: "2026-08-31T08:55:50Z"
+depends_on: []
+estimate_hours: 1
+id: B096
+priority: high
+status: pending
+tags: []
+title: 'Unprobed engine semantics behind B087: does the engine bind an import to a namespaced body, and does it accept shared interface/enum/funcdef'
+updated_at: "2026-08-31T08:55:50Z"
+---
+
+# Unprobed engine semantics behind B087: does the engine bind an import to a namespaced body, and does it accept shared interface/enum/funcdef
+
+## Steps to Reproduce
+
+1. TODO: Add steps
+
+## Expected Behavior
+
+TODO: Describe expected behavior
+
+## Actual Behavior
+
+TODO: Describe actual behavior

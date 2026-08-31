@@ -94,3 +94,4 @@ bugs:
     - file: B093-no-quick-fix-for-nomatchingsym.todo
     - file: B094-when-a-class-c-implements-an-i.todo
     - file: B095-extension-should-have-suggesti.todo
+    - file: B096-unprobed-engine-semantics-behi.todo
