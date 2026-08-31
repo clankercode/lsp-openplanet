@@ -70,3 +70,7 @@ implementations after it" and the test updates with it.
 
 ## Lane decision (2026-08-31, bl-fix-many batch B103-105)
 Serialized AFTER B103 in the same worktree (.worktrees/nav) — same file (src/server/navigation.rs definition path), and this ticket's accessor-pair test case depends on B103 landing first. Implement B104 only once B103 is committed in the lane.
+
+## Landed (2026-08-31, merged with B103; master gate SUITE-VERIFIED 2802/0, 33/33)
+Declaration first, implementations after, deterministic order; implementers from pooled inheritance records (sub-interfaces and non-redeclaring derived classes correctly excluded); overloads share arity_admits with unique_overload_for_argc. Contract-change tests updated with rationale at the site.
+Deliberately not done: textDocument/implementation (greenfield handler + capability registration; definition-returns-union was this ticket's bar per the design note). Hover/definition now deliberately disagree on override shadowing — see B113 notes; do not 'fix' hover to match.
