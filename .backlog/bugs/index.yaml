@@ -79,3 +79,4 @@ bugs:
     - file: B078-flaky-sigsegv-in-multi-root-te.todo
     - file: B079-two-scope-predicates-and-two-e.todo
     - file: B080-probe-corpora-do-not-record-wh.todo
+    - file: B081-is-external-derived-from-is-sh.todo

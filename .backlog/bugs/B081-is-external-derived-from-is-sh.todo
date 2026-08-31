@@ -1,0 +1,83 @@
+---
+complexity: medium
+created_at: "2026-08-31T03:23:05Z"
+depends_on: []
+estimate_hours: 1
+id: B081
+priority: high
+status: pending
+tags: []
+title: is_external_derived_from is shadow-blind by construction and indistinguishable from is_external_type at the call site
+updated_at: "2026-08-31T03:23:05Z"
+---
+Split out of B079 (2026-08-31) because neither of B079's two moves can reach
+it, and it needs a different mechanism.
+
+## The pair
+
+- `is_external_derived_from` resolves a name against the type index **whether
+  or not the workspace shadows it**. It is a pure index-chain query, shadow-
+  blind by construction.
+- `is_external_type` asks `workspace_type_shadows` first.
+
+Both are legitimately public. Both are used by the checker. Neither is a
+precondition for the other. **They answer different questions**, which is
+exactly why B079's two mechanisms miss them:
+
+- **Reduction (privacy) cannot help** — both have real external callers.
+- **A witness type cannot help** — a witness encodes "check A ran before B".
+  There is no ordering here to encode.
+
+## Why it is worth its own ticket
+
+This is B079's fifth instance and the most instructive one. It was introduced
+by a lane that was **actively reasoning about B079 at the time** — it was being
+careful not to duplicate a predicate, and never checked whether the predicate
+it chose answered its question. The symptom: a plugin declaring
+`class CSmPlayer {}` was offered the ENGINE class's injected methods, because
+the shadow-blind query resolved the name anyway.
+
+Nothing was missing. The correct predicate already existed, already correct,
+one identifier away.
+
+## Options, weakest first
+
+1. **Rename** `is_external_derived_from` -> `external_chain_contains`, with the
+   doc comment stating it is shadow-blind by construction. Cheap.
+   **Weak on its own, and the lane that proposed it said so**: it relies on the
+   caller reading the name, which is precisely what failed. A better name is
+   still strictly better than a worse one, so this is worth doing regardless —
+   just not worth believing in.
+2. **A newtype on the argument**: `external_chain_contains(a: ExternalTypeName, ...)`
+   where `ExternalTypeName` can only be minted by the shadow-aware resolver.
+   This **would have caught the defect at compile time**. Cost: threading it
+   through 4 call sites in `checker.rs` and 3 in `builtins.rs`.
+3. Leave it, documented.
+
+## Decision (coordinator)
+
+**Do (1) AND (2). Not (1) alone.**
+
+The argument for (1)-alone is cost, and the argument against it is the
+evidence: five instances, four of them selection errors, and the most recent
+committed by someone concentrating on this exact hazard. Names did not protect
+a careful reader who was thinking about the problem while making the mistake.
+Treating a rename as the fix would be recording a lesson while declining to act
+on it.
+
+(2) is authorised even though it is the more invasive option, because this is
+the one place in the batch where a compile-time guarantee is available, cheap
+in absolute terms (7 call sites), and **demonstrated against a real defect
+rather than a hypothetical**.
+
+**Sequencing: after B079's Move 1, and after lane-b060-b062's merge lands.**
+`checker.rs` is the most-contended file in the batch — one lane spent eight
+review rounds in it — and 7 call sites of argument-threading must not race
+that. Confirm those call sites are quiet before starting.
+
+## Related
+
+B079 (the parent: two failure modes, duplication and selection — this is pure
+selection), B063 (where the defect was introduced and caught),
+`docs/verification-hazards.md` (a private predicate behind a public wrapper is
+not private — the sibling finding from the same design pass).
