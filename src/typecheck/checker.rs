@@ -256,7 +256,21 @@ pub enum TypeDiagnosticKind {
     UnreachableCode,
     /// GH #49: no implicit conversion exists between distinct math value
     /// types (`int3 size = map.Size;` — nat3 → int3). Game wording:
-    /// `Can't implicitly convert from 'const nat3' to 'int3&'.`
+    /// `Can't implicitly convert from 'const nat3' to 'int3'.`
+    ///
+    /// B171: the engine's TRAILING `&` on the target is CONDITIONAL and we
+    /// deliberately do not reproduce it. Measured over 10 conversion messages
+    /// (`docs/probes/b171-conversion-target-spelling.tsv`), the target carries
+    /// `&` only when all three of: the source is non-const, the target type is
+    /// not a primitive, and the slot is an assignable variable rather than a
+    /// return. Two of those — source constness and slot kind — are not
+    /// available here, so emitting `&` unconditionally (B160) was wrong for
+    /// every conversion from a const source, which is what an engine property
+    /// read such as `map.Size` is. The unsuffixed form is byte-exact with the
+    /// engine for const sources, return slots and primitive targets.
+    ///
+    /// The trailing full stop IS unconditional: all 10 measured messages carry
+    /// it, as did the 22 B160 measured. That half of B160 stands.
     NoImplicitConversion {
         from: String,
         to: String,
@@ -477,7 +491,7 @@ impl TypeDiagnostic {
             }
             TypeDiagnosticKind::UnreachableCode => "Unreachable code".to_string(),
             TypeDiagnosticKind::NoImplicitConversion { from, to } => {
-                format!("Can't implicitly convert from '{from}' to '{to}&'.")
+                format!("Can't implicitly convert from '{from}' to '{to}'.")
             }
             TypeDiagnosticKind::NoMatchingSignatures { text } => {
                 format!("No matching signatures to '{text}'")

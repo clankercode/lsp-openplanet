@@ -430,9 +430,11 @@ mod tests {
     ) -> Vec<CodeAction> {
         let defines: HashSet<String> = defines.iter().map(|name| (*name).to_string()).collect();
         let analysis = DocumentAnalysis::analyze(source, &defines);
-        let diagnostics = with_diagnostics
-            .then(|| inactive_region_diagnostics(source, &analysis, InactiveLevel::Hint))
-            .unwrap_or_default();
+        let diagnostics = if with_diagnostics {
+            inactive_region_diagnostics(source, &analysis, InactiveLevel::Hint)
+        } else {
+            Vec::new()
+        };
         let context = CodeActionContext {
             diagnostics,
             only: Some(vec![CodeActionKind::QUICKFIX]),
