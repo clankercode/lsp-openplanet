@@ -411,7 +411,8 @@ mod tests {
     use std::collections::HashSet;
 
     use tower_lsp::lsp_types::{
-        CodeActionContext, CodeActionKind, NumberOrString, Position, Range, Url,
+        CodeActionContext, CodeActionKind, CodeActionOrCommand, NumberOrString, Position, Range,
+        Url,
     };
 
     use super::*;
@@ -450,7 +451,7 @@ mod tests {
         let workspace = SymbolTable::new();
         let uri = Url::parse("file:///tmp/B170.as").unwrap();
         let files = [(uri.clone(), &analysis)];
-        define_actions(&CodeActionRequest {
+        crate::server::code_actions::code_actions(&CodeActionRequest {
             uri: &uri,
             analysis: &analysis,
             defines: &_defines,
@@ -461,6 +462,12 @@ mod tests {
             files: WorkspaceFileResolver::new(&files),
             lazy_edits: true,
         })
+        .into_iter()
+        .filter_map(|action| match action {
+            CodeActionOrCommand::CodeAction(action) => Some(action),
+            CodeActionOrCommand::Command(_) => None,
+        })
+        .collect()
     }
 
     fn actions_for_first_inactive(source: &str, defines: &[&str]) -> Vec<CodeAction> {
@@ -682,7 +689,13 @@ mod tests {
             ..Default::default()
         };
         let actions = actions_with_context(source, define_set, analysis, current.range, context);
-        assert!(actions.is_empty());
+        assert!(actions.iter().all(|action| {
+            action
+                .command
+                .as_ref()
+                .map(|command| command.command.as_str())
+                != Some(SET_DEFINE_COMMAND)
+        }));
     }
 
     #[test]
