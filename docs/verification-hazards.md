@@ -2583,9 +2583,7 @@ the two correct runs and `[lsp-openplanet-bf0363fb]` on the bad one — and
 withdrew the specific claim while keeping the unrelated real finding about my
 merge. Both halves matter: a retraction that also abandoned the true half would
 have been as unhelpful as never retracting.
-||||||| b6584a0
 
-||||||| parent of 14bd3fb (docs(b101): a consumer that parses the rendered string is outside the compiler's net)
 
 ## "Add the field and see what breaks" cannot see a consumer that parses the rendered string
 
@@ -4063,7 +4061,6 @@ The verdict now prints `python3 scripts/remote-build.py --allow-unresolved test`
 verbatim and says why it cannot go through `just`. **An instruction a reader
 cannot execute is not a remedy; check yours against the entry point they were
 told to use, not the one you happen to be typing in.**
-||||||| parent of 511e59c (fix(b168): make every audit exemption state something a machine can refute)
 
 ## A justification records conviction, not correctness
 
