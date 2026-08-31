@@ -69,3 +69,106 @@ B068 (batched probes fabricating ACCEPTED rows), B077 (stranded fixtures
 contaminating later probes — the same class: the probe environment is state
 nobody is tracking), `docs/probes/b071-enum-conversion.tsv`,
 `scripts/probe_enum_corpus.py`.
+
+## MEASURED GROUND TRUTH (lane-resolver, 2026-08-31)
+
+### The premise is TRUE but INCOMPLETE, and the gap lands on the rows that matter
+
+"Provenance is recoverable from data the corpus already collects" holds as far
+as it goes: b052 has **63 context pins — 44 SCOPE, 20 ABSENT**, message forms
+unambiguous, no third form.
+
+**But only FOUR of the six prefixes behind the twelve
+`PLUGIN_NAMESPACE_ARTEFACTS` spellings are pinned** (`Foo`, `Foo::Bar`,
+`MathX`, `GameData`). **`MLHook` and `VehicleState` have NO pin row at all.**
+A consumer deriving provenance from pins alone would silently classify
+`MLHook::VirtualKey` and `VehicleState::VirtualKey` as engine-stable — two of
+the twelve.
+
+Overall: **234 distinct prefixes appear in ACCEPTED rows; 63 are pinned.**
+
+**Therefore UNPINNED must be a FIRST-CLASS VALUE, never an absence defaulting
+to ENGINE.** A format where the unmeasured case is spelled the same as the
+measured-safe case is how the drift below happened in the first place.
+
+Consistency check that DID hold: **zero ACCEPTED rows have a prefix pinned
+ABSENT.** Keep this as a generator assertion, not a one-off check.
+
+### Installed-plugin scan — MEASURED, not reasoned
+
+Scanned all 44 installed plugin entries plus `.op` archives for both
+`namespace X` AND (per B067) type declarations of X:
+
+| prefix | declared by | reading |
+|---|---|---|
+| `MathX` | 5 installed plugins (Editor, ghosts-pp, ghosts-pp.op, map-together, test-draw-dev) | HOST |
+| `MLFeed` | MLFeedRaceData.op | HOST |
+| `MLHook` | MLHook.op | HOST |
+| `Foo` | **nothing** | consistent with today's flip |
+| `GameData` | nothing | ENGINE |
+| `Discord` | nothing — and it is a **Core namespace** | ENGINE |
+| `GmFunc` | nothing — `GmFunc::ERotationOrder` is a literal Nadeo dump key | ENGINE |
+| `VehicleState` | **nothing declares it, but two installed plugins declare `dependencies = ["VehicleState"]`** | **LOOSE END** |
+
+`VehicleState` is the one row that would otherwise record an INFERENCE. A
+dependency can be satisfied by something that declares the namespace, by
+something that does not, or by a library resolved outside the scanned paths.
+**Coordinator ruling: record it UNPINNED until a probe settles it.** An
+inference committed into the artefact whose purpose is separating measurement
+from reasoning would defeat the ticket.
+
+## `PLUGIN_NAMESPACE_ARTEFACTS` HAS ALREADY DRIFTED — the ticket predicted this
+
+Two label errors, each contradicted by prose in the same repo. **No behavioural
+effect** — all thirteen spellings expect the same verdict either way — so
+relabelling changes NO test expectation.
+
+**(a)** The list names `GameData::ESceneCharVisNotice`,
+`GameData::ESceneVehicleVisEvent` and `GameData::VirtualKey` as plugin
+artefacts, while the `UNEXPLAINED_ENGINE_SCOPES` doc comment **~50 lines below
+in the same file** says GameData is NOT a plugin artefact and "was mislabelled
+as one when first written" — and keeps a fourth GameData row in that other
+list.
+
+**(b)** Its doc comment still says `Foo` compiled "because the probe plugin
+declared it itself", which `global_scope.rs:527` explicitly corrects: the probe
+emits no `namespace` in either template, so `Foo` was a foreign plugin's.
+
+When a file's own doc comment 50 lines down says a list entry was mislabelled
+while the list still carries it, the file is already telling you which one is
+wrong. A hand-maintained list drifted from the fact inside this repo's own
+history — which is the argument for deriving it rather than maintaining it.
+
+## DESIGN + COORDINATOR RULING
+
+Sidecar `docs/probes/b052-scope-provenance.tsv`, keyed by scope prefix:
+prefix / pin / origin / evidence. `pin` recomputed mechanically from the
+corpus's own pin-row MESSAGE FORMS. `origin` one of
+ENGINE / HOST / ENGINE_UNMODELLED / UNKNOWN, recorded **with evidence**, since
+that is the half a compile probe cannot compute. Offline `--scope-provenance`
+generator carries `origin` forward by prefix and writes UNKNOWN for any unseen
+prefix, so a regenerated corpus surfaces a new scope loudly. Both hardcoded
+lists in `resolver.rs` are deleted in favour of deriving from the sidecar.
+
+**The generator must REFUSE to emit ENGINE_UNMODELLED without an evidence
+cell.** "The engine has it, our typedb does not" is a claim, not a default;
+UNKNOWN is the honest default.
+
+**MUST SHIP AS TWO COMMITS** (coordinator ruling):
+
+1. **Mechanism, provably inert.** Derive the set from the sidecar carrying
+   TODAY's labels, mislabelled GameData rows included exactly as they are, plus
+   a test asserting the derived set is byte-identical to the current hardcoded
+   set. That test IS the deliverable. If the sets are not identical, STOP and
+   report — that is a finding, not a conflict to smooth over. Both guards land
+   here, protecting the mechanism before any label moves: a HOST prefix marked
+   ENGINE reddens the corpus sweep; an ENGINE prefix marked HOST contradicts the
+   shipped typedb.
+2. **Data, diff visible.** Move the four GameData rows to the ENGINE side in
+   its own commit, showing the explicit set difference and stating that no test
+   expectation changed.
+
+Rationale: this batch reverted a CORRECT merge because a bisect changed two
+variables at once. A refactor and a data change landing together means a later
+surprise cannot be attributed to either half. Separated, each is falsifiable
+alone.
