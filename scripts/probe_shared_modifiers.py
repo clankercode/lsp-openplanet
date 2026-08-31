@@ -388,46 +388,7 @@ def write_fixture(root: Path, v: V) -> Path:
     return plugin
 
 
-def build_slice(window: str, fid: str) -> list[str]:
-    """The log lines of THIS build, bracketed by its own start/finish markers.
-
-    RemoteBuild serialises builds and brackets each one with
-    `Starting build for "<fid>"` ... `Loaded plugin '<fid>'`, so the slice is
-    this build's and nothing else's. It deliberately ENDS at the load line:
-    everything after it is runtime, and this is a compile-only question.
-    """
-    lines = window.splitlines()
-    start = next((i for i, l in enumerate(lines)
-                  if f'Starting build for "{fid}"' in l), None)
-    if start is None:
-        return []
-    end = next((i for i, l in enumerate(lines[start:], start)
-                if f"Loaded plugin '{fid}'" in l), len(lines) - 1)
-    return lines[start:end + 1]
-
-
-def raw_build_errors(window: str, fid: str) -> list[str]:
-    """Build `[ERROR]` lines that carry NO source location.
-
-    `fleet.parse_game_diagnostics` only matches `path (line, col) : SEV : msg`,
-    so an engine error without a location is invisible to it — invisible to
-    `game_errors`, to `foreign_errors` AND to `unattributed_errors`, so
-    `contended` stays False too. Measured live: a fixture with an unresolvable
-    `dependencies` entry logs
-
-        [ERROR] Couldn't find required plugin dependency "..." while loading
-                plugin "<fid>"
-
-    and the engine then logs `Loaded plugin '<fid>'` ANYWAY. Under the
-    inherited oracle that combination scores a clean ACCEPT. On a question
-    whose subject is acceptance that is a false green, so this reads the
-    bracketed slice directly instead of only the parsed diagnostics.
-    """
-    return [l.strip() for l in build_slice(window, fid)
-            if "[ERROR]" in l and "Loaded plugin" not in l]
-
-
-def classify(v: V, rec: dict, window: str) -> tuple[str, str]:
+def classify(v: V, rec: dict) -> tuple[str, str]:
     """ACCEPT / REJECT / BUILD-ERR / AMBIGUOUS, with the reason."""
     if rec.get("skipped"):
         return "AMBIGUOUS", rec["skipped"]
@@ -436,9 +397,8 @@ def classify(v: V, rec: dict, window: str) -> tuple[str, str]:
             f"log window contended: {len(rec.get('foreign_errors', []))} foreign "
             f"and {len(rec.get('unattributed_errors', []))} unattributed ERR"
         )
-    fid = rec["folder_id"]
-    started = f'Starting build for "{fid}"' in window
-    loaded = f"Loaded plugin '{fid}'" in window
+    started = rec.get("build_ran", False)
+    loaded = rec.get("build_loaded", False)
     errs = rec.get("game_errors", [])
     if errs:
         return "REJECT", "; ".join(
@@ -449,7 +409,7 @@ def classify(v: V, rec: dict, window: str) -> tuple[str, str]:
             "no `Starting build` line for this folder: the build never ran, so "
             "an absence of errors is not an ACCEPT"
         )
-    raw = raw_build_errors(window, fid)
+    raw = rec.get("raw_build_errors") or []
     if raw:
         # A build error with no source location. NOT reported as REJECT: it is
         # not the construct being refused, and collapsing the two would let
@@ -495,24 +455,11 @@ def main() -> int:
     try:
         for v in variants:
             fixture = write_fixture(tmp, v)
-            captured: dict[str, str] = {}
-
-            def grab(mark: int, folder: str, _c=captured) -> str:
-                """Unfiltered window: `Loaded plugin` is a TRAC line and
-                fleet.read_log_window drops TRAC, which would leave ACCEPT
-                resting on absence of evidence."""
-                try:
-                    with open(fleet.OP_LOG, "rb") as fh:
-                        fh.seek(mark)
-                        raw = fh.read().decode(errors="replace")
-                except OSError as exc:
-                    raw = f"<log read failed: {exc}>"
-                _c["window"] = raw
-                return raw
-
-            rec = repro.probe(fixture, read_log_window_fn=grab)
-            window = captured.get("window", "")
-            verdict, reason = classify(v, rec, window)
+            # B118 landed the unfiltered window, the build bracket and the
+            # BUILD-ERR/REJECT split in the harness itself, so this no longer
+            # injects its own reader.
+            rec = repro.probe(fixture)
+            verdict, reason = classify(v, rec)
             rows.append({
                 "id": v.id, "construct": v.construct, "placement": v.placement,
                 "context": v.context, "shared": v.shared, "expect": v.expect,

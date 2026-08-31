@@ -2129,6 +2129,86 @@ which is more than can be said for "think harder about your silence tests".
 **Corollary for reviewers.** A red/green report saying "11 failed, 4 passed" is
 not fully good news. The 4 are the ones to ask about.
 
+## Three ways a probe's silence was scored as a passing answer (B118)
+
+Found by lane-resolver during B096 claim 2, and it is the ABSENCE hazard above
+wearing an instrument instead of a test. Same mechanism, one level down: not "a
+test that passes for the wrong reason", but **an oracle that cannot tell its
+own failure from the answer it is looking for.**
+
+`issue_repro_game.probe` asks the live game whether a construct compiles. Three
+independent channels each turned *no signal* into ACCEPT:
+
+1. **The window it read dropped every `[ TRAC]` line** — and both build markers,
+   `Starting build for "<id>"` and `Loaded plugin '<id>'`, are TRAC. So the
+   oracle could see whether anything *complained*, never whether the build
+   *happened*. A build that never ran and a build that ran clean were the same
+   observation.
+2. **A location-less engine error matched no bucket at all.** The diagnostic
+   parser matches `path (line, col) : SEV : msg`; an error without a location
+   matches nothing, so it missed `game_errors`, `foreign_errors` AND
+   `unattributed_errors` — which left `contended` False too. Every guard
+   downstream was derived from that one parse, so no guard anywhere fired.
+3. **`Loaded plugin` is logged even after `Script compilation failed!`**, so
+   its presence is necessary and *not sufficient*. This is the trap laid for
+   whoever fixes channel 1: un-filter TRAC, test for `Loaded plugin`, and you
+   have swapped one false green for another.
+
+**The polarity is what makes this severe.** On a question whose entire subject
+is ACCEPTANCE, every one of these failure modes is indistinguishable from the
+affirmative answer. A transport outage, a typo in a plugin id, a missing
+dependency — all report "accepted".
+
+It was caught only because a fixture with a deliberately wrong dependency id
+scored ACCEPT. Nothing else in that run looked wrong, and the run had passing
+controls: a positive control and a negative control both behaved correctly
+*while the oracle was blind*, because neither exercised a build that failed to
+run. **Controls prove the instrument can discriminate the cases they contain,
+and nothing about the cases they omit.**
+
+### The conceptual fix: two different answers must not share a verdict
+
+The defect is not really three parsing bugs. It is that **"the engine refused
+this construct" and "this build did not happen" were the same value.** Once
+they are the same value, no amount of parsing care helps, because the caller
+has nowhere to put the distinction. So the fix is a third verdict —
+`BUILD-ERR`, kept deliberately distinct from `REJECTED` — plus slicing the log
+by the build's **own start/end markers** rather than by severity or by time,
+which is what makes the attribution structural instead of a guess.
+
+Generally: *when an instrument's failure mode and one of its answers would be
+recorded identically, that is a design defect in the verdict set, not a
+detection problem.*
+
+### Testing a MISSING signal: measure the pair, then mutate
+
+A red run cannot validate any of this, for the reason the section above gives —
+the pre-fix state is silence everywhere. Two rules, both learned the hard way
+here:
+
+**Assert both halves of a pair and that they DIFFER.** A guard that condemns
+everything passes a one-sided assertion just as well as a correct one. Every
+B118 case measures the good half and the bad half and asserts the verdicts are
+not equal.
+
+**Then mutation-test, because the pairs were not enough.** Restoring each half
+of the original defect in a throwaway copy found that **4 of the 9 new guards
+were vacuous**, all for the same undramatic reason: an *earlier* check in the
+verdict chain already decided those cases, so the guard under test never ran.
+
+- "never ran" was tested with an EMPTY window, so a broken build-slicer looked
+  correct for free — the real log is shared and always has other traffic in it.
+- `Script compilation failed!` was only ever tested alongside a located error,
+  which had already decided the verdict.
+- "started but never loaded" was not tested at all.
+- a located error being double-counted into the raw bucket was not tested at
+  all.
+
+None of those were visible by inspection, and all four are now cases.
+`just probe-cleanup-mutants` runs 21 mutations, 0 missed. **The lesson is that
+a suite of pair-tests is still only a claim until each guard has been shown to
+fire on its own.**
+
 ## A merge run inside a lane's worktree does nothing and reports success
 
 My own mistake, and the second false-green I authored in one night while
