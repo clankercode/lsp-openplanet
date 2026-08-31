@@ -1157,14 +1157,22 @@ fn format_json(report: &CheckReport) -> String {
         .iter()
         .map(|item| {
             let rel = item.path.strip_prefix(&report.root).unwrap_or(&item.path);
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "path": rel.display().to_string(),
                 "line": item.diagnostic.range.start.line + 1,
                 "col": item.diagnostic.range.start.character + 1,
                 "severity": severity_label(item.diagnostic.severity),
                 "message": item.diagnostic.message,
                 "combo": item.combos,
-            })
+            });
+            // GH #18: additive — absent unless version-specific.
+            if !item.versions.is_empty() {
+                value.as_object_mut().expect("literal object").insert(
+                    "versions".to_string(),
+                    serde_json::json!(item.versions),
+                );
+            }
+            value
         })
         .collect();
     let mut doc = serde_json::json!({
@@ -1175,6 +1183,12 @@ fn format_json(report: &CheckReport) -> String {
     // GH #59: additive — absent (not null) when no DB was loaded.
     if let (Some(versions), Some(obj)) = (&report.type_db, doc.as_object_mut()) {
         obj.insert("typedb".to_string(), versions.to_json());
+    }
+    // GH #18: additive — absent on legacy single-target runs.
+    if !report.targets.is_empty() {
+        doc.as_object_mut()
+            .expect("literal object")
+            .insert("targets".to_string(), serde_json::json!(report.targets));
     }
     format!(
         "{}\n",
@@ -1212,14 +1226,17 @@ fn format_plain(report: &CheckReport, color: bool) -> String {
         };
 
         out.push_str(&format!(
-            "{}:{}: {}: {}{}\n",
+            "{}:{}: {}: {}{}{}\n",
             term::path(color, rel.display().to_string()),
             term::loc(color, format!("{line}:{col}")),
             sev_styled,
             // GH #57: combo label ([DEV] / [seen in: {} | DEV]) — empty in
             // single-combo runs.
             matrix::combo_prefix(&item.combos),
-            item.diagnostic.message
+            item.diagnostic.message,
+            // GH #18: version label ([op 1.29.5]) — empty unless the
+            // diagnostic is version-specific in a multi-target run.
+            matrix::version_suffix(&item.versions)
         ));
     }
 

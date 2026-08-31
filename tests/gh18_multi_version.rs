@@ -150,6 +150,85 @@ fn single_target_run_has_no_version_labels() {
 }
 
 #[test]
+fn formatters_render_version_labels_only_where_version_specific() {
+    use openplanet_lsp::cli::{format_check_report_for, CheckFormat};
+    let s = setup("format");
+    let opts = parse_check_args(&[
+        "--typedb-versions-dir".into(),
+        s.versions_root.display().to_string(),
+        "--openplanet-version".into(),
+        "1.0.0,2.0.0".into(),
+        s.plugin.display().to_string(),
+    ])
+    .unwrap();
+    let report = run_check(&opts).unwrap();
+
+    let plain = format_check_report_for(&report, CheckFormat::Plain);
+    let old_line = plain
+        .lines()
+        .find(|l| l.contains("Ns::Old"))
+        .expect("plain output has an Ns::Old line");
+    assert!(old_line.contains("[op 2.0.0]"), "version label on: {old_line}");
+    let never_line = plain
+        .lines()
+        .find(|l| l.contains("Ns::Never"))
+        .expect("plain output has an Ns::Never line");
+    assert!(
+        !never_line.contains("[op"),
+        "all-targets diagnostic carries no label: {never_line}"
+    );
+
+    let pretty = format_check_report_for(&report, CheckFormat::Pretty);
+    assert!(
+        pretty.contains("[op 2.0.0]"),
+        "pretty output labels version-specific findings: {pretty}"
+    );
+
+    let json = format_check_report_for(&report, CheckFormat::Json);
+    let doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        doc["targets"],
+        serde_json::json!(["1.0.0", "2.0.0"]),
+        "report-level targets"
+    );
+    let diags = doc["diagnostics"].as_array().unwrap();
+    let old = diags
+        .iter()
+        .find(|d| d["message"].as_str().unwrap_or("").contains("Ns::Old"))
+        .expect("json has Ns::Old");
+    assert_eq!(old["versions"], serde_json::json!(["2.0.0"]));
+    let never = diags
+        .iter()
+        .find(|d| d["message"].as_str().unwrap_or("").contains("Ns::Never"))
+        .expect("json has Ns::Never");
+    assert!(
+        never.get("versions").is_none(),
+        "no versions key on an all-targets diagnostic: {never}"
+    );
+}
+
+#[test]
+fn single_target_output_is_label_free() {
+    use openplanet_lsp::cli::{format_check_report_for, CheckFormat};
+    let s = setup("format-single");
+    let opts = parse_check_args(&[
+        "--typedb-dir".into(),
+        s.v1_dir.display().to_string(),
+        s.plugin.display().to_string(),
+    ])
+    .unwrap();
+    let report = run_check(&opts).unwrap();
+    let plain = format_check_report_for(&report, CheckFormat::Plain);
+    assert!(!plain.contains("[op"), "no labels on single-target runs: {plain}");
+    let json = format_check_report_for(&report, CheckFormat::Json);
+    let doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        doc.get("targets").is_none(),
+        "no targets key on legacy runs: {doc}"
+    );
+}
+
+#[test]
 fn unknown_requested_version_is_a_hard_error_naming_known() {
     let s = setup("unknown");
     let opts = parse_check_args(&[

@@ -149,6 +149,18 @@ pub fn combo_prefix(combos: &[Vec<String>]) -> String {
     }
 }
 
+/// GH #18: plain/pretty-output suffix naming the target versions a
+/// diagnostic fired on: ` [op 1.29.5]` / ` [op 1.29.5, 1.29.14]`. Empty
+/// when the diagnostic carries no version label (single-target run, or it
+/// fired on every target).
+pub fn version_suffix(versions: &[String]) -> String {
+    if versions.is_empty() {
+        String::new()
+    } else {
+        format!(" [op {}]", versions.join(", "))
+    }
+}
+
 /// Merge duplicate diagnostics across combos — and, GH #18, across target
 /// versions: identical (path, line, col, severity, message) diagnostics
 /// are reported ONCE with the combined combo and version lists.

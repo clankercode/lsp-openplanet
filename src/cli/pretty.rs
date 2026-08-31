@@ -149,11 +149,15 @@ fn format_diagnostic_block(
     };
 
     let mut out = String::new();
-    // header: path:line:col + severity (+ GH #57 combo label, if any)
+    // header: path:line:col + severity (+ GH #57 combo label and GH #18
+    // version label, if any)
     let combo = super::matrix::combo_prefix(&item.combos);
     let combo = combo.trim_end();
     let sep = if combo.is_empty() { "" } else { " " };
-    out.push_str(&format!("{path_s}:{loc_s}: {sev_styled}{sep}{combo}\n"));
+    let versions = super::matrix::version_suffix(&item.versions);
+    out.push_str(&format!(
+        "{path_s}:{loc_s}: {sev_styled}{sep}{combo}{versions}\n"
+    ));
 
     let source = source_cache
         .entry(item.path.clone())
