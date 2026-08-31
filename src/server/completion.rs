@@ -1690,6 +1690,51 @@ mod b088_enum_values_after_colon_colon {
         .collect()
     }
 
+    /// THE BASELINE, pinned per shape, and it records WHICH of the two
+    /// stacked defects made the `::` path empty.
+    ///
+    /// This distinction is not pedantry. Before the fix every shape below
+    /// returned an empty list, and "empty" has two possible causes here: the
+    /// `scope_exists` gate rejecting the path, or the enumeration behind it
+    /// having no enum-value branch. A fix to only the second still returns
+    /// empty, so a baseline that was ASSUMED rather than measured would make
+    /// that read as "my change did nothing" instead of "the gate is still
+    /// rejecting". Measured: the gate is false for every enum shape, so the
+    /// gate was the proximate cause and the missing branch was never reached.
+    ///
+    /// It also guards the architectural boundary this ticket turns on.
+    /// `scope_exists` is the TYPECHECKER's notion of a valid namespace path
+    /// and B088 was explicitly not to be fixed by widening it — doing so
+    /// would make the checker accept paths THROUGH an enum. An enum is still
+    /// not a scope; completion simply asks a broader question. If someone
+    /// later "fixes" this at the gate, this test goes red and says why.
+    #[test]
+    fn an_enum_is_still_not_a_namespace_scope_for_the_typechecker() {
+        let idx = real_index();
+        for shape in [
+            "Meta::RunContext",            // Core enum in a namespace
+            "UI::Cond",                    // ditto, second namespace
+            "VirtualKey",                  // Core enum at global scope
+            "Game::CGameMenu::EMenuOrder", // Nadeo enum under a class scope
+        ] {
+            assert!(
+                idx.lookup_enum(shape).is_some(),
+                "fixture drift: `{shape}` is not an enum any more"
+            );
+            assert!(
+                !idx.scope_exists(shape),
+                "`{shape}` must NOT be a typechecker scope — B088 is fixed in \
+                 the completion path precisely so this stays false"
+            );
+        }
+        // …while the namespace CONTAINING one is a scope, which is what the
+        // fall-through path needs.
+        assert!(
+            idx.scope_exists("Meta"),
+            "the enclosing namespace must still be a scope"
+        );
+    }
+
     /// THE REPORT. `Meta::RunContext::` — a Core enum inside a namespace.
     #[test]
     fn core_enum_in_a_namespace_offers_its_values() {

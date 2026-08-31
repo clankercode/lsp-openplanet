@@ -1,0 +1,7 @@
+[meta]
+name    = "Issue Repro B094 - Interface Not Implemented"
+author  = "clankercode"
+version = "0.1.0"
+
+[script]
+module = "T"

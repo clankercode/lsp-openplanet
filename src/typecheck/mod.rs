@@ -17,6 +17,7 @@ pub mod builtins;
 pub mod call_site;
 pub mod checker;
 pub mod global_scope;
+pub mod interface_impl;
 pub mod repr;
 pub mod resolver;
 pub mod workspace;
