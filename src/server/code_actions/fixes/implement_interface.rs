@@ -40,6 +40,7 @@ use crate::parser::ast::{Item, SourceFile};
 use crate::server::code_actions::fix::{FixContext, FixDescriptor, FixFamily};
 use crate::server::diagnostics::span_to_range;
 use crate::symbols::scope::SymbolKind;
+use crate::typecheck::interface_impl::canonical_type;
 use crate::typecheck::{TypeDiagnostic, TypeDiagnosticKind};
 
 pub const FAMILY: FixFamily = FixFamily {
@@ -225,11 +226,20 @@ fn interface_params(ctx: &FixContext<'_>, parsed: &ParsedSignature) -> Option<Ve
         if *is_const != parsed.is_const {
             continue;
         }
-        let canonical: Vec<String> = params
-            .iter()
-            .map(|(_, t)| t.chars().filter(|c| !c.is_whitespace()).collect())
-            .collect();
-        if canonical != parsed.param_types {
+        // B112: canonicalise BOTH sides, with the checker's own rule.
+        //
+        // This used to strip whitespace from the POOLED type and compare it
+        // against the diagnostic's parameter text VERBATIM, which agreed
+        // only because `render_signature` also stripped whitespace — i.e. a
+        // user-facing MESSAGE was doubling as a wire format. The moment that
+        // message was spelled the way the engine spells it
+        // (`const string&in`, B112), the match broke and the action stopped
+        // being offered. Comparing canonical to canonical makes this
+        // independent of how the message is spelled, which is what the
+        // comparison always meant to be.
+        let canonical: Vec<String> = params.iter().map(|(_, t)| canonical_type(t)).collect();
+        let want: Vec<String> = parsed.param_types.iter().map(|t| canonical_type(t)).collect();
+        if canonical != want {
             continue;
         }
         if hit.is_some() {
@@ -461,6 +471,35 @@ mod tests {
         ] {
             let out = fixed(&format!("interface I {{ {iface} }}\nclass C : I {{}}\n"));
             assert!(out.contains(want), "for `{iface}` expected `{want}` in:\n{out}");
+        }
+    }
+
+    /// B112: the action must be offered whatever whitespace the interface
+    /// author used, because the diagnostic's parameter text is a MESSAGE,
+    /// not a wire format. Before B112 the two sides agreed only because
+    /// both were whitespace-stripped; once the message was spelled the way
+    /// the engine spells it, a verbatim comparison stopped matching and the
+    /// quick fix silently disappeared. Every spelling below denotes the same
+    /// type and must therefore produce the same single action.
+    #[test]
+    fn the_action_survives_any_source_spelling_of_a_parameter() {
+        for (decl, want) in [
+            ("void M(const string &in s);", "Implement `void I::M(const string&in)`"),
+            ("void M(const string&in s);", "Implement `void I::M(const string&in)`"),
+            (
+                "void M(const  string   &   in  s);",
+                "Implement `void I::M(const string&in)`",
+            ),
+            ("void M(int &out a);", "Implement `void I::M(int&out)`"),
+            ("void M(int&out a);", "Implement `void I::M(int&out)`"),
+            ("void M(int &inout a);", "Implement `void I::M(int&inout)`"),
+            ("void M(Thing@ t);", "Implement `void I::M(Thing@)`"),
+            ("void M(Thing @ t);", "Implement `void I::M(Thing@)`"),
+            ("void M(int a);", "Implement `void I::M(int)`"),
+        ] {
+            let source =
+                format!("class Thing {{}}\ninterface I {{ {decl} }}\nclass C : I {{}}\n");
+            assert_eq!(titles(&source), vec![want.to_string()], "for `{decl}`");
         }
     }
 
