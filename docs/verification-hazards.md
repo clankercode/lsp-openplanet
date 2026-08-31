@@ -1945,3 +1945,61 @@ records under vacuity.
 Related: "Mechanism 4: the presentation dropped the rows, and the presentation
 looked fine" — same family, one level up. There the rows existed and were not
 shown; here the number existed and was not read.
+
+## Piping a gate to `tail` destroys its exit code — and why that did not cost us
+
+Found by lane-unused during B093, self-reported. Its first RED run was
+
+    just rrun ... 2>&1 | tail -60
+
+and the shell reported the exit status of `tail`, which is 0, over a cargo run
+that had actually exited **101**. It caught this only because it read the body
+rather than the status.
+
+That is the **third** distinct false-green mechanism in one day, and each was a
+different axis:
+
+1. `--test <name>` went to libtest as a name filter — coverage complete, total
+   zero, every check passed (fixed in 586d18b).
+2. ENOSPC on the build box — `just rtest` exited 0 over a build that failed
+   (B106).
+3. This one — the exit code never survived the pipeline at all.
+
+**The rule.** Never pipe a gate command. Redirect to a file and capture the
+status, then read the file:
+
+    LSP_REMOTE_HOST=x-tuf python3 scripts/remote-build.py test > /tmp/gate.txt 2>&1
+    echo "exit: $status"        # zsh; $? in bash
+    tail -3 /tmp/gate.txt
+
+**But the interesting half is why this batch survived it anyway**, including in
+the coordinator's own merges, every one of which piped `just rtest` to `tail`.
+
+The answer is that the evidence was never the exit code. It was the printed
+`SUITE-VERIFIED` line, which `scripts/test-suite.py` emits *only* on a run that
+passed every check, and which carries the totals and the binary count. A run
+that dies produces no marker, so a pipeline that has thrown the status away
+still gets **nothing** rather than a smaller number. That is not luck — it is
+the documented design intent, stated in that file:
+
+> That is what makes the gate survive the second mechanism: a lane whose
+> pipeline discards the exit code still gets NOTHING from a broken run rather
+> than a smaller number, because the line it greps for is absent.
+
+**Generalisation, and it is the durable part.** Three independent false-green
+mechanisms landed on this gate in a single day, from three directions nobody
+enumerated in advance. None produced a bad merge. What held was not that we
+predicted them — we predicted none of them — but that the gate was built so its
+*positive* signal is expensive to forge: a single line, printed at one place,
+only on a fully clean run, carrying numbers that have to reconcile against the
+previous run.
+
+So when you build a check, ask which direction is cheap to fake. A check whose
+"pass" is the ABSENCE of something — a zero exit, an empty diff, no output —
+can be forged by anything that breaks the machinery, and every one of the three
+mechanisms above did exactly that. A check whose pass is a specific positive
+assertion that must reconcile with an independent number cannot be forged by
+breakage, only by a working system telling the truth.
+
+The corollary for reviewers: **reconcile the total, do not just read the word.**
+2601 + 15 = 2616 is the check. `SUITE-VERIFIED` on its own is a word.
