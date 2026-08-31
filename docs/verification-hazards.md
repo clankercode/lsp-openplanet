@@ -383,6 +383,70 @@ indistinguishable from "I am structurally incapable of seeing it".
   instance above was caught by something written down, never by the
   understanding that had just been demonstrated in prose.
 
+- **A refactor inverted a cleanup ordering that the original had right, and
+  `ignore_errors=True` hid the consequence.** Master's probe unloaded the
+  plugin from the game and *then* removed its directory. Wrapping the probe
+  body in a `with` block moved removal into the context manager's exit — which
+  runs **before** the inner unload — so the code removed a directory the game
+  still held open. Paired with `shutil.rmtree(ignore_errors=True)`, a removal
+  that failed because of those open handles was **indistinguishable from one
+  that succeeded**. The first version of the fix could therefore produce the
+  exact stranded fixture the ticket exists to prevent, silently.
+
+  Three separate lessons, and they compound:
+
+  - **`with` / RAII changes *when* cleanup runs, not just whether it runs.**
+    Moving an operation into a context manager reorders it against every other
+    teardown in the function. Scope exit is reverse order of acquisition, which
+    is correct for resources and wrong whenever teardown has an external
+    dependency ordering — here, "tell the game to let go" must precede "delete
+    the files".
+  - **`ignore_errors=True` is not error handling; it is the deletion of
+    evidence.** It converts a failed destructive operation into a successful-
+    looking one, which is the single worst direction for a failure to point.
+    The fix retries, verifies, and **downgrades the probe to `skipped` rather
+    than reporting a verdict it cannot stand behind** — a cleanup failure that
+    is merely logged is not acted upon.
+  - **The original was right and the improvement broke it.** Refactoring for
+    tidiness silently traded a correctness property for a structural one. When
+    restructuring code that already works, the ordering it happens to have may
+    be load-bearing and undocumented — which is an argument for a comment at
+    the time you discover why, not for never refactoring.
+
+- **Prefix matching is not an ownership test.** The same sweep deleted
+  directories matching `lsp-issue-repro-*`. A real third-party plugin happening
+  to carry that name would have been destroyed — and the sweep ran *before*
+  argument validation, so an invocation with no fixture at all deleted things
+  on its way to an arg error.
+
+  **Deleting someone else's data is worse than refusing to run**, so the rule
+  became: removal requires an explicit `.lsp-probe-owned` marker, or an empty
+  directory (which declares nothing and is the observed shape of the strays
+  this ticket found). Anything else is left in place with a warning that names
+  it.
+
+  The marker also carries the owning **pid**, and a directory owned by a live
+  process is never swept — deleting it would corrupt that run's measurement,
+  which is the same damage the ticket is about, pointed the other way. **A
+  cleanup mechanism is itself a contamination mechanism when it runs beside
+  something it does not know about.**
+
+  General form: **a name is a hint, not a title deed.** Any destructive sweep
+  keyed on a naming convention will eventually meet something that matches by
+  coincidence, and the failure is unrecoverable and belongs to someone else.
+  Require a positive ownership claim the sweeper itself wrote.
+
+- **Review value scales with blast radius, not with change size.** Earlier in
+  this batch a killed review was deliberately *not* re-run, on the reasoning
+  that the outstanding question was better answered by an enforcement scan than
+  by a reviewer. That was right for a config-loading change with strong measured
+  evidence and no destructive operations. It would have been badly wrong here:
+  this change deletes directories in a live application's plugin folder, and an
+  independent review returned FAIL with four blocking findings, two of which
+  could destroy a user's unrelated data. **The question is never "is this
+  change big?" but "what is the worst thing this code can do to state it does
+  not own?"**
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
