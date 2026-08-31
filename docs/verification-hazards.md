@@ -3882,3 +3882,45 @@ The illustration from the same night, kept short because it is an illustration:
 lane-unused read ten commits on master as ten merges landed, having never asked
 what the commits touched — the denominator was on screen, the units were not,
 and one `git log --name-only` distinguished them.
+
+## Write the expected count down BEFORE the run
+
+Three instrument defects were caught in this batch by their author, and every one
+was found **while building or measuring an instrument — never while reviewing
+output.** That is not luck. It follows from the polarity recorded under the
+nothing-ran entry: a defect that empties a population also suppresses the error
+explaining why, so it leaves a reviewer nothing to notice. It surfaces only when
+somebody is holding an expected number and the arriving number contradicts it.
+
+**The rule: predict the count before the run, not after.** A number written down
+in advance can be contradicted. A number explained afterwards almost never is,
+because any number that arrives has a story available — and the story is
+constructed by the same person who wants the run to have worked.
+
+**Prediction beats reconciliation even when reconciliation is exact.** The
+misplaced-`#[test]` incident recorded above is the proof: the suite total
+reconciled *perfectly* and was still wrong, because +1 duplicate and −1 disabled
+cancel. **Reconciliation checks arithmetic. Prediction checks understanding.**
+The two are not degrees of the same rigour; a reconciliation cannot fail for the
+reason a prediction fails.
+
+**A STRUCTURAL prediction is stronger than a numeric one.** In B134 the alias
+pairing made a 4/4 split *structurally necessary* — four deprecated names, four
+replacements, one shared doc string each — so a 3/5 was **impossible**, not
+merely surprising, and the substring bug behind it had nowhere to hide. A
+predicted *range* can absorb a bad result; a predicted *structure* cannot. This
+distinction is worth stating because "predict the number" invites a soft guess,
+and a soft guess is precisely what a wrong result hides inside. Prefer a
+prediction that some arithmetic or invariant forces over one you merely expect.
+
+**When you cannot predict it, say so.** This is the honest and common case: a new
+corpus, an unfamiliar dump, a first run. The failure is not the absence of a
+prediction — it is letting the number arrive and treating it as confirmation
+anyway. Report the run as **uncalibrated** and act accordingly. An unpredicted
+number is data; it is not a check, and it must not be cited later as though a
+check had passed.
+
+The corollary for reports: a count quoted without the expectation it was measured
+against carries no information about whether anything was verified. The habit
+that survives from this batch is one line written before the command runs —
+"this should report N, because …" — where the *because* is doing the work.
