@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T09:43:56Z"
 depends_on: []
 estimate_hours: 1
 id: B101
 priority: high
+started_at: null
 status: pending
 tags: []
 title: Method constness is absent from the pooled symbol, so void M() const and void M() are indistinguishable to every consumer of the symbol table
@@ -24,3 +26,66 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by lane-unused while implementing B094 (2026-08-31). Filed separately
+because it affects EVERY consumer of the symbol table, not only the rule that
+surfaced it.
+
+## Defect
+
+`SymbolKind::Function` carries no `is_const`, so a pooled method symbol drops
+the trailing `const`. `void M() const` and `void M()` are therefore
+indistinguishable to anything reading the symbol table.
+
+**The engine treats them as different signatures — MEASURED**, not assumed. From
+B094's 18-fixture probe against Openplanet 1.29.14:
+
+    class C : I { void M() {} }   where I declares `void M() const`
+      -> Missing implementation of 'void I::M() const'
+
+So the engine rejects a non-const method offered against a const requirement,
+and names the constness in the message it wants back.
+
+## Consequence today
+
+B094's interface-implementation check cannot compare constness, so it does NOT
+diagnose that case. That is a **known missed error in the deliberately chosen
+direction** — B094 fails silent wherever it cannot compare confidently, because
+its risk polarity is a false ERROR on code that compiles, which is worse than a
+missed warning. So this is not a B094 bug; it is the reason B094 has a hole.
+
+But B094 is only the consumer that noticed. Anything else that reasons about
+method signatures from the symbol table has the same blindness available to it.
+
+## Work
+
+Add `is_const` to `SymbolKind::Function` and thread it from the parser through
+the pool. Then B094's `types_equal` path can compare it and drop that bail.
+
+Check every consumer before changing the variant: completion, hover, signature
+help, go-to-definition, and the unused analysis all read function symbols, and
+a new field is the kind of change that compiles everywhere and changes
+behaviour somewhere.
+
+## Test plan
+
+Red: an interface declaring `void M() const` implemented by a class with
+`void M()` must diagnose, quoting the engine's exact message.
+
+Generalise per CLAUDE.md — const on the interface side only, on the class side
+only, on both (must be SILENT), and combined with each of the parameter shapes
+B086 measured (`&in`, `&out`, `T@`, defaulted). Constness interacts with those
+rather than being orthogonal to them.
+
+Required silence in the same fixture: a correctly const-matched pair, and a
+non-const pair, both silent — otherwise "flag any const difference" passes.
+
+The engine verdict for the const case is already measured and quoted above; the
+combinations with parameter shapes are NOT, and would want the port via
+`tm-control-mcp` (B097 — RemoteBuild cannot deliver a `load_plugin`).
+
+## Related
+
+B094 (the consumer that surfaced it, and whose silence this explains), B086
+(the export-stub binding probe that measured how the engine treats signature
+differences, where `const` alone was likewise enough to break a bind).
