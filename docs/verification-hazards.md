@@ -1675,3 +1675,68 @@ that generalises.
 Corollary already recorded but now reinforced: a helper reached from one of N
 positions is a check that exists at one of N positions, and it LOOKS from the
 call site like it exists everywhere.
+
+## A silence test written before the fix passes for free, and stays green for reasons that are not the fix
+
+B088, 2026-08-31, caught by lane-unused with a mutation and worth the space
+because the failure survives the standard red/green discipline entirely.
+
+The ticket needed required-silences alongside its positives: a real namespace
+must still offer members and not enum values; an anonymous member-enum key must
+not leak; an unknown qualifier must offer nothing. Written before the fix, as
+TDD asks. Red was 9 failed / 7 passed — **and the 7 that passed were exactly the
+silences.** That much is expected and fine: nothing was being offered at all, so
+every "must offer nothing" assertion passed for free.
+
+The trap is what happens next. After the fix they are still green, and the habit
+is to read that as confirmation. **It is the same population it always was.**
+Nothing in the observation distinguishes
+
+- *still correctly silent* — the guard works, from
+- *still structurally incapable of speaking* — the assertion could never fail.
+
+One of them was the second case, and remained so after the fix.
+`an_anonymous_member_enum_key_offers_nothing` probed `CControlEntry::Type::`,
+asserting a value was absent. That spelling **resolves to nothing in the index at
+all** — the real key is `Control::CControlEntry::Type` — so the assertion could
+not have failed for any implementation whatsoever. It was vacuous twice over: a
+silence test that passed for free, naming a key that did not exist.
+
+It was found only by a SECOND mutation: removing the anonymous filter from the
+code under test left every test green. The guard the comment described was never
+being exercised.
+
+**Countermeasures.**
+
+- **A silence test's green tells you nothing until you have made it go red.**
+  Mutate the guard it names — delete the filter, invert the condition — and
+  require that specific test to fail. A silence assertion that no mutation can
+  break is a comment with a `#[test]` on it.
+- **Check that the subject of a negative assertion EXISTS.** "X is not offered"
+  is vacuous when X could never be offered. Assert the lookup resolves first,
+  then assert what is done with it. This is the same shape as a `grep -v` over a
+  file whose name is misspelled.
+- **Prefer a structural property to an instance** where one is available. The
+  replacement asserts over the whole shipped typedb that *no* anonymous enum is
+  reachable by any source spelling — which cannot be satisfied by naming a key
+  that does not exist, and which found the real mechanism: `source_names`
+  excludes anonymous entries entirely, so `lookup_source_enum`'s own
+  `!anonymous` filter is a second line that currently CANNOT FIRE. The comment
+  had been wrong about which line was doing the work.
+- **Give the structural assertion a positive control.** Aimed at named enums the
+  same code reports 630 reachable and fails with the list, so the instrument is
+  known to be able to observe a failure.
+
+Note how this differs from the ordinary red/green rule. Red-then-green already
+covers the POSITIVE cases — they were 9 genuine reds. Silences are the half
+where red-then-green gives no signal by construction, because their red and
+their green look identical. **Every required-silence assertion needs its own
+mutation, or it is unverified no matter how disciplined the surrounding
+workflow.**
+
+Related and reinforcing, from the same day: a negative CONTROL must fail for a
+different reason than the positive case would (B097 — `zzz_no_such_route`
+failed through the same 64-byte truncation as every route it was controlling
+for, so it could not discriminate). Both are the same underlying error — an
+assertion that cannot distinguish the world where the code is right from the
+world where it is broken.
