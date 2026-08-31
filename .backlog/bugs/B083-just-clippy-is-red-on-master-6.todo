@@ -82,3 +82,42 @@ findings: the line-normalised set diff between branch `b074-env-enforcement`
 and master `cb28c49` is empty in both directions, and both trees report the
 same 65 errors under `-D warnings`. Filed rather than fixed, per the standing
 instruction not to widen a ticket.
+
+## SCOPE DECISION (coordinator, 2026-08-31)
+
+**Do NOT fix the 65 errors. Build the differential gate instead.** Land
+`scripts/clippy-delta.py`, offered by lane-b057 before it stopped.
+
+Reasoning, since the ticket title invites the other reading:
+
+- **Fixing 65 clippy errors touches most of the tree.** Four lanes are editing
+  `checker.rs`, `unused.rs`, `resolver.rs` and the test scripts right now. A
+  tree-wide lint sweep conflicts with every one of them and forces each to
+  review against a base the sweep invalidated. The gate is what is wanted; the
+  clean tree is a separate, later, low-value errand.
+- **The gate a lane actually needs is "did I add a lint?", not "is the tree
+  clean?"** A differential check answers that on a red tree, so it works today
+  instead of after a sweep.
+
+## Method constraints — these are load-bearing, not style
+
+- **Never run with `-D warnings`.** It aborts compilation early and TRUNCATES
+  the diagnostic set: the authoritative count on this tree is **129 raw / 77
+  unique**, and `-D warnings` reports **115 / 63**. A gate built on the smaller
+  number silently permits the 14 it cannot see.
+- **Compare by set difference with line numbers normalised out**, not by count.
+  Equal totals collided by coincidence at least once in this batch; a count is
+  not an identity. An unchanged total with a swapped member must fail.
+- **A baseline without its method is not comparable to anything.** Record how
+  the baseline was produced (exact command, toolchain version, feature flags)
+  in the same file as the numbers, or the next reader compares 77 against 63
+  and concludes something moved.
+
+## Anti-vacuity requirement
+
+The gate must be proven able to fail. Inject a known lint into a throwaway copy
+and require a red; a differential gate that reports "no new lints" because it
+failed to parse clippy's output is the exact failure this batch keeps finding.
+Follow `scripts/check_probe_cleanup_nonvacuous.py` (B077) — it scores a missing
+or ambiguous anchor as a MISS rather than skipping it, and gates the baseline
+first.
