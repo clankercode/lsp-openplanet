@@ -1231,6 +1231,478 @@ def run_selftest() -> int:
         check("an un-injected probe is refused rather than reaching the game",
               refused is not None and "must not touch the game" in refused, True)
 
+    # --- B145: the engine's verdict must be RECORDED, and recorded honestly --
+    # 64 fixtures carried zero committed engine evidence because the generator
+    # printed and nobody stored. Every case here is a PAIR: a recorder that
+    # refuses everything, or that calls everything CLEAN, passes a suite that
+    # only checks records get written.
+    def rec_of(status, errors=(), skipped=None):
+        r = {"fixture": "fx", "build_status": status,
+             "game_errors": [dict(file="lsp-issue-repro-fx/Main.as", line=l,
+                                  col=c, sev="ERR", msg=m)
+                             for l, c, m in errors]}
+        if skipped:
+            r["skipped"] = skipped
+        return r
+
+    rejected = tsv_row(rec_of("REJECTED", [(21, 25, "Only object types ... &inout")]),
+                       {"count": 12}, "1.29.14", "2026-09-01")
+    check("B145: a REJECTED fixture records the engine's polarity",
+          (rejected["verdict"], rejected["build_status"]), ("REJECT", "REJECTED"))
+    check("B145: the engine message is recorded VERBATIM to the right of the "
+          "colon — that is the part hand-transcription loses",
+          rejected["engine_message"],
+          "Main.as(21,25): Only object types ... &inout")
+    check("B145: the staging folder id is normalised away — it is an artefact "
+          "of the probe, not of the fixture",
+          "lsp-issue-repro" in rejected["engine_message"], False)
+    check("B145: this LSP's answer is recorded beside the engine's",
+          rejected["lsp_today"], "DIAGNOSES(12)")
+
+    # PAIR: the ACCEPT half. B086's defect was a recorder that only handled
+    # one polarity.
+    accepted = tsv_row(rec_of("CLEAN"), {"count": 0}, "1.29.14", "2026-09-01")
+    check("B145: a CLEAN fixture records the OTHER polarity",
+          (accepted["verdict"], accepted["build_status"], accepted["lsp_today"]),
+          ("ACCEPT", "CLEAN", "CLEAN"))
+    check("B145: the two polarities produce DIFFERENT rows",
+          rejected["engine_message"] == accepted["engine_message"], False)
+
+    # A probe that could not look must not be recorded as an answer.
+    notrun = tsv_row(rec_of("NOT-RUN", skipped="RemoteBuild not alive"),
+                     {"count": 0}, "1.29.14", "2026-09-01")
+    check("B145: a probe that never ran is NOT recorded as ACCEPT",
+          notrun["verdict"], "UNKNOWN")
+    # A skipped probe never sets build_status AT ALL -- that is the real shape,
+    # and testing only an explicit "NOT-RUN" left the fallback untested. It is
+    # the fallback that decides what a probe which never spoke is recorded as.
+    absent = tsv_row({"fixture": "fx", "skipped": "RemoteBuild not alive"},
+                     {"count": 0}, "1.29.14", "2026-09-01")
+    check("B145: a record with NO build_status at all falls back to NOT-RUN, "
+          "not to CLEAN — a probe that never spoke has not accepted anything",
+          (absent["build_status"], absent["verdict"]), ("NOT-RUN", "UNKNOWN"))
+    check("B145: and its message says why it could not be measured",
+          absent["engine_message"], "RemoteBuild not alive")
+    check("B145: an unmeasured LSP is UNMEASURED, not CLEAN",
+          tsv_row(rec_of("CLEAN"), {"count": None}, "1.29.14",
+                  "2026-09-01")["lsp_today"], "UNMEASURED")
+
+    # --- B145 follow-up: a prose reason must EXPIRE when its subject moves --
+    # B157 and B168 found the same defect in two separate audits: a JUSTIFIED
+    # row whose free-text reason WAS the false claim, so the audit accepted the
+    # defect BECAUSE of the justification. This artifact reproduced it within
+    # one regeneration: b102-array-sort-correct-callbacks carried the note "the
+    # engine rejects all three 'correct' comparators and the LSP is silent on
+    # all three", and after B152 moved those comparators to the sibling fixture
+    # the row measured engine ACCEPT and LSP DIAGNOSES(3) -- both halves
+    # inverted -- with the note carried across unchanged and nothing firing.
+    def stamped(**kw):
+        base = {"fixture": "fx", "build_status": "REJECTED", "verdict": "REJECT",
+                "engine_compiled": "4", "lsp_today": "CLEAN",
+                "divergence": "the LSP misses this",
+                "divergence_for": "REJECT|CLEAN"}
+        base.update(kw)
+        return base
+
+    check("B145: a note stamped for the CURRENT measurement settles the row",
+          agreement_problems([stamped()]), [])
+    flipped = agreement_problems([stamped(verdict="ACCEPT",
+                                          build_status="CLEAN",
+                                          lsp_today="DIAGNOSES(3)")])
+    if not flipped:
+        check("B145: a note survives a POLARITY FLIP — the exact b102 shape, "
+              "where both halves inverted and the prose still read as a reason",
+              flipped, ["<a problem>"])
+    elif "stamped for" not in flipped[0]:
+        check("B145: the expiry report names the stamp and the new state",
+              flipped, ["stamped for"])
+    # It must expire on EITHER half moving, not only on a full flip.
+    for label, kw in (("the LSP's answer alone", {"lsp_today": "DIAGNOSES(9)"}),
+                      ("the engine's verdict alone",
+                       {"verdict": "ACCEPT", "build_status": "CLEAN"})):
+        if not agreement_problems([stamped(**kw)]):
+            check(f"B145: a note expires when {label} moves", [], ["<a problem>"])
+    # An unstamped note -- hand-typed straight into the file, dodging the
+    # generator's expiry -- must not settle anything either.
+    if not agreement_problems([stamped(divergence_for="-")]):
+        check("B145: an UNSTAMPED note does not settle a row; typing prose "
+              "directly into the file must not bypass the expiry",
+              [], ["<a problem>"])
+    # PAIR: a row with NO note is judged on its own merits, not condemned for
+    # a missing stamp.
+    check("B145: a row with no note is not asked for a stamp",
+          agreement_problems([stamped(divergence="-", divergence_for="-",
+                                      verdict="REJECT",
+                                      lsp_today="DIAGNOSES(3)")]), [])
+    # The carry/expire decision itself, which lives inside a function that
+    # needs a live game -- so it is tested here, where it can be reached. Two
+    # mutations that disabled it were MISSED before this existed.
+    _probe = {"fixture": "fx", "verdict": "REJECT", "lsp_today": "CLEAN"}
+    check("B145: a note whose stamp still holds is carried across a regen",
+          carry_forward({"fx": ("a reason", "REJECT|CLEAN")}, _probe),
+          ("a reason", "REJECT|CLEAN"))
+    check("B145: a note whose stamp no longer holds is DROPPED, not carried",
+          carry_forward({"fx": ("a reason", "ACCEPT|DIAGNOSES(3)")}, _probe),
+          None)
+    check("B145: a fixture with no previous note carries nothing",
+          carry_forward({}, _probe), None)
+    check("B145: a placeholder note is not carried as if it were a reason",
+          carry_forward({"fx": ("-", "REJECT|CLEAN")}, _probe), None)
+    # And a freshly written row must be stamped with ITS OWN state, or the
+    # stamp stops describing what the note was written against.
+    _fresh = tsv_row(rec_of("REJECTED", [(1, 1, "boom")]), {"count": 0},
+                     "1.29.14", "2026-09-01", {"fx": "a fresh reason"})
+    check("B145: a freshly stamped note records this row's own measurement",
+          (_fresh["divergence"], _fresh["divergence_for"]),
+          ("a fresh reason", divergence_state(_fresh["verdict"],
+                                              _fresh["lsp_today"])))
+    check("B145: a row with no note carries no stamp",
+          tsv_row(rec_of("CLEAN"), {"count": 0}, "1.29.14",
+                  "2026-09-01")["divergence_for"], "-")
+
+    check("B145: divergence_state is the pair a divergence claim is ABOUT",
+          divergence_state("ACCEPT", "DIAGNOSES(3)"), "ACCEPT|DIAGNOSES(3)")
+    if divergence_state("ACCEPT", "CLEAN") == divergence_state("REJECT", "CLEAN"):
+        check("B145: divergence_state distinguishes the engine's verdict",
+              "collapsed", "distinct")
+
+    # --- B145 follow-up: polarity agreement is not the same question -------
+    # b102-array-sort-mismatched-callbacks declares `int &inout` at line 21,
+    # which is not declarable. The engine emitted two errors there, compiled
+    # ZERO bodies, and never verdicted one of the twelve Sort calls the fixture
+    # exists to measure -- while the LSP reported 12 diagnostics about exactly
+    # those calls. Recorded as REJECTED beside DIAGNOSES(12), the agreement
+    # check called it agreement. Five of 63 rows were in that state.
+    def reached_row(**kw):
+        base = {"fixture": "fx", "build_status": "REJECTED", "verdict": "REJECT",
+                "engine_compiled": "3", "lsp_today": "DIAGNOSES(12)",
+                "divergence": "-"}
+        base.update(kw)
+        base.setdefault("divergence_for",
+                        divergence_state(base["verdict"], base["lsp_today"]))
+        return base
+
+    aborted = agreement_problems([reached_row(engine_compiled="0")])
+    if not aborted:
+        check("B145: an engine that compiled ZERO bodies beside an LSP "
+              "reporting call-site diagnostics is reported — both spoke, and "
+              "that is all the polarity check can see",
+              aborted, ["<a problem>"])
+    elif "same question" not in aborted[0]:
+        check("B145: the report says why polarity is not enough",
+              aborted, ["same question"])
+
+    # PAIR, and it is the one that matters: four of the five real rows are
+    # fixtures whose SUBJECT is a declaration, where a declaration-time
+    # rejection is the complete and correct answer. A note settles them, and a
+    # check that refused them regardless would be turned off within the week.
+    check("B145: a declared reason settles a declaration-time rejection",
+          agreement_problems([reached_row(
+              engine_compiled="0",
+              divergence="the fixture's subject IS the duplicate declaration")]),
+          [])
+    # PAIR: an engine that DID reach the call sites needs no note.
+    check("B145: an engine that compiled bodies is ordinary agreement",
+          agreement_problems([reached_row()]), [])
+    # PAIR: and zero bodies beside a SILENT LSP is a real disagreement already
+    # caught by the polarity check — it must not be re-reported as this.
+    silent = agreement_problems([reached_row(engine_compiled="0",
+                                             lsp_today="CLEAN")])
+    if len(silent) != 1 or "no divergence is declared" not in silent[0]:
+        check("B145: zero bodies beside a SILENT LSP stays the plain polarity "
+              "disagreement, reported once and not twice",
+              silent, ["<one polarity problem>"])
+    # PAIR: a CLEAN build compiles bodies or not; either way this rule is about
+    # REJECTED units only, or every clean fixture would demand a note.
+    check("B145: a CLEAN engine verdict is never asked for this note",
+          agreement_problems([reached_row(build_status="CLEAN",
+                                          verdict="ACCEPT",
+                                          engine_compiled="0",
+                                          lsp_today="CLEAN")]), [])
+
+    # The counter itself: attributed, and INFO-only.
+    _cr = {"folder_id": "lsp-issue-repro-fx", "diagnostics": [
+        {"file": "lsp-issue-repro-fx/Main.as", "sev": "INFO",
+         "msg": "Compiling void Main()"},
+        {"file": "lsp-issue-repro-fx/Main.as", "sev": "INFO",
+         "msg": "Compiling void Other()"},
+        {"file": "lsp-issue-repro-fx/Main.as", "sev": "INFO",
+         "msg": "Something else entirely"},
+        {"file": "someone-elses-plugin/Main.as", "sev": "INFO",
+         "msg": "Compiling void Theirs()"},
+        {"file": "lsp-issue-repro-fx/Main.as", "sev": "ERR",
+         "msg": "Compiling void NotAnInfoLine()"},
+    ]}
+    check("B145: only this folder's INFO `Compiling` lines are counted — the "
+          "log is shared, and another session's compile would inflate ours",
+          folder_compiled(_cr), 2)
+    check("B145: a record with no folder id counts nothing rather than "
+          "everything",
+          folder_compiled({"diagnostics": _cr["diagnostics"]}), 0)
+    aborted_rec = tsv_row(
+        {"fixture": "fx", "folder_id": "lsp-issue-repro-fx",
+         "build_status": "REJECTED", "diagnostics": [],
+         "game_errors": [{"file": "lsp-issue-repro-fx/Main.as", "line": 21,
+                          "col": 25, "sev": "ERR", "msg": "not declarable"}]},
+        {"count": 12}, "1.29.14", "2026-09-01")
+    check("B145: a declaration-time abort records ZERO compiled bodies",
+          aborted_rec["engine_compiled"], 0)
+
+    # --- B145: measuring the LSP side, and refusing to guess ---------------
+    # Every one of these returns "I could not measure", which the recorder
+    # turns into UNMEASURED. A version that answered 0 instead would record a
+    # CLI that never ran as a clean run -- the same silence-as-answer shape
+    # that left 64 fixtures with no evidence.
+    class _Proc:
+        def __init__(self, out):
+            self.stdout, self.stderr = out, ""
+
+    _fx = FIXTURES / "does-not-matter"
+    check("B145: an LSP binary that is not there is UNMEASURED, not clean",
+          run_lsp_on_fixture(_fx, binary=Path("/nonexistent/openplanet-lsp"))
+          ["count"], None)
+    check("B145: output with no recognised summary line is UNMEASURED",
+          run_lsp_on_fixture(_fx, binary=Path(__file__),
+                             runner=lambda c: _Proc("panicked at src/main.rs"))
+          ["count"], None)
+    check("B145: a CLI that could not be launched at all is UNMEASURED",
+          run_lsp_on_fixture(
+              _fx, binary=Path(__file__),
+              runner=lambda c: (_ for _ in ()).throw(OSError("boom")))
+          ["count"], None)
+    # PAIR: and real output must still parse, or the recorder can never
+    # measure anything and the artifact is empty by construction.
+    check("B145: an ordinary summary line parses",
+          run_lsp_on_fixture(_fx, binary=Path(__file__),
+                             runner=lambda c: _Proc("7 diagnostics (7 errors) in /x"))
+          ["count"], 7)
+    check("B145: B090's zero shape parses as zero, not as unmeasured",
+          run_lsp_on_fixture(
+              _fx, binary=Path(__file__),
+              runner=lambda c: _Proc("0 errors/warnings (3 info hidden) in /x"))
+          ["count"], 0)
+
+    # folder_warnings must select on SEVERITY as well as attribution. Widening
+    # it to errors would double-count every rejection: the errors are already
+    # in the message from `game_errors`.
+    _mixed = {"folder_id": "lsp-issue-repro-fx", "diagnostics": [
+        {"file": "lsp-issue-repro-fx/Main.as", "line": 1, "col": 1,
+         "sev": "ERR", "msg": "an error"},
+        {"file": "lsp-issue-repro-fx/Main.as", "line": 2, "col": 1,
+         "sev": "WARN", "msg": "a warning"},
+        {"file": "lsp-issue-repro-fx/Main.as", "line": 3, "col": 1,
+         "sev": "INFO", "msg": "compiling"},
+    ]}
+    check("B145: folder_warnings selects WARN only — errors are already "
+          "carried by game_errors and would be double-counted",
+          [d["msg"] for d in folder_warnings(_mixed)], ["a warning"])
+    check("B145: a record with no folder id attributes nothing rather than "
+          "attributing everything",
+          folder_warnings({"diagnostics": _mixed["diagnostics"]}), [])
+
+    # --- B145: engine and LSP must be compared, with gaps DECLARED ----------
+    def agree_row(**kw):
+        base = {"fixture": "fx", "build_status": "REJECTED",
+                "verdict": "REJECT", "lsp_today": "DIAGNOSES(3)",
+                "divergence": "-"}
+        base.update(kw)
+        # Default the stamp to this row's own state, so a case that is not
+        # ABOUT expiry does not accidentally test expiry.
+        base.setdefault("divergence_for",
+                        divergence_state(base["verdict"], base["lsp_today"]))
+        return base
+
+    check("B145: engine REJECTED and LSP diagnosing is agreement",
+          agreement_problems([agree_row()]), [])
+    check("B145: engine CLEAN and LSP clean is agreement",
+          agreement_problems([agree_row(build_status="CLEAN",
+                                        verdict="ACCEPT",
+                                        lsp_today="CLEAN")]), [])
+    # An engine WARNING is the engine saying something. Recording it as
+    # silence manufactured a disagreement with an LSP that was right, and lost
+    # the message text this artifact exists to keep.
+    check("B145: an engine WARNING beside an LSP diagnostic is AGREEMENT, not "
+          "a gap — the engine is a compiler and this LSP is also a linter",
+          agreement_problems([agree_row(build_status="CLEAN",
+                                        verdict="ACCEPT-WITH-WARNINGS",
+                                        lsp_today="DIAGNOSES(1)")]), [])
+    # PAIR: and a warned fixture the LSP says NOTHING about is still a gap.
+    if not agreement_problems([agree_row(build_status="CLEAN",
+                                         verdict="ACCEPT-WITH-WARNINGS",
+                                         lsp_today="CLEAN")]):
+        check("B145: a fixture the engine WARNS about and the LSP is silent "
+              "on is still reported", [], ["<a problem>"])
+    warned = tsv_row(
+        {"fixture": "fx", "folder_id": "lsp-issue-repro-fx",
+         "build_status": "CLEAN", "game_errors": [],
+         "diagnostics": [{"file": "lsp-issue-repro-fx/Main.as", "line": 8,
+                          "col": 13, "sev": "WARN",
+                          "msg": "Variable 'x' hides another variable"},
+                         {"file": "someone-elses-plugin/Main.as", "line": 1,
+                          "col": 1, "sev": "WARN", "msg": "not ours"}]},
+        {"count": 1}, "1.29.14", "2026-09-01")
+    check("B145: an engine WARNING is recorded verbatim, not replaced by the "
+          "clean boilerplate",
+          warned["engine_message"],
+          "Main.as(8,13): Variable 'x' hides another variable")
+    check("B145: a warned fixture is distinguishable from a silent one",
+          warned["verdict"], "ACCEPT-WITH-WARNINGS")
+    check("B145: another session's warning in the shared log is NOT "
+          "attributed to this fixture",
+          "not ours" in warned["engine_message"], False)
+
+    for label, row, want in (
+        ("a gap the LSP misses",
+         agree_row(lsp_today="CLEAN"), "no divergence is declared"),
+        ("a false positive the LSP invents",
+         agree_row(build_status="CLEAN", verdict="ACCEPT"),
+         "no divergence is declared"),
+        ("an engine verdict the probe could not take",
+         agree_row(build_status="NOT-RUN", verdict="UNKNOWN"),
+         "could not measure"),
+        ("a BUILD-ERR engine verdict",
+         agree_row(build_status="BUILD-ERR", verdict="UNKNOWN"),
+         "could not measure"),
+        ("an LSP answer that was never measured",
+         agree_row(lsp_today="UNMEASURED"), "not measured"),
+        ("a STALE divergence note on a row that now agrees",
+         agree_row(divergence="the LSP misses this"), "now AGREE"),
+    ):
+        got = agreement_problems([row])
+        if not got:
+            check(f"B145: {label} is reported", got, ["<a problem>"])
+        elif want not in got[0]:
+            check(f"B145: the report for {label} says why", got, [want])
+
+    # A NOT-RUN row is settled by a stamped reason, and ONLY by one.
+    _nr = {"fixture": "fx", "build_status": "NOT-RUN", "verdict": "UNKNOWN",
+           "engine_compiled": "0", "lsp_today": "CLEAN"}
+    if not agreement_problems([dict(_nr, divergence="-", divergence_for="-")]):
+        check("B145: an unexplained NOT-RUN row is still reported", [],
+              ["<a problem>"])
+    check("B145: a NOT-RUN row with a stamped reason is a recorded finding, "
+          "not a permanent red — a gate that can never go green is ignored",
+          agreement_problems([dict(_nr, divergence="the name contains a slash",
+                                   divergence_for="UNKNOWN|CLEAN")]), [])
+    if not agreement_problems([dict(_nr, divergence="the name contains a slash",
+                                    divergence_for="UNKNOWN|DIAGNOSES(2)")]):
+        check("B145: a NOT-RUN row's reason expires like any other", [],
+              ["<a problem>"])
+
+    # PAIR: a DECLARED divergence is data, not a failure. A check that refuses
+    # every known gap would make the artifact impossible to commit at all.
+    check("B145: a declared divergence is accepted — a known gap is a "
+          "recorded fact, not an error",
+          agreement_problems([agree_row(lsp_today="CLEAN",
+                                        divergence="LSP has no &inout check")]),
+          [])
+
+    # --- B145: writing and reading the corpus back -------------------------
+    _b145 = Path(tempfile.mkdtemp(prefix="b145-tsv-"))
+    try:
+        dest = _b145 / "corpus.tsv"
+        rows = [tsv_row(rec_of("CLEAN"), {"count": 0}, "1.29.14", "2026-09-01")]
+        rows[0]["fixture"] = "fx-a"
+        rows[0]["divergence"] = "a hand-written note"
+        rows[0]["divergence_for"] = divergence_state(rows[0]["verdict"],
+                                                     rows[0]["lsp_today"])
+        write_tsv(dest, rows, "1.29.14", "2026-09-01", "e" * 64)
+        text = dest.read_text()
+        for want in ("1.29.14", "2026-09-01", "e" * 64, "fx-a"):
+            if want not in text:
+                check(f"B145: the corpus records {want!r}", text[:200], want)
+        body = [l for l in text.splitlines() if not l.startswith("#")]
+        check("B145: the corpus has a header row and one data row per fixture",
+              (body[0].split("\t"), len(body)), (list(TSV_COLUMNS), 2))
+        # The hand-written note is the ONLY authored field; a regen that drops
+        # it turns every explained gap into an unexplained one, and the run
+        # still looks green because the notes were what made it green.
+        check("B145: hand-written divergence notes survive a regen, WITH the "
+              "state each was written against",
+              read_declared_divergences(dest),
+              {"fx-a": ("a hand-written note", rows[0]["divergence_for"])})
+        check("B145: a corpus that does not exist yet yields no notes rather "
+              "than raising",
+              read_declared_divergences(_b145 / "nope.tsv"), {})
+        # A tab inside a message would silently shift every later column.
+        tabby = tsv_row(rec_of("REJECTED", [(1, 1, "a\tb")]), {"count": 1},
+                        "1.29.14", "2026-09-01")
+        write_tsv(dest, [tabby], "1.29.14", "2026-09-01", None)
+        data = [l for l in dest.read_text().splitlines()
+                if not l.startswith("#")][1]
+        check("B145: a tab inside an engine message does not shift the "
+              "columns of every row after it",
+              len(data.split("\t")), len(TSV_COLUMNS))
+
+        # A failed regeneration must never replace the last known-good
+        # evidence. The generator used to write first and validate second, so
+        # an UNMEASURED LSP or an engine probe that never ran destroyed the
+        # committed corpus immediately before returning 1. Exercise all three
+        # non-answer states rather than pinning only the incident's spelling.
+        original = b"last known-good corpus bytes\n"
+        saved_version = globals()["fleet_engine_version"]
+        saved_binary = globals()["lsp_cli_bin"]
+        saved_run_lsp = globals()["run_lsp_on_fixture"]
+        globals()["fleet_engine_version"] = lambda: "1.29.14"
+        globals()["lsp_cli_bin"] = lambda: Path(__file__)
+        try:
+            invalid_regens = (
+                ("NOT-RUN", rec_of("NOT-RUN", skipped="probe did not run"),
+                 {"count": 0}),
+                ("BUILD-ERR", rec_of("BUILD-ERR", skipped="transport failed"),
+                 {"count": 0}),
+                ("UNMEASURED", rec_of("CLEAN"), {"count": None}),
+            )
+            for label, rec, lsp_result in invalid_regens:
+                dest.write_bytes(original)
+                globals()["run_lsp_on_fixture"] = (
+                    lambda _fixture, result=lsp_result: result
+                )
+                rc = write_corpus(dest, [rec], all_fixtures=True)
+                check(f"B145: a failing {label} regeneration returns non-zero",
+                      rc, 1)
+                check(f"B145: a failing {label} regeneration leaves the "
+                      "existing corpus byte-identical",
+                      dest.read_bytes(), original)
+        finally:
+            globals()["fleet_engine_version"] = saved_version
+            globals()["lsp_cli_bin"] = saved_binary
+            globals()["run_lsp_on_fixture"] = saved_run_lsp
+
+        # Publication itself must be one same-directory rename. Simulate the
+        # rename failing after the complete replacement has been staged: the
+        # known-good destination must remain untouched and the temp must be
+        # cleaned. This is the filesystem failure half of the validation test
+        # above; either one alone leaves a destructive gap.
+        dest.write_bytes(original)
+        saved_replace = os.replace
+        replace_calls = []
+
+        def fail_replace(src, target):
+            replace_calls.append((Path(src), Path(target)))
+            raise OSError("simulated rename failure")
+
+        os.replace = fail_replace
+        rename_failed = False
+        try:
+            write_tsv(dest, rows, "1.29.14", "2026-09-01", "e" * 64)
+        except OSError:
+            rename_failed = True
+        finally:
+            os.replace = saved_replace
+        check("B145: corpus publication reaches one atomic rename",
+              rename_failed and len(replace_calls) == 1, True)
+        if replace_calls:
+            src, target = replace_calls[0]
+            check("B145: the replacement temp is in the destination directory",
+                  (src.parent, target.parent), (dest.parent, dest.parent))
+        check("B145: a failed atomic rename preserves the old corpus bytes",
+              dest.read_bytes(), original)
+        check("B145: a failed atomic rename removes its staged temp",
+              list(dest.parent.glob(f".{dest.name}.*.tmp")), [])
+    finally:
+        shutil.rmtree(_b145, ignore_errors=True)
+
     if failures:
         print(f"FAIL: {len(failures)} check(s) failed", file=sys.stderr)
         for f in failures:
@@ -1238,6 +1710,428 @@ def run_selftest() -> int:
         return 1
     print("PASS: cleanup, isolation, and fail-closed guards verified.")
     return 0
+
+
+# ---- B145: committing the engine's verdict, not just printing it -----------
+# 64 fixtures carried ZERO committed engine evidence. The generator existed and
+# was hardened (B118's four-valued build_status, B127's load-is-not-build fix,
+# B123's raw reader); its output went to an ad-hoc path a human named, and the
+# engine's message was then hand-typed into a Rust assertion. So the fixture
+# README's own rule -- "a fixture's LSP assertion is only meaningful against the
+# game compiler's verdict on the same bytes" -- held at the moment someone ran
+# the probe and not afterwards.
+#
+# The record is a B129 CORPUS artifact and a manifest row, deliberately not a
+# parallel mechanism: B129's inventory found the load-bearing gap is that the
+# artifact -> generator edge exists nowhere machine-readable, and "a generator
+# with no recorded output" is exactly that shape.
+#
+# TWO measurements per fixture, both machine-produced:
+#   * the ENGINE's verdict, from this probe;
+#   * what THIS LSP says about the same bytes today, from the real CLI.
+# The only hand-written field is `divergence`, and it is required precisely
+# where the two disagree -- so a disagreement cannot be recorded silently, and
+# a disagreement that gets FIXED shows up as a stale divergence note.
+
+LSP_TSV_FLAGS = ("--typedb-dir", "tests/fixtures/typedb")
+CLEAN_REASON = "compiled and loaded, no error attributed to this folder"
+
+
+def repo_root_for_tsv() -> Path:
+    return FIXTURES.parent.parent.parent
+
+
+def lsp_cli_bin() -> Path:
+    """The CLI the Rust issue-repro tests drive, which is the DEBUG binary.
+
+    Deliberately not the release build: `run_issue_repro` uses
+    `CARGO_BIN_EXE_openplanet-lsp`, and recording a different binary's answer
+    would make the corpus agree with something no test runs.
+    """
+    return repo_root_for_tsv() / "target/debug/openplanet-lsp"
+
+
+def run_lsp_on_fixture(fixture: Path, binary: Path | None = None,
+                       runner=None) -> dict:
+    """What this LSP says about the fixture today. Never raises.
+
+    Returns `count=None` when the CLI could not be run or its output could not
+    be parsed. That is a THIRD answer and the corpus writer refuses on it:
+    "I could not measure the LSP" must not be recorded as "the LSP was clean",
+    which is the shape that put 64 fixtures here in the first place.
+    """
+    binary = lsp_cli_bin() if binary is None else binary
+    if not binary.is_file():
+        return {"count": None, "error": f"no LSP binary at {binary}"}
+    cmd = [str(binary), "check", *LSP_TSV_FLAGS, str(fixture)]
+    run = runner or (lambda c: subprocess.run(
+        c, capture_output=True, text=True, timeout=120,
+        cwd=str(repo_root_for_tsv()),
+        env={**os.environ, "NO_COLOR": "1"}))
+    try:
+        proc = run(cmd)
+    except Exception as exc:  # noqa: BLE001 - a driver failure, not a verdict
+        return {"count": None, "error": f"lsp run failed: {exc}"}
+    out = (proc.stdout or "") + (proc.stderr or "")
+    # fleet.parse_lsp_count, not a fourth copy of the regex: it already knew
+    # one summary shape and B145 measured a second (B090's `0 errors/warnings
+    # (N info hidden: ...)`), which is exactly the kind of drift a duplicated
+    # pattern keeps out of sight.
+    count = fleet.parse_lsp_count(out)
+    if count is None:
+        return {"count": None, "error": "no diagnostic count in LSP output"}
+    return {"count": count, "error": ""}
+
+
+def _engine_text(d: dict) -> str:
+    """One engine diagnostic, with the STAGING path normalised away.
+
+    The folder id is an artefact of this probe -- it is derived from the
+    fixture's info.toml name and changes when that does -- so keeping it would
+    make the record churn for a reason that has nothing to do with the engine.
+    Everything to the right of the colon is verbatim: that is the part
+    hand-transcription loses and the part that moves between engine versions.
+    """
+    leaf = str(d.get("file", "")).split("/")[-1] or "?"
+    return f"{leaf}({d['line']},{d['col']}): {d['msg']}"
+
+
+def folder_compiled(rec: dict) -> int:
+    """How many function bodies the engine actually COMPILED for this folder.
+
+    B145 follow-up, and it is the difference between a verdict and a verdict
+    about the thing you asked. Openplanet logs `Compiling <signature>` per
+    function body it reaches. A DECLARATION error -- an undeclarable parameter
+    mode, a name conflict, a parse failure -- aborts the unit before any body
+    is compiled, so the engine returns REJECTED having never looked at a single
+    call site.
+
+    Measured: `b102-array-sort-mismatched-callbacks` declares
+    `bool WrongModeInout(int &inout a, int &inout b)` at line 21. `int &inout`
+    is not declarable. The engine emitted exactly two errors, both at line 21,
+    and compiled ZERO bodies -- so it never returned a verdict on ANY of the
+    twelve `Sort` calls at lines 32-43, which are the entire subject of the
+    fixture. The row nevertheless recorded REJECTED beside an LSP reporting 12
+    diagnostics, and the agreement check called that agreement.
+
+    Both sides said something. They were not talking about the same code.
+    """
+    fid = rec.get("folder_id") or ""
+    if not fid:
+        return 0
+    return sum(
+        1 for d in rec.get("diagnostics", [])
+        if d.get("sev") == "INFO"
+        and str(d.get("msg", "")).startswith("Compiling ")
+        and str(d.get("file", "")).split("/")[0] == fid
+    )
+
+
+def folder_warnings(rec: dict) -> list[dict]:
+    """WARN diagnostics attributed to THIS probe's folder.
+
+    `build_verdict` buckets errors by attribution because Openplanet.log is
+    shared; warnings get no such bucket, so they are filtered here by the same
+    rule rather than by widening a shared primitive four consumers depend on.
+    An unattributed warning is another session's, and counting it would turn a
+    clean fixture into a warned one at random.
+    """
+    fid = rec.get("folder_id") or ""
+    if not fid:
+        return []
+    return [d for d in rec.get("diagnostics", [])
+            if d.get("sev") == "WARN"
+            and str(d.get("file", "")).split("/")[0] == fid]
+
+
+def divergence_state(verdict: str, lsp_today: str) -> str:
+    """The measurement a divergence note was written against.
+
+    B157/B168 found the same defect in two separate audits: a JUSTIFIED row
+    whose free-text reason WAS the false claim, so the audit accepted the
+    defect BECAUSE of the justification. Prose records that somebody was
+    convinced; it never records that they were right.
+
+    This artifact had a live instance of it within one regeneration.
+    `b102-array-sort-correct-callbacks` carried the note *"the engine rejects
+    all three 'correct' comparators and the LSP is silent on all three"*. After
+    lane-const's B152 moved those comparators to the sibling fixture, the same
+    row measured engine ACCEPT and LSP DIAGNOSES(3) -- BOTH HALVES INVERTED --
+    and the note carried across the regeneration unchanged. Nothing fired: the
+    stale-note rule only triggers when the two sides come to AGREE, and these
+    two still disagreed, just in the opposite direction.
+
+    So a note is stamped with the (verdict, LSP answer) pair it was written
+    against, and is carried across a regeneration ONLY while that pair still
+    holds. It cannot be verified -- prose never can -- but it can be made to
+    EXPIRE the moment its subject moves, which turns an unfalsifiable claim
+    into one with a shelf life. A note whose stamp no longer matches is
+    dropped, and the row goes back to demanding a fresh reason.
+    """
+    return f"{verdict}|{lsp_today}"
+
+
+def tsv_row(rec: dict, lsp: dict, engine_version: str, probe_date: str,
+            divergences: dict[str, str] | None = None) -> dict:
+    """One corpus row: the engine's answer and this LSP's, side by side."""
+    divergences = divergences or {}
+    slug = rec["fixture"]
+    status = rec.get("build_status") or "NOT-RUN"
+    # B145. The engine's WARNINGS are ground truth too, and the first run of
+    # this recorder dropped them: 37d-variable-shadow came back CLEAN with the
+    # boilerplate "no error attributed", while the engine had in fact said
+    # `Variable 'x' hides another variable of same name in outer scope`. That
+    # is precisely the message text this artifact exists to stop losing, and
+    # discarding it also manufactured a disagreement with an LSP that was
+    # right to flag the same line.
+    #
+    # build_status stays B118's four ERROR-polarity values -- that contract is
+    # not this ticket's to change. The warnings ride in `verdict` and in the
+    # message, so "the engine said nothing at all" stays distinguishable from
+    # "the engine compiled it but complained".
+    warns = folder_warnings(rec)
+    verdict = {"CLEAN": "ACCEPT", "REJECTED": "REJECT"}.get(status, "UNKNOWN")
+    if verdict == "ACCEPT" and warns:
+        verdict = "ACCEPT-WITH-WARNINGS"
+
+    if status == "REJECTED":
+        # The staging folder id is an artefact of THIS probe, not engine ground
+        # truth about the fixture, so the path is normalised to the file inside
+        # it. Everything to the right of the colon -- which is the part
+        # hand-transcription loses and the part that moves between engine
+        # versions -- is verbatim.
+        message = " | ".join(_engine_text(d)
+                             for d in rec.get("game_errors", [])) \
+            or "REJECTED with no attributed error"
+    elif status == "CLEAN":
+        message = " | ".join(_engine_text(d) for d in warns) or CLEAN_REASON
+    else:
+        message = rec.get("skipped") or f"build_status={status}"
+
+    lsp_count = lsp.get("count")
+    lsp_says = "UNMEASURED" if lsp_count is None else (
+        "CLEAN" if lsp_count == 0 else f"DIAGNOSES({lsp_count})")
+    return {
+        "fixture": slug,
+        "verdict": verdict,
+        "build_status": status,
+        "engine_compiled": folder_compiled(rec),
+        "engine_message": message,
+        "lsp_today": lsp_says,
+        "engine_version": engine_version,
+        "probe_date": probe_date,
+        "divergence_for": (divergence_state(verdict, lsp_says)
+                           if divergences.get(slug) else "-"),
+        "divergence": divergences.get(slug, "-"),
+    }
+
+
+TSV_COLUMNS = ("fixture", "verdict", "build_status", "engine_compiled",
+               "engine_message", "lsp_today", "engine_version", "probe_date",
+               "divergence_for", "divergence")
+
+
+def agreement_problems(rows: list[dict]) -> list[str]:
+    """Where the engine and this LSP disagree without a declared reason.
+
+    The check the ticket asks for, expressed over the corpus rather than over
+    the Rust source: a hand-typed assertion cannot drift from the engine
+    evidence behind it if both sides are measured and compared.
+
+    An UNMEASURED LSP or a NOT-RUN engine is refused rather than skipped. "I
+    could not look" is not "I looked and they agree" -- the whole reason this
+    artifact exists is that a silence was being read as an answer.
+    """
+    problems = []
+    for row in rows:
+        slug = row["fixture"]
+        status, lsp = row["build_status"], row["lsp_today"]
+        declared = (row.get("divergence") or "-").strip()
+        # A note must be stamped with the measurement it was written against,
+        # and the stamp must still hold. Checked FIRST, above every branch that
+        # a note could settle: an expired reason is not a reason about this
+        # row, and a hand-edited note with no stamp must not slip past the
+        # generator's expiry by being typed straight into the file.
+        if declared != "-":
+            stamp = (row.get("divergence_for") or "-").strip()
+            now = divergence_state(row.get("verdict", ""), lsp)
+            if stamp != now:
+                problems.append(
+                    f"{slug}: the divergence note is stamped for {stamp!r} but "
+                    f"this row now measures {now!r}. A reason written against a "
+                    f"different measurement is not evidence about this one, "
+                    f"however plausible it still reads -- rewrite it against "
+                    f"what is measured now, or delete it.")
+                continue
+
+        if status in ("NOT-RUN", "BUILD-ERR"):
+            # Settled by a stamped note, like every other row. B129's rule is
+            # that an artifact which cannot be regenerated is a FINDING and is
+            # reported on every run -- reported, which a recorded reason does.
+            # Refusing it forever instead would leave the artifact permanently
+            # red for a fact about the fixture that nobody can change from
+            # here, and a gate that can never go green is one that gets
+            # ignored. What must not happen is the row reading as an ANSWER,
+            # and `verdict=UNKNOWN` plus a written reason is the opposite.
+            if declared != "-":
+                continue
+            problems.append(
+                f"{slug}: the engine verdict is {status} -- the probe could "
+                f"not measure it, so this row is not evidence of anything. "
+                f"Record in `divergence` why it cannot be probed, or remove "
+                f"the row; do not leave it recorded as though it were an "
+                f"answer.")
+            continue
+        if lsp == "UNMEASURED":
+            problems.append(
+                f"{slug}: this LSP's answer was not measured, so the row "
+                f"cannot say whether it agrees with the engine.")
+            continue
+        # B145. Compared on "did this side say ANYTHING about the code", not
+        # on error polarity. The engine is a compiler and this LSP is also a
+        # linter, so a fixture the engine compiles WITH A WARNING and the LSP
+        # flags is agreement, not a gap -- and treating it as a gap was
+        # manufacturing divergences the first run of this recorder reported.
+        # `verdict` carries that distinction; `build_status` deliberately does
+        # not, because B118's four values are about errors.
+        engine_silent = row.get("verdict") == "ACCEPT"
+        agrees = engine_silent == (lsp == "CLEAN")
+
+        # AGREEING ON POLARITY IS NOT ANSWERING THE SAME QUESTION. When the
+        # engine rejected the unit at DECLARATION time it compiled no function
+        # bodies, so its verdict covers the declarations and nothing else --
+        # while the LSP's diagnostics may be entirely about call sites the
+        # engine never reached. Both said something; that is all polarity sees.
+        #
+        # Measured on b102-array-sort-mismatched-callbacks: `int &inout` at
+        # line 21 is not declarable, the engine emitted two errors there and
+        # compiled ZERO bodies, and so never verdicted one of the twelve Sort
+        # calls the fixture exists to measure. Recorded REJECTED beside
+        # DIAGNOSES(12), it read as agreement.
+        #
+        # A note is REQUIRED rather than the row refused, because for a fixture
+        # whose subject IS a declaration -- a duplicate function, an
+        # unimplemented interface, a reserved keyword -- a declaration-time
+        # rejection is the complete and correct answer, and four of the five
+        # rows in this state are exactly that. Which one this is cannot be
+        # derived from the log. Make the question unavoidable; do not infer the
+        # answer.
+        needs_note = (
+            agrees
+            and status == "REJECTED"
+            and str(row.get("engine_compiled", "")) == "0"
+            and lsp != "CLEAN"
+        )
+
+        if needs_note and declared == "-":
+            problems.append(
+                f"{slug}: the engine rejected this unit at DECLARATION time "
+                f"(0 function bodies compiled) and this LSP reports {lsp}. "
+                f"They agree on polarity, which is not evidence they are "
+                f"answering the same question -- the engine never reached a "
+                f"call site. Record in `divergence` either that the fixture's "
+                f"subject IS the declaration, so the engine's verdict is "
+                f"complete, or that the engine never verdicted what this "
+                f"fixture exists to measure.")
+        elif agrees and not needs_note and declared != "-":
+            problems.append(
+                f"{slug}: a divergence is declared ({declared!r}) but the "
+                f"engine ({status}) and this LSP ({lsp}) now AGREE. A stale "
+                f"divergence note is how a fixed gap keeps being described as "
+                f"an open one -- delete it.")
+        elif not agrees and declared == "-":
+            problems.append(
+                f"{slug}: the engine says {status} and this LSP says {lsp}, "
+                f"and no divergence is declared. Either the LSP has a gap "
+                f"worth naming in the `divergence` column, or one of the two "
+                f"has drifted since this row was written.")
+    return problems
+
+
+def write_tsv(path: Path, rows: list[dict], engine_version: str,
+              probe_date: str, binary_sha: str | None) -> None:
+    preamble = [
+        "# B145 ISSUE-REPRO ENGINE VERDICTS - what the GAME compiler says about",
+        "# each fixture in tests/fixtures/issue-repros/, beside what THIS LSP",
+        "# says about the same bytes.",
+        "#",
+        "# Registered in docs/probes/MANIFEST.tsv. Regenerate with the",
+        "# generator named there; it needs Trackmania + Openplanet with",
+        "# RemoteBuild, and it stages/loads/unloads each fixture in turn.",
+        "#",
+        "# COLUMNS",
+        "#   fixture         directory under tests/fixtures/issue-repros/.",
+        "#   verdict         ACCEPT / REJECT / UNKNOWN - the engine's polarity.",
+        "#   build_status    B118's four values. CLEAN and REJECTED are",
+        "#                   answers; NOT-RUN and BUILD-ERR are the probe",
+        "#                   saying it could not look, and are never recorded",
+        "#                   as agreement.",
+        "#   engine_compiled how many `Compiling <sig>` lines the engine logged",
+        "#                   for THIS folder. Read it ONLY beside a REJECTED",
+        "#                   row, where 0 means the unit was rejected at",
+        "#                   DECLARATION time and the engine never reached a",
+        "#                   call site -- so its verdict covers the",
+        "#                   declarations and nothing else. On a CLEAN row 0",
+        "#                   carries no such meaning: a clean compile usually",
+        "#                   logs no per-function lines at all (15 of 20 clean",
+        "#                   rows here are 0). Do not read a clean 0 as",
+        "#                   'nothing was compiled'.",
+        "#   engine_message  the engine's text, verbatim to the right of the",
+        "#                   colon. The staging folder id is normalised away -",
+        "#                   it is an artefact of the probe, not of the fixture",
+        "#                   - so `Main.as(21,25): <msg>`. Multiple errors are",
+        "#                   joined with ` | `.",
+        "#   lsp_today       what this repo's CLI reports for the same fixture,",
+        f"#                   run as `check {' '.join(LSP_TSV_FLAGS)} <fixture>`.",
+        "#   engine_version  PER ROW, not only per file: the repo already holds",
+        "#                   claims from three engine generations, and a",
+        "#                   partial re-probe must not silently inherit the",
+        "#                   file's stamp.",
+        "#   probe_date      when this row was last measured.",
+        "#   divergence_for  the `verdict|lsp_today` the note beside it was",
+        "#                   written against. A reason is carried across a",
+        "#                   regeneration ONLY while that pair still holds.",
+        "#                   Prose cannot be verified -- B157 and B168 each",
+        "#                   found an audit whose JUSTIFIED row was defended by",
+        "#                   a reason that was itself the false claim -- but it",
+        "#                   CAN be made to expire when its subject moves. This",
+        "#                   artifact needed it: b102's note survived a full",
+        "#                   polarity flip and still read as a reason.",
+        "#   divergence      why the two columns differ, or `-`. REQUIRED",
+        "#                   wherever they differ, and REFUSED where they",
+        "#                   agree - so neither an unexplained gap nor a stale",
+        "#                   note about a fixed one can sit here quietly.",
+        "#",
+        f"# LSP binary sha256: {binary_sha or 'UNKNOWN'}",
+        f"# Engine: {engine_version}   Probed: {probe_date}",
+        "#",
+    ]
+    lines = preamble + ["\t".join(TSV_COLUMNS)]
+    for row in rows:
+        lines.append("\t".join(str(row[c]).replace("\t", " ") for c in TSV_COLUMNS))
+    payload = "\n".join(lines) + "\n"
+
+    # Publish with one rename in the destination directory. A direct
+    # write/truncate destroys the last known-good corpus if the process dies
+    # halfway through; a temp elsewhere cannot be renamed atomically across
+    # filesystems. Preserve the existing file's mode when replacing it.
+    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o644
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fd = -1
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp_path.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -1248,6 +2142,9 @@ def main() -> int:
     ap.add_argument("fixture", nargs="?", help="fixture dir name or path")
     ap.add_argument("--all", action="store_true", help="probe every fixture")
     ap.add_argument("--json", help="also write results to this JSON file")
+    ap.add_argument("--tsv", help="write the committed B129 corpus (B145). "
+                                  "Refuses to write a partial or unmeasured "
+                                  "record; see agreement_problems.")
     ap.add_argument("--selftest", action="store_true", help="offline cleanup checks; no game")
     args = ap.parse_args()
 
@@ -1302,8 +2199,156 @@ def main() -> int:
         Path(args.json).write_text(json.dumps(results, indent=2))
         print(f"wrote {args.json}")
 
+    if args.tsv:
+        rc = write_corpus(Path(args.tsv), results, all_fixtures=args.all)
+        if rc:
+            return rc
+
     # Exit non-zero if any probe failed to run (skipped) so CI/callers notice.
     return 1 if any(r.get("skipped") for r in results) else 0
+
+
+def write_corpus(dest: Path, results: list[dict], *, all_fixtures: bool) -> int:
+    """B145. Measure this LSP beside the engine, then commit both.
+
+    Refuses a PARTIAL write. The corpus is registered in B129's manifest with a
+    row count the Rust test checks against the file on disk, so a single-fixture
+    run overwriting the 64-row artifact would be a silent, total data loss that
+    looks exactly like a successful regen. `--tsv` without `--all` is the
+    natural way to do that by accident, so it is refused by name.
+    """
+    if not all_fixtures:
+        print("--tsv writes the WHOLE corpus and would truncate it to the "
+              "fixtures probed in this run. Use --all --tsv, or --json for a "
+              "single fixture.", file=sys.stderr)
+        return 2
+    version = fleet_engine_version()
+    if version is None:
+        print("cannot stamp the corpus: no Openplanet version line in the log. "
+              "An unstamped engine artifact is one that cannot be diffed "
+              "against a later generation, and this repo already holds claims "
+              "from three of them (B129).", file=sys.stderr)
+        return 2
+    binary = lsp_cli_bin()
+    sha = _sha256(binary)
+    date = time.strftime("%Y-%m-%d")
+    previous = read_declared_divergences(dest)
+    rows, expired = [], []
+    for rec in results:
+        lsp = run_lsp_on_fixture(FIXTURES / rec["fixture"])
+        # Build the row with NO note first, so its freshly measured verdict and
+        # LSP answer are available to test the old note's stamp against.
+        probe_row = tsv_row(rec, lsp, version, date, {})
+        slug = probe_row["fixture"]
+        note, stamp = previous.get(slug, ("", ""))
+        now = divergence_state(probe_row["verdict"], probe_row["lsp_today"])
+        kept = carry_forward(previous, probe_row)
+        if kept:
+            probe_row["divergence"], probe_row["divergence_for"] = kept
+        elif note:
+            # EXPIRED. The measurement this reason was written against no
+            # longer holds, so the reason is not evidence about the current
+            # one -- however plausible it still reads.
+            expired.append(f"{slug}: written for {stamp!r}, now {now!r}\n"
+                           f"      dropped note: {note}")
+        rows.append(probe_row)
+    rows.sort(key=lambda r: r["fixture"])
+    if expired:
+        print(f"\n{len(expired)} divergence note(s) EXPIRED and were dropped -- "
+              f"the state each was written against no longer holds:",
+              file=sys.stderr)
+        for e in expired:
+            print(f"  - {e}", file=sys.stderr)
+    problems = agreement_problems(rows)
+    if problems:
+        print(f"\n{len(problems)} row(s) need attention:", file=sys.stderr)
+        for pr in problems:
+            print(f"  - {pr}", file=sys.stderr)
+        return 1
+    write_tsv(dest, rows, version, date, sha)
+    print(f"wrote {dest} ({len(rows)} rows, engine {version})")
+    return 0
+
+
+def carry_forward(previous: dict, probe_row: dict) -> tuple[str, str] | None:
+    """The note to keep for this row, or None if it has EXPIRED.
+
+    Pure, and split out of `write_corpus` on purpose: that function needs a
+    live game, so the carry/expire decision inside it could never be exercised
+    offline -- and two mutations that disabled it were duly MISSED. A guard
+    that cannot be reached by a test is not a guard, and the remedy is the same
+    one the flag classification needed: extract the judgement, hand it
+    synthetic inputs, and let the mutation run confirm it bites.
+    """
+    slug = probe_row["fixture"]
+    entry = previous.get(slug)
+    if not entry:
+        return None
+    note, stamp = entry
+    if not note or note == "-":
+        return None
+    now = divergence_state(probe_row["verdict"], probe_row["lsp_today"])
+    if stamp != now:
+        return None
+    return note, now
+
+
+def read_declared_divergences(dest: Path) -> dict[str, tuple[str, str]]:
+    """Hand-written notes from the previous corpus, with the state each was
+    written against.
+
+    They are the ONLY field a regeneration cannot re-derive, so dropping them
+    wholesale would convert every explained gap into an unexplained one -- and
+    the run would still look green, because the notes were what made it green.
+
+    But carrying them UNCONDITIONALLY is how a note outlives its subject, which
+    is the B157/B168 defect and which this artifact reproduced within one
+    regeneration. So each note comes back with its `divergence_for` stamp and
+    the caller drops it unless the new measurement still matches.
+    """
+    if not dest.is_file():
+        return {}
+    out: dict[str, tuple[str, str]] = {}
+    header = None
+    for line in dest.read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        cells = line.split("\t")
+        if header is None:
+            header = cells
+            continue
+        row = dict(zip(header, cells))
+        note = (row.get("divergence") or "-").strip()
+        if row.get("fixture") and note != "-":
+            out[row["fixture"]] = (note, (row.get("divergence_for") or "-").strip())
+    return out
+
+
+def fleet_engine_version() -> str | None:
+    """The live engine's version, read from the same log the probe reads."""
+    m = None
+    try:
+        text = Path(fleet.OPN_LOG).read_text(errors="replace") \
+            if hasattr(fleet, "OPN_LOG") else \
+            (fleet.HOME / "OpenplanetNext/Openplanet.log").read_text(errors="replace")
+    except Exception:
+        return None
+    for line in text.splitlines():
+        hit = re.search(r"Openplanet:\s+(\d+\.\d+\.\d+)", line)
+        if hit:
+            m = hit.group(1)
+    return m
+
+
+def _sha256(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 if __name__ == "__main__":

@@ -2232,13 +2232,16 @@ compiler as syntax.
 
 ### Refuse on the OPERATION, never on the tree
 
-The guard refuses on `MERGE_HEAD` / `REBASE_HEAD` / `rebase-merge/` /
-`rebase-apply/` / `CHERRY_PICK_HEAD` / `REVERT_HEAD`, and **never on a dirty
-tree**. Gating uncommitted work is the normal lane workflow — every lane does
-it on every run — so a guard that fired on dirty would be a far worse
-regression than the defect it fixed. `BISECT_LOG` is deliberately excluded: a
-bisect checks out real commits and cannot produce a conflict marker, so
-refusing there costs a legitimate workflow to prevent an impossible failure.
+The guard refuses on `MERGE_HEAD` / `rebase-merge/` / `rebase-apply/` /
+`CHERRY_PICK_HEAD` / `REVERT_HEAD`, and **never on a dirty tree**. `REBASE_HEAD`
+is deliberately excluded: git leaves it behind after a conflicted rebase
+succeeds, while the two rebase directories exist only while the operation is
+active (B169). Gating uncommitted work is the normal lane workflow — every lane
+does it on every run — so a guard that fired on dirty would be a far worse
+regression than the defect it fixed. `BISECT_LOG` is also deliberately
+excluded: a bisect checks out real commits and cannot produce a conflict
+marker, so refusing there costs a legitimate workflow to prevent an impossible
+failure.
 
 **Operation state is PER-WORKTREE and resolving it by hand would have been an
 outage.** A merge in the main checkout lives in `.git/`; a linked worktree's
@@ -4140,3 +4143,238 @@ the scanner silently matches nothing.
 counting the same population from an independent direction and asserting the two
 agree; a hand-picked number is a guess about the future that someone will
 eventually have to edit, and the edit is indistinguishable from the erosion.
+
+## Resolved: the stale-artefact incident, and what it cost to close (B147)
+
+The section above — *"A verification step whose INPUT silently did not
+update"* — is now closed. Closing it turned up two things worth writing down,
+neither of which was the thing the ticket named.
+
+### 1. The same `$HOME` rule failed in a THIRD direction
+
+`remote_paths` exists because ssh runs a shell (so `$HOME` expands) and rsync
+does not (so it must not appear). That rule had already been got wrong once per
+direction. It was then got wrong a third way, in the guard added to prevent the
+second:
+
+```python
+remote_path = f"{remote_target}/{a.sync_back}"          # begins "$HOME/..."
+probe_rc, _ = capture_ssh(a.host, f"test -e {shlex.quote(remote_path)}")
+```
+
+`shlex.quote` wraps its argument in **single** quotes, and no shell expands
+`$HOME` inside single quotes. So the probe asked whether a path with a literal
+dollar-sign in it existed. It never does. **Every `--sync-back` of an artefact
+that WAS on the remote was reported missing**, and the refusal then printed the
+same unexpanded string — so the operator was shown a path that is not the path
+that was checked, and could not reproduce the failure by hand. Measured on the
+real host: the binary was there, `test -e '$HOME/…'` returned 1, `test -e
+"$HOME/…"` returned 0.
+
+The general shape: **a correct rule stated as "which spelling goes where" does
+not survive contact with a function that changes the spelling.** `shlex.quote`
+is not a formatting choice, it is a semantic one, and the two halves of this
+path have OPPOSITE requirements — `$HOME` must be expanded, the caller's
+subpath must not be. That cannot be expressed by quoting the whole string
+either way. It is now one function, `sync_back_probe_script`, that concatenates
+an unquoted `"$HOME"` with a `shlex.quote`d relative path, and it is tested by
+being **run through a real bash with a known `HOME`** rather than by asserting
+on its shape. A substring check for `"$HOME"` would have passed the shipped
+bug's replacement just as happily.
+
+### 2. The status was never the problem; the SILENCE was
+
+The ticket said a failed `--sync-back` did not exit non-zero. Measured, every
+failure path already did — `die()` had closed that. The residual was this line:
+
+```python
+if status == 0 and a.sync_back:
+```
+
+When the remote command failed, sync-back was declined and **nothing was
+printed at all**. The exit status was the command's, which is correct and is
+beside the point: the operator asked for an artefact, did not get one, and was
+left with the previous one at the destination wearing a plausible mtime.
+Everything downstream then read a file that exists and is wrong.
+
+**A caller who checks the status is fine either way; a caller who looks at the
+FILE has to be told the file is not what they asked for.** This is the reason
+"it already exits non-zero" is not an answer to a stale-artefact bug. Reaching
+for the status is reaching for the wrong channel — the artefact is the channel
+that was consumed.
+
+### 3. Hash on every fetch, not only under the flag
+
+Two mechanisms now, and the split matters:
+
+* `remote-build.py --sync-back-must-change` refuses (**exit 4**) when the
+  fetched artefact is byte-identical to the one already there. It is opt-in
+  because a no-op sync and a genuine no-change are indistinguishable from the
+  artefact alone — only the caller knows which they meant.
+* The **sha256 is printed on every fetch regardless**. That is the half that
+  does not need anyone to have anticipated the failure: a run whose log records
+  the hash can be audited afterwards by someone who never passed the flag.
+  Exit 3 is "asked for an artefact, did not get one"; exit 4 is "got one, and
+  it is unchanged" — distinct so a comparison script can branch without parsing
+  prose.
+
+On the fleet side, `save_state` now stamps every ledger with the identity of
+the LSP binary that produced it, and `fleet_dogfood.py compare A B` refuses
+(exit 3) when the two ledgers share a hash **or when either does not record
+one**. The second condition is the point of the first: an old ledger with no
+record is *unknowable*, not *different*, and letting it through would restore
+the original defect with extra steps.
+
+The end-to-end mutation the ticket asked for was run rather than described:
+with `remote-build.py`'s rsync call replaced by `back = 0`, the fetch reports
+success, the artefact is untouched, and the comparison built on it now exits 3
+naming the shared hash instead of reporting IDENTICAL. The control — the same
+pipeline with the real rsync — proceeds and prints `binaries differ`.
+
+### 4. What the mutation run caught that review did not
+
+Sixteen new mutations on `remote-build.py` and twelve on `fleet_dogfood.py`.
+One guard was vacuous: the not-fetched message's check listed `STALE` and the
+exit status but never `PREVIOUS` or the stale hash, so deleting the sentence
+that names the stale artefact changed nothing. **The message under test was
+written in the same hour as the assertion about it, by someone who had just
+finished writing this batch's other entries about exactly this shape.** Knowing
+a hazard does not stop you writing it. Only the mutation run does.
+
+A second, free finding fell out of adding the flag: `LOCAL_ONLY_FLAGS` matches
+with `==` or `flag=`, so `--sync-back-must-change` is **not** covered by the
+`--sync-back` entry — a longer flag sharing a prefix falls straight through and
+is handed to the remote shell as `command not found`. `--allow-unresolved` had
+had that gap since B132, from the ordinary cause: the list is a second place to
+remember. Both are now in the list and both are asserted.
+
+## The recorder you write to stop losing evidence loses evidence (B145)
+
+64 fixture directories carried zero committed engine verdicts. The generator
+existed and had been hardened three times over; its output went to an ad-hoc
+path a human named, and the engine's message was then hand-typed into a Rust
+doc comment. So the fixture README's own rule — *a fixture's LSP assertion is
+only meaningful against the game compiler's verdict on the same bytes* — held
+**at the moment someone ran the probe and not afterwards**.
+
+Writing the recorder produced four findings, and only one of them was the thing
+the ticket described.
+
+### 1. The first run's disagreements were mostly the recorder's own fault
+
+The first live sweep reported **15 rows** where the engine and this LSP did not
+line up. Eight of those were artefacts of the recorder:
+
+* **Five were dropped engine WARNINGS.** `build_verdict` buckets ERRORS,
+  because B118 is about errors, and the recorder wrote `CLEAN` plus the
+  boilerplate `no error attributed to this folder` for a fixture the engine had
+  in fact said `Variable 'x' hides another variable of same name in outer
+  scope` about. That both **threw away the message text the artifact exists to
+  keep** and **manufactured a disagreement with an LSP that was right**. An
+  engine that compiles-with-a-complaint and a linter that complains are
+  agreeing; comparing error-polarity alone cannot see that.
+* **Three were a CLI summary line the parser did not know.** B090 gave the
+  zero case its own wording — `0 errors/warnings (6 info hidden: …)` — which
+  matches no `N diagnostics` pattern, so three measured-and-clean fixtures were
+  recorded as *unmeasured*. `fleet_dogfood.parse_lsp_count` had the same hole
+  and still has every fleet consumer downstream of it.
+
+**The rule: a comparison's first run measures your comparison, not the
+subject.** Both defects made the artifact look like it was finding things. A
+recorder whose first output is 15 interesting-looking rows is not evidence that
+it works; it is the point at which to ask which of them are about you.
+
+### 2. Seven were real, and each one is a different kind of real
+
+Worth listing, because "engine and LSP disagree" turned out to name four
+unrelated conditions that a single boolean would have flattened:
+
+* **two LSP gaps** — the engine rejects `startnew(Worker::Tick)` ("Can't pass
+  class method as arg directly") and rejects all three comparators in
+  `b102-array-sort-**correct**-callbacks`; the LSP is silent on both. The
+  second also means **the fixture is misnamed**: the "correct" callbacks do not
+  compile, which bears directly on B144's const-handle question;
+* **one LSP over-report** that is the fixture's own subject — under strict
+  module semantics the engine never compiles the exports body file, so its
+  undefined identifier is dead code to the engine;
+* **one version straddle** — the engine is 1.29.14 and `tests/fixtures/typedb`
+  is stamped 1.29.5, so `Text::Join` exists for one and not the other. B129's
+  per-artifact version rule is the only reason this reads as a version fact
+  rather than as a checker bug;
+* **one measurement artefact** — the fixture needs per-fixture `defines` that
+  its Rust test supplies through an isolated HOME and the corpus's uniform
+  invocation does not;
+* **two fixtures that cannot be probed at all** — their `info.toml` names
+  contain a `/`, so no safe staging id can be derived and the guard refuses.
+  Recorded as `UNKNOWN` with the reason, per B129: **an artifact that cannot be
+  regenerated is a finding, and the run reports it as one every time.**
+
+### 3. A `divergence` column has to be wrong in BOTH directions
+
+The one hand-authored field. It is required wherever the two sides disagree —
+and **refused wherever they agree**. Only the second half stops a note about a
+gap that has since been *fixed* from sitting in the artifact forever, which is
+the same rot as a stale comment but with a green gate over it. Both directions
+are mutation-tested.
+
+The same symmetry applies to the regen: the notes are the only thing a
+regeneration cannot re-derive, so a regen that dropped them would convert every
+explained gap into an unexplained one — **and the run would still look green,
+because the notes were what made it green.**
+
+### 4. `0 passed` is not `passed`
+
+`just rtest b145` reported `test result: ok` across every binary with **0
+passed, 0 failed** — cargo's filter matches test *names*, and none of the new
+test functions contained `b145`. A tidy wall of `ok` for a run that executed
+nothing. Same family as this batch's other zero-denominator greens, and the
+only reason it was caught is that a green with no numbers in it is now a thing
+to look at twice.
+
+## A hand-maintained list cannot notice what is not in it (B147, follow-up)
+
+`LOCAL_ONLY_FLAGS` names the options of `remote-build.py` that must be refused
+when they turn up after the action, because otherwise they are handed to the
+remote shell as `--allow-unresolved: command not found`. It is a second copy of
+a subset of the parser's own option strings.
+
+**Three flags were missing from it, added by three different changes:**
+`--allow-unresolved` since B132, `--disk-floor` since B106, and
+`--sync-back-must-change` from the very hour in which the first omission was
+being found and fixed, by the author who was finding it. Three independent
+omissions is not three mistakes; it is one defect in the container, which has no
+way to report what it does not contain.
+
+The instance fix is to add the three. **The shape fix is to make not-deciding
+impossible:** the parser is now built by a function a guard can walk, every
+option must appear in exactly one of `LOCAL_ONLY_FLAGS` or
+`SHARED_SPELLING_FLAGS`, and an option in neither fails the selftest by name.
+That does not make the right classification obvious — `--jobs` and
+`--test-threads` genuinely belong on the shared side, because
+`run -- cargo test -- --test-threads=4` is a normal invocation — it makes the
+question unavoidable. **The guard found `--disk-floor` on its first run**, which
+no reviewer had.
+
+This is the same shape as the `use Border` / `use Borders` prefix collision
+found in a different file the same night: a container matched by exact spelling,
+silently not covering a longer name that begins with a covered one. Whenever a
+list of names is matched with `==` or `startswith(name + sep)`, ask what tells
+you the list is COMPLETE.
+
+### And the guard for it was vacuous, for a reason worth naming
+
+The first version computed `unclassified`, `phantom` and `overlap` inline
+against the real tuples. All three mutations that neutered those computations
+were **MISSED** — because the real classification is correct, so each returns
+the empty list, and *the empty list is also what a check that does nothing
+returns*. Nothing distinguished them.
+
+**A check whose correct answer is "nothing wrong" cannot be validated against a
+tree that is already right.** It has to be a pure function given deliberately
+broken input, so that it must produce something. Extracting
+`flag_classification_problems(parser_flags, local_only, shared)` and handing it
+three synthetic bad classifications — plus one good one, so it cannot pass by
+condemning everything — took the same three mutations from MISSED to caught.
+
+This generalises past flag lists: it applies to every guard in this repo whose
+green output is an empty collection.

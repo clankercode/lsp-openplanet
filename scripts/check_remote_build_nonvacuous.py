@@ -108,6 +108,108 @@ MUTATIONS = [
      "merge stops every lane worktree at once",
      '            ["git", "-C", str(root), "rev-parse", "--absolute-git-dir"],',
      '            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],'),
+
+    # --- B147: the $HOME spelling, a THIRD time --------------------------
+    # Measured in production: an artefact that demonstrably existed was
+    # reported missing, because shlex.quote single-quotes and no shell expands
+    # $HOME inside single quotes. The selftest runs the script through a real
+    # bash, so restoring the shipped bug must be caught.
+    ("B147: the probe re-quotes $HOME, restoring the shipped defect where an "
+     "artefact that EXISTS is reported missing",
+     '        f\'p="$HOME"/{shlex.quote(rel)}\\n\'',
+     "        f'p={shlex.quote(chr(36) + chr(72) + chr(79) + chr(77) + chr(69) + chr(47) + rel)}\\n'"),
+    ("B147 OVER-CONDEMN: the probe stops quoting the subpath, so a path with "
+     "a space or a `;` is split or executed on the remote",
+     '        f\'p="$HOME"/{shlex.quote(rel)}\\n\'',
+     '        f\'p="$HOME"/{rel}\\n\''),
+    ("B147: the probe tests a path other than the one it printed",
+     '        f\'test -e "$p"\\n\'',
+     "        f'test -e \"$HOME\"\\n'"),
+    ("B147: the probe stops printing the path it resolved, so the not-found "
+     "message falls back to the unexpanded template",
+     '        f\'printf {shlex.quote(PROBE_PATH_MARK + "%s")}"\\\\n" "$p"\\n\'',
+     "        f'true\\n'"),
+    ("B147: parse_probe_path invents a path instead of falling back",
+     "    return fallback",
+     '    return "/invented/path"'),
+    ("B147: parse_probe_path ignores the marker and returns any last line, so "
+     "login-shell noise is mistaken for the artefact path",
+     "        if line.startswith(PROBE_PATH_MARK):\n"
+     "            return line[len(PROBE_PATH_MARK):].strip()",
+     "        if line.strip():\n            return line.strip()"),
+
+    # --- B147: a failed sync-back must be visible and non-zero -------------
+    ("B147: the sync-back failure statuses collapse to 0, so a caller cannot "
+     "tell a failed fetch from a successful one (the incident's own shape)",
+     "SYNC_BACK_FAILED = 3      # asked for an artefact, did not get one\n"
+     "SYNC_BACK_UNCHANGED = 4   # got one, and it is byte-identical to the old one",
+     "SYNC_BACK_FAILED = 0\nSYNC_BACK_UNCHANGED = 0"),
+    ("B147: 'not fetched' and 'fetched but unchanged' share a status, so a "
+     "comparison script cannot branch on them",
+     "SYNC_BACK_UNCHANGED = 4   # got one, and it is byte-identical to the old one",
+     "SYNC_BACK_UNCHANGED = 3"),
+    ("B147: the not-fetched message stops naming the stale local artefact",
+     '    what = (f"The file already at that path is the PREVIOUS one "',
+     '    what = (f"The file already at that path is the fine one "'),
+    ("B147 OVER-CONDEMN: the not-fetched message claims a stale previous "
+     "artefact even when there was no file there at all",
+     "            if stale else \"Nothing is at that path.\")",
+     "            if True else \"Nothing is at that path.\")"),
+    ("B147: --sync-back-must-change is dropped from the local-only flag list, "
+     "so it is handed to the remote shell as a command",
+     '    "--sync-back-must-change",',
+     '    "--sync-back-zzz",'),
+    ("B147: --allow-unresolved is dropped from the local-only flag list",
+     '    "--allow-unresolved",\n    # Found by',
+     '    "--allow-unresolved-zzz",\n    # Found by'),
+    ("B147: --disk-floor is dropped from the local-only flag list — the third "
+     "omission, and the one the completeness guard found rather than a person",
+     '    "--disk-floor",\n)',
+     '    "--disk-floor-zzz",\n)'),
+
+    # --- B147: the list must not be able to MISS a flag --------------------
+    # Three omissions by three different changes is the LIST's problem, not any
+    # author's. These mutate the guard that makes an omission impossible.
+    ("B147: the parser is no longer walked, so a flag in neither tuple is "
+     "silently uncovered again — this is the guard that found --disk-floor",
+     "    unclassified = sorted(set(parser_flags) - classified)",
+     "    unclassified = []"),
+    ("B147: a classification naming a flag that no longer exists is accepted, "
+     "so a RENAME leaves the real new spelling uncovered",
+     "    phantom = sorted(classified - set(parser_flags))",
+     "    phantom = []"),
+    ("B147: a flag classified BOTH ways is accepted, so the two tuples stop "
+     "saying anything",
+     "    overlap = sorted(set(local_only) & set(shared))",
+     "    overlap = []"),
+    ("B147 OVER-CONDEMN: a flag the remote command shares is moved to the "
+     "local-only list, which breaks `run -- cargo test -- --test-threads=4`",
+     '    "--test-threads",        # libtest\'s own, passed after a second `--`',
+     '    "--zzz-not-test-threads",'),
+    ("B147: misplaced_flags stops refusing anything, so every local-only flag "
+     "reaches the remote shell",
+     "        if any(x == flag or x.startswith(f\"{flag}=\") for flag in LOCAL_ONLY_FLAGS)",
+     "        if False"),
+    ("B147 OVER-CONDEMN: misplaced_flags refuses everything, so no remote "
+     "command can be run at all",
+     "        if any(x == flag or x.startswith(f\"{flag}=\") for flag in LOCAL_ONLY_FLAGS)",
+     "        if True"),
+
+    # --- B147: the hash, which is what makes a comparison real -------------
+    ("B147: file_sha256 fabricates a hash for a file that is not there, so "
+     "'no previous artefact' becomes indistinguishable from 'identical'",
+     "    if not path.is_file():\n        return None\n    h = hashlib.sha256()",
+     '    if not path.is_file():\n        return "0" * 64\n    h = hashlib.sha256()'),
+    ("B147: file_sha256 hashes only a prefix, so two builds differing late "
+     "(which is most of them) look identical",
+     "        for chunk in iter(lambda: fh.read(1 << 20), b\"\"):\n            h.update(chunk)\n    return h.hexdigest()",
+     "        h.update(fh.read(64))\n    return h.hexdigest()"),
+    ("B147: file_sha256 returns a constant, so every artefact is 'unchanged'",
+     "    return h.hexdigest()",
+     '    return "c" * 64'),
+    ("B147: the unchanged-artefact message stops naming the hash",
+     '        f"    sha256={digest}\\n\\n"',
+     '        f"\\n\\n"'),
 ]
 
 

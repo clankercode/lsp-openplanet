@@ -66,6 +66,20 @@ test-selftest:
 rtest-inventory-mutants:
     python3 scripts/remote-build.py run -- python3 scripts/check_test_inventory_nonvacuous.py
 
+# Prove the B145 issue-repro corpus gate can fail. That corpus is engine ground
+# truth nothing in CI can re-derive — the game is not available there — so a
+# vacuous gate would quietly turn the artifact back into decoration, which is
+# the state B145 was raised to end. Runs on the remote: one sync, N cargo runs.
+b145-corpus-mutants:
+    python3 scripts/remote-build.py run -- python3 scripts/check_b145_corpus_nonvacuous.py
+
+# Re-measure every issue-repro fixture against the LIVE game and rewrite the
+# committed corpus. Needs Trackmania + Openplanet with RemoteBuild; takes ~10
+# minutes and stages each fixture in turn. Hand-written `divergence` notes are
+# carried across. Leaves a dirty tree on purpose — a human reviews and commits.
+b145-regen:
+    python3 scripts/issue_repro_game.py --all --tsv docs/probes/b145-issue-repro-verdicts.tsv
+
 # The inventory check alone, on the remote.
 rtest-inventory *ARGS:
     python3 scripts/remote-build.py run -- python3 scripts/test_inventory.py {{ARGS}}
@@ -223,6 +237,17 @@ fleet-selftest:
 # every build broken passes a suite that only checks broken builds get caught.
 fleet-verdict-mutants:
     python3 scripts/check_fleet_verdict_nonvacuous.py
+
+# Gate a before/after fleet comparison on the two sweeps having actually run
+# DIFFERENT binaries (B147). The measured incident: a comparison reported
+# IDENTICAL while both halves ran the same stale artefact, because the
+# sync-back between them silently did not take effect. Exits 3 rather than
+# printing a diff when the two ledgers share a binary hash, or when either
+# does not record one — "I could not look" is not "I looked and they differ".
+#
+# Produce the two ledgers with FLEET_STATE_FILE=... on each sweep.
+fleet-compare BEFORE AFTER:
+    python3 scripts/fleet_dogfood.py compare {{BEFORE}} {{AFTER}}
 
 # Prove probe-selftest is non-vacuous: restore each half of a defect the enum
 # probe's guards exist to prevent (B068's sentinel, B097's load check, B123's
@@ -495,7 +520,11 @@ rcheck *ARGS:
 rclippy *ARGS:
     python3 scripts/remote-build.py clippy -- {{ARGS}}
 
-# cargo build on the remote; add --sync-back debug/openplanet-lsp to fetch it
+# cargo build on the remote; add --sync-back debug/openplanet-lsp to fetch it.
+# For a before/after comparison add --sync-back-must-change: it refuses (exit
+# 4) when the fetched artefact is byte-identical to the one already there,
+# which is the fetch-that-never-happened this batch measured (B147). The
+# sha256 of every fetch is printed whether or not the flag is passed.
 rbuild *ARGS:
     python3 scripts/remote-build.py build -- {{ARGS}}
 
