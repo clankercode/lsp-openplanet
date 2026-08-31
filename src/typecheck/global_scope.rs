@@ -2212,6 +2212,25 @@ impl<'a> GlobalScope<'a> {
     /// a directly named method; this is the retired sidecar's name-keyed
     /// behavior. B116 intentionally shares this answer across files, keeping
     /// its cross-file verdict aligned with the same-file rule.
+    ///
+    /// That aggregation PRESERVES A KNOWN FALSE NEGATIVE, recorded here so
+    /// it does not read as intent. For
+    /// `class C { void M() {} int get_M() const {} }`, the call `c.M()` on a
+    /// const receiver invokes the DIRECT, non-const `M()` — the game rejects
+    /// it — but the const `get_M` makes this name-keyed answer `Some(true)`
+    /// and nothing is diagnosed. The accessor is the property `c.M`, not the
+    /// call `c.M()`, so strictly the two spellings should not pool their
+    /// constness at a call site.
+    ///
+    /// It is kept because `file_const_methods` behaved exactly this way —
+    /// one set keyed by name, holding both spellings — and B114 is a
+    /// RETIREMENT: the pool must answer what the sidecar answered, or the
+    /// refactor is smuggling a behaviour change into a diagnostic that fires
+    /// on shipped plugins. Splitting the call spelling from the property
+    /// spelling is a real improvement and a separate, measurable one.
+    /// Pinned by `b114_accessor_names_and_direct_collisions_preserve_name_keyed_constness`,
+    /// which states the collision cases explicitly rather than leaving them
+    /// to be rediscovered.
     pub fn workspace_own_method_is_const(&self, class_name: &str, method: &str) -> Option<bool> {
         let owner = self.normalize_workspace_class_name(class_name);
         // `index_file_classes` inserted a const `get_V`/`set_V` under `V`
