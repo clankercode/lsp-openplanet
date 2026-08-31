@@ -88,3 +88,4 @@ bugs:
     - file: B087-exported-functions-and-shared.todo
     - file: B088-extension-did-not-get-suggesti.todo
     - file: B089-a-funcdef-typed-parameter-acce.todo
+    - file: B090-config-tui-needs-an-option-for.todo
