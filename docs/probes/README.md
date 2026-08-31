@@ -9,6 +9,34 @@ Produced by the B052/B053 lane, 2026-08-30, against **Trackmania + Openplanet
 1.29.5 (next, Public, 1234ad9e)**, type DB `tests/fixtures/typedb` (Nadeo dump
 dated 2026-02-03), via `scripts/probe_enum_corpus.py`.
 
+## The manifest is `MANIFEST.tsv`, not this table (B129)
+
+`docs/probes/MANIFEST.tsv` is the authoritative, machine-readable list of every
+engine-derived artifact in this repo, and `just regen-golds` reads it. This
+README stays as the prose companion — the reasoning, the caveats, and the
+asymmetries a row cannot carry — but it is no longer the list.
+
+That split exists because this table WAS the de-facto manifest and had quietly
+stopped covering the directory: `b067-class-position-scopes.tsv` (63 rows),
+`b071-enum-conversion.tsv` (8 rows) and `b096-namespaced-export-binding.tsv`
+(6 rows) were all committed corpora absent from it. A hand-maintained list
+does not fail when it falls behind; it just covers less while continuing to
+look complete. `tests/b129_gold_manifest.rs` now parses this DIRECTORY and
+fails if a `.tsv` here is missing from the manifest, so the same drift cannot
+recur silently.
+
+Two findings the manifest records rather than hides:
+
+* **`b067` and `b071` have no generator anywhere in this repo.** Both are
+  fully stamped engine gold with their method written out in their own
+  preambles, and reproducing either means a human rebuilding the probe by
+  hand. `just regen-golds` reports them as `UNCHECKED (no-generator)` on every
+  run, because an artifact that cannot be regenerated is a finding.
+* **Five corpora carry no engine version inside the file**, and two corpora
+  probed on the SAME DAY record different versions (1.29.5 and 1.29.14). The
+  manifest carries the version per artifact and the runner refuses to diff an
+  `UNKNOWN` or moved one, rather than reporting a version change as drift.
+
 | file | rows | what it answers |
 |---|---|---|
 | `b052-qualified-enum-spellings.tsv` | 1901 | for a qualified *type* spelling (`Scene::ESceneCharVisNotice`, `UI::VirtualKey`, `CGameMenu::EMenuOrder`), does the game accept it, and if not, what does it say? |

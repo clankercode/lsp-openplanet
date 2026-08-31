@@ -961,6 +961,9 @@ impl SignatureMode {
 
 /// Which host OS the analysis models (B028). A real process defines exactly
 /// one OS family. Empirically verified against the live game under Wine
+/// PRIMARY engine ground truth, registered in `docs/probes/MANIFEST.tsv`
+/// and reported UNCHECKED by `just regen-golds`: it records no Openplanet
+/// version, so a rerun must RESTAMP it rather than merely confirm it.
 /// (RemoteBuild probe, 2026-08-29): a Wine run defines BOTH `WINDOWS` and
 /// `WINDOWS_WINE`; the probe fixtures
 /// `tests/fixtures/issue-repros/b028-os-arch-defines-probe` pin this.

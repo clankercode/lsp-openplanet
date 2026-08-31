@@ -257,6 +257,37 @@ typedb-refresh-apply:
 typedb-guard:
     cargo test --locked --lib typedb_shape_guard
 
+# B129: every engine-derived gold artifact in one report. AUDIT ONLY — needs no
+# game, changes nothing, and reports each artifact's status against
+# docs/probes/MANIFEST.tsv. Nothing here ever auto-commits.
+#
+# The typedb fixtures are MANIFESTED, not re-scripted: `just typedb-refresh` /
+# `typedb-refresh-apply` / `typedb-guard` above already are the pattern this
+# ticket asked for, so the manifest records that edge rather than wrapping it
+# in a second command that could drift from it.
+regen-golds *ARGS:
+    python3 scripts/regen_golds.py {{ARGS}}
+
+# The same runner against the LIVE GAME: reruns every generator, rewrites the
+# artifacts, prints the drift. Leaves a dirty tree on purpose — a human reviews
+# and commits. Needs Trackmania + Openplanet with RemoteBuild on port 30000.
+regen-golds-apply:
+    python3 scripts/regen_golds.py --regen
+
+# Offline checks of the runner itself: NOT-RUN is never CLEAN, an unstamped or
+# version-moved artifact refuses to diff, orphans and PRIMARY rows keep their
+# own reasons, and a corpus missing from the manifest is reported. No game.
+regen-golds-selftest:
+    python3 scripts/regen_golds.py --selftest
+
+# Prove those guards are non-vacuous: neuter each one in a throwaway copy and
+# require the selftest to go red FOR THAT GUARD. Includes two OVER-CONDEMN
+# mutations — regen-golds is unusually exposed to them, because its normal
+# audit output is entirely UNCHECKED and so a report with no failures in it
+# looks exactly like a report in which nothing was measured.
+regen-golds-mutants:
+    python3 scripts/check_regen_golds_nonvacuous.py
+
 # Watch TUI on showcase fixture
 watch-showcase:
     cargo build --release

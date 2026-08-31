@@ -14,6 +14,14 @@
 //! class C : I { void M(string) {} }       Missing implementation of 'void I::M(const string&in)'
 //! ```
 //!
+//! That block is PRIMARY engine ground truth: it is a transcription of what
+//! the game said, with no corpus or generator behind it, and it is registered
+//! as such in `docs/probes/MANIFEST.tsv`. `just regen-golds` reports it
+//! `UNCHECKED (manual-re-verify)` on every run rather than pretending it was
+//! checked — there is no output file to overwrite, so only a human re-probing
+//! the five fixtures can refresh it. It was measured at 1.29.5 and the engine
+//! has since moved to 1.29.14, so treat it as owed a re-probe.
+//!
 //! **The engine has exactly ONE message form.** Max's ticket asked whether a
 //! same-name-different-signature method is a separate error "unless
 //! openplanet compile error is just unimplemented" — it is just
