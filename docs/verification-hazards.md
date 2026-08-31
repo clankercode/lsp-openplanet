@@ -3508,3 +3508,58 @@ above.
 
 With several lanes sharing one game, this is not a hypothetical: it happened
 twice in one night.
+
+## It is not enough for a check to REACH a guard — the input must land elsewhere without it
+
+B154's first mutation run had **4 of 11 surviving**, and two of them share a shape
+that a coverage measure would call covered:
+
+Both guards were **reachable only through inputs that were already AMBIGUOUS for
+another reason**, so disabling either changed no verdict.
+
+- `not started` was tested with a window carrying no unbound error — AMBIGUOUS
+  either way. The defect it exists to prevent (an unbound error with NO start
+  token scored as UNBOUND, writing a probe that never ran into a test as a fact
+  about the engine) was never exercised.
+- The load-error branch was tested with a window that was AMBIGUOUS anyway, so
+  "a refused load outranks a window that would otherwise read BOUND" went
+  unchecked.
+
+**The guard ran. The line was covered. Nothing depended on the answer.**
+
+This is the sharp form of the earlier entry about a guard shadowed by a
+neighbouring guard: it is not enough for the input to REACH the check, it must
+**land somewhere else without it.** A mutation is the only way to ask that
+question, because coverage cannot distinguish "this line executed" from "this
+line changed the outcome".
+
+The other two survivors were B118's rule earned a fourth time — production paths
+the selftest structurally cannot see, because every existing check hands
+`classify` a synthetic window:
+
+- **Swapping the RAW log reader for the filtered one left the selftest green.**
+  The filtered reader drops every `[ TRAC]` line, and this probe's entire
+  evidence is a plugin's `print()` plus a runtime exception — the exact filter
+  that cost three probes their answer. Now observed by substituting BOTH readers
+  and checking which is called, rather than asserted in a docstring.
+- **Deleting the consumer's CALL to the import also left it green.** Binding is a
+  runtime property, so an unmatched stub compiles fine on both sides and a
+  consumer that does not call measures nothing.
+
+**A suite that only exercises paths it hands in cannot see the path production
+takes.** Fourth independent instance in this batch.
+
+## `for f in $files` does not word-split in zsh
+
+lane-unused's replay of two commits "silently measured nothing": zsh does not
+word-split an unquoted variable, so the loop ran ONCE over both filenames joined,
+`git show` failed on the nonexistent path, and a trailing `|| continue` swallowed
+the error.
+
+**The no-failures-because-nothing-ran shape, occurring inside a check being
+written to validate a guard against that very shape.**
+
+Caught because the output had fewer lines than there were files — a count check,
+which is the cheapest available defence and the one that has worked repeatedly in
+this batch. Add `${(f)files}` or an explicit array; and never let `|| continue`
+swallow a command whose failure means the loop body never ran.
