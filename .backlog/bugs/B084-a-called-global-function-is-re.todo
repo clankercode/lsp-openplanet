@@ -73,3 +73,79 @@ Variants, per repo CLAUDE.md — sweep the spellings rather than pinning one:
 B061 (property reads not crediting accessors — same family, different path),
 B062 (whose export rooting masks this), tm-editor-plus-plus
 `Editor/WFC.as`, `Editor/CacheMapBounds.as`.
+
+## ROOT CAUSE + CORPUS MEASUREMENT (lane-unused, 2026-08-31) — premise HELD
+
+**The defect is OVERLOADING.** A called global function is reported unused when
+it has more than one overload. `Checker::call_type`'s bare-`Ident` ladder
+credits a call through `lookup_function_return`, whose workspace fallback
+`lookup_workspace_function_property` returns `None` the moment TWO function
+symbols share the name — the deliberate "ambiguous, say nothing" arm. The call
+then fell through to the `has_global_ident` silencer, which suppressed the
+undefined-identifier diagnostic and recorded **nothing**.
+
+The **namespaced twin of that arm, one screen up, has always called
+`record_value_use_variants`.** So the fix is one line restoring a symmetry that
+was broken, not a new rule. `src/typecheck/checker.rs:3666`.
+
+An enum used only as a cast-call — `tostring(WheelOrder(w))` — reaches the same
+arm, so the fix credits that shape too. Different syntax, same hole.
+
+## The masking claim is CONFIRMED, and the ticket understated it
+
+`CoordToPos` is overloaded 3x AND has an export stub in
+`Editor/MacroblockManip_ExportCode.as` (listed in `info.toml` `exports`), so
+B062 roots it — exactly as this ticket suspected.
+
+**But a live, visible instance was already in the corpus and nobody had looked
+for it.** `LabeledValue` in tm-editor-plus-plus `src/UI/UI_Util.as` — 10
+overloads, called from dozens of sites, in no export file — **was being
+reported unused ten times on master.** The ticket's belief that the symptom was
+entirely masked was a hypothesis, not a fact. Worth remembering: "the symptom
+is gone" is a claim about where someone looked.
+
+## Measurement (debug binary, same machine both runs, only checker.rs differing)
+
+| corpus | before | after | delta |
+|---|---|---|---|
+| tm-editor-plus-plus | 1451 | 1417 | **-34, 0 new** |
+| tm-dips-plus-plus | 271 | 251 | **-25, +5 new** |
+| tm-archivist | unchanged | | |
+| tm-counter | unchanged | | |
+| tm-dashboard | unchanged | | |
+
+All 59 removals are overload GROUPS — `LabeledValue` x10, `SmoothLerp`,
+`log_debug`, `nvgDrawRect3d` — plus `enum WheelOrder` via the cast-call shape.
+
+## The 5 additions are TRUE positives, and they are the risky half
+
+Verified by hand, and **they were masked by the false positives they sat
+behind**:
+
+- `SmoothLerp`'s `t` parameter is genuinely unread (the body uses `g_DT`). It
+  was hidden by the no-double-warn gate while the function itself was being
+  wrongly reported unused.
+- `WheelOrder`'s four values are never named anywhere, and were skipped by the
+  documented "a value of an UNUSED enum is skipped" rule — which stopped
+  applying once the enum was correctly credited as used.
+
+**These must be pinned as DELIBERATE SCOPE ADDITIONS in labelled tests** (the
+B060 precedent). Removing a false positive is the safe direction; ADDING a
+diagnostic is the direction that creates one if the reasoning is wrong. The two
+halves of a 59-removals/+5-additions result do not carry equal weight and must
+not be committed as though they do. The labelling exists so a later lane cannot
+silently revert them as false positives.
+
+Note for anyone running a per-diagnostic gate: these 5 appear as ADDITIONS and
+will look like a regression unless the gate knows they are intended.
+
+## Red/green
+
+16 tests in a new `called_global_functions_are_credited` module. Red: 9 failed,
+7 passed — and **the 7 that passed are exactly the controls**: a non-overloaded
+global, the three namespaced arms that already recorded, an overloaded method on
+a typed receiver (via `record_member_use_from_type`), and the over-rooting gate
+`uncalled_overloads_are_still_reported`. Green: 16/16.
+
+`SUITE-VERIFIED: 2404 passed; 0 failed; 14 ignored; 26/26 binaries reported`
+(2388 + 16, exact).
