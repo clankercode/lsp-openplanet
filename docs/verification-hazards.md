@@ -2128,3 +2128,55 @@ which is more than can be said for "think harder about your silence tests".
 
 **Corollary for reviewers.** A red/green report saying "11 failed, 4 passed" is
 not fully good news. The 4 are the ones to ask about.
+
+## A merge run inside a lane's worktree does nothing and reports success
+
+My own mistake, and the second false-green I authored in one night while
+coordinating the effort to eliminate them.
+
+I ran this as a single compound command from the main checkout:
+
+    cd .worktrees/unused && git rebase master && git merge --ff-only lane/unused
+
+The `cd` persists across the `&&` chain, so the **merge also executed inside the
+lane's worktree**. Git reported:
+
+    Already up to date.
+
+Which is true, and useless. That worktree *is* `lane/unused`, so merging the
+branch into itself is a no-op. Master never received the commit. The command
+exited 0, printed a reassuring sentence, and did nothing.
+
+I caught it only because the next gate's **binary count** did not match what I
+believed master contained — 31/31 where I expected 30/30, because a peer
+session's merge had landed in between. The arithmetic caught it, not the git
+output.
+
+**Two things make this worth recording separately from the `git pull` entry.**
+
+First, the failure mode is a *success message*. "Already up to date" is what a
+correct no-op looks like, so there is no shape to distinguish it from the case
+where you genuinely had nothing to merge. Same family as the rest of this
+document: the wrong answer is well-formed.
+
+Second, and worse: the lane had **uncommitted work in that worktree** — a red
+test for its next ticket. It survived only because `git rebase` refuses on a
+dirty tree touching the affected path. That is luck, not design, and the lane
+was right to raise it rather than let it pass.
+
+**Rules for anyone coordinating lanes.**
+
+- **Merge only from the main checkout.** Never `cd` into a lane's worktree to
+  merge. If you must inspect one, do it in a separate command so a stale `cd`
+  cannot leak into a mutating one.
+- **Never rebase inside a lane's tree while that lane is running.** Ask the lane
+  to rebase; it knows what it has uncommitted and can park in seconds. Or merge
+  with `--no-ff`, which needs no rebase at all — that is what B107 finally
+  landed as, specifically so the lane's in-flight B108 work was never at risk.
+- **Verify the merge landed rather than trusting the message.** `git merge-base
+  --is-ancestor <branch> HEAD` answers it directly, and the gate's reconciling
+  total answers it independently.
+
+The general lesson is the same one the gate teaches: a mutating command that can
+succeed by doing nothing needs a check on the *outcome*, not on its exit status
+or its output.
