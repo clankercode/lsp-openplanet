@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T13:39:48Z"
 depends_on: []
 estimate_hours: 1
 id: B119
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Const-receiver rule is own-class-only: an inherited non-const method reached through a derived const receiver is silent on both sides of the file boundary'
@@ -12,3 +14,54 @@ updated_at: "2026-08-31T13:39:48Z"
 ---
 
 Const-receiver rule is own-class-only: an inherited non-const method reached through a derived const receiver is silent on both sides of the file boundary
+
+
+## Found by lane-enum while measuring B116, 2026-08-31. Left out of scope deliberately.
+
+## The one fleet site, measured not guessed
+
+`tm-map-together/src/Socket.as:467`
+
+    skins[i].WriteToNetworkBuffer(buf)
+
+where `skins` is `const Editor::SetSkinSpec@[]@`. `WriteToNetworkBuffer` is
+non-const on `NetworkSerializable`, **two levels up** the hierarchy.
+
+A parent-walking gate fires here. B116's own-class-only gate does not, on either
+side of the file boundary — this is not a cross-file gap, B116 closed that.
+
+Exactly **one** site in 151 plugins, out of 827 unique call sites reached.
+
+## Why it was left out, and why that was right
+
+There are two live possibilities and they want different fixes:
+
+1. It is a **real missed error**, and the rule should walk parents.
+2. `const T@[]` **element constness** does not propagate the way we model it —
+   in which case the receiver is not const at all and there is nothing to fire
+   on. The outer handle being const says nothing on its own about the elements.
+
+Nothing in the repo distinguishes these. **Probe the game first.** Writing
+either fix before that is picking an answer by coin flip and then building tests
+that ratify it.
+
+## The test that will flip
+
+`b116_cross_file_const_receiver_tests::inherited_nonconst_method_agrees_across_the_file_boundary`
+
+It asserts the two halves are **EQUAL** rather than hardcoding zero, precisely so
+that closing this gap trips it instead of sliding past. Do not delete it; change
+what it pins, and say which of the two possibilities above the probe settled.
+
+## Test axes
+
+- Inheritance depth 1, 2 and 4. MLFeed ships 4-deep hierarchies and B116 already
+  measured 2 sites there (inherited-const, so silent and correct).
+- A const method inherited from a parent (must stay silent) against a non-const
+  one (must fire) — without the const half, a fix that fires on all inherited
+  methods passes.
+- The receiver spellings B116 already pairs: `const T&in`, `const T@ &in`,
+  `const T@`, `const T`, plus `const T@[]@` and `const T[]` for the element
+  question specifically.
+- Same-file and cross-file for each, since B116 established the two arms are
+  separate code paths and a fix to one is not a fix to the other.
