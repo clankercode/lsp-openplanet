@@ -16,3 +16,57 @@ updated_at: "2026-08-31T15:29:06Z"
 ---
 
 Max's plugin dev norms mean code is often moved from /src/ to / within the plugin directory. so the info.toml entries need to be without 'src/'. We should support extra search dirs for export files (keeping their path if the have one). so we check <export_path> and if that's not found, we check <search_dir>/<export_path> too. This goes for normal and shared exports. This should make it work with most of Max's plugins.
+
+
+## Clarification from Max, 2026-09-01
+
+- Default extra search paths: **just `src/`** (which is already the hardcoded
+  default in `DependencySearch::with_defaults()`).
+- **The user can add or change them** — so this needs to become a real config
+  key, which it currently is not.
+- **Config TUI support required.**
+
+## Orientation from the coordinator — VERIFY, DO NOT TRUST
+
+The described fallback **appears to already exist**, which means this ticket
+describes a real failure whose cause has not been found. Reproduce before
+implementing, or you will ship a no-op with passing tests.
+
+- `resolve_plugin_file` (src/workspace/deps.rs:253) already tries `root/file`,
+  then `root/<search_root>/file` for each search root.
+- `DependencySearch::with_defaults()` (src/workspace/load.rs:147) already
+  defaults `plugin_files_search_paths` to `["src"]`; src/entrypoint.rs:51 sets
+  the same.
+- `own_export_paths` (src/workspace/load.rs:220) already calls it for BOTH
+  `script.exports` and `script.shared_exports`.
+
+### The direction that is NOT covered, and the likely bug
+
+An entry of `src/Foo.as` when the file has **moved to `root/Foo.as`**. The
+current fallback tries `root/src/Foo.as`, then `root/src/src/Foo.as`, and
+fails. Max's phrasing — code moved *from* `/src/` *to* `/` — points at exactly
+this, and it is the one direction the existing fallback cannot handle.
+
+Other candidates, unconfirmed: a code path that bypasses `resolve_plugin_file`
+(check src/server/diagnostics.rs and src/analysis_snapshot.rs, not only the CLI),
+or a `DependencySearch` built literally rather than via `with_defaults()` leaving
+the search paths empty (src/cli/mod.rs:882 builds one from
+`options.plugin_files_search_paths` — check what populates that with no flag).
+
+**Name the mechanism with evidence, and say WHICH of Max's shipped plugins fail
+and why.** The ticket's success criterion is "works with most of Max's plugins",
+so a reproduction against named plugins under `~/src/openplanet/my-plugins`
+(READ ONLY) is worth more than a synthetic fixture.
+
+## Config surface
+
+`plugin_files_search_paths` is currently **not a config key at all** — it appears
+in src/config.rs only as a consumer at line 1694, and nowhere in src/tui/. It is
+settable only from a CLI option and the hardcoded default.
+
+Follow the existing list-valued-key pattern (`plugins_dir`, `source_paths`,
+`ignore_paths`) rather than inventing a shape, and honour the GH #60 precedence
+ladder: a CLI flag beats a workspace or user-global setting. The config TUI is
+spec-driven (src/tui/config.rs navigates by `spec.key`); add to the spec table
+rather than special-casing, and read how B090's severity work landed there so
+this is consistent.
