@@ -2226,9 +2226,12 @@ impl<'a> GlobalScope<'a> {
             let mut any_const = false;
             for qualified in &candidates {
                 for s in self.lookup_workspace(qualified) {
-                    if let SymbolKind::Function { is_const, .. } = &s.kind {
+                    // B114: the qualifier moved from `SymbolKind::Function`
+                    // onto `Symbol::modifiers`, so there is ONE home for
+                    // every declaration modifier rather than one per kind.
+                    if matches!(s.kind, SymbolKind::Function { .. }) {
                         found = true;
-                        any_const |= *is_const;
+                        any_const |= s.modifiers.is_const;
                     }
                 }
             }

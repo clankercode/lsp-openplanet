@@ -30,22 +30,27 @@ use crate::lexer::Span;
 ///   `is_shared` across five variants, and an always-false bool is a
 ///   cheaper wrong than a fivefold repetition.
 ///
-/// # One value here is KNOWN WRONG, and it is not this ticket's to fix
+/// # Visibility is complete across all three member shapes
 ///
-/// Visibility on a class FIELD is dropped by the PARSER, one layer earlier
-/// than pooling: `parse_class_member` eats `private` / `protected` and
-/// threads them into every `FunctionDecl` it builds, but
-/// `ClassMember::Field` holds a `VarDeclStmt`, which has no field to put
-/// them in. So `is_private` on a pooled FIELD reads `false` even for
-/// `private int x;` — an absence indistinguishable from a "no". Methods are
-/// correct; fields are not.
+/// `is_private` / `is_protected` are carried for METHODS, class FIELDS and
+/// class PROPERTIES alike, so a consumer may filter on any of them.
 ///
-/// Do not read field visibility off this until the parser records it.
-/// `a_private_field_loses_its_visibility_at_parse_time` pins the gap so it
-/// stays visible rather than reading as intent, and names the test to flip
-/// when the parser change lands. The consequence for the feature this
-/// unblocks: completion visibility filtering will be right for methods and
-/// half-blind for fields until then.
+/// This was briefly untrue and the history is worth keeping, because the
+/// gap was in a layer BELOW this one. The parser used to eat `private` /
+/// `protected` in `parse_class_member` and thread them only into the
+/// `FunctionDecl` it built; `ClassMember::Field` holds a `VarDeclStmt` and
+/// `ClassMember::Property` a `PropertyDecl`, neither of which had anywhere
+/// to put them. Methods were right and state-shaped members read `false`
+/// even for `private int x;` — an absence indistinguishable from a "no".
+/// B115 gave both nodes real fields and B114 carries them here.
+///
+/// Two things follow for anyone extending this. The FILE-SCOPE spellings
+/// (`Item::VarDecl`, `Item::Property`) and locals share `VarDeclStmt` with a
+/// class field but cannot carry visibility in the language, so they are
+/// always false — pinned, not assumed. And completion's dot-member path
+/// reads workspace members EXCLUSIVELY from the pool, with no AST fallback,
+/// which makes these flags the sole source of truth for visibility
+/// filtering rather than one of two.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeclModifiers {
     /// `shared` — the cross-plugin entity mechanism, on a function, class,
@@ -68,13 +73,23 @@ pub struct DeclModifiers {
     pub is_override: bool,
     /// `final` on a method or class.
     pub is_final: bool,
-    /// `private` on a member (or, per the parser, a file-scope
-    /// declaration). NOTE: nothing reads visibility yet — completion has
-    /// no filtering at all — so this is the enabling half of a
-    /// user-visible feature, pooled here because that feature cannot be
-    /// written without it.
+    /// `private` on a class member — a method, a field or a property.
+    /// Always false for a file-scope declaration and a local, which cannot
+    /// carry visibility in the language.
+    ///
+    /// This is the enabling half of a user-visible feature: completion has
+    /// no visibility filtering at all yet, and cannot get one without these
+    /// flags, because its dot-member path reads workspace members only from
+    /// the pool.
     pub is_private: bool,
-    /// `protected` on a member.
+    /// `protected` on a class member.
+    ///
+    /// A SEPARATE flag rather than a "not public" bit shared with
+    /// [`Self::is_private`], because the two differ exactly at a
+    /// derived-class access site: `protected` is reachable from a subclass
+    /// and `private` is not. A consumer that could only see "not public"
+    /// could not make that distinction. The parser takes the first keyword
+    /// it sees and never sets both.
     pub is_protected: bool,
 }
 

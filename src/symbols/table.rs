@@ -29,6 +29,28 @@ fn class_modifiers(c: &ast::ClassDecl) -> DeclModifiers {
     }
 }
 
+/// B114 + B115: the modifiers a STATE-shaped declaration was written with —
+/// a class field (`VarDeclStmt`) or a class property (`PropertyDecl`).
+///
+/// Visibility is the only modifier either can carry. Before B115 the parser
+/// ate `private` / `protected` on these and dropped them, so pooling them was
+/// impossible and this arm hardcoded a default; B115 records them, and this
+/// is what carries them the rest of the way to the pool.
+///
+/// Also used for the FILE-SCOPE spellings (`Item::VarDecl`,
+/// `Item::Property`), where the language permits no visibility at all and the
+/// parser therefore always reports false. Threading them anyway costs
+/// nothing, cannot be wrong, and means the pool follows the parser if that
+/// ever changes — rather than a second place that has to be remembered.
+/// Pinned by `locals_and_file_scope_variables_declare_no_visibility`.
+fn state_modifiers(is_private: bool, is_protected: bool) -> DeclModifiers {
+    DeclModifiers {
+        is_private,
+        is_protected,
+        ..DeclModifiers::default()
+    }
+}
+
 /// B114: `shared` is the only modifier an interface, enum or funcdef can
 /// carry.
 fn shared_only(is_shared: bool) -> DeclModifiers {
@@ -435,7 +457,10 @@ impl SymbolTable {
                             for decl in &var.declarators {
                                 let mname = format!("{}::{}", class_name, decl.name.text(source));
                                 out.push(Symbol {
-                                    modifiers: DeclModifiers::default(),
+                                    // B115 records a field's visibility; B114
+                                    // carries it to the pool, which is the
+                                    // only source completion can filter on.
+                                    modifiers: state_modifiers(var.is_private, var.is_protected),
                                     name: mname,
                                     kind: SymbolKind::Variable {
                                         type_name: type_text.clone(),
@@ -517,7 +542,10 @@ impl SymbolTable {
                             let mname = format!("{}::{}", class_name, prop.name.text(source));
                             let type_text = prop.type_expr.span.text(source).to_string();
                             out.push(Symbol {
-                                modifiers: DeclModifiers::default(),
+                                // The other STATE-shaped member. B115 fixed
+                                // both, so pooling only fields would rebuild
+                                // the half-blind asymmetry one layer up.
+                                modifiers: state_modifiers(prop.is_private, prop.is_protected),
                                 name: mname,
                                 kind: SymbolKind::Variable {
                                     type_name: type_text,
@@ -713,7 +741,10 @@ impl SymbolTable {
                 for decl in &var.declarators {
                     let name = qualify(decl.name.text(source));
                     out.push(Symbol {
-                        modifiers: DeclModifiers::default(),
+                        // Structurally always false — a file-scope variable
+                        // cannot carry visibility — but threaded rather than
+                        // hardcoded so the pool follows the parser.
+                        modifiers: state_modifiers(var.is_private, var.is_protected),
                         name,
                         kind: SymbolKind::Variable {
                             type_name: type_text.clone(),
@@ -728,7 +759,8 @@ impl SymbolTable {
                 let name = qualify(prop.name.text(source));
                 let type_text = prop.type_expr.span.text(source).to_string();
                 out.push(Symbol {
-                    modifiers: DeclModifiers::default(),
+                    // As above: always false at file scope, threaded anyway.
+                    modifiers: state_modifiers(prop.is_private, prop.is_protected),
                     name,
                     kind: SymbolKind::Variable {
                         type_name: type_text,
@@ -1313,30 +1345,121 @@ mod tests {
 
     /// RECORDED, NOT FIXED — a gap one layer EARLIER than this ticket.
     ///
-    /// Visibility on a class FIELD is dropped by the PARSER, before pooling
-    /// can see it: `parse_class_member` eats `private` / `protected` and
-    /// threads them into every `FunctionDecl` it builds, but
-    /// `ClassMember::Field` holds a `VarDeclStmt`, which has no field to put
-    /// them in. So the pooled answer for a private field is `false` — known
-    /// wrong, asserted here so it reads as a recorded gap rather than as
-    /// intent, and so the parser ticket that closes it has a test to flip.
-    ///
-    /// Consequence for the feature this ticket unblocks: completion
-    /// visibility filtering will be correct for METHODS and half-blind for
-    /// FIELDS until that lands.
+    // ── Visibility on the STATE-shaped members (B115 + B114) ──────────
+    //
+    // These replace a tripwire that could never fire. It asserted the
+    // pooled value was `false` for a private field and told the reader
+    // "if this now passes, the parser was fixed — pin the true value
+    // instead". But the value it read was hardcoded to `false` by the
+    // field arm of this very module, not produced by the parser, so B115
+    // landing changed nothing the test could observe: it would have stayed
+    // green while reporting "still broken" forever.
+    //
+    // The lesson generalises past this test. An assertion is only a
+    // tripwire if the thing it reads is the thing that would change. Read
+    // through a layer that hardcodes the answer and it measures the
+    // hardcode, not the subject — a self-referential probe, and one that
+    // fails toward looking correct.
+    //
+    // B115 gave `VarDeclStmt` and `PropertyDecl` real `is_private` /
+    // `is_protected` fields, so the true values are pinned here instead.
+
+    /// A private FIELD pools its visibility.
     #[test]
-    fn a_private_field_loses_its_visibility_at_parse_time() {
+    fn a_private_field_pools_its_visibility() {
         let m = pooled_modifiers("class C { private int x; }", "C::x");
+        assert!(m.is_private, "a private field must pool as private");
+        assert!(!m.is_protected, "and not as protected");
+    }
+
+    /// A protected FIELD pools its visibility. Kept separate from
+    /// `private` because the two differ exactly at a derived-class access
+    /// site, which a single "not public" bit could not express.
+    #[test]
+    fn a_protected_field_pools_its_visibility() {
+        let m = pooled_modifiers("class C { protected int x; }", "C::x");
+        assert!(m.is_protected, "a protected field must pool as protected");
+        assert!(!m.is_private, "and not as private");
+    }
+
+    /// The positive control: without a keyword, a field declares neither.
+    /// Without this, "pools its visibility" is satisfiable by always
+    /// answering true.
+    #[test]
+    fn a_plain_field_declares_no_visibility() {
+        let m = pooled_modifiers("class C { int x; }", "C::x");
         assert!(
-            !m.is_private,
-            "KNOWN GAP: if this now passes the visibility, the parser was \
-             fixed — delete this test and pin the true value instead"
+            !m.is_private && !m.is_protected,
+            "a plain field declares no visibility, got {m:?}"
         );
-        // The METHOD beside it, in the same class, does keep its visibility
-        // — so this is a field-shaped hole, not a broken modifier.
+    }
+
+    /// A PROPERTY is the other state-shaped member, and B115 fixed both.
+    /// Pooling only fields would rebuild the half-blind asymmetry one
+    /// layer up.
+    #[test]
+    fn a_private_property_pools_its_visibility() {
+        let m = pooled_modifiers(
+            "class C { private int p { get { return 1; } } }",
+            "C::p",
+        );
+        assert!(m.is_private, "a private property must pool as private");
+        assert!(!m.is_protected, "and not as protected");
+    }
+
+    #[test]
+    fn a_protected_property_pools_its_visibility() {
+        let m = pooled_modifiers(
+            "class C { protected int p { get { return 1; } } }",
+            "C::p",
+        );
+        assert!(m.is_protected, "a protected property must pool as protected");
+        assert!(!m.is_private, "and not as private");
+    }
+
+    #[test]
+    fn a_plain_property_declares_no_visibility() {
+        let m = pooled_modifiers("class C { int p { get { return 1; } } }", "C::p");
         assert!(
-            pooled_modifiers("class C { private void M() {} }", "C::M").is_private,
-            "a private METHOD must keep its visibility"
+            !m.is_private && !m.is_protected,
+            "a plain property declares no visibility, got {m:?}"
+        );
+    }
+
+    /// Every state-shaped member beside its method twin, in ONE fixture, so
+    /// silence and reporting are measured against the same run — the shape
+    /// B087's family uses. A fix that stamps everything private passes each
+    /// positive above and fails here.
+    #[test]
+    fn visibility_is_pooled_for_fields_properties_and_methods_alike() {
+        let src = "class C { private int f; protected int g; int h; \
+                   private int p { get { return 1; } } \
+                   private void M() {} protected void N() {} void O() {} }";
+        for (name, private, protected) in [
+            ("C::f", true, false),
+            ("C::g", false, true),
+            ("C::h", false, false),
+            ("C::p", true, false),
+            ("C::M", true, false),
+            ("C::N", false, true),
+            ("C::O", false, false),
+        ] {
+            let m = pooled_modifiers(src, name);
+            assert_eq!(m.is_private, private, "wrong is_private for {name}");
+            assert_eq!(m.is_protected, protected, "wrong is_protected for {name}");
+        }
+    }
+
+    /// A LOCAL and a FILE-SCOPE variable share `VarDeclStmt` with a class
+    /// field but cannot carry visibility in the language, so the parser
+    /// leaves both flags false. Pinned so pooling never invents a
+    /// visibility for them.
+    #[test]
+    fn locals_and_file_scope_variables_declare_no_visibility() {
+        let m = pooled_modifiers("int g = 1;\nvoid f() { int l = 2; }", "g");
+        assert!(
+            !m.is_private && !m.is_protected,
+            "a file-scope variable declares no visibility, got {m:?}"
         );
     }
 
