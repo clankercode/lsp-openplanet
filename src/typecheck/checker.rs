@@ -4657,6 +4657,45 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                // B116: the same rule, one file boundary further out.
+                // `file_classes` is built by `index_file_classes`, which
+                // walks ONE document, so the arm above can only ever see a
+                // class declared in THIS file — a const receiver whose class
+                // lived in a sibling file fell straight through to
+                // `lookup_method_return` and was silently unchecked. The
+                // gate was `file_classes`, never the const set, which is why
+                // pooling `is_const` (B101) did not fix it on its own.
+                //
+                // Provenance is what makes widening safe. The constness
+                // comes from `workspace_own_method_is_const`, which reads
+                // the WORKSPACE half of the merged view only, so an engine
+                // receiver answers `None` and stays unchecked — the typedb
+                // has no const-qualifier metadata at all, and treating
+                // "not known const" as "non-const" would fire on it
+                // uniformly. Measured on the 151-plugin fleet: 827 const
+                // receiver call sites reach here, 807 of them engine or
+                // builtin types (`string`, `Json::Value`, `vec3`, `array`,
+                // …) that `None` correctly excludes.
+                //
+                // Same-file classes are excluded outright rather than
+                // re-decided, so the existing arm remains the single
+                // authority for anything it can see and this can only ever
+                // ADD the cross-file case.
+                if receiver_const
+                    && !self.file_classes.contains_key(&type_name)
+                    && self
+                        .scope
+                        .workspace_own_method_is_const(&type_name, &member_name)
+                        == Some(false)
+                {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: callee.span,
+                        kind: TypeDiagnosticKind::NonConstMethodOnConstReceiver {
+                            method: member_name.clone(),
+                            object_type: type_name.clone(),
+                        },
+                    });
+                }
                 if let Some(t) = self.scope.lookup_method_return(&type_name, &member_name) {
                     // External types: no const-qualifier metadata yet, so
                     // don't over-fire — see AC19 deferred follow-up.
@@ -12714,15 +12753,18 @@ void f() {
         assert_eq!(bad.len(), 1, "expected 1 diagnostic, got {:?}", diags);
     }
 
-    /// Cross-FILE workspace method (pooled table only, no same-file
-    /// metadata): conservatively silent — we can't see the const-qualifier
-    /// from here without full cross-file method metadata.
+    /// A receiver whose class is in NO file and NOT in the pool: silent.
+    ///
+    /// This test used to be named `cross_file_method_const_receiver_silent`
+    /// and was read as documenting deliberate cross-file silence. It never
+    /// tested that. `check` builds a workspace holding only this source, so
+    /// `C` is absent from the pooled table as well — the case measured here
+    /// is an UNKNOWN type, not a cross-file one. B116 fixed the real
+    /// cross-file case (see `b116_cross_file_const_receiver_tests`); this
+    /// one keeps its own, still-correct contract: with nothing known about
+    /// `C` anywhere, the rule must stay quiet.
     #[test]
-    fn cross_file_method_const_receiver_silent() {
-        // Method lives in another file: single-file `check` can't see it.
-        // The class is unknown here, so the receiver type resolves to
-        // Error and the rule must not fire (only UnknownType may appear,
-        // which is pre-existing behavior for unknown types in params).
+    fn unknown_class_const_receiver_silent() {
         let diags = check("void f(const C &in h) { h.M(); }");
         let bad: Vec<_> = diags
             .iter()
@@ -13514,4 +13556,303 @@ void f() {
         .expect("typedb fixtures must load")
     }
 
+}
+
+// ── B116: NonConstMethodOnConstReceiver across a file boundary ──────────────
+//
+// The rule's sole emit site used to sit inside the
+// `if let Some((_, members)) = self.file_classes.get(&type_name)` arm, and
+// `file_classes` is built by `index_file_classes`, which walks ONE document.
+// So a const receiver whose class lived in another file was silently
+// unchecked — the gate was `file_classes`, never the const set.
+//
+// Every case below is stated TWICE: once same-file (the control, which
+// already passed) and once split across files (the ticket). Keeping the pair
+// adjacent is the point — it is what stops the two from being conflated
+// again, in either direction.
+#[cfg(test)]
+mod b116_cross_file_const_receiver_tests {
+    use super::*;
+    use crate::lexer::tokenize_filtered;
+    use crate::parser::Parser;
+    use crate::symbols::SymbolTable;
+
+    /// Check `main` against a workspace that also holds every `sibling`
+    /// under its own file id. Diagnostics are those of `main` only, so a
+    /// sibling's own body can never contribute to the count.
+    fn check_ws(main: &str, siblings: &[&str], typedb: Option<&crate::typedb::TypeIndex>) -> Vec<TypeDiagnostic> {
+        let mut ws = SymbolTable::new();
+        for sibling in siblings {
+            let tokens = tokenize_filtered(sibling);
+            let mut parser = Parser::new(&tokens, sibling);
+            let file = parser.parse_file();
+            let fid = ws.allocate_file_id();
+            let syms = SymbolTable::extract_symbols(fid, sibling, &file);
+            ws.set_file_symbols(fid, syms);
+        }
+        let tokens = tokenize_filtered(main);
+        let mut parser = Parser::new(&tokens, main);
+        let file = parser.parse_file();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, main, &file);
+        ws.set_file_symbols(fid, syms);
+
+        let scope = GlobalScope::new(&ws, typedb);
+        let mut checker = Checker::new(main, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    /// How many `NonConstMethodOnConstReceiver` the rule produced.
+    fn fired(diags: &[TypeDiagnostic]) -> usize {
+        diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .count()
+    }
+
+    /// The class the cross-file cases reach for. `Mutate` is non-const,
+    /// `Peek` is const, `x` is a plain field.
+    const SIBLING_C: &str = "class C { int x; void Mutate() {} bool Peek() const { return true; } }";
+
+    /// Same-file spelling of `SIBLING_C`, so each case can be stated as a
+    /// pair without duplicating the class body.
+    fn same_file(body: &str) -> String {
+        format!("{SIBLING_C} {body}")
+    }
+
+    /// Every receiver spelling, with what the rule must answer. `&out` is
+    /// an OUTPUT parameter — the callee assigns it, so it is never const;
+    /// `&inout` aliases a mutable object. A by-value parameter is the
+    /// caller's copy. Only the spellings that make the OBJECT const fire.
+    ///
+    /// (`const C &out` is not valid AngelScript — an output reference that
+    /// cannot be written to is a contradiction — so it has no row.)
+    const RECEIVERS: &[(&str, bool)] = &[
+        ("const C &in c", true),
+        ("const C@ &in c", true),
+        ("const C@ c", true),
+        ("const C c", true),
+        ("C &in c", false),
+        ("C &out c", false),
+        ("C &inout c", false),
+        ("C c", false),
+        ("C@ c", false),
+    ];
+
+    /// The ticket's repro, verbatim: `class C` in `a.as`, the const
+    /// receiver in `b.as`. RED before B116 — the emit arm was gated on
+    /// `file_classes`, which never held `C`.
+    #[test]
+    fn cross_file_nonconst_method_on_const_ref_fires() {
+        let diags = check_ws("void f(const C@ c) { c.Mutate(); }", &[SIBLING_C], None);
+        assert_eq!(
+            fired(&diags),
+            1,
+            "cross-file const receiver must diagnose, got {:?}",
+            diags
+        );
+    }
+
+    /// The same-file control for the repro. This one always passed; it is
+    /// here so a regression cannot silently move the pair apart.
+    #[test]
+    fn same_file_nonconst_method_on_const_ref_fires() {
+        let diags = check_ws(&same_file("void f(const C@ c) { c.Mutate(); }"), &[], None);
+        assert_eq!(fired(&diags), 1, "same-file control, got {:?}", diags);
+    }
+
+    /// The full receiver matrix, stated as a same-file/cross-file PAIR for
+    /// every spelling. Both halves must give the same verdict: that
+    /// equality is the property B116 restores.
+    #[test]
+    fn receiver_matrix_agrees_across_the_file_boundary() {
+        for (recv, should_fire) in RECEIVERS {
+            let body = format!("void f({recv}) {{ c.Mutate(); }}");
+            let want = usize::from(*should_fire);
+
+            let same = check_ws(&same_file(&body), &[], None);
+            assert_eq!(
+                fired(&same),
+                want,
+                "same-file `{recv}` expected {want}, got {:?}",
+                same
+            );
+
+            let split = check_ws(&body, &[SIBLING_C], None);
+            assert_eq!(
+                fired(&split),
+                want,
+                "cross-file `{recv}` expected {want}, got {:?}",
+                split
+            );
+        }
+    }
+
+    /// A method that carries the trailing `const` qualifier is legal on a
+    /// const receiver — and the qualifier has to survive the file
+    /// boundary, or widening the gate just trades a false negative for a
+    /// false positive on every well-written const method.
+    #[test]
+    fn const_method_stays_silent_across_the_file_boundary() {
+        for recv in RECEIVERS.iter().map(|(r, _)| r) {
+            let body = format!("void f({recv}) {{ c.Peek(); }}");
+            let split = check_ws(&body, &[SIBLING_C], None);
+            assert_eq!(
+                fired(&split),
+                0,
+                "cross-file const method `{recv}` must be silent, got {:?}",
+                split
+            );
+            let same = check_ws(&same_file(&body), &[], None);
+            assert_eq!(
+                fired(&same),
+                0,
+                "same-file const method `{recv}` must be silent, got {:?}",
+                same
+            );
+        }
+    }
+
+    /// Reading a FIELD through a const receiver is not a method call. The
+    /// widened gate must not mistake a field for a non-const method just
+    /// because the pooled symbol lives in another file.
+    #[test]
+    fn cross_file_field_read_on_const_receiver_is_silent() {
+        let diags = check_ws("void f(const C@ c) { int y = c.x; }", &[SIBLING_C], None);
+        assert_eq!(fired(&diags), 0, "field read must be silent, got {:?}", diags);
+    }
+
+    /// An INHERITED method reached through a derived const receiver is
+    /// silent — and that is deliberate, because the same-file rule is
+    /// silent too. `index_file_classes` records only a class's OWN
+    /// members, so `d.Mutate()` on `class D : B` never matched inside the
+    /// `file_classes` arm either. B116 restores PARITY across the file
+    /// boundary; it does not invent a rule the same-file side never had.
+    ///
+    /// The residual false negative is real and shared by both halves —
+    /// which is why the assertion is on the pair being EQUAL rather than
+    /// on a hardcoded 0. Closing it is its own ticket: measured on the
+    /// 151-plugin fleet, a parent-walking gate would have changed exactly
+    /// one verdict (`Editor::SetSkinSpec::WriteToNetworkBuffer`, inherited
+    /// non-const from `NetworkSerializable`, called on a
+    /// `const Editor::SetSkinSpec@[]@` element in tm-map-together).
+    #[test]
+    fn inherited_nonconst_method_agrees_across_the_file_boundary() {
+        let base = "class B { void Mutate() {} }";
+        let derived = "class D : B {}";
+        let split = check_ws("void f(const D@ d) { d.Mutate(); }", &[base, derived], None);
+        let same = check_ws(
+            &format!("{base} {derived} void f(const D@ d) {{ d.Mutate(); }}"),
+            &[],
+            None,
+        );
+        assert_eq!(
+            fired(&split),
+            fired(&same),
+            "inherited-method verdict must not depend on the file boundary: \
+             cross-file {:?} vs same-file {:?}",
+            split,
+            same
+        );
+        assert_eq!(
+            fired(&same),
+            0,
+            "own-class-only is the same-file rule; a change here is a scope \
+             change, not a refactor: {:?}",
+            same
+        );
+    }
+
+    /// An inherited CONST method is silent on both sides too — same
+    /// mechanism, but here the silence is also the CORRECT answer, so it
+    /// pins the pair from the other direction.
+    #[test]
+    fn cross_file_inherited_const_method_is_silent() {
+        let base = "class B { bool Peek() const { return true; } }";
+        let derived = "class D : B {}";
+        let diags = check_ws("void f(const D@ d) { d.Peek(); }", &[base, derived], None);
+        assert_eq!(fired(&diags), 0, "inherited const method, got {:?}", diags);
+    }
+
+    /// An override in the DERIVED class wins over the base's qualifier:
+    /// a const base method overridden without `const` is non-const here.
+    #[test]
+    fn cross_file_derived_override_decides_constness() {
+        let base = "class B { bool Peek() const { return true; } }";
+        let derived = "class D : B { bool Peek() { return false; } }";
+        let diags = check_ws("void f(const D@ d) { d.Peek(); }", &[base, derived], None);
+        assert_eq!(
+            fired(&diags),
+            1,
+            "derived non-const override must diagnose, got {:?}",
+            diags
+        );
+    }
+
+    /// A virtual-property accessor: `get_V() const` satisfies a const
+    /// receiver, `set_V()` does not. Same-file already handled this
+    /// through `file_const_methods`; the pooled path must agree.
+    #[test]
+    fn cross_file_virtual_property_accessors_follow_their_qualifier() {
+        let sib = "class P { int _v; int get_V() const { return _v; } void set_V(int v) { _v = v; } }";
+        let read = check_ws("void f(const P@ p) { int y = p.get_V(); }", &[sib], None);
+        assert_eq!(fired(&read), 0, "const getter must be silent, got {:?}", read);
+        let write = check_ws("void f(const P@ p) { p.set_V(1); }", &[sib], None);
+        assert_eq!(
+            fired(&write),
+            1,
+            "non-const setter must diagnose, got {:?}",
+            write
+        );
+    }
+
+    /// THE FALSE-POSITIVE GUARD, and the reason B116 is its own ticket.
+    /// An ENGINE type has no const-qualifier metadata in the typedb —
+    /// `lookup_method_return`'s own comment concedes it — so widening the
+    /// gate must not let the rule reach external receivers. Everything
+    /// the engine offers would look non-const and fire.
+    #[test]
+    fn external_engine_receiver_never_fires() {
+        use crate::typedb::TypeIndex;
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let idx = TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load");
+        for src in [
+            "void f(const CTrackMania@ app) { app.BackToMainMenu(); }",
+            "void f(const CMwNod@ n) { n.MwAddRef(); }",
+            "void f(const MwFastBuffer<uint>@ b) { b.Add(1); }",
+        ] {
+            let diags = check_ws(src, &[], Some(&idx));
+            assert_eq!(
+                fired(&diags),
+                0,
+                "engine receiver must never fire (no const metadata): {src} -> {:?}",
+                diags
+            );
+        }
+    }
+
+    /// A namespaced workspace class, split across files: the pooled name
+    /// is `N::C`, and the rule has to normalize to it or it silently
+    /// stops firing again for every plugin that uses a namespace.
+    #[test]
+    fn cross_file_namespaced_class_fires() {
+        let sib = "namespace N { class C { void Mutate() {} } }";
+        let diags = check_ws("void f(const N::C@ c) { c.Mutate(); }", &[sib], None);
+        assert_eq!(
+            fired(&diags),
+            1,
+            "namespaced cross-file class must diagnose, got {:?}",
+            diags
+        );
+    }
 }
