@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T09:56:41Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T10:19:38Z"
 complexity: medium
 created_at: "2026-08-31T09:50:52Z"
 depends_on: []
+duration_minutes: 22.960236759483333
 estimate_hours: 1
 id: B102
 priority: high
 started_at: "2026-08-31T09:56:41Z"
-status: in_progress
+status: done
 tags: []
 title: 'array<T>::Sort / SortNonConst callbacks are unchecked: every wrong function handle is silently accepted, and no fixture in the corpus exercises them'
-updated_at: "2026-08-31T09:56:41Z"
+updated_at: "2026-08-31T10:19:38Z"
 ---
 
 # array<T>::Sort / SortNonConst callbacks are unchecked: every wrong function handle is silently accepted, and no fixture in the corpus exercises them
