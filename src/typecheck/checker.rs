@@ -3972,9 +3972,7 @@ impl<'a> Checker<'a> {
                     return TypeRepr::Named(resolved);
                 }
                 // B071: the workspace's own declaration outranks an engine
-                // enum that merely shares this SHORT name — the same rule
-                // `workspace_shadows_funcdef` already applies one fallback
-                // above, and for the same reason.
+                // enum that merely shares this SHORT name.
                 //
                 // Fleet-measured, not anticipated: `tm-editor-plus-plus`
                 // declares `enum Axis` and writes `Axis(c)`, and the
@@ -3985,9 +3983,38 @@ impl<'a> Checker<'a> {
                 // positive the enum work produced across 151 real plugins,
                 // and the mismatch report was right about the types it was
                 // given. The wrong half was here.
-                if self.scope.workspace_declares_type(&name) {
+                //
+                // `workspace_shadowing_type_name` (B073) rather than the
+                // bare-boolean `workspace_declares_type`, because two
+                // predicates answering one question is how they drift
+                // (B079: compose, never merely add). B073 found the same
+                // rule at a different call site and needed the WINNER's
+                // qualified name, since a shadowing declaration may not be
+                // spelled the way the reference is. Taking the name here
+                // hands the enum-conversion check a canonical key instead of
+                // making it re-derive one.
+                //
+                // Honest limit on that, so the next reader does not test for
+                // a behaviour difference there is not: TODAY the two spell
+                // the same string at this position. The predicate's exact
+                // arm returns `name` itself, and its tail arm — the one that
+                // could return `Nz::Axis` for a bare `Axis` — is already
+                // consumed by `resolve_unqualified` one fallback above,
+                // which scans the same tail table. The qualified form is
+                // correctness insurance if that ordering ever changes, not
+                // an observable fix. Its exclusion of real funcdefs is right
+                // here too: step 5 above already owns that case.
+                //
+                // AND NOTE THIS GUARD MASKS B098, it does not fix it. The
+                // bare call form still resolves to a namespaced engine enum
+                // whenever the workspace declares nothing of that name — 436
+                // spellings the game rejects. The fleet sweep going from one
+                // delta to zero is the mask, not the rule being clean; that
+                // is the B084 shape, where B062's export rooting hid a
+                // crediting defect behind a green gate.
+                if let Some(declared) = self.scope.workspace_shadowing_type_name(&name) {
                     self.walk_args(args);
-                    return TypeRepr::Named(name);
+                    return TypeRepr::Named(declared);
                 }
                 if let Some(enum_name) = self.scope.external_enum_by_short_name(&name) {
                     self.walk_args(args);

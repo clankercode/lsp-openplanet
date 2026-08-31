@@ -20,28 +20,68 @@
 //! `overload_*` silence below sits in the same fixture as the errors, and
 //! `acceptance_*` asserts an exact total rather than a lower bound.
 //!
-//! # Game probe: NOT AVAILABLE, and why
+//! # Game probe: NOT AVAILABLE (B097), and what stands in for it
 //!
-//! The ticket asks for a live verdict before trusting LSP silence. The game
-//! is up (RemoteBuild answers `get_status`), but its plugin-control routes
-//! cannot be driven right now: RemoteBuild reads at most 64 bytes per socket
-//! read and treats each chunk as a whole payload, so any request longer than
-//! that is split into two unparseable halves. `load_plugin`'s payload is ~79
-//! bytes before the id, so it can never be delivered, and `unload_plugin`
-//! needs an id of 18 characters or fewer — shorter than the harness's own
-//! `lsp-issue-repro-` prefix leaves room for. Every probe today therefore
-//! stages a fixture, fails to load it, and fails to tear it down. Reported
-//! to the coordinator; the one fixture this lane staged was verified never
-//! loaded (no `Loaded plugin` line) and removed by hand.
+//! The ticket asks for a live verdict rather than trusting LSP silence. It
+//! cannot be had, repo-wide: RemoteBuild calls `Json::Parse` on each raw
+//! socket read and `ReadRaw` caps at ~66 bytes, so any longer payload is
+//! split into fragments that each fail to parse. Measured deterministically
+//! by lane-tooling — 66 bytes OK, 67 FAIL. `load_plugin`'s shortest possible
+//! payload is 72 bytes with a one-character id, so it cannot be delivered at
+//! ANY id length. `get_status` is short enough to work, which is the trap:
+//! `rb_alive()` reports Alive and a probe then fails on the route that
+//! matters. Filed as B097.
 //!
-//! What the expectation rests on instead, stated so a later reader can weigh
-//! it: the engine's verdict on this exact binding is already known from the
-//! OTHER positions. `Maker@ b = MakeDistinct;` errors (B076, four positions)
-//! and `Maker(MakeDistinct)` errors (B023's constructor path), and the
-//! ticket's own framing is that the LSP currently gives two answers for one
-//! binding depending on where it is written. This change makes the answer
-//! uniform; it does not invent a new rule. The empirical guard in place of
-//! the probe is a base-vs-branch sweep over 151 real plugins.
+//! So: THIS SHAPE IS UNPROBED, as of 2026-08-31, for that reason. What
+//! follows is the evidence that does exist, and it is deliberately not
+//! described as a measurement of this shape.
+//!
+//! ## 1. The engine's verdict at an ARGUMENT position, already measured
+//!
+//! B060's game probe (recorded in that ticket, each fixture its own unit)
+//! includes a funcdef slot in argument position rejecting a value whose type
+//! does not match:
+//!
+//! ```text
+//! funcdef uint UintFn(); uint get_Off(); UintFn@ bad = UintFn(Off);
+//!   -> No matching signatures to 'UintFn(uint)'
+//! ```
+//!
+//! That is closer to this ticket's position than B076's four
+//! declaration sites are — it is an argument, not an initializer — and it
+//! settles two things this file relies on: the engine rejects a
+//! non-matching value at a funcdef argument slot, and `No matching
+//! signatures to '<callee>(<args>)'` is the engine's own wording there,
+//! which is why these tests assert that string.
+//!
+//! ## 2. Shipped plugins writing this exact shape, which is stronger than a
+//! probe would have been
+//!
+//! Per `docs/probes/README.md`, a probe ACCEPT can leak from another
+//! installed plugin; a shipped plugin's own declaration cannot. A scan of the
+//! 151-plugin fleet finds 245 distinct call sites across 9 plugins passing a
+//! BARE function name into a funcdef-typed parameter of a workspace function
+//! or method — the precise shape this change newly checks. The cleanest is
+//! `tm-better-totd/src/TOTDs.as:140`:
+//!
+//! ```angelscript
+//! funcdef int MapLessF(LazyMap@ m1, LazyMap@ m2);              // :166
+//! void totdsQuicksort(LazyMap@[]@ arr, MapLessF@ f, ...) {}    // :245
+//! int Less_OldFirst(LazyMap@ m1, LazyMap@ m2) { ... }          // :215
+//! totdsQuicksort(allTotds, Less_OldFirst);                     // :140
+//! ```
+//!
+//! Every one of those 245 is silent under this change, and the game compiles
+//! all of them. That is the ACCEPT direction established on real code.
+//!
+//! ## 3. What is NOT established, stated plainly
+//!
+//! No shipped plugin can evidence the REJECT direction — a plugin containing
+//! a mismatched bind would not compile, so it would not ship. The reject side
+//! rests on (1) above plus the consistency argument in the ticket: the same
+//! binding already errors as `Maker@ b = MakeDistinct;` (B076, four
+//! positions) and as `Maker(MakeDistinct)` (B023). This change makes one
+//! answer out of two; it does not invent a rule. Re-probe when B097 is fixed.
 
 use openplanet_lsp::config::LspConfig;
 use openplanet_lsp::server::diagnostics::compute_diagnostics;
