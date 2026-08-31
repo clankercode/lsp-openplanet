@@ -919,6 +919,31 @@ indistinguishable from "I am structurally incapable of seeing it".
   once per reference. Measure the before and after of free space; never quote
   `du`'s total as the reclaim.
 
+- **A red test written against an unverified expectation is an assumption in a
+  test's clothing.** B071 says enum type mismatches "are not diagnosed" and its
+  own text marks the expected behaviour **UNVERIFIED**, because the game was
+  down when it was filed. AngelScript implicitly converts enums to integers, so
+  some of the silent lines the ticket lists may be **correctly** silent.
+
+  Implementing to that ticket would produce a red test, a fix that turns it
+  green, a clean gate — and **false errors on code the game accepts**. For a
+  type checker that is the damaging direction, and the one that teaches users
+  to add suppressions.
+
+  **A ticket that honestly labels its expectation as unverified is in one way
+  more dangerous than one that does not**: the label is prose and gets skimmed,
+  while the expectation is a list of file:line and gets implemented. Every
+  downstream artifact — the red test, the fixture, the acceptance count —
+  inherits the assumption and then *looks* like evidence, because a passing
+  test is indistinguishable from a correct one when nobody measured the
+  premise.
+
+  The order that fixes it is cheap and non-negotiable: **probe for ground
+  truth, write the expectation from the engine's verdicts, then implement.**
+  Not the reverse, and not in parallel. This is the B061 hazard one level
+  worse — there the acceptance criterion was derived by a method blind to the
+  phenomenon; here there is no measurement at all and the ticket says so.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
