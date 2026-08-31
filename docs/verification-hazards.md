@@ -423,30 +423,69 @@ The test passes, and would have passed either way.
   pressure, from "~2G free" — which read the `free` column where `available`
   governs, and `available` was 21–22G throughout.
 
-  **THIRD DIAGNOSIS ALSO UNDER REVISION (2026-08-31).** What follows was the
-  second reading and is now itself in doubt: a lane measured `rsp` sitting
-  2016 KiB above the bottom of a 2052 KiB stack region — about **36 KiB
-  used** — and `si_addr == rip` exactly, at an identical module offset
-  across five different ASLR bases. That is an execute fault at a
-  deterministic location, not a stack access, and it refutes stack
-  exhaustion too. Left standing until that lane confirms, because a third
-  confident rewrite would be worse than a marked one. **The entry's value
-  is now the pattern, not the conclusion: three plausible causes, three
-  refutations, each refuted by a measurement nobody had taken.**
+  **RESOLVED (2026-08-31). All three diagnoses were wrong, and the true answer
+  was not a software defect at all.** Recorded in full because the sequence is
+  the lesson.
 
-  Second reading, retained for the record: `si_code=SEGV_ACCERR`, read as a
-  guard-page hit, so it **is** a stack overflow — but the stack is **shallow**, ~32–40 frames, and **frame #0
-  is the parser's ENTRY point**, before any recursion. A recursive-descent
-  parser overflowing on nested input shows hundreds or thousands of frames. The
-  thread was already out of stack when it arrived; the TOML input is a
-  bystander. The consumer is the large `Backend::new` / `LspConfig` values
-  inside a big async state machine on a tokio worker.
+  - **First:** stack overflow from parser recursion. Refuted by stack DEPTH —
+    ~32-40 frames, frame #0 the parser's entry point, before any recursion.
+  - **Second:** stack overflow from large values on a tokio worker, read from
+    `si_code=SEGV_ACCERR` as a guard-page hit. Refuted by `rsp`: **36 KiB used
+    of a 2052 KiB stack**, 98% untouched, against a config-load path bisected
+    to need 44-48 KiB. A 42x margin.
+  - **Third:** a jump to a bad address at a fixed module offset. Refuted by
+    reading the pushed return address out of five cores: `rip` is
+    `toml_edit::parser::prelude::new_input` and `[rsp]` is `parse_document`,
+    **exactly frame #1 in all five**. The `call` executed correctly. Nothing
+    was corrupted.
 
-  **Transferable: when a stack overflow is blamed on recursion, the stack DEPTH
-  is the discriminator, and it costs nothing to read.** A shallow stack means
-  something consumed the stack before the suspect ran. Both wrong diagnoses
-  were plausible, self-consistent, and pointed at fixes that would have
-  addressed nothing — more RAM, or a recursion limit. Evidence: B078.)
+  What it actually is: an **instruction-fetch permission fault on a present,
+  executable page**, verified from the cores' own PT_LOAD flags. That cannot
+  happen in correct operation, in any program — so there is nothing in this
+  codebase to fix. Six further mechanisms were each refuted by measurement
+  rather than argument (NUMA balancing, THP collapse, CET/IBT, a rewritten
+  binary, load, hardware error). The `ETXTBSY` one is the model: the lane's
+  leading hypothesis was that the binary was rewritten underneath the running
+  process, and instead of reasoning about it, it copied a binary, ran it, and
+  tried to truncate the file — `OSError: [Errno 26] Text file busy`. Refuted in
+  one command.
+
+  **`SEGV_ACCERR` does not mean "guard page".** It means mapped-but-wrong-
+  permission. The guard page is only its most common cause, and reading the
+  common cause as the meaning is what produced diagnosis two — mine.
+
+  **The fourth cause was deliberately left unasserted.** The evidence has a
+  clear shape — one file, one text page, a 70-second window, three different
+  tests, no other process on the machine faulting — which is consistent with a
+  transiently bad page-cache page or PTE, clearing on eviction. It cannot be
+  confirmed on this box (no memory controller registered under
+  `/sys/devices/system/edac/mc/`, so ECC errors go unreported). The lane wrote
+  it up as *the shape of the evidence, not a diagnosis*, and stopped. **After
+  three refuted causes, declining to name a fourth is the disciplined move, not
+  an incomplete one.**
+
+  **What this cost, and the actual transferable lesson.** Three confident
+  diagnoses, each self-consistent, each pointing at a fix that would have
+  addressed nothing — a recursion limit, a bigger stack, a hunt for a corrupted
+  pointer. Every one was refuted by a cheap measurement that nobody had taken:
+  frame count, `rsp`, and the pushed return address. All three were sitting in
+  a coredump the whole time. **The gap was never analysis; it was that each
+  diagnosis explained the evidence already in hand well enough to stop
+  collecting more.** A plausible mechanism is a reason to take the next
+  measurement, not a substitute for it.
+
+  And the practical residue outlived the mystery: the crash's real cost was
+  never the crash. It was that **a crashed binary makes `cargo test` exit 101
+  and emit ZERO `test result` lines**, so a gate that sums those lines drops
+  the tests silently and stays green — which is exactly what produced a
+  reported 2190/2218 against a true 2223. Fixing the count made every later run
+  honest; diagnosing the SIGSEGV would have fixed nothing.
+
+  **Transferable: when a fault is blamed on a mechanism, find the number that
+  mechanism PREDICTS and read it.** Recursion predicts deep stacks — read the
+  frame count. Exhaustion predicts a full stack — read `rsp`. A corrupted jump
+  predicts a wrong return address — read `[rsp]`. Each took one command and
+  each killed a diagnosis outright. Evidence: B078.)
 
 **The strongest datapoint in this batch for that claim.** One lane's change
   went through **six** adversarial review passes. Every pass found a real
