@@ -2234,3 +2234,41 @@ the two correct runs and `[lsp-openplanet-bf0363fb]` on the bad one — and
 withdrew the specific claim while keeping the unrelated real finding about my
 merge. Both halves matter: a retraction that also abandoned the true half would
 have been as unhelpful as never retracting.
+||||||| b6584a0
+
+||||||| parent of 14bd3fb (docs(b101): a consumer that parses the rendered string is outside the compiler's net)
+
+## "Add the field and see what breaks" cannot see a consumer that parses the rendered string
+
+Found by lane-resolver during B101, whose whole method was the one the ticket
+prescribed: add `is_const` to `SymbolKind::Function`, then let the breakages
+tell you which consumers had been relying on the conflation.
+
+The compiler found **26 construction sites and 2 exhaustive destructures**, all
+of them mechanical, none load-bearing. The one consumer that actually broke was
+**invisible to that method entirely**: B095's `implement_interface` code action
+does not read the enum at all — it parses the *rendered* signature B094 emits.
+Its `parse_signature` did `signature.split_once('(')` then
+`rest.strip_suffix(')')`, which returns `None` on `void I::M() const`, and a
+`None` there means **no code action is offered at all**. Not an error, not a
+wrong stub — the menu entry silently disappears for every const method.
+
+**Measured, not argued.** Reverting only that parser (mutation M2) and running
+the family's tests: 5 failed, 14 passed. The 5 were the ones written for B101;
+all 14 pre-existing tests were green. So neither the compiler nor the existing
+suite could have surfaced it — the breakage was found by *reading the consumer
+list* before writing any code, and only afterwards confirmed by mutation.
+
+**Generalisation.** A field added to a type is checked by the compiler at every
+site that *names the type*. A consumer one serialisation away — it takes a
+string another module rendered — is outside that net, and its failure mode is
+"produces nothing" rather than "produces something wrong", which no assertion
+about existing behaviour will catch. When a change alters what a module
+**renders**, the consumer list is everything that parses that rendering, and it
+has to be enumerated by hand. Grep for the render function's callers, not for
+the type.
+
+**Corollary for scope discipline.** "Find out what breaks" is a *lower bound*
+on the affected set, not the set. Treating a clean build plus a green suite as
+the completion criterion would have shipped B101 with a silently dead code
+action.

@@ -109,3 +109,5 @@ bugs:
     - file: B108-render-no-matching-sig-renders.todo
     - file: B109-argtypemismatch-renders-a-call.todo
     - file: B110-funcdef-types-compatible-accep.todo
+    - file: B111-b094-false-error-on-mixin-clas.todo
+    - file: B112-render-signature-strips-all-wh.todo
