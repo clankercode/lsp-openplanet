@@ -13,73 +13,30 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
-### Fixed
-- **The implicit-conversion message no longer invents a `&` on the target**
-  (B171) — B160 adopted `to 'VirtualKey&'.` as the engine's universal spelling
-  from a measured 22-of-22, but both corpora it had available happened to carry
-  non-const object targets in variable slots: the sample was uniform because the
-  sampling frame was. Measured across 10 more conversion messages
-  (`docs/probes/b171-conversion-target-spelling.tsv`), the engine suffixes the
-  target only when the source is non-const AND the target type is not a
-  primitive AND the slot is an assignable variable rather than a return. Two of
-  those are invisible at our diagnostic site, and the unsuffixed form is exactly
-  right for the commonest real case — a conversion from a const source, which is
-  what every engine property read such as `int3 size = map.Size;` is. We now
-  emit `Can't implicitly convert from 'const nat3' to 'int3'.`, byte-exact with
-  the engine there. B160's trailing full stop was never in doubt and stays.
-- **`MwRefBuffer<T>` indexes to `T`, and `MwFastBufferCat<T>` no longer
-  pretends to** (B156) — the array-generic list had drifted from the
-  shipped typedb in both directions at once. `MwRefBuffer` registers
-  `T& opIndex(uint)` and both `Length` spellings just like its seven
-  siblings, but was missing, so `buf[i]` yielded no element type and
-  `buf.Length` was not recognised. `MwFastBufferCat` was listed and
-  registers no methods at all — only a constructor and a destructor — so
-  `cat[i]` was confidently typed as `T` for a class the engine cannot
-  index. Membership is now decided by the dump rather than by judgement
-  (a class belongs iff it exposes an `opIndex` returning the template
-  parameter `T`), and an audit re-derives the set on every run and fails
-  if the list drifts either way.
-- **A funcdef signature match is now exact about `const`** (B152) — the
-  engine distinguishes all four const positions a handle parameter can be
-  spelled with (`T@`, `const T@`, `T@ const`, `const T@ const`), in both
-  directions, at every parameter mode and in the return type; and
-  `array<T>::Sort`'s comparator is `const T@ const &in` for a handle
-  element type, `const T&in` for a value one, with `SortNonConst` the
-  mirror image at `T&in`. The checker was neutral about all of that, which
-  accepted callbacks the game rejects. Two supporting repairs were needed
-  first and are fixes in their own right: a Core funcdef parameter's
-  `const` lives in the database's `typeflags` bits rather than its type
-  text and was being dropped on load, and the `Sort` comparator's
-  synthesised signature carried no `const` at all. Across the 152-plugin
-  corpus this adds no diagnostic and removes none, measured against 7442
-  funcdef signature comparisons of which 674 are const-bearing.
-- **`Math::Min(uint(20), buf.Length)` no longer reports a missing
-  overload** (B150) — a bare `obj.Name` is a property READ, not a method
-  reference, whenever the class also exposes `get_Name`. The eight `Mw*`
-  engine containers (`MwFastBuffer`, `MwFastArray`, `MwSArray`,
-  `MwStridedArray`, `MwNodPool`, `MwVirtualArray`, `MwArrayInPlaceDyn`)
-  ship BOTH `uint Length()` and `uint get_Length()`, so `buf.Length` was
-  taken for a callable: the call was rejected outright and the argument
-  rendered as `uint()`, a zero-arg signature. Script `array`, `string`
-  and `wstring` ship only the accessor and were never affected;
-  `vec2`/`vec3`/`vec4`/`quat` ship only the method, so `v.Length` is
-  still a genuine method reference and still renders `float()`. The type
-  itself was always right — every non-argument position (`uint n =
-  b.Length`, `int(b.Length)`, `b.Length > 3`, `for (…; i < b.Length;
-  …)`) was already silent.
-- **The config TUI no longer displays a stale default for `unused`**
-  (B149) — B090 made `info` the real default and left `openplanet-lsp
-  config` declaring `warn`, so the TUI showed `warn (default)` for an
-  unset key while a `check` run behaved as `info`. The same flip had
-  also missed the LSP `initializationOptions` path, where
-  `"unused": true` still meant `warn` while `unused = true` in
-  `.openplanet-lsp.toml` and the string token `"true"` both meant
-  `info` — one intent, three spellings, two answers. All three now
-  resolve to the default level, spelled as the default itself so a
-  future flip cannot leave a surface behind.
+## [0.7.0] - 2026-09-01
 
 ### Added
 - **`plugin_files_search_paths` is now a config key, with config-TUI
+- **Inactive `#if` branches are greyed out** (B031) — LSP-only `Unnecessary`
+  hints, so a branch that the current defines switch off reads as inactive in
+  the editor instead of looking like live code.
+- **Contextual quick actions on `#if` defines** (B170) — enable or disable a
+  branch from the define itself.
+- **Unused findings have quiet levels** (B030) — `unused = hint|info`, carrying
+  the LSP `Unnecessary` tag rather than a warning, so an ordinary `check` run
+  is not buried in them.
+- **Quick fix for `No matching symbol`** (B093) — offers the relocation and
+  near-name hints the diagnostic already computed.
+- **Unimplemented interface methods are diagnosed, with a quick fix** (B094,
+  B095) — "Implement `void I::M()`" writes the stub.
+- **Enum values complete after `::`** (B088), and **workspace namespace members
+  complete at all** (B107) — `Helper::` previously had no producer.
+- **Nadeo class docs and member notes reach hover** (B158) — 829 member notes,
+  259 of them migration advice naming a replacement; the loader had been
+  discarding every one.
+- **Nadeo method return types are loaded** (B157) — 1618 of them, behind a
+  comment claiming the format used numeric ids, which was measurably false.
+
   support** (B143) — the search roots that `info.toml` `exports` /
   `shared_exports` entries resolve through were previously settable only
   by the CLI flag `check --plugin-files-search-path`, with a hardcoded
@@ -92,102 +49,6 @@ GitHub Release body to match this section (gh release edit).
   default, so a configured search root could move the loader but not the
   squiggle.
 
-### Fixed
-- **A `const` HANDLE parameter (`T@ const &in`) no longer breaks every
-  funcdef signature match** (B144) — reported by Max against a shipped
-  plugin that compiles in the game, where it was the ONLY error:
-  `No matching signatures to 'array::Sort(SortGhosts)'` for
-  `bool SortGhosts(const Json::Value@ const &in a, ...)`. AngelScript
-  spells two different qualifiers with one keyword — a LEADING `const`
-  makes the pointed-to OBJECT read-only, a TRAILING one makes the HANDLE
-  read-only — and the type-string parser knew only the leading form. A
-  trailing `const` fell through to the type NAME, producing a type
-  literally called `Json::Value@ const` that matched nothing, so the
-  funcdef constructor, implicit handle assignment, argument passing and
-  `array<T>::Sort` all rejected it alike. It now parses as the const
-  handle it is, and `display()` prints it back as `T@ const` instead of
-  collapsing it onto the other qualifier. Across the 152-plugin corpus
-  three false errors disappear and none appear — every const-handle
-  parameter site in the corpus, all three of them.
-- **Export entries survive a `src/` -> root move in BOTH directions**
-  (B143) — resolution already fell back from `Export.as` to
-  `src/Export.as`, but not the reverse: an entry that still read
-  `src/Export.as` after the file was moved up to the plugin root
-  reported `Export file not found`, AND lost the export exemption, so
-  the plugin's whole public API was additionally reported as unused. An
-  entry that carries a configured search root as its leading component
-  is now also tried with that component stripped, preserving any deeper
-  path (`src/Ex/Shared.as` -> `Ex/Shared.as`). Applies to `exports` and
-  `shared_exports` alike, and to any configured search root, not just
-  `src`. Every layout that already resolved resolves to the same file:
-  the direct join is still tried first, then the search roots, and the
-  new rule runs last.
-
-### Changed
-- **Go-to-definition offers every implementation, not one location**
-  (B104) — a method reached through an interface- or base-typed receiver
-  has more than one honest answer, so definition now returns all of them
-  and the editor opens a peek list. The declaration the receiver's static
-  type owns still comes FIRST (unchanged behaviour, now pinned), with
-  each workspace class that implements or overrides it after, in
-  workspace file order. Base classes work the same way as interfaces,
-  including transitively; a derived class that inherits the method
-  without redeclaring it is not listed, because it has no definition to
-  jump to. Overload sets follow the same principle: a call site whose
-  argument count narrows to one signature keeps its single precise
-  target, while one that cannot be narrowed lists every overload.
-
-### Fixed
-- **Hover on a virtual property shows the accessors** (B113) — hovering
-  `ID` in `obj.ID`, where the type declares only `get_ID` / `set_ID`,
-  used to report the inferred type (or, at a `Ns::Thing` site, nothing at
-  all). It now presents the accessor the position calls for, in one code
-  block labelled `(property get)` / `(property set)`: a read shows the
-  getter, a write the setter, and a compound assign (`obj.ID += 1`) both,
-  getter first. Covers accessors inherited from a base class, declared on
-  an interface, reached through `this`, and namespace-level or global
-  properties. A real field or method named `ID` still wins over any
-  same-named accessor pair. Hovering a class field now reads
-  `(field) int C::Speed` instead of mislabelling it `(local)`.
-- **Declaration modifiers survive into the symbol pool** (B114) — a
-  symbol recorded what it *is* but not what it was *declared as*, so
-  `shared`, `abstract`, `override`, `final`, `private` and `protected`
-  were dropped when symbols were pooled and had to be re-derived by
-  walking one file's syntax tree — which by construction cannot see a
-  declaration in another file. They are now carried on the pooled symbol,
-  for methods, fields and properties alike, and the two workarounds that
-  existed to compensate are gone, so there is a single source of truth
-  rather than answers that can disagree. Mostly invisible on its own; it
-  is what lets const-correctness be checked uniformly wherever a class was
-  declared, and it is the prerequisite for filtering `private` members out
-  of completion.
-- **Go-to-definition on a virtual property** (B103) — `obj.ID`, where the
-  type declares only the accessor pair `get_ID` / `set_ID`, used to
-  resolve nothing. It now jumps to the accessor the position calls for:
-  a read goes to `get_ID`, a write (`obj.ID = x`) to `set_ID` — falling
-  back to the getter when the property is get-only — and a compound
-  assign (`obj.ID += 1`), which reads AND writes, offers both. Works for
-  accessors inherited from a base class, declared on an interface, and
-  for namespace-level properties (`Ns::Thing` → `Ns::get_Thing`). A real
-  field named `ID` still wins over any same-named accessor, and a
-  property's namespace is part of its identity, so an outer-scope
-  accessor never shadows a nearer declaration.
-
-### Changed
-- **Unused findings default to `info` and fold out of `check` output**
-  (B090) — a normal run no longer lists every unused function/variable;
-  the summary carries a per-kind hidden count instead
-  (`(5 info hidden: 3 unused function, 2 unused local variable —
-  --show-info to list)`), and `--show-info` reveals the lines. All
-  INFO/HINT diagnostics fold this way in human output; JSON still carries
-  every diagnostic, and editors still list/fade unused findings as
-  before. `--unused warn` restores the old visible warnings (note: a CI
-  lane relying on `--warnings-as-errors` to catch unused code needs
-  `--unused warn` now); `unused = true`/`on` now means the default level
-  (info), not warn. The summary never claims "0 diagnostics" while
-  anything is folded.
-
-### Added
 - **The language server notices when its own binary is replaced** (B105)
   — after a self-update or a package-manager upgrade, a running server
   used to keep answering from the old binary until the editor happened to
@@ -201,6 +62,7 @@ GitHub Release body to match this section (gh release edit).
   a replacement, so the server cannot restart toward a binary that is not
   there. Not detected: installs that upgrade by repointing a symlink at a
   new immutable file (Nix and similar).
+
 - **Multi-version Openplanet checking** (GH #18) — `check` can now target
   any recorded Openplanet version, or several at once:
   `--openplanet-version 1.29.5,1.29.14` runs the typecheck once per
@@ -218,6 +80,7 @@ GitHub Release body to match this section (gh release edit).
   (`openplanet_version`, `typedb_versions_dir`; config file or init
   options) and checks the first listed version, falling back to the
   installed dump on any resolution problem.
+
 - **Openplanet-injected methods are offered everywhere the LSP describes a
   type** (B063) — `MwAddRef`, `MwRelease`, `GetCurrentEntityID` and
   `GetManialinkPages` are registered by Openplanet rather than listed in the
@@ -225,6 +88,7 @@ GitHub Release body to match this section (gh release edit).
   all behaved as though they did not exist. They are now known to all four.
   A plugin that declares its own type shadowing an engine one (say
   `class CSmPlayer {}`) is correctly *not* offered the engine methods.
+
 - **Colour swatches and a colour picker** (B041) — the server now advertises
   `color_provider`, so VS Code shows an editable swatch beside the two forms
   Openplanet code actually uses: `vec3`/`vec4` literals in the game's 0..1
@@ -247,6 +111,7 @@ GitHub Release body to match this section (gh release edit).
   style codes (`$z`, `$g`, `$o`, …) are all outside the hex alphabet.
   Codes in comments are reported too, since that is where commented-out UI
   code and colour notes live.
+
 - **`openplanet.regenerateTypeDb` reports what changed** (B039) — the command
   now answers with the type-database build stamps BEFORE and AFTER the
   reload (`before` / `after` / `changed`, using the same `op` / `mp` /
@@ -256,6 +121,7 @@ GitHub Release body to match this section (gh release edit).
   when the game has not written a fresh dump yet, and one a bare "done" hides.
   Reachable from VS Code since the extension's B039 change; before that it was
   advertised and no client could invoke it.
+
 - **`openplanet/resolvedDefines` — config introspection** (B050) — a custom
   LSP request returning the EFFECTIVE preprocessor define set with an origin
   per entry (`target` / `signature` / `os` / `arch` / `build` / `manifest` /
@@ -294,6 +160,7 @@ GitHub Release body to match this section (gh release edit).
   `Meta::StartWithRunContext` has no overload. A wrong rewrite here would
   silently drop the coroutine, so anything unrecognised offers nothing.
   Never applied by `source.fixAll.openplanet`.
+
 - **Quick fixes for unused declarations** (B036) — an unused local or
   parameter now offers an edit, not just a squiggle. Prefixing the name with
   `_` is offered for both and is the preferred fix for a **parameter**, where
@@ -326,6 +193,7 @@ GitHub Release body to match this section (gh release edit).
   the `#if` / `#elif` / `#else` / `#endif` lines stay at normal weight, and a
   nested block inside an already-dead body folds into the outermost span
   rather than splitting it.
+
 - **Quiet levels for unused declarations: `unused = "hint" | "info"`** — "never
   used" is advisory, not a defect, so it no longer has to be a warning.
   `info` keeps the findings listed in an editor's problems panel; `hint` drops
@@ -335,12 +203,14 @@ GitHub Release body to match this section (gh release edit).
   hint|info` on the CLI (aliases `grey`/`faded` and `note`/`information`),
   `unused = "hint"` in `.openplanet-lsp.toml` or the user config, and
   `initializationOptions` from an editor.
+
 - **Unused findings carry the LSP `Unnecessary` diagnostic tag** — at every
   level, including `warn` and `error`. That tag, not the severity, is what
   makes an editor fade the declaration (VS Code gates the grey-out on
   `editor.showUnused`), and it is what keeps `unused = "hint"` visible when a
   client omits HINT diagnostics from its problems list. Clients without
   `publishDiagnostics.tagSupport` ignore it.
+
 - **`signature_mode` — choose which `SIG_*` defines are live (#64)** — the LSP
   used to define `SIG_OFFICIAL`, `SIG_REGULAR`, `SIG_SCHOOL` and
   `SIG_DEVELOPER` unconditionally, so a plugin could never be analysed the way
@@ -355,12 +225,14 @@ GitHub Release body to match this section (gh release edit).
   `developer`, falling back permissive because masking code out is what
   manufactures undefined-identifier errors. `defines` overrides still get the
   last word, so `defines = ["-SIG_DEVELOPER"]` works on top of any level.
+
 - **`check --game-target NAME` and `check --signature MODE` (#64)** — the two
   selectors are now settable per run, for CI that asks "does this still
   compile as Regular on MP4?". Both ride the `initializationOptions` layer, so
   the define set is re-derived AND the typedb variant / game JSON re-probe
   follows the target (GH #45); both reject an unknown value with a usage error
   naming the valid set, and neither can swallow a following flag (GH #62).
+
 - **`os_target` / `arch_target` selectors + `check --os` / `check --arch`
   (B028)** — the OS and architecture defines are selector keys now,
   resolved through the same ladder as `game_target` / `signature_mode`
@@ -378,7 +250,255 @@ GitHub Release body to match this section (gh release edit).
   `--arch` value is a usage error (exit 2); an unknown config value warns
   and keeps the previous setting.
 
+### Changed
+- **Go-to-definition offers every implementation, not one location**
+  (B104) — a method reached through an interface- or base-typed receiver
+  has more than one honest answer, so definition now returns all of them
+  and the editor opens a peek list. The declaration the receiver's static
+  type owns still comes FIRST (unchanged behaviour, now pinned), with
+  each workspace class that implements or overrides it after, in
+  workspace file order. Base classes work the same way as interfaces,
+  including transitively; a derived class that inherits the method
+  without redeclaring it is not listed, because it has no definition to
+  jump to. Overload sets follow the same principle: a call site whose
+  argument count narrows to one signature keeps its single precise
+  target, while one that cannot be narrowed lists every overload.
+
+- **Unused findings default to `info` and fold out of `check` output**
+  (B090) — a normal run no longer lists every unused function/variable;
+  the summary carries a per-kind hidden count instead
+  (`(5 info hidden: 3 unused function, 2 unused local variable —
+  --show-info to list)`), and `--show-info` reveals the lines. All
+  INFO/HINT diagnostics fold this way in human output; JSON still carries
+  every diagnostic, and editors still list/fade unused findings as
+  before. `--unused warn` restores the old visible warnings (note: a CI
+  lane relying on `--warnings-as-errors` to catch unused code needs
+  `--unused warn` now); `unused = true`/`on` now means the default level
+  (info), not warn. The summary never claims "0 diagnostics" while
+  anything is folded.
+
+- **`source.fixAll.openplanet` now prefixes unused LOCALS with `_` (B047)** —
+  previously no unused-declaration fix could be applied on save at all,
+  because that producer sat outside the fix registry. Now that it is a
+  registry family it can be batched, and the `_` prefix for a local is:
+  mechanical, reversible, and changes no API surface. Two things are still
+  never applied on save — **removing** a declaration, which is lossy, and
+  prefixing a **parameter**, which renames part of the callable API since
+  AngelScript has named arguments. Both remain available as ordinary quick
+  fixes. Only affects users who opted into `source.fixAll.openplanet` in
+  `editor.codeActionsOnSave`; it is never applied by default.
+
+- **Quick fixes for unused declarations and misspelled names now follow the
+  same rules as every other quick fix (B047)** — they are scoped to the range
+  the editor asked about, and their edit is computed when the action is picked
+  rather than for every action in the menu. Previously these two were wired
+  into the request handler by hand, outside the fix registry, so they ignored
+  the requested range and always computed their edits up front. Same fixes,
+  same edits; only when and where they are offered has changed.
+
+- **DEFAULT CHANGE: the analysis profile is now a windows/64 client (B028)** —
+  the LSP used to define `MANIA64`, `MANIA32`, `WINDOWS`, `WINDOWS_WINE`,
+  `LINUX`, `SERVER`, `LOGS`, `HAS_DEV` and `DEVELOPER` ALL at once, so
+  mutually exclusive `#if` branches were analyzed together: a plugin
+  declaring the same function under `#if MANIA32` and `#if MANIA64` got a
+  phantom "A function with the same name and parameters already exists"
+  error, and `#if LINUX` / `#if SERVER` code was checked on a Windows client
+  that would never compile it. The defaults now model a real client — one
+  OS (`windows`), one arch (`64`) — verified against the live game under
+  Wine (RemoteBuild probe 2026-08-29: `WINDOWS` + `WINDOWS_WINE` +
+  `MANIA64` on; `LINUX`, `MANIA32`, `SERVER`, `LOGS`, `HAS_DEV`,
+  `DEVELOPER` off). If you rely on checking code that only compiles on
+  Linux, on 32-bit, or in a server/logs/dev build, opt back in with
+  `os_target` / `arch_target` / the build-flag keys in
+  `.openplanet-lsp.toml`, pass `--os` / `--arch` to `check`, or add the
+  define back with `defines = ["LINUX"]` (B024 additive overrides). The
+  four build flags themselves stay ON by default (no default churn — only
+  the OS/arch pairs got realistic defaults, because their exclusivity is
+  the reported failure mode).
+
+- **Config TUI names the accepted values for every setting** — a new footer
+  line under the help text says how the selected value is typed in:
+  `comma-separated · e.g. DEV, DEBUG_BROWSER, -LOGS` for `defines` (nothing
+  previously said the editor splits on commas, let alone showed an example),
+  `comma-separated groups · e.g. [A, B] | [C, D]` for the nested lists,
+  `one of: …` with every choice for enums (invisible until you cycled through
+  them), plus true/false, number and path hints with their defaults. The line
+  is shown while browsing and while editing, and wraps when the choices are
+  wider than the terminal. The `defines` help text describes the new additive
+  semantics.
+
 ### Fixed
+- **The implicit-conversion message no longer invents a `&` on the target**
+- **Enum type mismatches are diagnosed in every binding position** (B071),
+  and a bare short name no longer rescues a namespaced engine enum in call
+  position (B098).
+- **Funcdef binding is checked where it actually happens** — at declarations and
+  not only constructor sites (B076), at workspace call sites (B089), with a
+  bare class method no longer able to bind a funcdef slot (B091), method
+  references resolving as callables at ctor sites (B025), a callable argument
+  named by its signature rather than its return type (B108), and the signature
+  match treated as exact because it is not a conversion site (B110).
+- **`array<T>::Sort` callbacks are checked** by substituting the element type
+  (B102).
+- **Member visibility is honoured** — the parser records the keyword (B115),
+  member completion respects it at the access site the engine actually checks
+  (B117), and hover, navigation and the outline show visibility rather than
+  hiding on it (B135).
+- **The const-receiver rule is much closer to the engine** — it crosses the file
+  boundary (B116), walks parents (B119), travels through a cross-file method
+  return (B120) but only where the return can alias the receiver (B121), and
+  reaches Core engine receivers (B130). Engine method constness lives in `decl`
+  and now actually arrives (B124, B125); method constness reaches the pooled
+  symbol (B101).
+- **A mixin class no longer owes the interface it names** (B111), and interface
+  signatures are spelled the way the engine spells them (B112).
+- **`Ns::` stops labelling every member a function** (B099); a workspace
+  free-function overload set gained an argument-check entry point (B100);
+  hover answers for a global enum reached through a workspace namespace (B070)
+  and respects workspace enum shadowing (B133).
+- **A quote inside a char literal no longer blinds the scan** (B074) — it had
+  silently truncated analysis on seven files in the corpus.
+- **The type database is read as one generation, or not at all** (B072), and
+  unknown Nadeo facts are representable rather than guessed: constness (B137)
+  and parameter direction (B146) are `unknown`, not silently "non-const" and
+  "by value". A loader audit found and fixed an asserted literal (B138, B142).
+- **`scratch_dir` no longer leaks under `target/`** (B075).
+
+  (B171) — B160 adopted `to 'VirtualKey&'.` as the engine's universal spelling
+  from a measured 22-of-22, but both corpora it had available happened to carry
+  non-const object targets in variable slots: the sample was uniform because the
+  sampling frame was. Measured across 10 more conversion messages
+  (`docs/probes/b171-conversion-target-spelling.tsv`), the engine suffixes the
+  target only when the source is non-const AND the target type is not a
+  primitive AND the slot is an assignable variable rather than a return. Two of
+  those are invisible at our diagnostic site, and the unsuffixed form is exactly
+  right for the commonest real case — a conversion from a const source, which is
+  what every engine property read such as `int3 size = map.Size;` is. We now
+  emit `Can't implicitly convert from 'const nat3' to 'int3'.`, byte-exact with
+  the engine there. B160's trailing full stop was never in doubt and stays.
+
+- **`MwRefBuffer<T>` indexes to `T`, and `MwFastBufferCat<T>` no longer
+  pretends to** (B156) — the array-generic list had drifted from the
+  shipped typedb in both directions at once. `MwRefBuffer` registers
+  `T& opIndex(uint)` and both `Length` spellings just like its seven
+  siblings, but was missing, so `buf[i]` yielded no element type and
+  `buf.Length` was not recognised. `MwFastBufferCat` was listed and
+  registers no methods at all — only a constructor and a destructor — so
+  `cat[i]` was confidently typed as `T` for a class the engine cannot
+  index. Membership is now decided by the dump rather than by judgement
+  (a class belongs iff it exposes an `opIndex` returning the template
+  parameter `T`), and an audit re-derives the set on every run and fails
+  if the list drifts either way.
+
+- **A funcdef signature match is now exact about `const`** (B152) — the
+  engine distinguishes all four const positions a handle parameter can be
+  spelled with (`T@`, `const T@`, `T@ const`, `const T@ const`), in both
+  directions, at every parameter mode and in the return type; and
+  `array<T>::Sort`'s comparator is `const T@ const &in` for a handle
+  element type, `const T&in` for a value one, with `SortNonConst` the
+  mirror image at `T&in`. The checker was neutral about all of that, which
+  accepted callbacks the game rejects. Two supporting repairs were needed
+  first and are fixes in their own right: a Core funcdef parameter's
+  `const` lives in the database's `typeflags` bits rather than its type
+  text and was being dropped on load, and the `Sort` comparator's
+  synthesised signature carried no `const` at all. Across the 152-plugin
+  corpus this adds no diagnostic and removes none, measured against 7442
+  funcdef signature comparisons of which 674 are const-bearing.
+
+- **`Math::Min(uint(20), buf.Length)` no longer reports a missing
+  overload** (B150) — a bare `obj.Name` is a property READ, not a method
+  reference, whenever the class also exposes `get_Name`. The eight `Mw*`
+  engine containers (`MwFastBuffer`, `MwFastArray`, `MwSArray`,
+  `MwStridedArray`, `MwNodPool`, `MwVirtualArray`, `MwArrayInPlaceDyn`)
+  ship BOTH `uint Length()` and `uint get_Length()`, so `buf.Length` was
+  taken for a callable: the call was rejected outright and the argument
+  rendered as `uint()`, a zero-arg signature. Script `array`, `string`
+  and `wstring` ship only the accessor and were never affected;
+  `vec2`/`vec3`/`vec4`/`quat` ship only the method, so `v.Length` is
+  still a genuine method reference and still renders `float()`. The type
+  itself was always right — every non-argument position (`uint n =
+  b.Length`, `int(b.Length)`, `b.Length > 3`, `for (…; i < b.Length;
+  …)`) was already silent.
+
+- **The config TUI no longer displays a stale default for `unused`**
+  (B149) — B090 made `info` the real default and left `openplanet-lsp
+  config` declaring `warn`, so the TUI showed `warn (default)` for an
+  unset key while a `check` run behaved as `info`. The same flip had
+  also missed the LSP `initializationOptions` path, where
+  `"unused": true` still meant `warn` while `unused = true` in
+  `.openplanet-lsp.toml` and the string token `"true"` both meant
+  `info` — one intent, three spellings, two answers. All three now
+  resolve to the default level, spelled as the default itself so a
+  future flip cannot leave a surface behind.
+
+- **A `const` HANDLE parameter (`T@ const &in`) no longer breaks every
+  funcdef signature match** (B144) — reported by Max against a shipped
+  plugin that compiles in the game, where it was the ONLY error:
+  `No matching signatures to 'array::Sort(SortGhosts)'` for
+  `bool SortGhosts(const Json::Value@ const &in a, ...)`. AngelScript
+  spells two different qualifiers with one keyword — a LEADING `const`
+  makes the pointed-to OBJECT read-only, a TRAILING one makes the HANDLE
+  read-only — and the type-string parser knew only the leading form. A
+  trailing `const` fell through to the type NAME, producing a type
+  literally called `Json::Value@ const` that matched nothing, so the
+  funcdef constructor, implicit handle assignment, argument passing and
+  `array<T>::Sort` all rejected it alike. It now parses as the const
+  handle it is, and `display()` prints it back as `T@ const` instead of
+  collapsing it onto the other qualifier. Across the 152-plugin corpus
+  three false errors disappear and none appear — every const-handle
+  parameter site in the corpus, all three of them.
+
+- **Export entries survive a `src/` -> root move in BOTH directions**
+  (B143) — resolution already fell back from `Export.as` to
+  `src/Export.as`, but not the reverse: an entry that still read
+  `src/Export.as` after the file was moved up to the plugin root
+  reported `Export file not found`, AND lost the export exemption, so
+  the plugin's whole public API was additionally reported as unused. An
+  entry that carries a configured search root as its leading component
+  is now also tried with that component stripped, preserving any deeper
+  path (`src/Ex/Shared.as` -> `Ex/Shared.as`). Applies to `exports` and
+  `shared_exports` alike, and to any configured search root, not just
+  `src`. Every layout that already resolved resolves to the same file:
+  the direct join is still tried first, then the search roots, and the
+  new rule runs last.
+
+- **Hover on a virtual property shows the accessors** (B113) — hovering
+  `ID` in `obj.ID`, where the type declares only `get_ID` / `set_ID`,
+  used to report the inferred type (or, at a `Ns::Thing` site, nothing at
+  all). It now presents the accessor the position calls for, in one code
+  block labelled `(property get)` / `(property set)`: a read shows the
+  getter, a write the setter, and a compound assign (`obj.ID += 1`) both,
+  getter first. Covers accessors inherited from a base class, declared on
+  an interface, reached through `this`, and namespace-level or global
+  properties. A real field or method named `ID` still wins over any
+  same-named accessor pair. Hovering a class field now reads
+  `(field) int C::Speed` instead of mislabelling it `(local)`.
+
+- **Declaration modifiers survive into the symbol pool** (B114) — a
+  symbol recorded what it *is* but not what it was *declared as*, so
+  `shared`, `abstract`, `override`, `final`, `private` and `protected`
+  were dropped when symbols were pooled and had to be re-derived by
+  walking one file's syntax tree — which by construction cannot see a
+  declaration in another file. They are now carried on the pooled symbol,
+  for methods, fields and properties alike, and the two workarounds that
+  existed to compensate are gone, so there is a single source of truth
+  rather than answers that can disagree. Mostly invisible on its own; it
+  is what lets const-correctness be checked uniformly wherever a class was
+  declared, and it is the prerequisite for filtering `private` members out
+  of completion.
+
+- **Go-to-definition on a virtual property** (B103) — `obj.ID`, where the
+  type declares only the accessor pair `get_ID` / `set_ID`, used to
+  resolve nothing. It now jumps to the accessor the position calls for:
+  a read goes to `get_ID`, a write (`obj.ID = x`) to `set_ID` — falling
+  back to the getter when the property is get-only — and a compound
+  assign (`obj.ID += 1`), which reads AND writes, offers both. Works for
+  accessors inherited from a base class, declared on an interface, and
+  for namespace-level properties (`Ns::Thing` → `Ns::get_Thing`). A real
+  field named `ID` still wins over any same-named accessor, and a
+  property's namespace is part of its identity, so an outer-scope
+  accessor never shadows a nearer declaration.
+
 - **117 false "never used" warnings removed across four plugin corpora**
   (B084, B087) — three separate defects all reported live code as dead.
 
@@ -404,6 +524,7 @@ GitHub Release body to match this section (gh release edit).
 
   Five warnings are NEW and all are genuine — an unread parameter and four
   unreferenced enum values that the false positives had been hiding.
+
 - **A plugin type that shares a name with an engine funcdef now shadows it**
   (B073, GH #38) — a plugin declaring `class CoroutineFunc` resolved to the
   *engine* funcdef of that name, so constructing its own class reported
@@ -418,6 +539,7 @@ GitHub Release body to match this section (gh release edit).
 
   The same hole existed in a second place: `awaitable` is not a typedb funcdef
   but a hardcoded builtin, and it took the same fix.
+
 - **Functions a plugin exports to other plugins are no longer reported unused**
   (B062) — a plugin whose `info.toml` names `[script] exports` implements that
   surface in ordinary source files, and nothing inside the plugin calls them:
@@ -429,6 +551,7 @@ GitHub Release body to match this section (gh release edit).
   act as roots for the bodies they bind to. Declarations nothing exports still
   warn, including a class member that happens to share an exported name. Across
   the repo's own fixtures this clears 15 more false warnings, adding none.
+
 - **A property-syntax read now credits its accessor** (B061) — reading
   `Directives::Showing`, where `bool get_Showing()` implements it, did not
   mark `Directives::get_Showing` used, so the accessor was reported
@@ -441,17 +564,20 @@ GitHub Release body to match this section (gh release edit).
   An accessor with no reader still warns, and the global and member forms are
   unchanged. Across the repo's own fixtures this clears 24 false warnings
   (22 in tm-editor-plus-plus, 2 in tm-dips-plus-plus), adding none.
+
 - **An explicit `openplanet_dir` was silently replaced by the variant probe**
   (B066) — the guard deciding whether to re-probe was always true, so a
   directory you set explicitly in config was overwritten by whatever the probe
   found. The setting is now honoured. Provenance is recorded rather than
   inferred by comparing values, so an explicit path that happens to equal the
   default survives too.
+
 - **Namespace-shortcut completion offered raw storage keys** (B069) — for a
   configured Nadeo module the shortcut surface listed the internal storage key
   instead of the spelling that appears in source, so accepting a completion
   inserted a name the compiler does not recognise. It now offers the source
   spelling.
+
 - **`openplanet.regenerateTypeDb` can no longer report a database it did not
   load (B064)** — the `after` stamps described whatever was on disk when the
   answer was written, not the database that had just been parsed into memory.
@@ -508,6 +634,7 @@ GitHub Release body to match this section (gh release edit).
   `docs/probes/openplanet-injected-methods.md`.
 
 ||||||| parent of 3ec242b (fix B056: a type answers to its SOURCE NAME, not to the loader's index key)
+
 - **Qualified engine names are checked against the spelling the game actually
   accepts (B056)** — `Game::CGameCtnApp` used to resolve, and the game answers
   `Namespace 'Game' doesn't exist.` So did `Plot::Marker` (the enum is
@@ -551,6 +678,7 @@ GitHub Release body to match this section (gh release edit).
   for having no name at all. Every one of the 2989 bare value names in the
   shipped type DB was compiled in the live game to establish the rule, and the
   verdicts are committed at `docs/probes/b053-bare-enum-values.tsv`.
+
 - **An unknown `workspace/executeCommand` is now a JSON-RPC error** (B039) —
   it used to answer `Ok(null)`, which a client cannot tell apart from a
   command that ran and had nothing to report. That is precisely how an
@@ -560,6 +688,7 @@ GitHub Release body to match this section (gh release edit).
   a real service, reads the advertised list back off its own `initialize`
   response, and executes every entry — a gate that fails for ANY future
   advertised-but-unimplemented command, not only this one.
+
 - **A bare enum value two enums define is now an error, as in the game
   (B053)** — the game refuses to choose between them (`Found multiple matching
   enum values`); `openplanet-lsp` took the first match and said nothing, so the
@@ -676,12 +805,14 @@ GitHub Release body to match this section (gh release edit).
   `textDocument/prepareRename` is now implemented, so an editor greys out F2
   and shows the reason instead of offering a rename that cannot be done
   correctly.
+
 - **Find All References is scope-aware too (B049)** — it shared the same
   token scan, so it reported every same-spelled identifier in the workspace.
   It now uses the same classification and precise occurrence sets as rename.
   When resolution is indeterminate (members, qualified names, ambiguous named
   argument labels, lambdas, or an incomplete workspace closure), it returns an
   empty result rather than presenting an unmarked approximation as exact.
+
 - **A bare value name of an unnamed engine enum is now an error (B044)** — the
   engine dump declares 132 enums inline on a member and gives them no name, so
   nothing in source can spell such an enum and nothing can reach its values by a
@@ -705,6 +836,7 @@ GitHub Release body to match this section (gh release edit).
   52 further value names of those enums already failed to resolve, and these 3
   were resolving only by accident, through the scan this change narrows. See
   `todo-false-positives.txt`.
+
 - **Hover shows the full signature and every overload (B033)** — hovering a
   function or method used to render `SomeType name()` with a hardcoded empty
   parameter list, or `(local) void name` with no signature at all, because the
@@ -733,6 +865,7 @@ GitHub Release body to match this section (gh release edit).
   parameter is optional but not its default expression (type-database
   signatures do show the real default); and workspace symbols still carry no
   doc comment, because symbol extraction reads the comment-masked source.
+
 - **TUI diagnostic messages are readable at narrow widths (B029)** — the detail
   box used to hard-clip long messages at the pane edge with no `…`, so you
   could not even tell text was missing, and a long `path:line:col` could squeeze
@@ -747,6 +880,7 @@ GitHub Release body to match this section (gh release edit).
   mid-sequence. A wide character before the underlined span no longer pushes the
   detail box's caret row out of alignment with it, and a message containing
   newlines now renders as separate rows instead of one run-together line.
+
 - **Engine enums declared inline on a member are no longer dropped (B016)** —
   the game dump gives such an enum no name of its own, so the loader keyed
   every one in a module as `<Module>::UnnamedEnum` and kept only the first:
@@ -767,6 +901,7 @@ GitHub Release body to match this section (gh release edit).
   module's collision were already accepted, so suppressing them all is the
   only change that does not newly reject working code. Making the checker
   match the game here is a separate change.
+
 - **`check` no longer undoes `defines` removals of manifest defines (B026)** —
   `run_check` re-applied `info.toml`'s `[script].defines` and the
   `DEPENDENCY_*` defines AFTER `LspConfig::load` had already applied them and
@@ -786,54 +921,6 @@ GitHub Release body to match this section (gh release edit).
   (`MP4` under a TMNEXT target) still replaces the target's selectors — exactly
   one `#if <platform>` family stays live (GH #36) — and now warns that
   `game_target` is the intended way to pick a game.
-
-### Changed
-- **`source.fixAll.openplanet` now prefixes unused LOCALS with `_` (B047)** —
-  previously no unused-declaration fix could be applied on save at all,
-  because that producer sat outside the fix registry. Now that it is a
-  registry family it can be batched, and the `_` prefix for a local is:
-  mechanical, reversible, and changes no API surface. Two things are still
-  never applied on save — **removing** a declaration, which is lossy, and
-  prefixing a **parameter**, which renames part of the callable API since
-  AngelScript has named arguments. Both remain available as ordinary quick
-  fixes. Only affects users who opted into `source.fixAll.openplanet` in
-  `editor.codeActionsOnSave`; it is never applied by default.
-- **Quick fixes for unused declarations and misspelled names now follow the
-  same rules as every other quick fix (B047)** — they are scoped to the range
-  the editor asked about, and their edit is computed when the action is picked
-  rather than for every action in the menu. Previously these two were wired
-  into the request handler by hand, outside the fix registry, so they ignored
-  the requested range and always computed their edits up front. Same fixes,
-  same edits; only when and where they are offered has changed.
-- **DEFAULT CHANGE: the analysis profile is now a windows/64 client (B028)** —
-  the LSP used to define `MANIA64`, `MANIA32`, `WINDOWS`, `WINDOWS_WINE`,
-  `LINUX`, `SERVER`, `LOGS`, `HAS_DEV` and `DEVELOPER` ALL at once, so
-  mutually exclusive `#if` branches were analyzed together: a plugin
-  declaring the same function under `#if MANIA32` and `#if MANIA64` got a
-  phantom "A function with the same name and parameters already exists"
-  error, and `#if LINUX` / `#if SERVER` code was checked on a Windows client
-  that would never compile it. The defaults now model a real client — one
-  OS (`windows`), one arch (`64`) — verified against the live game under
-  Wine (RemoteBuild probe 2026-08-29: `WINDOWS` + `WINDOWS_WINE` +
-  `MANIA64` on; `LINUX`, `MANIA32`, `SERVER`, `LOGS`, `HAS_DEV`,
-  `DEVELOPER` off). If you rely on checking code that only compiles on
-  Linux, on 32-bit, or in a server/logs/dev build, opt back in with
-  `os_target` / `arch_target` / the build-flag keys in
-  `.openplanet-lsp.toml`, pass `--os` / `--arch` to `check`, or add the
-  define back with `defines = ["LINUX"]` (B024 additive overrides). The
-  four build flags themselves stay ON by default (no default churn — only
-  the OS/arch pairs got realistic defaults, because their exclusivity is
-  the reported failure mode).
-- **Config TUI names the accepted values for every setting** — a new footer
-  line under the help text says how the selected value is typed in:
-  `comma-separated · e.g. DEV, DEBUG_BROWSER, -LOGS` for `defines` (nothing
-  previously said the editor splits on commas, let alone showed an example),
-  `comma-separated groups · e.g. [A, B] | [C, D]` for the nested lists,
-  `one of: …` with every choice for enums (invisible until you cycled through
-  them), plus true/false, number and path hints with their defaults. The line
-  is shown while browsing and while editing, and wraps when the choices are
-  wider than the terminal. The `defines` help text describes the new additive
-  semantics.
 
 ## [0.6.0] - 2026-08-29
 
