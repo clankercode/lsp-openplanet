@@ -2383,3 +2383,63 @@ ONE thing changed, and that one thing has to be the thing the guard reads. Both
 failures above were controls that differed from their negative case in some
 *other* respect as well, so they passed with the guard removed. Write the
 control by editing the negative input, not by writing a new one.
+
+## A ticket that pre-authorises fixture churn makes its reds more dangerous
+
+Found by lane-unused during B108, and it is a defect in how *I* write tickets
+rather than in any code.
+
+B108's body said, correctly and helpfully:
+
+> Expect to update those fixtures' expected output as part of this ticket; that
+> is the design, not a regression.
+
+That sentence is true. B091 had deliberately pinned the current wording so a
+later improvement would surface as a visible test change, and saying so spares
+the next reader a needless investigation.
+
+It also **pre-authorises the wrong response to every red the ticket produces.**
+
+The lane's first cut over-reached: B108 reads as "a callable argument prints as
+its return type", which sounds like it covers every callable, so the fix
+rewrote all three callable shapes. Measured, only one of them ever lost
+information:
+
+| argument | types as | verdict |
+|---|---|---|
+| `this.Tick` — method reference | `void`, the **return type** | identity gone → fix it |
+| `WrongArityOne` — bare function name | `Funcdef("WrongArityOne")` | already the author's name |
+| `badHandle` — funcdef-typed value | `StringLess@` | already the author's name |
+
+`b102_a_funcdef_handle_of_the_wrong_shape_is_reported` went red — and B102's
+own comment records that pin as **load-bearing**, because it is what makes the
+sibling fixture's correct-handle row falsifiable. The suite was doing its job.
+
+**The trap is structural.** Once a ticket says fixture churn is expected,
+"just update the pin" becomes the *frictionless* reading of any red under it,
+including the reds that are the suite refusing an over-reach. The sentence that
+was meant to save an investigation instead removes the friction that would have
+forced one.
+
+**So: a red under a churn-authorising ticket deserves MORE scrutiny than a
+normal red, not less.**
+
+**The discriminator that worked**, and it is cheap: ask whether the **old text
+was wrong** — not whether the new text is defensible. `StringLess@` was never
+the method's return type, so nothing licensed changing it. "Defensible" is
+satisfied by almost any coherent output; "the old one was wrong" is a claim you
+have to be able to support.
+
+**A second-order instance in the same ticket.** The lane's own first boundary
+test then asserted that a bare function name *should* render as a signature —
+the same over-reach restated as an expectation, and it failed for the same
+reason. Caught by running it, not by re-reading it. Its corrected version draws
+its positive control from the *other* fixture, since only method references
+changed; without that cross-fixture control, the "names are kept" assertions
+would be satisfied by reverting the whole change — which is the vacuity failure
+this document keeps returning to.
+
+**When writing a ticket that expects pinned text to move**, name the *specific*
+lines you expect to change and why, rather than granting blanket permission.
+A blanket grant cannot distinguish the churn you predicted from the churn that
+means you were wrong.
