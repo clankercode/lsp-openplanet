@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T08:57:40Z"
 depends_on: []
 estimate_hours: 1
 id: B097
 priority: high
+started_at: null
 status: pending
 tags: []
 title: RemoteBuild payloads can be split across reads and parsed as separate messages, so a probe verdict taken beside another client may be silently wrong
@@ -24,3 +26,89 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Reported 2026-08-31 by the tm-tournament-station session, which hit it while we
+were probing concurrently. **Our requests are in their log, interleaved in the
+same second, both times it happened. We were the other client.**
+
+## Evidence (their log, verbatim)
+
+    Read payload: {"route": "load_plugin", "data": {"id": "tournament-station", "s
+    Bytes to read: 34
+    Read payload: ource": "user", "type": "folder"}}
+
+One request split across two socket reads; the game-side plugin parsed **each
+half as a complete payload**. The second fragment is invalid JSON, the route
+came out empty, and the call failed with `Not implemented:` (empty route).
+
+## Why this is a probe-integrity ticket and not someone else's tooling bug
+
+Every game verdict this repo relies on — B052/B053 corpora, B068's re-probe,
+B071's ten-case table, B080's provenance pins, every issue repro — travels over
+this transport.
+
+This is a **second contamination channel**, independent of the one B068 and
+B077 closed, and none of those guards watch it:
+
+| channel | guard | what it damages |
+|---|---|---|
+| batched compilation unit | B068 (one name per unit) | an abort marks the rest ACCEPTED |
+| stranded fixture in Plugins/ | B077 (registration-before-copy, fail-closed sweep) | an ACCEPT reads a leftover plugin |
+| **split payload on the wire** | **NONE** | **the game answers a question nobody asked** |
+
+**The third is the worst of them, for one specific reason.** A contaminated
+fixture makes an ACCEPT untrustworthy but leaves the transaction intact — you
+asked X and got an answer about X in a dirty room. A mangled payload can make
+the game compile something that is not what was sent, and **a truncated script
+is still a script — it can compile.** So the corrupted case can return a clean,
+plausible, WRONG verdict with nothing in the output marking it as damaged.
+Every existing guard assumes the question arrived intact.
+
+## Likely root cause, and the check that would confirm it
+
+`Bytes to read: 34` followed by a fragment beginning `ource":` looks like the
+reader treating each `read()` return as a complete message instead of
+accumulating to the declared length. If so, **concurrency is not the cause, only
+the trigger** — it makes splitting likely, but any payload large enough to split
+would corrupt with a single client.
+
+That is a falsifiable prediction and it is worth one test: send a single large
+payload from ONE client with nothing else on the port. If it corrupts, this is
+"the reader does not honour its own length prefix", which is a much easier bug
+to fix and a much stronger report than "concurrent clients interfere".
+
+Predicted, so state it before measuring: if the single-client large-payload test
+passes cleanly, the length-prefix theory is WRONG and it really is a
+concurrency/interleaving bug in the read loop. Do not retro-fit the explanation
+to whichever result appears.
+
+## Consequences to act on
+
+- **`Error receiving header bytes` was written off as flakiness by two sessions
+  today.** That write-off now looks wrong; it is the same family. Stop treating
+  it as noise.
+- Probe verdicts require **confirmed-exclusive port access**, and the tooling
+  should say so and ideally check it, rather than relying on a coordinator
+  serialising lanes by hand — which is what was in force today and did not
+  prevent this, because the other client was a different session entirely.
+- Provenance sidecars (B080) must record that a verdict was taken under
+  exclusive access. A row measured beside another client is environment-
+  dependent in exactly that ticket's sense, and the corpus cannot currently
+  express it.
+- Consider whether the probe tooling can DETECT the condition rather than merely
+  avoid it — e.g. echo a nonce through the round trip and refuse any verdict
+  whose response does not carry it back. A guard that detects beats a
+  convention that coordinates, because conventions do not bind other sessions.
+
+## Already done
+
+lane-resolver's six-name B080 probe was halted mid-run and its results
+DISCARDED rather than reconciled against a re-run: a verdict indistinguishable
+from a corrupted verdict is not evidence, and "the two runs agreed" would
+launder it rather than check it.
+
+## Related
+
+B068 (batched-unit channel), B077 (stranded-fixture channel), B080 (needs this
+recorded as provenance), B092 (a different unexplained-result ticket from the
+same day).
