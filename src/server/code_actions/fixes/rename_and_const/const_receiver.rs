@@ -669,17 +669,36 @@ mod tests {
         assert!(out.contains("class D : B {}"), "{out}");
     }
 
+    /// B119 CHANGED WHAT THIS PINS. It used to record that the checker did
+    /// not diagnose an inherited method on a DERIVED const receiver, so the
+    /// fix had nothing to attach to. The engine DOES reject that call
+    /// (measured: `docs/probes/b119-const-receiver.tsv`), the checker now
+    /// walks parents, and the offer appears.
+    ///
+    /// What matters here is WHICH offer. The diagnostic names the receiver's
+    /// type `D`, but `M` is declared on `B`, so a "mark `D::M()` const" edit
+    /// would have nowhere correct to land. The fix declines it rather than
+    /// guessing, and offers only the receiver-side alternative — verified by
+    /// title, not by count, because a count of 1 would also be satisfied by
+    /// the wrong single offer.
+    ///
+    /// The remaining gap is that the const-side fix is not RETARGETED onto
+    /// the declaring class the way `an_inherited_method_fix_targets_the_
+    /// declaring_class` does when the receiver is typed as the base. That is
+    /// a code-action improvement, not a checker one, and it is recorded here
+    /// rather than left to be rediscovered.
     #[test]
-    fn a_derived_receiver_is_not_diagnosed_today_so_nothing_is_offered() {
-        // Documented limitation of the checker, not of the fix: an
-        // inherited method reached through a DERIVED const receiver does
-        // not fire the rule (the member is not a direct member of `D`).
+    fn a_derived_receiver_offers_only_the_receiver_side_fix() {
+        let src = "class B { bool M() { return true; } } class D : B {} \
+                   void f(const D &in h) { h.M(); }";
+        let titles: Vec<String> = const_fixes(&Workspace::single(src))
+            .into_iter()
+            .map(|c| c.fix.title)
+            .collect();
         assert_eq!(
-            fix_count(
-                "class B { bool M() { return true; } } class D : B {} \
-                 void f(const D &in h) { h.M(); }"
-            ),
-            0
+            titles,
+            vec!["Remove `const` from the declaration of `h`".to_string()],
+            "exactly the receiver-side offer, and no edit aimed at `D`"
         );
     }
 

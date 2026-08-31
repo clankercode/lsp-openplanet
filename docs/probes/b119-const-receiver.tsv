@@ -1,0 +1,24 @@
+id	question	expect	verdict	build_status	reason	stands_for
+ctl-valid	control	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	any correctly-written const method on a const receiver
+ctl-bogus	control	REJECT	REJECT	REJECTED	lsp-issue-repro-b119cr-ctl-bogus/Main.as(5,48): No matching symbol 'NoSuchMethodB119CRctlbogus'	a definitely-invalid call; proves the oracle sees errors
+ctl-own-nonconst	control	REJECT	REJECT	REJECTED	lsp-issue-repro-b119cr-ctl-own-nonconst/Main.as(5,66): No matching signatures to 'CB119CRctlownnonconst::Mutate() const'	the rule the checker already implements (own-class, non-const)
+inh-d1-nonconst	Q-A	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-inh-d1-nonconst/Main.as(6,64): No matching signatures to 'DB119CRinhd1nonconst::Mutate() const'	the exact shape of the flip test in checker.rs
+inh-d2-nonconst	Q-A	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-inh-d2-nonconst/Main.as(7,64): No matching signatures to 'DB119CRinhd2nonconst::Mutate() const'	Editor::SetSkinSpec -> NetworkSerializable, two levels up
+inh-d4-nonconst	Q-A	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-inh-d4-nonconst/Main.as(8,65): No matching signatures to 'A4B119CRinhd4nonconst::Mutate() const'	MLFeed's 4-deep hierarchies (B116 measured 2 sites there)
+inh-d2-const	Q-A-guard	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	an inherited CONST method; a fix must not fire on this
+recv-constref	Q-A-spelling	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-recv-constref/Main.as(6,65): No matching signatures to 'DB119CRrecvconstref::Mutate() const'	the receiver spellings B116 already pairs
+recv-consthandleref	Q-A-spelling	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-recv-consthandleref/Main.as(6,78): No matching signatures to 'DB119CRrecvconsthandleref::Mutate() const'	the receiver spellings B116 already pairs
+recv-constvalue	Q-A-spelling	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-recv-constvalue/Main.as(6,65): No matching signatures to 'DB119CRrecvconstvalue::Mutate() const'	the receiver spellings B116 already pairs
+arr-own-nonconst	Q-B-discriminator	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	isolates element constness from the parent walk
+arr-inherited-nonconst	Q-B	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	tm-map-together Socket.as:467, the one fleet site, exactly
+arr-value-array	Q-B	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-arr-value-array/Main.as(5,72): No matching signatures to 'CB119CRarrvaluearray::Mutate() const'	`const T[]` -- the value-array spelling
+arr-generic-spelling	Q-B	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	`const array<T@>@` -- must agree with the `T@[]@` shorthand
+arrq-mutate-array	Q-C-anchor	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-arrq-mutate-array/Main.as(5,75): No matching signatures to 'array::InsertLast(<null handle>) const'	mutating the const array ITSELF; anchors that const is live
+arrq-assign-element	Q-C	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-arrq-assign-element/Main.as(5,112): Reference is read-only	handle-assign INTO a const handle-array element slot
+arrq-write-field	Q-C	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	writing a FIELD through a const handle-array element
+arrq-assign-value-element	Q-C	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-arrq-assign-value-element/Main.as(5,90): Reference is read-only	assigning into a const VALUE-array element slot
+arrq-elem-to-mutable-handle	Q-D-elem-type	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	does an element bind to a NON-const handle (const not on pointee)?
+arrq-elem-to-const-handle	Q-D-elem-type	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	reading an element into a const handle must always work
+arrq-noouter-elem-method	Q-E-no-outer-handle	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	`const T@[]`: is the ELEMENT pointee mutable, as with `T@[]@`?
+arrq-noouter-mutate-array	Q-E-anchor	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b119cr-arrq-noouter-mutate-array/Main.as(5,88): No matching signatures to 'array::InsertLast(<null handle>) const'	`const T@[]`: is the ARRAY itself const? anchors the row above
+arr-const-method	Q-B-guard	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a const method through a const array must always compile

@@ -217,18 +217,29 @@ impl<'a> Parser<'a> {
 
         let mut ty = self.parse_base_type()?;
 
+        // B119: WHERE the leading `const` binds is decided by the whole
+        // suffix chain, not by the first `@` in it. Measured against the
+        // game, not assumed -- see `const_binding_at`.
+        let const_at = if is_const {
+            self.const_binding_at()
+        } else {
+            None
+        };
+        let mut ats_seen = 0usize;
+
         // Parse suffixes: @, &[in/out/inout], []
         loop {
             match self.peek() {
                 TokenKind::At => {
                     self.advance();
+                    ats_seen += 1;
                     // If a leading `const` was seen, it binds to the pointee:
                     // `const Foo@` → `Handle(Const(Foo))`. The span starts at
                     // the `const` keyword, not at the named type — otherwise
                     // every consumer that reads the type back as source text
                     // (the symbol table's stored parameter types, and so
                     // hover) silently loses the `const` (B033).
-                    if is_const {
+                    if is_const && const_at == Some(ats_seen) {
                         let span = self.span_from(start);
                         ty = TypeExpr {
                             span,
@@ -284,6 +295,91 @@ impl<'a> Parser<'a> {
         }
 
         Ok(ty)
+    }
+
+    /// B119: which `@` in the suffix chain a leading `const` binds to.
+    ///
+    /// Returns the 1-based ordinal of that `@`, or `None` when the `const`
+    /// belongs at the very end (outside every suffix).
+    ///
+    /// # The rule, and the measurement behind it
+    ///
+    /// `const` binds to the type formed by every suffix EXCEPT a trailing
+    /// handle -- and a trailing reference is transparent, because `&in` marks
+    /// how a parameter is passed rather than what it is:
+    ///
+    /// | spelling | binds to | result |
+    /// |---|---|---|
+    /// | `const C` | the whole thing | `Const(C)` |
+    /// | `const C@` | before the final `@` | `Handle(Const(C))` |
+    /// | `const C[]` | the whole thing | `Const(Array(C))` |
+    /// | `const C@[]` | the whole thing | `Const(Array(Handle(C)))` |
+    /// | `const C@[]@` | before the final `@` | `Handle(Const(Array(Handle(C))))` |
+    /// | `const C@ &in` | before the final `@` | `Reference(Handle(Const(C)))` |
+    ///
+    /// The old code consumed the `const` at the FIRST `@` unconditionally, so
+    /// `const C@[]@` came out as `Handle(Array(Handle(Const(C))))` -- an array
+    /// of handles to CONST C, rather than a handle to a CONST ARRAY of mutable
+    /// handles. The two spellings of one type disagreed
+    /// (`const array<C@>@` was already correct) while rendering to the SAME
+    /// display string, which is why it stayed hidden.
+    ///
+    /// Measured on Trackmania + Openplanet via
+    /// `scripts/probe_const_receiver.py`, because the two readings are not
+    /// distinguishable by inspection. For `const C@[]@ arr`:
+    ///
+    /// * `arr.InsertLast(null)` is REJECTED -- so the ARRAY is const;
+    /// * `@arr[0] = c` is REJECTED -- so the element SLOT is read-only;
+    /// * `arr[0].Mutate()` and `arr[0].x = 1` are ACCEPTED -- so the POINTEE
+    ///   is mutable, which an `array<const C@>` would not permit;
+    /// * `C@ e = arr[0];` is ACCEPTED -- binding an element to a NON-const
+    ///   handle. That is the decisive one: if the element's static type were
+    ///   `const C@`, this would strip `const` and the engine would refuse.
+    ///
+    /// The old shape made `arr[0]` a const receiver and fired
+    /// `NonConstMethodOnConstReceiver` on code the engine compiles -- a live
+    /// FALSE POSITIVE, and the reason the one fleet site B116 found
+    /// (`tm-map-together/src/Socket.as:467`) reads as silent-and-correct only
+    /// because a second bug cancelled it.
+    fn const_binding_at(&self) -> Option<usize> {
+        let mut i = 0usize;
+        let mut ats = 0usize;
+        // ('a', ordinal) handle, ('r', 0) reference, ('b', 0) array
+        let mut chain: Vec<(char, usize)> = Vec::new();
+        loop {
+            match self.peek_ahead(i) {
+                TokenKind::At => {
+                    ats += 1;
+                    chain.push(('a', ats));
+                    i += 1;
+                    // `Foo@ const` -- the trailing const is its own thing.
+                    if self.peek_ahead(i) == TokenKind::KwConst {
+                        i += 1;
+                    }
+                }
+                TokenKind::Amp => {
+                    chain.push(('r', 0));
+                    i += 1;
+                    match self.peek_ahead(i) {
+                        TokenKind::KwIn | TokenKind::KwOut | TokenKind::KwInout => i += 1,
+                        _ => {}
+                    }
+                }
+                TokenKind::LBracket if self.peek_ahead(i + 1) == TokenKind::RBracket => {
+                    chain.push(('b', 0));
+                    i += 2;
+                }
+                _ => break,
+            }
+        }
+        // A trailing reference is transparent to the binding.
+        while matches!(chain.last(), Some(('r', _))) {
+            chain.pop();
+        }
+        match chain.last() {
+            Some(('a', ord)) => Some(*ord),
+            _ => None,
+        }
     }
 
     /// Parse a base type: primitive keywords, auto, array<T>, dictionary, named types.
