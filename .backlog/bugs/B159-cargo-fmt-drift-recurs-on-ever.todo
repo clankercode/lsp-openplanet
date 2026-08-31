@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T16:44:53Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T16:53:47Z"
 complexity: medium
 created_at: "2026-08-31T16:44:49Z"
 depends_on: []
+duration_minutes: 8.904381026233333
 estimate_hours: 1
 id: B159
 priority: high
 started_at: "2026-08-31T16:44:53Z"
-status: in_progress
+status: done
 tags: []
 title: 'cargo fmt drift recurs on every merge: three lanes have now landed unformatted files and each needed a central repair — nothing gates it'
-updated_at: "2026-08-31T16:44:53Z"
+updated_at: "2026-08-31T16:53:47Z"
 ---
 
 cargo fmt drift recurs on every merge: three lanes have now landed unformatted files and each needed a central repair — nothing gates it
