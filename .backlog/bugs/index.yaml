@@ -105,3 +105,4 @@ bugs:
     - file: B104-go-to-definition-on-interface.todo
     - file: B105-lsp-server-should-notice-its-b.todo
     - file: B106-just-rtest-reports-exit-0-when.todo
+    - file: B107-completion-after-a-workspace-n.todo
