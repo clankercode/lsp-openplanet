@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T16:03:54Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T16:34:57Z"
 complexity: medium
 created_at: "2026-08-31T15:58:52Z"
 depends_on: []
+duration_minutes: 31.062338343266667
 estimate_hours: 1
 id: B150
 priority: high
 started_at: "2026-08-31T16:03:54Z"
-status: in_progress
+status: done
 tags: []
 title: No matching signatures renders MwFastBuffer.Length as uint() — a zero-arg function, not a uint value
-updated_at: "2026-08-31T16:03:54Z"
+updated_at: "2026-08-31T16:34:57Z"
 ---
 # No matching signatures renders `.Length` as `uint()`
 
