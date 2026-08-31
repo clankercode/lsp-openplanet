@@ -15667,6 +15667,87 @@ mod b130_engine_const_receiver_tests {
         }
     }
 
+    /// B137: WHY the Nadeo exclusion is right, stated more precisely than
+    /// B130 managed — and correcting that ticket's reasoning.
+    ///
+    /// B130 said consuming the Nadeo `is_const` would fire "on every
+    /// correctly-written const Nadeo call". Probed live, that population
+    /// appears to be EMPTY: the engine rejected every Nadeo member reached
+    /// through a const receiver, including two pure getters and a plain
+    /// property read.
+    ///
+    ///   const CMwNod@              n.MwAddRef()        REJECT
+    ///   CMwNod@ (non-const)        n.MwAddRef()        ACCEPT   <- isolates
+    ///                                                              constness
+    ///   const CGameCtnBlock@       b.IsGhostBlock()    REJECT
+    ///   const CGameCtnMediaBlock@  b.GetKeysCount()    REJECT
+    ///   const CGameCtnChallenge@   c.MapName (read)    REJECT
+    ///        "Non-const method call on read-only object reference"
+    ///
+    /// So the old hardcoded `false` was, as it happens, factually right on
+    /// every shape probed — consuming it would have produced true positives,
+    /// not false ones. B130's danger was overstated and this records that.
+    ///
+    /// The exclusion stands anyway, for the reason that does survive: a value
+    /// that is right by coincidence is not knowledge. Five probed members do
+    /// not license a claim about 3084, and the dump genuinely does not say —
+    /// so `None` is the honest state and a caller must decline on it. If a
+    /// wider probe ever establishes that Openplanet registers NO Nadeo member
+    /// as const, `Some(false)` becomes defensible and this rule can fire; that
+    /// is a measurement nobody has made.
+    ///
+    /// The practical stakes are small in either direction, and the probe is
+    /// what shows it: a `const CMwNod@` receiver cannot even be READ through,
+    /// so almost no correct code has one. That is exactly why the fleet has
+    /// zero Nadeo const-receiver sites — not an accident of the corpus.
+    #[test]
+    fn nadeo_constness_is_unknown_so_the_rule_declines() {
+        let idx = typedb();
+        for src in [
+            "void f(const CGameCtnBlock@ b) { b.IsGhostBlock(); }",
+            "void f(const CGameCtnMediaBlock@ b) { b.GetKeysCount(); }",
+            "void f(const CMwNod@ n) { n.MwAddRef(); }",
+        ] {
+            let d = check(src, &idx);
+            assert_eq!(
+                fired(&d),
+                0,
+                "Nadeo constness is UNKNOWN, so the rule must decline rather                  than guess: {src} -> {:?}",
+                d
+            );
+        }
+    }
+
+    /// The three-valued aggregation, at the surface that consumes it. Core
+    /// answers; Nadeo declines; and the two are distinguishable, which is the
+    /// whole point of B137's `Option<bool>`.
+    #[test]
+    fn external_method_is_const_distinguishes_known_from_unknown() {
+        let idx = typedb();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+        // Core: a real answer, both polarities.
+        assert_eq!(
+            scope.external_method_is_const("string", "ToLower"),
+            Some(true)
+        );
+        assert_eq!(
+            scope.external_method_is_const("MemoryBuffer", "Seek"),
+            Some(false)
+        );
+        // Nadeo: the database does not say.
+        assert_eq!(
+            scope.external_method_is_const("Game::CGameCtnBlock", "IsGhostBlock"),
+            None,
+            "the Nadeo dump carries no signature text, so this must be UNKNOWN              rather than `Some(false)`"
+        );
+        // Not a method of anything.
+        assert_eq!(
+            scope.external_method_is_const("string", "NoSuchThing"),
+            None
+        );
+    }
+
     /// One diagnostic, not two. The engine arm sits downstream of the
     /// workspace own-class and inherited arms, and a receiver that is an
     /// engine type reaches none of them — but the count is asserted rather

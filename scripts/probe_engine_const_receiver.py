@@ -171,12 +171,46 @@ def variants() -> list[V]:
         stands_for="`uint Length() const` — must stay ACCEPT",
     ))
 
-    # ---- Q-E4: NADEO type — no constness data exists at all -------------
+    # ---- Q-E4 (B137): the NADEO half, where the dump says nothing -------
+    # Measured: the Nadeo dump has no `decl` key and no signature text, so
+    # every method arrives with constness UNKNOWN. These rows ask the engine
+    # what the answers WOULD be, which is the only oracle available — the
+    # fleet has zero Nadeo const-receiver exposure, so a corpus sweep here can
+    # only produce an uninterpretable zero.
     v.append(V(
         id="nadeo-nonconst",
         code="void Use%(S)s(const CMwNod@ n) { n.MwAddRef(); }\n",
         question="Q-E4", expect="UNKNOWN",
-        stands_for="the Nadeo half, where is_const is hardcoded false = UNKNOWN",
+        stands_for="a Nadeo method the engine rejects on a const receiver",
+    ))
+    v.append(V(
+        id="nadeo-nonconst-ok-recv",
+        code="void Use%(S)s(CMwNod@ n) { n.MwAddRef(); }\n",
+        question="Q-E5", expect="UNKNOWN",
+        stands_for="the SAME call on a non-const receiver; isolates constness",
+    ))
+    # The row the ticket names as load-bearing: if NO Nadeo method is ever
+    # accepted on a const receiver, the old hardcoded `false` was accidentally
+    # harmless and a future parse buys little. If one IS accepted, the false
+    # positive was real.
+    v.append(V(
+        id="nadeo-getter-bool",
+        code="void Use%(S)s(const CGameCtnBlock@ b) { b.IsGhostBlock(); }\n",
+        question="Q-E6", expect="UNKNOWN",
+        stands_for="`bool IsGhostBlock()` — getter-shaped, a const candidate",
+    ))
+    v.append(V(
+        id="nadeo-getter-uint",
+        code="void Use%(S)s(const CGameCtnMediaBlock@ b) { b.GetKeysCount(); }\n",
+        question="Q-E6", expect="UNKNOWN",
+        stands_for="`uint GetKeysCount()` — getter-shaped, a const candidate",
+    ))
+    v.append(V(
+        id="nadeo-prop-read",
+        code=("void Use%(S)s(const CGameCtnChallenge@ c) { string s = c.MapName; }\n"),
+        question="Q-E6", expect="UNKNOWN",
+        stands_for="reading a Nadeo PROPERTY through a const handle; proves a "
+                   "const Nadeo receiver is usable at all",
     ))
 
     # ---- Q-E2: engine VALUE type through `const T &in` ------------------
