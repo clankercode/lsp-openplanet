@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T09:50:52Z"
 depends_on: []
 estimate_hours: 1
 id: B102
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'array<T>::Sort / SortNonConst callbacks are unchecked: every wrong function handle is silently accepted, and no fixture in the corpus exercises them'
@@ -24,3 +26,145 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Requested by Max 2026-08-31, off the back of B094: "we need some test fixture
+plugins that use the angelscript sorting functions that take a function handle
+and make sure that we match those and it all works as expected and we can
+detect when a function handle that is provided matches or not."
+
+## Verified broken (2026-08-31, live binary, master post-B071/B089)
+
+Fixture, `check` reports ONE diagnostic and it is an unrelated unused-function
+warning. Every bad callback is silent:
+
+```angelscript
+class Item { int v; }
+bool LessInt(const int &in a, const int &in b) { return a < b; }
+bool LessItem(const Item@ &in a, const Item@ &in b) { return a.v < b.v; }
+bool WrongArity(const int &in a) { return a < 0; }
+bool WrongTypes(const string &in a, const string &in b) { return a < b; }
+void WrongReturn(const int &in a, const int &in b) { }
+
+void Use() {
+    int[] xs = {3,1,2};
+    xs.Sort(LessInt);      // good      -> silent (correct)
+    xs.Sort(WrongArity);   // BAD arity -> SILENT
+    xs.Sort(WrongTypes);   // BAD types -> SILENT
+    xs.Sort(WrongReturn);  // BAD ret   -> SILENT
+    xs.Sort(LessItem);     // BAD elem  -> SILENT
+    array<Item@> items;
+    items.Sort(LessItem);  // good      -> silent (correct)
+    items.Sort(LessInt);   // BAD elem  -> SILENT
+}
+```
+
+## Why this is NOT just B089 again
+
+B089 checks a funcdef-typed parameter of a WORKSPACE function at a workspace
+call site. That path is live and gated. This is the ENGINE side, and it has a
+shape nothing else in the typedb has:
+
+    void Sort(T[]::less&in, uint startAt = 0, uint count = uint(-1))
+    void SortNonConst(T[]::less_nonconst&in, uint startAt = 0, uint count = uint(-1))
+
+`T[]::less` is a TEMPLATE-MEMBER funcdef. Its parameter types are the array's
+element type, so the expected signature is not fixed -- it must be computed per
+call site by substituting T:
+
+  * `int[]`      -> `bool(const int&in, const int&in)`
+  * `Item@[]`    -> `bool(const Item@&in, const Item@&in)`
+
+No other funcdef slot in the codebase needs substitution. Every existing
+funcdef check compares against a fixed declared signature.
+
+## The typedb does not declare `less` at all
+
+Measured against `tests/fixtures/typedb/OpenplanetCore.json`:
+
+| typeid | what | status |
+|---|---|---|
+| 67108888 | `less` funcdef (referenced by `Sort`'s first arg) | **DANGLING -- referenced, never declared** |
+| 67108889 | `less_nonconst` funcdef | DECLARED: `bool less_nonconst(T&in a, T&in b)` |
+| 67112305 | `T` template parameter type | **DANGLING -- referenced, never declared** |
+
+`funcdefs` contains exactly: CoroutineFunc, CoroutineFuncUserdata,
+CoroutineFuncUserdataBool, CoroutineFuncUserdataDouble,
+CoroutineFuncUserdataInt64, CoroutineFuncUserdataString,
+CoroutineFuncUserdataUint64, InputTextCallback, NodTreeMemberCallback,
+ProcIntercept, ProcInterceptEx, less_nonconst. No `less`.
+
+So the const form has no declaration to check against and its signature must be
+SYNTHESISED. `bool less(const T&in a, const T&in b)` is the obvious reading --
+by analogy with the declared `less_nonconst` and with the AngelScript array
+add-on -- but it is a GUESS until probed. **Probe the game before relying on
+it.** In particular settle whether the engine accepts a `bool(T&in, T&in)`
+(non-const) callback at the const `Sort` slot, and whether it accepts a
+`const T&in` callback at the `SortNonConst` slot. Those two answers decide
+whether the two slots need separate rules or one.
+
+## Why nobody noticed, and why the fleet sweep will not notice either
+
+**Zero call sites across the whole fixture corpus.** `grep -rn '\.Sort(' tests/fixtures/
+--include='*.as'` excluding no-arg `.Sort()` returns 0 matches, and so does
+`.SortNonConst(`. Every plugin that sorts either uses `SortAsc`/`SortDesc` or
+hand-rolls a quicksort taking its own workspace funcdef -- which is the
+tm-better-totd `totdsQuicksort(allTotds, Less_OldFirst)` shape, i.e. the B089
+path, not this one.
+
+This matters for the gate. A fleet sweep over 151 plugins is the standard
+"did we break anything" signal here, and for this rule it is structurally
+blind: zero delta is guaranteed regardless of whether the code works. Do not
+report a sweep as evidence for this ticket. A positive control on a real
+plugin is required, and it will have to be an INJECTED `.Sort(cb)` call site,
+since no shipped plugin provides one.
+
+## Work
+
+1. Probe the engine first (see above). Record verdicts verbatim in the ticket.
+   Per B068, probe each fixture as its OWN compilation unit -- never batched.
+   REJECT-direction verdicts are the trustworthy ones on this machine.
+2. Resolve `T[]::less` / `T[]::less_nonconst` at an array method call site to a
+   concrete signature by substituting the receiver's element type.
+3. Check the argument against it: arity, parameter types, parameter MODES
+   (`&in` vs `&out` vs `&inout` -- B027 already enforces exact modes for
+   delegate construction, reuse that comparison rather than writing a second
+   one), and return type.
+4. Fixture plugins under `tests/fixtures/`, plugin-shaped (with `info.toml`),
+   not just inline strings -- Max asked for fixture plugins specifically.
+
+## Test matrix (generalise per repo CLAUDE.md)
+
+Element types: `int`, `float`, `string`, `Item` (value class), `Item@`
+(handle), `array<int>` (nested), an engine type (`CGameCtnChallenge@`), an
+enum, a `dictionary@`.
+
+Callback shapes, each x good/bad:
+  * exact `bool(const T&in, const T&in)` -- accept
+  * non-const `bool(T&in, T&in)` at `Sort` -- verdict per probe
+  * const at `SortNonConst` -- verdict per probe
+  * `&out` / `&inout` parameters -- reject
+  * by-value `bool(T, T)` -- verdict per probe
+  * wrong arity (1 arg, 3 args) -- reject
+  * wrong element type (`int[]` given an `Item` comparer) -- reject
+  * wrong return (`void`, `int`) -- reject
+  * a class METHOD passed bare -- reject (see B091, this is the same wrapping
+    rule the CoroutineFunc ticket covers)
+  * a `funcdef` handle VARIABLE of the right shape -- accept
+  * a null literal -- verdict per probe
+  * the 3-arg form `xs.Sort(cb, 0, 5)` -- the extra `uint` args must not
+    disturb the funcdef slot
+  * `SortAsc()` / `SortDesc()` / `SortAsc(0,5)` stay silent (control)
+  * the WORKSPACE quicksort shape (`totdsQuicksort(arr, Less_OldFirst)`) stays
+    working -- that is B089's path and must not regress
+
+Include a NEGATIVE control: a correct callback on every element type must stay
+silent, or a rule that rejects everything scores as a pass.
+
+## Related
+
+B089 (workspace funcdef params at call sites -- the sibling path, already
+fixed), B027 (exact &in/&out/&inout mode comparison, reuse it), B023
+(function-shaped args at funcdef slots), B091 (class method must be wrapped in
+CoroutineFunc -- same wrapping rule, different callee), B100 (workspace
+overload sets reach no argument check), B060 (a property READ is a value, not
+a function -- relevant if a getter is passed as a comparer).
