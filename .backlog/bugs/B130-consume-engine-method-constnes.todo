@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:26:10Z"
 depends_on: []
 estimate_hours: 1
 id: B130
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Consume engine method constness in the const-receiver rules: the data now arrives via MethodInfo::is_const, but closing B116''s engine-receiver exclusion is a new false-positive surface that needs its own variant sweep'
@@ -12,3 +14,54 @@ updated_at: "2026-08-31T14:26:10Z"
 ---
 
 Consume engine method constness in the const-receiver rules: the data now arrives via MethodInfo::is_const, but closing B116's engine-receiver exclusion is a new false-positive surface that needs its own variant sweep
+
+
+## Filed by lane-enum on completing B124/B125, 2026-09-01
+
+## What changed to make this possible
+
+`MethodInfo::is_const` is now populated for the 301 of 1002 Core class methods
+whose `decl` ends in ` const`. B124's stale comment is corrected. So the data
+arrives — and **that is exactly why this ticket needs a guard rail rather than a
+one-liner.**
+
+## The prize and the price
+
+**Prize:** B116 excludes the entire engine-receiver population by provenance.
+That exclusion was argued partly on "no const-qualifier metadata exists", which
+is no longer true. Closing it would extend the const-receiver rule to the
+largest population it currently cannot see.
+
+**Price, all three numbers already measured:**
+
+- **807** engine receivers excluded by provenance (B116) — the population a gate
+  reading "not known const" as "non-const" fires on.
+- **80** handle-returning engine sites reached (B121).
+- **3** of those provably indistinguishable from genuine views: `string::Split`
+  returns a fresh `string[]@`, `Json::Value::Get` returns a real view, and both
+  are `returntypeflags` 0 with a `@`.
+
+## DO NOT let this be a one-liner because the data exists now
+
+Run the variant sweep, the same shape B116, B120 and B121 all used: keep the
+current answer, record every disagreement across the fleet, **read** the
+disagreements, then decide. Report **exposure** as well as emits — the live
+workspace surface has measured a structural zero four times running and a fifth
+zero means nothing without reach. See the hazards entry.
+
+## A hypothesis worth testing first, from the histogram
+
+**The residual is ONLY the handle case.** By-value engine returns are fully
+decided by `returntypeflags` (0 → 865 by value or handle, 3 → 123 `T&`,
+7 → 14 `const T&`), so a rule restricted to **non-handle returns** may be
+shippable with a far smaller surface than the full 807.
+
+That is a hypothesis from a histogram, **not a measurement.** It needs the sweep
+like everything else. Its value is that it suggests a cheaper first increment
+than "all or nothing", not that it can skip the work.
+
+## Related
+
+B121's `residual_fresh_handles_are_documented_not_fixed` is the test that pins
+the indistinguishable case. If this ticket finds a way to separate fresh handles
+from views, that test is designed to fail — which is the signal, not a break.
