@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:11:35Z"
 depends_on: []
 estimate_hours: 1
 id: B124
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'lookup_method_return''s ''External types: no const-qualifier metadata yet'' is stale: 301 of 1002 Core method decls carry a trailing const in the decl string, unparsed'
@@ -12,3 +14,47 @@ updated_at: "2026-08-31T14:11:35Z"
 ---
 
 lookup_method_return's 'External types: no const-qualifier metadata yet' is stale: 301 of 1002 Core method decls carry a trailing const in the decl string, unparsed
+
+
+## Measured by lane-enum during B121, 2026-09-01
+
+## The stale comment
+
+`lookup_method_return` says *"External types: no const-qualifier metadata yet"*.
+**That is no longer true, and it has been steering decisions.** It partly
+underpinned B116's provenance argument for excluding the engine population.
+
+## What the dumps actually carry
+
+- **301 of 1002 Core class methods (30%) carry a trailing ` const` in their
+  `decl` string** — e.g. `"string GetName() const"`. The constness is present,
+  just unparsed.
+- `returntypeflags` carries what `returntypedecl` loses: `decl "const T& opIndex(...)"`
+  has `returntypedecl "T"` but `returntypeflags 7`. Histogram: `0` → 865 (value
+  or handle), `3` → 123 (`T&`), `7` → 14 (`const T&`).
+
+So by-value vs by-reference IS available. What is **absent at every level** is
+the fresh-vs-aliasing distinction for a returned **handle**, which is why this
+does not close B121.
+
+## DO NOT "just parse the decl"
+
+Parsing it would let B116's engine-receiver exclusion be revisited — that is the
+prize — but it opens a **new false-positive surface**: 80 handle-returning
+engine sites are reached across the fleet, and B121 measured that 3 of them
+(`string::Split`, returning `string[]@` — a fresh array behind a handle) cannot
+be separated from `Json::Value::Get`, which returns a genuine view. Both are
+`returntypeflags 0` with a `@`.
+
+**This needs its own variant sweep before any fix**, the same shape B116, B120
+and B121 all used: keep the current answer, record every disagreement, read the
+disagreements, then decide. Report EXPOSURE as well as emits — see the hazards
+entry, because the live workspace surface has measured a structural zero three
+times running and a fourth zero will mean nothing without reach.
+
+## Related
+
+`CoreMethod.is_const` is the dead field that would be the obvious place to put
+this — see the sibling ticket. Fixing that and fixing this are the same work if
+done in the right order, and the wrong order leaves a populated field nobody
+reads.
