@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T12:08:52Z"
 depends_on: []
 estimate_hours: 1
 id: B111
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'B094 false ERROR on mixin class: a mixin need not satisfy the interface it names, and two shipped plugins are flagged'
@@ -24,3 +26,80 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by lane-resolver during B101's corpus sweep, 2026-08-31. PRESENT ON BASE
+-- not a B101 regression -- but it is a false ERROR in exactly the polarity
+B094 was built to avoid, so it should be treated as higher priority than a
+missing warning.
+
+## What was measured
+
+Sweep over the 22 plugins (of 167) that declare an `interface` -- the only
+place the rule can fire. Two release binaries from the same base c92fa25, with
+a differential control run FIRST: on a synthetic const fixture the base binary
+reports 0 and the new one reports 1, so the sweep can observe the rule in both
+directions rather than being a dead harness.
+
+Result: 11 findings before, 11 after. **8 of those 11 are the same false
+positive**:
+
+    mixin class CPAbstractionOpCmp : CPAbstraction
+
+in `tm-buffer-time` and `tm-cotd-buffer-time`. Both plugins SHIP and COMPILE in
+the game today.
+
+## Why it is wrong
+
+A `mixin` class's members are copied into each including class. The mixin
+itself is never instantiated and does not have to satisfy the interface it
+names -- the INCLUDING class does. So requiring the mixin to implement
+`CPAbstraction`'s methods asks the wrong type for them.
+
+## Why this matters more than an ordinary false positive
+
+B094 is deliberately fail-silent. Its module doc states the reason: comparing
+AngelScript signature text is where B062 recorded a normalisation slip becoming
+a false report, and the risk polarity here is a false ERROR on a class that
+compiles, on a construct every interface-using plugin depends on. Four
+enumerated bails all resolve to silence for that reason.
+
+This is the exact outcome those bails exist to prevent, arriving by a route
+none of them cover: not a comparison that went wrong, but a REQUIREMENT applied
+to a declaration that never owed it. The bails guard the comparison; nothing
+guards the applicability.
+
+## Work
+
+1. Exclude `mixin` classes from the requirement set. Confirm the parser records
+   the qualifier and that it survives pooling -- B101 has just shown that a
+   qualifier the parser records can be dropped on the way into the symbol
+   table, so check rather than assume.
+2. Settle what a mixin's interface list MEANS to the engine, and record which
+   half is measured. Probing is blocked (B097), so if the engine's treatment
+   cannot be established, take the silent option -- consistent with the
+   module's polarity.
+3. The INCLUDING class is the one that owes the methods. Whether B094 should
+   check that instead is a separate question; do not widen this ticket into it
+   without saying so.
+
+## Tests
+
+Both shipped shapes as fixtures (a mixin naming an interface it does not
+implement; an including class that does). Then generalise: a mixin that DOES
+implement everything; a mixin naming an interface where the including class
+supplies the methods; an including class missing a method the mixin does not
+supply -- which must still ERROR, or the fix has bought silence by disabling
+the rule; a mixin with no interface list; and a plain class as the negative
+control, so the requirement still fires where it should.
+
+That "must still error" case is the important one. Per the batch's absence rule
+(docs/verification-hazards.md), every assertion here whose subject is a silence
+passes for free once the requirement is dropped -- so mutation-test them: remove
+the mixin exclusion and confirm each silence test goes red.
+
+## Related
+
+B094 (the diagnostic and its four bails), B101 (constness now comparable; the
+same sweep), B095 (the code action that consumes B094's output -- a mixin
+offering a stub for a method it does not owe is the downstream symptom), B062
+(the normalisation slip that set B094's polarity).
