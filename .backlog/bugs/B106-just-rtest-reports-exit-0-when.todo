@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T10:44:45Z"
 depends_on: []
 estimate_hours: 2
 id: B106
 priority: high
+started_at: null
 status: pending
 tags: []
 title: just rtest reports exit 0 when the remote build actually failed (x-alpha ENOSPC false green)
@@ -25,3 +27,9 @@ scripts/remote-build.py must propagate the remote command's real exit status thr
 - Related incomplete-run hazard family: B078, B085, B092 (cargo stops at first failing binary). This is the same class — a green signal that does not mean what it says — but at the transport layer.
 - Repro shape: fill the remote target fs (or a quota'd test dir), run just rtest, observe local exit 0 + failed build output.
 - x-tuf works as fallback (LSP_REMOTE_HOST=x-tuf; just is now installed there).
+
+## Peer intel (claude-mortar-vicar-eqog, 2026-08-31)
+- Their four x-alpha gates in the ENOSPC window (20:00-20:35) are believed real: each SUITE-VERIFIED total reconciled arithmetically against the prior gate (+14 B095, +4 B098, +3 B102); re-verifying master on x-tuf anyway.
+- Sibling false-green fixed same day in 586d18b: 'just rtest -- --test <name>' sends --test to libtest (name substring, matches nothing) -> 30/30 coverage, 0 failures, exit 0, 'SUITE-VERIFIED: 0 passed'. Mechanism: completeness measured per-binary, totals per-test — different axes. Detection now uses libtest's own 'filtered out' count.
+- Their hypothesis for THIS bug: the gate reconciles what cargo PRINTED but never checks cargo actually ran; test the specific input 'ENOSPC run emits partial sections that still reconcile' — that is the case that slips through. If no sections at all are emitted the marker is withheld, so the partial-sections case is the dangerous one.
+- docs/verification-hazards.md has a section on this family ('coverage and totals on different axes'); the fix for this ticket should add the ENOSPC/transport case there.
