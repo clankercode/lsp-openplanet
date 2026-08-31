@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T13:41:43Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T14:32:31Z"
 complexity: medium
 created_at: "2026-08-31T13:39:48Z"
 depends_on: []
+duration_minutes: 50.80185456618333
 estimate_hours: 1
 id: B119
 priority: high
 started_at: "2026-08-31T13:41:43Z"
-status: in_progress
+status: done
 tags: []
 title: 'Const-receiver rule is own-class-only: an inherited non-const method reached through a derived const receiver is silent on both sides of the file boundary'
-updated_at: "2026-08-31T13:41:43Z"
+updated_at: "2026-08-31T14:32:31Z"
 ---
 
 Const-receiver rule is own-class-only: an inherited non-const method reached through a derived const receiver is silent on both sides of the file boundary
