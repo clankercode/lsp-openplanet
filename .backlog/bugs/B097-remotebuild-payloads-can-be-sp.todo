@@ -374,3 +374,58 @@ Max's game plugin is worse than neither.
 
 **`~/src/tm-remote-build`'s Python side has UNCOMMITTED WORK OF MAX'S. Do not
 touch that path.**
+
+## THIRD CORRECTION — "every game probe in this repo is dead" was TOO BROAD (coordinator + lane-resolver, 2026-08-31)
+
+I said the probe harness could not run at all. That is wrong for one of the two
+scripts, and it has been steering tickets — B098 and B080 were both marked
+blocked on it.
+
+**`scripts/probe_enum_corpus.py` is NOT blocked.** Verified statically by
+lane-resolver, and the reasoning is short enough to check:
+
+- `fleet.rb_route` (`scripts/fleet_dogfood.py:49`) wraps everything in
+  `try/except Exception` and RETURNS an error dict. It never raises. So an
+  unparseable or `Not implemented:` reply cannot propagate to a caller.
+- `probe_enum_corpus.py:190` calls it for `load_plugin` and **discards the
+  return value entirely** — no assignment, no check — then `time.sleep(3.0)` and
+  reads the game log window.
+- So the failed load is completely invisible to the harness, and **Openplanet's
+  own file watcher** compiles the staged folder.
+- Corroborating: the shipped corpora exist and `load_plugin` has never worked,
+  so the call cannot be what produced them.
+
+**Attempting it is CHEAP because the failure mode is loud.** B068's sentinel
+means a probe that does not compile yields UNDETERMINED for every name, never a
+verdict. Given that the standing worry all day has been clean-looking wrong
+answers, this is the rare case where trying costs a wasted minute rather than a
+bad row.
+
+**The one link that cannot be checked from disk**: whether Openplanet's watcher
+picks up a NEWLY CREATED plugin directory as opposed to a modified file in an
+already-loaded one. The shipped corpora are the evidence for it.
+
+`scripts/issue_repro_game.py` IS genuinely blocked — its teardown goes through
+the B077 holder, the split `unload_plugin` fails, `holder.preserve()` fires
+correctly, and the run is marked SKIP.
+
+## A B080 consequence of the same mechanism
+
+A failed `load_plugin` is followed by an `unload_plugin` that splits the same
+way, so `holder.preserve()` fires and **the fixture is left installed**. That is
+a documented mechanism by which a probe fixture becomes an installed plugin
+declaring names later runs ask about — a third independent reason the
+`HOST_PLUGIN` label on `Foo` was wrong, arriving after it had already been
+demoted on other grounds.
+
+Two qualifications so nobody over-reads it: that path is
+`issue_repro_game.py`'s, not `probe_enum_corpus.py`'s (the latter `rmtree`s its
+staged dir in a `finally`, so it strands nothing short of a SIGKILL), and it
+makes "a stranded fixture" concrete without identifying WHICH one — so `Foo`
+stays `HOST_UNATTRIBUTED`.
+
+Worth recording as a hypothesis rather than a finding: the original
+`global_scope.rs` wording, "Probed on a plugin declaring
+`namespace Foo { namespace Bar { ... } }`", reads exactly like a deliberately
+hand-staged B052 test fixture. A plausible supplier, NOT a measured one. A
+`git log` over the B052 lane's history could settle it cheaply.
