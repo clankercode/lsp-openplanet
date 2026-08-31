@@ -133,19 +133,37 @@ impl<'a> TypeResolver<'a> {
             };
         }
 
-        // Funcdefs are types, but the constructed / annotated form is
-        // `TypeRepr::Funcdef`, not `Named` — a handle `T@` is then
-        // handle-compatible with the ctor result (GH #63).
-        if self.scope.lookup_funcdef(&qualified).is_some() {
-            return TypeRepr::Funcdef(qualified);
-        }
+        // GH #38 / B073: a plugin's own TYPE declaration shadows the engine
+        // symbol of the same name. The two lookups immediately below both
+        // answer from the ENGINE — `lookup_funcdef` walks workspace symbols
+        // but only *returns* on a real funcdef before falling through to the
+        // typedb, and the builtin table is hardcoded — so asking either one
+        // first is what let a plugin's `class CoroutineFunc` resolve to the
+        // Core funcdef. Establish the shadowing declaration once, here, and
+        // let it win below.
+        //
+        // The three later `lookup_funcdef` calls in this function need no
+        // such guard and deliberately do not have one: each is reached only
+        // after this name failed to resolve, which cannot happen while the
+        // workspace declares a type of it — an exact declaration answers
+        // here, and a namespaced one answers here through the tail table.
+        let workspace_shadowing = self.scope.workspace_shadowing_type_name(&qualified);
 
-        // AngelScript builtin funcdef / synthetic helper types that the
-        // core database references but does not formally declare as
-        // classes. Treat them as known types so user code referencing
-        // them doesn't drown in false positives.
-        if is_angelscript_builtin_type(&qualified) {
-            return TypeRepr::Named(qualified);
+        if workspace_shadowing.is_none() {
+            // Funcdefs are types, but the constructed / annotated form is
+            // `TypeRepr::Funcdef`, not `Named` — a handle `T@` is then
+            // handle-compatible with the ctor result (GH #63).
+            if self.scope.lookup_funcdef(&qualified).is_some() {
+                return TypeRepr::Funcdef(qualified);
+            }
+
+            // AngelScript builtin funcdef / synthetic helper types that the
+            // core database references but does not formally declare as
+            // classes. Treat them as known types so user code referencing
+            // them doesn't drown in false positives.
+            if is_angelscript_builtin_type(&qualified) {
+                return TypeRepr::Named(qualified);
+            }
         }
 
         // Primitives occasionally appear as identifiers (e.g. when an
@@ -156,6 +174,16 @@ impl<'a> TypeResolver<'a> {
         }
         if qualified == "void" {
             return TypeRepr::Void;
+        }
+
+        // The workspace declaration from above, now that the primitives have
+        // had their say — a keyword-spelled type is not something a plugin
+        // can shadow. Answered with the DECLARATION's qualified name, not the
+        // spelling, so `CoroutineFunc` written inside `namespace Nz` is the
+        // same `Nz::CoroutineFunc` a non-colliding name would have resolved
+        // to through `resolve_unqualified` below.
+        if let Some(declared) = workspace_shadowing {
+            return TypeRepr::Named(declared);
         }
 
         if self.scope.resolves(&qualified) {
@@ -722,5 +750,311 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── B073 / GH #38: a workspace TYPE shadows an engine funcdef ───────────
+
+    /// Resolve `spelling` against a workspace holding exactly `symbols`,
+    /// with the shipped typedb behind it and `stack` as the active
+    /// namespace stack. Returns the repr and whether it resolved cleanly.
+    fn resolve_against(
+        index: &crate::typedb::index::TypeIndex,
+        symbols: &[(&str, SymbolKind)],
+        stack: &[&str],
+        spelling: &str,
+    ) -> (TypeRepr, bool) {
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        ws.set_file_symbols(
+            fid,
+            symbols
+                .iter()
+                .map(|(name, kind)| Symbol {
+                    name: (*name).to_string(),
+                    kind: kind.clone(),
+                    span: Span::new(0, 0),
+                    file_id: fid,
+                    doc: None,
+                })
+                .collect(),
+        );
+        let scope = GlobalScope::new(&ws, Some(index));
+        let ty = parse_type(spelling);
+        let mut r = TypeResolver::new(&scope, spelling)
+            .with_namespace_stack(stack.iter().map(|s| (*s).to_string()).collect());
+        let out = r.resolve(&ty);
+        let clean = r.take_diagnostics().is_empty();
+        (out, clean)
+    }
+
+    /// Every shape a workspace can declare a TYPE in. `typedef` is in the
+    /// list deliberately: it reuses `SymbolKind::Funcdef` and is the shape
+    /// `lookup_funcdef` skips, so an enumeration that forgets it leaves the
+    /// subtlest cell of the hole open.
+    fn type_shapes() -> Vec<(&'static str, SymbolKind)> {
+        vec![
+            ("class", SymbolKind::Class { parents: vec![] }),
+            ("interface", SymbolKind::Interface { parents: vec![] }),
+            ("enum", SymbolKind::Enum { values: vec![] }),
+            (
+                "typedef",
+                SymbolKind::Funcdef {
+                    return_type: "int".into(),
+                    params: vec![],
+                    is_typedef: true,
+                },
+            ),
+        ]
+    }
+
+    /// B073 / GH #38. A plugin's own type declaration shadows the ENGINE
+    /// symbol of the same name. That rule was applied for class-vs-class
+    /// collisions and not when the engine symbol is a **funcdef**, because
+    /// `lookup_funcdef` walks workspace symbols but only *returns* on a real
+    /// funcdef and then falls through to the typedb.
+    ///
+    /// Swept over three axes at once, because a guard that enumerates one
+    /// axis passes while leaving the others open:
+    ///
+    /// * **shape** — class / interface / enum / `typedef`;
+    /// * **engine name** — two real Core funcdefs, so the rule is not pinned
+    ///   to one spelling;
+    /// * **namespace** — declared at the top level, or inside `namespace Nz`
+    ///   and reached bare (from inside the namespace and from outside it, via
+    ///   the tail table) or fully qualified.
+    ///
+    /// The engine-funcdef control below proves no row here passes vacuously:
+    /// with the same typedb and an empty workspace every one of these
+    /// spellings is `TypeRepr::Funcdef`.
+    #[test]
+    fn workspace_type_shadows_an_engine_funcdef_in_every_shape() {
+        let index = typedb_fixture_index();
+        let mut wrong: Vec<String> = Vec::new();
+
+        for engine in ["CoroutineFunc", "CoroutineFuncUserdataString"] {
+            for (shape, kind) in type_shapes() {
+                let namespaced = format!("Nz::{engine}");
+                let cells: Vec<(&str, Vec<(&str, SymbolKind)>, Vec<&str>, &str, String)> = vec![
+                    (
+                        "declared at the top level, spelled bare",
+                        vec![(engine, kind.clone())],
+                        vec![],
+                        engine,
+                        engine.to_string(),
+                    ),
+                    (
+                        "declared in `namespace Nz`, spelled bare from inside it",
+                        vec![(namespaced.as_str(), kind.clone())],
+                        vec!["Nz"],
+                        engine,
+                        namespaced.clone(),
+                    ),
+                    (
+                        "declared in `namespace Nz`, spelled bare from outside it",
+                        vec![(namespaced.as_str(), kind.clone())],
+                        vec![],
+                        engine,
+                        namespaced.clone(),
+                    ),
+                    (
+                        "declared in `namespace Nz`, spelled fully qualified",
+                        vec![(namespaced.as_str(), kind.clone())],
+                        vec![],
+                        namespaced.as_str(),
+                        namespaced.clone(),
+                    ),
+                ];
+                for (cell, symbols, stack, spelling, expected) in cells {
+                    let (out, clean) = resolve_against(&index, &symbols, &stack, spelling);
+                    let want = TypeRepr::Named(expected.clone());
+                    if out != want || !clean {
+                        wrong.push(format!(
+                            "{engine} as {shape}, {cell}: `{spelling}` -> {out:?} \
+                             (clean={clean}), want {want:?}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            wrong.is_empty(),
+            "{} cells wrong: {:#?}",
+            wrong.len(),
+            wrong
+        );
+    }
+
+    /// The other half of the rule, and the reason the fix cannot be "never
+    /// resolve these names as funcdefs": with nothing in the workspace, a
+    /// real engine funcdef must still resolve to the engine funcdef.
+    ///
+    /// The VALUE rows are the over-blocking edge B060 paid four review rounds
+    /// for. A workspace variable or function that happens to share the name is
+    /// a value, not a type, and shadows nothing.
+    #[test]
+    fn only_a_workspace_type_shadows_an_engine_funcdef() {
+        let index = typedb_fixture_index();
+        let mut wrong: Vec<String> = Vec::new();
+
+        for engine in ["CoroutineFunc", "CoroutineFuncUserdataString"] {
+            let namespaced = format!("Nz::{engine}");
+            let value_shapes: Vec<(&str, Vec<(&str, SymbolKind)>)> = vec![
+                ("nothing in the workspace", vec![]),
+                (
+                    "a workspace VARIABLE of the same name",
+                    vec![(
+                        engine,
+                        SymbolKind::Variable {
+                            type_name: "int".into(),
+                        },
+                    )],
+                ),
+                (
+                    "a workspace FUNCTION of the same name",
+                    vec![(
+                        engine,
+                        SymbolKind::Function {
+                            return_type: "void".into(),
+                            params: vec![],
+                            min_args: 0,
+                            imported: false,
+                        },
+                    )],
+                ),
+                (
+                    "a workspace VARIABLE of the same name inside `namespace Nz`",
+                    vec![(
+                        namespaced.as_str(),
+                        SymbolKind::Variable {
+                            type_name: "int".into(),
+                        },
+                    )],
+                ),
+                (
+                    "a workspace FUNCDEF of the same name — a funcdef is not a \
+                     shadowing type, it IS the thing being named",
+                    vec![(
+                        engine,
+                        SymbolKind::Funcdef {
+                            return_type: "void".into(),
+                            params: vec![],
+                            is_typedef: false,
+                        },
+                    )],
+                ),
+            ];
+            for (cell, symbols) in value_shapes {
+                let (out, clean) = resolve_against(&index, &symbols, &[], engine);
+                let want = TypeRepr::Funcdef(engine.to_string());
+                if out != want || !clean {
+                    wrong.push(format!(
+                        "{engine} with {cell}: -> {out:?} (clean={clean}), want {want:?}"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            wrong.is_empty(),
+            "{} cells wrong: {:#?}",
+            wrong.len(),
+            wrong
+        );
+    }
+
+    /// The non-colliding control for each shape. Without it the sweep above
+    /// cannot distinguish "shadowing works" from "this shape is simply never
+    /// treated as a funcdef" — a fix that broke class resolution outright
+    /// would still satisfy the shadowing rows.
+    #[test]
+    fn a_workspace_type_that_collides_with_nothing_resolves_to_itself() {
+        let index = typedb_fixture_index();
+        let mut wrong: Vec<String> = Vec::new();
+
+        for (shape, kind) in type_shapes() {
+            for (cell, symbols, stack, spelling, expected) in [
+                (
+                    "top level",
+                    vec![("ZZZWidget", kind.clone())],
+                    vec![],
+                    "ZZZWidget",
+                    "ZZZWidget",
+                ),
+                (
+                    "inside `namespace Nz`, spelled bare",
+                    vec![("Nz::ZZZWidget", kind.clone())],
+                    vec!["Nz"],
+                    "ZZZWidget",
+                    "Nz::ZZZWidget",
+                ),
+                (
+                    "inside `namespace Nz`, spelled fully qualified",
+                    vec![("Nz::ZZZWidget", kind.clone())],
+                    vec![],
+                    "Nz::ZZZWidget",
+                    "Nz::ZZZWidget",
+                ),
+            ] {
+                let (out, clean) = resolve_against(&index, &symbols, &stack, spelling);
+                let want = TypeRepr::Named(expected.to_string());
+                if out != want || !clean {
+                    wrong.push(format!(
+                        "{shape} at {cell}: `{spelling}` -> {out:?} (clean={clean}), \
+                         want {want:?}"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            wrong.is_empty(),
+            "{} cells wrong: {:#?}",
+            wrong.len(),
+            wrong
+        );
+    }
+
+    /// The builtin TABLE is the same hole one step along. `awaitable` is not
+    /// a typedb funcdef — it is hardcoded in `is_angelscript_builtin_type` —
+    /// and that check also answered from the engine before the workspace was
+    /// consulted, so a plugin type of that name inside a namespace lost its
+    /// qualifier and came back as the bare builtin.
+    ///
+    /// Guarding only `lookup_funcdef` leaves this cell red, which is why it
+    /// is here rather than folded into the sweep above.
+    #[test]
+    fn workspace_type_shadows_a_hardcoded_builtin_type_name() {
+        let index = typedb_fixture_index();
+        let mut wrong: Vec<String> = Vec::new();
+
+        for (shape, kind) in type_shapes() {
+            let (out, clean) = resolve_against(
+                &index,
+                &[("Nz::awaitable", kind.clone())],
+                &["Nz"],
+                "awaitable",
+            );
+            let want = TypeRepr::Named("Nz::awaitable".into());
+            if out != want || !clean {
+                wrong.push(format!(
+                    "`awaitable` as {shape} in `namespace Nz` -> {out:?} \
+                     (clean={clean}), want {want:?}"
+                ));
+            }
+        }
+
+        // …and with nothing declared it is still the builtin, so the row
+        // above is not passing because the table stopped working.
+        let (out, clean) = resolve_against(&index, &[], &[], "awaitable");
+        assert_eq!(out, TypeRepr::Named("awaitable".into()));
+        assert!(clean, "`awaitable` is a builtin and must resolve cleanly");
+
+        assert!(
+            wrong.is_empty(),
+            "{} cells wrong: {:#?}",
+            wrong.len(),
+            wrong
+        );
     }
 }

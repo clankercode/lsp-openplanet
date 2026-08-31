@@ -1600,7 +1600,21 @@ impl<'a> GlobalScope<'a> {
     /// that are really CLASS MEMBERS are skipped, exactly as
     /// [`Self::has_global_ident`] skips them (GH #30).
     pub fn workspace_shadows_funcdef(&self, name: &str) -> bool {
-        self.any_workspace_symbol(name, |kind| {
+        self.workspace_shadowing_type_name(name).is_some()
+    }
+
+    /// The same question as [`Self::workspace_shadows_funcdef`], answered
+    /// with the WINNER's fully qualified name instead of a bool — the
+    /// `Nz::CoroutineFunc` behind a bare `CoroutineFunc`, or `name` itself
+    /// when the declaration is exact.
+    ///
+    /// A caller that has decided the workspace wins then has to resolve the
+    /// name, and the shadowing declaration may not be spelled the way the
+    /// reference is (B073). Deriving the winner separately from the predicate
+    /// is how the two would drift, so the predicate is expressed in terms of
+    /// this rather than beside it.
+    pub fn workspace_shadowing_type_name(&self, name: &str) -> Option<String> {
+        self.first_workspace_symbol(name, |kind| {
             declares_type(kind)
                 && !matches!(
                     kind,
@@ -1625,14 +1639,26 @@ impl<'a> GlobalScope<'a> {
     /// really CLASS MEMBERS exactly as [`Self::has_global_ident`] skips them
     /// (GH #30).
     fn any_workspace_symbol(&self, name: &str, pred: impl Fn(&SymbolKind) -> bool) -> bool {
+        self.first_workspace_symbol(name, pred).is_some()
+    }
+
+    /// [`Self::any_workspace_symbol`] with the matching symbol's qualified
+    /// name, which is `name` itself for an exact hit and the declaration's
+    /// own spelling for a tail hit.
+    fn first_workspace_symbol(
+        &self,
+        name: &str,
+        pred: impl Fn(&SymbolKind) -> bool,
+    ) -> Option<String> {
         if self.lookup_workspace(name).iter().any(|s| pred(&s.kind)) {
-            return true;
+            return Some(name.to_string());
         }
         let suffix = format!("::{}", name);
         self.lookup_workspace_tail(name)
             .iter()
             .filter(|s| !self.tail_prefix_is_class_member(&s.name, &suffix))
-            .any(|s| pred(&s.kind))
+            .find(|s| pred(&s.kind))
+            .map(|s| s.name.clone())
     }
 
     /// True when `name` names a workspace interface symbol. The interface
