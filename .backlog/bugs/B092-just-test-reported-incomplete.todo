@@ -1,4 +1,6 @@
 ---
+claimed_at: "2026-08-31T10:09:25Z"
+claimed_by: cli-user
 completed_at: null
 complexity: medium
 created_at: "2026-08-31T08:45:07Z"
@@ -6,11 +8,11 @@ depends_on: []
 estimate_hours: 1
 id: B092
 priority: high
-started_at: null
-status: pending
+started_at: "2026-08-31T10:09:25Z"
+status: in_progress
 tags: []
 title: just test reported INCOMPLETE RUN once and passed on an immediate re-run of the identical tree
-updated_at: "2026-08-31T08:45:07Z"
+updated_at: "2026-08-31T10:09:25Z"
 ---
 
 # just test reported INCOMPLETE RUN once and passed on an immediate re-run of the identical tree
