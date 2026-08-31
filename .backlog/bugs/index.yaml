@@ -132,3 +132,4 @@ bugs:
     - file: B131-coremethod-is-protected-is-the.todo
     - file: B132-remote-build-py-gates-a-dirty.todo
     - file: B133-enum-value-doc-strings-are-dro.todo
+    - file: B134-gh-18-lead-a-subset-of-enum-va.todo
