@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-30T07:31:21Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T04:29:02Z"
 complexity: medium
 created_at: "2026-08-30T05:30:24Z"
 depends_on: []
+duration_minutes: 1257.69933614075
 estimate_hours: 1
 id: B062
 priority: high
 started_at: "2026-08-30T07:31:21Z"
-status: in_progress
+status: done
 tags: []
 title: 'Manifest exports should root the unused analysis: exported globals reported unused'
-updated_at: "2026-08-30T07:31:21Z"
+updated_at: "2026-08-31T04:29:02Z"
 ---
 
 # Manifest exports should root the unused analysis: exported globals reported unused
