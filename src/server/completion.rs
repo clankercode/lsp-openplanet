@@ -47,7 +47,7 @@ pub fn complete(
 
     // Namespace/scope resolution completion (`::`).
     if let Some(ns) = extract_namespace_prefix(trimmed) {
-        return complete_namespace_members(&ns, type_index);
+        return complete_namespace_members(&ns, type_index, workspace);
     }
 
     // Member completion (`.`).
@@ -86,18 +86,111 @@ fn extract_namespace_prefix(prefix: &str) -> Option<String> {
     }
 }
 
+/// What can follow `::` in the editor.
+///
+/// B088: that is a genuinely BROADER question than "what is a namespace",
+/// and conflating the two is why no enum had ever offered its values here.
+/// This used to be a one-line delegation to
+/// [`TypeIndex::source_scope_members`], which opens with a `scope_exists`
+/// gate; `build_scope_index` registers a Core enum's NAMESPACE (`Meta`) and
+/// never the enum itself, so `Meta::RunContext::` was rejected before any
+/// lookup — and the enumeration behind that gate walks only types,
+/// functions and nested scopes, so it had no enum-value branch to reach.
+///
+/// The enum check is deliberately NOT a widening of `scope_exists`. That
+/// predicate is the TYPECHECKER's notion of a valid namespace path, and
+/// teaching it about enums would make the checker start accepting paths
+/// THROUGH one (`Meta::RunContext::Main::Whatever`). B079 exists because
+/// two nearly-identical scope/enum predicates were already being picked
+/// wrongly at call sites; this adds no third meaning to that one.
+///
+/// Resolution order, and why:
+///
+/// 1. **Workspace enum first**, so a plugin's own `Meta::RunContext`
+///    shadows the engine's — the same precedence the resolver uses.
+/// 2. **Engine enum**, looked up through [`TypeIndex::source_name_key`],
+///    which maps the spelling SOURCE must write to the loader's storage
+///    key. Going through it rather than keying the raw index is what makes
+///    `CGameMenu::EMenuOrder::` work (the synthetic module segment is
+///    dropped in source) while `Game::CGameMenu::EMenuOrder::` correctly
+///    offers nothing — B056 established the game answers `Namespace 'Game'
+///    doesn't exist.` for that spelling, and B069 records shortcut
+///    completion having already shipped the bug of offering a storage
+///    spelling the checker refuses.
+/// 3. Otherwise the namespace path exactly as before.
+///
+/// `lookup_source_enum` filters anonymous entries, which is the B016 guard:
+/// a member-enum key is synthesized from its declaring context and names
+/// nothing the game accepts.
 fn complete_namespace_members(
     namespace: &str,
     type_index: Option<&TypeIndex>,
+    workspace: Option<&SymbolTable>,
 ) -> Vec<CompletionItem> {
+    if let Some(values) = workspace_enum_values(namespace, workspace) {
+        return values
+            .iter()
+            .map(|v| make_item(v, CompletionItemKind::ENUM_MEMBER))
+            .collect();
+    }
     let Some(index) = type_index else {
         return Vec::new();
     };
+    if let Some(info) = index
+        .source_name_key(namespace)
+        .and_then(|key| index.lookup_source_enum(key))
+    {
+        return info
+            .values
+            .iter()
+            .map(|(name, _)| make_item(name, CompletionItemKind::ENUM_MEMBER))
+            .collect();
+    }
+    // NOTE (B088): every member below is emitted as FUNCTION, including
+    // nested namespaces and types. That is pre-existing and wrong, but it is
+    // a visible change to cases this ticket did not touch and
+    // `source_scope_members` returns bare names with no kind to key on, so
+    // it is reported rather than silently altered here.
     index
         .source_scope_members(namespace)
         .into_iter()
         .map(|name| make_item(&name, CompletionItemKind::FUNCTION))
         .collect()
+}
+
+/// The values of a WORKSPACE enum spelled exactly `qualified`, or `None`
+/// when the workspace declares no such enum.
+///
+/// `None` and `Some(vec![])` are different answers: an enum with no values
+/// still shadows the engine's, so the caller must not fall through to the
+/// typedb for it.
+///
+/// Gated on `qualified` actually being an `Enum` symbol rather than on a
+/// prefix scan alone. A bare scan for `Ns::<x>` would make a NAMESPACE
+/// containing an enum spill that enum's values, which is the
+/// "offer everything after `::`" failure this ticket warns about.
+fn workspace_enum_values(qualified: &str, workspace: Option<&SymbolTable>) -> Option<Vec<String>> {
+    let table = workspace?;
+    let is_enum = table
+        .lookup(qualified)
+        .iter()
+        .any(|sym| matches!(sym.kind, SymbolKind::Enum { .. }));
+    if !is_enum {
+        return None;
+    }
+    let prefix = format!("{}::", qualified);
+    let mut values = Vec::new();
+    for sym in table.all_symbols() {
+        if !matches!(sym.kind, SymbolKind::EnumValue { .. }) {
+            continue;
+        }
+        if let Some(rest) = sym.name.strip_prefix(&prefix) {
+            if !rest.contains("::") && !values.iter().any(|v| v == rest) {
+                values.push(rest.to_string());
+            }
+        }
+    }
+    Some(values)
 }
 
 /// Extract the identifier immediately before the trailing `.` in `prefix`.
@@ -1518,6 +1611,355 @@ mod tests {
             per_call < std::time::Duration::from_millis(20),
             "completion too slow: {:?} per call",
             per_call
+        );
+    }
+}
+
+/// B088: an enum must offer its VALUES after `::`.
+///
+/// Two stacked defects, so neither half alone shows anything.
+/// `complete_namespace_members` delegated straight to
+/// `TypeIndex::source_scope_members`, which opens with a `scope_exists`
+/// gate — and `build_scope_index` registers only an enum's NAMESPACE
+/// (`Meta`), never the enum itself, so the gate returned empty before any
+/// lookup. And that function walks only types, functions and nested
+/// scopes; enum values live in `EnumInfo::values` and were read by nothing
+/// on this path.
+///
+/// The module doc at the top of this file has listed "`::` at cursor →
+/// namespace member / enum value / nested type" the whole time. It
+/// described intent and was read as description; every enum-value test in
+/// the tree exercises the SHORTCUT path (`shortcut_match_enums`), which is
+/// a different feature, so a whole missing branch sat behind that line.
+#[cfg(test)]
+mod b088_enum_values_after_colon_colon {
+    use super::*;
+
+    /// The real shipped typedb — the enum SHAPES reach the index by
+    /// different routes and a hand-built fake would not reproduce them.
+    fn ws_from(source: &str) -> crate::server::test_support::TestWorkspace {
+        crate::server::test_support::TestWorkspace::one_file("compl.as", source)
+    }
+
+    fn pos_after(source: &str, marker: &str) -> Position {
+        let byte = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("marker {:?} not found", marker))
+            + marker.len();
+        let prefix = &source[..byte];
+        let line = prefix.matches('\n').count() as u32;
+        let col = prefix.rfind('\n').map_or(byte, |nl| byte - nl - 1) as u32;
+        Position::new(line, col)
+    }
+
+    fn real_index() -> crate::typedb::TypeIndex {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        crate::typedb::TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
+    fn after(src: &str, marker: &str, idx: Option<&crate::typedb::TypeIndex>) -> Vec<String> {
+        let pos = pos_after(src, marker);
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        complete(&analysis, None, pos, idx, None, &[], false)
+            .iter()
+            .map(|i| i.label.clone())
+            .collect()
+    }
+
+    /// With a workspace symbol table, for workspace-declared enums.
+    fn after_ws(src: &str, marker: &str, idx: Option<&crate::typedb::TypeIndex>) -> Vec<String> {
+        let ws = ws_from(src);
+        let pos = pos_after(src, marker);
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        complete(
+            &analysis,
+            None,
+            pos,
+            idx,
+            Some(ws.snapshot.symbols()),
+            &[],
+            false,
+        )
+        .iter()
+        .map(|i| i.label.clone())
+        .collect()
+    }
+
+    /// THE REPORT. `Meta::RunContext::` — a Core enum inside a namespace.
+    #[test]
+    fn core_enum_in_a_namespace_offers_its_values() {
+        let got = after(
+            "void f() { Meta::RunContext:: }",
+            "Meta::RunContext::",
+            Some(&real_index()),
+        );
+        for v in ["Main", "BeforeScripts", "MainLoop"] {
+            assert!(got.iter().any(|l| l == v), "missing `{v}` in {got:?}");
+        }
+    }
+
+    /// The same shape, a different namespace — so the fix is not keyed to
+    /// `Meta` by accident.
+    #[test]
+    fn a_second_core_enum_in_a_namespace_offers_its_values() {
+        let got = after("void f() { UI::Cond:: }", "UI::Cond::", Some(&real_index()));
+        assert!(
+            got.iter().any(|l| l == "Always"),
+            "UI::Cond:: must offer `Always`, got {got:?}"
+        );
+    }
+
+    /// A Core enum at GLOBAL scope — no namespace segment at all.
+    #[test]
+    fn core_enum_at_global_scope_offers_its_values() {
+        let got = after(
+            "void f() { VirtualKey:: }",
+            "VirtualKey::",
+            Some(&real_index()),
+        );
+        for v in ["Shift", "Control"] {
+            assert!(got.iter().any(|l| l == v), "missing `{v}` in {got:?}");
+        }
+    }
+
+    /// A Nadeo enum under a CLASS scope, written the way source must write
+    /// it — with the synthetic module segment DROPPED.
+    #[test]
+    fn nadeo_enum_under_a_class_scope_offers_its_values() {
+        let got = after(
+            "void f() { CGameMenu::EMenuOrder:: }",
+            "CGameMenu::EMenuOrder::",
+            Some(&real_index()),
+        );
+        assert!(
+            !got.is_empty(),
+            "CGameMenu::EMenuOrder:: must offer its values, got {got:?}"
+        );
+    }
+
+    /// THE CHECKER-AGREEMENT GATE, and the reason this is keyed on
+    /// `source_name_key` rather than a raw key lookup. `Game::` is the
+    /// LOADER's storage prefix; B056 established the game rejects it
+    /// (`Namespace 'Game' doesn't exist.`). Completion must not offer a
+    /// spelling the typechecker refuses — that is the two-features-
+    /// contradicting-each-other failure, and B069 records shortcut
+    /// completion already having shipped exactly this bug once.
+    #[test]
+    fn the_synthetic_module_storage_spelling_offers_nothing() {
+        let got = after(
+            "void f() { Game::CGameMenu::EMenuOrder:: }",
+            "Game::CGameMenu::EMenuOrder::",
+            Some(&real_index()),
+        );
+        assert!(
+            got.is_empty(),
+            "the `Game::` storage spelling is not source-writable; \
+             offering it contradicts the checker: {got:?}"
+        );
+    }
+
+    /// Enum values must be `ENUM_MEMBER`, not `FUNCTION`.
+    #[test]
+    fn enum_values_are_offered_as_enum_members() {
+        let idx = real_index();
+        let pos = pos_after("void f() { Meta::RunContext:: }", "Meta::RunContext::");
+        let analysis =
+            crate::analysis::DocumentAnalysis::analyze_plain("void f() { Meta::RunContext:: }");
+        let items = complete(&analysis, None, pos, Some(&idx), None, &[], false);
+        assert!(!items.is_empty(), "no items at all");
+        for item in &items {
+            assert_eq!(
+                item.kind,
+                Some(CompletionItemKind::ENUM_MEMBER),
+                "`{}` should be ENUM_MEMBER, got {:?}",
+                item.label,
+                item.kind
+            );
+        }
+    }
+
+    // ── workspace-declared enums ─────────────────────────────────────────
+
+    #[test]
+    fn a_workspace_enum_offers_its_values() {
+        let src = "enum Colour { Red, Green, Blue }\nvoid f() { Colour:: }\n";
+        let got = after_ws(src, "Colour::", None);
+        for v in ["Red", "Green", "Blue"] {
+            assert!(got.iter().any(|l| l == v), "missing `{v}` in {got:?}");
+        }
+    }
+
+    #[test]
+    fn a_workspace_enum_inside_a_namespace_offers_its_values() {
+        let src = "namespace Ns { enum Colour { Red, Green } }\nvoid f() { Ns::Colour:: }\n";
+        let got = after_ws(src, "Ns::Colour::", None);
+        for v in ["Red", "Green"] {
+            assert!(got.iter().any(|l| l == v), "missing `{v}` in {got:?}");
+        }
+    }
+
+    /// Two namespaces deep — "regardless of how deep it is" is the
+    /// reporter's actual requirement.
+    #[test]
+    fn a_deeply_nested_workspace_enum_offers_its_values() {
+        let src =
+            "namespace A { namespace B { enum Deep { One, Two } } }\nvoid f() { A::B::Deep:: }\n";
+        let got = after_ws(src, "A::B::Deep::", None);
+        for v in ["One", "Two"] {
+            assert!(got.iter().any(|l| l == v), "missing `{v}` in {got:?}");
+        }
+    }
+
+    /// A workspace enum SHADOWING an engine one: the workspace values win.
+    #[test]
+    fn a_workspace_enum_shadowing_an_engine_one_offers_the_workspace_values() {
+        let src = "namespace Meta { enum RunContext { ZzzWorkspaceOnly } }\nvoid f() { Meta::RunContext:: }\n";
+        let got = after_ws(src, "Meta::RunContext::", Some(&real_index()));
+        assert!(
+            got.iter().any(|l| l == "ZzzWorkspaceOnly"),
+            "the workspace declaration must win, got {got:?}"
+        );
+        assert!(
+            !got.iter().any(|l| l == "BeforeScripts"),
+            "engine values must not be mixed in, got {got:?}"
+        );
+    }
+
+    // ── REQUIRED SILENCES, in the same fixture as the successes ──────────
+
+    /// A genuine NAMESPACE still offers its members, and does NOT spill the
+    /// values of enums declared inside it. Without this, "offer everything
+    /// after `::`" passes every test above.
+    #[test]
+    fn a_real_namespace_still_offers_members_and_not_enum_values() {
+        let got = after("void f() { Meta:: }", "Meta::", Some(&real_index()));
+        assert!(
+            got.iter().any(|l| l == "RunContext"),
+            "`Meta::` must still offer the enum NAME `RunContext`: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|l| l == "BeforeScripts"),
+            "`Meta::` must NOT offer values of an enum inside it: {got:?}"
+        );
+    }
+
+    /// B016: an anonymous member-enum key is synthesized from its declaring
+    /// context (`Module::Class::Member`) and names nothing the game accepts,
+    /// so its values must never be offered after `::`.
+    ///
+    /// Both spellings: the real synthesized key, and the module-dropped form
+    /// a user might actually type.
+    ///
+    /// THIS TEST WAS VACUOUS AS FIRST WRITTEN and the mutation test below is
+    /// why the version you are reading is different. It probed only
+    /// `CControlEntry::Type::` and asserted a value was absent — but that
+    /// spelling resolves to NOTHING in the index (`lookup_enum` is `None`
+    /// for it; the real key is `Control::CControlEntry::Type`), so the
+    /// assertion could not have failed for any implementation. Removing the
+    /// anonymous filter from the code under test left it green.
+    #[test]
+    fn an_anonymous_member_enum_key_offers_nothing() {
+        let idx = real_index();
+        assert!(
+            idx.lookup_enum("Control::CControlEntry::Type")
+                .is_some_and(|e| e.anonymous),
+            "fixture drift: this test needs a real anonymous member-enum key"
+        );
+        for spelling in ["Control::CControlEntry::Type", "CControlEntry::Type"] {
+            let src = format!("void f() {{ {spelling}:: }}");
+            let got = after(&src, &format!("{spelling}::"), Some(&idx));
+            assert!(
+                !got.iter().any(|l| l == "TimeHhMmSsMil"),
+                "anonymous member-enum values must not leak from `{spelling}::`: {got:?}"
+            );
+        }
+    }
+
+    /// …and the STRUCTURAL reason, which is what actually protects the `::`
+    /// path — stated as a property over the whole shipped typedb rather than
+    /// one hand-picked key, so it can observe a failure.
+    ///
+    /// The enum branch resolves through `source_name_key`, and `source_names`
+    /// excludes anonymous entries entirely, so no anonymous enum is reachable
+    /// by any source spelling. That makes `lookup_source_enum`'s own
+    /// `!anonymous` filter a second line of defence that currently cannot
+    /// fire — worth saying plainly, because a mutation removing it leaves
+    /// every test in this module green.
+    ///
+    /// If the loader ever starts registering a source name for a synthesized
+    /// key, this goes red and the second line becomes load-bearing.
+    #[test]
+    fn no_anonymous_enum_is_reachable_by_any_source_spelling() {
+        let idx = real_index();
+        let mut anonymous = 0usize;
+        let mut reachable = Vec::new();
+        for (key, info) in idx.enums_iter() {
+            if !info.anonymous {
+                continue;
+            }
+            anonymous += 1;
+            for spelling in
+                std::iter::once(key.as_str()).chain(key.split_once("::").map(|(_, rest)| rest))
+            {
+                if idx.source_name_key(spelling).is_some() {
+                    reachable.push(spelling.to_string());
+                }
+            }
+        }
+        assert!(
+            anonymous > 0,
+            "fixture drift: no anonymous enums at all, so this proves nothing"
+        );
+        assert!(
+            reachable.is_empty(),
+            "{} of {anonymous} anonymous enums are reachable by a source \
+             spelling and would leak their values after `::`: {reachable:?}",
+            reachable.len()
+        );
+    }
+
+    /// An unknown qualifier still offers nothing.
+    #[test]
+    fn an_unknown_qualifier_offers_nothing() {
+        let got = after(
+            "void f() { ZZZNoSuch:: }",
+            "ZZZNoSuch::",
+            Some(&real_index()),
+        );
+        assert!(
+            got.is_empty(),
+            "unknown qualifier must offer nothing: {got:?}"
+        );
+    }
+
+    /// A qualifier that is a real TYPE but not an enum falls through to the
+    /// namespace path rather than inventing values.
+    #[test]
+    fn a_class_qualifier_offers_no_enum_values() {
+        let got = after(
+            "void f() { CGameMenu:: }",
+            "CGameMenu::",
+            Some(&real_index()),
+        );
+        assert!(
+            !got.iter().any(|l| l == "TimeHhMmSsMil"),
+            "a class is not an enum: {got:?}"
+        );
+    }
+
+    /// A workspace NAMESPACE is not an enum either.
+    #[test]
+    fn a_workspace_namespace_qualifier_offers_no_enum_values() {
+        let src = "namespace Ns { enum Colour { Red } }\nvoid f() { Ns:: }\n";
+        let got = after_ws(src, "Ns::", None);
+        assert!(
+            !got.iter().any(|l| l == "Red"),
+            "`Ns::` must not spill values of `Ns::Colour`: {got:?}"
         );
     }
 }
