@@ -8,7 +8,6 @@ depends_on: []
 estimate_hours: 1
 id: B117
 priority: high
-reason: 'Blocked on B114 (peer session). Measured by lane-unused: the ONLY dot-member completion path for a workspace class is add_type_members (src/server/completion.rs:340), whose workspace branch reads exclusively from the pool via ws.all_symbols() with no AST fallback. So unpooled member visibility blocks B117 on ALL axes, not just cross-file. B114 as currently written on .worktrees/pool hardcodes DeclModifiers::default() at the field arm, so its landing is necessary but NOT sufficient — the field arm must also pass field_modifiers(var). Peer notified 2026-08-31 23:45. The one AST-sourced site, complete_identifier''s enclosing-class walk, needs no filter: inside your own class every own member is legitimately visible and it only offers cls.members, never inherited ones.'
 started_at: "2026-08-31T13:32:20Z"
 status: blocked
 tags: []
@@ -79,3 +78,22 @@ been burned by fixtures that did not match the shipped code they generalised to.
 is stricter than the engine turns completion into a source of false negatives —
 worse than the current permissiveness, because the current behaviour is at least
 predictable.
+
+
+## Bound established by B131, 2026-09-01
+
+**Engine members are always public, as far as the typedb can tell.** Measured:
+`CoreMethod::is_protected` was populated by **0 of 1002** methods in the 1.29.5
+fixture and **0 of 975** in the installed 1.29.14 dump, and the string
+`"protected"` appears **nowhere in either file**. Neither does `private`.
+
+So access specifiers are recoverable from **nothing** in the typedb — unlike
+constness, which turned out to be recoverable from the `decl` suffix (B124/B125).
+The field has been deleted rather than populated.
+
+**What this means for B117, as a stated bound rather than something to
+rediscover:** visibility filtering is a **workspace-half-only** feature. Engine
+members are treated as public because there is no signal to treat them otherwise,
+and that is a measured fact, not a simplification. Say so in the code at the
+filter site, so the next reader does not go looking for engine visibility data
+that does not exist.
