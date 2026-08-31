@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T17:27:55Z"
 depends_on: []
 estimate_hours: 1
 id: B168
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'B153''s Nadeo field audit has the same defect B157 found in B138: its JUSTIFIED rows are unverified free-text prose, so a wrong belief becomes a permanent exemption and the audit defends the defect'
@@ -12,3 +14,55 @@ updated_at: "2026-08-31T17:27:55Z"
 ---
 
 B153's Nadeo field audit has the same defect B157 found in B138: its JUSTIFIED rows are unverified free-text prose, so a wrong belief becomes a permanent exemption and the audit defends the defect
+
+SELF-REPORTED by lane-enum on merging B157, about its own earlier B153 work.
+
+WHAT B157 FOUND IN B138. B138's audit carried a JUSTIFIED row exempting the exact
+literal B157 turned out to be a bug -- and the stated reason WAS the false claim:
+"the Nadeo dump identifies return types by numeric id, not text". Measurably
+false; 1618 return types were being discarded behind it.
+
+So the audit did not accept the defect DESPITE a justification. It accepted it
+BECAUSE OF one. A free-text reason records that somebody was convinced. It never
+records that they were right. Once written, the scanner stops asking, and the
+wrong belief is now permanent and load-bearing -- strictly worse than no audit,
+because an unaudited literal still gets read by the next person to walk past it.
+
+That is the sixth stale Nadeo-dump claim found in this batch, and the only one
+that had been formally blessed.
+
+WHY THIS IS A TICKET RATHER THAN A NOTE. B153's audit (also lane-enum's) has the
+IDENTICAL structure. Its JUSTIFIED rows are unverified prose. Its READ_CONFIRMED
+rows are the only ones that must prove themselves against the source -- those
+carry a snippet that has to literally occur, so a claim that stops being true
+fails rather than persisting. The mitigation is already in the file; it is simply
+not applied to the JUSTIFIED half.
+
+THE WORK:
+  1. Enumerate B153's JUSTIFIED rows.
+  2. For each, either convert it to a READ_CONFIRMED-style row whose evidence
+     must literally occur in the dump or the source, or re-derive the claim and
+     record the measurement that supports it.
+  3. Any row that can be neither converted nor re-derived is not justified. It is
+     unexamined, and should say so in those words -- an honest UNEXAMINED row is
+     worth more than a JUSTIFIED one nobody can substantiate, because it invites
+     the next reader to look instead of telling them not to.
+  4. Apply the same pass to B138's remaining JUSTIFIED rows. B157 removed one of
+     them; the others have never been checked and share the provenance of the one
+     that was wrong.
+
+SECOND, SMALLER DEFECT FROM THE SAME COMMIT -- worth fixing here. Removing the
+bad literal tripped B138's own non-vacuity floor, `found.len() >= 5`, which read
+a legitimate improvement as scanner drift. lane-enum retied the floor to
+`JUSTIFIED.len()`.
+
+The general rule, and it belongs in docs/verification-hazards.md: A NON-VACUITY
+FLOOR WRITTEN AS A HAND-PICKED CONSTANT ERODES. Every genuine improvement to the
+codebase pushes the real count toward it, so the constant must be edited down --
+which trains people to lower a floor whenever it complains, which is exactly how
+a floor stops meaning anything. Tie it to something that moves WITH the codebase.
+
+Related: B138 (the stale-binary trap and the JUSTIFIED table), B153 (the audit),
+B157 (the discovery). See also the hazards entry on a rejection resting on a
+claim about the data rotting as quietly as an acceptance does -- this is that
+rule applied to an exemption rather than a conclusion.
