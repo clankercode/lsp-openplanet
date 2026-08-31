@@ -238,6 +238,11 @@ fn run_check_command(args: &[String]) -> i32 {
                     eprintln!("{}", versions.summary_line());
                 }
             }
+            // GH #18: name every resolved target version. The stamp line
+            // above shows only the first target's DB build.
+            if !report.targets.is_empty() && options.format != cli::CheckFormat::Json {
+                eprintln!("targets: op {}", report.targets.join(", "));
+            }
             print!("{}", cli::format_check_report_for(&report, options.format));
             let has_errors = report.diagnostics.iter().any(|item| {
                 let is_error = !matches!(

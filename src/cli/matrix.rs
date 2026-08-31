@@ -149,9 +149,22 @@ pub fn combo_prefix(combos: &[Vec<String>]) -> String {
     }
 }
 
-/// Merge duplicate diagnostics across combos: identical (path, line, col,
-/// severity, message) diagnostics are reported ONCE with the combined
-/// combo list. First-seen order and first-seen Diagnostic payload win.
+/// GH #18: plain/pretty-output suffix naming the target versions a
+/// diagnostic fired on: ` [op 1.29.5]` / ` [op 1.29.5, 1.29.14]`. Empty
+/// when the diagnostic carries no version label (single-target run, or it
+/// fired on every target).
+pub fn version_suffix(versions: &[String]) -> String {
+    if versions.is_empty() {
+        String::new()
+    } else {
+        format!(" [op {}]", versions.join(", "))
+    }
+}
+
+/// Merge duplicate diagnostics across combos — and, GH #18, across target
+/// versions: identical (path, line, col, severity, message) diagnostics
+/// are reported ONCE with the combined combo and version lists.
+/// First-seen order and first-seen Diagnostic payload win.
 pub fn merge_combo_diagnostics(diags: Vec<CliDiagnostic>) -> Vec<CliDiagnostic> {
     #[derive(PartialEq, Eq, Hash)]
     struct Key {
@@ -178,6 +191,11 @@ pub fn merge_combo_diagnostics(diags: Vec<CliDiagnostic>) -> Vec<CliDiagnostic> 
                 for combo in diag.combos {
                     if !out[idx].combos.contains(&combo) {
                         out[idx].combos.push(combo);
+                    }
+                }
+                for version in diag.versions {
+                    if !out[idx].versions.contains(&version) {
+                        out[idx].versions.push(version);
                     }
                 }
             }
@@ -217,6 +235,7 @@ mod tests {
         CliDiagnostic {
             path: PathBuf::from(path),
             combos,
+            versions: Vec::new(),
             diagnostic: Diagnostic {
                 range: Range::new(Position::new(line, col), Position::new(line, col + 1)),
                 severity: Some(DiagnosticSeverity::ERROR),

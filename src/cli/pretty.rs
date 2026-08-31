@@ -149,11 +149,15 @@ fn format_diagnostic_block(
     };
 
     let mut out = String::new();
-    // header: path:line:col + severity (+ GH #57 combo label, if any)
+    // header: path:line:col + severity (+ GH #57 combo label and GH #18
+    // version label, if any)
     let combo = super::matrix::combo_prefix(&item.combos);
     let combo = combo.trim_end();
     let sep = if combo.is_empty() { "" } else { " " };
-    out.push_str(&format!("{path_s}:{loc_s}: {sev_styled}{sep}{combo}\n"));
+    let versions = super::matrix::version_suffix(&item.versions);
+    out.push_str(&format!(
+        "{path_s}:{loc_s}: {sev_styled}{sep}{combo}{versions}\n"
+    ));
 
     let source = source_cache
         .entry(item.path.clone())
@@ -281,6 +285,7 @@ pub(super) fn test_diag(
     CliDiagnostic {
         path: path.into(),
         combos: Vec::new(),
+        versions: Vec::new(),
         diagnostic: Diagnostic {
             range: Range {
                 start: Position {
@@ -355,6 +360,7 @@ mod tests {
                 type_database_loaded: false,
                 type_db: None,
                 errors: crate::config::ErrorGroup::Off,
+                targets: Vec::new(),
             };
 
             let out = format_check_report_with(&report, false, CheckFormat::Pretty);
@@ -389,6 +395,7 @@ mod tests {
             type_database_loaded: false,
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
+            targets: Vec::new(),
         };
 
         let out = format_check_report_with(&report, false, CheckFormat::Plain);
@@ -423,6 +430,7 @@ mod tests {
             type_database_loaded: false,
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
+            targets: Vec::new(),
         };
 
         // color=false, format=pretty → pretty layout, no ANSI
@@ -473,6 +481,7 @@ mod tests {
             type_database_loaded: true,
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
+            targets: Vec::new(),
         };
 
         let plainish = format_check_report_with(&report, false, CheckFormat::Auto);
@@ -501,6 +510,7 @@ mod tests {
             type_database_loaded: true,
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
+            targets: Vec::new(),
         };
         let out = format_check_report_with(&report, false, CheckFormat::Pretty);
         assert!(

@@ -14,6 +14,23 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **Multi-version Openplanet checking** (GH #18) — `check` can now target
+  any recorded Openplanet version, or several at once:
+  `--openplanet-version 1.29.5,1.29.14` runs the typecheck once per
+  version and labels version-specific findings `[op 1.29.5]`, so a plugin
+  can be validated for prod and beta players in one run. Recorded
+  snapshots live under `--typedb-versions-dir` (in-repo:
+  `tests/fixtures/typedb-versions/`, currently 1.29.5 and 1.29.14); the
+  default target remains the installed Openplanet, and an unrecorded
+  version is a hard error naming the known ones. Missing symbols that
+  other recorded versions know are explained — `Text::Join` on a 1.29.5
+  target reports "added in Openplanet 1.29.14" — with the ranges derived
+  by diffing the snapshots, and `string::Join` / `string::Repeat` (hard
+  compile errors since 1.29.14) now carry relocation hints to their
+  `Text::` replacements. The LSP server accepts the same two settings
+  (`openplanet_version`, `typedb_versions_dir`; config file or init
+  options) and checks the first listed version, falling back to the
+  installed dump on any resolution problem.
 - **Openplanet-injected methods are offered everywhere the LSP describes a
   type** (B063) — `MwAddRef`, `MwRelease`, `GetCurrentEntityID` and
   `GetManialinkPages` are registered by Openplanet rather than listed in the

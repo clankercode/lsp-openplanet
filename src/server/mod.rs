@@ -1253,9 +1253,24 @@ impl LanguageServer for Backend {
         )
         .await;
 
-        // Load type database
+        // Load type database. GH #18: `openplanet_version` /
+        // `typedb_versions_dir` can redirect the pair to a recorded
+        // snapshot; any resolution problem logs and falls back to the
+        // installed pair — a server must not refuse to start over a
+        // config typo.
         let config = self.config.read().await;
-        if let (Some(core), Some(game)) = (&config.core_json, &config.game_json) {
+        let (resolved_pair, version_warning) = crate::typedb::catalog::resolve_single_pair(
+            config
+                .core_json
+                .as_deref()
+                .zip(config.game_json.as_deref()),
+            config.typedb_versions_dir.as_deref(),
+            config.openplanet_version.as_deref(),
+        );
+        if let Some(warning) = version_warning {
+            tracing::warn!("{}", warning);
+        }
+        if let Some((core, game)) = &resolved_pair {
             match TypeIndex::load(core, game) {
                 Ok(index) => {
                     // GH #59: name the build, not just the success — a

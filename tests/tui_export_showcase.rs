@@ -42,6 +42,8 @@ fn showcase_snapshot() -> Snapshot {
         path: root.clone(),
         typedb_dir: Some(typedb),
         no_typedb: false,
+        openplanet_version: None,
+        typedb_versions_dir: None,
         plugins_dirs: Vec::new(),
         plugin_files_search_paths: vec![PathBuf::from("src")],
         format: openplanet_lsp::cli::CheckFormat::Plain,

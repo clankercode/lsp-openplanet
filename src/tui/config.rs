@@ -567,8 +567,9 @@ mod tests {
     #[test]
     fn render_lists_every_persisted_setting() {
         let (_dir, mut app) = temp_app("render");
-        // 17 settings + chrome needs more than 24 rows to show the full catalog.
-        let out = frame_size(&mut app, 80, 30);
+        // 19 settings + chrome needs more than 24 rows to show the full
+        // catalog (GH #18 added openplanet_version / typedb_versions_dir).
+        let out = frame_size(&mut app, 80, 32);
         let _ = std::fs::write("/tmp/opl-config-tui-frame.txt", &out);
         for spec in SETTINGS {
             assert!(

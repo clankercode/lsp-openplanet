@@ -11,6 +11,7 @@ use crate::config::{
     ArchTarget, ErrorGroup, LspConfig, OsTarget, SignatureMode, UnusedLevel, UserPrefs,
 };
 use crate::server::diagnostics;
+use crate::typedb::catalog::VersionCatalog;
 use crate::typedb::TypeIndex;
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
 use crate::workspace::manifest::ManifestWorkspace;
@@ -97,6 +98,15 @@ OPTIONS:
                         single-combo run.
     --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
                         (plus Openplanet.h, if present)
+    --openplanet-version V[,V...]
+                        Check against these Openplanet versions instead of the
+                        installed one. Each V must be the installed version or
+                        a snapshot under --typedb-versions-dir; with several,
+                        diagnostics are labeled with the versions they fire on.
+    --typedb-versions-dir DIR
+                        Root of recorded typedb snapshots (one subdirectory
+                        per version, each holding OpenplanetCore.json and
+                        OpenplanetNext.json)
     --no-typedb         Run without Openplanet/Nadeo type database files
     --no-gitignore      Check .as files that .gitignore excludes. Discovery
                         honors .gitignore at or below the plugin root by
@@ -182,6 +192,12 @@ pub struct CheckOptions {
     pub path: PathBuf,
     pub typedb_dir: Option<PathBuf>,
     pub no_typedb: bool,
+    /// GH #18: target Openplanet version(s), comma-separated. Raw string;
+    /// resolution against the version catalog happens in `run_check`.
+    pub openplanet_version: Option<String>,
+    /// GH #18: root of recorded typedb snapshots
+    /// (`tests/fixtures/typedb-versions`-shaped).
+    pub typedb_versions_dir: Option<PathBuf>,
     pub plugins_dirs: Vec<PathBuf>,
     pub plugin_files_search_paths: Vec<PathBuf>,
     pub format: CheckFormat,
@@ -289,6 +305,10 @@ pub struct CheckReport {
     /// Grouping applied to human (plain/pretty) output only. JSON keeps
     /// `diagnostics` in analysis order regardless of this field.
     pub errors: ErrorGroup,
+    /// GH #18: labels of the resolved target versions, in request order.
+    /// Empty on a legacy single-target run (no `--openplanet-version` /
+    /// `--typedb-versions-dir`), so existing output stays byte-identical.
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +318,11 @@ pub struct CliDiagnostic {
     /// sorted define list; `[]` = the base combo). Empty = single-combo
     /// (non-matrix) run — formatters render no label in that case.
     pub combos: Vec<Vec<String>>,
+    /// GH #18: the target Openplanet versions this diagnostic fired on.
+    /// Empty on a single-target run, and on a multi-target run when it
+    /// fired on EVERY target (firing everywhere is not version news) —
+    /// formatters render no label in either case.
+    pub versions: Vec<String>,
     pub diagnostic: Diagnostic,
 }
 
@@ -566,6 +591,28 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 options.typedb_dir = Some(PathBuf::from(value));
                 i += used;
             }
+            _ if arg == "--openplanet-version" || arg.starts_with("--openplanet-version=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--openplanet-version",
+                    "--openplanet-version requires a version argument",
+                    true,
+                )?;
+                options.openplanet_version = Some(value.to_string());
+                i += used;
+            }
+            _ if arg == "--typedb-versions-dir" || arg.starts_with("--typedb-versions-dir=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--typedb-versions-dir",
+                    "--typedb-versions-dir requires a directory argument",
+                    true,
+                )?;
+                options.typedb_versions_dir = Some(PathBuf::from(value));
+                i += used;
+            }
             _ if arg == "--plugins-dir" || arg.starts_with("--plugins-dir=") => {
                 let (value, used) = take_value_arg(
                     args,
@@ -608,6 +655,16 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
     if options.no_typedb && options.typedb_dir.is_some() {
         return Err(CliError::Usage(
             "--no-typedb cannot be combined with --typedb-dir".to_string(),
+        ));
+    }
+    if options.no_typedb && options.openplanet_version.is_some() {
+        return Err(CliError::Usage(
+            "--no-typedb cannot be combined with --openplanet-version".to_string(),
+        ));
+    }
+    if options.no_typedb && options.typedb_versions_dir.is_some() {
+        return Err(CliError::Usage(
+            "--no-typedb cannot be combined with --typedb-versions-dir".to_string(),
         ));
     }
 
@@ -730,12 +787,82 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         config.defines.insert(define.clone());
     }
 
-    let type_index = load_type_index(&config, options.no_typedb)?;
+    // GH #18: one target per requested Openplanet version. Without either
+    // version flag this is a single unlabeled target holding exactly the
+    // index `load_type_index` resolves today, so legacy runs stay
+    // byte-identical.
+    struct Target {
+        /// `None` on the legacy path; `Some(version)` when the catalog
+        /// resolved it (a lone catalog target is still labeled in the
+        /// report, but only multi-target runs label diagnostics).
+        label: Option<String>,
+        index: Option<TypeIndex>,
+        /// GH #18: what other recorded versions know about symbols this
+        /// target lacks. `None` when the catalog has nothing to diff
+        /// against (legacy path, or a single-entry catalog).
+        notes: Option<crate::typedb::catalog::VersionNotes>,
+    }
+    let targets: Vec<Target> = if options.openplanet_version.is_none()
+        && options.typedb_versions_dir.is_none()
+    {
+        vec![Target {
+            label: None,
+            index: load_type_index(&config, options.no_typedb)?,
+            notes: None,
+        }]
+    } else {
+        let installed = config.core_json.as_deref().zip(config.game_json.as_deref());
+        let catalog =
+            VersionCatalog::build(installed, options.typedb_versions_dir.as_deref())
+                .map_err(CliError::Check)?;
+        let resolved = catalog
+            .resolve_targets(options.openplanet_version.as_deref())
+            .map_err(CliError::Check)?;
+        if resolved.is_empty() {
+            // A versions root but no request and no installed dump: the run
+            // proceeds without a typedb, exactly like discovery finding
+            // nothing today.
+            vec![Target {
+                label: None,
+                index: None,
+                notes: None,
+            }]
+        } else {
+            // With a second version to diff against, missing-symbol
+            // diagnostics can say WHEN the symbol appeared or vanished.
+            let diffable = catalog.entries().len() > 1;
+            resolved
+                .into_iter()
+                .map(|entry| {
+                    let index = TypeIndex::load(&entry.core_json, &entry.game_json).map_err(
+                        |e| CliError::Check(format!("failed to load type database: {e}")),
+                    )?;
+                    let notes = diffable
+                        .then(|| catalog.notes_for_target(entry))
+                        .transpose()
+                        .map_err(CliError::Check)?
+                        .filter(|n| !n.is_empty());
+                    Ok(Target {
+                        label: Some(entry.label.clone()),
+                        index: Some(index),
+                        notes,
+                    })
+                })
+                .collect::<Result<Vec<_>, CliError>>()?
+        }
+    };
+    let multi_target = targets.len() > 1;
     // GH #59: stamp the run with the DB build it judged the code against.
     // B064: out of the index, not out of a second read of the files — the
     // report has to name the database the diagnostics came from, and a re-read
-    // names whatever is on disk when the run finishes instead.
-    let type_db = type_index.as_ref().map(|index| index.versions().clone());
+    // names whatever is on disk when the run finishes instead. Multi-target
+    // runs keep the first target's stamps here (back-compat single slot);
+    // `targets` names every version.
+    let type_db = targets
+        .iter()
+        .find_map(|t| t.index.as_ref())
+        .map(|index| index.versions().clone());
+    let type_database_loaded = targets.iter().any(|t| t.index.is_some());
 
     let mut search = DependencySearch {
         plugins_dirs: options.plugins_dirs.clone(),
@@ -766,35 +893,63 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         combo_config.defines.extend(combo.iter().cloned());
 
         // One snapshot per combo: `#if` masking is define-dependent, so
-        // parsing + symbol pooling must re-run (GH #39 / GH #57).
+        // parsing + symbol pooling must re-run (GH #39 / GH #57). The
+        // snapshot is version-independent, so targets share it (GH #18).
         let snapshot = AnalysisSnapshot::from_load(&load, &combo_config);
-        let pass_start = cli_diagnostics.len();
-        collect_pass_diagnostics(
-            &load,
-            &snapshot,
-            &combo_config,
-            type_index.as_ref(),
-            &manifest_path,
-            &search.plugin_files_search_paths,
-            &mut cli_diagnostics,
-        );
-        if matrix_run {
-            for diag in &mut cli_diagnostics[pass_start..] {
-                diag.combos.push(combo.clone());
+        for target in &targets {
+            let pass_start = cli_diagnostics.len();
+            let version = target
+                .notes
+                .as_ref()
+                .zip(target.label.as_deref());
+            collect_pass_diagnostics(
+                &load,
+                &snapshot,
+                &combo_config,
+                target.index.as_ref(),
+                version,
+                &manifest_path,
+                &search.plugin_files_search_paths,
+                &mut cli_diagnostics,
+            );
+            if matrix_run {
+                for diag in &mut cli_diagnostics[pass_start..] {
+                    diag.combos.push(combo.clone());
+                }
+            }
+            if multi_target {
+                let label = target
+                    .label
+                    .clone()
+                    .expect("multi-target entries come from the catalog, which labels them");
+                for diag in &mut cli_diagnostics[pass_start..] {
+                    diag.versions.push(label.clone());
+                }
             }
         }
     }
 
     // GH #57: a diagnostic firing in several combos is reported once,
-    // labeled with every combo it fired in.
-    let cli_diagnostics = matrix::merge_combo_diagnostics(cli_diagnostics);
+    // labeled with every combo it fired in. GH #18: likewise across target
+    // versions.
+    let mut cli_diagnostics = matrix::merge_combo_diagnostics(cli_diagnostics);
+    if multi_target {
+        // Firing on EVERY target is not version news — drop the label so
+        // only version-specific findings carry one.
+        for diag in &mut cli_diagnostics {
+            if diag.versions.len() == targets.len() {
+                diag.versions.clear();
+            }
+        }
+    }
 
     Ok(CheckReport {
         root: load.root,
         diagnostics: cli_diagnostics,
-        type_database_loaded: type_index.is_some(),
+        type_database_loaded,
         type_db,
         errors: config.errors,
+        targets: targets.iter().filter_map(|t| t.label.clone()).collect(),
     })
 }
 
@@ -806,6 +961,7 @@ fn collect_pass_diagnostics(
     snapshot: &AnalysisSnapshot,
     config: &LspConfig,
     type_index: Option<&TypeIndex>,
+    version: Option<(&crate::typedb::catalog::VersionNotes, &str)>,
     manifest_path: &Path,
     plugin_files_search_paths: &[PathBuf],
     cli_diagnostics: &mut Vec<CliDiagnostic>,
@@ -817,6 +973,7 @@ fn collect_pass_diagnostics(
             cli_diagnostics.push(CliDiagnostic {
                 path: manifest_path.to_path_buf(),
                 combos: Vec::new(),
+                versions: Vec::new(),
                 diagnostic,
             });
         }
@@ -838,6 +995,7 @@ fn collect_pass_diagnostics(
                 cli_diagnostics.push(CliDiagnostic {
                     path: manifest_path.to_path_buf(),
                     combos: Vec::new(),
+                    versions: Vec::new(),
                     diagnostic,
                 });
             }
@@ -869,18 +1027,20 @@ fn collect_pass_diagnostics(
         // own import decls must resolve within it).
         let table_for_check =
             snapshot.table_for_own_file(crate::analysis_snapshot::FileRef::Path(&item.path));
-        for mut diagnostic in diagnostics::compute_diagnostics_from_analysis(
+        for mut diagnostic in diagnostics::compute_diagnostics_with_versions(
             &uri,
             analysis,
             config,
             type_index,
             &table_for_check,
+            version,
         ) {
             diagnostic.range =
                 diagnostics::range_to_utf8_columns(&analysis.source, diagnostic.range);
             cli_diagnostics.push(CliDiagnostic {
                 path: item.path.clone(),
                 combos: Vec::new(),
+                versions: Vec::new(),
                 diagnostic,
             });
         }
@@ -900,6 +1060,7 @@ fn collect_pass_diagnostics(
                 cli_diagnostics.push(CliDiagnostic {
                     path: item.path.clone(),
                     combos: Vec::new(),
+                    versions: Vec::new(),
                     diagnostic,
                 });
             }
@@ -990,6 +1151,7 @@ fn report_for_human_format(report: &CheckReport) -> CheckReport {
         type_database_loaded: report.type_database_loaded,
         type_db: report.type_db.clone(),
         errors: report.errors,
+        targets: report.targets.clone(),
     }
 }
 
@@ -1017,14 +1179,22 @@ fn format_json(report: &CheckReport) -> String {
         .iter()
         .map(|item| {
             let rel = item.path.strip_prefix(&report.root).unwrap_or(&item.path);
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "path": rel.display().to_string(),
                 "line": item.diagnostic.range.start.line + 1,
                 "col": item.diagnostic.range.start.character + 1,
                 "severity": severity_label(item.diagnostic.severity),
                 "message": item.diagnostic.message,
                 "combo": item.combos,
-            })
+            });
+            // GH #18: additive — absent unless version-specific.
+            if !item.versions.is_empty() {
+                value.as_object_mut().expect("literal object").insert(
+                    "versions".to_string(),
+                    serde_json::json!(item.versions),
+                );
+            }
+            value
         })
         .collect();
     let mut doc = serde_json::json!({
@@ -1035,6 +1205,12 @@ fn format_json(report: &CheckReport) -> String {
     // GH #59: additive — absent (not null) when no DB was loaded.
     if let (Some(versions), Some(obj)) = (&report.type_db, doc.as_object_mut()) {
         obj.insert("typedb".to_string(), versions.to_json());
+    }
+    // GH #18: additive — absent on legacy single-target runs.
+    if !report.targets.is_empty() {
+        doc.as_object_mut()
+            .expect("literal object")
+            .insert("targets".to_string(), serde_json::json!(report.targets));
     }
     format!(
         "{}\n",
@@ -1072,14 +1248,17 @@ fn format_plain(report: &CheckReport, color: bool) -> String {
         };
 
         out.push_str(&format!(
-            "{}:{}: {}: {}{}\n",
+            "{}:{}: {}: {}{}{}\n",
             term::path(color, rel.display().to_string()),
             term::loc(color, format!("{line}:{col}")),
             sev_styled,
             // GH #57: combo label ([DEV] / [seen in: {} | DEV]) — empty in
             // single-combo runs.
             matrix::combo_prefix(&item.combos),
-            item.diagnostic.message
+            item.diagnostic.message,
+            // GH #18: version label ([op 1.29.5]) — empty unless the
+            // diagnostic is version-specific in a multi-target run.
+            matrix::version_suffix(&item.versions)
         ));
     }
 
@@ -1394,6 +1573,7 @@ mod tests {
             .map(|_| CliDiagnostic {
                 path: PathBuf::from("/tmp/plugin/src/Main.as"),
                 combos: Vec::new(),
+                versions: Vec::new(),
                 diagnostic: Diagnostic {
                     severity: Some(DiagnosticSeverity::ERROR),
                     message: "boom".to_string(),
@@ -1407,6 +1587,7 @@ mod tests {
             type_database_loaded: false,
             type_db: None,
             errors: ErrorGroup::Off,
+            targets: Vec::new(),
         }
     }
 
@@ -1528,6 +1709,7 @@ mod tests {
         let item = |sev: Option<DiagnosticSeverity>, msg: &str| CliDiagnostic {
             path: PathBuf::from("/tmp/plugin/src/Main.as"),
             combos: Vec::new(),
+            versions: Vec::new(),
             diagnostic: Diagnostic {
                 severity: sev,
                 message: msg.to_string(),
@@ -1549,6 +1731,7 @@ mod tests {
             type_database_loaded: false,
             type_db: None,
             errors: group,
+            targets: Vec::new(),
         }
     }
 
@@ -1709,6 +1892,77 @@ mod tests {
         let msg = usage_msg(&["--typedb-dir", "--no-typedb", "tests/fixtures/tm-counter"]);
         assert!(
             msg.contains("--typedb-dir requires a directory argument"),
+            "{msg}"
+        );
+    }
+
+    /// GH #18: `--openplanet-version` captures separated and `=` values.
+    #[test]
+    fn parse_check_args_openplanet_version_captures_value() {
+        let opts = parse_check_args(&[
+            "--openplanet-version".into(),
+            "1.29.5,1.29.14".into(),
+            ".".into(),
+        ])
+        .unwrap();
+        assert_eq!(opts.openplanet_version.as_deref(), Some("1.29.5,1.29.14"));
+
+        let opts = parse_check_args(&["--openplanet-version=1.29.5".into(), ".".into()]).unwrap();
+        assert_eq!(opts.openplanet_version.as_deref(), Some("1.29.5"));
+    }
+
+    /// GH #18: `--typedb-versions-dir` captures separated and `=` values.
+    #[test]
+    fn parse_check_args_typedb_versions_dir_captures_value() {
+        let opts = parse_check_args(&[
+            "--typedb-versions-dir".into(),
+            "tests/fixtures/typedb-versions".into(),
+            ".".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            opts.typedb_versions_dir,
+            Some(PathBuf::from("tests/fixtures/typedb-versions"))
+        );
+
+        let opts =
+            parse_check_args(&["--typedb-versions-dir=--weird".into(), ".".into()]).unwrap();
+        assert_eq!(opts.typedb_versions_dir, Some(PathBuf::from("--weird")));
+    }
+
+    /// GH #18, same shape as GH #62: a following flag is never a value.
+    #[test]
+    fn parse_check_args_openplanet_version_rejects_following_flag() {
+        let msg = usage_msg(&["--openplanet-version", "--no-typedb", "."]);
+        assert!(
+            msg.contains("--openplanet-version requires a version argument"),
+            "{msg}"
+        );
+    }
+
+    /// GH #18, same shape as GH #62: a following flag is never a value.
+    #[test]
+    fn parse_check_args_typedb_versions_dir_rejects_following_flag() {
+        let msg = usage_msg(&["--typedb-versions-dir", "--no-typedb", "."]);
+        assert!(
+            msg.contains("--typedb-versions-dir requires a directory argument"),
+            "{msg}"
+        );
+    }
+
+    /// GH #18: `--no-typedb` contradicts both version flags, exactly as it
+    /// contradicts `--typedb-dir`.
+    #[test]
+    fn parse_check_args_no_typedb_conflicts_with_version_flags() {
+        let msg = usage_msg(&["--no-typedb", "--openplanet-version", "1.29.5", "."]);
+        assert!(
+            msg.contains("--no-typedb cannot be combined with --openplanet-version"),
+            "{msg}"
+        );
+
+        let msg = usage_msg(&["--no-typedb", "--typedb-versions-dir", "dir", "."]);
+        assert!(
+            msg.contains("--no-typedb cannot be combined with --typedb-versions-dir"),
             "{msg}"
         );
     }

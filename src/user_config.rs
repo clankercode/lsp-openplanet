@@ -278,6 +278,16 @@ pub const SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::Path,
     },
     SettingSpec {
+        key: "openplanet_version",
+        help: "Target Openplanet version(s), comma-separated (GH #18)",
+        kind: SettingKind::String,
+    },
+    SettingSpec {
+        key: "typedb_versions_dir",
+        help: "Root of recorded typedb snapshots, one dir per version",
+        kind: SettingKind::Path,
+    },
+    SettingSpec {
         key: "plugins_dir",
         help: "Directory to search for plugin dependencies",
         kind: SettingKind::Path,
