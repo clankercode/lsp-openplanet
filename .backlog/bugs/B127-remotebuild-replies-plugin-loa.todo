@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T14:12:59Z"
+depends_on: []
+estimate_hours: 1
+id: B127
+priority: high
+status: pending
+tags: []
+title: RemoteBuild replies 'Plugin loaded' with an empty error even when the engine could not resolve the plugin's dependencies, so B097's fail-fast guard in run_batch never fires
+updated_at: "2026-08-31T14:12:59Z"
+---
+
+RemoteBuild replies 'Plugin loaded' with an empty error even when the engine could not resolve the plugin's dependencies, so B097's fail-fast guard in run_batch never fires
