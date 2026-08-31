@@ -94,10 +94,48 @@ pub struct CoreMethod {
     pub desc: Option<String>,
     #[serde(default)]
     pub decl: Option<String>,
-    #[serde(rename = "const", default)]
-    pub is_const: bool,
     #[serde(rename = "protected", default)]
     pub is_protected: bool,
+}
+
+impl CoreMethod {
+    /// B125: does this method carry a trailing `const` qualifier?
+    ///
+    /// Read from `decl`, which is the only place the dumps put it. There
+    /// used to be a `#[serde(rename = "const")] is_const: bool` field here
+    /// and it was DEAD: measured against the shipped 1.29.5 Core dump, 0 of
+    /// 1002 class methods carry a `const` key, so `serde(default)` made it
+    /// answer `false` for every engine method on earth. Nothing
+    /// distinguished "no engine method is const" from "we never read this",
+    /// and its one consumer — the `typedb diff` drift report — silently
+    /// rendered every engine signature as non-const.
+    ///
+    /// The suffix is the whole rule, and it has to be the SUFFIX rather
+    /// than a substring search. Measured on the same dump:
+    ///
+    /// * 301 of 1002 decls end in ` const` — the real answer.
+    /// * 352 contain `const` only inside a PARAMETER
+    ///   (`bool opEquals(const MwId&in)`); a `contains("const")` test marks
+    ///   every one of them const, which is the trap this avoids.
+    /// * 26 begin with `const ` because the RETURN type is const
+    ///   (`const Json::Value@ opIndex(int) const`). A prefix test reads
+    ///   return-constness as method-constness. All 26 happen to also be
+    ///   method-const here, so a prefix test would look right on this dump
+    ///   and be wrong on the next one.
+    /// * 0 use a spaceless `)const`, and 0 lack a `decl` entirely.
+    /// * 0 of 854 free functions end in ` const`, which is the sanity
+    ///   check that the suffix means what it should — a free function
+    ///   cannot carry the qualifier.
+    ///
+    /// This says what the dump said and nothing more. It is NOT wired into
+    /// the const-receiver diagnostics — see B124 and the follow-up ticket;
+    /// doing that changes what those rules can see and needs its own
+    /// measured sweep.
+    pub fn declared_const(&self) -> bool {
+        self.decl
+            .as_deref()
+            .is_some_and(|d| d.trim_end().ends_with(" const"))
+    }
 }
 
 #[derive(Debug, Deserialize)]

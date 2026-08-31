@@ -4765,8 +4765,28 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Some(t) = self.scope.lookup_method_return(&type_name, &member_name) {
-                    // External types: no const-qualifier metadata yet, so
-                    // don't over-fire — see AC19 deferred follow-up.
+                    // EXTERNAL types are not const-checked here. The reason
+                    // is NOT that the metadata is missing — that claim used
+                    // to be written here and it was stale (B124).
+                    //
+                    // The dumps DO carry engine method constness, in the
+                    // `decl` string: 301 of 1002 Core class methods end in
+                    // ` const`, and `CoreMethod::declared_const` reads it.
+                    // What is genuinely absent, at every level, is whether a
+                    // returned HANDLE aliases the receiver. `string::Split`
+                    // returns `string[]@` — a fresh array — and
+                    // `Json::Value::Get` returns a real view into its
+                    // receiver; both are `returntypeflags` 0 with a `@`, so
+                    // nothing separates them.
+                    //
+                    // That is why this arm stays silent, and it is a
+                    // narrower reason than the old comment gave. Consuming
+                    // engine constness here would let the rule fire on the
+                    // engine population, which B116 measured at 807 excluded
+                    // receivers and B121 measured at 80 handle-returning
+                    // sites, 3 of which are provably indistinguishable from
+                    // views. It needs its own variant sweep before anyone
+                    // turns it on — see B124.
                     return t;
                 }
                 // Workspace-local class: any member is fine — silence.
