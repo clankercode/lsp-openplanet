@@ -584,7 +584,50 @@ indistinguishable from "I am structurally incapable of seeing it".
   Note the lane's own framing when it retracted an earlier figure: *read the
   previous "10 of 10" as the one I cannot reproduce, and this one as the one
   you can.* Reproducibility, not the number, is what makes a verification claim
-  worth anything.
+  worth anything. The retracted figure came from an ad-hoc harness that no
+  longer exists and had been running against a live game, so what it measured
+  is unknown. The figure that replaced it is **11/11 via
+  `scripts/check_probe_cleanup_nonvacuous.py` (`just probe-cleanup-mutants`)**,
+  named here so a reader can re-run it rather than trust a transcript. **Cite
+  the target, not the number** — a verification figure with no reproducible
+  command attached is a rumour with a decimal point.
+
+- **A green test is not evidence until you know what made it green.** The lane
+  that hit the port slip drew the sharpest form of this document's own rule,
+  and it is an extension rather than a restatement. The recorded rule is
+  *assert the value, not the presence* — "a file was created" versus "a file
+  was created where I asked". Pointed at side effects instead of outputs, it
+  becomes: the lane asserted that its selftest **passed**; it never asserted
+  that the selftest passed **without touching the game**. So the test went
+  green for a reason nobody had checked, twelve times a run, against a shared
+  resource.
+
+  **The presence/value distinction generalises from "what did the test assert
+  about its output" to "what was the test allowed to touch".** Both halves of a
+  green result matter: the answer, and the means by which it was reached. A
+  suite that only checks the first will happily certify code that reaches
+  outside its sandbox, because reaching outside usually makes things *work*.
+
+- **A running dependency makes the wrong code work, so the symptom lands in
+  someone else's logs and never in your test results.** This is why the port
+  slip survived documentation, a coordinator's reading, and a reviewer's pass.
+  There was no red test to find, and there could not have been: with the game
+  up, the accidental round-trip **succeeded**. The only trace was noise in the
+  game's log — a system the lane does not own and does not read.
+
+  Two consequences worth carrying:
+
+  - **A defect whose only symptom appears in a system you do not own is
+    invisible to every gate you control.** Test suites, linters and reviews all
+    look inward. Nothing in that set can see "this correctly-passing test also
+    wrote to a shared service".
+  - The fix must therefore be **structural, not a patch to the call site**. The
+    lane's chosen remedy — the selftest *revokes* `rb_alive` / `rb_route` /
+    `read_log_window` outright, so any future path reaching for the game fails
+    loudly — is right for exactly this reason: patching the one known site
+    leaves the next one to reintroduce the bug silently and for the same
+    reason. **When the failure mode is "nothing goes red", the fix has to be
+    the thing that makes something go red.**
 
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
