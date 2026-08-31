@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::scope::{Symbol, SymbolKind};
 use crate::parser::ast;
@@ -235,6 +235,56 @@ impl SymbolTable {
             .filter(|(fid, _)| !self.hidden_files.contains(fid))
             .filter_map(|(file_id, idx)| self.files.get(file_id)?.symbols.get(*idx))
             .collect()
+    }
+
+    /// True when the workspace declares `ns` as a NAMESPACE (B107).
+    ///
+    /// A class is not one. AngelScript has no statics, so `MyClass::` names
+    /// nothing — the same fence GH #58 decision 4 keeps on the checking
+    /// side, and the reason this is a predicate rather than "did the walk
+    /// return anything": a class's members ARE pooled as `Class::member`, so
+    /// enumerating without asking this first would spill them.
+    pub fn namespace_is_declared(&self, ns: &str) -> bool {
+        !ns.is_empty()
+            && self
+                .lookup(ns)
+                .iter()
+                .any(|sym| matches!(sym.kind, SymbolKind::Namespace))
+    }
+
+    /// The DIRECT members of namespace `ns`, as symbols — one per name, in
+    /// deterministic order (B107).
+    ///
+    /// THE one enumeration of a workspace namespace's members. It was
+    /// already here in spirit, buried inside
+    /// `GlobalScope::workspace_namespace_member_names`, which projected the
+    /// names out and dropped the symbols; that made it useless to anything
+    /// needing a KIND, and completion consequently had no workspace producer
+    /// at all. Hoisted rather than copied: that method is now a projection
+    /// of this, so the checker's near-name hint and the editor's `Ns::`
+    /// completion read one walk. A rule living at one of N sites is the
+    /// recurring defect shape in this tree (B073, B076, B098).
+    ///
+    /// "Direct" excludes anything deeper: `A::B::Deep` is a member of
+    /// `A::B`, never of `A`. `A::B` itself IS a member of `A`, because a
+    /// nested namespace is pooled as its own `Namespace` symbol.
+    ///
+    /// Deliberately NOT gated on the dependency-closure fence. This answers
+    /// "what can I see", not "what does not exist"; the fence belongs to the
+    /// caller that makes the second claim.
+    pub fn namespace_member_symbols(&self, ns: &str) -> Vec<&Symbol> {
+        let prefix = format!("{ns}::");
+        let mut seen: BTreeMap<&str, &Symbol> = BTreeMap::new();
+        for sym in self.lookup_members(ns) {
+            let Some(rest) = sym.name.strip_prefix(&prefix) else {
+                continue;
+            };
+            if rest.is_empty() || rest.contains("::") {
+                continue;
+            }
+            seen.entry(rest).or_insert(sym);
+        }
+        seen.into_values().collect()
     }
 
     /// Hide a file's symbols from lookups (strict own-`exports` files —

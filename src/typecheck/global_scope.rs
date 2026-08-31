@@ -216,12 +216,9 @@ impl<'a> GlobalScope<'a> {
     /// qualifier AngelScript resolves free calls through, so this is the
     /// gate for the workspace `No matching symbol` rule (GH #58).
     pub fn workspace_namespace_declared(&self, qualified: &str) -> bool {
-        !qualified.is_empty()
-            && self
-                .workspace
-                .lookup(qualified)
-                .iter()
-                .any(|s| matches!(s.kind, SymbolKind::Namespace))
+        // B107: delegated, so the checker and completion cannot disagree
+        // about what counts as a namespace.
+        self.workspace.namespace_is_declared(qualified)
     }
 
     /// True when the workspace pool holds ANY symbol under the exact
@@ -238,19 +235,17 @@ impl<'a> GlobalScope<'a> {
     /// and not `method`. Backs the near-name hint on the workspace
     /// `No matching symbol` rule (GH #58), mirroring the typedb
     /// `UI::GetIO` path.
+    /// B107: a PROJECTION of [`SymbolTable::namespace_member_symbols`], which
+    /// is now the single walk. This used to do the walk itself and throw the
+    /// symbols away, which is why completion had no workspace producer to
+    /// share — the kinds were discarded one level too early.
     pub fn workspace_namespace_member_names(&self, ns: &str) -> Vec<String> {
-        let prefix = format!("{ns}::");
-        let mut names: Vec<String> = self
-            .workspace
-            .lookup_members(ns)
-            .iter()
-            .filter_map(|s| s.name.strip_prefix(&prefix))
-            .filter(|rest| !rest.contains("::") && !rest.is_empty())
-            .map(|rest| rest.to_string())
-            .collect();
-        names.sort();
-        names.dedup();
-        names
+        self.workspace
+            .namespace_member_symbols(ns)
+            .into_iter()
+            .filter_map(|sym| sym.name.rsplit("::").next())
+            .map(str::to_string)
+            .collect()
     }
 
     /// True if the qualified name refers to a type (class / interface /
