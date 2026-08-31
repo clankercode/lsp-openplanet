@@ -3,74 +3,71 @@
 ## Now
 
 **Read this line before you read any number below.** These figures go stale
-within the hour and have twice nearly turned a real delta into an apparent null
-result. **Treat every total here as a hint and MEASURE YOUR OWN BASE by gating
-before you write code.** The gate costs 30-60s on x-alpha; a false null costs a
-night.
+within the hour and have nearly turned a real delta into an apparent null result
+three times. **Treat every total here as a hint and MEASURE YOUR OWN BASE by
+gating before you write code.** Three separate lanes have caught a moved master
+by measuring instead of quoting; nobody has been bitten by measuring.
 
-Last written 2026-09-01 00:20 AEST.
+Last written 2026-09-01 03:15 AEST.
 
-- **Suite:** `SUITE-VERIFIED: 2839 passed; 0 failed; 12 ignored; 34/34 binaries`
+- **Suite:** `SUITE-VERIFIED: 2958 passed; 0 failed; 12 ignored; 34/34 binaries`
   on x-alpha, from the main checkout.
 - **Clippy:** `CLIPPY-DELTA-VERIFIED` on x-tuf, baseline `6ea004ea`,
   130 raw / 39 fingerprints. **Tight — no FIXED entries remain to absorb a
-  regression.** Two lanes have already had it catch a real lint tonight.
+  regression.** It has caught a real new lint in four separate lanes tonight.
+- **`cargo fmt` is CLEAN repo-wide** (B122) and the restriction on running it is
+  lifted. `.git-blame-ignore-revs` carries the reformat SHA.
 
 ### Where each gate runs, and why it is not interchangeable
 
 - **Suite -> x-alpha.** 48 cores. Correctness only; its rustc is 1.97.1.
 - **Clippy delta -> x-tuf.** Its rustc 1.97.0 MATCHES local. x-alpha's 1.97.1
-  emits a different lint set and its numbers are not comparable to this
-  baseline. The gate refuses to compare them rather than reporting a difference
-  that is not one.
+  emits a different lint set; the gate refuses to compare them rather than
+  reporting a difference that is not one.
 
-### Closed this stretch
+### Gates now refuse an unresolved git operation — B132
 
-B081, B096 (both claims), B097, B115, B116, B118, B120.
+`MERGE_HEAD`, `REBASE_HEAD`, `rebase-merge/`, `rebase-apply/`,
+`CHERRY_PICK_HEAD`, `REVERT_HEAD` -> **refused by name, with the unmerged files
+listed.** A merely DIRTY tree still proceeds; the banner reports `dirty=N`.
+Operation state is read **per-worktree** — a merge in the main checkout must not
+stop five lanes.
 
-### The probe harness contract CHANGED — B118
+If a gate refuses with a git-operation message, that is the guard working.
 
-`build_status` is now four-valued: **CLEAN / REJECTED / BUILD-ERR / NOT-RUN**.
-It used to be a boolean, and the defect was not three parsing bugs: **"the
-engine refused this construct" and "this build did not happen" were the same
-value**, so the caller had nowhere to put the distinction. The log is now sliced
-by each build's own start/end markers rather than by severity or time, which
-makes attribution structural — a concurrent session's plugin cannot appear
-between another build's two markers. `compiled_clean` survives as
-`build_status == "CLEAN"`.
+### Probe harness contract — B118, B123, B127
 
-**If you collected a probe verdict before this landed, re-read it.** A NOT-RUN
-previously read as ACCEPT, which is the worst polarity on any question whose
-subject is acceptance.
+`build_status` is four-valued: **CLEAN / REJECTED / BUILD-ERR / NOT-RUN**. The
+original defect was that *"the engine refused this construct"* and *"this build
+did not happen"* were the same value, so the caller had nowhere to put the
+distinction. `compiled_clean` survives as `build_status == "CLEAN"`.
 
-### Game probing works
+**Load success is NOT build success.** RemoteBuild replies
+`{"error":"","data":"Plugin loaded"}` even when the engine cannot resolve
+dependencies. Route build decisions through `build_status`, never through the
+load reply.
 
-B097 is closed. `load_plugin` reaches its handler at 90 bytes; it had never
-worked before 2026-08-31. **The fix is UNCOMMITTED in Max's tree**
-(`~/src/tm-remote-build`, branch `fix/readraw-64-byte-short-read`) — nobody from
-this repo commits it.
+### Numbers that turned out to be wrong, so nobody re-cites them
 
-B068 (one name per compilation unit) and B077 (registration-before-copy sweep)
-**still apply unchanged.** B118 closed a third channel, not all of them.
+- **B116's "807 engine receivers would fire" was an ARTEFACT.** With the real
+  qualifier parsed (B124/B125/B130): **807 const_ok, 0 would-fire, 0 unknown.**
+  It measured a gate reading "not known const" as "non-const", not a population.
+- **`lookup_method_return`'s "no const-qualifier metadata yet" was STALE** — 301
+  of 1002 Core decls end in ` const`.
+- **B115's "completion is half-blind" was wrong** — it was totally blind; nothing
+  above the parser read visibility, for fields OR methods.
 
-### Open, and who has them
+### Open
 
 | ticket | lane | note |
 |---|---|---|
-| B119 | lane-unused | inherited non-const method; needs a game probe to choose between two readings |
-| B121 | lane-enum | AC19 propagates through fresh return values; 10 measured FPs across 7 plugins |
-| B123 | lane-resolver | last consumer of the filtered log reader |
-| B113 | peer session | hover accessors |
-| B114 | peer session | pooling; rework required pre-merge, see below |
-| B117 | BLOCKED on B114 | member visibility has no consumer at any layer |
-| B122 | HELD | `cargo fmt --check` red repo-wide; a reformat is a merge-conflict generator, so it waits until no lane is in flight |
+| B129 | lane-unused | one-command regen + drift report; inventory measurement first |
+| B137 | lane-enum | Nadeo loader hardcodes `is_const: false`, so false means UNKNOWN |
+| B139 | lane-resolver | sweep every gate for a missing pre-flight |
+| B140 | lane-resolver | `--sync-back` resolves under CARGO_TARGET_DIR |
+| B126 | unclaimed | double-emit on `c.Get().x = 1` |
+| B133 | unclaimed | enum value doc strings dropped (206/929) |
+| B134 | unclaimed | GH #18 lead: migration hints are prose, not metadata |
+| B138 | unclaimed | audit loader-side hardcoded values, not just dump field presence |
 
-### B114 had a tripwire that could not fire
-
-Its field arm hardcoded `DeclModifiers::default()` while the test watching for
-the gap read that same hardcoded value. It would have merged green reporting
-"still broken", leaving a doc comment blaming a parser layer B115 had already
-fixed. Caught pre-merge; the peer session has redirected its lane to thread both
-field AND property visibility through pooling and invert the pin.
-
-Nothing is blocked on Max.
+Nothing is blocked on Max. The peer session has closed out.
