@@ -275,7 +275,7 @@ impl Default for LspConfig {
             define_combinations: None,
             define_matrix_max_combinations: crate::cli::matrix::DEFAULT_MAX_COMBINATIONS,
             unused_callbacks: Vec::new(),
-            unused: UnusedLevel::Warn,
+            unused: UnusedLevel::Info,
             inactive_regions: InactiveLevel::Hint,
             errors: ErrorGroup::Last,
             config_issues: Vec::new(),
@@ -806,8 +806,11 @@ fn write_config_issues(
 
 /// How unused-declaration findings are reported.
 ///
-/// Default is [`UnusedLevel::Warn`] (today's behavior). `ignore` drops the
-/// pass entirely (it is noisy on large plugins). `error` emits ERROR
+/// Default is [`UnusedLevel::Info`] (B090): quiet enough that a normal
+/// `check` run folds the findings into its summary instead of spamming
+/// the log, still visible in editors (faded via the UNNECESSARY tag).
+/// `ignore` drops the pass entirely (it is noisy on large plugins).
+/// `warn` restores the pre-B090 behavior; `error` emits ERROR
 /// diagnostics so `check` fails without `--warnings-as-errors`.
 ///
 /// The two quiet levels exist because "never used" is advisory, not a
@@ -824,22 +827,23 @@ fn write_config_issues(
 pub enum UnusedLevel {
     Ignore,
     Hint,
-    Info,
     #[default]
+    Info,
     Warn,
     Error,
 }
 
 impl UnusedLevel {
     /// Parse a config / CLI token. Aliases: off/false/none/disable → ignore;
-    /// faded/grey/gray → hint; information/note → info; on/true/warning →
-    /// warn; err/errors → error.
+    /// faded/grey/gray → hint; information/note/on/true → info (B090:
+    /// on/true mean "enabled at the default level"); warning → warn;
+    /// err/errors → error.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "ignore" | "off" | "false" | "none" | "disable" | "disabled" => Some(Self::Ignore),
             "hint" | "faded" | "grey" | "gray" => Some(Self::Hint),
-            "info" | "information" | "note" => Some(Self::Info),
-            "warn" | "warning" | "on" | "true" => Some(Self::Warn),
+            "info" | "information" | "note" | "on" | "true" => Some(Self::Info),
+            "warn" | "warning" => Some(Self::Warn),
             "error" | "err" | "errors" => Some(Self::Error),
             _ => None,
         }
@@ -2208,7 +2212,8 @@ fn parse_unused_toml(value: &toml::Value) -> Option<UnusedLevel> {
     match value {
         toml::Value::String(s) => UnusedLevel::parse(s),
         toml::Value::Boolean(false) => Some(UnusedLevel::Ignore),
-        toml::Value::Boolean(true) => Some(UnusedLevel::Warn),
+        // B090: `true` means "enabled at the default level" — info.
+        toml::Value::Boolean(true) => Some(UnusedLevel::Info),
         _ => None,
     }
 }
@@ -2337,8 +2342,9 @@ mod tests {
             ("disabled", UnusedLevel::Ignore),
             ("warn", UnusedLevel::Warn),
             ("warning", UnusedLevel::Warn),
-            ("on", UnusedLevel::Warn),
-            ("true", UnusedLevel::Warn),
+            // B090: on/true mean "enabled at the default level" — info.
+            ("on", UnusedLevel::Info),
+            ("true", UnusedLevel::Info),
             ("error", UnusedLevel::Error),
             ("err", UnusedLevel::Error),
             ("errors", UnusedLevel::Error),
@@ -2358,12 +2364,15 @@ mod tests {
         assert!(UnusedLevel::parse("").is_none());
     }
 
+    /// B090: unused findings default to INFO — quiet enough for a normal
+    /// check run (folded into the summary), still visible in editors.
+    /// `--unused warn|error` is the opt-back-in for gates.
     #[test]
-    fn unused_defaults_to_warn() {
-        assert_eq!(LspConfig::default().unused, UnusedLevel::Warn);
+    fn unused_defaults_to_info() {
+        assert_eq!(LspConfig::default().unused, UnusedLevel::Info);
         assert_eq!(
             LspConfig::from_layers(None, None, None).0.unused,
-            UnusedLevel::Warn
+            UnusedLevel::Info
         );
     }
 

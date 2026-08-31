@@ -117,10 +117,12 @@ OPTIONS:
     --unused MODE       Unused functions/vars/etc:
                         ignore | hint | info | warn | error (aliases:
                         off/false → ignore, grey/faded → hint,
-                        note/information → info, on/true → warn,
-                        err → error). Default warn. `hint` and `info` report
-                        the same findings at a quieter severity and never
-                        fail the run, not even under --warnings-as-errors.
+                        note/information/on/true → info, err → error).
+                        Default info (B090): folded out of check output into
+                        the summary — see --show-info. `hint` and `info`
+                        never fail the run, not even under
+                        --warnings-as-errors; `warn` restores the old
+                        behavior.
                         Also `unused = \"ignore\"|\"hint\"|\"info\"|\"warn\"|
                         \"error\"` in .openplanet-lsp.toml or the user config;
                         workspace wins over user. The flag wins over both.
