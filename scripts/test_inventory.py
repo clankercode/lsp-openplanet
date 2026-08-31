@@ -499,6 +499,82 @@ def _ago(seconds: float) -> str:
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# B106: a build that fails must say WHY
+# --------------------------------------------------------------------------
+
+def build_failure_report(stdout: str, limit: int = 8) -> str:
+    """rustc's own diagnostics, pulled back out of a ``--message-format=json`` build.
+
+    MEASURED (B106), on a build box whose disk filled mid-compile. The gate
+    printed exactly this and nothing else::
+
+        error: could not compile `openplanet-lsp` (lib) due to 1 previous error
+        error: `cargo test --no-run` failed (exit 101)
+
+    The word `No space left on device` never appeared. It was not missing from
+    the machine -- it was in rustc's `compiler-message` records on cargo's
+    STDOUT, which this parser reads for `compiler-artifact` records and drops
+    everything else. So the one line that named the real dimension (the
+    machine, not the code) was discarded by the tool whose job was to report
+    it, and the reader is left to conclude that the tree does not compile.
+
+    An error that names the wrong dimension costs more than a silent failure:
+    see docs/verification-hazards.md.
+
+    Returns text to print. When cargo produced no diagnostics at all, that is
+    itself the finding -- a build that failed with nothing to say about the
+    code failed for a reason OUTSIDE the code -- and it says so rather than
+    returning an empty string that reads as "no further information".
+    """
+    rendered: list[str] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("reason") != "compiler-message":
+            continue
+        diagnostic = msg.get("message") or {}
+        if not str(diagnostic.get("level", "")).startswith("error"):
+            continue
+        text = diagnostic.get("rendered") or diagnostic.get("message") or ""
+        if text.strip():
+            rendered.append(text.rstrip())
+    if not rendered:
+        return (
+            "cargo emitted no compiler diagnostics, so the build did not fail\n"
+            "on the code. Look at the MACHINE: free disk on the target dir,\n"
+            "memory, the toolchain, a killed process. Cargo's own stderr is\n"
+            "above this line."
+        )
+    body = "\n".join(elide(text) for text in rendered[:limit])
+    if len(rendered) > limit:
+        body += f"\n... and {len(rendered) - limit} more error(s)"
+    return body
+
+
+def elide(text: str, head: int = 15, tail: int = 10) -> str:
+    """Keep a diagnostic's head AND tail, drop the middle.
+
+    MEASURED, on the same disk-full build: one `error: linking with cc failed`
+    rendered ~10 KB, almost all of it a single `cc` command line naming 257
+    object files. Head-only truncation would have cut `collect2: fatal error`
+    off the end, and that trailing line is where the linker says what actually
+    went wrong. Both ends carry the reason; the middle is the argument list.
+    """
+    lines = text.splitlines()
+    if len(lines) <= head + tail + 1:
+        return text
+    dropped = len(lines) - head - tail
+    return "\n".join(
+        [*lines[:head], f"    ... {dropped} line(s) elided ...", *lines[-tail:]]
+    )
+
+
 def enumerate_artifacts(cargo_args: list[str] | None = None) -> list[dict]:
     """Build, and return cargo's own artifact records for this workspace.
 
@@ -524,7 +600,10 @@ def enumerate_artifacts(cargo_args: list[str] | None = None) -> list[dict]:
         check=False,
     )
     if proc.returncode != 0:
-        sys.exit(f"error: `cargo test --no-run` failed (exit {proc.returncode})")
+        sys.exit(
+            f"error: `cargo test --no-run` failed (exit {proc.returncode})\n"
+            f"{build_failure_report(proc.stdout)}"
+        )
 
     artifacts = []
     for line in proc.stdout.splitlines():

@@ -2272,3 +2272,114 @@ the type.
 on the affected set, not the set. Treating a clean build plus a green suite as
 the completion criterion would have shipped B101 with a silently dead code
 action.
+
+## The tool that swallowed the reason: a full disk rendered as "your code does not compile"
+
+B106 was filed as the second of the three false greens above: *`just rtest`
+exited 0 while the remote build had failed with ENOSPC*. The first move was to
+reproduce it rather than to fix the wrapper it accused, and **the accusation
+did not survive the measurement.**
+
+Five paths were driven with a real, isolated ENOSPC — a loop-mounted 12 GiB
+ext4 image standing in for the build box's filesystem, so the box itself was
+never at risk and the free space was set exactly:
+
+| input | local exit | marker |
+|---|---|---|
+| build from cold, 374 MiB free | **1** | withheld |
+| fully built tree, 712 KiB free | 0 | printed — and CORRECTLY: a fresh tree writes almost nothing |
+| one source touched, 105 MiB free | **1** | withheld |
+| rsync into a filesystem with 0 bytes | **11**, propagated by `die` | n/a |
+| remote script exiting 0/1/42/101, on both boxes | **0/1/42/101** | n/a |
+
+So `ssh` returns the remote status, `run_ssh` returns `ssh`'s, and every layer
+above passes it up. **The reported symptom is mechanism 3, not mechanism 2** —
+piping the gate to `tail` and reading `tail`'s status — which is
+indistinguishable from an ENOSPC false green at the point of observation and
+needs a completely different fix. Recording that here because the ticket will
+be re-read: *measure which of two mechanisms you have before you change the
+code one of them accuses.*
+
+**But the reproduction found a different defect, and a worse one.** This is the
+whole output a lane got from the third row above:
+
+    Compiling openplanet-lsp v0.6.0
+    error: could not compile `openplanet-lsp` (lib) due to 1 previous error
+    error: `cargo test --no-run` failed (exit 101)
+
+The words `No space left on device` appear nowhere. They were not missing from
+the machine — rustc emitted them, into the `compiler-message` records on
+cargo's stdout, which the gate reads for `compiler-artifact` records and drops
+everything else. **The one line that named the real dimension was discarded by
+the tool whose job was to report it**, and what reached the reader was a
+statement about their code.
+
+That is the "an error message that names the wrong dimension" hazard, and note
+how much it costs *here* specifically: it does not merely waste time, it
+manufactures the false-green report. A lane that is told its tree does not
+compile, on a box where the tree compiled ten minutes ago, is being pointed
+away from the machine at exactly the moment it should look at it.
+
+**Generalisation.** A parser that reads a structured stream for one record type
+is silently discarding the others. Ask what is in the records you skip — and
+ask it especially on the FAILURE path, where a parser written for the success
+case is running for the first time and nobody has looked at its output.
+
+**The disk check that was added, and the one that was rejected.** The obvious
+countermeasure is a free-space floor that refuses the run. It was rejected for
+the gate: row two above is a *genuine* `SUITE-VERIFIED: 2601 passed ... 30/30`
+earned with 712 KiB free, and refusing it would be a false negative on a total
+that was complete and correct. The gate warns instead, and its hard failure is
+an OUTCOME — `No space left on device` in cargo's own output — in the same way
+the filtered-run check reads libtest's `filtered out` count rather than the
+caller's argv. The floor lives in `remote-build.py`, before anything is synced,
+where refusing is cheap and the alternative is filling someone's build box.
+
+**THREE of this fix's own controls were vacuous, and mutation testing is what
+said so.** None would have been found by reading.
+
+1. The disk-full check excluded libtest's lines by shape, and the control was
+   "a passing test named `writes_fail_with_no_space_left_on_device` must not
+   fail the suite". Removing the exclusion left the selftest **green**: a test
+   name cannot contain spaces, so `No space left on device` never matched it
+   in either direction. The control could not discriminate — the same defect
+   this document records for `zzz_no_such_route`. The check is now scoped to
+   the build preamble (everything before the first `Running` line, which is
+   cargo's own output because `cargo test` builds before it runs), and the
+   control is the *byte-identical* string moved to after that line.
+2. The remote wrapper's slug check asserted that `/a/b` and `/a/c` get
+   different slugs. Deleting the path hash left it **green** — those differ by
+   basename alone. The collision the hash exists for is *same basename,
+   different parent*, which is every lane worktree under `.worktrees/`. The
+   assertion now names that case.
+3. The clean-run control for "the disk check must not reject everything"
+   started at the `Running` line, so its build preamble was **empty**.
+   Mutating the check to flag every preamble line left the selftest green:
+   there were no lines to flag. The control now carries the ordinary
+   `Compiling` / `Finished` lines a real run has.
+
+A fourth, of a different kind and worth its own note: the preamble scoping was
+added and the selftest was NOT re-run before the mutation harness went off, so
+the harness reported `baseline not green` and nine mutation results were
+wasted. **Re-establish green after every change to the thing under test, before
+mutating it** — a mutation run against a red baseline measures nothing.
+
+A fifth, in git rather than in code, and the same shape as this document's
+`git pull` entry: a resolution script raised an `AssertionError` on a line
+number, and the `&&`-chained `git checkout --theirs .` after it ran anyway and
+overwrote four of this file's sections with the branch's own copy. Recovered by
+extracting the new section, `git checkout master -- <file>`, and appending.
+**Never chain a recovery command after a step that can fail on its own terms.**
+
+This is the operational half of "When the subject is an ABSENCE, the red run
+cannot validate the test", above. B106's subject is a gate that wrongly
+SUCCEEDS, so every assertion it can make has the form *the marker is absent* or
+*the gate refuses* — the exact shape that passes for free. Three of them did.
+The rule that found them is that entry's: **after a red run, mutation-test
+every test that passed**, and the transferable refinement is the one below.
+
+**The transferable rule.** A positive control has to be the negative case with
+ONE thing changed, and that one thing has to be the thing the guard reads. Both
+failures above were controls that differed from their negative case in some
+*other* respect as well, so they passed with the guard removed. Write the
+control by editing the negative input, not by writing a new one.
