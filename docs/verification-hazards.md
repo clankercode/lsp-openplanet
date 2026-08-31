@@ -3172,3 +3172,34 @@ decide whether constness was trustworthy. Right answer, wrong reason, and quietl
 wrong the moment a Core method arrives without constness or a Nadeo one with it.
 **Read the datum's own "I do not know" rather than inferring it from where the
 datum came from.**
+
+## A detector that cannot see the counterexample gives a confident wrong answer
+
+B129's inventory needed to know whether any in-source engine table is PRIMARY
+ground truth or merely a restatement of a corpus — the fact the whole design
+question turned on. A pipe-table detector found 9 tables, all restatements, and
+the lane was one step from reporting **"0 of 9 are primary."** Clean, decisive,
+and wrong.
+
+It only matched **markdown pipe tables**. Re-run over fenced doc-comment blocks
+it found `src/typecheck/interface_impl.rs:8` — five compile attempts with the
+engine's exact error strings, six prose bullets of measured behaviour, and a
+deliberate `NOT MEASURED` gap. Its own text says *"GROUND TRUTH is the measured
+table at the top of this module."*
+
+**The instrument could not represent the thing it was built to look for**, so its
+zero was a statement about the detector, not the repo — and a zero is exactly the
+result nobody interrogates, because it looks like a finished search.
+
+**The rule: before believing a survey's zero, ask what shape the instrument can
+see, and go find one instance BY HAND.** One confirmed positive, located
+independently, converts a zero from "nothing exists" to "nothing else exists".
+That is the same discipline as the exposure entry, applied to search rather than
+measurement.
+
+This is the fourth time in this batch that re-DERIVING caught what re-READING
+would have missed: a `cut -d/ -f2` that concentrated 53 plugins into 6, two fleet
+sweeps returning `0 dirs / 0 results` from a stray path and a missing `mapfile`, a
+grep matching a local variable of the same name and producing a whole ticket on a
+false premise, and now this. **Re-reading finds typos. Re-deriving finds wrong
+questions.**
