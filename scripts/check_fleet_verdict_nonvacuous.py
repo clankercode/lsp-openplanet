@@ -54,6 +54,20 @@ MUTATIONS = [
     ("B118 ch3: build_slice stops distinguishing 'never started'",
      "    if start is None:\n        return []",
      "    if start is None:\n        start = 0"),
+    # --- B128: the filtered reader must stay test-only --------------------
+    # The guard here is a static scan, so the mutation reintroduces the thing
+    # it guards against -- a real production caller -- rather than neutering
+    # the scan, which would only prove the suite notices its own absence.
+    ("B128: a production caller of the severity-filtered reader reappears, "
+     "which is how B118's three false-green channels come back",
+     "probe_enum_corpus.py",
+     "        window = fleet.read_log_window_raw(mark, PROBE_ID)",
+     "        window = fleet.read_log_window(mark, PROBE_ID)"),
+    ("B128 OVER-CONDEMN: the scan matches everything, so it would flag "
+     "docstrings and stubs and become an alarm nobody can satisfy",
+     '    needle = "fleet.read_log_window" + "("',
+     '    needle = "e"'),
+
     # The control that proves the harness is wired at all.
     ("control: own/foreign error attribution stops discriminating",
      '    game_errors = [d for d in errs if d["file"].startswith(mine)]',
@@ -72,8 +86,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="b127-mut-") as tmp:
         work = Path(tmp) / "wt"
         shutil.copytree(SRC / "scripts", work / "scripts")
-        target = work / "scripts" / "fleet_dogfood.py"
-        pristine = target.read_text()
+        targets = {
+            "fleet_dogfood.py": work / "scripts" / "fleet_dogfood.py",
+            "probe_enum_corpus.py": work / "scripts" / "probe_enum_corpus.py",
+        }
+        pristines = {k: v.read_text() for k, v in targets.items()}
 
         if run(work) != 0:
             print("BASELINE FAILED — mutations prove nothing", file=sys.stderr)
@@ -81,7 +98,11 @@ def main() -> int:
         print("baseline: PASS")
 
         caught = missed = 0
-        for label, old, new in MUTATIONS:
+        for mut in MUTATIONS:
+            # 4-tuples name a file; 3-tuples mean fleet_dogfood.py.
+            label, old, new = mut[0], mut[-2], mut[-1]
+            fname = mut[1] if len(mut) == 4 else "fleet_dogfood.py"
+            target, pristine = targets[fname], pristines[fname]
             if old not in pristine:
                 print(f"  ANCHOR MISSING: {label}", file=sys.stderr)
                 missed += 1

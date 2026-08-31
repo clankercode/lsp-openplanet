@@ -56,8 +56,10 @@ import fcntl
 import hashlib
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -144,6 +146,137 @@ def git_branch(root: Path) -> str:
         # A missing git, a detached worktree, anything at all: the banner must
         # never be the reason a build does not run.
         return "?"
+
+
+# An unresolved git operation, by the sentinel git itself writes. Ordered
+# most-specific first, because a stopped rebase has BOTH `REBASE_HEAD` and a
+# `rebase-merge/` directory and should be named once, as a rebase.
+#
+# `BISECT_LOG` is deliberately ABSENT. A bisect checks out real commits and
+# produces no conflict markers, so gating during one is a legitimate thing to
+# want; refusing there would be over-condemning, which costs a lane its whole
+# workflow to prevent a failure that cannot occur.
+GIT_OPERATION_SENTINELS = (
+    ("rebase-merge", "rebase"),
+    ("rebase-apply", "rebase"),
+    ("REBASE_HEAD", "rebase"),
+    ("MERGE_HEAD", "merge"),
+    ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("REVERT_HEAD", "revert"),
+)
+
+
+def git_dir_for(root: Path) -> Path | None:
+    """The gitdir for THIS tree, which for a worktree is not `root/.git`.
+
+    In a linked worktree `.git` is a FILE pointing elsewhere, and the
+    operation sentinels live in `.git/worktrees/<name>/`. That is the correct
+    scope and not merely an implementation detail: a merge running in the main
+    checkout must NOT stop a lane worktree from gating, and vice versa. Asking
+    git is what gets that right; joining `.git` by hand would either miss the
+    operation or attribute someone else's to you.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--absolute-git-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        return Path(out.stdout.strip())
+    except Exception:
+        return None
+
+
+def operation_in_progress(gitdir: Path | None) -> str | None:
+    """Name the unresolved git operation in this tree, or None.
+
+    Filesystem-only and takes the gitdir as an argument, so the selftest can
+    build real sentinels in a temp directory rather than mock git.
+    """
+    if gitdir is None:
+        return None
+    for name, label in GIT_OPERATION_SENTINELS:
+        if (gitdir / name).exists():
+            return label
+    return None
+
+
+def unmerged_paths(root: Path) -> list[str]:
+    """Files with conflict markers, per git's index. Never raises.
+
+    `--no-optional-locks` because this is a read on someone else's checkout: a
+    plain `git diff` can take `index.lock` when the index is stat-stale, which
+    races the very operation we are reporting on.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(root),
+             "diff", "--name-only", "--diff-filter=U"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode != 0:
+            return []
+        return [l for l in out.stdout.splitlines() if l.strip()]
+    except Exception:
+        return []
+
+
+def dirty_count(root: Path) -> int | None:
+    """How many paths differ from HEAD. `None` if it could not be determined."""
+    try:
+        out = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(root),
+             "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode != 0:
+            return None
+        return sum(1 for l in out.stdout.splitlines() if l.strip())
+    except Exception:
+        return None
+
+
+def unresolved_verdict(operation: str | None, unmerged: list[str]) -> str | None:
+    """The refusal message, or None to proceed. Pure, so it is testable.
+
+    REFUSES ON AN UNRESOLVED OPERATION, NEVER ON A DIRTY TREE. Gating
+    uncommitted work is the normal workflow here -- every lane does it on every
+    run -- so a guard that fired on dirty would be a far worse regression than
+    the defect it fixed. `operation is None` means proceed, however dirty.
+    """
+    if not operation:
+        return None
+    lines = [
+        f"the working tree has an unresolved {operation}, so gating it would "
+        f"measure conflict markers rather than your code.",
+    ]
+    if unmerged:
+        shown = unmerged[:10]
+        lines.append(f"\n  {len(unmerged)} unmerged file(s):")
+        lines.extend(f"    {p}" for p in shown)
+        if len(unmerged) > len(shown):
+            lines.append(f"    ... and {len(unmerged) - len(shown)} more")
+    else:
+        # A stopped rebase can have every conflict staged and still be
+        # unfinished. Say so rather than printing an empty list, which would
+        # read as "nothing is wrong".
+        lines.append(
+            f"\n  No files are currently unmerged, but the {operation} has not "
+            f"been finished, so HEAD is not what you think you are gating."
+        )
+    lines.append(
+        "\nThis gate rsyncs FILES, not commits. It cannot see the git index, so "
+        "`<<<<<<<` reaches the compiler as syntax and comes back as an error IN "
+        "YOUR CODE -- which is the wrong diagnosis and has cost real time. In a "
+        "shared checkout the operation may belong to ANOTHER SESSION."
+    )
+    lines.append(
+        f"\nFinish or abort it (`git {operation} --continue` / "
+        f"`git {operation} --abort`), or gate a different worktree. "
+        "Pass --allow-unresolved to gate the tree exactly as it sits."
+    )
+    return "\n".join(lines)
 
 
 def slug_for(root: Path) -> str:
@@ -563,14 +696,214 @@ def run_selftest() -> int:
             "build box would no longer say which lane owns which tree"
         )
 
+    # --- B132: an unresolved operation is not a code defect ---------------
+    # The gate rsyncs FILES and cannot see the git index, so a conflicted tree
+    # arrives at the compiler as syntax. The verdict was already correct (B083
+    # refused a zero-unit run); the DIAGNOSIS said "your code does not
+    # compile" when the truth was "another session is mid-merge in your
+    # checkout".
+    #
+    # THE REFUSAL AND THE PROCEED CASES CARRY EQUAL WEIGHT HERE. Gating
+    # uncommitted work is the normal lane workflow, so a guard that fired on a
+    # dirty tree would break every lane -- a worse regression than the defect.
+    # Each case below is therefore a PAIR.
+    for op in ("merge", "rebase", "cherry-pick", "revert"):
+        msg = unresolved_verdict(op, ["src/a.rs"])
+        if not msg:
+            problems.append(f"an unresolved {op} was not refused")
+            continue
+        if op not in msg:
+            problems.append(f"the {op} refusal does not name the operation")
+        # The whole point of the ticket: say WHICH files.
+        if "src/a.rs" not in msg:
+            problems.append(
+                f"the {op} refusal does not name the unmerged files, which is "
+                f"the part that turns the worst diagnostic into the clearest"
+            )
+        if "ANOTHER SESSION" not in msg:
+            problems.append(
+                f"the {op} refusal does not mention that the operation may "
+                f"belong to another session -- the shared-checkout case is how "
+                f"this was found"
+            )
+    # The proceed half. A guard that refuses everything satisfies every check
+    # above and destroys the workflow, so these are not optional.
+    if unresolved_verdict(None, []) is not None:
+        problems.append("a clean tree was refused")
+    if unresolved_verdict(None, ["src/a.rs", "src/b.rs"]) is not None:
+        problems.append(
+            "a DIRTY tree with no operation in progress was refused — gating "
+            "uncommitted work is the normal lane workflow and refusing it "
+            "would break every lane"
+        )
+    # A stopped rebase can have every conflict staged and still be unfinished,
+    # so an empty unmerged list must not read as 'nothing is wrong'.
+    staged = unresolved_verdict("rebase", [])
+    if not staged or "has not been finished" not in staged:
+        problems.append(
+            "an unresolved operation with NO unmerged files was not refused, "
+            "or did not explain why it still matters"
+        )
+
+    # `operation_in_progress` against real sentinel names, in a temp gitdir.
+    with tempfile.TemporaryDirectory(prefix="b132-") as tmp:
+        gd = Path(tmp)
+        if operation_in_progress(gd) is not None:
+            problems.append("an empty gitdir reported an operation in progress")
+        if operation_in_progress(None) is not None:
+            problems.append("a missing gitdir reported an operation in progress")
+        for name, label in GIT_OPERATION_SENTINELS:
+            marker = gd / name
+            marker.mkdir() if name.startswith("rebase-") else marker.write_text("x")
+            got = operation_in_progress(gd)
+            if got != label:
+                problems.append(f"sentinel {name} reported {got!r}, want {label!r}")
+            shutil.rmtree(marker) if marker.is_dir() else marker.unlink()
+        # The loop above iterates GIT_OPERATION_SENTINELS, so it proves each
+        # entry WORKS and nothing at all about which entries EXIST -- delete
+        # `CHERRY_PICK_HEAD` from the table and that loop still passes, having
+        # simply stopped testing it. A test that derives its expectations from
+        # the thing under test cannot see an omission. So the required
+        # operations are named HERE, by the filename git actually writes,
+        # independent of the table.
+        for filename, want in (
+            ("MERGE_HEAD", "merge"),
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+            ("REVERT_HEAD", "revert"),
+            ("REBASE_HEAD", "rebase"),
+        ):
+            marker = gd / filename
+            marker.write_text("x")
+            got = operation_in_progress(gd)
+            marker.unlink()
+            if got != want:
+                problems.append(
+                    f"git writes {filename} for an unresolved {want}, but the "
+                    f"probe reported {got!r} — that operation would be gated "
+                    f"with conflict markers in the tree"
+                )
+        for dirname in ("rebase-merge", "rebase-apply"):
+            marker = gd / dirname
+            marker.mkdir()
+            got = operation_in_progress(gd)
+            shutil.rmtree(marker)
+            if got != "rebase":
+                problems.append(
+                    f"git writes {dirname}/ during a rebase, but the probe "
+                    f"reported {got!r}"
+                )
+
+        # Deliberate NON-sentinel: a bisect checks out real commits and cannot
+        # produce a conflict marker, so refusing during one would be
+        # over-condemning. This pins the exclusion so nobody "completes" the
+        # list later without noticing it costs a legitimate workflow.
+        (gd / "BISECT_LOG").write_text("x")
+        if operation_in_progress(gd) is not None:
+            problems.append(
+                "a bisect was treated as an unresolved operation — it produces "
+                "no conflict markers, so gating during one is legitimate"
+            )
+
+    # THE WIRING. Every case above tests the decision; none of them proves
+    # `main` ASKS. This runs the real entry point against a genuinely
+    # conflicted repository and requires it to refuse BEFORE any ssh — which
+    # is the ticket's actual claim: a tree with conflict markers must not
+    # reach the remote. Offline: the guard fires before the first ssh, and the
+    # host is an RFC 2606 `.invalid` name that cannot resolve either way.
+    with tempfile.TemporaryDirectory(prefix="b132-wire-") as tmp:
+        repo = Path(tmp) / "r"
+        repo.mkdir()
+
+        def git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+            return subprocess.run(["git", "-C", str(repo), *args],
+                                  capture_output=True, text=True,
+                                  check=False, timeout=30)
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "selftest@example.invalid")
+        git("config", "user.name", "selftest")
+        (repo / "f.rs").write_text("base\n")
+        git("add", "f.rs")
+        git("commit", "-qm", "base")
+        git("checkout", "-qb", "other")
+        (repo / "f.rs").write_text("theirs\n")
+        git("commit", "-qam", "theirs")
+        git("checkout", "-q", "main")
+        (repo / "f.rs").write_text("ours\n")
+        git("commit", "-qam", "ours")
+        git("merge", "other")
+        if "<<<<<<<" not in (repo / "f.rs").read_text():
+            problems.append(
+                "the wiring fixture did not actually conflict, so it proves "
+                "nothing about a conflicted tree"
+            )
+        else:
+            proc = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "check",
+                 "--host", "no-such-host.invalid"],
+                cwd=repo, capture_output=True, text=True, timeout=120,
+            )
+            blob = proc.stdout + proc.stderr
+            if "unresolved merge" not in blob:
+                problems.append(
+                    "main() did not refuse a conflicted tree — the guard is "
+                    f"not wired into the entry point (got: {blob.strip()[:200]!r})"
+                )
+            if "f.rs" not in blob:
+                problems.append("the refusal from main() did not name f.rs")
+            # It must refuse BEFORE contacting the remote; the banner is
+            # printed only once the run is under way.
+            if "remote-build: no-such-host.invalid" in blob:
+                problems.append(
+                    "main() reached the remote phase despite the conflict"
+                )
+            # THE PROPERTY THAT KEEPS THIS GUARD FROM BLOCKING EVERY LANE.
+            # Operation state is PER-WORKTREE: a merge running in the main
+            # checkout lives in `.git/`, while a linked worktree's lives in
+            # `.git/worktrees/<name>/`. Resolving the gitdir by hand as
+            # `root/.git` would attribute the coordinator's merge to every lane
+            # and stop all of them at once -- turning a diagnostic fix into an
+            # outage. Asking git is what gets this right, and this is what
+            # proves it still does.
+            wt = Path(tmp) / "wt"
+            git("worktree", "add", "-q", "-b", "lane", str(wt))
+            if wt.is_dir():
+                proc_wt = subprocess.run(
+                    [sys.executable, str(Path(__file__).resolve()), "check",
+                     "--host", "no-such-host.invalid"],
+                    cwd=wt, capture_output=True, text=True, timeout=120,
+                )
+                if "unresolved merge" in (proc_wt.stdout + proc_wt.stderr):
+                    problems.append(
+                        "a linked worktree was refused because the MAIN "
+                        "checkout is mid-merge — operation state is "
+                        "per-worktree, and conflating them would stop every "
+                        "lane whenever the coordinator merges"
+                    )
+
+            # PAIR: the same repo, same command, with the merge aborted, must
+            # get PAST this guard. Without it the wiring check above is
+            # satisfied by a main() that refuses unconditionally.
+            git("merge", "--abort")
+            proc2 = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "check",
+                 "--host", "no-such-host.invalid"],
+                cwd=repo, capture_output=True, text=True, timeout=120,
+            )
+            if "unresolved merge" in (proc2.stdout + proc2.stderr):
+                problems.append(
+                    "main() still refused after the merge was aborted — the "
+                    "guard fires on a clean tree"
+                )
+
     if problems:
         print("FAIL: remote-build self-test", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         return 1
     print("PASS: remote-build guards — $HOME spelling, disk floor, df parsing,\n"
-          "flag order and slug isolation each reject the bad case and accept\n"
-          "the good one.")
+          "flag order, slug isolation and the unresolved-operation probe each\n"
+          "reject the bad case and accept the good one.")
     return 0
 
 
@@ -614,6 +947,9 @@ def main() -> int:
                          "or $LSP_REMOTE_DISK_FLOOR_GB)")
     ap.add_argument("--allow-low-disk", action="store_true",
                     help="skip the free-space pre-flight (B106)")
+    ap.add_argument("--allow-unresolved", action="store_true",
+                    help="gate the tree even with an unresolved merge/rebase/"
+                         "cherry-pick in progress (B132)")
     a = ap.parse_args()
     if not (a.host or "").strip():
         die("--host / $LSP_REMOTE_HOST is empty. An empty host is not a host: "
@@ -651,6 +987,22 @@ def main() -> int:
     if a.action == "shell":
         os.execvp("ssh", ["ssh", "-t", a.host,
                           f"cd {remote_src} 2>/dev/null || cd $HOME; exec bash -l"])
+
+    # B132, and deliberately BEFORE the lock and before any ssh: this is a
+    # local read that costs nothing, and the condition it catches makes every
+    # later step meaningless. Skipped under --no-sync, where this run copies
+    # nothing and so cannot carry a conflict marker to the remote.
+    #
+    # Placed after the `clean` and `shell` early-returns on purpose: neither
+    # syncs source, and refusing to open a shell or delete a remote tree
+    # because a merge is in progress would be exactly the over-condemning this
+    # guard has to avoid.
+    if not a.no_sync and not a.allow_unresolved:
+        refusal = unresolved_verdict(
+            operation_in_progress(git_dir_for(root)), unmerged_paths(root)
+        )
+        if refusal:
+            die(refusal)
 
     with RemoteLock(slug):
         rc, cores = capture_ssh(a.host, "nproc")
@@ -736,8 +1088,15 @@ def main() -> int:
         #
         # The branch is not opaque. A lane knows it is on `lane/enum`, so
         # seeing `master` here is unmissable in a way a differing hash is not.
-        print(f"remote-build: {a.host} [{slug}] branch={git_branch(root)} "
-              f"j={jobs} :: {cmd}", file=sys.stderr)
+        # `dirty=N` rides the line the operator already reads. A separate
+        # WARNING would fire on essentially every lane run -- gating
+        # uncommitted work is the normal workflow -- and a warning that is
+        # always on is one nobody reads. As a field on the banner it costs no
+        # line and still answers "am I gating what I think I am?".
+        nd = dirty_count(root)
+        dirty = "" if nd is None else (f" dirty={nd}" if nd else "")
+        print(f"remote-build: {a.host} [{slug}] branch={git_branch(root)}"
+              f"{dirty} j={jobs} :: {cmd}", file=sys.stderr)
         t0 = time.monotonic()
         rc = run_ssh(a.host, script)
         status, note = exit_status(rc)
