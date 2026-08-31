@@ -2495,3 +2495,40 @@ and it survives being passed between people while the evidence does not. A
 report worth filing on is one that says what was MEASURED; "I noticed X" is a
 lead. This document's other entries all end with a measurement, and this ticket
 is what the file looks like when one is missing.
+
+## A shared status file is a stale baseline with a plausible number in it
+
+`docs/BATCH-STATE.md` carried `2745` while master was at `2802`. The gap was 57
+tests from another session's B103 and B104, merged in the interval.
+
+Two lanes hit it on the same night, and the failure is worse than "an old number
+in a doc":
+
+- **lane-enum (B081)** would have reconciled `2745 + 5` and reported `2750`
+  against a measured `2807`. The arithmetic is right and the conclusion is
+  garbage.
+- **lane-resolver (B096)** would have compared a probe run against `2745` and
+  seen a delta of `+57` for a change that touched only Python and docs.
+
+**The sharp edge is the direction of the error.** A stale base makes a REAL
+delta look like noise and makes NO delta look like a real change, and it does it
+while every downstream step behaves impeccably. The reconciliation ritual this
+batch relies on — old total + N new tests = new total, exactly — is what caught
+the moved master both times, but only because both lanes had been told to gate
+first and reconcile against **what they measured**, not against what they read.
+
+**The rule: a number written by another process at another time is a hint, not a
+baseline.** Gate before you write code, and reconcile against your own measured
+base. The gate costs 30-60s on x-alpha. A false null costs a night.
+
+The status file now says so in its first paragraph, above the numbers, because a
+warning printed after the figure it qualifies is a warning nobody reads.
+
+**The general shape, which is not specific to test counts:** any artifact that
+records a measurement taken elsewhere is only as good as the interval since it
+was written, and nothing in the artifact itself reveals that interval has
+elapsed. This is the same defect as the stale clippy baseline, the same defect
+as `game_route`'s docstring promising behaviour its own branch condition could
+no longer deliver, and the same defect as a comment saying "before the fix". In
+every case the text was TRUE when written and stayed plausible after it stopped
+being true.
