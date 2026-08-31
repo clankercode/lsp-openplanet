@@ -242,15 +242,31 @@ def reconcile(exit_code: int, lines: list[str], expected: dict[str, str]) -> tup
         )
         return 0, "\n".join(report)
 
-    # Deliberately NOT phrased as "N passed": a fragment must not match the
-    # shape a gate greps for. See VERIFIED_MARKER above.
-    report.append(
-        f"==> INCOMPLETE RUN: {len(reported_paths)} of {len(expected)} binaries "
-        f"reported. The counts below are a fragment, not a total."
-    )
-    report.append(f"    fragment: {passed} pass / {failed} fail / {ignored} ignored")
+    # Two different bad outcomes, and calling them both "incomplete" would be
+    # wrong: a suite where every binary reported and some tests FAILED is
+    # complete and red, which is the ordinary case a lane sees while working.
+    # Only a run missing binaries is a fragment.
+    #
+    # Neither branch prints the "N passed" shape a summing gate matches, and
+    # neither prints VERIFIED_MARKER. See VERIFIED_MARKER above.
+    if started_without_summary or missing:
+        report.append(
+            f"==> INCOMPLETE RUN: {len(reported_paths)} of {len(expected)} binaries "
+            f"reported. The counts below are a fragment, not a total."
+        )
+        report.append(f"    fragment: {passed} pass / {failed} fail / {ignored} ignored")
+    else:
+        report.append(
+            f"==> COMPLETE RUN, RED: all {len(expected)} binaries reported, "
+            f"{len(sections)} sections"
+        )
+        report.append(f"    {passed} pass / {failed} fail / {ignored} ignored")
     report.append("")
-    report.append("FAIL: this run did not produce a trustworthy total.")
+    report.append(
+        "FAIL: this run did not produce a trustworthy total."
+        if (started_without_summary or missing)
+        else "FAIL: the run was complete, but tests failed."
+    )
     for problem in problems:
         report.append(f"  - {problem}")
     report.append("")
@@ -321,6 +337,28 @@ def run_selftest() -> int:
     # a binary cargo never reached must name it. The extra entry is synthetic
     # because staging it for real would mean running an unrelated `#[ignore]`d
     # binary, several of which need a live game (B068).
+    # A COMPLETE run whose tests merely failed must not be called incomplete —
+    # that is the ordinary red suite a lane sees while working, and mislabelling
+    # it teaches people to ignore the word. It must still withhold the marker.
+    # Synthetic input, because producing it for real would mean committing a
+    # failing test.
+    example = "/deps/example-0000000000000000"
+    complete_red = [
+        f"     Running tests/example.rs ({example})",
+        "test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; "
+        "0 filtered out; finished in 0.01s",
+    ]
+    red_status, red_report = reconcile(101, complete_red, {example: "example"})
+    if red_status == 0:
+        problems.append("a run with failing tests was accepted as green")
+    if "INCOMPLETE" in red_report:
+        problems.append(
+            "a complete run whose tests failed was labelled INCOMPLETE — the word "
+            "no longer distinguishes a truncated run from a red one"
+        )
+    if VERIFIED_MARKER in red_report:
+        problems.append(f"a run with failing tests printed `{VERIFIED_MARKER}`")
+
     never_reached = dict(canary)
     never_reached["/nonexistent/deps/never_reached-0000000000000000"] = "never_reached"
     stop_status, stop_report = reconcile(exit_code, lines, never_reached)
