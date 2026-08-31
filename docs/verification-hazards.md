@@ -806,6 +806,37 @@ indistinguishable from "I am structurally incapable of seeing it".
     suite run and costs the ability to attribute a failure — and here it also
     created the window in which a stale artifact could be believed.
 
+- **A ticket's preferred fix was already implemented, and inert.** B062 asked
+  for "whole-file rooting: exempt declarations in a manifest `exports` file",
+  and deprioritised signature matching as the fallback. A lane checked before
+  building and found whole-file rooting **already exists** — and is a **no-op
+  for this defect**, because the manifest-named file contains only
+  `import … from` stubs while the declarations needing rooting are bodies in
+  ordinary files.
+
+  So the ticket's picture of the defect was wrong, and its preferred remedy
+  could not have worked. Both errors came from the same assumption — that the
+  exports file holds implementations — which the repo's **own fixture**
+  explicitly contradicts: *"the strict export file carries ONLY import
+  declarations … Bodies live in ordinary source files."*
+
+  **The failure this avoided is specific: implementing something already
+  present, finding no behaviour change, and concluding the analysis needs
+  widening.** The natural next move after an inert fix is to make it less
+  precise, which here would have exempted whole files that should not be —
+  turning a false-positive ticket into a false-negative one. A wrong diagnosis
+  does not merely waste the fix; **it aims the next fix in the wrong
+  direction.**
+
+  Two checks did the work, both cheap and both skippable: reading the existing
+  implementation before adding to it, and reading the repo's own fixture
+  comments, which had recorded the correct model all along. **A ticket is a
+  report of a symptom by someone who did not have to make it work.** Its
+  proposed remedy is a hypothesis with no more standing than the reporter's
+  understanding of the subsystem — which is exactly the "Work section as
+  hypothesis, not specification" rule, applied one level up to the *diagnosis*
+  rather than the fix.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
