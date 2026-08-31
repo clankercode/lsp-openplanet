@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T09:02:13Z"
 depends_on: []
 estimate_hours: 1
 id: B098
 priority: high
+started_at: null
 status: pending
 tags: []
 title: external_enum_by_short_name resolves a bare call-form reference to a namespaced engine enum, which the game rejects
@@ -24,3 +26,85 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by lane-enum while implementing B071, on master, INDEPENDENT of B071.
+Left unfixed deliberately: removing the path is a scope decision with its own
+blast radius, and B071 only needed the workspace-wins half.
+
+## Defect
+
+`Axis(1)`, with nothing named `Axis` in the workspace, resolves to the Core
+enum `UI::Plot::Axis` via `GlobalScope::external_enum_by_short_name`.
+
+The game rejects exactly that spelling:
+
+    Identifier 'Axis' is not a data type in global namespace
+
+**436 engine enum names are reachable this way.**
+
+## Why this path survived
+
+`resolve_unqualified` was ALREADY fixed for this — B056 — and it deliberately
+excludes enums. `external_enum_by_short_name` is the surviving path that still
+does it, and it is reached from exactly one place: `checker.rs`, the
+Ident-callee arm.
+
+So this is the same defect class B056 closed, at a second call site that the
+fix did not reach. That is now the third instance in this batch of a check
+existing at one of N sites — B076 (a correct check reached from one of four
+initializer positions), B073 (`awaitable` hardcoded in a second path beside
+`lookup_funcdef`), and this. Worth stating as a pattern rather than three
+coincidences: **when a rule is fixed in a resolver, grep for every other
+function that answers the same question, because the codebase reaches these
+questions from more places than the ticket names.**
+
+## Evidence it is real and currently the ONLY such delta
+
+lane-enum ran a base-vs-branch sweep over **151 real plugins** in
+`~/src/openplanet/my-plugins`. Before B071 the sweep showed exactly ONE delta —
+this false positive. After B071 it is zero, because B071's workspace-wins guard
+happens to mask it wherever a workspace type exists. **The masking is
+incidental, not a fix**: the false positive survives for any bare call-form use
+of one of the 436 names where the workspace declares nothing of that name.
+
+Same shape as B084, where B062's export rooting masked a crediting defect: a
+clean gate is not evidence of a clean rule.
+
+## Work
+
+Decide whether `external_enum_by_short_name` should exclude enums the way
+`resolve_unqualified` already does, or whether the Ident-callee arm should stop
+consulting it. Either is a real scope decision — 436 names is a wide surface and
+the direction of change ADDS diagnostics, which is the direction that creates
+false positives if the reasoning is wrong.
+
+## Test plan
+
+Red: `Axis(1)` with an empty workspace must diagnose.
+
+Generalise per CLAUDE.md — the 436 names are not homogeneous: cover a Core enum
+nested in a namespace (`UI::Plot::Axis`), a Core enum at global scope, a Nadeo
+enum under a class scope, and the same spellings in NON-call position, since
+this path is specifically the Ident-CALLEE arm and the value position may
+already behave.
+
+Required silences in the same fixture: a genuinely global engine enum used bare
+must still resolve; a workspace type of the same short name must still win
+(B071's guard); and a correctly qualified `UI::Plot::Axis(1)` must still work.
+
+## GAME PROBE REQUIRED, AND CURRENTLY IMPOSSIBLE
+
+The `Identifier 'Axis' is not a data type in global namespace` verdict above
+came from the documented rule in `resolve_unqualified` (B056's measurement), NOT
+from a fresh probe. Before anyone changes behaviour over 436 names, re-measure —
+and note that **all game probing in this repo is blocked by B097** (RemoteBuild
+cannot deliver a `load_plugin` payload at all). Do not treat B056's recorded
+verdict as a substitute for measuring this specific spelling in call position;
+that is exactly the "cited as evidence for something nobody measured" failure
+B086 exists for.
+
+## Related
+
+B056 (fixed the same class in `resolve_unqualified`), B071 (whose guard
+incidentally masks this), B076 / B073 (the same one-of-N-call-sites pattern),
+B097 (blocks the probe), B086 (why the recorded verdict is not enough).
