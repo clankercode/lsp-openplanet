@@ -2207,39 +2207,36 @@ impl<'a> GlobalScope<'a> {
     ///
     /// `Some(true)` when ANY overload of the name is const: on a const
     /// receiver the engine selects a const overload if one exists, so one
-    /// const declaration makes the call legal.
+    /// const declaration makes the call legal. Virtual-property accessors
+    /// contribute under their stripped spelling too, and are aggregated with
+    /// a directly named method; this is the retired sidecar's name-keyed
+    /// behavior. B116 intentionally shares this answer across files, keeping
+    /// its cross-file verdict aligned with the same-file rule.
     pub fn workspace_own_method_is_const(&self, class_name: &str, method: &str) -> Option<bool> {
         let owner = self.normalize_workspace_class_name(class_name);
-        // The method as written, then — only if no method of that exact
-        // name exists — its virtual-property spelling. `index_file_classes`
-        // registers `get_V`/`set_V` under the property name `V` too and
-        // marks the property const from the accessor's own qualifier; this
-        // mirrors that, so the two surfaces agree on `p.V()`.
-        for candidates in [
-            vec![format!("{owner}::{method}")],
-            vec![
-                format!("{owner}::get_{method}"),
-                format!("{owner}::set_{method}"),
-            ],
-        ] {
-            let mut found = false;
-            let mut any_const = false;
-            for qualified in &candidates {
-                for s in self.lookup_workspace(qualified) {
-                    // B114: the qualifier moved from `SymbolKind::Function`
-                    // onto `Symbol::modifiers`, so there is ONE home for
-                    // every declaration modifier rather than one per kind.
-                    if matches!(s.kind, SymbolKind::Function { .. }) {
-                        found = true;
-                        any_const |= s.modifiers.is_const;
-                    }
+        // `index_file_classes` inserted a const `get_V`/`set_V` under `V`
+        // even when a direct `V` existed. Keep all three spellings in one
+        // candidate set: name-keyed constness is true iff any declaration is
+        // const, not whichever spelling happens to be found first.
+        let candidates = [
+            format!("{owner}::{method}"),
+            format!("{owner}::get_{method}"),
+            format!("{owner}::set_{method}"),
+        ];
+        let mut found = false;
+        let mut any_const = false;
+        for qualified in &candidates {
+            for s in self.lookup_workspace(qualified) {
+                // B114: the qualifier moved from `SymbolKind::Function`
+                // onto `Symbol::modifiers`, so there is ONE home for every
+                // declaration modifier rather than one per kind.
+                if matches!(s.kind, SymbolKind::Function { .. }) {
+                    found = true;
+                    any_const |= s.modifiers.is_const;
                 }
             }
-            if found {
-                return Some(any_const);
-            }
         }
-        None
+        found.then_some(any_const)
     }
 
     pub fn workspace_class_member(&self, class_name: &str, member: &str) -> Option<TypeRepr> {

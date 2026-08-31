@@ -14074,6 +14074,45 @@ mod b116_cross_file_const_receiver_tests {
         );
     }
 
+    /// B114: constness is keyed by the name a call uses, just like the
+    /// retired same-file sidecar. A virtual-property accessor therefore
+    /// contributes under both `get_V`/`set_V` and its stripped `V` name.
+    ///
+    /// State the cases as same-file/cross-file pairs: B116 deliberately uses
+    /// this same pooled question, so a collision must not change its verdict
+    /// merely because the declaration moved to a sibling file.
+    #[test]
+    fn b114_accessor_names_and_direct_collisions_preserve_name_keyed_constness() {
+        let accessor = "class P { int _v; int get_V() const { return _v; } }";
+        let collision = "class C { void M() {} int get_M() const { return 1; } }";
+        let setter_collision = "class S { void M() {} void set_M() const {} }";
+        let no_const_match = "class N { void M() {} int get_M() { return 1; } }";
+
+        for (class, receiver, call, want, label) in [
+            (accessor, "P", "p.V()", 0, "stripped const getter"),
+            (collision, "C", "c.M()", 0, "direct/accessor const collision"),
+            (setter_collision, "S", "s.M()", 0, "direct/setter const collision"),
+            (no_const_match, "N", "n.M()", 1, "direct/accessor all non-const"),
+        ] {
+            let var = receiver.to_ascii_lowercase();
+            let body = format!("void f(const {receiver}@ {var}) {{ {call}; }}");
+            let same = check_ws(&format!("{class} {body}"), &[], None);
+            let split = check_ws(&body, &[class], None);
+            assert_eq!(
+                fired(&same),
+                want,
+                "same-file {label} expected {want}, got {:?}",
+                same
+            );
+            assert_eq!(
+                fired(&split),
+                want,
+                "cross-file {label} expected {want}, got {:?}",
+                split
+            );
+        }
+    }
+
     /// THE FALSE-POSITIVE GUARD, and the reason B116 is its own ticket.
     /// An ENGINE type has no const-qualifier metadata in the typedb —
     /// `lookup_method_return`'s own comment concedes it — so widening the
