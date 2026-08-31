@@ -59,3 +59,5 @@ consumed the disk protects the report but not the box.
 
 Related: B164 (a stale baseline binary the sweep guard cannot see), B106 (the
 original ENOSPC false green and the 10 GiB floor).
+
+Decision 2026-09-01: serial tooling lane after B164 because both change scripts/remote-build.py and remote-tree lifecycle. First enumerate remote trees and map them to extant local worktrees; no shared-host deletion occurs until the coordinator confirms the orphan set. Then add a durable teardown/reclaim path and prove the disk-floor preflight runs before build/sync.
