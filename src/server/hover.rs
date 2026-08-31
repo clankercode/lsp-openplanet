@@ -93,8 +93,9 @@ pub fn hover(
             if let Some(ty) = checked.type_at_offset(offset) {
                 if is_field_name(analysis, offset, &bare) {
                     let md = fence(&format!(
-                        "(field) {}:{} {}",
+                        "(field) {}:{}{} {}",
                         class_name_at(analysis, offset),
+                        enclosing_member_visibility(analysis, offset, &bare),
                         ty.display(),
                         bare
                     ));
@@ -136,7 +137,13 @@ pub fn hover(
         if let Some(cls) = scope_query::find_enclosing_class(file, offset) {
             if let Some(ty_text) = scope_query::class_member_type(cls, source, &bare) {
                 let cls_name = cls.name.text(source);
-                let md = fence(&format!("(field) {}::{}: {}", cls_name, bare, ty_text));
+                let md = fence(&format!(
+                    "(field) {}::{}: {}{}",
+                    cls_name,
+                    bare,
+                    enclosing_member_visibility(analysis, offset, &bare),
+                    ty_text
+                ));
                 return Some(markdown_hover(md));
             }
         }
@@ -308,6 +315,97 @@ fn render_params(params: &[HoverParam]) -> String {
 }
 
 /// `rt Name(params)`, with an empty return type rendered as `void`.
+/// B135: the visibility keyword for a hover signature, or `""`.
+///
+/// # The decision, and it is a decision rather than an oversight
+///
+/// B117 taught member COMPLETION to hide `private` and `protected` members at
+/// access sites where the engine refuses them. The obvious follow-up is "do the
+/// same in hover", and that is wrong. The two features have different jobs and
+/// the same flag does not mean the same thing in both:
+///
+/// * Completion PROPOSES. Offering a member the engine will refuse wastes the
+///   user's time and produces code that does not compile, so hiding it is a
+///   service.
+/// * Hover EXPLAINS a symbol the user is already pointing at, in source they
+///   can already see. Suppressing it answers a question they did not ask and
+///   withholds the one they did. It is also actively unhelpful in the exact
+///   case that matters: a user hovers a member precisely BECAUSE they cannot
+///   use it and want to know why.
+///
+/// So hover never suppresses. It ANNOTATES, which is strictly additive: the
+/// visibility keyword was not rendered anywhere before this, so a private field
+/// and a public one hovered identically and the user had no way to learn the
+/// difference short of opening the declaration.
+///
+/// Engine members always render without a keyword, and that is a measured bound
+/// rather than a default: B131 found the typedb carries NO visibility data at
+/// all (0 of 1002 methods in the 1.29.5 fixture, 0 of 975 in 1.29.14, the
+/// strings absent from both dumps). There is nothing to annotate them with, and
+/// nothing to go looking for.
+/// B135: the visibility keyword for a member named `bare` on the class the
+/// cursor sits inside, read from the AST.
+///
+/// The implicit-`this` hover paths resolve a bare name against the enclosing
+/// class without ever consulting the pool, so they need their own source of
+/// the keyword. Reading the AST keeps all three field-rendering paths agreeing
+/// — a private field must not hover as private through `c.mem` and as public
+/// through a bare `mem` in the same class, which is exactly what happened
+/// while only the pooled path was annotated.
+fn enclosing_member_visibility(
+    analysis: &DocumentAnalysis,
+    offset: u32,
+    bare: &str,
+) -> &'static str {
+    use crate::parser::ast::ClassMember;
+    let source = analysis.masked_source();
+    let Some(cls) = scope_query::find_enclosing_class(&analysis.file, offset) else {
+        return "";
+    };
+    for m in &cls.members {
+        let (is_private, is_protected) = match m {
+            ClassMember::Field(v) => {
+                if !v.declarators.iter().any(|d| d.name.text(source) == bare) {
+                    continue;
+                }
+                (v.is_private, v.is_protected)
+            }
+            ClassMember::Method(f) | ClassMember::Constructor(f) | ClassMember::Destructor(f) => {
+                if f.name.text(source) != bare {
+                    continue;
+                }
+                (f.is_private, f.is_protected)
+            }
+            ClassMember::Property(pr) => {
+                if pr.name.text(source) != bare {
+                    continue;
+                }
+                (pr.is_private, pr.is_protected)
+            }
+        };
+        return if is_private {
+            "private "
+        } else if is_protected {
+            "protected "
+        } else {
+            ""
+        };
+    }
+    ""
+}
+
+fn visibility_keyword(modifiers: &crate::symbols::scope::DeclModifiers) -> &'static str {
+    // The parser takes the first keyword it sees and never sets both, so this
+    // is a choice rather than a combination.
+    if modifiers.is_private {
+        "private "
+    } else if modifiers.is_protected {
+        "protected "
+    } else {
+        ""
+    }
+}
+
 fn signature(return_type: &str, name: &str, params: &[HoverParam]) -> String {
     let rt = return_type.trim();
     let rt = if rt.is_empty() { "void" } else { rt };
@@ -448,7 +546,13 @@ fn workspace_function_sig(sym: &Symbol, prefix: Option<&str>) -> Option<HoverSig
         return None;
     };
     let rendered = workspace_params(params, *min_args);
-    let mut text = signature(return_type, &sym.name, &rendered);
+    // B135: the visibility keyword leads the signature, so the line reads the
+    // way the member was declared.
+    let mut text = format!(
+        "{}{}",
+        visibility_keyword(&sym.modifiers),
+        signature(return_type, &sym.name, &rendered)
+    );
     if let Some(prefix) = prefix {
         text = format!("{} {}", prefix, text);
     }
@@ -482,7 +586,15 @@ fn format_workspace_symbol(sym: &Symbol) -> Option<String> {
             } else {
                 type_name.as_str()
             };
-            fence(&format!("{} {}", ty, sym.name))
+            // B135: a class FIELD reached through this path carries its
+            // visibility too. A file-scope variable and a local always render
+            // without a keyword, because neither can carry one.
+            fence(&format!(
+                "{}{} {}",
+                visibility_keyword(&sym.modifiers),
+                ty,
+                sym.name
+            ))
         }
         SymbolKind::Class { parents, .. } => {
             let mut s = format!("class {}", sym.name);
@@ -637,7 +749,12 @@ fn field_member_hover(scope: &GlobalScope<'_>, owner: &str, member: &str) -> Opt
         type_name.as_str()
     };
     Some(with_doc(
-        fence(&format!("(field) {} {}", ty, sym.name)),
+        fence(&format!(
+            "(field) {}{} {}",
+            visibility_keyword(&sym.modifiers),
+            ty,
+            sym.name
+        )),
         sym.doc.as_ref(),
     ))
 }
@@ -1132,7 +1249,7 @@ mod tests {
     }
 
     /// Hover through the production path: checked view present, no typedb.
-    fn hover_checked(src: &str, needle: &str, occurrence: usize) -> String {
+    pub(super) fn hover_checked(src: &str, needle: &str, occurrence: usize) -> String {
         let tw = TestWorkspace::one_file("hover.as", src);
         let scope = tw.scope();
         let checked = tw
@@ -1144,7 +1261,7 @@ mod tests {
     }
 
     /// Hover with no checked view — exercises the workspace formatter.
-    fn hover_plain(src: &str, needle: &str, occurrence: usize) -> String {
+    pub(super) fn hover_plain(src: &str, needle: &str, occurrence: usize) -> String {
         let tw = TestWorkspace::one_file("hover.as", src);
         let scope = tw.scope();
         let pos = pos_of(src, needle, occurrence);
@@ -2774,6 +2891,153 @@ mod tests {
         assert!(
             !md.contains("get_Thing"),
             "a real global must never hover as an accessor, got {md:?}"
+        );
+    }
+}
+
+// ── B135: hover ANNOTATES visibility, and never suppresses ──────────────────
+//
+// B117 taught member completion to HIDE private and protected members where
+// the engine refuses them. Hover deliberately reaches the opposite conclusion,
+// and these tests exist so the difference stays a decision rather than drifting
+// into an inconsistency somebody "fixes".
+//
+// Completion PROPOSES code to write; hover EXPLAINS a symbol the user is
+// already pointing at, in source they can already see. The case that matters
+// most is a user hovering a member precisely BECAUSE they cannot use it.
+//
+// The annotation is strictly additive: before this, a private field and a
+// public one hovered identically.
+#[cfg(test)]
+mod b135_hover_visibility_tests {
+    use super::tests::{hover_checked, hover_plain};
+
+    /// Hover must still PRODUCE something for a private member.
+    ///
+    /// # What this pins, and what it does NOT
+    ///
+    /// It pins that SOMETHING renders, which is real and is what makes the
+    /// content assertions below evidence rather than vacuous. It does NOT
+    /// prove the member-specific path is intact: mutation testing showed this
+    /// test stays green when `field_member_hover` is made to suppress private
+    /// fields, because `hover` falls back to another path that still renders a
+    /// type and a name. A suppression bug could therefore hide here.
+    ///
+    /// `a_private_member_hovers_from_every_access_site` is the row that
+    /// actually catches suppression, because it additionally requires the
+    /// annotation — and it DID fail under that mutation. Recorded rather than
+    /// left implied, so nobody reads this test as a stronger guarantee than it
+    /// gives.
+    #[test]
+    fn hover_on_a_private_member_still_renders() {
+        let src = "class C {\n  private int mem;\n}\nvoid f(C@ c) { c.mem = 1; }";
+        let md = hover_checked(src, "mem", 2);
+        assert!(md.contains("mem"), "hover must not be suppressed: {md:?}");
+        assert!(md.contains("int"), "and must keep the type: {md:?}");
+    }
+
+    #[test]
+    fn a_private_field_hover_names_its_visibility() {
+        let src = "class C {\n  private int mem;\n}\nvoid f(C@ c) { c.mem = 1; }";
+        let md = hover_checked(src, "mem", 2);
+        assert!(md.contains("private"), "expected `private` in {md:?}");
+    }
+
+    #[test]
+    fn a_protected_field_hover_names_its_visibility() {
+        let src = "class C {\n  protected int mem;\n}\nvoid f(C@ c) { c.mem = 1; }";
+        let md = hover_checked(src, "mem", 2);
+        assert!(md.contains("protected"), "expected `protected` in {md:?}");
+        assert!(
+            !md.contains("private"),
+            "protected must not render as private: {md:?}"
+        );
+    }
+
+    /// The default, pinned rather than assumed — and the row that stops an
+    /// implementation from annotating everything.
+    #[test]
+    fn a_public_field_hover_names_no_visibility() {
+        let src = "class C {\n  int mem;\n}\nvoid f(C@ c) { c.mem = 1; }";
+        let md = hover_checked(src, "mem", 2);
+        assert!(md.contains("mem"), "still renders: {md:?}");
+        assert!(!md.contains("private"), "no keyword expected: {md:?}");
+        assert!(!md.contains("protected"), "no keyword expected: {md:?}");
+    }
+
+    /// `private` and `protected` must be DISTINGUISHABLE, stated as a
+    /// difference. This is the mutation B117 flagged as the one a suite
+    /// without a derived-class site would miss, and it applies here too: an
+    /// implementation that renders one keyword for "not public" passes every
+    /// test above and fails this one.
+    #[test]
+    fn private_and_protected_hovers_differ() {
+        let priv_md = hover_checked(
+            "class C {\n  private int mem;\n}\nvoid f(C@ c) { c.mem = 1; }",
+            "mem",
+            2,
+        );
+        let prot_md = hover_checked(
+            "class C {\n  protected int mem;\n}\nvoid f(C@ c) { c.mem = 1; }",
+            "mem",
+            2,
+        );
+        assert_ne!(
+            priv_md, prot_md,
+            "the two keywords must not render identically"
+        );
+    }
+
+    #[test]
+    fn a_private_method_hover_names_its_visibility() {
+        let src = "class C {\n  private void M(int a) {}\n}\nvoid f(C@ c) { c.M(1); }";
+        let md = hover_checked(src, "M", 2);
+        assert!(md.contains("private"), "expected `private` in {md:?}");
+        assert!(md.contains("int a"), "and the parameters survive: {md:?}");
+    }
+
+    #[test]
+    fn a_protected_method_hover_names_its_visibility() {
+        let src = "class C {\n  protected void M(int a) {}\n}\nvoid f(C@ c) { c.M(1); }";
+        let md = hover_checked(src, "M", 2);
+        assert!(md.contains("protected"), "expected `protected` in {md:?}");
+    }
+
+    /// Hover is offered at EVERY access site, including the ones completion
+    /// hides at. That is the whole decision, so it is stated directly rather
+    /// than left implied by the single-site tests above.
+    #[test]
+    fn a_private_member_hovers_from_every_access_site() {
+        let sites = [
+            // inside the declaring class
+            "class C {\n  private int mem;\n  void T() { mem = 1; }\n}",
+            // inside a derived class, where completion hides it
+            "class C {\n  private int mem;\n}\nclass D : C {\n  void T(C@ c) { c.mem = 1; }\n}",
+            // an unrelated function, where completion hides it
+            "class C {\n  private int mem;\n}\nvoid f(C@ c) { c.mem = 1; }",
+        ];
+        for src in sites {
+            let md = hover_checked(src, "mem", 2);
+            assert!(
+                md.contains("mem") && md.contains("private"),
+                "hover must render everywhere; source `{src}` gave {md:?}"
+            );
+        }
+    }
+
+    /// A file-scope variable cannot carry visibility in the language, so it
+    /// must never acquire a keyword. Without this row, annotating the shared
+    /// `Variable` rendering path would silently mislabel globals.
+    #[test]
+    fn a_file_scope_variable_is_never_annotated() {
+        let md = hover_plain("int g = 1;\nvoid f() { g = 2; }", "g", 2);
+        assert!(
+            !md.contains("private"),
+            "a global has no visibility: {md:?}"
+        );
+        assert!(
+            !md.contains("protected"),
+            "a global has no visibility: {md:?}"
         );
     }
 }

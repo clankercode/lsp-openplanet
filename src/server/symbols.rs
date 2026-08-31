@@ -8,6 +8,30 @@ use crate::server::diagnostics::span_to_range;
 use crate::symbols::scope::SymbolKind as InternalSymbolKind;
 use crate::symbols::SymbolTable;
 
+/// B135: the visibility keyword for an outline entry's `detail`, or `None`.
+///
+/// # The decision
+///
+/// The document outline SHOWS every member, including `private` ones, and
+/// annotates rather than filters. An outline is a map of the file the user
+/// already has open: hiding a declaration that is plainly visible three lines
+/// away misrepresents the file rather than protecting anyone. That is the
+/// opposite conclusion from B117's completion filter, and deliberately so —
+/// completion PROPOSES code to write, an outline DESCRIBES code that exists.
+///
+/// `detail` was `None` on every entry before this, so the annotation is purely
+/// additive; nothing that was rendered before renders differently.
+fn visibility_detail(is_private: bool, is_protected: bool) -> Option<String> {
+    // The parser takes the first keyword it sees and never sets both.
+    if is_private {
+        Some("private".to_string())
+    } else if is_protected {
+        Some("protected".to_string())
+    } else {
+        None
+    }
+}
+
 pub fn document_symbols(analysis: &DocumentAnalysis) -> Option<DocumentSymbolResponse> {
     // Names and ranges come from the masked AST; masking preserves byte
     // offsets, so span→text/line mapping via the masked source is exact.
@@ -48,7 +72,7 @@ fn item_to_symbol(item: &Item, source: &str) -> Option<DocumentSymbol> {
                         for decl in &var.declarators {
                             children.push(DocumentSymbol {
                                 name: decl.name.text(source).to_string(),
-                                detail: None,
+                                detail: visibility_detail(var.is_private, var.is_protected),
                                 kind: SymbolKind::FIELD,
                                 range: span_to_range(source, var.span),
                                 selection_range: span_to_range(source, decl.name.span),
@@ -61,7 +85,7 @@ fn item_to_symbol(item: &Item, source: &str) -> Option<DocumentSymbol> {
                     ClassMember::Method(func) => {
                         children.push(DocumentSymbol {
                             name: func.name.text(source).to_string(),
-                            detail: None,
+                            detail: visibility_detail(func.is_private, func.is_protected),
                             kind: SymbolKind::METHOD,
                             range: span_to_range(source, func.span),
                             selection_range: span_to_range(source, func.name.span),
@@ -73,7 +97,7 @@ fn item_to_symbol(item: &Item, source: &str) -> Option<DocumentSymbol> {
                     ClassMember::Constructor(func) => {
                         children.push(DocumentSymbol {
                             name: func.name.text(source).to_string(),
-                            detail: None,
+                            detail: visibility_detail(func.is_private, func.is_protected),
                             kind: SymbolKind::CONSTRUCTOR,
                             range: span_to_range(source, func.span),
                             selection_range: span_to_range(source, func.name.span),
@@ -85,7 +109,7 @@ fn item_to_symbol(item: &Item, source: &str) -> Option<DocumentSymbol> {
                     ClassMember::Destructor(func) => {
                         children.push(DocumentSymbol {
                             name: func.name.text(source).to_string(),
-                            detail: None,
+                            detail: visibility_detail(func.is_private, func.is_protected),
                             kind: SymbolKind::METHOD,
                             range: span_to_range(source, func.span),
                             selection_range: span_to_range(source, func.name.span),
@@ -97,7 +121,7 @@ fn item_to_symbol(item: &Item, source: &str) -> Option<DocumentSymbol> {
                     ClassMember::Property(prop) => {
                         children.push(DocumentSymbol {
                             name: prop.name.text(source).to_string(),
-                            detail: None,
+                            detail: visibility_detail(prop.is_private, prop.is_protected),
                             kind: SymbolKind::PROPERTY,
                             range: span_to_range(source, prop.span),
                             selection_range: span_to_range(source, prop.name.span),
@@ -255,7 +279,7 @@ mod tests {
     use super::*;
     use crate::parser::ast::SourceFile;
 
-    fn doc_symbols(src: &str) -> Vec<DocumentSymbol> {
+    pub(super) fn doc_symbols(src: &str) -> Vec<DocumentSymbol> {
         let analysis = DocumentAnalysis::analyze_plain(src);
         match document_symbols(&analysis) {
             Some(DocumentSymbolResponse::Nested(v)) => v,
@@ -379,5 +403,88 @@ mod tests {
             .map(|s| s.name.clone())
             .collect();
         assert!(names.contains(&"Ns::I::Go".to_string()), "got {names:?}");
+    }
+}
+
+// ── B135: the outline SHOWS every member and annotates it ───────────────────
+//
+// The opposite conclusion from B117's completion filter, deliberately. An
+// outline is a map of the file the user already has open; hiding a declaration
+// that is plainly visible a few lines away misrepresents the file rather than
+// protecting anyone. Completion proposes code to write, an outline describes
+// code that exists.
+#[cfg(test)]
+mod b135_outline_visibility_tests {
+    use super::tests::doc_symbols;
+
+    fn member<'a>(syms: &'a [super::DocumentSymbol], name: &str) -> &'a super::DocumentSymbol {
+        syms[0]
+            .children
+            .as_ref()
+            .expect("class children")
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no outline entry for `{name}`"))
+    }
+
+    const SRC: &str = "class C { private int privF; protected int protF; int pubF; \
+        private void privM() {} protected void protM() {} void pubM() {} \
+        private int privP { get { return 1; } } }";
+
+    /// The load-bearing negative control: nothing is HIDDEN. Every assertion
+    /// about `detail` below would pass vacuously against an outline that had
+    /// dropped the entry entirely.
+    #[test]
+    fn every_member_appears_in_the_outline_whatever_its_visibility() {
+        let syms = doc_symbols(SRC);
+        let children = syms[0].children.as_ref().expect("class children");
+        for name in ["privF", "protF", "pubF", "privM", "protM", "pubM", "privP"] {
+            assert!(
+                children.iter().any(|c| c.name == name),
+                "`{name}` must appear in the outline, got {:?}",
+                children.iter().map(|c| &c.name).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_private_member_is_annotated_private() {
+        let syms = doc_symbols(SRC);
+        assert_eq!(member(&syms, "privF").detail.as_deref(), Some("private"));
+        assert_eq!(member(&syms, "privM").detail.as_deref(), Some("private"));
+        assert_eq!(member(&syms, "privP").detail.as_deref(), Some("private"));
+    }
+
+    #[test]
+    fn a_protected_member_is_annotated_protected() {
+        let syms = doc_symbols(SRC);
+        assert_eq!(member(&syms, "protF").detail.as_deref(), Some("protected"));
+        assert_eq!(member(&syms, "protM").detail.as_deref(), Some("protected"));
+    }
+
+    /// The default, pinned. Also the row that stops an implementation from
+    /// annotating everything.
+    #[test]
+    fn a_public_member_carries_no_annotation() {
+        let syms = doc_symbols(SRC);
+        assert_eq!(member(&syms, "pubF").detail, None);
+        assert_eq!(member(&syms, "pubM").detail, None);
+    }
+
+    /// Stated as a difference, so an implementation rendering one "not public"
+    /// label passes everything above and fails here.
+    #[test]
+    fn private_and_protected_annotations_differ() {
+        let syms = doc_symbols(SRC);
+        assert_ne!(member(&syms, "privM").detail, member(&syms, "protM").detail);
+    }
+
+    /// A private CONSTRUCTOR is a real pattern (a factory-only class) and the
+    /// engine enforces it — B117 measured `Illegal call to private method` on
+    /// one called from an unrelated function. It must still be outlined.
+    #[test]
+    fn a_private_constructor_is_outlined_and_annotated() {
+        let syms = doc_symbols("class C { private C() {} }");
+        assert_eq!(member(&syms, "C").detail.as_deref(), Some("private"));
     }
 }
