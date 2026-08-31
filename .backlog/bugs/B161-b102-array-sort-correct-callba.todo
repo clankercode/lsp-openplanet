@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T17:03:07Z"
 depends_on: []
 estimate_hours: 1
 id: B161
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'b102-array-sort-correct-callbacks does not compile: the engine rejects all three comparators the fixture calls correct, and the LSP is silent on every one'
@@ -12,3 +14,41 @@ updated_at: "2026-08-31T17:03:07Z"
 ---
 
 b102-array-sort-correct-callbacks does not compile: the engine rejects all three comparators the fixture calls correct, and the LSP is silent on every one
+
+Found by lane-resolver while building B145's engine-verdict corpus, measured live
+against Openplanet 1.29.14. This is not a corpus bookkeeping detail — it is a
+false negative in the checker, and the fixture's own name asserts the opposite.
+
+WHAT WAS MEASURED
+  tests/fixtures/issue-repros/b102-array-sort-correct-callbacks/
+  Engine verdict: REJECTED. All three comparators the fixture labels "correct"
+  fail to compile in the real engine.
+  LSP verdict: silent on all three. Zero diagnostics.
+
+So the fixture is misnamed, AND we agree with a spelling the engine refuses.
+B145's corpus is what made this visible: nothing else in the suite compares our
+verdict against the engine's on this fixture, and a fixture asserting "no
+diagnostics expected" passes forever whether or not the code is legal.
+
+WHY THIS IS B144's FAMILY
+  B145's ticket called this pair B144's natural first entry, and it is. B144 was
+  the checker demanding a spelling the engine rejects (Json::Value@ const parsed
+  as a Named type equal to nothing). This is the mirror: the checker ACCEPTING a
+  spelling the engine rejects. Same seam — the array-sort / Less callback
+  binding — opposite polarity.
+
+  Whoever takes this must establish the engine's actual rule for a sort
+  comparator's parameter binding before changing anything, from the engine's own
+  messages, not from what the fixture assumed. Do not fix the fixture to match
+  the checker. Do not fix the checker to match the fixture. Get the engine's
+  answer first and let it decide which of the two is wrong — quite possibly both.
+
+RISK POLARITY
+  Making this diagnose ADDS errors to real plugins, same inverted polarity as
+  B152. A fleet sweep with EXPOSURE reported is mandatory: a zero-difference
+  sweep proves nothing here unless it also reports how many plugins contain a
+  sort callback at all. See docs/verification-hazards.md, "Design the instrument
+  to report EXPOSURE, or a zero is uninterpretable".
+
+DEPENDS ON B145 being merged (the corpus and its verdict column are the
+evidence). Assign to lane-const, which owns the B144/B152 const-exactness seam.
