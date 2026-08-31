@@ -175,6 +175,12 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **An explicit `openplanet_dir` was silently replaced by the variant probe**
+  (B066) — the guard deciding whether to re-probe was always true, so a
+  directory you set explicitly in config was overwritten by whatever the probe
+  found. The setting is now honoured. Provenance is recorded rather than
+  inferred by comparing values, so an explicit path that happens to equal the
+  default survives too.
 - **Namespace-shortcut completion offered raw storage keys** (B069) — for a
   configured Nadeo module the shortcut surface listed the internal storage key
   instead of the spelling that appears in source, so accepting a completion
