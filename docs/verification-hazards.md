@@ -2769,3 +2769,28 @@ must give 1, run before trusting any 0.
 
 **Never accept a negative result from an instrument you have not seen produce a
 positive one.**
+
+## The pipe-eats-the-status trap applies to your EVIDENCE, not only to your gates
+
+lane-enum caught itself checking "are my files fmt-clean?" with
+
+    grep ... | sort -u; echo $?
+
+which reads `sort`'s exit status, not `grep`'s. Same mechanism as the piped-gate
+hazard already in this catalogue. It re-ran with `grep -c` and got a real answer.
+
+**The reason this deserves its own entry is that it is QUIETER.** A piped gate at
+least gets read as a gate; someone eventually asks whether that green was real. A
+piped *verification step* produces a number you then cite as evidence in a
+report, and nothing anywhere goes red. The lie propagates into the writeup, into
+the merge decision, and into whatever the next lane builds on it.
+
+This is now the fourth context in which the same mechanism has bitten this batch:
+gates (`| tail` destroying the exit code), discovery (`grep | head` cutting off
+the real process), a fleet sweep (zsh missing `mapfile`, yielding `0 results`),
+and now evidence-gathering.
+
+**The rule is not "do not pipe gates".** It is: **any command whose output or
+status you are about to draw a conclusion from must not be piped, truncated, or
+have its status read through another process.** Gate, probe, sanity check, or
+one-off — the mechanism does not care which you called it.
