@@ -3989,3 +3989,77 @@ filter. Advice to "put the flag before the `--`" would send the reader in a
 circle. The verdict therefore distinguishes a misplaced cargo selector
 (`just rrun cargo test --test <name>`) from a plain misspelling, because the
 two have different fixes and one of them cannot be stated correctly by guessing.
+
+---
+
+## A sentinel needs the two-sided fact, and the test that pinned it down pinned the wrong half (B169)
+
+`remote-build.py` refuses to gate a tree with an unresolved git operation,
+because the gate rsyncs *files* and cannot see the index, so `<<<<<<<` reaches
+the compiler as syntax and returns as an error in your code. Correct guard,
+real defect, and it worked for merge, cherry-pick and revert.
+
+It listed `REBASE_HEAD` as the rebase sentinel. Git does write that file during
+a rebase — the stated premise was **true** — and git also **leaves it behind
+when the rebase succeeds**. So the guard fired on a clean tree. Measured, one
+throwaway repo per operation, conflicted and then resolved:
+
+    op            mid-conflict                  survives resolution
+    merge         MERGE_HEAD                    --
+    cherry-pick   CHERRY_PICK_HEAD              --
+    revert        REVERT_HEAD                   --
+    rebase        REBASE_HEAD, rebase-merge/    REBASE_HEAD
+
+**The property a sentinel needs is two-sided: git writes it during the
+operation AND removes it on resolution.** Presence-only is not evidence of
+anything. Three of the four files satisfy both halves, which is why the bug
+stayed invisible: the wrong rule and the right rule agree on 75% of the table,
+and the disagreeing case is the one this repo's workflow runs constantly.
+
+It fires exactly where it costs most. Rebase-then-re-gate is the mandated lane
+workflow, so the refusal landed on the lane that had just resolved a conflict
+and was doing the right thing — and it *named* a rebase that git itself called
+`fatal: no rebase in progress`. A guard that is right about the general danger
+can still be wrong about the specific signal, and it will look authoritative
+while it is.
+
+### The omission guard encoded the defect
+
+The selftest already knew the shape of this problem. Its sentinel loop iterates
+the table, so it proves each entry *works* and nothing about which entries
+*exist* — delete one and the loop passes, having stopped testing it. Whoever
+wrote it saw that and hardcoded the required operations separately, by hand,
+independent of the table. Right instinct.
+
+They hardcoded them **by the filename git writes** — the one-sided fact. So the
+test asserted `REBASE_HEAD` must map to `"rebase"`, which is precisely the bug,
+and any correct fix failed the suite. The protection worked perfectly; it was
+aimed at a wrong fact, and its strength became the strength of the lock.
+
+**Fix the fact, keep the independence.** All four operations are still required
+by hand, so an omission is still caught, but rebase is required through
+`rebase-merge/` / `rebase-apply/` — sentinels that clear — and `REBASE_HEAD`
+moved to an explicit exclusion pin next to the existing `BISECT_LOG` one. A
+future "the list is missing REBASE_HEAD" fix now has to delete a named,
+explained pin rather than fill a silent gap. The generalisation: when a
+hardcoded expectation blocks a fix, the choice is not "obey it" or "delete it"
+— restate it over the corrected premise, and it goes on protecting.
+
+### The red and the green are not enough on their own
+
+Removing `REBASE_HEAD` makes the false refusal stop, and so does deleting the
+guard. The two are indistinguishable without a **positive control on a
+genuinely mid-conflict tree**, which must still be refused. Both were run
+against real repositories, not synthesised gitdirs: mid-conflict returned
+`'rebase'`, post-resolution returned `None` with `REBASE_HEAD` still on disk.
+
+### Remediation advice must be followable through the documented entry point
+
+The refusal said "pass `--allow-unresolved`". It is a `remote-build.py` flag and
+flags go before the action, so `just rtest --allow-unresolved` forwards it to
+libtest and reprints the same refusal — handing the reader a second instance of
+the fault instead of a way out. Same failure as B162's `--test`, one layer up.
+The verdict now prints `python3 scripts/remote-build.py --allow-unresolved test`
+verbatim and says why it cannot go through `just`. **An instruction a reader
+cannot execute is not a remedy; check yours against the entry point they were
+told to use, not the one you happen to be typing in.**
