@@ -248,3 +248,94 @@ not an unanalysed file — the negative control returned rc=1
 So the implementer starts from: five confirmed missing diagnostics, one row
 closed as correct-silence, the engine's exact wording for each message, and a
 fixture set that is already known to be non-vacuous.
+
+## GAME PROBE — ground truth, measured 2026-08-31 (lane-b060-b062)
+
+**This supersedes the ticket's UNVERIFIED expectation. Write the fix against
+this table, not against the prose above.** Ten cases, each its OWN compilation
+unit (never batched — B068), controls in their own units, run against the
+engine and then the same ten through the LSP at master `a17a991`.
+
+| case | ENGINE | LSP | verdict |
+|---|---|---|---|
+| `ctl-pos` trivially valid | ACCEPT | ACCEPT | both harnesses sound |
+| `ctl-neg` unknown type | REJECT | REJECT | both harnesses sound |
+| `engine-reachable` `EGhostNameLogoType::None` | ACCEPT | ACCEPT | premise holds |
+| `engine-cross` two engine enums | **REJECT** | ACCEPT | **MISSING** |
+| `workspace-cross` two workspace enums | **REJECT** | ACCEPT | **MISSING** |
+| `bad-value-workspace` | **REJECT** | ACCEPT | **MISSING** |
+| `bad-value-engine` | **REJECT** | ACCEPT | **MISSING** |
+| `enum-to-int` `int i = LocalOne::X` | ACCEPT | ACCEPT | **MUST STAY SILENT** |
+| `int-to-enum` `LocalOne e = 5` | **REJECT** | ACCEPT | **MISSING — not in this ticket** |
+| `enum-arith` `LocalOne::X + LocalTwo::Y` | ACCEPT | ACCEPT | **MUST STAY SILENT** |
+
+Engine messages, verbatim:
+
+    Can't implicitly convert from 'EDummyCollectionIdent' to 'EGhostNameLogoType'.
+    Can't implicitly convert from 'LocalOne' to 'LocalTwo'.
+    No matching symbol 'LocalOne::NoSuchValueZZZ'
+    Can't implicitly convert from 'int' to 'LocalOne'.
+
+All five REJECTs are the trustworthy direction — an ACCEPT on this machine can
+leak from another installed plugin, a REJECT cannot. The two ACCEPTs that
+matter (`enum-to-int`, `enum-arith`) are sound anyway: nothing in those units
+resolves through a foreign namespace and the enums are declared in the fixture.
+Both controls behaved on both sides, so neither harness was silently broken.
+
+## Three things the probe changes
+
+**1. The surface is larger than this ticket states.** `int -> enum` is rejected
+by the engine and silent in the LSP, and is not mentioned above. **The
+asymmetry is the whole point: enum -> int is ACCEPTED, int -> enum is
+REJECTED.** A fix written as "enums and ints are interchangeable" gets one of
+them backwards whichever way it guesses — structurally the same trap as B061's
+crossed pair.
+
+**2. Two boundaries a naive fix would break.** `enum-to-int` and cross-enum
+ARITHMETIC are both accepted by the engine and **must stay silent**; two
+different enum types in one arithmetic expression is fine because both decay to
+int. So the fix scopes to **assignment/initialisation compatibility**, NOT to
+"two enum types appearing in one expression". Without those two pinned as
+required-silent, a plausible implementation ships false errors on code the game
+compiles.
+
+**3. This ticket's own repro line is wrong and would have misled the
+implementer.** It uses `EDummyCollectionIdent::Undefined`; the typedb says that
+enum's only value is `Dummy`. So that line fails for **bad value**, not for
+**cross-enum assignment** — two different defects, both on this ticket's list,
+and anyone reproducing it verbatim would have got a REJECT and attributed it to
+the wrong cause. The probe used `EDummyCollectionIdent::Dummy` to isolate the
+cross-enum question.
+
+Also checked because everything else depended on it: both engine enums are
+**member-scoped** in the dump (nested under `CGameGhost`), yet `engine-reachable`
+shows they are usable as bare global type names.
+
+## ACCEPTANCE CRITERION (coordinator, supersedes the Test plan above)
+
+**Six required diagnostics** — the four originally claimed, plus `int -> enum`,
+plus the engine bad-value case — **and two required silences**: `enum -> int`
+and cross-enum arithmetic.
+
+The silences are the over-firing gate and **must live in the same fixture as
+the errors**, so "just flag any enum type mismatch" cannot pass. Same
+construction as `TrulyDead` in B062.
+
+## Implementation warning (lane-b064, from B076)
+
+**Do not simply extend `check_init_conversion`.** It is called from **exactly
+one** of the four initializer positions — `check_var_decl_local` only. Not
+globals, not class fields, not assignments. That asymmetry is exactly what B076
+turned out to be: a correct check reached from one position while three others
+were silently unchecked. A fix landing there covers local variables only and
+the identical bug class reappears one ticket later.
+
+Prefer a sibling method with the same signature, called from all four
+positions; a shared dispatcher is a THIRD step once both behaviours are pinned,
+not something folded into either fix.
+
+Second trap from the same lane: a regression test that runs with
+`type_index: None` has no engine enum to resolve, so it asserts silence and
+gets silence **from a code path that never executed**. `EDummyCollectionIdent`
+only exists with a typedb loaded. Load the fixture typedb and add an
+anti-vacuity control proving the engine enum IS live.
