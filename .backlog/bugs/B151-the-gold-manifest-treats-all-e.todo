@@ -102,3 +102,52 @@ The classification is cheap; the data is not currently in a state to act on it:
 
 **Restamp and re-measure before adding a retention policy**, or the policy will
 be applied to labels nobody has verified.
+
+
+## AMENDMENT from B148's regeneration, 2026-09-01 — the split has a hybrid the two labels do not cover
+
+lane-unused regenerated both orphan corpora at 1.29.14 and hit a case that
+breaks the clean SURFACE/SEMANTICS division:
+
+**`b067-class-position-scopes.tsv` is a HYBRID.** It measures a **language rule**
+— can a class name qualify a type? — over an enumeration of **41 game class
+names**. A game update removing `CGxLightBall` changes a row for a SURFACE
+reason, inside an artifact classified SEMANTICS.
+
+So the question the design has to answer is: **is `volatility` per-artifact, or
+per-column?**
+
+The same question is raised independently by B144's new `engine_messages`
+column — the manifest's column set is already growing per-artifact, so the shape
+"one label for the whole file" may be wrong for more than this one row.
+
+## The middle case fired on the FIRST regeneration, exactly as predicted
+
+`b071-enum-conversion.tsv`: **3 WORDING-CHANGED, 0 behaviour changes.** The
+engine now names an assignment target as a reference — `to 'VirtualKey'` is today
+`to 'VirtualKey&'`.
+
+That is B151's message-text case occurring in the wild on its first run, and the
+lane's `INSTRUMENT-BROKEN`-first ordering handled it correctly. It confirms the
+mechanism is needed, and it also shows the mechanism is not sufficient for the
+b067 hybrid above.
+
+**And it was not read as confirming the preamble.** The competing explanation —
+that the reconstructed fixture differed from the original, since the `fixture`
+column is abbreviated rather than literal source — was tested and ruled out by
+probing init / assign / argument shapes before any conclusion was drawn.
+
+## The other regeneration result, for the record
+
+**`b067`: byte-identical at 1.29.14. 63/63 SAME, 22/22 controls passed.** So the
+`1.29.5 / 1234ad9e` stamp was mislabelled and **nothing drawn from those 63 rows
+is wrong.** A second result rides along free: the committed corpus measured its
+41 SAMPLE rows in one B068-unsafe batch, and re-measured one-per-compilation-unit
+they are unchanged — so that batch was not silently corrupt.
+
+## Still true, and still the precondition
+
+5 of the manifest's rows carry `engine_version=UNKNOWN`, and
+`tests/fixtures/typedb` — the SURFACE artifact most in need of per-version
+history — remains stamped 1.29.5 while the live engine is 1.29.14. **Restamp
+before applying a retention policy to labels nobody has verified.**
