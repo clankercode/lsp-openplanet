@@ -2963,3 +2963,34 @@ session did not run `merge --abort`, `checkout` or `reset` on a merge it did not
 start, and the peer announced a bounded, pre-announced hold-gates window for its
 retry. **In a shared checkout, the index belongs to whoever started the
 operation.** Abort is not a cleanup command when the mess is someone else's.
+
+## A test that derives its expectations from the thing under test cannot see an omission
+
+Two shapes from B132, both written by the lane that had authored the mutation
+rule two tickets earlier, and both invisible by inspection:
+
+**1. The whole test block was unreachable.** ~120 lines of assertions landed
+below an early `if problems: return 1`, appending to a list nothing read. The
+mutation harness scored **0/10 against a green baseline** — and that signature is
+worth recognising on its own: *everything missed while the baseline passes* means
+the assertions are never REACHED, as opposed to the usual one or two guards that
+run but cannot discriminate.
+
+**2. The sentinel loop iterated the constant under test.** The test walked
+`GIT_OPERATION_SENTINELS` to decide what to check. Deleting `CHERRY_PICK_HEAD`
+from that list did not fail the suite — **it just stopped testing it.** The suite
+happily verified whatever remained.
+
+**The general rule: a test that derives its expectations from the thing under
+test can detect a MALFUNCTION but never an OMISSION.** It answers "does what is
+listed work?" when the question was "is the list complete?". The fix is to assert
+against an external authority — here, the filenames git itself writes.
+
+This is the same family as the `read_log_window` deletion caught in B128: removing
+the function left both mutation harnesses still scoring their revert-to-filtered
+mutations as CAUGHT, but caught by an `AttributeError` at import rather than by
+the guard. **A quiet downgrade into a crash-detector reports a full score while
+one mutation has silently stopped testing anything.** A loud break would have
+been fine.
+
+**Watch for the score that stays perfect while the thing being scored changes.**
