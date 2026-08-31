@@ -2003,3 +2003,74 @@ breakage, only by a working system telling the truth.
 
 The corollary for reviewers: **reconcile the total, do not just read the word.**
 2601 + 15 = 2616 is the check. `SUITE-VERIFIED` on its own is a word.
+
+## A partial instrument looks exactly like a clean result
+
+Found by lane-unused during B099, self-reported, and distinct from the pipe
+mistake though they landed in the same session.
+
+It grepped a clippy log that was **still being written**, counted 4 warnings,
+and nearly reported "only 4 warnings, all pre-existing". The finished run had
+**79**.
+
+**Why this is nastier than a truncation.** The output was not corrupted and not
+visibly cut off. It was just *smaller* — and for a warning count, smaller is
+exactly what a good result looks like. There is no shape to the wrong answer
+that distinguishes it from the right one. Compare a crashed test binary, which
+produces no summary line and is therefore loud.
+
+Same family as two earlier entries; it now has three members:
+
+- reading a log mid-write (this one)
+- `grep -i oom` matching `r-oom-s` in an unrelated service name, producing a
+  confident report of OOM kills that never happened
+- `head -6` / `| tail -6` over a result set whose interesting rows were outside
+  the window
+
+In every case the instrument answered a question **narrower than the one being
+asked**, and the narrow answer was well-formed.
+
+**The countermeasure that worked, and it beats "wait longer".** Waiting is
+unfalsifiable — you cannot tell from the output whether you waited enough. The
+lane compared warning **distributions** between two *complete* runs: same 79
+warnings, same 25 files, none in the touched lines. That is a differential, and
+a differential cannot be satisfied by an instrument that simply had less to say,
+because "less" moves the two sides apart.
+
+**Generalisation.** When a measurement's failure mode is *fewer rows*, an
+absolute count cannot detect it and no amount of care in reading it will. Reach
+for a comparison against a second complete measurement, or a number that must
+reconcile against an independent one — the same principle the suite gate relies
+on. A pass that must RECONCILE is expensive to forge; a pass that is merely a
+small number is free.
+
+## Never `git pull` in this repository — I did, and it rewrote 782 commits
+
+My own mistake, same session, recorded because the recovery is not obvious and
+the next agent will be tempted by the same reflex.
+
+Other sessions commit to this master **in the same local checkout**, not through
+a remote. `origin` is a GitHub repo that is **782 commits behind**. So `git pull
+--rebase`, run reflexively to "catch up" before committing, does not sync
+anything — it begins replaying the entire local history onto a months-old
+`origin/master`, starting from commits as old as B023. It conflicted on
+`tests/cli_check_tests.rs` immediately.
+
+**The compounding error was mine and worth naming separately:** I had chained
+`git pull --rebase --quiet 2>/dev/null` with `&& git add -A && git commit` in a
+single command. `--quiet` and the `2>/dev/null` hid the conflict, and the
+unconditional `git add -A` then committed a file containing `<<<<<<<` markers as
+though it were my documentation change. Two habits that are individually
+harmless — silencing a command's chatter, and staging everything — combined into
+committing a broken tree under a message that described something else entirely.
+
+Recovery, which was clean: `git rebase --abort` restored the pre-pull HEAD
+exactly, markers and all gone, tree clean. Nothing was lost except the commit I
+had just made, which was trivially re-applied.
+
+**Rules.**
+- Do not `git pull` here. To pick up another session's work, it is already in
+  your checkout; in a worktree use `git rebase master`.
+- Never silence a command whose failure should stop the chain, and never follow
+  a merge/rebase with an unconditional `git add -A`. Check for markers first —
+  `git status` reports `both modified`, and `git diff --check` finds them.
