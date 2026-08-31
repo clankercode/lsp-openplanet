@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T17:17:42Z"
 depends_on: []
 estimate_hours: 1
 id: B164
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'remote-build.py can silently produce a stale baseline binary: run from a lane worktree, the master build is the pre-rebase artefact, and the sweep guard cannot see it because base != fixed is still true'
@@ -12,3 +14,49 @@ updated_at: "2026-08-31T17:17:42Z"
 ---
 
 remote-build.py can silently produce a stale baseline binary: run from a lane worktree, the master build is the pre-rebase artefact, and the sweep guard cannot see it because base != fixed is still true
+
+NEAR-MISS, self-reported by lane-const during B152's post-rebase sweep
+(2026-09-01). Caught before it produced a wrong result, but only by an ad-hoc
+observation the tooling does not make.
+
+WHAT HAPPENED. The first post-rebase master build produced a binary with the
+IDENTICAL hash to the pre-rebase one, because `remote-build.py` was run from the
+LANE's directory for both builds -- so "master" was the stale pre-rebase
+artefact. Rebuilt from the main checkout, the hash changed.
+
+WHY THE EXISTING GUARD CANNOT SEE IT. The fleet sweep asserts `base != fixed`.
+That was still TRUE: a stale base and a fresh fixed differ perfectly well. The
+guard is checking that two binaries are different, which is not the same claim as
+either of them being the right binary. An A/B comparison against a stale baseline
+attributes master's own changes to the lane, or hides the lane's changes behind
+master's -- in either direction the ADDED/REMOVED numbers are wrong and nothing
+in the run says so.
+
+WHAT ACTUALLY CAUGHT IT: comparing the new base hash against the PREVIOUS base
+hash and noticing it had not moved while master had. That is the guard to
+automate.
+
+THE RULE TO IMPLEMENT: the baseline binary must differ from the last recorded
+baseline whenever the baseline COMMIT moved. Equivalently, stamp each built
+artefact with the commit it was built from and refuse a sweep whose baseline
+stamp does not match the baseline commit it claims. `fleet_dogfood.save_state`
+already stamps ledgers with the producing binary (B147), so the stamping half
+partly exists -- the missing half is checking it against the commit.
+
+Each worktree gets its own remote tree and target dir, which is what makes the
+wrong-directory invocation silent rather than obviously wrong: it succeeds, it
+builds something, and it returns a plausible artefact.
+
+REQUIRED EVIDENCE:
+  - RED: build a baseline from a lane directory after master has moved, and show
+    the current tooling accepts it -- same hash, sweep proceeds, `base != fixed`
+    passes.
+  - GREEN: the same invocation refuses, naming the stale stamp and the commit it
+    expected.
+  - POSITIVE CONTROL: an ordinary correct sweep still runs. Without this the fix
+    could be "always refuse" and the red/green would look identical.
+
+Same family as B147 (a sync-back that reported success while leaving the previous
+artefact in place with a plausible mtime). Both are "the instrument returned an
+artefact from the wrong point in time, and nothing downstream could tell".
+Belongs in `scripts/remote-build.py` and the sweep harness, not in a lane.
