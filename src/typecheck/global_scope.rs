@@ -1567,7 +1567,7 @@ impl<'a> GlobalScope<'a> {
     pub fn workspace_class_parents(&self, class_name: &str) -> Vec<String> {
         for s in self.lookup_workspace(class_name) {
             match &s.kind {
-                SymbolKind::Class { parents } | SymbolKind::Interface { parents } => {
+                SymbolKind::Class { parents, .. } | SymbolKind::Interface { parents } => {
                     return parents.clone()
                 }
                 _ => {}
@@ -3266,6 +3266,7 @@ mod tests {
                     "Holder",
                     SymbolKind::Class {
                         parents: Vec::new(),
+                        is_mixin: false,
                     },
                 ),
                 make_symbol(
@@ -3867,7 +3868,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "MyClass",
-                SymbolKind::Class { parents: vec![] },
+                SymbolKind::Class { parents: vec![], is_mixin: false },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -3971,7 +3972,7 @@ mod tests {
             fid,
             vec![make_symbol(
                 "Deep::Ns::Thing",
-                SymbolKind::Class { parents: vec![] },
+                SymbolKind::Class { parents: vec![], is_mixin: false },
             )],
         );
         let scope = GlobalScope::new(&ws, None);
@@ -4122,7 +4123,7 @@ mod tests {
         let fid = ws.allocate_file_id();
         ws.set_file_symbols(
             fid,
-            vec![make_symbol("mat3", SymbolKind::Class { parents: vec![] })],
+            vec![make_symbol("mat3", SymbolKind::Class { parents: vec![], is_mixin: false })],
         );
         let scope = GlobalScope::new(&ws, Some(&idx));
         assert!(!scope.external_ctor_converts("mat3", "mat4"));
@@ -4246,7 +4247,7 @@ mod tests {
             vec![
                 make_symbol(
                     "Editor::NetworkSerializable",
-                    SymbolKind::Class { parents: vec![] },
+                    SymbolKind::Class { parents: vec![], is_mixin: false },
                 ),
                 make_symbol(
                     "Editor::NetworkSerializable::ReadFromNetworkBuffer",
@@ -4262,6 +4263,7 @@ mod tests {
                     "Editor::Child",
                     SymbolKind::Class {
                         parents: vec!["NetworkSerializable".into()],
+                        is_mixin: false,
                     },
                 ),
             ],
@@ -4282,8 +4284,8 @@ mod tests {
         ws.set_file_symbols(
             fid,
             vec![
-                make_symbol("ItemSpec", SymbolKind::Class { parents: vec![] }),
-                make_symbol("Editor::ItemSpec", SymbolKind::Class { parents: vec![] }),
+                make_symbol("ItemSpec", SymbolKind::Class { parents: vec![], is_mixin: false }),
+                make_symbol("Editor::ItemSpec", SymbolKind::Class { parents: vec![], is_mixin: false }),
                 make_symbol(
                     "Editor::ItemSpec::ReadFromNetworkBuffer",
                     SymbolKind::Function {
@@ -4298,6 +4300,7 @@ mod tests {
                     "Editor::ItemSpecPriv",
                     SymbolKind::Class {
                         parents: vec!["ItemSpec".into()],
+                        is_mixin: false,
                     },
                 ),
             ],

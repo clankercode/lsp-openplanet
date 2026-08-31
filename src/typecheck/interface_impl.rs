@@ -45,6 +45,23 @@
 //! So every uncertainty resolves to SILENCE. The bail conditions are
 //! enumerated in [`missing_interface_methods`] and each has its own test.
 //!
+//! # A mixin owes nothing (B111)
+//!
+//! A `mixin` class's members are copied into each class that includes it.
+//! The mixin is never instantiated and never itself implements the
+//! interface it names — the INCLUDING class does. Checking the mixin was a
+//! false ERROR on code that compiles: 8 of the 11 findings in B101's
+//! corpus sweep were `mixin class CPAbstractionOpCmp : CPAbstraction` in
+//! tm-buffer-time and tm-cotd-buffer-time, both of which ship today.
+//!
+//! That is the outcome the four bails below exist to prevent, and none of
+//! them covered it, because they all guard the COMPARISON and this is a
+//! question of APPLICABILITY. Bail 5 is the guard.
+//!
+//! It also removed a DOUBLE REPORT: where an including class really was
+//! missing a method, the mixin was flagged for the same method, so one
+//! defect surfaced as two errors on two different lines.
+//!
 //! # Constness (B101)
 //!
 //! This module shipped unable to compare the trailing `const`, because the
@@ -95,6 +112,11 @@ pub struct MissingImpl {
 ///    a declaration we cannot see, and it may supply the very method that
 ///    would otherwise look missing.
 /// 3. The class declares no interface base at all (nothing to check).
+/// 5. B111: `class_qname` is a `mixin` class. A mixin's members are copied
+///    into each including class; the mixin is never instantiated and never
+///    owes the interface it names — the INCLUDING class does. This is the
+///    only bail that is not about uncertainty: it is not that the answer
+///    cannot be established, it is that the question does not apply.
 ///
 /// and per-method:
 ///
@@ -107,6 +129,16 @@ pub fn missing_interface_methods(class_qname: &str, scope: &GlobalScope) -> Vec<
     let Some(bases) = class_bases(class_qname, scope) else {
         return Vec::new();
     };
+
+    // Bail 5 (B111): a mixin owes nothing. Checked before anything else —
+    // the requirement does not APPLY to this declaration, so there is
+    // nothing for the later bails to be uncertain about. Note the mixin is
+    // still walked as a BASE of the classes that include it (see
+    // `resolved_ancestry`), because its methods really do satisfy their
+    // requirements; only the mixin's own obligation is dropped.
+    if is_workspace_mixin(class_qname, scope) {
+        return Vec::new();
+    }
 
     // Bail 2, applied to the whole transitive ancestry before anything else:
     // one unresolvable link anywhere and the provided-method set is unknown.
@@ -193,9 +225,23 @@ fn class_bases(class_qname: &str, scope: &GlobalScope) -> Option<Vec<String>> {
         .lookup_workspace(class_qname)
         .iter()
         .find_map(|s| match &s.kind {
-            SymbolKind::Class { parents } => Some(parents.clone()),
+            SymbolKind::Class { parents, .. } => Some(parents.clone()),
             _ => None,
         })
+}
+
+/// True when `qname` is pooled as a `mixin` class (B111, bail 5).
+///
+/// Reads the pooled flag rather than the AST: every other decision this
+/// module makes comes from the symbol table, and the one caller in
+/// `check_class_decl` has the AST flag to hand — putting the guard there
+/// instead would leave this function wrong for any future caller and split
+/// the rule's five bails across two files.
+fn is_workspace_mixin(qname: &str, scope: &GlobalScope) -> bool {
+    scope
+        .lookup_workspace(qname)
+        .iter()
+        .any(|s| matches!(s.kind, SymbolKind::Class { is_mixin: true, .. }))
 }
 
 /// Resolve a base-list name the way the class body sees it, preferring an
@@ -234,7 +280,7 @@ fn resolved_ancestry(class_qname: &str, scope: &GlobalScope) -> Option<Vec<Strin
             .lookup_workspace(&name)
             .iter()
             .find_map(|s| match &s.kind {
-                SymbolKind::Class { parents } | SymbolKind::Interface { parents } => {
+                SymbolKind::Class { parents, .. } | SymbolKind::Interface { parents } => {
                     Some(parents.clone())
                 }
                 _ => None,
@@ -866,6 +912,134 @@ mod tests {
             missing("interface I { void C(); }\nclass C : I { C() {} }\n"),
             vec!["void I::C()"],
             "a constructor must not satisfy a requirement that shares its name"
+        );
+    }
+
+    // ── B111: a `mixin` class never owes the interface it names ──────────
+    //
+    // A mixin's members are COPIED into each including class; the mixin is
+    // never instantiated and does not itself implement the interface. Two
+    // SHIPPED plugins (tm-buffer-time, tm-cotd-buffer-time) were flagged by
+    // this rule — 8 of the 11 findings in B101's corpus sweep — and both
+    // compile in the game today. That is a false ERROR, the one outcome
+    // this module's four bails exist to prevent, arriving by a route none
+    // of them covers: the bails guard the COMPARISON, this guards the
+    // APPLICABILITY.
+
+    /// The shipped shape, reduced. Was: `int CPA::get_cpCount() const`
+    /// reported against the mixin.
+    #[test]
+    fn the_shipped_mixin_shape_is_silent() {
+        assert!(
+            missing(
+                "interface CPA { int get_cpCount() const; int opCmp(const CPA@ o) const; }\n\
+                 mixin class CPAOpCmp : CPA { int opCmp(const CPA@ o) const { return 0; } }\n\
+                 class Wrap : CPA, CPAOpCmp { int get_cpCount() const { return 0; } }\n"
+            )
+            .is_empty(),
+            "tm-buffer-time compiles in the game; flagging its mixin is a false error"
+        );
+    }
+
+    /// The minimal form: a mixin naming an interface it implements none of.
+    #[test]
+    fn a_mixin_implementing_nothing_it_names_is_silent() {
+        assert!(missing("interface I { void M(); }\nmixin class X : I {}\n").is_empty());
+    }
+
+    /// …and the shapes the modifier can be written in.
+    #[test]
+    fn every_mixin_spelling_is_silent() {
+        for src in [
+            // fully implementing (must not depend on WHY it is silent)
+            "interface I { void M(); }\nmixin class X : I { void M() {} }\n",
+            // no interface list at all
+            "interface I { void M(); }\nmixin class X { void M() {} }\n",
+            // `shared mixin class`
+            "shared interface I { void M(); }\nshared mixin class X : I {}\n",
+            // inside a namespace, where the base pools long
+            "namespace N { interface I { void M(); } mixin class X : I {} }\n",
+            // two interfaces, neither implemented
+            "interface I { void M(); }\ninterface J { void N(); }\nmixin class X : I, J {}\n",
+            // a mixin extending a plain class as well
+            "interface I { void M(); }\nclass B {}\nmixin class X : B, I {}\n",
+            // const requirement (B101) on the mixin route
+            "interface I { void M() const; }\nmixin class X : I {}\n",
+        ] {
+            assert!(missing(src).is_empty(), "mixin must not be checked: `{src}`");
+        }
+    }
+
+    // ── B111 REQUIRED ERRORS: the fix must not buy silence by disabling ──
+    //
+    // Every assertion above is a SILENCE and passes for free once the
+    // requirement is dropped (docs/verification-hazards.md, the absence
+    // rule). These are the rows that fail if the rule is disabled rather
+    // than narrowed, and they are mutation-tested against exactly that.
+
+    /// THE CONTROL: a plain class is still checked.
+    #[test]
+    fn a_plain_class_beside_a_mixin_is_still_checked() {
+        assert_eq!(
+            missing("interface I { void M(); }\nmixin class X : I {}\nclass C : I {}\n"),
+            vec!["void I::M()"],
+            "narrowing to mixins must not silence ordinary classes"
+        );
+    }
+
+    /// An including class missing a method the mixin does NOT supply must
+    /// still error — the row the ticket flagged as the important one.
+    ///
+    /// It also pins a SECOND defect the fix removes: today this reports
+    /// `void I::B()` TWICE, once anchored on the mixin and once on the
+    /// class, because the mixin is checked as if it owed the method too.
+    /// A user sees one missing method reported as two errors.
+    #[test]
+    fn an_including_class_still_errors_for_what_the_mixin_does_not_supply() {
+        assert_eq!(
+            missing(
+                "interface I { void A(); void B(); }\n\
+                 mixin class X : I { void A() {} }\n\
+                 class C : I, X {}\n"
+            ),
+            vec!["void I::B()"],
+            "exactly ONE diagnostic: the mixin must not double-report it"
+        );
+    }
+
+    /// The mixin's members DO satisfy the including class — the mixin must
+    /// stay in the ancestry walk even though it is not itself checked.
+    #[test]
+    fn a_mixin_still_supplies_methods_to_the_including_class() {
+        assert!(
+            missing(
+                "interface I { void M(); }\nmixin class X : I { void M() {} }\nclass C : I, X {}\n"
+            )
+            .is_empty(),
+            "excluding the mixin from being CHECKED must not stop it PROVIDING"
+        );
+    }
+
+    /// KNOWN MISSED ERROR, recorded rather than hidden. When the including
+    /// class names ONLY the mixin, `required_interfaces` never reaches the
+    /// interface (a non-interface base is skipped and its own bases are not
+    /// enqueued), so nothing is checked. AngelScript's documented
+    /// behaviour is that the mixin's interface list is added to the
+    /// including class, which would make `C` owe `M` — but that is NOT
+    /// MEASURED here (probing is blocked, B097), and before this ticket the
+    /// only reason anything was reported for this shape was the false
+    /// positive on the mixin itself.
+    ///
+    /// Silence is this module's chosen direction for the unestablished, so
+    /// silence is what it gets — pinned here so the gap is visible rather
+    /// than looking like intent. Filed as a follow-up question, not fixed
+    /// under B111, which would be widening it.
+    #[test]
+    fn an_including_class_naming_only_the_mixin_is_a_known_missed_error() {
+        assert!(
+            missing("interface I { void M(); }\nmixin class X : I {}\nclass C : X {}\n")
+                .is_empty(),
+            "deliberate: the requirement does not propagate through a mixin base today"
         );
     }
 

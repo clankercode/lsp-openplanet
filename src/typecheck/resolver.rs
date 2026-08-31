@@ -295,7 +295,7 @@ mod tests {
             fid,
             vec![Symbol {
                 name: name.to_string(),
-                kind: SymbolKind::Class { parents: vec![] },
+                kind: SymbolKind::Class { parents: vec![], is_mixin: false },
                 span: Span::new(0, 0),
                 file_id: fid,
                 doc: None,
@@ -689,7 +689,7 @@ mod tests {
             fid,
             vec![Symbol {
                 name: "Ns::Foo".to_string(),
-                kind: SymbolKind::Class { parents: vec![] },
+                kind: SymbolKind::Class { parents: vec![], is_mixin: false },
                 span: Span::new(0, 0),
                 file_id: fid,
                 doc: None,
@@ -834,7 +834,7 @@ mod tests {
     /// subtlest cell of the hole open.
     fn type_shapes() -> Vec<(&'static str, SymbolKind)> {
         vec![
-            ("class", SymbolKind::Class { parents: vec![] }),
+            ("class", SymbolKind::Class { parents: vec![], is_mixin: false }),
             ("interface", SymbolKind::Interface { parents: vec![] }),
             ("enum", SymbolKind::Enum { values: vec![] }),
             (

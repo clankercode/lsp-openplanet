@@ -526,6 +526,7 @@ mod tests {
                 name: (*name).to_string(),
                 kind: SymbolKind::Class {
                     parents: Vec::new(),
+                    is_mixin: false,
                 },
                 span: Span { start: 0, end: 0 },
                 file_id: fid,
