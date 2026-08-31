@@ -175,6 +175,17 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **Functions a plugin exports to other plugins are no longer reported unused**
+  (B062) — a plugin whose `info.toml` names `[script] exports` implements that
+  surface in ordinary source files, and nothing inside the plugin calls them:
+  consumers bind to them by signature. Every one was reported
+  `a function 'SendEvent' is never used`. The manifest already named and
+  resolved the file; the analysis simply did not use it to root anything.
+  A strict export file holds only `import <sig> from "Mod";` declarations and
+  compiles into consumers rather than the defining plugin, so those stubs now
+  act as roots for the bodies they bind to. Declarations nothing exports still
+  warn, including a class member that happens to share an exported name. Across
+  the repo's own fixtures this clears 15 more false warnings, adding none.
 - **A property-syntax read now credits its accessor** (B061) — reading
   `Directives::Showing`, where `bool get_Showing()` implements it, did not
   mark `Directives::get_Showing` used, so the accessor was reported

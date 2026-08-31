@@ -1,0 +1,9 @@
+[meta]
+name    = "Issue Repro B062 - Manifest Exports Root The Unused Analysis"
+author  = "clankercode"
+version = "0.1.0"
+
+[script]
+module         = "T"
+exports        = ["Exports_Decls.as"]
+shared_exports = ["Shared_Helper.as"]

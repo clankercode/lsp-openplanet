@@ -314,6 +314,80 @@ pub fn unused_declarations_for_file(
 }
 
 /// Shared body: `only` limits the walk to one file_id.
+/// B062: the signatures this plugin exports to consumers, as
+/// `(simple name, min_args, max_args)`.
+///
+/// A strict `[script] exports` file carries ONLY `import <sig> from "Mod";`
+/// declarations and compiles into CONSUMERS, never into this plugin — the
+/// repo's own `60-exports-correct-pattern` fixture states the rule and
+/// `analysis_snapshot` pins it from a live probe. The BODIES those stubs
+/// bind to live in ordinary source files and are called from nowhere in the
+/// plugin, so they were reported unused.
+///
+/// Exempting the export FILE, which this module already does, cannot reach
+/// them: the file holds stubs and the bodies are elsewhere. So the stubs are
+/// read as a ROOT SET instead and matched against ordinary declarations.
+///
+/// Matched by SIMPLE name, because the two sides are not in the same
+/// namespace: a consumer reaches `TournamentStation::SendEvent` through the
+/// export namespace while the body is a plain global `SendEvent`. Arity
+/// ranges must overlap. Parameter TYPES are deliberately not compared — the
+/// fixture above pairs an `import ... (string a, string b)` stub with a
+/// `(const string &in a, const string &in b)` body and calls that the
+/// correct pattern, so a stricter rule would invent a precision the engine
+/// does not have and would resurrect the false warning it exists to remove.
+fn exported_signature_roots(snapshot: &AnalysisSnapshot) -> HashSet<(String, usize, usize)> {
+    let strict = snapshot.strict_export_paths();
+    if strict.is_empty() {
+        return HashSet::new();
+    }
+    let strict_ids: HashSet<usize> = snapshot
+        .files()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            let canonical = f.path.canonicalize().unwrap_or_else(|_| f.path.clone());
+            strict.contains(&canonical)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    snapshot
+        .symbols()
+        .all_symbols()
+        .filter(|sym| strict_ids.contains(&sym.file_id))
+        .filter_map(|sym| match &sym.kind {
+            SymbolKind::Function {
+                params,
+                min_args,
+                imported: true,
+                ..
+            } => Some((tail_name(&sym.name).to_string(), *min_args, params.len())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// True when `sym` is a plain global function body that a strict export
+/// stub binds to. Class members are excluded: an `import` stub names a
+/// global function, never a method.
+fn matches_an_exported_signature(sym: &Symbol, roots: &HashSet<(String, usize, usize)>) -> bool {
+    let SymbolKind::Function {
+        params,
+        min_args,
+        imported: false,
+        ..
+    } = &sym.kind
+    else {
+        return false;
+    };
+    if sym.name.contains("::") {
+        return false;
+    }
+    roots.iter().any(|(name, stub_min, stub_max)| {
+        name == &sym.name && *stub_min <= params.len() && *min_args <= *stub_max
+    })
+}
+
 fn unused_declarations_filtered(
     snapshot: &AnalysisSnapshot,
     usage: &WorkspaceUsage,
@@ -332,6 +406,7 @@ fn unused_declarations_filtered(
     // the broad "any omission disarms the rule" alternative: readable
     // omissions keep the declaration pass fully active, and locals/params
     // below remain sound because their usage is bounded by their function.
+    let exported_roots = exported_signature_roots(snapshot);
     if snapshot.usage_only_sources_complete() {
         let symbols = snapshot.symbols();
         for (file_id, file) in snapshot.files().iter().enumerate() {
@@ -378,6 +453,11 @@ fn unused_declarations_filtered(
             };
             for sym in symbols.file_symbols(file_id) {
                 if declared_by_an_interface(sym) {
+                    continue;
+                }
+                // B062: a body the plugin exports to consumers is reachable
+                // by definition, even though nothing in this plugin calls it.
+                if matches_an_exported_signature(sym, &exported_roots) {
                     continue;
                 }
                 if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
