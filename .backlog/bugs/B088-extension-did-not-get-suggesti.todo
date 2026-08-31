@@ -16,3 +16,102 @@ updated_at: "2026-08-31T08:02:11Z"
 Extension: did not get suggestions for Meta::RunContext::* enum values
 
 need to red/green test and ensure we handle all this fine regardless of how deep it is
+
+## DIAGNOSIS (coordinator, 2026-08-31) — root-caused, not yet fixed
+
+Confirmed by reading the source. The data is present and correct: the typedb
+has `{"ns": "Meta", "id": 74, "name": "RunContext", ...}` with a full `values`
+map (`Main`, `BeforeScripts`, `MainLoop`, ...). Nothing is missing from the
+dump. The completion path never asks for it.
+
+**This is not specific to `Meta::RunContext`. NO enum has ever offered its
+values after `::`.** The reporter hit the general case.
+
+### Two stacked defects — fixing either alone still yields nothing
+
+`complete` (`src/server/completion.rs:48`) routes a `::` prefix to
+`complete_namespace_members` (`:89`), which is a one-line delegation to
+`TypeIndex::source_scope_members` (`src/typedb/index.rs:1030`).
+
+**Defect 1 — the gate rejects the path before any lookup.**
+`source_scope_members` opens with `if !self.scope_exists(scope) { return
+Vec::new(); }`, and `scope_exists` is just `self.scopes.contains(path)`.
+`build_scope_index` (`src/typedb/index.rs:686`) inserts, for a Core enum, only
+**its namespace** — `Meta` — never the enum itself. So
+`scope_exists("Meta::RunContext")` is **false** and the function returns empty
+before doing anything.
+
+**Defect 2 — the enumeration has no enum-value branch anyway.**
+`source_scope_members` walks exactly three collections: `source_names` (types
+and enum *names*), `functions`, and `scopes` (nested namespaces). Enum
+**values** live in `EnumInfo::values` and are read by nothing on this path.
+
+So the fix must address both. A change that only makes the enum a scope returns
+an empty list; a change that only adds the value branch never reaches it.
+
+### The doc already claims this works
+
+`src/server/completion.rs:6` reads:
+
+    //! 2. `::` at cursor → namespace member / enum value / nested type
+
+"enum value" has been in that list the whole time and was never implemented.
+Worth noting in the fix: this is a case where the module doc described intent
+and was read as description.
+
+### Why it was never caught
+
+Enum values ARE offered — but only by the **namespace-shortcut** path
+(`shortcut_match_enums`, `completion.rs:453-500`), which is a different
+feature: it offers `UI::Cond::Always` in *identifier* position when the user
+has configured shortcut namespaces. Every enum-value completion test in the
+tree (`:1384`, `:1406`, `:1429`) exercises that path. **The `::` path has no
+enum-value coverage at all**, which is exactly why a whole missing branch sat
+behind a doc line claiming it existed.
+
+## DO NOT FIX IT AT `scope_exists`
+
+Tempting and wrong. `scope_exists` is the typechecker's notion of a valid
+namespace path; widening it to include enums would make the CHECKER start
+accepting paths *through* an enum (`Meta::RunContext::Main::Whatever`) and
+would change diagnostics far from completion. B067 already moved this
+predicate once and B079 exists because two nearly-identical scope/enum
+predicates were being picked wrongly at call sites — do not add a third
+meaning to this one.
+
+**Fix in the completion path instead**: when the `::` qualifier resolves to an
+enum, offer its values; otherwise fall through to `source_scope_members` as
+today. Completion asking a different question from the typechecker is correct
+here — "what can follow `::` in the editor" genuinely is a broader set than
+"what is a namespace".
+
+## Test plan (TDD, red first) — generalise per CLAUDE.md
+
+The reporter's note "regardless of how deep it is" is the real requirement.
+Cover each enum SHAPE, since they reach the index by different routes in
+`build_scope_index`:
+
+- **Core enum in a namespace** — `Meta::RunContext::` (the report), `UI::Cond::`
+- **Core enum at global scope** — `SomeEnum::`
+- **Nadeo enum under a class scope** — the `Module::Scope::Name` form whose
+  module segment is dropped; e.g. `CGameMenu::EMenuOrder::`
+- **Deeply nested** — a class-scope enum two or more segments down
+- **Workspace-declared enum**, plain and inside a `namespace`
+- **A workspace enum shadowing an engine one** — must offer the workspace values
+- Kind should be `ENUM_MEMBER`, not `FUNCTION` (`complete_namespace_members`
+  currently hardcodes `CompletionItemKind::FUNCTION` for everything it emits —
+  check whether that is wrong for the existing cases too, and say so rather
+  than silently changing it).
+
+**Required silences, in the same fixture as the successes** — otherwise "offer
+everything after `::`" passes:
+
+- a genuine namespace (`Meta::`) still offers its members and NOT enum values
+  from enums inside it
+- an anonymous/synthetic member-enum key must not leak (B016 already guards
+  this on the shortcut path; the `::` path needs its own guard)
+- an unknown qualifier (`ZZZNoSuch::`) still offers nothing
+
+Game-probing is NOT required — this is editor UX, not engine semantics. The
+engine question ("is `Meta::RunContext::Main` valid?") is already settled by
+the typedb.
