@@ -1175,6 +1175,81 @@ impl<'a> GlobalScope<'a> {
         None
     }
 
+    /// B130: the trailing-`const` qualifier of an ENGINE method, from the
+    /// typedb. `None` when no such method is known, when the type is not an
+    /// external type at all, or when a workspace class shadows the name —
+    /// the same provenance discipline `workspace_own_method_is_const` applies
+    /// to the other half of the merged view.
+    ///
+    /// The data reaching here is B125's: `CoreMethod::declared_const` reads
+    /// the trailing ` const` off the `decl` string, which is the only place
+    /// the dumps carry it. 301 of 1002 Core class methods have one.
+    ///
+    /// `Some(true)` when ANY overload of the name is const, matching
+    /// `workspace_own_method_is_const` — on a const receiver the engine
+    /// selects a const overload if one exists, so one const declaration makes
+    /// the call legal. The `get_V`/`set_V` accessor spellings are folded in
+    /// for the same reason they are there.
+    ///
+    /// Parents ARE walked, unlike the workspace own-class helper. The engine
+    /// hierarchy is the typedb's own and `ext_lookup_method_return` already
+    /// walks it to find the return type, so stopping short here would answer
+    /// `None` for a method this very module can otherwise resolve.
+    pub fn external_method_is_const(&self, type_name: &str, method: &str) -> Option<bool> {
+        if self.workspace_type_shadows(type_name) {
+            return None;
+        }
+        let ext = self.external?;
+        let getter = format!("get_{method}");
+        let setter = format!("set_{method}");
+        let mut current: Option<String> = Self::resolve_external_type_name(ext, type_name);
+        let mut hops = 0usize;
+        while let Some(name) = current.take() {
+            hops += 1;
+            if hops > 32 {
+                break;
+            }
+            let info = ext.lookup_type(&name)?;
+            let mut found = false;
+            let mut any_const = false;
+            for m in &info.methods {
+                if m.name == method || m.name == getter || m.name == setter {
+                    found = true;
+                    any_const |= m.is_const;
+                }
+            }
+            if found {
+                // ONLY Core carries real constness. The Nadeo loader
+                // hardcodes `is_const: false` on every method it builds,
+                // because that dump "stores no declaration text" — so there
+                // `false` means UNKNOWN, not non-const, and reading it as an
+                // answer would fire on every Nadeo method reached through a
+                // const receiver.
+                //
+                // That is the same `bool`-defaults-to-a-lie defect B125 and
+                // B131 fixed on the Core side, surviving in the other half of
+                // the loader. The fleet cannot catch it: all 807 engine
+                // receiver sites across 152 plugins are Core types
+                // (`string`, `Json::Value`, `Reflection::MwClassInfo`,
+                // `vec3`, ...), so the Nadeo population has ZERO exposure
+                // there and a zero measured on it would mean nothing.
+                //
+                // Giving Nadeo a real answer means parsing constness out of
+                // its signature text — a separate ticket with its own
+                // measurement, not something to infer here.
+                if info.source != crate::typedb::index::TypeSource::Core {
+                    return None;
+                }
+                return Some(any_const);
+            }
+            current = info
+                .parent
+                .as_ref()
+                .and_then(|p| Self::resolve_external_type_name(ext, p));
+        }
+        None
+    }
+
     /// GH #54: true when AngelScript can implicitly convert `from` into `to`
     /// through a single-argument constructor registered on `to`.
     ///
