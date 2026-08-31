@@ -142,6 +142,14 @@ probe-export-binding *ARGS:
 probe-export-binding-selftest:
     python3 scripts/probe_export_binding.py --selftest
 
+# Prove probe-selftest is non-vacuous: restore each half of a defect the enum
+# probe's guards exist to prevent (B068's sentinel, B097's load check, B123's
+# build-health check) and require the selftest to go red for every one. B118
+# found 4 of 9 new guards vacuous this way after all their pair-tests passed,
+# so a passing pair is not evidence that a guard ran.
+enum-probe-mutants:
+    python3 scripts/check_enum_probe_nonvacuous.py
+
 # Prove repro-selftest is non-vacuous: neuter each cleanup guard in a
 # throwaway copy and require the selftest to go red for every one. A green
 # suite with the protection removed would be worse than no suite (B077).

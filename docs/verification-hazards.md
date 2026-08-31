@@ -2129,6 +2129,68 @@ which is more than can be said for "think harder about your silence tests".
 **Corollary for reviewers.** A red/green report saying "11 failed, 4 passed" is
 not fully good news. The 4 are the ones to ask about.
 
+## A success reply from the transport is not a report on the build (B123)
+
+Follow-up to B118, and the more useful half of it. `probe_enum_corpus.run_batch`
+guards its batch with
+
+    if loaded.get("error"): raise SystemExit(...)
+
+added by B097 with exactly the right reasoning: a failed load must stop the run,
+"otherwise every name comes back UNDETERMINED and the run looks merely
+inconclusive rather than broken."
+
+**Measured 2026-09-01: that guard cannot see a failed build.** For a plugin
+whose dependency could not be resolved, RemoteBuild answers
+
+    {"error": "", "data": "Plugin loaded"}
+
+while the engine logs `Couldn't find required plugin dependency "..."` and then
+`Loaded plugin` anyway. So `loaded["error"]` is empty, the batch proceeds, no
+name is analysed, and the run produces the precise outcome the guard exists to
+prevent — through the one door it does not cover.
+
+**The general shape: the transport answering "I delivered your request" is a
+different proposition from the engine answering "your build succeeded", and a
+guard written against the first cannot enforce the second.** The two were
+conflated because, before B097, the load call was inert and its reply carried
+no information at all — so the reply became load-bearing the day the transport
+started working, without anybody revisiting what it actually asserts. *A value
+that was decoration becoming meaningful is a change in the contract, even
+though no line of the consumer changed.*
+
+### An oracle that demands a positive control is exempt, and it is worth saying why
+
+B123 opened as "the last consumer still on the severity-filtered reader, so it
+cannot notice a build that never ran". Measuring it first showed that
+conclusion is wrong, for a structural reason worth generalising:
+
+- B118's oracle asked *"did anything complain?"*, so **silence was its
+  affirmative answer** and every failure mode impersonated ACCEPT.
+- This oracle asks *"did the SENTINEL complain?"* (B068). The sentinel is a
+  name the engine must reject, so its diagnostic is a **positive control that
+  has to be present before any silence counts**. A build that never ran
+  produces no sentinel, every name degrades to UNDETERMINED, and the writers
+  already refuse to emit a corpus containing one.
+
+**Silence is the negative answer here, and that is the whole difference.** The
+filtered reader could drop the sentinel entirely and the failure would still be
+safe — noisy and wrong-looking, never a confident wrong row. Which is the test
+to apply to any oracle: *ask what its silence means.* If silence is the
+affirmative, every outage in the stack is indistinguishable from success.
+
+`run_batch` moved to the raw reader anyway, but for a different and much
+narrower reason than the ticket assumed: attribution never needed it (both
+readers yield the same ERR set, pinned by a test asserting identical verdicts),
+while the **build-health check is impossible without it** — `Starting build for`
+and `Loaded plugin` are both `[ TRAC]`, so the build bracket is literally
+invisible in the filtered window and `build_slice` returns zero lines from it.
+
+The reusable rule: **when a ticket says a consumer is unsafe, measure the
+consumer's oracle before migrating it.** The migration here was right and the
+stated reason for it was wrong, and shipping it under the wrong reason would
+have left the next reader believing attribution had been at risk.
+
 ## Three ways a probe's silence was scored as a passing answer (B118)
 
 Found by lane-resolver during B096 claim 2, and it is the ABSENCE hazard above
