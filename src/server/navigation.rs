@@ -513,6 +513,50 @@ mod tests {
         assert_eq!(loc.range.start.line, 2, "should point at `void greet` line");
     }
 
+    /// B063: an Openplanet-injected method has NO AngelScript declaration
+    /// anywhere — it is registered from C++ — so there is nothing to jump to.
+    ///
+    /// The requirement is therefore not that this resolves, but that it
+    /// degrades gracefully: no location, no error, no panic. An unhandled
+    /// `None` on this path surfaces as a client-side crash rather than a
+    /// missing feature, which is why it is pinned rather than left to
+    /// inspection. Completion now OFFERS these methods, so users will click
+    /// through to them, which is exactly what makes this path newly reachable.
+    #[test]
+    fn goto_definition_on_an_injected_method_degrades_gracefully() {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let idx = crate::typedb::TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load");
+        for (src, needle) in [
+            (
+                "void f(CSmPlayer@ p) { p.GetCurrentEntityID(); }\n",
+                "GetCurrentEntityID",
+            ),
+            ("void f(CMwNod@ n) { n.MwAddRef(); }\n", "MwAddRef"),
+            (
+                "void f(CGameNetwork@ n) { n.GetManialinkPages(); }\n",
+                "GetManialinkPages",
+            ),
+        ] {
+            let tw = build_single_file_workspace("file:///t/inj.as", src);
+            let analysis = tw.analysis();
+            let files = tw.uri_map();
+            let ws_files = WorkspaceFiles { files: &files };
+            let scope = GlobalScope::new(tw.snapshot.symbols(), Some(&idx));
+            let col = src.find(needle).expect("needle") as u32;
+            // Must not panic, and must not invent a location.
+            let loc = goto_definition(analysis, None, pos(0, col + 1), &scope, &ws_files);
+            assert!(
+                loc.is_none(),
+                "an injected method has no source declaration to jump to, got {loc:?} for {needle}"
+            );
+        }
+    }
+
     #[test]
     fn goto_definition_resolves_single_file() {
         let src = "int target = 1;\nvoid main() { int x = target; }\n";

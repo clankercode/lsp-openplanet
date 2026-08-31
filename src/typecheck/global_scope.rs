@@ -481,9 +481,24 @@ impl<'a> GlobalScope<'a> {
     ///
     /// The workspace half is not a nicety: a plugin that writes `namespace
     /// Foo { … }` can spell a global engine enum `Foo::VirtualKey`, and the
-    /// game accepts it. Probed on a plugin declaring `namespace Foo {
-    /// namespace Bar { … } }`: `Foo::VirtualKey` and `Foo::Bar::VirtualKey`
-    /// both compile.
+    /// game accepts it — the ancestor walk reaches global from any real scope.
+    ///
+    /// PROVENANCE, corrected. An earlier version of this comment cited a probe
+    /// "on a plugin declaring `namespace Foo { namespace Bar { … } }`", which
+    /// reads as the probe fixture's own declaration and was taken that way.
+    /// It was not: `scripts/probe_enum_corpus.py` emits no `namespace` in
+    /// either template, and the b052 re-probe flipped every `Foo::*` row to
+    /// `Namespace 'Foo' doesn't exist.` once a plugin declaring it was no
+    /// longer installed. So those rows measured a FOREIGN plugin's namespace,
+    /// an environment fact, not this rule.
+    ///
+    /// What supports this rule is the Core-namespace evidence, which did not
+    /// flip: `Audio::VirtualKey`, `Crypto::VirtualKey`, `Dev::VirtualKey`,
+    /// `Display::VirtualKey`, `Fids::VirtualKey`. A namespace the workspace
+    /// itself declares is a real scope in its own compilation unit and reaches
+    /// global by the same walk. Do not re-cite the `Foo::*` rows for it; they
+    /// are listed in `PLUGIN_NAMESPACE_ARTEFACTS` precisely because they must
+    /// NOT resolve when nothing declares them.
     pub fn scope_exists(&self, path: &str) -> bool {
         if path.is_empty() {
             return false;
