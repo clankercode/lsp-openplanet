@@ -692,7 +692,16 @@ impl<'a> Parser<'a> {
         if self.at(TokenKind::LParen) {
             // Same disambiguation as at file scope.
             if self.looks_like_constructor_init() {
-                let decl = self.parse_var_decl_rest(attrs, type_expr, member_name)?;
+                // B115: a constructor-initialised field (`private IO::File f(p);`)
+                // is still a field, and takes the same visibility as the plain
+                // spelling below.
+                let decl = self.parse_var_decl_rest(
+                    attrs,
+                    type_expr,
+                    member_name,
+                    is_private,
+                    is_protected,
+                )?;
                 return Ok(ClassMember::Field(decl));
             }
             // It's a method
@@ -701,11 +710,18 @@ impl<'a> Parser<'a> {
             Ok(ClassMember::Method(decl))
         } else if self.at(TokenKind::LBrace) {
             // Property accessor block: `Type name { get { ... } [set { ... }] }`
-            let prop = self.parse_property_accessor_block(type_start, type_expr, member_name)?;
+            let prop = self.parse_property_accessor_block(
+                type_start,
+                type_expr,
+                member_name,
+                is_private,
+                is_protected,
+            )?;
             Ok(ClassMember::Property(prop))
         } else {
             // It's a field
-            let decl = self.parse_var_decl_rest(attrs, type_expr, member_name)?;
+            let decl =
+                self.parse_var_decl_rest(attrs, type_expr, member_name, is_private, is_protected)?;
             Ok(ClassMember::Field(decl))
         }
     }
@@ -1158,7 +1174,10 @@ impl<'a> Parser<'a> {
                 if is_shared {
                     return Err(shared_var_err(name.span));
                 }
-                let decl = self.parse_var_decl_rest(attrs, type_expr, name)?;
+                // B115: file scope has no visibility to record — `parse_item`
+                // eats a top-level `private`/`protected` deliberately and does
+                // not propagate it (see the comment there).
+                let decl = self.parse_var_decl_rest(attrs, type_expr, name, false, false)?;
                 return Ok(Item::VarDecl(decl));
             }
             // Function declaration — `shared` is legal here. B087: record
@@ -1174,25 +1193,31 @@ impl<'a> Parser<'a> {
             if is_shared {
                 return Err(shared_var_err(name.span));
             }
-            let prop = self.parse_property_accessor_block(type_start, type_expr, name)?;
+            let prop =
+                self.parse_property_accessor_block(type_start, type_expr, name, false, false)?;
             Ok(Item::Property(prop))
         } else {
             // Variable declaration
             if is_shared {
                 return Err(shared_var_err(name.span));
             }
-            let decl = self.parse_var_decl_rest(attrs, type_expr, name)?;
+            let decl = self.parse_var_decl_rest(attrs, type_expr, name, false, false)?;
             Ok(Item::VarDecl(decl))
         }
     }
 
     /// Parse a property accessor block following `Type name`. Caller has
     /// already consumed the type and name; current token is `{`.
+    /// B115: `is_private`/`is_protected` mirror [`Self::parse_var_decl_rest`] —
+    /// a class property carries the visibility its member keyword declared, and
+    /// a top-level property passes `false, false`.
     fn parse_property_accessor_block(
         &mut self,
         type_start: u32,
         type_expr: TypeExpr,
         name: Ident,
+        is_private: bool,
+        is_protected: bool,
     ) -> Result<PropertyDecl, ParseError> {
         self.expect(TokenKind::LBrace)?;
         let mut getter: Option<FunctionBody> = None;
@@ -1242,6 +1267,8 @@ impl<'a> Parser<'a> {
             name,
             getter,
             setter,
+            is_private,
+            is_protected,
         })
     }
 
@@ -1428,11 +1455,18 @@ impl<'a> Parser<'a> {
 
     /// Parse a variable declaration after the type and first name have been read:
     /// `[= init] [, name [= init]]* ;`
+    /// B115: `is_private`/`is_protected` are the class-field visibility the
+    /// caller has already consumed. A local or file-scope variable cannot
+    /// carry visibility, so those callers pass `false, false`; they are
+    /// parameters rather than a post-hoc mutation so that a new caller has to
+    /// answer the question instead of silently inheriting a default.
     fn parse_var_decl_rest(
         &mut self,
         attrs: Vec<Attribute>,
         type_expr: TypeExpr,
         first_name: Ident,
+        is_private: bool,
+        is_protected: bool,
     ) -> Result<VarDeclStmt, ParseError> {
         let start = type_expr.span.start;
         let mut declarators = Vec::new();
@@ -1459,6 +1493,8 @@ impl<'a> Parser<'a> {
             attributes: attrs,
             type_expr,
             declarators,
+            is_private,
+            is_protected,
         })
     }
 
@@ -2787,7 +2823,8 @@ impl<'a> Parser<'a> {
         let start = self.current_span().start;
         let type_expr = self.parse_type_expr()?;
         let first_name = self.expect_ident()?;
-        let decl = self.parse_var_decl_rest(Vec::new(), type_expr, first_name)?;
+        // B115: a local has no visibility keyword to record.
+        let decl = self.parse_var_decl_rest(Vec::new(), type_expr, first_name, false, false)?;
         let span = Span::new(start, decl.span.end);
         Ok(Stmt {
             span,
