@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T15:44:07Z"
 depends_on: []
 estimate_hours: 1
 id: B147
 priority: high
+started_at: null
 status: pending
 tags: []
 title: remote-build sync-back reports a missing artefact that exists, printing an unexpanded HOME, and a failed sync-back leaves a stale binary so downstream before/after comparisons silently pass
@@ -12,3 +14,68 @@ updated_at: "2026-08-31T15:44:07Z"
 ---
 
 remote-build sync-back reports a missing artefact that exists, printing an unexpanded HOME, and a failed sync-back leaves a stale binary so downstream before/after comparisons silently pass
+
+
+## Found by lane-enum during B138, 2026-09-01. Same surface as B140 (closed) — read that first.
+
+## Two defects, and the second is the dangerous one
+
+**1. A false negative with a misleading message.**
+`--sync-back release/openplanet-lsp` fails with *"does not exist on x-alpha"*
+while the file is demonstrably there. The error prints the path as
+`$HOME/.remote-builds/...` — **unexpanded**. That is the same `$HOME` spelling
+hazard `just remote-selftest` exists to guard, and it is exactly the class B140
+fixed elsewhere in the same function.
+
+**B140's improved message currently makes a path bug read like user error**,
+which is worse than the bare `rsync: Broken pipe (32)` it replaced, because it is
+confidently wrong instead of merely unhelpful.
+
+**2. A FALSE GREEN downstream, which is why this is high rather than cosmetic.**
+
+The lane's first before/after fleet comparison reported **IDENTICAL** while both
+sweeps ran **the same stale binary**. The sync failed, the sweep ran anyway, and
+the answer looked like success. It was caught only because the diagnostic count
+(571) did not match the 558 seen an hour earlier — luck, not process.
+
+This is the pipe-eats-the-status family one layer out: **a verification step
+whose INPUT silently did not update.** The comparison was honest about two
+identical inputs; nothing told it the inputs were supposed to differ.
+
+## Deliverable
+
+- Fix the path expansion so an existing artefact is found. `$HOME` must not reach
+  rsync unexpanded — see B140's own note that rsync does not run a shell on the
+  remote path, so every rsync-side path must be relative to the remote home.
+- **Make a failed `--sync-back` exit non-zero.** Today it does not, which is what
+  let the sweep proceed on a stale artefact.
+- Give the fleet-comparison idiom a hash check: **hash the fetched binary and
+  assert the two differ** before comparing their output. lane-enum did this by
+  hand with `md5sum` and that is what turned an unfounded IDENTICAL into a sound
+  one.
+
+Workaround meanwhile, verified working:
+
+    rsync -a x-alpha:.remote-builds/<slug>/target/release/openplanet-lsp target/release/
+
+## Test axes
+
+- An artefact that EXISTS -> fetched, and the local file's hash matches the
+  remote's. The positive control; without it a guard that refuses everything
+  passes.
+- An artefact that genuinely does NOT exist -> refuses, non-zero, and names the
+  real expanded path.
+- A path containing `$HOME` literally -> must not be passed through unexpanded.
+- A sync-back that fails -> **the caller must be able to tell.** Pin the exit
+  status, not just the message.
+- **Mutation:** make the sync silently no-op and confirm a before/after
+  comparison built on it now FAILS rather than reporting IDENTICAL. That is the
+  guard this ticket is really about, and per the hazards catalogue it is vacuous
+  until a mutation run says otherwise.
+
+## Related
+
+B132 added the git-operation pre-flight to the same script and B139 swept for
+missing pre-flights across the gates. This is the fourth infrastructure condition
+in this batch to be reported as something other than what it was — see B139 and
+the hazards entry on empty results not being clean results.
