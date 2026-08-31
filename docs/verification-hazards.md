@@ -4287,6 +4287,63 @@ is handed to the remote shell as `command not found`. `--allow-unresolved` had
 had that gap since B132, from the ordinary cause: the list is a second place to
 remember. Both are now in the list and both are asserted.
 
+## A per-worktree remote cache needs a per-worktree teardown (B167)
+
+The isolation that keeps concurrent lanes correct also keeps every completed
+lane's cache alive. On x-alpha, seven substantial remote trees occupied the
+shared filesystem; six mapped to extant local checkouts and one did not:
+`pool-d616b701`, 9.2 GiB. After the coordinator confirmed only that exact tree
+was orphaned, process cwd/fd/maps checks found no user and it was removed. Free
+space moved from 64 GiB (86% used) to 73 GiB (84% used). No other tree was
+touched, including the hundreds of tiny `r-*` / `wt-*` test directories.
+
+The durable workflow is now:
+
+1. Before/around local worktree teardown, run `just rinventory` and retain the
+   exact absolute local root plus remote slug. The inventory maps against
+   `git worktree list --porcelain`, reports size rather than age, labels an
+   unmatched tree `NO-LOCAL-MATCH`, and explicitly says that is **not proof of
+   orphanhood**. Unmatched trees under 1 MiB are omitted from display noise.
+2. Confirm the candidate with the coordinator. Mtime is never used as a stale
+   signal; an idle lane is still live.
+3. After the local worktree is removed, run
+   `just rreclaim /absolute/former/root slug-12345678`. This is a dry-run and
+   prints the exact resolved remote path.
+4. Run `just rreclaim-now ...` only after confirming that path. Reclaim requires
+   both keys to hash to each other, refuses a registered or extant local path,
+   and refuses a symlink/wrong remote parent. Normal build, sync, shell, clean,
+   and reclaim paths all hold the same crash-safe per-slug `flock` on the build
+   host. Both preview and execution require a non-symlinked cache root and an
+   exact canonical `$HOME/.remote-builds/<slug>` target. Under the locks,
+   execute re-reads the local Git worktree ledger and path existence, then
+   atomically occupies the absent former pathname with an exclusive regular-file
+   lease until remote deletion returns. Normal `git worktree add` and directory
+   recreation therefore cannot enter after the check. Reclaim then revalidates
+   the remote target, scans same-owner process cwd/fds/maps/cmdlines, treats
+   every failed FD resolution as an incomplete scan while the process exists,
+   atomically renames the identity-pinned slug to a private quarantine name,
+   and scans both the former and quarantined spellings again. If that second
+   scan is busy or incomplete, reclaim restores the original name and refuses;
+   otherwise it recursively deletes the quarantine relative to an
+   `O_NOFOLLOW`-opened cache-root FD. The rename closes the public-path race for
+   non-cooperating same-owner processes, while a parent or slug swap refuses
+   instead of redirecting deletion. There is also no unlocked gap in which a
+   cooperating build can start.
+
+The B106 floor was already textually before source-tree mkdir and rsync. B167
+made the whole first-use ordering executable: disk is measured before the host
+lock can create its directory, then rechecked under that lock immediately
+before `preflight_remote_tree` performs `mkdir -> sync`; the build exists only
+afterwards. Its injected test proves low disk never reaches either remote mkdir,
+the normal control reaches `disk -> lock -> disk -> mkdir -> sync -> build`,
+`--allow-low-disk` bypasses only the measurements, and `--no-sync` does not
+create the source tree. The mutation harness removes/reverses each branch so
+this cannot pass as a comment about the intended order. It also exercises
+source drift, canonical/symlink path escapes, busy and incomplete process scans
+(including late cwd acquisition and a late failed FD resolution), successful
+exact-target removal, and loss of the shared remote lock at each
+destructive/build entry point.
+
 ## The recorder you write to stop losing evidence loses evidence (B145)
 
 64 fixture directories carried zero committed engine verdicts. The generator

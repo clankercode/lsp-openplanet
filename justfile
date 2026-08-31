@@ -526,7 +526,8 @@ clean:
 # Run `just rdoctor` first on a new machine.
 # ---------------------------------------------------------------------------
 
-# Verify the remote host is usable (ssh, rsync, cargo, python3, just, versions)
+# Verify the remote host is usable (ssh, rsync, flock, realpath, cargo,
+# python3, just, versions)
 rdoctor:
     python3 scripts/remote-build.py doctor
 
@@ -566,6 +567,27 @@ rrun *ARGS:
 rshell:
     python3 scripts/remote-build.py shell
 
-# Remove this worktree's remote tree and build cache
+# Remove this worktree's remote tree and build cache under its shared host lock.
 rclean:
     python3 scripts/remote-build.py clean
+
+# Map substantial remote trees to git's currently registered local worktrees.
+# NO-LOCAL-MATCH is a review queue, not proof of staleness; confirm ownership
+# with the coordinator before reclaiming anything (B167).
+rinventory:
+    python3 scripts/remote-build.py inventory
+
+# Reclaim after a local worktree has already been removed. Both the exact former
+# absolute path and its matching remote slug are required. This recipe is a
+# dry-run; it prints the resolved remote target and removes nothing.
+rreclaim FORMER_ROOT REMOTE_SLUG:
+    python3 scripts/remote-build.py --reclaim-root "{{FORMER_ROOT}}" --remote-slug "{{REMOTE_SLUG}}" reclaim
+
+# Execute the same validated reclaim after coordinator confirmation. The tool
+# refuses an extant/registered local worktree, an unsafe remote path, and any
+# remote process whose cwd/fd/maps/cmdline still points beneath the target, or
+# any incomplete process scan. After the first scan, it atomically quarantines
+# the target name and rescans before FD-relative deletion. The whole operation
+# holds the same remote flock as ordinary builds.
+rreclaim-now FORMER_ROOT REMOTE_SLUG:
+    python3 scripts/remote-build.py --reclaim-root "{{FORMER_ROOT}}" --remote-slug "{{REMOTE_SLUG}}" --execute-reclaim reclaim

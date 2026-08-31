@@ -210,6 +210,141 @@ MUTATIONS = [
     ("B147: the unchanged-artefact message stops naming the hash",
      '        f"    sha256={digest}\\n\\n"',
      '        f"\\n\\n"'),
+
+    # --- B167: disk order and safe orphan reclaim --------------------------
+    ("B167: the disk-floor preflight is skipped, so mkdir/sync run on a full "
+     "host",
+     "    if allow_low_disk:\n        return",
+     "    if True:\n        return"),
+    ("B167 OVER-CONDEMN: --allow-low-disk no longer bypasses the floor",
+     "    if allow_low_disk:\n        return",
+     "    if False:\n        return"),
+    ("B167: --no-sync still creates and rsyncs the remote tree",
+     "    if no_sync:\n        return\n    rc, out = mkdir_fn",
+     "    if False:\n        return\n    rc, out = mkdir_fn"),
+    ("B167: a reclaim slug that does not match the former local root is "
+     "accepted",
+     "    if requested_slug != expected:",
+     "    if False:"),
+    ("B167: a still-registered live worktree is reclaimable",
+     "    if canonical_former in canonical_registered:",
+     "    if False:"),
+    ("B167: an alternate requested spelling bypasses worktree registration",
+     "    canonical_former = former_root.resolve(strict=False)",
+     "    canonical_former = former_root"),
+    ("B167: an alternate registered spelling bypasses worktree registration",
+     "        path.resolve(strict=False) for path in registered",
+     "        path for path in registered"),
+    ("B167: an extant unregistered local path is reclaimable",
+     "    if os.path.lexists(former_root):",
+     "    if False:"),
+    ("B167: the exact remote parent/name validation is removed",
+     "    if (not pure.is_absolute() or pure.name != slug\n"
+     "            or pure.parent.name != REMOTE_ROOT):",
+     "    if False:"),
+    ("B167: preview and final reclaim bypass canonical/symlink path safety",
+     "reclaim_path_safe || {",
+     "true || {"),
+    ("B167: reclaim deletes by default instead of dry-run",
+     "    if not execute:\n        return \"dry-run\"",
+     "    if False:\n        return \"dry-run\""),
+    ("B167: post-quarantine reclaim ignores an incomplete process scan",
+     'if [ "$unknown" -ne 0 ]; then\n'
+     '    restore_quarantine || exit $?\n'
+     "    printf 'refused: post-quarantine process scan was incomplete\\n'\n"
+     "    exit 5\n"
+     "fi",
+     'if false; then\n'
+     '    restore_quarantine || exit $?\n'
+     "    printf 'refused: post-quarantine process scan was incomplete\\n'\n"
+     "    exit 5\n"
+     "fi"),
+    ("B167: post-quarantine failed fd reads are treated as absence",
+     '            if [ $? -ne 0 ]; then\n'
+     '                [ -e "$proc" ] && {\n'
+     "                    printf 'scan-unknown: %s\\n' \"$link\"; unknown=1;\n"
+     '                }\n'
+     '                continue\n'
+     '            fi\n'
+     '            case "$resolved" in\n'
+     '                "$target"|"$target"/*|"$quarantine_target"|'
+     '"$quarantine_target"/*)\n'
+     "                    printf 'in-use: %s -> %s\\n' \"$link\" "
+     '"$resolved"; busy=1 ;;',
+     '            if false; then\n'
+     '                [ -e "$proc" ] && {\n'
+     "                    printf 'scan-unknown: %s\\n' \"$link\"; unknown=1;\n"
+     '                }\n'
+     '                continue\n'
+     '            fi\n'
+     '            case "$resolved" in\n'
+     '                "$target"|"$target"/*|"$quarantine_target"|'
+     '"$quarantine_target"/*)\n'
+     "                    printf 'in-use: %s -> %s\\n' \"$link\" "
+     '"$resolved"; busy=1 ;;'),
+    ("B167: atomic reclaim reports success without deleting the target",
+     "        remove_dir_at(root_fd, quarantine, expected_target)",
+     "        pass  # deletion removed"),
+    ("B167: reclaim does not atomically quarantine the scanned target",
+     "        os.rename(\n"
+     "            slug, quarantine, src_dir_fd=root_fd, dst_dir_fd=root_fd,\n"
+     "        )",
+     "        os.mkdir(quarantine, dir_fd=root_fd)"),
+    ("B167: reclaim ignores use acquired between initial scan and quarantine",
+     'if [ "$busy" -ne 0 ]; then\n'
+     '    restore_quarantine || exit $?\n'
+     "    printf 'refused: target entered use during reclaim\\n'\n"
+     "    exit 4\n"
+     "fi",
+     'if false; then\n'
+     '    restore_quarantine || exit $?\n'
+     "    printf 'refused: target entered use during reclaim\\n'\n"
+     "    exit 4\n"
+     "fi"),
+    ("B167: fd-relative deletion follows a swapped cache-root symlink",
+     "cache_root, slug, expected_root, expected_target = sys.argv[1:]\n"
+     "flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC",
+     "cache_root, slug, expected_root, expected_target = sys.argv[1:]\n"
+     "flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC"),
+    ("B167: deletion ignores replacement of the scanned cache-root directory",
+     "        if identity(os.fstat(root_fd)) != expected_root:\n"
+     "            raise RuntimeError(\"cache-root identity changed after scan\")\n"
+     "        target = os.stat(slug, dir_fd=root_fd, follow_symlinks=False)",
+     "        if False:\n"
+     "            raise RuntimeError(\"cache-root identity changed after scan\")\n"
+     "        target = os.stat(slug, dir_fd=root_fd, follow_symlinks=False)"),
+    ("B167: deletion ignores replacement of the scanned slug directory",
+     "        if not stat.S_ISDIR(target.st_mode) or identity(target) != expected_target:\n"
+     "            raise RuntimeError(\"target identity changed after scan\")",
+     "        if False:\n"
+     "            raise RuntimeError(\"target identity changed after scan\")"),
+    ("B167: execute skips locked local ownership revalidation",
+     "        locked_problems = reclaim_request_problems(\n"
+     "            former_root, requested_slug, worktree_paths_fn(root)\n"
+     "        )",
+     "        locked_problems = []"),
+    ("B167: execute drops the atomic former-path deletion lease",
+     "        with lease_context_fn(former_root):",
+     "        with nullcontext():"),
+    ("B167: the former-path lease can open an already occupied pathname",
+     "    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC",
+     "    flags = os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC"),
+    ("B167: normal builds stop holding the shared remote slug lock",
+     "    with RemoteLock(slug), preflighted_remote_host_lock(\n"
+     "        a.host, slug, disk_check_before_remote_mutation,\n"
+     "    ):\n"
+     "        rc, cores",
+     "    with RemoteLock(slug):\n        rc, cores"),
+    ("B167: the remote host lock mkdir runs before the disk preflight",
+     "    disk_check()\n    with lock_factory(host, slug):\n        yield",
+     "    with lock_factory(host, slug):\n        disk_check()\n        yield"),
+    ("B167: current-tree clean can race a build or reclaim",
+     "        with RemoteLock(slug), RemoteHostLock(a.host, slug):\n"
+     "            return run_ssh",
+     "        with RemoteLock(slug):\n            return run_ssh"),
+    ("B167: orphan reclaim stops holding the lock normal builds share",
+     "            with RemoteLock(lock_slug), RemoteHostLock(lock_host, lock_slug):",
+     "            with RemoteLock(lock_slug):"),
 ]
 
 
