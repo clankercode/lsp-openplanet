@@ -2560,3 +2560,37 @@ edited — the same discipline as reconciling a test total, applied to a diff.
 **Prefer `git reset --soft $(git merge-base HEAD master)`** over
 `git reset --soft master`. The merge base is where the lane actually diverged and
 it does not move when master does.
+
+## Design the instrument to report EXPOSURE, or a zero is uninterpretable
+
+lane-enum widened the const-receiver rule to reach cross-file classes (B116),
+instrumented the change across 151 plugins, and measured **zero** additional
+emits. Read naively that is a broken instrument. It was not, and the reasoning
+generalises to every error-class rule measured against shipped code:
+
+**Shipped plugins compile in the game.** So for a rule whose subject is a
+compile ERROR, the corpus CANNOT CONTAIN A TRUE POSITIVE. The fleet is not a
+coverage measurement at all — it can only ever answer the FALSE-POSITIVE
+question, and "zero would-fire" is that question's answer rather than a failure
+to find anything.
+
+**What made the zero non-vacuous was a second number.** The instrument also
+recorded that the widened gate was genuinely REACHED by 17 real cross-file
+workspace classes, and correctly declined on 17 of 17 using pooled `is_const`.
+Reach without emits is a working gate. Zero reach with zero emits is a gate that
+does not run, and the two are indistinguishable if you only count emits.
+
+The same run reported 807 sites excluded by provenance (dominated by `string` at
+582 raw and `Json::Value` at 334) — the population a naive gate reading
+"not known const" as "non-const" would have fired on. That turned a standing
+caution in a comment into a quantity.
+
+**The rule: an instrument that counts only what changed cannot tell "nothing
+should have changed" from "nothing was measured".** Record what the new code
+REACHED, what it DECLINED, and why, not just what it EMITTED. Then a zero is a
+result you can defend instead of one you have to apologise for.
+
+Note the polarity difference from a normal sweep, because it inverts the
+expectation: for a rule that TIGHTENS, a non-zero fleet delta is a reason to
+stop and read. For a rule that WIDENS, a zero delta is the reason to stop and
+check the instrument — and the check is exposure, not emits.
