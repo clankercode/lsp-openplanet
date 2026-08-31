@@ -3068,3 +3068,59 @@ one mutation has silently stopped testing anything.** A loud break would have
 been fine.
 
 **Watch for the score that stays perfect while the thing being scored changes.**
+
+## A control proves nothing by not failing
+
+B139's sweep found every probe's ROW-LEVEL oracle was sound — `build_verdict`
+demands two positive markers, so a build that never happened yields AMBIGUOUS and
+never ACCEPT. The exposure was one level up, in a run gate four probes had each
+hand-rolled:
+
+    bad = [r for r in rows if r["expect"] != "UNKNOWN" and r["verdict"] != r["expect"]]
+    return 1 if bad else 0
+
+**That exits 0 for a run that measured nothing, two different ways.**
+
+1. `--only` can filter the CONTROLS out. `bad` is then computed over an empty
+   set, and the run writes its corpus and exits 0 having verified no channel at
+   all.
+2. The transport can die midway. Every later row goes AMBIGUOUS, **no control
+   mismatches — because controls that never ran cannot mismatch** — and a full
+   column of AMBIGUOUS is exported as the measured answer with a success status.
+
+**In that expression an ABSENT control and a PASSING control are the same
+value.** That is B118's absence defect wearing a different hat, and it is the
+general form: a check written as "no failures" cannot distinguish "everything
+passed" from "nothing ran".
+
+**The rule: assert on the presence of the control, not only on its verdict.** A
+run gate must refuse when there are no rows, no controls, a mismatched control,
+or an AMBIGUOUS control — the last because a control that could not be measured
+has not been satisfied.
+
+**And note what it must NOT refuse.** A single ambiguous row beside passing
+controls is often honest — B096 claim 2 shipped two, correctly. Making AMBIGUOUS
+fatal would destroy every legitimate partial result while passing any suite that
+only checks bad runs get refused. **The over-condemn mutation is not optional
+here; it is the one that distinguishes a gate from a wall.**
+
+### Two corollaries from the same sweep
+
+**A copy whose docstring claims to delegate is outside the coverage it appears to
+have.** `probe_member_visibility` carried a duplicated `classify` documented as
+delegating to the shared one. A future fix to the shared classifier would have
+silently missed it, and nothing would have gone red.
+
+**A failure and the false reading it causes can live in different processes hours
+apart.** `probe_engine_const_receiver` had no post-run stranded-fixture sweep, so
+it could exit 0 leaving a fixture installed and turn every SUBSEQUENT probe's
+rows into AMBIGUOUS. No single run looked wrong. Cleanup is not hygiene; it is
+part of the next run's correctness.
+
+### Record the entry points that were FINE
+
+B139 wrote down that `clippy_delta.py` already enforces its toolchain rather than
+merely recording it, that `test-suite.py` has the zero-binary exit, green-zero
+refusal and per-binary reconciliation, and that a grep for Rust tests that
+self-skip on a missing fixture found zero. **A sweep that only records defects
+guarantees the next sweep re-derives the clean cases.**
