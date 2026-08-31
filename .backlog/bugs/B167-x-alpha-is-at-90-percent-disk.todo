@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T17:23:21Z"
 depends_on: []
 estimate_hours: 1
 id: B167
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'x-alpha is at 90 percent disk with 45G free and six per-lane target dirs holding 82G: the B106 ENOSPC false-green route is one concurrent lane away from reopening'
@@ -12,3 +14,48 @@ updated_at: "2026-08-31T17:23:21Z"
 ---
 
 x-alpha is at 90 percent disk with 45G free and six per-lane target dirs holding 82G: the B106 ENOSPC false-green route is one concurrent lane away from reopening
+
+MEASURED on x-alpha, 2026-09-01, by lane-tooling while costing B163's design:
+
+  458G total, 390G used, 45G free -- 90% full.
+  Six per-lane target dirs: 9.6 / 11 / 14 / 15 / 16 / 16 GB = ~82 GB.
+  B106's floor: 10 GiB.
+
+WHY THIS IS URGENT RATHER THAN HOUSEKEEPING. B106's incident was x-alpha at 0
+bytes with GATES EXITING 0 WHILE BUILDS FAILED WITH ENOSPC -- a false green on
+the instrument every lane's evidence depends on. The floor guard exists because
+of it. We are currently 35 GB above that floor while running four concurrent
+lanes at ~14 GB of target dir each. One additional concurrent tree, or one lane
+doing a clean rebuild, closes the gap.
+
+This is also what killed B163's live-merge-base-build option: it would have
+needed a SECOND target dir per lane (reusing the lane's own thrashes the
+incremental cache between two source trees, which is why remote-build.py isolates
+them at all), i.e. ~56 GB against 45 GB free. Buying a set-diff by reopening a
+false-green route in every other gate on the box.
+
+WHAT TO DO -- and CAUTION, this is a SHARED build box, not ours alone:
+  1. Enumerate the six target dirs and map each to a worktree that still exists.
+     `remote-build.py` names the remote tree per worktree, so an orphan is a
+     target dir whose lane worktree is gone. DO NOT infer staleness from mtime
+     alone -- a lane can idle for hours mid-ticket and this batch has had lanes
+     hold for 40 minutes at a stretch.
+  2. Confirm with the coordinator which lanes are live BEFORE deleting anything.
+     There are currently four active lanes plus recently-removed worktrees, so
+     the orphan set is real but is not simply "the oldest two".
+  3. Only then reclaim. `cargo clean` in an orphan tree, or remove the orphan
+     remote tree entirely.
+
+STRUCTURAL FOLLOW-UP, worth more than the one-off cleanup: nothing currently
+removes a remote tree or target dir when a lane worktree is cleaned up locally.
+Every completed lane in this repo's history has left ~14 GB on the build box
+forever. The reclaim should be part of worktree teardown, not a periodic manual
+sweep -- otherwise this ticket recurs on a schedule set by how fast we close
+tickets.
+
+Also worth checking whether B106's floor check runs BEFORE the build or only
+guards the reported result. A floor that is consulted after a build has already
+consumed the disk protects the report but not the box.
+
+Related: B164 (a stale baseline binary the sweep guard cannot see), B106 (the
+original ENOSPC false green and the 10 GiB floor).
