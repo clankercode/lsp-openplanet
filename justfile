@@ -56,6 +56,20 @@ test *ARGS:
 test-selftest:
     python3 scripts/test-suite.py --selftest
 
+# The inventory non-vacuity harness, on the remote. It runs WHOLLY over there
+# and is never split across machines: its whole subject is the mtime
+# relationship between sources and the artifacts built from them on ONE
+# filesystem. Sync a tree and you rewrite that relationship, so a split run
+# would measure rsync rather than the tree.
+#
+# Proves `just test-inventory` can fail (real artifacts, on the remote).
+rtest-inventory-mutants:
+    python3 scripts/remote-build.py run -- python3 scripts/check_test_inventory_nonvacuous.py
+
+# The inventory check alone, on the remote.
+rtest-inventory *ARGS:
+    python3 scripts/remote-build.py run -- python3 scripts/test_inventory.py {{ARGS}}
+
 # B085: the inventory check on its own, without running the suite. Per test
 # binary, `--list` count vs the `#[test]` count in the sources cargo's dep-info
 # says it was built from; plus every artifact's mtime against those sources,

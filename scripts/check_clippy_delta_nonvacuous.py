@@ -158,8 +158,13 @@ GUARD_MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "baseline command mismatch guard",
-        '    if method.get("command") != CLIPPY_CMD:',
+        '    if identity(method.get("command")) != identity(CLIPPY_CMD):',
         "    if False:",
+    ),
+    (
+        "`-j` is excluded from the command identity",
+        '    return [a for a in (command or []) if not a.startswith(("-j", "--jobs"))]',
+        "    return list(command or [])",
     ),
     (
         "toolchain mismatch guard",
@@ -274,6 +279,15 @@ def method_mismatch_case(baseline: dict) -> tuple[int, int]:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         wrong = Path(handle.name)
     try:
+        # Its OWN target dir, and this is not a tidiness choice. Measured on
+        # the remote: `cargo clippy` NARROWER than the warm tree's last build
+        # emits zero artifacts and zero messages and exits 0 — so recording
+        # into the shared dir produced an empty baseline, which the gate's
+        # zero-units guard then correctly refused. A cold dir makes cargo
+        # actually run, which is what this fixture needs it to do.
+        alt_target = Path(
+            os.environ.get("CARGO_TARGET_DIR", str(REPO_ROOT / "target"))
+        ) / "b083-altmethod"
         rc = subprocess.run(
             [
                 sys.executable,
@@ -281,14 +295,18 @@ def method_mismatch_case(baseline: dict) -> tuple[int, int]:
                 "--record",
                 "--baseline",
                 str(wrong),
-                # Capture WITHOUT --all-targets by overriding the command.
+                "--commit",
+                "0" * 40,
+                # Capture WITHOUT --all-targets by overriding the command. No
+                # `-j` here: the script appends its own from CARGO_BUILD_JOBS.
                 "--command-override",
-                "cargo,clippy,--locked,--message-format=json,-j2",
+                "cargo,clippy,--locked,--message-format=json",
             ],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             timeout=3600,
+            env={**os.environ, "CARGO_TARGET_DIR": str(alt_target)},
         )
         if rc.returncode != 0 or not wrong.exists():
             print(

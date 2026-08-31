@@ -1435,6 +1435,33 @@ The test passes, and would have passed either way.
   **And it does not retry.** A gate that retries until green converts an
   intermittent into silence, which is strictly worse than a red run.
 
+  **And it saves the whole run to a file.** B092 cannot name its own failing
+  binary, because the one occurrence was captured with `| tail -6` and the
+  verdict line naming it was above the cut. An intermittent is exactly the
+  case you get one look at, so the gate now writes the complete output on
+  failure and prints the path as its LAST line, where a tail will still find
+  it.
+
+- **Which machine a check runs on can be part of what it measures.** Two of
+  this repo's harnesses moved to a remote build host, and they do not move the
+  same way. `check_clippy_delta_nonvacuous.py` splits fine — clippy's verdict
+  does not depend on the filesystem. `check_test_inventory_nonvacuous.py`
+  cannot be split at all: its subject IS the mtime relationship between
+  sources and the artifacts built from them, and an rsync rewrites exactly
+  that. Run it across two machines and it measures the sync.
+
+  Two guards had to change for the move, both for the same reason. The
+  restore check verified itself with `git status` — but `.git` is deliberately
+  not synced to the build host, so that check would have **silently stopped
+  checking** the moment the harness ran there. It now compares a sha256 of
+  each file it touched, which is stronger anyway and works everywhere. And the
+  clippy baseline recorded a blank commit remotely, quietly disabling the
+  staleness report; recording without a commit is now refused.
+
+  The transferable question: **when you move a check to another machine, ask
+  which of its inputs came from the machine.** Filesystem timestamps, `.git`,
+  the toolchain version and the core count all did here.
+
 - **`-D warnings` makes clippy report FEWER lints, not more.** It turns the
   first warning into an error, so compilation stops early and the diagnostic
   set is truncated. Measured on this tree, rustc 1.97.0:
