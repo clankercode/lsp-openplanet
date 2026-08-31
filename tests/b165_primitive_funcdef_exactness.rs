@@ -90,24 +90,53 @@ fn the_live_oracle_covers_every_requested_direction_and_both_controls() {
     }
 }
 
-#[test]
-fn the_engine_rejects_every_primitive_mismatch_including_real_startnew() {
-    let rows = corpus_rows();
-    for (id, row) in &rows {
-        if row.expect != "UNKNOWN" {
-            continue;
-        }
+fn assert_all_question_rows_are_unknown_rejects(rows: &BTreeMap<String, Row>) {
+    let mut ids = vec!["b165-primitive-startnew-int-int64".to_string()];
+    ids.extend(
+        PAIRS
+            .iter()
+            .map(|(id, _, _)| format!("b165-primitive-{id}")),
+    );
+    assert_eq!(ids.len(), 9, "startnew + eight directional rows");
+
+    for id in ids {
+        let row = rows
+            .get(&id)
+            .unwrap_or_else(|| panic!("missing required B165 question row {id}: {rows:#?}"));
+        assert_eq!(
+            row.expect, "UNKNOWN",
+            "{id} must remain a question row; changing expect must not hide an engine verdict"
+        );
         assert_eq!(row.verdict, "REJECT", "engine accepted {id}: {row:?}");
         assert_ne!(
             row.messages, "-",
             "a rejected row must preserve the engine's diagnostic: {id}"
         );
     }
+}
+
+#[test]
+fn the_engine_rejects_every_primitive_mismatch_including_real_startnew() {
+    let rows = corpus_rows();
+    assert_all_question_rows_are_unknown_rejects(&rows);
     assert!(
         rows["b165-primitive-startnew-int-int64"]
             .messages
             .contains("No matching signatures to 'startnew"),
         "the real built-in seam must be measured directly"
+    );
+}
+
+#[test]
+fn changing_a_question_expectation_cannot_hide_its_reject_verdict() {
+    let mut rows = corpus_rows();
+    rows.get_mut("b165-primitive-int-at-int64")
+        .expect("mutation target must exist")
+        .expect = "ACCEPT".to_string();
+    let caught = std::panic::catch_unwind(|| assert_all_question_rows_are_unknown_rejects(&rows));
+    assert!(
+        caught.is_err(),
+        "the oracle guard must fail if a required question row stops being UNKNOWN"
     );
 }
 

@@ -2037,7 +2037,7 @@ impl<'a> Checker<'a> {
         }
         // GH #49: distinct math value types (nat3/int3/vec*/iso*/quat) have
         // no implicit conversion — the game rejects the initializer with
-        // `Can't implicitly convert from 'const nat3' to 'int3'`.
+        // `Can't implicitly convert from 'const nat3' to 'int3&'.`
         if let (TypeRepr::Named(target_n), TypeRepr::Named(source_n)) = (target, source) {
             if is_math_value_type(target_n) && is_math_value_type(source_n) && target_n != source_n
             {
@@ -2175,20 +2175,18 @@ impl<'a> Checker<'a> {
     /// rules are unaltered and nothing about this function's logic follows
     /// from the difference.
     ///
-    /// **Our own diagnostic deliberately keeps the unsuffixed spelling** (and
-    /// drops the engine's trailing full stop). The `&` is an artifact of how
-    /// the engine models assignment, not part of the type the user wrote, and
-    /// `to 'LocalTwo'` is what a reader is looking for. That is a deliberate
-    /// divergence from b071's "match the engine's own text" guidance.
+    /// B160 resolved the product decision in favour of exact engine spelling:
+    /// our renderer now includes both the target-reference `&` and the final
+    /// full stop. The 15 exact-string assertions in
+    /// `b071_enum_type_mismatch` and `cli_check_tests` pin that choice.
     ///
-    /// B155 made it CHECKED rather than merely recorded:
+    /// B155/B160 keep the relationship CHECKED rather than merely recorded:
     /// `tests/b155_engine_wording_divergence.rs` derives the engine's spelling
     /// from the probe corpora (22 of 22 measured messages carry BOTH marks,
-    /// across b071 and b144) and asserts the difference is exactly "drop the
-    /// target's `&`, drop the trailing `.`" and nothing else. Flipping the
-    /// decision is a one-line change to the renderer above plus that file's
-    /// transform — the 15 exact-string assertions in `b071_enum_type_mismatch`
-    /// and `cli_check_tests` are the rest of the blast radius.
+    /// across b071 and b144 when B160 landed). B160 inverted the old drop
+    /// transform: it adds both marks to the former local spelling, must
+    /// reproduce a measured engine row character-for-character, and then
+    /// requires the live renderer to equal that row.
     ///
     /// The converse of the second is LEGAL — `int i = LocalOne::X;` compiles,
     /// because an enum value decays to `int`. That asymmetry is the trap: a
@@ -3310,8 +3308,8 @@ impl<'a> Checker<'a> {
     /// function.
     ///
     /// Without this the message reads `Can't implicitly convert from 'G' to
-    /// 'F@'`, naming an identifier where a type belongs and hiding the very
-    /// thing that differs. `from 'int()' to 'F@'` shows the mismatch and
+    /// 'F@&'.`, naming an identifier where a type belongs and hiding the very
+    /// thing that differs. `from 'int()' to 'F@&'.` shows the mismatch and
     /// matches how the engine words it. Falls back to the type display when
     /// the reference is overloaded or does not resolve, since then there is
     /// no single signature to name.
@@ -3655,7 +3653,7 @@ impl<'a> Checker<'a> {
     /// type.
     ///
     /// Reuses [`Self::funcdef_binding_source_display`], which is what already
-    /// produces `Can't implicitly convert from 'void()' to 'CoroutineFunc@'`
+    /// produces `Can't implicitly convert from 'void()' to 'CoroutineFunc@&'.`
     /// at the DECLARATION position — the same argument shape, one message
     /// away. Deliberately not `render_func_or_type`, which B108 names:
     /// that one emits `"{} ({})"` with a space and takes `sigs.first()`,
