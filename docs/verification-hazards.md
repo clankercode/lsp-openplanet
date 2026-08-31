@@ -349,8 +349,19 @@ The test passes, and would have passed either way.
   pressure, from "~2G free" — which read the `free` column where `available`
   governs, and `available` was 21–22G throughout.
 
-  What the coredump shows: `si_code=SEGV_ACCERR`, a guard-page hit, so it **is**
-  a stack overflow — but the stack is **shallow**, ~32–40 frames, and **frame #0
+  **THIRD DIAGNOSIS ALSO UNDER REVISION (2026-08-31).** What follows was the
+  second reading and is now itself in doubt: a lane measured `rsp` sitting
+  2016 KiB above the bottom of a 2052 KiB stack region — about **36 KiB
+  used** — and `si_addr == rip` exactly, at an identical module offset
+  across five different ASLR bases. That is an execute fault at a
+  deterministic location, not a stack access, and it refutes stack
+  exhaustion too. Left standing until that lane confirms, because a third
+  confident rewrite would be worse than a marked one. **The entry's value
+  is now the pattern, not the conclusion: three plausible causes, three
+  refutations, each refuted by a measurement nobody had taken.**
+
+  Second reading, retained for the record: `si_code=SEGV_ACCERR`, read as a
+  guard-page hit, so it **is** a stack overflow — but the stack is **shallow**, ~32–40 frames, and **frame #0
   is the parser's ENTRY point**, before any recursion. A recursive-descent
   parser overflowing on nested input shows hundreds or thousands of frames. The
   thread was already out of stack when it arrived; the TOML input is a
