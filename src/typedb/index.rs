@@ -164,18 +164,73 @@ pub struct PropertyInfo {
     pub writable: bool,
 }
 
+/// How a parameter is passed (B146). AngelScript has exactly these four
+/// modes, so one enum replaces three `bool`s that could encode eight states.
+///
+/// `Value` is a real, positive claim ("passed by value"), NOT a stand-in for
+/// "unknown" — that is what `Option::None` on `ParamInfo::direction` is for.
+/// Conflating the two is the defect B146 removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamDirection {
+    Value,
+    In,
+    Out,
+    Inout,
+}
+
+impl ParamDirection {
+    /// Decode the typedb `typeflags` bits: bit 0 is `in`, bit 1 is `out`, and
+    /// both together are `inout`. Only Core carries these bits.
+    pub fn from_typeflags(typeflags: u32) -> ParamDirection {
+        match typeflags & 0b11 {
+            0b11 => ParamDirection::Inout,
+            0b10 => ParamDirection::Out,
+            0b01 => ParamDirection::In,
+            _ => ParamDirection::Value,
+        }
+    }
+
+    /// True when the slot takes a REFERENCE the caller must already own, so a
+    /// literal or other temporary cannot bind it (GH #47). That is `&out` and
+    /// `&inout` alike.
+    ///
+    /// This is what the replaced `is_out` bool actually meant: it was set
+    /// from `typeflags & 0b10`, and bit 1 is set for `inout` (0b11) as well
+    /// as `out` (0b10), so the old field was true for both. Core carries
+    /// exactly one `&inout` param (`T[] arr`, typeflags 7) — measured, not
+    /// assumed — and narrowing this to `Out` alone would have quietly
+    /// loosened the rule for it.
+    pub fn binds_by_reference(self) -> bool {
+        matches!(self, ParamDirection::Out | ParamDirection::Inout)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ParamInfo {
     pub name: Option<String>,
     pub type_name: String,
     pub default: Option<String>,
-    /// `&in` reference parameter (typedb `typeflags` bit 1) (B027).
-    pub is_in: bool,
-    /// `&out` reference parameter (typedb `typeflags` bit 2): only an
-    /// l-value argument can bind (GH #47).
-    pub is_out: bool,
-    /// `&inout` reference parameter (typedb `typeflags` bits 1|2) (B027).
-    pub is_inout: bool,
+    /// B146: how the parameter is passed — `None` when the source database
+    /// does not say, which is a THIRD state and not a synonym for "by value".
+    ///
+    /// This was three independent `bool`s (`is_in`/`is_out`/`is_inout`), and
+    /// the Nadeo loader hardcoded all three to `false` for every one of its
+    /// 2701 params. That triple is not an absence: all-false is the encoding
+    /// for `ParamDirection::Value`, so the loader was not declining to
+    /// answer, it was asserting PASS BY VALUE about parameters no dump has
+    /// ever described. For 61 of them the dump's own text refutes it — their
+    /// arg string carries a `&` (every one `MwFastBuffer<wstring>&`, across
+    /// 56 methods; five methods take two such params), and a `&` parameter is
+    /// by definition not passed by value.
+    ///
+    /// Core sets it from real `typeflags` bits. Nadeo has no per-parameter
+    /// key at all — the eight member keys are `n,i,t,c,m,r,e,a`, and `a` is a
+    /// single flat string — so `None` is the only honest value, and readers
+    /// must apply an explicit unknown policy rather than a default.
+    ///
+    /// One field rather than three also deletes the four impossible states
+    /// the bools could encode (`is_out && !is_inout && is_in`, and so on).
+    pub direction: Option<ParamDirection>,
     /// `typeflags` bit 3 (value 4): the parameter is const-qualified. Kept so
     /// the no-`decl` rendering path (the Nadeo half, and any Core entry that
     /// omits `decl`) can still show `const T &in` rather than `T &in` (B033).
@@ -1223,9 +1278,7 @@ impl TypeIndex {
                         default: a.default.clone(),
                         // typedb typeflags: bit 1 `&in`, bit 2 `&out`,
                         // both = `&inout` (B027); bit 4 is const.
-                        is_in: a.typeflags & 0b1 != 0,
-                        is_out: a.typeflags & 0b10 != 0,
-                        is_inout: a.typeflags & 0b11 == 0b11,
+                        direction: Some(ParamDirection::from_typeflags(a.typeflags)),
                         is_const: Some(a.typeflags & 0b100 != 0),
                     })
                     .collect(),
@@ -1255,9 +1308,7 @@ impl TypeIndex {
                                 name: a.name.clone(),
                                 type_name: a.typedecl.clone(),
                                 default: a.default.clone(),
-                                is_in: a.typeflags & 0b1 != 0,
-                                is_out: a.typeflags & 0b10 != 0,
-                                is_inout: a.typeflags & 0b11 == 0b11,
+                                direction: Some(ParamDirection::from_typeflags(a.typeflags)),
                                 is_const: Some(a.typeflags & 0b100 != 0),
                             })
                             .collect(),
@@ -1342,9 +1393,7 @@ impl TypeIndex {
                             name: a.name.clone(),
                             type_name: a.typedecl.clone(),
                             default: a.default.clone(),
-                            is_in: a.typeflags & 0b1 != 0,
-                            is_out: a.typeflags & 0b10 != 0,
-                            is_inout: a.typeflags & 0b11 == 0b11,
+                            direction: Some(ParamDirection::from_typeflags(a.typeflags)),
                             is_const: Some(a.typeflags & 0b100 != 0),
                         })
                         .collect(),
@@ -1413,9 +1462,14 @@ impl TypeIndex {
                                         name: Some(name),
                                         type_name: ty,
                                         default: None,
-                                        is_in: false,
-                                        is_out: false,
-                                        is_inout: false,
+                                        // B146: the Nadeo dump has no
+                                        // per-parameter key of any kind, so
+                                        // the direction is UNKNOWN. It was
+                                        // `false` three times over, which
+                                        // asserts "by value" — refuted by the
+                                        // 61 params whose own type text
+                                        // carries a `&`.
+                                        direction: None,
                                         // B142: UNKNOWN, not `false`.
                                         //
                                         // The comment here used to say the
@@ -2197,8 +2251,15 @@ fn render_params(params: &[ParamInfo]) -> String {
                 p.name.as_deref().unwrap_or("<unnamed>"),
                 p.type_name
             );
-            if p.is_out {
-                rendered.push_str(" &out");
+            // B146: unknown direction renders nothing, exactly as the
+            // hardcoded `false` did — the display stays silent rather than
+            // inventing a mode. The one Core `&inout` param used to render as
+            // `&out` here, because the old bool was the `typeflags & 0b10`
+            // bit test and that bit is set for both; it now says what it is.
+            match p.direction {
+                Some(ParamDirection::Out) => rendered.push_str(" &out"),
+                Some(ParamDirection::Inout) => rendered.push_str(" &inout"),
+                Some(ParamDirection::In) | Some(ParamDirection::Value) | None => {}
             }
             if let Some(default) = &p.default {
                 rendered.push_str(&format!(" = {default}"));
@@ -6019,31 +6080,11 @@ mod b138_loader_literal_audit {
             "the Nadeo dump carries no `behaviors`, and engine classes are \
              reference types with no constructor conversions (GH #54)",
         ),
-        // The remaining three are NOT justified — they are the open finding
-        // this audit exists to surface, kept here so the test states the
-        // count rather than tolerating it silently. See the follow-up ticket:
-        // every Nadeo param is recorded as none of in/out/inout, a state
-        // AngelScript has no way to represent, and 56 of 1387 Nadeo arg
-        // strings carry a `&` the loader drops on the floor. `is_out` is not
-        // cosmetic — it feeds `param_out` and thus arg-type checking.
-        (
-            "is_in",
-            "false",
-            1,
-            "OPEN FINDING, tracked: Nadeo param direction is unknown, not `in`",
-        ),
-        (
-            "is_out",
-            "false",
-            1,
-            "OPEN FINDING, tracked: feeds `param_out` -> arg-type checking",
-        ),
-        (
-            "is_inout",
-            "false",
-            1,
-            "OPEN FINDING, tracked: 56 of 1387 Nadeo args carry a dropped `&`",
-        ),
+        // B146 closed the three rows that used to sit here (`is_in`,
+        // `is_out`, `is_inout`, each hardcoded `false` on the Nadeo side).
+        // They are gone rather than justified: the three bools became one
+        // `Option<ParamDirection>` that is `None` when the dump does not say,
+        // and `None` claims nothing, so it needs no row.
     ];
 
     /// Literals that state an absence rather than assert a fact.
@@ -6193,6 +6234,237 @@ mod b138_loader_literal_audit {
              for. A `bool` literal claims a fact to every caller; if the dump \
              never said it, either fix it or add a row saying why it is true. \
              `None` needs no row — it claims nothing."
+        );
+    }
+}
+
+/// B146: a Nadeo parameter's PASSING DIRECTION is unknown, not "by value".
+///
+/// The loader recorded `is_in`/`is_out`/`is_inout` as `false` for all 2701
+/// Nadeo params. That triple is not an absence — all-false is the encoding
+/// for PASS BY VALUE, a legal and positive claim. So the loader was not
+/// failing to answer; it was answering "by value" about parameters no dump
+/// has ever described that way.
+///
+/// For 61 of them the dump's own text contradicts the claim outright: their
+/// arg string carries a `&` (every one of them `MwFastBuffer<wstring>&`, on
+/// 56 methods — five methods take two such params). A `&` parameter is by
+/// definition not passed by value.
+#[cfg(test)]
+mod b146_nadeo_param_direction_is_unknown {
+    use super::*;
+
+    fn fixtures() -> TypeIndex {
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("fixtures must load")
+    }
+
+    /// The decoder, over every mode rather than the one that happened to
+    /// matter. Bit 0 is `in`, bit 1 is `out`, both together are `inout`, and
+    /// neither is a real `Value` claim.
+    #[test]
+    fn typeflags_decode_to_every_direction() {
+        use ParamDirection::*;
+        for (flags, want) in [
+            (0b000u32, Value),
+            (0b001, In),
+            (0b010, Out),
+            (0b011, Inout),
+            // The const bit (bit 2) is carried separately by `is_const` and
+            // must not disturb the direction decode.
+            (0b100, Value),
+            (0b101, In),
+            (0b110, Out),
+            (0b111, Inout),
+        ] {
+            assert_eq!(
+                ParamDirection::from_typeflags(flags),
+                want,
+                "typeflags {flags:#05b}"
+            );
+        }
+    }
+
+    /// `binds_by_reference` must stay true for `&inout`, not just `&out`.
+    /// The bool it replaced was the `typeflags & 0b10` bit test, and bit 1 is
+    /// set for `inout` too — so a reading of "out only" silently loosens
+    /// GH #47 for every `&inout` slot.
+    #[test]
+    fn out_and_inout_both_bind_by_reference_but_in_and_value_do_not() {
+        use ParamDirection::*;
+        for (d, want) in [(Value, false), (In, false), (Out, true), (Inout, true)] {
+            assert_eq!(d.binds_by_reference(), want, "{d:?}");
+        }
+    }
+
+    /// The Core `&inout` population, pinned. It is a single param today, and
+    /// a test that did not name it would let the regression above through
+    /// unnoticed because almost nothing exercises it.
+    #[test]
+    fn core_carries_exactly_one_inout_param() {
+        let idx = fixtures();
+        let mut inout: Vec<String> = Vec::new();
+        for info in idx.types.values() {
+            if info.source != TypeSource::Core {
+                continue;
+            }
+            for m in &info.methods {
+                for p in &m.params {
+                    if p.direction == Some(ParamDirection::Inout) {
+                        inout.push(format!("{}::{}({})", info.name, m.name, p.type_name));
+                    }
+                }
+            }
+        }
+        for f in idx.functions.values().flatten() {
+            for p in &f.params {
+                if p.direction == Some(ParamDirection::Inout) {
+                    inout.push(format!("{}({})", f.name, p.type_name));
+                }
+            }
+        }
+        inout.sort();
+        assert_eq!(inout.len(), 1, "Core `&inout` params: {inout:?}");
+    }
+
+    /// `Value` and "unknown" are different answers, and the type keeps them
+    /// apart. This is the whole point of the ticket stated as one assertion.
+    #[test]
+    fn pass_by_value_is_not_the_same_answer_as_unknown() {
+        let by_value: Option<ParamDirection> = Some(ParamDirection::Value);
+        let unknown: Option<ParamDirection> = None;
+        assert_ne!(
+            by_value, unknown,
+            "collapsing these two is the defect B146 removed"
+        );
+    }
+
+    /// THE INVARIANT, in B137's shape. Core reads real `typeflags` bits so it
+    /// always has an answer; Nadeo has no per-parameter key at all so it never
+    /// does. Stated over every param in the shipped dumps rather than a
+    /// sample, so a loader that starts defaulting again fails here.
+    #[test]
+    fn core_params_state_their_direction_and_nadeo_params_do_not() {
+        let idx = fixtures();
+        let mut core_known = 0usize;
+        let mut nadeo_unknown = 0usize;
+        for info in idx.types.values() {
+            for m in &info.methods {
+                for p in &m.params {
+                    match info.source {
+                        TypeSource::Core => {
+                            assert!(
+                                p.direction.is_some(),
+                                "Core carries `typeflags`, so direction must always \
+                                 have an answer: {}::{} param {:?}",
+                                info.name,
+                                m.name,
+                                p.name
+                            );
+                            core_known += 1;
+                        }
+                        _ => {
+                            assert_eq!(
+                                p.direction, None,
+                                "the Nadeo dump has no per-parameter key, so its \
+                                 direction must be UNKNOWN rather than a mode: \
+                                 {}::{} param {:?}",
+                                info.name, m.name, p.name
+                            );
+                            nadeo_unknown += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Non-vacuity: both populations must be non-empty, or the assertions
+        // above are being made about nothing.
+        assert!(core_known > 500, "only {core_known} Core params audited");
+        assert!(
+            nadeo_unknown > 2000,
+            "only {nadeo_unknown} Nadeo params audited"
+        );
+    }
+
+    /// The measured population, pinned. If a future dump starts decorating
+    /// its arg strings, this count moves and the ticket gets revisited rather
+    /// than the change passing unnoticed.
+    #[test]
+    fn the_nadeo_reference_population_is_sixty_one_params_on_fifty_six_methods() {
+        let idx = fixtures();
+        let mut params = 0usize;
+        let mut methods = 0usize;
+        for info in idx.types.values() {
+            if info.source == TypeSource::Core {
+                continue;
+            }
+            for m in &info.methods {
+                let n = m.params.iter().filter(|p| p.type_name.contains('&')).count();
+                if n > 0 {
+                    methods += 1;
+                }
+                params += n;
+            }
+        }
+        assert_eq!((params, methods), (61, 56), "(params, methods) with a `&`");
+    }
+
+    /// THE RED. A param whose own type text says `&` must never be recorded
+    /// as pass-by-value. Stated over every shipped Nadeo method rather than a
+    /// sample, so a loader that starts asserting a direction again fails here.
+    #[test]
+    fn a_reference_typed_nadeo_param_is_never_recorded_as_pass_by_value() {
+        let idx = fixtures();
+        let mut refs = 0usize;
+        let mut by_value: Vec<String> = Vec::new();
+        for info in idx.types.values() {
+            if info.source == TypeSource::Core {
+                continue;
+            }
+            for m in &info.methods {
+                for p in &m.params {
+                    if !p.type_name.contains('&') {
+                        continue;
+                    }
+                    refs += 1;
+                    if p.direction == Some(ParamDirection::Value) {
+                        // The param NAME is part of the key on purpose: five
+                        // methods take two `MwFastBuffer<wstring>&` params, so
+                        // keying on the type alone collapses 61 params to 56
+                        // distinct strings -- which silently equals the count
+                        // of `&`-carrying MEMBERS, a different quantity
+                        // reached a different way. Two derivations landing on
+                        // one number is how a wrong story gets confirmed.
+                        by_value.push(format!(
+                            "{}::{}({} {})",
+                            info.name,
+                            m.name,
+                            p.type_name,
+                            p.name.as_deref().unwrap_or("<unnamed>")
+                        ));
+                    }
+                }
+            }
+        }
+        // Non-vacuity: the reference-typed population must actually be found,
+        // or the assertion below is being made about nothing.
+        assert_eq!(
+            refs, 61,
+            "expected the 61 `&`-carrying Nadeo params measured from the dump"
+        );
+        by_value.sort();
+        assert!(
+            by_value.is_empty(),
+            "{} of {refs} reference-typed Nadeo params are recorded as \
+             PASS BY VALUE, which their own type text contradicts; \
+             direction is unknown here, not `false`: {:?}",
+            by_value.len(),
+            &by_value[..by_value.len().min(4)]
         );
     }
 }

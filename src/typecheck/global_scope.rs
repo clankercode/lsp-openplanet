@@ -10,7 +10,7 @@ use super::access_position::AccessPosition;
 use super::repr::{param_mode_from_text, ParamMode, TypeRepr};
 use crate::symbols::scope::{Symbol, SymbolKind};
 use crate::symbols::SymbolTable;
-use crate::typedb::index::ParamInfo;
+use crate::typedb::index::{ParamDirection, ParamInfo};
 use crate::typedb::TypeIndex;
 
 /// Read-only merged view of all globally visible symbols:
@@ -65,14 +65,34 @@ fn typedb_param_mode(p: &ParamInfo) -> ParamMode {
     if from_text != ParamMode::Value {
         return from_text;
     }
-    if p.is_inout {
-        ParamMode::Inout
-    } else if p.is_out {
-        ParamMode::Out
-    } else if p.is_in {
-        ParamMode::In
-    } else {
-        ParamMode::Value
+    // B146: THE UNKNOWN POLICY, written down rather than defaulted. The Nadeo
+    // half states no direction at all (its dump has no per-parameter key —
+    // the eight member keys are `n,i,t,c,m,r,e,a`), so `None` arrives here
+    // and must stay PERMISSIVE.
+    //
+    // MEASURED, 163-plugin fleet sweep with the binaries hashed and proven to
+    // differ: substituting `Out` for `None` breaks 19 plugins with 57 fresh
+    // false-positive errors and flips 9 exit statuses, all on shipped code
+    // that compiles in the game — they arrive through the GH #47 rule below
+    // ("a bool literal cannot bind an `&out` slot"), which reads `param_out`.
+    // Substituting `Inout` changes nothing at all.
+    //
+    // So the corpus proves `Out` wrong and cannot separate `None` from
+    // `Inout`. That is exactly why the field is `Option` and not a guess: a
+    // future rule that starts consuming direction would find `Inout` a
+    // landmine and `None` a stop sign. B130 nearly shipped a false positive
+    // on every const Nadeo call by consuming a hardcoded `false` the same
+    // way, which is the same story one field over.
+    //
+    // `Value` here is what the old all-`false` triple produced, so this is
+    // behaviour-identical; the difference is that the fallback is now visible
+    // and attributed instead of looking like data.
+    match p.direction {
+        Some(ParamDirection::Inout) => ParamMode::Inout,
+        Some(ParamDirection::Out) => ParamMode::Out,
+        Some(ParamDirection::In) => ParamMode::In,
+        Some(ParamDirection::Value) => ParamMode::Value,
+        None => ParamMode::Value,
     }
 }
 
@@ -1631,7 +1651,7 @@ impl<'a> GlobalScope<'a> {
                 out.push(OverloadSig {
                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                     param_types: m.params.iter().map(|p| p.type_name.clone()).collect(),
-                    param_out: m.params.iter().map(|p| p.is_out).collect(),
+                    param_out: m.params.iter().map(|p| p.direction.is_some_and(ParamDirection::binds_by_reference)).collect(),
                     param_modes: m.params.iter().map(|p| typedb_param_mode(p)).collect(),
                     min_args,
                     return_type: m.return_type.clone(),
@@ -1670,7 +1690,7 @@ impl<'a> GlobalScope<'a> {
                     OverloadSig {
                         param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         param_types: f.params.iter().map(|p| p.type_name.clone()).collect(),
-                        param_out: f.params.iter().map(|p| p.is_out).collect(),
+                        param_out: f.params.iter().map(|p| p.direction.is_some_and(ParamDirection::binds_by_reference)).collect(),
                         param_modes: f.params.iter().map(|p| typedb_param_mode(p)).collect(),
                         min_args,
                         return_type: f.return_type.clone(),
@@ -4732,6 +4752,69 @@ mod tests {
         assert_eq!(fd.return_type, "void");
         assert_eq!(fd.param_types, vec!["int &out"]);
         assert_eq!(fd.param_modes, vec![ParamMode::Out]);
+    }
+
+    /// B146: the permissive unknown policy, pinned at the boundary that
+    /// produces it, and PAIRED against a Core method that really is `&out` so
+    /// the test cannot pass by the typedb simply being empty.
+    ///
+    /// Nadeo states no direction, so every Nadeo slot must come out `Value` /
+    /// not-out. Core states one, so a genuine `&out` slot must come out `Out`
+    /// / out. Asserting only the first half would be satisfied by a lookup
+    /// that returns nothing at all.
+    #[test]
+    fn nadeo_slots_are_permissive_and_core_out_slots_are_not() {
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+
+        // The Nadeo half: `EditReplay(MwFastBuffer<wstring>& ReplayList)` is
+        // one of the 61 `&`-carrying params. Unknown direction must not
+        // become an `&out` slot.
+        let nadeo = idx
+            .find_by_short_name("CGameManiaTitleControlScriptAPI")
+            .iter()
+            .find(|h| h.ends_with("::CGameManiaTitleControlScriptAPI"))
+            .cloned()
+            .expect("fixture must carry the class");
+        let sigs = scope
+            .lookup_external_method_param_overloads(&nadeo, "EditReplay")
+            .expect("EditReplay must resolve on the Nadeo class");
+        assert!(!sigs.is_empty(), "no EditReplay overload found");
+        let mut checked = 0usize;
+        for sig in &sigs {
+            for (i, ty) in sig.param_types.iter().enumerate() {
+                assert!(
+                    !sig.param_out[i],
+                    "unknown direction must not become an `&out` slot: {ty}"
+                );
+                assert_eq!(
+                    sig.param_modes[i],
+                    ParamMode::Value,
+                    "unknown direction must stay permissive: {ty}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "EditReplay has no params to check");
+
+        // The Core half: a real `&out` must still be recognised, or the
+        // assertions above prove nothing about the mechanism. `UI::Begin`'s
+        // `bool &out open` is the exact slot GH #47 documents.
+        let core = scope
+            .lookup_external_function_param_overloads("UI::Begin")
+            .expect("UI::Begin must exist in the fixture");
+        assert!(!core.is_empty(), "UI::Begin has no overloads");
+        let saw_core_out = core.iter().any(|sig| sig.param_out.iter().any(|o| *o));
+        assert!(
+            saw_core_out,
+            "Core must still report genuine `&out` params, or the Nadeo \
+             assertions above are vacuous"
+        );
     }
 
     #[test]
