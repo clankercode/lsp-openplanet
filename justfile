@@ -142,6 +142,33 @@ probe-export-binding *ARGS:
 probe-export-binding-selftest:
     python3 scripts/probe_export_binding.py --selftest
 
+# B119/B121: does receiver constness travel through a method's return value?
+# Needs the game. Offline half: `just probe-const-receiver-selftest`.
+probe-const-receiver *ARGS:
+    python3 scripts/probe_const_receiver.py {{ARGS}}
+
+# B117: does the engine enforce private/protected member access?
+probe-member-visibility *ARGS:
+    python3 scripts/probe_member_visibility.py {{ARGS}}
+
+# B130: is an ENGINE method's constness enforced through a const receiver?
+probe-engine-const-receiver *ARGS:
+    python3 scripts/probe_engine_const_receiver.py {{ARGS}}
+
+# The offline halves of the three probes above: variant-table checks, no game
+# needed. These existed only as direct `python3` invocations until B141, and a
+# probe a lane cannot find is one whose logic gets hand-rolled a fourth time.
+probe-variant-selftests:
+    python3 scripts/probe_const_receiver.py --selftest
+    python3 scripts/probe_member_visibility.py --selftest
+    python3 scripts/probe_engine_const_receiver.py --selftest
+
+# Prove those three selftests are non-vacuous: drop every control row, blank
+# what a row stands in for, or restore the duplicated classifier, and each
+# probe's selftest must go red. Includes an OVER-CONDEMN mutation.
+probe-variant-mutants:
+    python3 scripts/check_probe_variants_nonvacuous.py
+
 # Prove remote-build's own guards are non-vacuous: remove the unresolved-merge
 # refusal and confirm a conflicted tree reaches the remote, plus five
 # OVER-CONDEMN mutations — gating uncommitted work is the normal lane workflow,

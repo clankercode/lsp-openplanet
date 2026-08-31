@@ -556,6 +556,66 @@ def raw_build_errors(window: str, fid: str) -> list[str]:
     ]
 
 
+def probe_variant_problems(variants: list) -> list[str]:
+    """Can this probe's variant TABLE answer anything? (B141)
+
+    `probe_run_problems` judges a run; this judges the table before one. Both
+    exist because the failure is the same: a probe that returns a tidy verdict
+    having established nothing.
+
+    Deliberately ONE shared function rather than a copy per probe. Three probes
+    already hand-rolled their run gate, and one carried a duplicated `classify`
+    whose docstring claimed to delegate — the fourth copy is written by
+    whoever cannot find the third, so the discoverability gap and the
+    duplication are the same defect.
+
+    Checks, each earned by a specific incident:
+
+    * **Opposite-polarity controls.** B086 ran a probe whose two variants
+      failed identically: it measured nothing while looking like it had. An
+      oracle needs a row that must ACCEPT and a row that must REJECT, or its
+      verdicts are not evidence.
+    * **`stands_for` on every row.** B096 claim 1 measured UNBOUND from a
+      fixture that did not match the plugins it generalised to, and would have
+      reported four shipped plugins as broken. A fixture is a CLAIM about the
+      code it stands in for, and an unnamed claim cannot be checked.
+    * **Unique ids.** Rows are keyed by id into the corpus; a duplicate
+      silently overwrites a measurement with another.
+    """
+    problems: list[str] = []
+    if not variants:
+        return ["the variant table is empty, so this probe can measure nothing"]
+
+    ids = [getattr(v, "id", None) for v in variants]
+    dupes = sorted({i for i in ids if i is not None and ids.count(i) > 1})
+    if dupes:
+        problems.append(
+            f"duplicate variant id(s) {dupes}: rows are keyed by id, so one "
+            f"measurement silently replaces another"
+        )
+
+    expects = {getattr(v, "expect", "UNKNOWN") for v in variants}
+    controls = expects - {"UNKNOWN"}
+    if len(controls) < 2:
+        problems.append(
+            f"the table has controls expecting {sorted(controls) or 'nothing'}, "
+            f"so no two rows are required to differ. A probe whose controls "
+            f"cannot disagree measures nothing while looking like it has "
+            f"(B086)."
+        )
+
+    unnamed = [getattr(v, "id", "?") for v in variants
+               if not str(getattr(v, "stands_for", "") or "").strip()]
+    if unnamed:
+        problems.append(
+            f"variant(s) {unnamed} do not say what shipped code they stand in "
+            f"for. A fixture is a claim about the code it generalises to, and "
+            f"B096 claim 1 nearly reported four shipped plugins broken off one "
+            f"that did not match them."
+        )
+    return problems
+
+
 def probe_run_problems(rows: list[dict], ambiguous: str = "AMBIGUOUS") -> list[str]:
     """Is this probe RUN evidence at all? (B139)
 
@@ -1090,6 +1150,35 @@ def run_selftest() -> int:
     check("an AMBIGUOUS control is a failed control, not a passing one",
           bool(probe_run_problems(
               [row("c", "AMBIGUOUS", "ACCEPT"), row("a", "ACCEPT")])), True)
+
+    # --- B141: can a probe's variant TABLE answer anything? ----------------
+    from dataclasses import dataclass as _dc
+
+    @_dc
+    class _V:
+        id: str
+        expect: str = "UNKNOWN"
+        stands_for: str = "some shipped code"
+
+    good = [_V("a", "ACCEPT"), _V("b", "REJECT"), _V("c")]
+    check("a table with opposite-polarity controls and named rows PROCEEDS",
+          probe_variant_problems(good), [])
+    for label, table, want in [
+        ("an empty table", [], "measure nothing"),
+        ("no controls at all", [_V("a"), _V("b")], "cannot disagree"),
+        ("controls of ONE polarity — B086's oracle-cannot-discriminate",
+         [_V("a", "ACCEPT"), _V("b", "ACCEPT")], "cannot disagree"),
+        ("a duplicate id silently replacing a measurement",
+         [_V("a", "ACCEPT"), _V("a", "REJECT")], "duplicate variant id"),
+        ("a row that does not say what it stands in for",
+         [_V("a", "ACCEPT"), _V("b", "REJECT"), _V("c", stands_for="")],
+         "stand in for"),
+    ]:
+        got = probe_variant_problems(table)
+        if not got:
+            check(f"B141 [{label}] is refused", got, ["<a refusal>"])
+        elif not any(want in g for g in got):
+            check(f"B141 [{label}] names the condition ({want!r})", got, [want])
 
     # --- B128: this reader must stay test-only ---------------------------
     # A docstring saying "nothing calls this" is a claim that rots the first

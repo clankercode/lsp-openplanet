@@ -78,6 +78,22 @@ MUTATIONS = [
      "    if measured and all(r[\"verdict\"] == ambiguous for r in measured):",
      "    if measured and any(r[\"verdict\"] == ambiguous for r in measured):"),
 
+    # --- B141: the variant-table checker -----------------------------------
+    ("B141: opposite-polarity controls stop being required, so a probe whose "
+     "controls cannot disagree passes (B086's original defect)",
+     "    if len(controls) < 2:",
+     "    if False:"),
+    ("B141: duplicate variant ids stop being caught, so one measurement "
+     "silently replaces another in the corpus",
+     "    if dupes:",
+     "    if False:"),
+    ("B141: rows no longer have to say what shipped code they stand in for",
+     "    if unnamed:",
+     "    if False:"),
+    ("B141 OVER-CONDEMN: every variant table rejected",
+     "    problems: list[str] = []\n    if not variants:",
+     '    problems: list[str] = ["always"]\n    if not variants:'),
+
     # --- B128: the filtered reader must stay test-only --------------------
     # The guard here is a static scan, so the mutation reintroduces the thing
     # it guards against -- a real production caller -- rather than neutering
