@@ -1,3 +1,4 @@
+pub mod binary_watch;
 pub mod call_hierarchy;
 pub mod code_actions;
 pub mod colors;
@@ -8,6 +9,7 @@ pub mod folding;
 pub mod formatter;
 pub mod highlights;
 pub mod hover;
+pub mod inflight;
 pub mod inlay_hints;
 pub mod lexical_scope;
 pub mod navigation;
@@ -23,6 +25,7 @@ pub mod test_support;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use serde_json::Value;
@@ -30,6 +33,8 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+use self::binary_watch::{BinaryWatch, ExeStamp, ReplacedMode, RestartSignal, ServerBinaryReplaced};
+use self::inflight::InFlight;
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::cli::TypeDbVersions;
 use crate::config::{LspConfig, ResolvedDefine};
@@ -180,6 +185,11 @@ pub struct Backend {
     /// and materialised in `codeAction/resolve`. A client that did not must
     /// receive edits up front or its actions would do nothing.
     code_action_resolve_support: Arc<std::sync::atomic::AtomicBool>,
+    /// B105: how many protocol messages the server is currently handling.
+    /// Maintained by [`inflight::CountedService`], which wraps the whole
+    /// service in [`run_stdio`], and read by the binary watcher to decide
+    /// whether restarting would drop an answer the editor is waiting for.
+    in_flight: InFlight,
 }
 
 /// B035: may we hand back a code action with no `edit` and wait for
@@ -559,7 +569,20 @@ impl Backend {
                 std::collections::HashSet::new(),
             )),
             code_action_resolve_support: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            in_flight: InFlight::new(),
         }
+    }
+
+    /// A handle on this server's in-flight message count, for the wrapper that
+    /// maintains it and for tests. Clones share one count.
+    pub fn in_flight(&self) -> InFlight {
+        self.in_flight.clone()
+    }
+
+    /// True when the editor is not waiting on the server for anything, so
+    /// ending the process would drop no answer. See [`inflight`].
+    pub fn is_idle(&self) -> bool {
+        self.in_flight.is_idle()
     }
 
     /// B017: surface unusable config keys once each. A mistyped key used to
@@ -1366,6 +1389,7 @@ impl LanguageServer for Backend {
     async fn initialized(&self, _: InitializedParams) {
         tracing::info!("Openplanet LSP initialized");
         self.spawn_update_check();
+        self.spawn_binary_watch(self.binary_watch_mode().await);
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let mut extra = self.plugin_roots.read().await.clone();
         extra.extend(self.folder_paths.read().await.iter().cloned());
@@ -2107,6 +2131,128 @@ impl Backend {
 
     /// Non-blocking update probe: writes `~/.config/openplanet-lsp/update-status.json`
     /// at most once per 24h and surfaces an info message when a newer npm release exists.
+    /// B105: what the client asked us to do when our binary is replaced.
+    ///
+    /// The opt-in travels in `initializationOptions`, which `initialize`
+    /// cached; absent or unrecognised means the clean-exit fallback.
+    pub async fn binary_watch_mode(&self) -> ReplacedMode {
+        ReplacedMode::from_init_options(self.init_options.read().await.as_ref())
+    }
+
+    /// B105: watch the executable's path and get the editor onto a new binary
+    /// when one is installed under us.
+    ///
+    /// Watches [`update::resolve_exe_path`] — the same path the self-updater
+    /// renames over — so the watcher and the updater cannot disagree about
+    /// which file "the binary" is.
+    fn spawn_binary_watch(&self, mode: ReplacedMode) {
+        if matches!(mode, ReplacedMode::Off) {
+            tracing::debug!("binary-replacement watch disabled by initializationOptions");
+            return;
+        }
+        match update::resolve_exe_path() {
+            Ok(path) => self.spawn_binary_watch_at(path, mode, binary_watch::POLL_INTERVAL),
+            // Not fatal: the server works fine, it just cannot notice its own
+            // replacement. Say so rather than watching a guessed path.
+            Err(err) => tracing::warn!("binary-replacement watch disabled: {err}"),
+        }
+    }
+
+    /// The watcher over an explicit path and tick interval.
+    ///
+    /// Public for tests, which cannot wait [`binary_watch::POLL_INTERVAL`] and
+    /// must not be handed the real executable.
+    pub fn spawn_binary_watch_at(&self, path: PathBuf, mode: ReplacedMode, interval: Duration) {
+        self.spawn_binary_watch_with_exit(path, mode, interval, || std::process::exit(0));
+    }
+
+    /// As [`Self::spawn_binary_watch_at`], with the process-ending half of the
+    /// fallback injected.
+    ///
+    /// The fallback's whole job is to end the process, which a test in this
+    /// process cannot observe by surviving it. Injecting it is what lets the
+    /// fallback path be *watched* rather than assumed — the alternative is a
+    /// branch that ships untested because testing it would kill the suite.
+    pub fn spawn_binary_watch_with_exit(
+        &self,
+        path: PathBuf,
+        mode: ReplacedMode,
+        interval: Duration,
+        on_exit: impl Fn() + Send + Sync + 'static,
+    ) {
+        let client = self.client.clone();
+        let in_flight = self.in_flight.clone();
+        let mut watch = BinaryWatch::new(
+            path.clone(),
+            update::current_version(),
+            mode,
+            ExeStamp::of_path(&path),
+        );
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // `interval`'s first tick resolves immediately; the baseline was
+            // taken above, so there is nothing to compare it against yet.
+            ticker.tick().await;
+
+            loop {
+                ticker.tick().await;
+
+                // `stat` off the runtime: on a network or fuse mount it can
+                // block for a long time, and a stalled worker thread would be
+                // a far worse bug than a late upgrade notice.
+                let probe = path.clone();
+                let stamp = match tokio::task::spawn_blocking(move || ExeStamp::of_path(&probe))
+                    .await
+                {
+                    Ok(stamp) => stamp,
+                    // No observation this tick, which the watch treats as "no
+                    // information" rather than "the file is gone".
+                    Err(err) => {
+                        tracing::debug!("binary stamp task failed: {err}");
+                        continue;
+                    }
+                };
+
+                let Some(signal) = watch.poll(stamp, in_flight.is_idle()) else {
+                    continue;
+                };
+
+                match signal {
+                    RestartSignal::Notify(replaced) => {
+                        tracing::warn!(
+                            "executable {} was replaced under the running server \
+                             (version {}, {:?} -> {:?}); notifying the client",
+                            replaced.path,
+                            replaced.running_version,
+                            replaced.previous,
+                            replaced.current,
+                        );
+                        client
+                            .send_notification::<ServerBinaryReplaced>(replaced)
+                            .await;
+                    }
+                    RestartSignal::ExitForRespawn(replaced) => {
+                        tracing::warn!(
+                            "executable {} was replaced under the running server \
+                             (version {}, {:?} -> {:?}); exiting while idle so the \
+                             editor restarts us on the new binary",
+                            replaced.path,
+                            replaced.running_version,
+                            replaced.previous,
+                            replaced.current,
+                        );
+                        on_exit();
+                    }
+                }
+                // The watch has latched: it can never signal again, so there
+                // is nothing left for this task to do.
+                return;
+            }
+        });
+    }
+
     fn spawn_update_check(&self) {
         let client = self.client.clone();
         tokio::spawn(async move {
@@ -2255,6 +2401,11 @@ pub async fn run_stdio() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let (service, socket) = build_service();
+    // B105: count every message the server is handed, so the binary watcher
+    // can tell whether the editor is waiting on an answer. Wrapping the whole
+    // service is the one place that cannot miss a handler.
+    let in_flight = service.inner().in_flight();
+    let service = inflight::CountedService::new(in_flight, service);
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 

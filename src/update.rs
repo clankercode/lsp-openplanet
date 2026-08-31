@@ -830,7 +830,7 @@ pub fn run_update(options: &UpdateOptions) -> Result<UpdateReport, UpdateError> 
 
 // ── internals ──────────────────────────────────────────────────────────────
 
-fn resolve_exe_path() -> Result<PathBuf, UpdateError> {
+pub(crate) fn resolve_exe_path() -> Result<PathBuf, UpdateError> {
     if let Ok(p) = std::env::var("OPENPLANET_LSP_EXE") {
         let pb = PathBuf::from(p);
         return Ok(pb.canonicalize().unwrap_or(pb));
