@@ -85,3 +85,4 @@ bugs:
     - file: B084-a-called-global-function-is-re.todo
     - file: B085-the-suite-gate-is-binary-level.todo
     - file: B086-the-60-exports-correct-pattern.todo
+    - file: B087-exported-functions-and-shared.todo

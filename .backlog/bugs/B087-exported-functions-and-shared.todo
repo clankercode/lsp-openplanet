@@ -1,0 +1,63 @@
+---
+complexity: medium
+created_at: "2026-08-31T07:38:30Z"
+depends_on: []
+estimate_hours: 2
+id: B087
+priority: high
+status: pending
+tags: []
+title: Exported functions and shared types/classes/interfaces flagged as unused
+updated_at: "2026-08-31T07:38:30Z"
+---
+## Expected Behavior
+
+Declarations that are part of a plugin's cross-plugin surface must never
+be reported unused by the unused-declaration analysis:
+
+- functions exported via info.toml `[script] exports` / import-signature
+  files, and
+- `shared` types — classes, interfaces, enums (and shared funcdefs /
+  shared global functions) — which dependent plugins consume via the
+  AngelScript shared-entity mechanism without any textual reference
+  inside this workspace.
+
+## Actual Behavior
+
+`src/analysis/unused.rs` exempts export FILE paths and (B062) roots the
+signatures named in strict export files (`import <sig> from "Mod";`).
+The `shared` keyword on a declaration is never consulted — the only
+`shared` mentions in the module are the `shared_exports` *path* set. A
+`shared class` / `shared interface` / `shared enum` declared in an
+ordinary (non-export) source file, unreferenced within the plugin
+itself, is flagged unused even though its whole purpose is consumption
+by dependent plugins. Exported functions whose shape B062's
+signature-rooting doesn't reach can be hit the same way.
+
+## Mechanism / Fix Sketch
+
+Treat the `shared` modifier as a usage root: any declaration carrying
+`shared` (and members reachable from it, per the existing rooting rules)
+is exempt from unused reporting. Verify the parser/AST records the
+`shared` modifier; if it is currently dropped at parse time, that is
+part of this bug. Exported functions should be rooted whether they reach
+the analysis via strict-export signature rooting or export-file
+exemption — cover the seams between the two.
+
+## Test Cases (generalize per repo convention)
+
+Positive (must NOT warn):
+- `shared class Foo {}` unreferenced in-plugin
+- `shared interface IFoo {}` unreferenced
+- `shared enum EFoo {}` unreferenced
+- shared funcdef / shared global function, if the grammar allows
+- function listed in a strict `[script] exports` import-signature file
+- function defined in an exports file exempted by path
+
+Negative controls (MUST still warn):
+- identical non-shared class/interface/enum, unreferenced
+- non-exported unreferenced function alongside the exported one
+
+## Related
+
+- B062 (exported-signature roots), GH #55/#56 (unused-warning family)
