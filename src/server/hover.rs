@@ -1028,6 +1028,13 @@ fn lookup_external(
     // `accepts_enum` before canonicalization, preserving the synthetic-prefix
     // and suffix guards documented at the outer hover ladder.
     if let Some((owner, value_name)) = qualified.rsplit_once("::") {
+        // A workspace enum owns the key before the typedb does. Step 3 above
+        // renders its valid values; reaching this fallback means the value is
+        // invalid (or otherwise unavailable), and the same-named Core enum
+        // must not leak a value/doc through the shadow.
+        if scope.workspace_enum_member_names(owner).is_some() {
+            return None;
+        }
         let owner_key = index
             .source_name_key(owner)
             .map(str::to_string)
@@ -2593,6 +2600,27 @@ mod tests {
             md.contains("E::Plain = 3"),
             "missing plain value hover: {md:?}"
         );
+    }
+
+    #[test]
+    fn workspace_enum_shadow_blocks_a_core_only_value_and_its_doc() {
+        let idx = typedb(serde_json::json!({
+            "op": "1.0",
+            "enums": [{"name": "E", "values": {
+                "Documented": {"v": 7, "d": "Core value must stay hidden."}
+            }}]
+        }));
+        let hover = hover_external(
+            "enum E { Plain = 3 }\nvoid main() { E::Documented; }",
+            "Documented",
+            1,
+            &idx,
+        );
+        if let Some(hover) = hover {
+            let md = md_of(hover);
+            assert!(!md.contains("Core value must stay hidden."), "{md:?}");
+            assert!(!md.contains("E::Documented = 7"), "{md:?}");
+        }
     }
 
     #[test]

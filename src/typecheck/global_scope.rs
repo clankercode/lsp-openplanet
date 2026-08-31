@@ -625,6 +625,9 @@ impl<'a> GlobalScope<'a> {
     /// says no and nothing downstream may judge its members. Callers must
     /// treat `None` as *stay silent*.
     pub fn enum_member_names(&self, qualified: &str) -> Option<Vec<String>> {
+        if let Some(values) = self.workspace_enum_member_names(qualified) {
+            return Some(values);
+        }
         let proof = self.accepts_enum(qualified)?;
         // `canonical_enum_key` returns `None` for an already-canonical
         // spelling, which is the common case here — reading that as "not
@@ -632,15 +635,27 @@ impl<'a> GlobalScope<'a> {
         let key = self
             .canonical_enum_key(qualified, proof)
             .unwrap_or_else(|| qualified.to_string());
-        // Workspace first: a plugin's own declaration outranks an engine
-        // enum of the same name, exactly as it does for `has_enum`.
-        for symbol in self.lookup_workspace(&key) {
-            if let SymbolKind::Enum { values } = &symbol.kind {
-                return Some(values.iter().map(|(name, _)| name.clone()).collect());
-            }
-        }
         let info = self.external?.lookup_source_enum(&key)?;
         Some(info.values.iter().map(|(name, _)| name.clone()).collect())
+    }
+
+    /// Members of a workspace enum which owns this accepted spelling.
+    ///
+    /// `Some` is also a provenance result: the workspace declaration
+    /// outranks an engine enum with the same key, so external UI must not
+    /// answer even for a same-named member.
+    pub fn workspace_enum_member_names(&self, qualified: &str) -> Option<Vec<String>> {
+        let proof = self.accepts_enum(qualified)?;
+        let key = self
+            .canonical_enum_key(qualified, proof)
+            .unwrap_or_else(|| qualified.to_string());
+        self.lookup_workspace(&key).iter().find_map(|symbol| {
+            if let SymbolKind::Enum { values } = &symbol.kind {
+                Some(values.iter().map(|(name, _)| name.clone()).collect())
+            } else {
+                None
+            }
+        })
     }
 
     /// True when `qualified` is a type's own key, exactly as stored — no
