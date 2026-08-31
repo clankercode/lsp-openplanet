@@ -690,19 +690,18 @@ mod tests {
             let ws = ws_from(&source);
             let scope =
                 crate::typecheck::global_scope::GlobalScope::new(ws.snapshot.symbols(), Some(&idx));
-            // Must not panic. No signature is acceptable; a wrong one is not.
+            // These injected methods are unrecognised on this path, so they
+            // must not manufacture a signature.
             let help = signature_help(
                 &DocumentAnalysis::analyze_plain(&source),
                 None,
                 position,
                 &scope,
             );
-            if let Some(h) = help {
-                assert!(
-                    !h.signatures.is_empty(),
-                    "signature help must not return an empty signature set: {source}"
-                );
-            }
+            assert!(
+                help.is_none(),
+                "unrecognised injected method must have no signature: {source}"
+            );
         }
     }
 

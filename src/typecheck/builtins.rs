@@ -154,17 +154,36 @@ pub fn injected_methods_named(name: &str) -> impl Iterator<Item = &'static Injec
 
 /// B063: every injected method that applies to the receiver `type_name`.
 ///
-/// **The receiver rule lives here, once.** It is the answer to "does this
-/// method exist on this type", and B063 exists because two features answered
-/// it differently: the checker consulted `INJECTED_METHODS`, completion walked
-/// only the `TypeIndex` — where an injected method is by definition absent,
-/// that being the whole premise of B059 — so the checker accepted
-/// `player.GetCurrentEntityID()` while completion would not suggest it.
+/// **This rule currently exists in TWO places, deliberately and temporarily.**
+/// Here, and again as `Checker::injected_method` in `src/typecheck/checker.rs`.
+/// That is not an oversight: removing the second copy means editing
+/// `checker.rs`, which another lane owns, and racing it to deduplicate a rule
+/// we have already filed a ticket for (B079) would trade a documented copy for
+/// a merge conflict in the most-reviewed file in the batch.
+///
+/// The duplication ends with B079. Until then the tripwire is
+/// `every_offered_injected_method_is_one_the_checker_accepts`, which drives
+/// both features end-to-end and fails if the two copies disagree.
+///
+/// It is the answer to "does this method exist on this type", and B063 exists
+/// because two features answered it differently: the checker consulted
+/// `INJECTED_METHODS`, completion walked only the `TypeIndex` — where an
+/// injected method is by definition absent, that being the whole premise of
+/// B059 — so the checker accepted `player.GetCurrentEntityID()` while
+/// completion would not suggest it.
 ///
 /// Taking a [`GlobalScope`] rather than a `TypeIndex` is deliberate: the
 /// derivation walk it needs is already public there, and re-deriving a parent
-/// chain locally would be a second implementation of an existing predicate —
+/// chain locally would be a THIRD implementation of an existing predicate —
 /// exactly the hazard B079 describes.
+///
+/// The `is_external_type` gate is load-bearing and was missed on the first
+/// attempt. A workspace type SHADOWS an external one of the same name, so a
+/// plugin declaring `class CSmPlayer {}` would otherwise be offered the engine
+/// class's injected methods — `is_external_derived_from` resolves the name
+/// against the index whether or not the workspace shadows it, while
+/// `is_external_type` checks `workspace_type_shadows` first. Picking the
+/// predicate that ignored shadowing is itself an instance of B079.
 ///
 /// `Exact` matches by identity rather than by descent, mirroring the binary:
 /// Openplanet hard-codes a registration list, so a future Nadeo type deriving
@@ -174,15 +193,21 @@ pub fn injected_methods_for_receiver<'a>(
     scope: &'a GlobalScope<'a>,
     type_name: &'a str,
 ) -> impl Iterator<Item = &'static InjectedMethod> + 'a {
-    INJECTED_METHODS.iter().filter(move |m| match &m.receivers {
-        InjectedReceiver::EveryEngineClass => scope.is_external_derived_from(type_name, "CMwNod"),
-        InjectedReceiver::Exact(names) => names.iter().any(|n| {
-            // Same external type, tolerating short vs qualified spellings:
-            // the typedb parent chain is a tree, so mutual derivation can
-            // only mean the two names resolve to one type.
-            scope.is_external_derived_from(type_name, n)
-                && scope.is_external_derived_from(n, type_name)
-        }),
+    let external_receiver = scope.is_external_type(type_name);
+    INJECTED_METHODS.iter().filter(move |m| {
+        external_receiver
+            && match &m.receivers {
+                InjectedReceiver::EveryEngineClass => {
+                    scope.is_external_derived_from(type_name, "CMwNod")
+                }
+                InjectedReceiver::Exact(names) => names.iter().any(|n| {
+                    // Same external type, tolerating short vs qualified spellings:
+                    // the typedb parent chain is a tree, so mutual derivation can
+                    // only mean the two names resolve to one type.
+                    scope.is_external_derived_from(type_name, n)
+                        && scope.is_external_derived_from(n, type_name)
+                }),
+            }
     })
 }
 

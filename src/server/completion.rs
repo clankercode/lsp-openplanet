@@ -215,11 +215,14 @@ fn add_type_members(
         // completion had no equivalent step and the two features contradicted
         // each other about whether `player.GetCurrentEntityID` exists.
         //
-        // The receiver rule is NOT reimplemented here. It lives once in
-        // `builtins::injected_methods_for_receiver`, so completion and the
-        // checker cannot drift about which receivers carry which method —
-        // `every_offered_injected_method_is_one_the_checker_accepts` pins that
-        // they agree. Constructing a `GlobalScope` costs two references; an
+        // The receiver rule is NOT reimplemented here — it is called from
+        // `builtins::injected_methods_for_receiver`. That helper and
+        // `Checker::injected_method` are currently two copies of one rule,
+        // deliberately and temporarily: deduplicating means editing
+        // `checker.rs`, which another lane owns, and B079 is where it ends.
+        // Until then `every_offered_injected_method_is_one_the_checker_accepts`
+        // is the tripwire that fails if the copies drift.
+        // Constructing a `GlobalScope` costs two references; an
         // absent workspace borrows an empty table, since the receiver test
         // reads only the external index.
         let empty_workspace;
@@ -902,6 +905,25 @@ mod tests {
         }
     }
 
+    /// A workspace type takes precedence over an external type with the same
+    /// name. It must therefore receive neither exact injected methods nor the
+    /// EveryEngineClass pair from the shadowed external `CSmPlayer`.
+    #[test]
+    fn member_completion_does_not_inject_methods_on_a_workspace_type_shadow() {
+        let idx = index_with_anonymous_member_enums();
+        let labels = member_labels(
+            "class CSmPlayer {} void f(CSmPlayer@ player) { player. }",
+            "player.",
+            &idx,
+        );
+        for name in ["GetCurrentEntityID", "MwAddRef", "MwRelease"] {
+            assert!(
+                !labels.iter().any(|label| label == name),
+                "workspace CSmPlayer must not inherit external {name}, got {labels:?}"
+            );
+        }
+    }
+
     /// All four registered network receivers, including `CGameNetwork` — the
     /// PARENT that a "CGameCtnNetwork and descendants" rule would miss (B059).
     #[test]
@@ -970,12 +992,14 @@ mod tests {
     /// checker is separately asked to type-check a real call on that same
     /// receiver; the two answers must agree for every injected name.
     ///
-    /// This is what makes the invariant hold under a change neither feature
-    /// can see. The receiver rule lives once in
-    /// `builtins::injected_methods_for_receiver`, but the checker still has
-    /// its own copy of the match arms until the lane holding `checker.rs`
-    /// lands — so until then this test, not the type system, is what stops
-    /// them drifting.
+    /// **This test exists BECAUSE the receiver rule is currently in two
+    /// places**, and it can be deleted when they become one. The rule lives in
+    /// `builtins::injected_methods_for_receiver`, which completion calls, and
+    /// again as `Checker::injected_method`. Deduplicating means editing
+    /// `checker.rs`, which another lane owns; B079 is the ticket where that
+    /// ends. Until then this test, not the type system, is what stops the two
+    /// copies drifting — so it is scaffolding rather than architecture, and it
+    /// should not outlive the duplication it guards.
     ///
     /// It also pins the exact-list fence from BOTH sides at once: a method
     /// registered on four network types must be offered by neither feature on
@@ -1008,6 +1032,24 @@ mod tests {
         ] {
             let completion_src = format!("void f({receiver}@ r) {{ r. }}");
             let offers = member_labels(&completion_src, "r.", &idx);
+            if receiver == "CGameManiaPlanetNetwork" {
+                // Its empty dump list makes the checker deliberately
+                // non-discriminating (B006), so pin completion directly.
+                // It is an engine class and an exact GetManialinkPages
+                // receiver, but never a GetCurrentEntityID receiver.
+                for (name, expected) in [
+                    ("MwAddRef", true),
+                    ("MwRelease", true),
+                    ("GetCurrentEntityID", false),
+                    ("GetManialinkPages", true),
+                ] {
+                    assert_eq!(
+                        offers.iter().any(|label| label == name),
+                        expected,
+                        "CGameManiaPlanetNetwork completion membership for {name}"
+                    );
+                }
+            }
             // `CGameManiaPlanetNetwork` carries 0 members in the dump; see the
             // B006 note below for why that changes what can be asserted.
             let empty_member_list = idx
