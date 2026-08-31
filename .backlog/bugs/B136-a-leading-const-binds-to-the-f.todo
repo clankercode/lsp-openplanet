@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T15:05:17Z"
 depends_on: []
 estimate_hours: 1
 id: B136
 priority: high
+started_at: null
 status: pending
 tags: []
 title: A leading const binds to the first @ in a type suffix chain, so const T@[]@ resolves to an array of handles-to-const instead of a handle to a const array — and renders to the same display string as the correct const array<T@>@ (FIXED IN B119, filed for findability)
@@ -12,3 +14,59 @@ updated_at: "2026-08-31T15:05:17Z"
 ---
 
 A leading const binds to the first @ in a type suffix chain, so const T@[]@ resolves to an array of handles-to-const instead of a handle to a const array — and renders to the same display string as the correct const array<T@>@ (FIXED IN B119, filed for findability)
+
+
+## FIXED IN B119, 2026-09-01 — filed for findability, not for action
+
+Recorded as its own ticket because it is a **parser** defect that was found and
+fixed inside a const-receiver ticket, and nobody hunting a parser bug would ever
+look there.
+
+## The defect
+
+A leading `const` bound to the **first `@`** in a suffix chain:
+
+| spelling | before | correct |
+|---|---|---|
+| `const C@[]@` | `Handle(Array(Handle(Const(C))))` | `Handle(Const(Array(Handle(C))))` |
+| `const C@[]`  | `Array(Handle(Const(C)))`         | `Const(Array(Handle(C)))` |
+| `const array<C@>@` | already correct | — |
+
+**Two spellings of one type produced different `TypeRepr` trees with IDENTICAL
+`display()` output.** That is why it survived: every string-level check agreed
+while the structures diverged.
+
+Fixed in `Parser::const_binding_at`, with the engine measurements behind each row
+of the binding table.
+
+## The family it belongs to
+
+*"The check and the thing being checked agree because the check cannot see the
+difference."*
+
+Same shape as several entries in `docs/verification-hazards.md`. It is worth
+stating as a standing caution for this codebase: **a test that compares types by
+rendered string cannot detect a structural type bug.** Anywhere the display
+string is the assertion, the assertion is blind to exactly this class of defect.
+
+That caution generalises past types. It is also why B129's regen/drift design
+needs care — a drift report that diffs RENDERED artifacts would miss precisely
+this, and it is noted on that ticket.
+
+## Guarantees now in place
+
+- `the_const_rebind_never_changes_an_aliasing_verdict` constructs both trees and
+  asserts B121's aliasing predicate agrees, so a future rebind that changed the
+  OUTERMOST constructor — which would silently change B121's answer for every
+  method returning that type — trips a test instead of shipping.
+- The engine's actual semantics are pinned in
+  `docs/probes/b119-const-receiver.tsv`: `arr.InsertLast(..)` REJECTED (the array
+  is const), `@arr[0] = c` REJECTED (slot read-only), `arr[0].Mutate()` and
+  `arr[0].x = 1` ACCEPTED (pointee mutable), and decisively `C@ e = arr[0];`
+  ACCEPTED — an element binds to a NON-const handle, which `array<const C@>`
+  would refuse.
+
+## If you are here because something looks wrong
+
+Check whether your test asserts on `display()`. If it does, it cannot see this
+class of bug, and the fix is to assert on the constructed tree.
