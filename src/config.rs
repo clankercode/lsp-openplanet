@@ -111,6 +111,13 @@ pub struct LspConfig {
     pub plugins_dir: Option<PathBuf>,
     pub core_json: Option<PathBuf>,
     pub game_json: Option<PathBuf>,
+    /// GH #18: target Openplanet version(s), comma-separated. Global typedb
+    /// setting (init > user > first root), resolved against the version
+    /// catalog by consumers; `None` = the installed dump.
+    pub openplanet_version: Option<String>,
+    /// GH #18: root of recorded typedb snapshots (one subdirectory per
+    /// version). Global typedb setting like `openplanet_dir`.
+    pub typedb_versions_dir: Option<PathBuf>,
     pub game_target: String,
     /// Which signature level's `SIG_*` defines are live (GH #64). Resolved
     /// through the same ladder as `game_target`; the defines are derived
@@ -244,6 +251,8 @@ impl Default for LspConfig {
             plugins_dir: None,
             core_json: None,
             game_json: None,
+            openplanet_version: None,
+            typedb_versions_dir: None,
             game_target: "TMNEXT".to_string(),
             signature_mode: SignatureMode::default(),
             os_target: OsTarget::default(),
@@ -288,6 +297,8 @@ impl Default for LspConfig {
 /// with [`ConfigFile`] and `crate::user_config::SETTINGS` (guarded by a test).
 pub const CONFIG_KEYS: &[&str] = &[
     "openplanet_dir",
+    "openplanet_version",
+    "typedb_versions_dir",
     "plugins_dir",
     "game_target",
     "signature_mode",
@@ -440,6 +451,10 @@ fn describe_value(value: &toml::Value) -> String {
 #[derive(Debug, Default)]
 struct ConfigFile {
     openplanet_dir: Option<String>,
+    /// GH #18: target Openplanet version(s), comma-separated.
+    openplanet_version: Option<String>,
+    /// GH #18: recorded-snapshots root.
+    typedb_versions_dir: Option<String>,
     plugins_dir: Option<String>,
     game_target: Option<String>,
     /// GH #64: `official` / `regular` / `school` / `developer` (default).
@@ -699,6 +714,8 @@ impl ConfigFile {
         };
         Self {
             openplanet_dir: r.string("openplanet_dir"),
+            openplanet_version: r.string("openplanet_version"),
+            typedb_versions_dir: r.string("typedb_versions_dir"),
             plugins_dir: r.string("plugins_dir"),
             game_target: r.game_target(),
             signature_mode: r.validated_string(
@@ -1992,6 +2009,12 @@ impl LspConfig {
         if let Some(dir) = cfg.openplanet_dir {
             self.set_openplanet_dir(PathBuf::from(dir), OpenplanetDirOrigin::Explicit);
         }
+        if let Some(version) = cfg.openplanet_version {
+            self.openplanet_version = Some(version);
+        }
+        if let Some(dir) = cfg.typedb_versions_dir {
+            self.typedb_versions_dir = Some(PathBuf::from(dir));
+        }
         if let Some(dir) = cfg.plugins_dir {
             self.plugins_dir = Some(PathBuf::from(dir));
         }
@@ -2071,6 +2094,12 @@ impl LspConfig {
     fn apply_init_options(&mut self, opts: &serde_json::Value) {
         if let Some(dir) = opts.get("openplanet_dir").and_then(|v| v.as_str()) {
             self.set_openplanet_dir(PathBuf::from(dir), OpenplanetDirOrigin::Explicit);
+        }
+        if let Some(version) = opts.get("openplanet_version").and_then(|v| v.as_str()) {
+            self.openplanet_version = Some(version.to_string());
+        }
+        if let Some(dir) = opts.get("typedb_versions_dir").and_then(|v| v.as_str()) {
+            self.typedb_versions_dir = Some(PathBuf::from(dir));
         }
         if let Some(dir) = opts.get("plugins_dir").and_then(|v| v.as_str()) {
             self.plugins_dir = Some(PathBuf::from(dir));
@@ -3922,6 +3951,39 @@ shortcut_match_enums = true
         assert!(!cfg.defines.contains("SIG_DEVELOPER"));
         assert!(cfg.defines.contains("TMNEXT"), "platform defines untouched");
         assert!(cfg.defines.contains("WINDOWS"), "always-on flags untouched");
+    }
+
+    /// GH #18: `openplanet_version` / `typedb_versions_dir` ride the same
+    /// global typedb ladder as `openplanet_dir` — config file sets them,
+    /// init options win, absent means None.
+    #[test]
+    fn openplanet_version_keys_ride_the_config_ladder() {
+        let tmp = crate::testing::TempDir::new("oplsp-gh18-keys");
+        std::fs::write(
+            tmp.join(".openplanet-lsp.toml"),
+            "openplanet_version = \"1.29.5\"\ntypedb_versions_dir = \"/tmp/vroot\"\n",
+        )
+        .unwrap();
+        let cfg = load_cfg(Some(&tmp), None);
+        assert_eq!(cfg.openplanet_version.as_deref(), Some("1.29.5"));
+        assert_eq!(cfg.typedb_versions_dir, Some(PathBuf::from("/tmp/vroot")));
+
+        let opts = serde_json::json!({
+            "openplanet_version": "1.29.14",
+            "typedb_versions_dir": "/tmp/other",
+        });
+        let cfg = load_cfg(Some(&tmp), Some(&opts));
+        assert_eq!(
+            cfg.openplanet_version.as_deref(),
+            Some("1.29.14"),
+            "init options beat the config file"
+        );
+        assert_eq!(cfg.typedb_versions_dir, Some(PathBuf::from("/tmp/other")));
+
+        let empty = crate::testing::TempDir::new("oplsp-gh18-keys-empty");
+        let cfg = load_cfg(Some(&empty), None);
+        assert!(cfg.openplanet_version.is_none(), "absent → None");
+        assert!(cfg.typedb_versions_dir.is_none(), "absent → None");
     }
 
     #[test]

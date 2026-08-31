@@ -340,6 +340,52 @@ impl VersionCatalog {
     }
 }
 
+/// GH #18, server path: the single typedb pair an LSP server should load.
+///
+/// The server checks ONE version (multi-target is a `check` feature), so a
+/// comma list resolves to its first element with a warning naming the
+/// choice. Any catalog or resolution failure falls back to the installed
+/// pair and returns the warning to log — a server must not refuse to
+/// start over a config typo. No flags at all → the installed pair,
+/// silently (today's behavior).
+pub fn resolve_single_pair(
+    installed: Option<(&Path, &Path)>,
+    versions_root: Option<&Path>,
+    requested: Option<&str>,
+) -> (Option<(PathBuf, PathBuf)>, Option<String>) {
+    let installed_pair =
+        || installed.map(|(c, g)| (c.to_path_buf(), g.to_path_buf()));
+    if versions_root.is_none() && requested.is_none() {
+        return (installed_pair(), None);
+    }
+    let resolved = VersionCatalog::build(installed, versions_root).and_then(|catalog| {
+        catalog.resolve_targets(requested).map(|targets| {
+            targets
+                .into_iter()
+                .map(|e| (e.label.clone(), e.core_json.clone(), e.game_json.clone()))
+                .collect::<Vec<_>>()
+        })
+    });
+    match resolved {
+        Err(e) => (
+            installed_pair(),
+            Some(format!(
+                "openplanet_version/typedb_versions_dir ignored ({e}); using the installed type database"
+            )),
+        ),
+        Ok(targets) => match targets.as_slice() {
+            [] => (installed_pair(), None),
+            [(_, core, game)] => (Some((core.clone(), game.clone())), None),
+            [(label, core, game), ..] => (
+                Some((core.clone(), game.clone())),
+                Some(format!(
+                    "openplanet_version lists several versions; the server checks one — using {label} (run `openplanet-lsp check --openplanet-version ...` for multi-version checking)"
+                )),
+            ),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,6 +732,61 @@ mod tests {
             Some("removed in Openplanet 1.29.14")
         );
         assert_eq!(notes14.get("Text::Join"), None, "present on target → no note");
+    }
+
+    #[test]
+    fn resolve_single_pair_defaults_to_installed_without_flags() {
+        let dir = tmp("pair-default");
+        write_snapshot(dir.path(), "install", "1.29.9 (next, Public, abcd1234)", "1.29.9");
+        let d = dir.path().join("install");
+        let installed = (d.join("OpenplanetCore.json"), d.join("OpenplanetNext.json"));
+        let (pair, warning) =
+            resolve_single_pair(Some((&installed.0, &installed.1)), None, None);
+        assert_eq!(pair, Some(installed));
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn resolve_single_pair_picks_recorded_version() {
+        let dir = tmp("pair-recorded");
+        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        let (pair, warning) = resolve_single_pair(None, Some(dir.path()), Some("1.29.5"));
+        let (core, _) = pair.expect("recorded snapshot resolves");
+        assert!(core.ends_with("1.29.5/OpenplanetCore.json"), "{core:?}");
+        assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn resolve_single_pair_falls_back_to_installed_on_unknown_version() {
+        let dir = tmp("pair-unknown");
+        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        write_snapshot(dir.path(), "install", "1.29.9 (next, Public, abcd1234)", "1.29.9");
+        let d = dir.path().join("install");
+        let installed = (d.join("OpenplanetCore.json"), d.join("OpenplanetNext.json"));
+        let (pair, warning) = resolve_single_pair(
+            Some((&installed.0, &installed.1)),
+            Some(dir.path()),
+            Some("9.9.9"),
+        );
+        assert_eq!(pair, Some(installed), "server must not refuse to start");
+        let warning = warning.expect("a config typo is logged, not fatal");
+        assert!(
+            warning.contains("9.9.9") && warning.contains("1.29.5"),
+            "warning names request and known versions: {warning}"
+        );
+    }
+
+    #[test]
+    fn resolve_single_pair_takes_first_of_a_list_with_warning() {
+        let dir = tmp("pair-list");
+        write_snapshot(dir.path(), "1.29.5", "1.29.5 (next, Public, 1234ad9e)", "1.29.5");
+        write_snapshot(dir.path(), "1.29.14", "1.29.14 (next, Public, 6fd4200f)", "1.29.14");
+        let (pair, warning) =
+            resolve_single_pair(None, Some(dir.path()), Some("1.29.14,1.29.5"));
+        let (core, _) = pair.expect("first target resolves");
+        assert!(core.ends_with("1.29.14/OpenplanetCore.json"), "{core:?}");
+        let warning = warning.expect("multi-version request on the server warns");
+        assert!(warning.contains("1.29.14"), "{warning}");
     }
 
     #[test]
