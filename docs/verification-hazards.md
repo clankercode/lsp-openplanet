@@ -3585,3 +3585,120 @@ that file and silently blending two engine generations.
 That is the general risk introduced by any per-version archive: **a test that
 reads "all the corpora" starts reading across time the moment retention is
 switched on**, and it will not announce that it has done so.
+
+## Make the comparison exact only after the thing it compares AGAINST is correct
+
+B152 tightened funcdef signature matching to the engine's measured `const`
+exactness. The risk polarity was the inverse of its parent ticket's: it ADDS
+diagnostics, the plugin corpus compiles in the game, so **any new diagnostic on
+a shipped plugin is a false positive by definition.**
+
+So it was measured before it was written, with B110's method — an instrumented
+build that keeps the old answer and prints a marker wherever the new rule would
+disagree, over all 152 plugins. The first run:
+
+> **214 disagreements across 33 plugins, every one of them a would-be new error,
+> and not one of them in the user's code.**
+
+All three causes were defects on the EXPECTED side — the data the checker
+compares *against*:
+
+| sites | cause |
+|---|---|
+| 170 | the database declares `CoroutineFuncUserdata(ref)`; every plugin writes `ref@`, and the game compiles them |
+| 38 | `CoroutineFuncUserdataString` stores its `const` in `typeflags`, not in `typedecl`, so loading the text dropped the qualifier |
+| 6 | `array<T>::Sort`'s synthesised comparator emitted a bare `T@` where the engine wants `const T@ const &in` |
+
+Repairing those three and re-running gave **0**. The tightening itself changed
+nothing on the corpus.
+
+The transferable rule:
+
+> **A tightening is only as good as the reference it tightens toward. Before
+> making a comparison exact, establish that BOTH sides are faithful — and
+> measure that, because a loose comparison hides an unfaithful side perfectly.**
+
+Every one of those 214 had been wrong for as long as the code existed. Nothing
+reported them, because a comparison that peels the field cannot notice that the
+field was never populated. **Looseness does not merely tolerate bad reference
+data; it conceals it, and the concealment is discovered only by the change that
+stops tolerating it.** Which means the instrumented pre-measurement is not
+optional diligence on a tightening — it is the only moment the reference data
+is ever audited.
+
+Two smaller findings from the same run:
+
+**The 170-row taught the scope.** The fix compares `const` exactly and leaves
+the HANDLE axis exactly as loose as it was, because `ref` versus `ref@` is not a
+`const` question and the `@` is not reliable across the typedb seam. A rule
+derived from "the engine is exact" would have been exact on both axes and wrong
+on one. **Measure per axis; a correct general principle does not license a
+change to an axis you did not measure.**
+
+**The guard caught its author, on the first run.** The sweep's positive control
+— "the new binary must be able to ADD a diagnostic" — refused the run, because
+the control pointed at the *master* checkout's copy of the fixture rather than
+the lane's, so it compared a 16-row fixture against itself. Without that guard
+the sweep would have printed a clean `ADDED 0` from an instrument that was
+partly measuring the wrong tree. That is the fourth time in this batch a guard
+has failed its own author first.
+
+## The second test in one family that could not fail on its own subject
+
+B144 found `parse_type_string_handle_trailing_const` named for the trailing
+`const` and asserting `Foo@` instead. B152 found its sibling.
+
+`const_is_still_peeled_before_the_exactness_test` (B110) pinned the claim that
+"`const int` and `int` still bind each other, in both directions". Its rows:
+
+```text
+("const int &in v", "int v")              <- also a MODE difference
+("int v", "const int &in v")              <- also a MODE difference
+("const int &in v", "const int &in v")    <- identical on both axes
+```
+
+and the assertion was guarded by `fd.contains("&in") == f.contains("&in")`,
+false for the first two. **The only row that ever reached an assertion was the
+one where both sides are the same string.** The test carried const-neutrality in
+its name for its whole life and could not observe `const` at all — it passed
+unchanged when B152 inverted the very behaviour it claimed to pin.
+
+Two of two, and the pattern in both is the same: written while the axis was
+UNMEASURED, by an author who knew they could not justify a claim about it. The
+missing assertion is not an oversight; it is the honest uncertainty of the day,
+preserved in a form that reads like a settled fact ever after.
+
+> **A test that cannot fail on its subject is where an unmeasured assumption
+> goes to look settled.** When you cannot yet justify the assertion, say so in a
+> name that admits it, or leave the test out — do not give a strong name to a
+> weak assertion.
+
+Both were caught the same way: by a change that made the subject decidable, and
+by re-reading the test against the new measurement instead of trusting that it
+was green.
+
+## A fixture the engine had never actually judged, because it failed at declaration
+
+`b102-array-sort-mismatched-callbacks` existed to pin twelve wrong `array::Sort`
+binds. Probed against the game, it returned **2 errors** — both
+`Only object types that support object handles can use &inout`, from a
+`bool WrongModeInout(int &inout a, int &inout b)` declaration.
+
+`int &inout` is not declarable in AngelScript, and a DECLARATION error aborts
+the compilation unit before `Main` is analysed. So the engine had never given a
+verdict on a single `Sort` row in that file, while the fixture sat in a
+directory whose README documents a game verdict per fixture and looked fully
+probed. Retyping the one row (to `Item &inout` over an `array<Item>`, keeping
+the mode axis) made the file compile far enough to be judged: **22 rejections at
+22 lines, matching the checker line for line.**
+
+> **A probe that returns very few errors on a fixture built to produce many has
+> not necessarily found your code correct — check whether it stopped EARLY.**
+> An aborted unit and a clean unit differ only in what is missing, and what is
+> missing is invisible.
+
+The generalisation beyond fixtures: a single un-declarable construct anywhere in
+a file silently withdraws the engine's opinion on everything after it. That is
+the same shape as B068 (a parse error in a batched probe marking every other
+line ACCEPTED), reached from the opposite direction — there the missing verdicts
+read as approval, here they read as a clean bill of health.

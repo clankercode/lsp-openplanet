@@ -60,6 +60,42 @@ pub struct FuncdefSig {
 /// Passing mode of a typedb parameter. Core `typedecl` text never carries
 /// the `&` decoration (the `typeflags` bits are authoritative there);
 /// Nadeo signature text may, so prefer the text and fall back to flags.
+/// B152: the typedb's parameter type text WITH its `const` restored.
+///
+/// Core stores a parameter's `const` in the `typeflags` bits, not in the
+/// `typedecl` text: `CoroutineFuncUserdataString` arrives as
+/// `typedecl="string", typeflags=5` while its own `decl` reads
+/// `void CoroutineFuncUserdataString(const string&in)`. Reading `typedecl`
+/// alone therefore loses the qualifier, and the loss is silent as long as
+/// the comparison peels `const` — which it did until B152.
+///
+/// It stops being silent the moment the comparison is const-EXACT. MEASURED,
+/// not predicted: an instrumented build that kept the neutral answer and
+/// printed a marker wherever an exact rule would disagree flagged **38 sites
+/// across the plugin corpus** on this one funcdef, every one of them a
+/// correctly-written `void H(const string &in)` that the game compiles. Had
+/// the tightening landed without this, those 38 would have been new errors
+/// on shipped code.
+///
+/// The `const` is placed as a LEADING qualifier. That is exact for every
+/// funcdef the shipped database actually contains, because none of them has
+/// a const HANDLE parameter — where a single flag bit could not say whether
+/// it meant `const T@` or `T@ const`. That is not an assumption:
+/// `every_core_funcdef_param_const_agrees_with_its_own_decl` reconstructs
+/// each parameter from the bits, checks it against the database's own `decl`
+/// string, and FAILS if a future dump introduces a const handle here, so the
+/// ambiguity becomes a deliberate decision rather than a wrong guess.
+fn typedb_param_type_text(p: &ParamInfo) -> String {
+    match p.is_const {
+        // `None` is Nadeo's "the dump does not say", and it is not a synonym
+        // for false (B142). Funcdefs are Core-only today, so this arm is
+        // unreachable; it is written as "add nothing" rather than "add
+        // const" so an unknown can never manufacture a qualifier.
+        Some(true) => format!("const {}", p.type_name),
+        Some(false) | None => p.type_name.clone(),
+    }
+}
+
 fn typedb_param_mode(p: &ParamInfo) -> ParamMode {
     let from_text = param_mode_from_text(&p.type_name);
     if from_text != ParamMode::Value {
@@ -423,8 +459,8 @@ impl<'a> GlobalScope<'a> {
         Some(FuncdefSig {
             qualified: qualified.to_string(),
             return_type: info.return_type.clone(),
-            param_types: info.params.iter().map(|p| p.type_name.clone()).collect(),
-            param_modes: info.params.iter().map(|p| typedb_param_mode(p)).collect(),
+            param_types: info.params.iter().map(typedb_param_type_text).collect(),
+            param_modes: info.params.iter().map(typedb_param_mode).collect(),
         })
     }
 

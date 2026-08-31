@@ -79,9 +79,14 @@
 //!     only the predicate reached through `func_matches_funcdef` changes.
 //!   * The parameter MODE comparison (B027), which is the sibling axis and
 //!     already lives at exactly one site. Nothing here adds a second.
-//!   * `const`, which B102 peels deliberately because the engine's stance is
-//!     unmeasured. Peeling happens before this arm, so the two do not now
-//!     disagree — pinned by `const_is_still_peeled_before_the_exactness_test`.
+//!   * `const`, WHICH B152 HAS SINCE TIGHTENED. When B110 landed, B102 peeled
+//!     `const` deliberately because the engine's stance was unmeasured, and
+//!     this file recorded that the two arms did not disagree. B144 measured
+//!     the engine and B152 acted: `const` is now compared exactly, before the
+//!     peel, and the peel still runs for the handle axis. Nothing in B110's
+//!     own subject moved — every test in this file passed unchanged across
+//!     that change — see `const_alone_decides_a_funcdef_match` at the bottom
+//!     for what replaced the pin, and why the pin could never have failed.
 
 use openplanet_lsp::config::LspConfig;
 use openplanet_lsp::server::diagnostics::compute_diagnostics;
@@ -314,16 +319,44 @@ fn the_int32_spelling_is_the_same_type_as_int() {
     );
 }
 
-/// B102 said const-ness is neutral BY CONSTRUCTION because the engine's
-/// stance is unmeasured and B097 blocks probing. That peeling happens before
-/// the primitive arm this ticket changes, so the two must not now disagree:
-/// `const int` and `int` still bind each other, in both directions.
+/// B152 REPLACED THIS TEST, and how it failed is worth more than what it
+/// asserted.
+///
+/// It shipped as `const_is_still_peeled_before_the_exactness_test`, pinning
+/// B102's claim that "`const int` and `int` still bind each other, in both
+/// directions". It never checked that. Its three rows were
+///
+/// ```text
+/// ("const int &in v", "int v")        <- also a MODE difference
+/// ("int v", "const int &in v")        <- also a MODE difference
+/// ("const int &in v", "const int &in v")   <- identical on both axes
+/// ```
+///
+/// and its assertion was guarded by `fd.contains("&in") == f.contains("&in")`,
+/// which is false for the first two. So the only row that ever reached an
+/// assertion was the one where both sides are the same string. The test
+/// carried const-neutrality in its name for its whole life and could not
+/// observe const at all.
+///
+/// That is the second time in this family: B144 found
+/// `parse_type_string_handle_trailing_const` named for the trailing-`const`
+/// case and asserting `Foo@` instead. Both were written while the engine's
+/// answer was unmeasured, and in both the un-asserted axis is exactly the one
+/// nobody could then justify a claim about. **A test that cannot fail on its
+/// subject is where an unmeasured assumption goes to look settled.**
+///
+/// The engine's answer is now measured
+/// (`docs/probes/b144-const-handle-funcdef.tsv`, OP 1.29.14) and it is the
+/// opposite of what the old name said: `const` alone DOES decide. So these
+/// rows vary const ONLY — same mode, same type, same arity — which is what
+/// the original was trying to do, and they assert the measured verdict.
 #[test]
-fn const_is_still_peeled_before_the_exactness_test() {
-    for (fd, f) in [
-        ("const int &in v", "int v"),
-        ("int v", "const int &in v"),
-        ("const int &in v", "const int &in v"),
+fn const_alone_decides_a_funcdef_match() {
+    for (fd, f, must_bind) in [
+        ("const int &in v", "const int &in v", true),
+        ("int &in v", "int &in v", true),
+        ("const int &in v", "int &in v", false),
+        ("int &in v", "const int &in v", false),
     ] {
         let src = format!(
             "funcdef void Maker({fd});\n\
@@ -332,20 +365,13 @@ fn const_is_still_peeled_before_the_exactness_test() {
              void Use() {{ Take(Make); }}\n"
         );
         let msgs = errors(&src);
-        // Parameter MODE is B027's axis and is compared separately and
-        // exactly; what this asserts is only that CONST-ness alone never
-        // decides, which is what B102 relies on.
-        let const_only = msgs
+        let rejected = msgs
             .iter()
             .any(|m| m.contains("No matching signatures") || m.contains("implicitly convert"));
-        if fd.replace("const ", "").replace(" &in", "")
-            == f.replace("const ", "").replace(" &in", "")
-            && fd.contains("&in") == f.contains("&in")
-        {
-            assert!(
-                !const_only,
-                "const alone must not reject — B102 depends on it: {msgs:?}\n{src}"
-            );
-        }
+        assert_eq!(
+            rejected, !must_bind,
+            "funcdef `{fd}` vs function `{f}`: expected bind={must_bind}, got \
+             {msgs:#?}\n{src}"
+        );
     }
 }

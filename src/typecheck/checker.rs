@@ -3095,11 +3095,35 @@ impl<'a> Checker<'a> {
         if !matches!(bare, "T[]::less" | "T[]::less_nonconst") {
             return None;
         }
+        // B152: the engine's own spelling, measured rather than guessed. A
+        // deliberate mismatch makes the compiler print the comparator it
+        // wants, and it depends on whether the ELEMENT is a handle:
+        //
+        //     bool int[]::less(const int&in, const int&in)
+        //     bool Item@[]::less(const Item@const&in, const Item@const&in)
+        //     bool int[]::less_nonconst(int&in, int&in)
+        //
+        // Measured for `int`, `uint`, `string`, `vec3`, an enum and a value
+        // class on the plain side, and for `C@`, `I@`, `Json::Value@`,
+        // `int[]@` and `dictionary@` on the handle side — eleven element
+        // types in one run, `docs/probes/b144-const-handle-funcdef.tsv`
+        // (2026-09-01, OP 1.29.14).
+        //
+        // The `const` here is load-bearing only once the comparison is
+        // const-EXACT (B152); before that it was invisible, which is exactly
+        // why B144 left it alone rather than changing it blind.
         let elem_text = elem.display();
+        let param = if bare == "T[]::less_nonconst" {
+            elem_text
+        } else if matches!(elem, TypeRepr::Handle(_)) {
+            format!("const {elem_text} const")
+        } else {
+            format!("const {elem_text}")
+        };
         Some(FuncdefSig {
             qualified: bare.to_string(),
             return_type: "bool".to_string(),
-            param_types: vec![elem_text.clone(), elem_text],
+            param_types: vec![param.clone(), param],
             param_modes: vec![ParamMode::In, ParamMode::In],
         })
     }
@@ -3779,7 +3803,77 @@ impl<'a> Checker<'a> {
             })
     }
 
+    /// B152: the CONST SHAPE of a type — the thing a funcdef signature match
+    /// compares exactly, and the only axis this ticket tightens.
+    ///
+    /// AngelScript spells two independent qualifiers with one keyword. A
+    /// LEADING `const` makes the pointed-to OBJECT read-only; a TRAILING one
+    /// makes the HANDLE read-only; a value type has only the one position.
+    /// So a handle parameter has FOUR spellings, and the engine tells them
+    /// apart at a funcdef slot in both directions — measured over every
+    /// position, mode and the return type
+    /// (`docs/probes/b144-const-handle-funcdef.tsv`, OP 1.29.14).
+    ///
+    /// `is_handle` is carried but is NOT itself matched — see
+    /// [`Self::const_shapes_compatible`].
+    fn const_shape(ty: &TypeRepr) -> (bool, bool, bool) {
+        let mut outer_const = false;
+        let mut cur = ty;
+        while let TypeRepr::Const(inner) = cur {
+            outer_const = true;
+            cur = inner;
+        }
+        match cur {
+            TypeRepr::Handle(pointee) => {
+                let mut p = pointee.as_ref();
+                let mut pointee_const = false;
+                while let TypeRepr::Const(inner) = p {
+                    pointee_const = true;
+                    p = inner;
+                }
+                (true, pointee_const, outer_const)
+            }
+            _ => (false, false, outer_const),
+        }
+    }
+
+    /// B152: do two types agree on `const`?
+    ///
+    /// EXACT when both sides are handles, because that is the only case where
+    /// the two const positions are distinguishable and it is the case the
+    /// engine was measured on.
+    ///
+    /// DELIBERATELY WEAKER when either side is not a handle, and this is the
+    /// most important line in the change. The `@` is not reliable across the
+    /// seam: the Core database declares `CoroutineFuncUserdata`'s parameter
+    /// as `ref`, while every plugin that uses it writes `ref@` and the game
+    /// compiles them. An instrumented build — the neutral answer kept, a
+    /// marker printed wherever an exact rule would disagree — found **170
+    /// such sites across 30 plugins** in the corpus. Requiring the handle
+    /// wrapper to match would have turned all 170 into errors on shipped
+    /// code, and none of them is about `const` at all.
+    ///
+    /// So the handle axis stays exactly as loose as it was before this
+    /// ticket (`funcdef_types_compatible` peels it), and only the const axis
+    /// tightens. One axis, measured, at one site.
+    fn const_shapes_compatible(got: &TypeRepr, expected: &TypeRepr) -> bool {
+        let (g_handle, g_pointee, g_outer) = Self::const_shape(got);
+        let (e_handle, e_pointee, e_outer) = Self::const_shape(expected);
+        if g_handle && e_handle {
+            g_pointee == e_pointee && g_outer == e_outer
+        } else {
+            (g_pointee || g_outer) == (e_pointee || e_outer)
+        }
+    }
+
     fn funcdef_types_compatible(&self, got: &TypeRepr, expected: &TypeRepr) -> bool {
+        // B152: `const` is part of the signature, so it is compared BEFORE
+        // the peel below throws it away. The peel stays for everything else
+        // — the handle axis is deliberately untouched, see
+        // `const_shapes_compatible`.
+        if !Self::const_shapes_compatible(got, expected) {
+            return false;
+        }
         let got = Self::peel_const_handle(got);
         let expected = Self::peel_const_handle(expected);
         match (got, expected) {

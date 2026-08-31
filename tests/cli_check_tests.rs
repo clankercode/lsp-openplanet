@@ -5387,21 +5387,30 @@ fn b102_correct_sort_callbacks_stay_silent() {
 
 /// Each mismatched bind must be reported. Asserted per LINE rather than as a
 /// count, so a failure names the row that regressed instead of moving a total.
+///
+/// B152: **every line below is a line the GAME rejects, at the same line
+/// number.** The fixture was un-adjudicable until B152 — `int &inout` is a
+/// declaration error that aborted the unit before `Main` was analysed, so the
+/// engine had never once given a verdict on any `Sort` row here. Retyping
+/// that one row made the whole file compile far enough to be judged, and the
+/// engine now rejects 22 rows at exactly these 22 lines (2026-09-01 probe, OP
+/// 1.29.14). This list is therefore a transcription of the engine's answer
+/// rather than a list of shapes someone reasoned were wrong.
 #[test]
 fn b102_mismatched_sort_callbacks_are_reported() {
     let errors = repro_errors("b102-array-sort-mismatched-callbacks");
     let joined = errors.join("\n");
     for (line, what) in [
-        (49, "wrong arity, one parameter"),
-        (50, "wrong arity, three parameters"),
-        (51, "wrong return type, void"),
-        (52, "wrong return type, int"),
-        (53, "wrong element type, string comparer on int[]"),
-        (54, "wrong element type, Item comparer on int[]"),
-        (55, "wrong parameter mode, &out"),
-        (56, "wrong parameter mode, &inout"),
-        (57, "wrong parameter mode, by value"),
-        (60, "wrong element type, int comparer on Item@[]"),
+        (85, "wrong arity, one parameter"),
+        (86, "wrong arity, three parameters"),
+        (87, "wrong return type, void"),
+        (88, "wrong return type, int"),
+        (89, "wrong element type, string comparer on int[]"),
+        (90, "wrong element type, Item comparer on int[]"),
+        (91, "wrong parameter mode, &out"),
+        (92, "wrong parameter mode, by value"),
+        (96, "wrong element type, int comparer on Item@[]"),
+        (103, "wrong parameter mode, &inout"),
         // B144: the same four axes again, each carried on a CONST HANDLE.
         // Before B144 these lines DID report — but for the wrong reason: the
         // const handle was parsed out of the stored signature as a type
@@ -5409,12 +5418,27 @@ fn b102_mismatched_sort_callbacks_are_reported() {
         // failed and the row would have passed even if arity, return type,
         // element type and mode were all ignored. They are here to prove the
         // const handle did not become a wildcard when it started parsing.
-        (61, "B144: wrong arity, on a const handle"),
-        (62, "B144: wrong return type, on a const handle"),
-        (63, "B144: wrong parameter mode, on a const handle"),
-        (64, "B144: wrong element type, on a const handle"),
-        (66, "the SortNonConst slot checks the same way"),
-        (69, "a funcdef HANDLE of the wrong shape"),
+        (97, "B144: wrong arity, on a const handle"),
+        (98, "B144: wrong return type, on a const handle"),
+        (99, "B144: wrong parameter mode, on a const handle"),
+        (100, "B144: wrong element type, on a const handle"),
+        (105, "the SortNonConst slot checks the same way"),
+        // B152: wrong ONLY on the const axis. Each of these is correct on
+        // arity, return type, element type and mode, so none of them can be
+        // reported for another reason — which makes this block the one that
+        // goes silent if the const tightening is reverted. Three of them
+        // (108, 106, 109) were pinned as REQUIRED SILENCE in the sibling
+        // fixture until B152, and the game rejects all three.
+        (108, "B152: non-const comparator at the const `Sort` slot"),
+        (
+            109,
+            "B152: const comparator at the non-const `SortNonConst` slot",
+        ),
+        (110, "B152: handle element, leading const only"),
+        (111, "B152: handle element, trailing const only"),
+        (112, "B152: handle element, neither const"),
+        (113, "B152: engine handle element, leading const only"),
+        (117, "a funcdef HANDLE of the wrong shape"),
     ] {
         assert!(
             joined.contains(&format!("Main.as:{line}:")),
@@ -5426,7 +5450,7 @@ fn b102_mismatched_sort_callbacks_are_reported() {
     // this the per-line loop is satisfied by a rule that rejects everything.
     assert_eq!(
         errors.len(),
-        16,
+        22,
         "unexpected extra diagnostics beyond the listed rows:\n{joined}"
     );
 }
@@ -5445,7 +5469,7 @@ fn b102_a_funcdef_handle_of_the_wrong_shape_is_reported() {
     assert!(
         errors
             .iter()
-            .any(|l| l.contains("Main.as:69:") && l.contains("array::Sort(StringLess@)")),
+            .any(|l| l.contains("Main.as:117:") && l.contains("array::Sort(StringLess@)")),
         "a funcdef handle whose signature does not match the element type \
          must be rejected like a bare function name: {errors:#?}"
     );
@@ -5656,8 +5680,8 @@ fn check_b108_only_a_method_reference_is_rewritten() {
     let b102 = repro_errors("b102-array-sort-mismatched-callbacks");
     let b102_joined = b102.join("\n");
     for (line, expected, what) in [
-        (49, "array::Sort(WrongArityOne)", "a bare function name"),
-        (69, "array::Sort(StringLess@)", "a funcdef-typed value"),
+        (85, "array::Sort(WrongArityOne)", "a bare function name"),
+        (117, "array::Sort(StringLess@)", "a funcdef-typed value"),
     ] {
         assert!(
             b102.iter()
