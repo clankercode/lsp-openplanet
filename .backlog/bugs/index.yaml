@@ -120,3 +120,4 @@ bugs:
     - file: B119-const-receiver-rule-is-own-cla.todo
     - file: B120-cross-file-const-receivers-do.todo
     - file: B121-ac19-propagates-receiver-const.todo
+    - file: B122-cargo-fmt-check-is-red-repo-wi.todo
