@@ -6404,7 +6404,11 @@ mod b146_nadeo_param_direction_is_unknown {
                 continue;
             }
             for m in &info.methods {
-                let n = m.params.iter().filter(|p| p.type_name.contains('&')).count();
+                let n = m
+                    .params
+                    .iter()
+                    .filter(|p| p.type_name.contains('&'))
+                    .count();
                 if n > 0 {
                     methods += 1;
                 }

@@ -1651,7 +1651,11 @@ impl<'a> GlobalScope<'a> {
                 out.push(OverloadSig {
                     param_names: m.params.iter().map(|p| p.name.clone()).collect(),
                     param_types: m.params.iter().map(|p| p.type_name.clone()).collect(),
-                    param_out: m.params.iter().map(|p| p.direction.is_some_and(ParamDirection::binds_by_reference)).collect(),
+                    param_out: m
+                        .params
+                        .iter()
+                        .map(|p| p.direction.is_some_and(ParamDirection::binds_by_reference))
+                        .collect(),
                     param_modes: m.params.iter().map(|p| typedb_param_mode(p)).collect(),
                     min_args,
                     return_type: m.return_type.clone(),
@@ -1690,7 +1694,11 @@ impl<'a> GlobalScope<'a> {
                     OverloadSig {
                         param_names: f.params.iter().map(|p| p.name.clone()).collect(),
                         param_types: f.params.iter().map(|p| p.type_name.clone()).collect(),
-                        param_out: f.params.iter().map(|p| p.direction.is_some_and(ParamDirection::binds_by_reference)).collect(),
+                        param_out: f
+                            .params
+                            .iter()
+                            .map(|p| p.direction.is_some_and(ParamDirection::binds_by_reference))
+                            .collect(),
                         param_modes: f.params.iter().map(|p| typedb_param_mode(p)).collect(),
                         min_args,
                         return_type: f.return_type.clone(),
