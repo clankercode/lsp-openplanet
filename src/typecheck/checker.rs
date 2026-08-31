@@ -4729,6 +4729,13 @@ fn removed_api_hint(qual: &str) -> Option<&'static str> {
         "Draw::GetWidth" => Some("Display::GetWidth"),
         "Draw::GetHeight" => Some("Display::GetHeight"),
         "Draw::MeasureString" => Some("UI::MeasureString"),
+        // GH #18: `string::Join`/`string::Repeat` moved to `Text::` in
+        // 1.29.14 and the whole `string` namespace left the dump — the
+        // game hard-fails the old calls (verified live 2026-08-31). On a
+        // pre-1.29.14 typedb the namespace exists, so trigger (b) never
+        // consults this table there and the old calls stay legal.
+        "string::Join" => Some("Text::Join"),
+        "string::Repeat" => Some("Text::Repeat"),
         _ => None,
     }
 }
@@ -5190,6 +5197,103 @@ mod tests {
         let mut checker = Checker::new(source, &scope);
         checker.check_file(&file);
         checker.diagnostics
+    }
+
+    /// Like `check_with_typedb`, but against a recorded snapshot from
+    /// `tests/fixtures/typedb-versions/<version>/` (GH #18).
+    fn check_with_versioned_typedb(source: &str, version: &str) -> Vec<TypeDiagnostic> {
+        use crate::typedb::TypeIndex;
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb-versions")
+            .join(version);
+        let idx = TypeIndex::load(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+        )
+        .expect("versioned typedb snapshot must load");
+        let tokens = tokenize_filtered(source);
+        let mut parser = Parser::new(&tokens, source);
+        let file = parser.parse_file();
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, source, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, Some(&idx));
+        let mut checker = Checker::new(source, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    /// GH #18: `string::Join` / `string::Repeat` moved to `Text::` and the
+    /// `string` namespace vanished from the 1.29.14 dump — the same shape
+    /// as `Draw` on 1.29.5, so trigger (b) must fire with the relocation
+    /// hint. The game hard-fails these calls on 1.29.14 (verified
+    /// 2026-08-31).
+    #[test]
+    fn string_join_and_repeat_relocations_fire_on_1_29_14() {
+        for (call, expect_hint) in [
+            (r#"void F() { string::Join({"a"}, ","); }"#, "Text::Join"),
+            (r#"void F() { string::Repeat("a", 3); }"#, "Text::Repeat"),
+        ] {
+            let diags = check_with_versioned_typedb(call, "1.29.14");
+            let hit = diags.iter().find_map(|d| match &d.kind {
+                TypeDiagnosticKind::NoMatchingSymbol { qualified, hint } => {
+                    Some((qualified.clone(), hint.clone()))
+                }
+                _ => None,
+            });
+            let (qualified, hint) = hit.unwrap_or_else(|| {
+                panic!("expected NoMatchingSymbol for {call:?}, got {diags:?}")
+            });
+            assert!(qualified.starts_with("string::"), "{qualified}");
+            assert_eq!(hint.as_deref(), Some(expect_hint), "for {call:?}");
+        }
+    }
+
+    /// Negative control: on 1.29.5 the `string::` pair exists and the
+    /// `Text::` pair does not — the exact version straddle. The old calls
+    /// must stay silent there (B00x parity), and the NEW calls must fire
+    /// via trigger (a) (`Text` is a known namespace on 1.29.5 too).
+    #[test]
+    fn string_join_silent_and_text_join_flagged_on_1_29_5() {
+        for legal in [
+            r#"void F() { string::Join({"a"}, ","); }"#,
+            r#"void F() { string::Repeat("a", 3); }"#,
+        ] {
+            let diags = check_with_versioned_typedb(legal, "1.29.5");
+            assert!(
+                !diags
+                    .iter()
+                    .any(|d| matches!(&d.kind, TypeDiagnosticKind::NoMatchingSymbol { .. })),
+                "legal on 1.29.5, got {diags:?}"
+            );
+        }
+        let diags =
+            check_with_versioned_typedb(r#"void F() { Text::Join({"a"}, ","); }"#, "1.29.5");
+        assert!(
+            diags.iter().any(|d| matches!(
+                &d.kind,
+                TypeDiagnosticKind::NoMatchingSymbol { qualified, .. } if qualified == "Text::Join"
+            )),
+            "Text::Join is missing on 1.29.5, got {diags:?}"
+        );
+    }
+
+    /// And the migrated calls are legal on 1.29.14.
+    #[test]
+    fn text_join_and_repeat_silent_on_1_29_14() {
+        for legal in [
+            r#"void F() { Text::Join({"a"}, ","); }"#,
+            r#"void F() { Text::Repeat("a", 3); }"#,
+        ] {
+            let diags = check_with_versioned_typedb(legal, "1.29.14");
+            assert!(
+                !diags
+                    .iter()
+                    .any(|d| matches!(&d.kind, TypeDiagnosticKind::NoMatchingSymbol { .. })),
+                "legal on 1.29.14, got {diags:?}"
+            );
+        }
     }
 
     #[test]
