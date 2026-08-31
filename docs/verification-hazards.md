@@ -3924,3 +3924,68 @@ The corollary for reports: a count quoted without the expectation it was measure
 against carries no information about whether anything was verified. The habit
 that survives from this batch is one line written before the command runs —
 "this should report N, because …" — where the *because* is doing the work.
+
+## A filter is an input to the gate, and a gate that cannot fail on its own input is not a gate
+
+`just rtest b145` printed `ok` for all 38 binaries with `0 passed; 0 failed`,
+and exited 0. Cargo filters on test NAMES; no name contained "b145" — the lane
+had just written those tests. Nothing ran, and the output was
+indistinguishable from success (B162).
+
+**Failing toward confidence at the moment of maximum credulity.** This is worse
+than an ordinary false green because of *when* it fires: right after a lane
+writes the tests it wants to see pass. The invocation is a lane's first
+instinct, the output is a wall of `ok`, and the exit code agrees.
+
+**Fixing half of it is what left it open.** B106 had already found this shape
+and fixed the MARKER half: `filtered out` withholds `SUITE-VERIFIED`, so a
+subset can never be reported as a suite total. It deliberately returned 0, on
+the reasoning that "a deliberately narrowed run is not a broken one" — correct
+for a filter that MATCHES, wrong for one that matches nothing. The distinction
+that was missing is not *filtered vs unfiltered*, it is **executed vs not**.
+
+**The filtered path was not the only route, and the other two were worse.**
+Measured, not assumed, by calling `reconcile()` directly:
+
+| route | verdict before | marker printed? |
+|---|---|---|
+| name filter matches nothing | `FILTERED RUN … 0 pass`, exit 0 | withheld |
+| every binary contains 0 tests | exit 0 | **`SUITE-VERIFIED: 0 passed; 1/1`** |
+| no binaries enumerated at all | exit 0 | **`SUITE-VERIFIED: 0 passed; 0/0`** |
+
+The two nobody reported are the ones that print the token every lane greps for.
+A filter-shaped rule would have closed one route and left two open. The rule
+that closes all three is **a run that executed zero tests is never a pass**,
+whatever the reason; the verdict then names which reason.
+
+**A rule stated over the safe direction is a rule you can land under other
+lanes.** "Zero executed" cannot fire on any run that executed at least one
+test — which is every real gate run — so the change is a no-op for the suite as
+anyone normally invokes it. That property is what made it safe to modify the
+instrument three other lanes were gating against at the time.
+
+**The positive control is the load-bearing half here, not the formality.**
+"Fail whenever a filter is present" satisfies the red/green identically and
+breaks every filtered run in the batch at once. The controls that catch it are:
+a filter that DID match, a filter matching only `#[ignore]`d tests (those names
+matched — a subset, not a miss), and B106's own clean-filtered-run assertion.
+Mutation-testing the over-firing version tripped all three.
+
+**The ticket's own suggested control did not match either.** B162 proposed
+`just rtest b129` as the "filter that DOES match" — it matches nothing, because
+an integration test's libtest name is its bare function name, NOT the file it
+lives in. The tests in `b129_gold_manifest.rs` are `every_manifest_artifact_
+exists_on_disk` and so on; the only line containing "b129" is cargo's `Running
+tests/b129_gold_manifest.rs` path. The person specifying the fix reached for a
+filter that matched nothing while believing it matched, which is the defect
+demonstrating itself one level up. A real control needs a name substring
+verified against `cargo test -- --list`.
+
+**And the natural repair is unreachable through the recipe.** `just rtest
+--test <binary>` looks like the fix and is not: `remote-build.py` builds
+`just test -j -- …ARGS`, so everything reaches libtest — where `--test` is
+*itself* a libtest flag, silently consumed, leaving its VALUE as the name
+filter. Advice to "put the flag before the `--`" would send the reader in a
+circle. The verdict therefore distinguishes a misplaced cargo selector
+(`just rrun cargo test --test <name>`) from a plain misspelling, because the
+two have different fixes and one of them cannot be stated correctly by guessing.
