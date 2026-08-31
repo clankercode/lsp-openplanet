@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T16:18:42Z"
 depends_on: []
 estimate_hours: 1
 id: B153
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'nadeo_format.rs drops two undeclared dump keys: member m (5036 occurrences) and class s (2585, every class) are silently discarded — B131''s audit never covered this file'
@@ -12,3 +14,65 @@ updated_at: "2026-08-31T16:18:42Z"
 ---
 
 nadeo_format.rs drops two undeclared dump keys: member m (5036 occurrences) and class s (2585, every class) are silently discarded — B131's audit never covered this file
+
+
+## Found by lane-enum during B146, 2026-09-01
+
+`nadeo_format.rs` declares member keys `{n,i,t,a,e,r,c}` and class keys
+`{i,c,p,f,m,e,d}`. The dump also carries:
+
+- **member `m` — 5036 occurrences**, always the literal `1`
+- **class `s` — 2585 occurrences, i.e. EVERY class** — looks like a byte size
+
+Both are **silently dropped**.
+
+## This is B131's defect class in the file B131 never covered
+
+B131 audited `core_format.rs` for fields that exist in the struct but are never
+populated from the dump. This is the mirror: **data that exists in the dump and
+is never read into the struct.** Same blindness, opposite direction, and the
+audit that would catch it was only ever pointed at the other file.
+
+Four hardcoded-literal or dropped-data defects have now been found by hand in
+these loaders — B125, B131, B137, B142 — and a fifth (B146) found `&`-carrying
+type text that the earlier work had wrongly reported as discarded. **Every one
+was found by a person noticing. The next one should be found by a machine.**
+
+## Deliverable
+
+Point a B131-shaped audit at `nadeo_format.rs`:
+
+1. Inventory the keys actually present in both shipped dumps (1.29.5 fixture and
+   the installed 1.29.14), with counts. Do it exhaustively rather than by
+   sampling — B146's direction finding rested on an exhaustive key inventory and
+   that is what made "the dump genuinely does not say" a measured claim rather
+   than an impression.
+2. Fail on any key present in the dump and absent from the declared set, and on
+   any declared field never populated. **Both directions**, as B131's does.
+3. Make it parse its own source for the declared set rather than a hand-copied
+   list. B131's first draft covered 7 of 11 structs precisely because the list
+   was copied.
+4. Decide `m` and `s` on the evidence: read them, or document why they are
+   ignored. **Do not leave them undeclared** — that is the state this ticket
+   exists to end.
+
+## Apply B138's distinction when you get there
+
+- `None` says *absent* — allowed silently.
+- `false`/`true`, `String::new()`, `Vec::new()` **assert** — a finding unless
+  justified.
+- And per B138's own near-miss: **`Some(false)` asserts exactly as much as a bare
+  `false`.** Making a field `Option` is only half the work; the other half is
+  writing `None`.
+
+## Test axes
+
+- A key present in the dump but not declared -> caught.
+- A declared field never populated -> caught.
+- A key declared, populated, and read -> passes. The positive control, without
+  which a guard that refuses everything passes.
+- A new loader file added to `src/typedb/` -> comes under audit automatically,
+  with no one remembering to register it.
+- **Mutation:** delete each direction of the check independently and confirm the
+  matching case survives. An audit whose two halves are never separately killed
+  has not been shown to have two halves.
