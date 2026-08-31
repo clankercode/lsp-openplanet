@@ -1343,8 +1343,6 @@ mod tests {
         );
     }
 
-    /// RECORDED, NOT FIXED — a gap one layer EARLIER than this ticket.
-    ///
     // ── Visibility on the STATE-shaped members (B115 + B114) ──────────
     //
     // These replace a tripwire that could never fire. It asserted the

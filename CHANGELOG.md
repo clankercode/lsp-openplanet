@@ -39,16 +39,18 @@ GitHub Release body to match this section (gh release edit).
   properties. A real field or method named `ID` still wins over any
   same-named accessor pair. Hovering a class field now reads
   `(field) int C::Speed` instead of mislabelling it `(local)`.
-- **Const-correctness is checked across files** (B114) — calling a
-  non-const method on a `const` receiver is a game compile error, and the
-  LSP reported it only when the class happened to be declared in the same
-  file as the call. The class's declaration modifiers now reach the
-  cross-file symbol pool, so the diagnostic fires wherever the class was
-  declared, and for methods inherited from a base class (previously
-  missed even within one file). Unchanged: a `const` method on a const
-  receiver stays silent, a field read is not a method call, and engine or
-  type-database types still carry no const metadata, so calls on them
-  remain silent rather than guessing.
+- **Declaration modifiers survive into the symbol pool** (B114) — a
+  symbol recorded what it *is* but not what it was *declared as*, so
+  `shared`, `abstract`, `override`, `final`, `private` and `protected`
+  were dropped when symbols were pooled and had to be re-derived by
+  walking one file's syntax tree — which by construction cannot see a
+  declaration in another file. They are now carried on the pooled symbol,
+  for methods, fields and properties alike, and the two workarounds that
+  existed to compensate are gone, so there is a single source of truth
+  rather than answers that can disagree. Mostly invisible on its own; it
+  is what lets const-correctness be checked uniformly wherever a class was
+  declared, and it is the prerequisite for filtering `private` members out
+  of completion.
 - **Go-to-definition on a virtual property** (B103) — `obj.ID`, where the
   type declares only the accessor pair `get_ID` / `set_ID`, used to
   resolve nothing. It now jumps to the accessor the position calls for:

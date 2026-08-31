@@ -663,16 +663,6 @@ pub struct Checker<'a> {
     /// can walk the parent chain for cross-method resolution within the
     /// same file.
     file_classes: std::collections::HashMap<String, (Vec<String>, Vec<(String, TypeRepr)>)>,
-    /// Set of `(class_qualname, method_name)` for workspace-local methods
-    /// declared with a trailing `const` qualifier. Used by AC19
-    /// (method-call const propagation): when a non-const method is
-    /// invoked on a const receiver, the return type is wrapped in
-    /// `Const(_)`; a const method leaves the return type untouched.
-    file_const_methods: std::collections::HashSet<(String, String)>,
-    /// Per-class METHOD name sets for same-file classes (fields excluded).
-    /// `file_classes` mixes fields and methods; the const-receiver rule
-    /// (NonConstMethodOnConstReceiver) must only fire for methods.
-    file_class_methods: std::collections::HashMap<String, std::collections::HashSet<String>>,
     return_type_stack: Vec<TypeRepr>,
     /// Stack of `frames.len()` values at each function/lambda entry —
     /// marks the first frame owned by the innermost function so shadow
@@ -728,8 +718,6 @@ impl<'a> Checker<'a> {
             class_stack: Vec::new(),
             namespace_stack: Vec::new(),
             file_classes: std::collections::HashMap::new(),
-            file_const_methods: std::collections::HashSet::new(),
-            file_class_methods: std::collections::HashMap::new(),
             return_type_stack: Vec::new(),
             function_frame_starts: Vec::new(),
             diagnostics: Vec::new(),
@@ -1036,19 +1024,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// True when `class_name` declares a METHOD named `method_name` in the
-    /// same file (fields don't count — `file_classes` mixes both, and a
-    /// field shadowing a method name must not trigger the const-receiver
-    /// diagnostic). Used by the NonConstMethodOnConstReceiver rule.
-    fn file_has_method(&self, class_name: &str, method_name: &str) -> bool {
-        self.file_class_methods
-            .get(class_name)
-            .is_some_and(|names| names.contains(method_name))
-    }
-
     /// B119: the parents of `class`, from whichever surface knows it.
     /// Same-file classes come from `file_classes`; anything else from the
     /// pooled workspace symbol.
+    ///
+    /// B114 note: `file_classes` SURVIVES the sidecar retirement and this is
+    /// a legitimate use of it. It carries resolved `TypeRepr`s and the parent
+    /// list for the file being checked — structure, not a declaration
+    /// MODIFIER — so it is not a second source of truth for anything the
+    /// pool answers.
     fn class_parents_for_const(&self, class: &str) -> Vec<String> {
         if let Some((parents, _)) = self.file_classes.get(class) {
             return parents.clone();
@@ -1065,11 +1049,10 @@ impl<'a> Checker<'a> {
     /// `cross_file_derived_override_decides_constness` pins one level down.
     ///
     /// `None` means no ancestor declares the name in the WORKSPACE. That is
-    /// also the answer for an engine/typedb ancestor, because both lookups
-    /// here read the workspace half only — `file_has_method` is per-document
-    /// and `workspace_own_method_is_const` reads the pooled workspace
-    /// symbols. Same provenance rule B116 established for the own-class
-    /// cross-file arm, applied one inheritance level out.
+    /// also the answer for an engine/typedb ancestor, because the lookup here
+    /// reads the workspace half only — `workspace_own_method_is_const` reads
+    /// the pooled workspace symbols. Same provenance rule B116 established
+    /// for the own-class cross-file arm, applied one inheritance level out.
     ///
     /// NOT because the dumps lack the data. B124 corrected that: 301 of 1002
     /// Core method decls end in ` const`, and the old
@@ -1084,6 +1067,34 @@ impl<'a> Checker<'a> {
     /// depths 1, 2 and 4 and for every receiver spelling, and accepts an
     /// inherited CONST one. So the walk is the engine's own rule, not a
     /// tightening chosen here.
+    ///
+    /// # B114: one lookup per ancestor, not two
+    ///
+    /// As written, this asked each ancestor twice: `file_has_method` +
+    /// `file_const_methods` for a SAME-FILE ancestor, then
+    /// `workspace_own_method_is_const` for anything else. Retiring those two
+    /// AST sidecars collapses the pair into the pooled call alone, which
+    /// already spans both cases because the file being checked is itself in
+    /// the pool.
+    ///
+    /// The collapse is behaviour-preserving, and the reason is specific
+    /// rather than general: `index_file_classes` inserted BOTH the direct
+    /// method name and the accessor's STRIPPED property name into both maps
+    /// under the same key, so the sidecar pair was already answering the
+    /// AGGREGATED question — "is the direct method, or `get_`/`set_` of that
+    /// name, const?". `workspace_own_method_is_const` aggregates exactly
+    /// those three spellings. For `class A { void M() {} int get_M() const {} }`
+    /// both surfaces answer `Some(true)`.
+    ///
+    /// So the ported helper reads the AGGREGATED answer deliberately, not the
+    /// direct spelling only. Reading direct-only would have been a change,
+    /// not a port: it would diverge from what this walk returned for a
+    /// same-file ancestor, and it would make the two halves of B119's own
+    /// walk disagree — the precise thing its provenance argument sets out to
+    /// avoid. It therefore inherits the known false negative recorded on
+    /// `workspace_own_method_is_const`, one inheritance level out; splitting
+    /// the call spelling from the property spelling remains a separate,
+    /// separately measurable improvement.
     fn inherited_method_is_const(&self, class: &str, method: &str) -> Option<bool> {
         let mut visited: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -1100,12 +1111,6 @@ impl<'a> Checker<'a> {
             }
             if !visited.insert(ancestor.clone()) {
                 continue;
-            }
-            if self.file_has_method(&ancestor, method) {
-                return Some(
-                    self.file_const_methods
-                        .contains(&(ancestor.clone(), method.to_string())),
-                );
             }
             if let Some(is_const) = self
                 .scope
@@ -1200,21 +1205,24 @@ impl<'a> Checker<'a> {
                                     repr
                                 };
                                 let method_name = func.name.text(self.source).to_string();
-                                // AC19: remember whether this method has a
-                                // trailing `const` qualifier so
-                                // `call_type::Member` can skip the
-                                // receiver-const propagation when the
-                                // method promises not to mutate `this`.
-                                if func.is_const {
-                                    self.file_const_methods
-                                        .insert((qual.clone(), method_name.clone()));
-                                }
-                                // Method-name index for the const-receiver
-                                // rule (fields never enter this set).
-                                self.file_class_methods
-                                    .entry(qual.clone())
-                                    .or_default()
-                                    .insert(method_name.clone());
+                                // B114: the trailing `const` and the
+                                // method-vs-field discrimination used to be
+                                // recorded here, into `file_const_methods`
+                                // and `file_class_methods`. Both are gone.
+                                // They were a per-file AST answer to a
+                                // question the pool can answer for any file,
+                                // and once B116 added a pooled path beside
+                                // them the codebase held TWO answers to
+                                // "is this method const" — the drift this
+                                // ticket exists to prevent.
+                                // `GlobalScope::workspace_own_method_is_const`
+                                // is now the only one.
+                                //
+                                // What remains here is purely the RETURN-TYPE
+                                // member list, which is legitimately
+                                // file-local: it carries resolved `TypeRepr`s
+                                // for the file being checked, not a modifier.
+                                //
                                 // AngelScript virtual-property accessors:
                                 // `get_X()`/`set_X()` expose member `X`, so
                                 // register the PROPERTY name as present too
@@ -1222,21 +1230,11 @@ impl<'a> Checker<'a> {
                                 // what lets `q.f0` resolve when the class
                                 // only declares `get_f0`/`set_f0` (E++
                                 // GameQuat, ClickFlags real-world shapes).
-                                // A const getter satisfies const receivers;
-                                // the property name inherits `is_const`.
                                 if let Some(prop) = method_name
                                     .strip_prefix("get_")
                                     .or_else(|| method_name.strip_prefix("set_"))
                                 {
                                     if !prop.is_empty() {
-                                        self.file_class_methods
-                                            .entry(qual.clone())
-                                            .or_default()
-                                            .insert(prop.to_string());
-                                        if func.is_const {
-                                            self.file_const_methods
-                                                .insert((qual.clone(), prop.to_string()));
-                                        }
                                         members.push((prop.to_string(), ret.clone()));
                                     }
                                 }
@@ -4721,28 +4719,46 @@ impl<'a> Checker<'a> {
                 // have reliable const metadata; external-type returns
                 // pass through unwrapped (follow-up noted below).
                 let receiver_const = Self::receiver_is_const(&obj_ty);
-                let method_is_const = self
-                    .file_const_methods
-                    .contains(&(type_name.clone(), member_name.clone()));
-                // Same-file workspace classes: prefer `file_classes` so
-                // we get the resolved return type AND know whether this
-                // was a method (vs. a field) for const-propagation.
+                // B114: constness comes from the POOL, for the same-file arm
+                // as well as B116's cross-file one below, so there is ONE
+                // source of truth rather than two that can drift.
+                //
+                // This retired `file_const_methods` and `file_class_methods`,
+                // two per-file AST maps built by `index_file_classes`.
+                // `workspace_own_method_is_const` reproduces BOTH exactly:
+                //
+                // * `Some(true)` iff any overload of the name is const —
+                //   `file_const_methods` was likewise a set keyed by name, so
+                //   one const declaration made it `contains`.
+                // * The `get_V`/`set_V` accessor spelling, which the sidecar
+                //   recorded under the STRIPPED property name.
+                // * `None` for a FIELD, which is the method-vs-field
+                //   discrimination `file_has_method` used to provide.
+                //
+                // Own-class scope is preserved deliberately: the sidecar
+                // recorded only a class's own members, so this is the surface
+                // that has to match it. An inherited non-const method reached
+                // through a derived const receiver stays a false negative on
+                // BOTH sides of the file boundary — B119, and not this
+                // ticket's to widen, because the fleet exposure of walking
+                // parents was measured for own-class scope only.
+                let method_constness = self
+                    .scope
+                    .workspace_own_method_is_const(&type_name, &member_name);
+                // Same-file workspace classes: prefer `file_classes` so we
+                // get the resolved return type for const-propagation.
                 if let Some((_, members)) = self.file_classes.get(&type_name) {
                     for (mname, t) in members {
                         if mname == &member_name {
                             let ret = t.clone();
-                            if receiver_const && !method_is_const {
-                                // Game parity (HatDump.as:60): a non-const
-                                // method invoked on a const receiver fails
-                                // the game compile. `file_const_methods`
-                                // only records CONST methods, and fields
-                                // never reach this arm with a method name
-                                // collision — but distinguish methods from
-                                // fields explicitly so a field shadowing a
-                                // method name can't mis-fire: check the
-                                // member is actually a METHOD of this class
-                                // before diagnosing.
-                                if self.file_has_method(&type_name, &member_name) {
+                            // `None` still WRAPS but never diagnoses: a field
+                            // read through a const receiver is genuinely
+                            // const, so its type must inherit `Const(_)`,
+                            // while firing on it would be a false positive.
+                            // Only `Some(false)` — a known non-const METHOD —
+                            // is the game-parity error (HatDump.as:60).
+                            if receiver_const && method_constness != Some(true) {
+                                if method_constness == Some(false) {
                                     self.diagnostics.push(TypeDiagnostic {
                                         span: callee.span,
                                         kind: TypeDiagnosticKind::NonConstMethodOnConstReceiver {
@@ -4786,15 +4802,16 @@ impl<'a> Checker<'a> {
                 // …) that `None` correctly excludes.
                 //
                 // Same-file classes are excluded outright rather than
-                // re-decided, so the existing arm remains the single
-                // authority for anything it can see and this can only ever
-                // ADD the cross-file case.
+                // re-decided, so the arm above remains the single authority
+                // for anything it can see and this can only ever ADD the
+                // cross-file case. B114 note: both arms now read the SAME
+                // `method_constness` computed once above — before, this one
+                // consulted the pool while the arm above consulted an AST
+                // sidecar, which is exactly the pair of answers that could
+                // drift apart.
                 if receiver_const
                     && !self.file_classes.contains_key(&type_name)
-                    && self
-                        .scope
-                        .workspace_own_method_is_const(&type_name, &member_name)
-                        == Some(false)
+                    && method_constness == Some(false)
                 {
                     self.diagnostics.push(TypeDiagnostic {
                         span: callee.span,
@@ -4878,11 +4895,16 @@ impl<'a> Checker<'a> {
                 // result -- that the shape proxy removes 7 of 10 false
                 // positives and leaves 3 it cannot see -- is the reason to
                 // stop rather than to extend it by analogy.
-                let own_declares = self.file_has_method(&type_name, &member_name)
-                    || self
-                        .scope
-                        .workspace_own_method_is_const(&type_name, &member_name)
-                        .is_some();
+                // B114: one lookup, not two. This read `file_has_method`
+                // (same-file, AST) OR the pooled question; retiring that
+                // sidecar leaves the pooled call, which already answers for
+                // both because the file being checked is itself in the pool.
+                // `is_some()` is exactly "the own class declares this name",
+                // since `None` is precisely the not-a-workspace-method case.
+                let own_declares = self
+                    .scope
+                    .workspace_own_method_is_const(&type_name, &member_name)
+                    .is_some();
                 if receiver_const
                     && !own_declares
                     && self.inherited_method_is_const(&type_name, &member_name)
@@ -14031,8 +14053,13 @@ mod b116_cross_file_const_receiver_tests {
     }
 
     /// A virtual-property accessor: `get_V() const` satisfies a const
-    /// receiver, `set_V()` does not. Same-file already handled this
-    /// through `file_const_methods`; the pooled path must agree.
+    /// receiver, `set_V()` does not. Same-file handled this through the
+    /// `file_const_methods` AST sidecar, which recorded a const accessor
+    /// under the STRIPPED property name; B114 retired that sidecar, and
+    /// both surfaces now read `workspace_own_method_is_const`, whose
+    /// accessor fallback is what keeps this case working. So this no
+    /// longer checks that two paths AGREE — there is only one — but it is
+    /// exactly the case that would regress if that fallback were dropped.
     #[test]
     fn cross_file_virtual_property_accessors_follow_their_qualifier() {
         let sib = "class P { int _v; int get_V() const { return _v; } void set_V(int v) { _v = v; } }";
