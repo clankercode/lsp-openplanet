@@ -4063,3 +4063,83 @@ The verdict now prints `python3 scripts/remote-build.py --allow-unresolved test`
 verbatim and says why it cannot go through `just`. **An instruction a reader
 cannot execute is not a remedy; check yours against the entry point they were
 told to use, not the one you happen to be typing in.**
+||||||| parent of 511e59c (fix(b168): make every audit exemption state something a machine can refute)
+
+## A justification records conviction, not correctness
+
+**B157 found the defect it was looking for sitting inside the exemption that was
+hiding it.** B138's audit carried a `JUSTIFIED` row for the exact literal that
+turned out to be the bug — `return_type: String::new()` — and the stated reason
+*was the false claim*: "the Nadeo dump identifies return types by numeric id, not
+text". Measurably false; 1618 method return types were being discarded behind it.
+
+So the audit did not accept the defect **despite** a justification. It accepted it
+**because of** one.
+
+**WHY THIS IS WORSE THAN NO AUDIT.** An unjustified literal is still read by the
+next person who walks past it. A blessed one is actively defended: the row tells
+that reader the question has already been settled, and the scanner stops asking.
+Free text records that somebody was convinced. It never records that they were
+right, and nothing degrades it when the world changes underneath it. A wrong
+belief entered once becomes permanent and load-bearing.
+
+**THE MITIGATION, AND IT WAS ALREADY IN THE FILE.** The same audit's
+`READ_CONFIRMED` rows never had this weakness, because each carries a snippet
+that must literally still occur in the source — a claim that stops being true
+fails instead of persisting. The fix is to give the justification half the same
+property: **every exemption must state at least one thing a machine can refute.**
+
+**WHAT THAT LOOKS LIKE IN PRACTICE (B168).** Converting six prose rows in B153's
+Nadeo audit into checked predicates refuted **three of them within the hour**, all
+written by the same author who had measured the dump that week:
+
+| the row said | the dump says |
+|---|---|
+| `Gbx class id ("1001000")` | 1522 of 2585 ids contain hex letters — it is hex, never decimal |
+| `the Gbx file this class roots` | 18 of 314 are not gbx at all (`.json`, `.txt`, `.svg`, `.zip`) |
+| *first correction:* every value is filename-shaped | 5 values have no dot at all (`Vehicle`, `txt`, `zip`, `gbx`) |
+| *second correction:* 294 end in gbx | 296 — the two bare `gbx` values end in gbx too |
+
+Three of those four were corrections to corrections. **Prose survives arithmetic
+that a predicate does not**: "mostly Gbx files" cannot be wrong, while
+`CaseInsensitiveSuffixCount("gbx", 294)` is wrong by two and says so.
+
+**THE THIRD STATE, AND IT IS THE POINT.** Some claims genuinely cannot be
+substantiated — a flag that is always the literal `1` with nothing in the dump
+saying which bit. Those rows must say **UNEXAMINED**, in that word, and the audit
+must enforce that the prose says it. An honest UNEXAMINED row is worth more than a
+JUSTIFIED one nobody can substantiate, because it invites the next reader to look
+instead of telling them not to. A row may still carry checked counts alongside it:
+"3831 occurrences, always literal 1, MEANING UNEXAMINED" is three facts and one
+admission, which is strictly better than one confident sentence.
+
+**THE SHAPE TO WATCH FOR.** Any table of exemptions — allowlists, `#[allow]` with
+a comment, waivers, known-failure lists, suppression files — has this structure.
+Ask of each row: *what would have to be true for this to be false, and does
+anything check it?* If the answer is "a reader would have to notice", the row is
+prose.
+
+## A non-vacuity floor written as a constant erodes
+
+**Removing the wrong literal in B157 broke B138's own guard.** The audit asserted
+`found.len() >= 5` so that a scanner matching nothing could not pass trivially —
+a good check. Deleting one genuinely-wrong row dropped the real count to 4, and
+the floor failed, reporting a *legitimate improvement* as scanner drift.
+
+**WHY THE OBVIOUS FIX IS THE TRAP.** The tempting response is to edit the 5 down
+to a 4. That works, and it is exactly how the guard dies: every genuine
+improvement pushes the real count toward the constant, so the constant gets
+lowered again, and a floor that is lowered whenever it complains is training
+rather than verification. After enough rounds it sits below anything that could
+ever fail and has become decoration that still reads as a check.
+
+**THE FIX.** Tie the floor to something that moves WITH the codebase. Here the
+floor became `found.len() >= JUSTIFIED.len()` — the scanner must find at least
+as many literals as there are rows claiming to explain literals. It cannot drift
+apart from what it guards, it needs no maintenance, and it still fails hard if
+the scanner silently matches nothing.
+
+**THE GENERAL RULE.** A non-vacuity floor should be derived, not chosen. Prefer
+counting the same population from an independent direction and asserting the two
+agree; a hand-picked number is a guess about the future that someone will
+eventually have to edit, and the edit is indistinguishable from the erosion.

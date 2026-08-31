@@ -6095,14 +6095,36 @@ mod b138_loader_literal_audit {
     /// Every row is a claim the loader makes on the dump's behalf. Reviewing
     /// this table is reviewing those claims; that is the point of making them
     /// enumerate themselves.
-    const JUSTIFIED: &[(&str, &str, usize, &str)] = &[
+    /// Machine-checked evidence for a B138 row (B168).
+    ///
+    /// B157 found that the row exempting `return_type: String::new()` gave
+    /// the FALSE CLAIM as its reason, so the audit defended the defect
+    /// instead of catching it. These four rows share that provenance and had
+    /// never been checked either. Each now states something a machine can
+    /// refute.
+    #[derive(Debug, Clone, Copy)]
+    enum Ev {
+        /// This snippet must literally occur in `src/typedb/`.
+        SourceContains(&'static str),
+        /// Exactly this many Nadeo members are named with one of these
+        /// prefixes.
+        NadeoNamePrefixCount(&'static [&'static str], usize),
+        /// This key occurs exactly this many times anywhere in the Nadeo dump.
+        NadeoKeyCount(&'static str, usize),
+    }
+
+    const JUSTIFIED: &[(&str, &str, usize, &str, &[Ev])] = &[
         (
             "writable",
             "true",
             3,
             "Core explicit props are real fields; Nadeo exposes no accessor \
              info and assumes writable deliberately, since only Core's proven \
-             get-only set hard-errors",
+             get-only set hard-errors. B168 checked the Nadeo half: 0 of its \
+             16321 members are named `get_*`/`set_*`, against 117 such names \
+             in Core, so \"exposes no accessor info\" is a measurement rather \
+             than an impression.",
+            &[Ev::NadeoNamePrefixCount(&["get_", "set_"], 0)],
         ),
         (
             "writable",
@@ -6110,20 +6132,30 @@ mod b138_loader_literal_audit {
             1,
             "synthesized get-only virtual property — reached only inside the \
              `!has_set` branch, so it is DERIVED from the dump, not assumed",
+            &[Ev::SourceContains("!has_set.contains(prop)")],
         ),
         (
             "anonymous",
             "false",
             2,
             "a named enum, in both the Core and Header paths; the anonymous \
-             ones are built elsewhere with `true` (B046)",
+             ones are built elsewhere with `true` (B046). B168 pinned that \
+             `elsewhere`: it is a call ARGUMENT, not a field literal, which is \
+             why grepping `anonymous: true` finds nothing and why this row \
+             needed a snippet rather than a reader's memory.",
+            &[Ev::SourceContains(
+                "self.insert_nadeo_enum(key, values, true)",
+            )],
         ),
         (
             "ctor_conversions",
             "Vec::new()",
             1,
             "the Nadeo dump carries no `behaviors`, and engine classes are \
-             reference types with no constructor conversions (GH #54)",
+             reference types with no constructor conversions (GH #54). B168 \
+             checked the first half: `behaviors` occurs 0 times in the Nadeo \
+             dump.",
+            &[Ev::NadeoKeyCount("behaviors", 0)],
         ),
         // B146 closed the three rows that used to sit here (`is_in`,
         // `is_out`, `is_inout`, each hardcoded `false` on the Nadeo side).
@@ -6279,7 +6311,7 @@ mod b138_loader_literal_audit {
 
         let expected: std::collections::BTreeMap<(String, String), usize> = JUSTIFIED
             .iter()
-            .map(|(f, v, n, _)| ((f.to_string(), v.to_string()), *n))
+            .map(|(f, v, n, _, _)| ((f.to_string(), v.to_string()), *n))
             .collect();
         assert_eq!(
             found, expected,
@@ -6287,6 +6319,102 @@ mod b138_loader_literal_audit {
              for. A `bool` literal claims a fact to every caller; if the dump \
              never said it, either fix it or add a row saying why it is true. \
              `None` needs no row — it claims nothing."
+        );
+    }
+    /// B168: EVERY B138 ROW MUST STATE SOMETHING A MACHINE CAN REFUTE.
+    ///
+    /// The row B157 deleted gave the false claim as its own reason, so the
+    /// audit defended the defect rather than catching it. Free text records
+    /// that somebody was convinced, never that they were right. These four
+    /// rows shared that provenance and had never been checked.
+    #[test]
+    fn every_justified_row_states_evidence_that_still_holds() {
+        // PRODUCTION text only — each file cut at its first test module.
+        //
+        // Without the cut this check is SELF-SATISFYING and can never fail:
+        // the snippet is written in the JUSTIFIED table above, that table is
+        // in one of these files, so `contains` finds the row's own text and
+        // reports the claim confirmed. Mutation testing caught it — changing
+        // the snippet to one that occurs nowhere still passed. The sibling
+        // audit in `nadeo_format.rs` already cut at `#[cfg(test)]` and was
+        // therefore safe; the mitigation was in the codebase and simply not
+        // applied here, which is B168's own finding recurring inside B168.
+        let prod: String = loader_sources()
+            .into_iter()
+            .map(|(_, src)| {
+                let cut = src.find("#[cfg(test)]").unwrap_or(src.len());
+                src[..cut].to_string()
+            })
+            .collect();
+        let nadeo: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/typedb/OpenplanetNext.json"),
+            )
+            .expect("fixture"),
+        )
+        .expect("parse");
+        fn count_key(v: &serde_json::Value, key: &str) -> usize {
+            match v {
+                serde_json::Value::Object(m) => m
+                    .iter()
+                    .map(|(k, x)| usize::from(k == key) + count_key(x, key))
+                    .sum(),
+                serde_json::Value::Array(a) => a.iter().map(|x| count_key(x, key)).sum(),
+                _ => 0,
+            }
+        }
+        let mut members: Vec<String> = Vec::new();
+        for ns in nadeo["ns"].as_object().expect("ns").values() {
+            for class in ns.as_object().expect("classes").values() {
+                for m in class
+                    .get("m")
+                    .and_then(|m| m.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(n) = m.get("n").and_then(|n| n.as_str()) {
+                        members.push(n.to_string());
+                    }
+                }
+            }
+        }
+        assert!(members.len() > 10_000, "member walk is vacuous");
+
+        let mut failures: Vec<String> = Vec::new();
+        for (field, value, _n, why, evidence) in JUSTIFIED {
+            assert!(
+                !evidence.is_empty(),
+                "{field}: {value} carries no evidence — prose alone is what \
+                 B157 found protecting the defect"
+            );
+            assert!(!why.trim().is_empty(), "{field}: {value} has no reason");
+            for e in *evidence {
+                let bad = match e {
+                    Ev::SourceContains(snippet) => (!prod.contains(snippet))
+                        .then(|| format!("snippet {snippet:?} no longer occurs")),
+                    Ev::NadeoNamePrefixCount(prefixes, want) => {
+                        let got = members
+                            .iter()
+                            .filter(|n| prefixes.iter().any(|p| n.starts_with(p)))
+                            .count();
+                        (got != *want)
+                            .then(|| format!("{got} members match {prefixes:?}, not {want}"))
+                    }
+                    Ev::NadeoKeyCount(key, want) => {
+                        let got = count_key(&nadeo, key);
+                        (got != *want)
+                            .then(|| format!("key `{key}` occurs {got} times, not {want}"))
+                    }
+                };
+                if let Some(actual) = bad {
+                    failures.push(format!("{field}: {value} — {e:?} REFUTED: {actual}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "B138 rows a machine refutes: {failures:#?}"
         );
     }
 }
