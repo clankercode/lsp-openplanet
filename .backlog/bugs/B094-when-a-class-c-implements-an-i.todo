@@ -16,3 +16,78 @@ updated_at: "2026-08-31T09:15:52Z"
 ---
 
 When a class C implements an interface I with method M, we should have an errors like: M being unimplemented, M type signature not matching if same name but different type (unless openplanet compile error is just unimplemented), etc. We need full tests around classes and interfaces, and these need to work in the extension too
+
+## ENGINE GROUND TRUTH (lane-unused, 2026-08-31, measured via tm-control-mcp)
+
+18 fixtures, each its own plugin so each is its own compilation unit (B068).
+Positive control (correctly implemented) compiled CLEAN with errorCount 0; the
+`ZZZNoSuchType` harness control ERRORED. Every compile line was attributed to
+this build by `Starting build for "<id>"` rather than scraped from the shared
+log by severity — which is what makes these ACCEPTs trustworthy, and never was
+on the RemoteBuild path.
+
+Confirmed from source before probing: **B094 is a NEW diagnostic, not a repair.**
+`TypeDiagnosticKind` has 28 variants and none covers unimplemented or
+mismatched interface methods.
+
+## Max's hedge was right, and the answer is a FOURTH outcome
+
+"unless openplanet compile error is just unimplemented" — **it is just
+unimplemented. But a mismatched signature is NOT accepted; it is reported AS a
+missing implementation.** One message form for everything:
+
+    class C : I {}                                Missing implementation of 'void I::M()'
+    class C : I { int M() {...} }      (I: void)  Missing implementation of 'void I::M()'
+    class C : I { void M() {} }        (I: int)   same
+    class C : I { void M() {} }        (I: M(int))       Missing implementation of 'void I::M(int)'
+    class C : I { void M(float) {} }   (I: M(int))       Missing implementation of 'void I::M(int)'
+    class C : I { void M() {} }        (I: const)        Missing implementation of 'void I::M() const'
+    class C : I { void M(string) {} }  (I: const&in)     Missing implementation of 'void I::M(const string&in)'
+
+**So there is no second diagnostic to build and no scope-addition question.**
+The mismatch case IS the missing-implementation case, and the engine's message
+names the signature it wanted — return type, parameter types, constness, `&in`.
+
+**Our message should mirror that.** The expected signature is the entire value
+of the error, and it is also exactly what B095's code action needs in order to
+generate a stub. One measurement settles both tickets' output format.
+
+## Eight more shapes, several of which would have been guessed wrong
+
+| shape | engine |
+|---|---|
+| **3 missing methods** | **3 errors, one per method**, all spanned at the CLASS NAME — not one summary error. Decides our diagnostic granularity. |
+| **`abstract class C : I {}`** | **STILL ERRORS.** Abstract does NOT exempt. The opposite of the normal rule in most languages, and would have been assumed wrong. |
+| `private void M() {}` | SATISFIES the interface. Clean. |
+| `class C : B, I {}` with `B::M` | inherited method SATISFIES. Clean. |
+| `class B : I {...}` / `class C : B {}` | clean |
+| interface `J : I` | implementing J requires I's methods too |
+| multiple interfaces | only the UNSATISFIED one is named |
+| correct `M(int)` beside spurious `M(float)` | extra overloads are FINE. Clean. |
+| a class not declaring the interface | never checked |
+
+## IMPLEMENTATION CONSTRAINT — fail silent, and this is the risky half
+
+Implementing this means comparing AngelScript signature TEXT: return type,
+parameter types, `const`, `&in`/`&out`/`&inout`. That is precisely where B062
+recorded that a normalisation slip becomes a false report — **and the polarity
+here is worse than it was there.** B062's failure mode was a MISSED WARNING;
+this one's is a FALSE ERROR on correct code, on a construct every plugin using
+interfaces relies on.
+
+**So it fails SILENT by construction**: where a signature cannot be normalised
+confidently — an unresolved type, a typedef, anything the resolver will not
+vouch for — NO diagnostic. A missed error is acceptable; a red squiggle on a
+class that compiles is not.
+
+The exact silence conditions go in the commit rather than staying implicit, and
+**each one gets its own mutation**, per the rule from B088: red-then-green
+covers the positive half by construction and gives NO signal on the silence
+half, because a required-silence assertion's red and its green look identical.
+
+## Related
+
+B095 (the code action, which consumes this measurement's signature text), B062
+(the normalisation-slip precedent, with the safer polarity), B060 (the
+scope-addition precedent, which turns out NOT to be needed here), B088 (the
+per-silence mutation rule), B097 (why RemoteBuild could not be used).
