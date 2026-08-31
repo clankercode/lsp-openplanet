@@ -13,6 +13,20 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Changed
+- **Unused findings default to `info` and fold out of `check` output**
+  (B090) — a normal run no longer lists every unused function/variable;
+  the summary carries a per-kind hidden count instead
+  (`(5 info hidden: 3 unused function, 2 unused local variable —
+  --show-info to list)`), and `--show-info` reveals the lines. All
+  INFO/HINT diagnostics fold this way in human output; JSON still carries
+  every diagnostic, and editors still list/fade unused findings as
+  before. `--unused warn` restores the old visible warnings (note: a CI
+  lane relying on `--warnings-as-errors` to catch unused code needs
+  `--unused warn` now); `unused = true`/`on` now means the default level
+  (info), not warn. The summary never claims "0 diagnostics" while
+  anything is folded.
+
 ### Added
 - **Multi-version Openplanet checking** (GH #18) — `check` can now target
   any recorded Openplanet version, or several at once:

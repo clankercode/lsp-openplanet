@@ -208,18 +208,21 @@ default_mode = "tui"   # or "lsp"
 # the user config; lists don't merge, the winning file's list is the list.
 # unused_callbacks = ["OnCounterUpdate", "OnThing*"]
 
-# Unused functions / vars / parameters / class members. Default "warn".
-# "ignore" turns the pass off (it is noisy on large plugins). "error"
-# emits ERROR diagnostics so `check` fails without --warnings-as-errors.
-# "info" and "hint" report the same findings at a quieter severity and
-# never fail the run, not even under --warnings-as-errors: "info" stays
-# listed in an editor's problems panel, "hint" drops out of it and leaves
-# only the greyed-out range. Every finding is tagged Unnecessary at all
-# levels, so editors that honour the tag (VS Code: `editor.showUnused`)
-# fade the declaration regardless of which level you pick.
+# Unused functions / vars / parameters / class members. Default "info"
+# (B090): `check` folds info-level findings out of its listing into a
+# per-kind hidden count in the summary — `--show-info` lists them — so a
+# normal run stays quiet; editors still see them (listed in the problems
+# panel, faded via the Unnecessary tag). "ignore" turns the pass off.
+# "warn" restores the pre-B090 visible warnings. "error" emits ERROR
+# diagnostics so `check` fails without --warnings-as-errors. "info" and
+# "hint" never fail the run, not even under --warnings-as-errors: "info"
+# stays listed in an editor's problems panel, "hint" drops out of it and
+# leaves only the greyed-out range. Every finding is tagged Unnecessary
+# at all levels, so editors that honour the tag (VS Code:
+# `editor.showUnused`) fade the declaration regardless of level.
 # CLI `--unused ignore|hint|info|warn|error` and `--no-unused` win over
 # this; workspace .openplanet-lsp.toml wins over the user config.
-# unused = "warn"
+# unused = "info"
 
 # Grey out `#if` branches the current defines switch off, the way an IDE
 # fades `#if 0` in C. Default "hint": the dead body gets a HINT diagnostic
@@ -386,6 +389,7 @@ Useful options (see `--help` for the full list):
 | `--errors last\|first\|off` | Group errors after / before / interleaved with other diagnostics (default last; ignored for JSON) |
 | `--typedb-dir <DIR>` | Load Openplanet type database from DIR |
 | `--no-typedb` | Skip type DB (parse-only / limited checks) |
+| `--show-info` | List INFO/HINT diagnostics instead of folding them into the summary's per-kind hidden count (unused findings are info by default since B090; JSON always carries everything) |
 | `--openplanet-version <V[,V...]>` | Check against these Openplanet versions (default: the installed one). Several versions check all of them at once; diagnostics that fire on only some targets get an `[op V]` label, and missing symbols other recorded versions know carry "added in" / "removed in" notes |
 | `--typedb-versions-dir <DIR>` | Root of recorded typedb snapshots, one `<version>/` subdirectory each (see `tests/fixtures/typedb-versions/`) |
 | `--plugins-dir <DIR>` | Extra Openplanet plugins dir for dependency exports |

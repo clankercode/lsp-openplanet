@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Url};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Url};
 
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::config::{
@@ -117,15 +117,20 @@ OPTIONS:
     --unused MODE       Unused functions/vars/etc:
                         ignore | hint | info | warn | error (aliases:
                         off/false → ignore, grey/faded → hint,
-                        note/information → info, on/true → warn,
-                        err → error). Default warn. `hint` and `info` report
-                        the same findings at a quieter severity and never
-                        fail the run, not even under --warnings-as-errors.
+                        note/information/on/true → info, err → error).
+                        Default info (B090): folded out of check output into
+                        the summary — see --show-info. `hint` and `info`
+                        never fail the run, not even under
+                        --warnings-as-errors; `warn` restores the old
+                        behavior.
                         Also `unused = \"ignore\"|\"hint\"|\"info\"|\"warn\"|
                         \"error\"` in .openplanet-lsp.toml or the user config;
                         workspace wins over user. The flag wins over both.
                         `--no-unused` is `--unused ignore`.
     --no-unused         Same as `--unused ignore`
+    --show-info         List INFO/HINT diagnostics in human output instead of
+                        folding them into the summary's hidden count (B090).
+                        JSON always carries every diagnostic.
     --errors MODE       Group errors in human check output: last | first | off
                         (aliases: end → last, start/begin → first,
                         none/false/interleaved → off). Default last:
@@ -221,6 +226,9 @@ pub struct CheckOptions {
     /// excludes. Wins over `honor_gitignore` at both config levels. There is
     /// no positive flag: honoring is already the default.
     pub no_gitignore: bool,
+    /// B090: reveal the INFO/HINT diagnostics human output folds into its
+    /// summary by default (`--show-info`).
+    pub show_info: bool,
     /// `--unused ignore|warn|error` / `--no-unused`. `None` = flag absent
     /// → config ladder (`unused` in workspace then user config, default
     /// warn). An explicit flag wins over both.
@@ -309,6 +317,10 @@ pub struct CheckReport {
     /// Empty on a legacy single-target run (no `--openplanet-version` /
     /// `--typedb-versions-dir`), so existing output stays byte-identical.
     pub targets: Vec<String>,
+    /// B090: presentation switch (like `errors`): human renderers fold
+    /// INFO/HINT diagnostics into the summary unless this is set
+    /// (`--show-info`). JSON ignores it — the machine surface is complete.
+    pub show_info: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +403,10 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
             }
             "--no-gitignore" => {
                 options.no_gitignore = true;
+                i += 1;
+            }
+            "--show-info" => {
+                options.show_info = true;
                 i += 1;
             }
             "--no-unused" => {
@@ -946,6 +962,7 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         type_db,
         errors: config.errors,
         targets: targets.iter().filter_map(|t| t.label.clone()).collect(),
+        show_info: options.show_info,
     })
 }
 
@@ -1148,6 +1165,7 @@ fn report_for_human_format(report: &CheckReport) -> CheckReport {
         type_db: report.type_db.clone(),
         errors: report.errors,
         targets: report.targets.clone(),
+        show_info: report.show_info,
     }
 }
 
@@ -1214,16 +1232,136 @@ fn format_json(report: &CheckReport) -> String {
     )
 }
 
+/// B090: the human renderers' fold of INFO/HINT diagnostics. `visible` is
+/// what gets rendered; the hidden counts and per-kind breakdown feed the
+/// summary's hidden note. With `report.show_info` everything is visible
+/// and the note is `None`. JSON never comes through here.
+pub(crate) struct FoldedDiagnostics<'r> {
+    pub(crate) visible: Vec<&'r CliDiagnostic>,
+    hidden_info: usize,
+    hidden_hint: usize,
+    /// (kind, count) in first-seen order; rendered count-desc with ties
+    /// keeping analysis order.
+    kinds: Vec<(String, usize)>,
+}
+
+impl<'r> FoldedDiagnostics<'r> {
+    pub(crate) fn fold(report: &'r CheckReport) -> Self {
+        let mut visible = Vec::with_capacity(report.diagnostics.len());
+        let (mut hidden_info, mut hidden_hint) = (0usize, 0usize);
+        let mut kinds: Vec<(String, usize)> = Vec::new();
+        for item in &report.diagnostics {
+            let fold = !report.show_info
+                && matches!(
+                    item.diagnostic.severity,
+                    Some(DiagnosticSeverity::INFORMATION) | Some(DiagnosticSeverity::HINT)
+                );
+            if !fold {
+                visible.push(item);
+                continue;
+            }
+            match item.diagnostic.severity {
+                Some(DiagnosticSeverity::HINT) => hidden_hint += 1,
+                _ => hidden_info += 1,
+            }
+            let kind = hidden_kind(&item.diagnostic);
+            match kinds.iter_mut().find(|(k, _)| *k == kind) {
+                Some((_, n)) => *n += 1,
+                None => kinds.push((kind, 1)),
+            }
+        }
+        kinds.sort_by(|a, b| b.1.cmp(&a.1));
+        Self {
+            visible,
+            hidden_info,
+            hidden_hint,
+            kinds,
+        }
+    }
+
+    fn hidden(&self) -> usize {
+        self.hidden_info + self.hidden_hint
+    }
+
+    /// `3 info + 1 hint hidden: 2 unused local variable, 1 manifest —
+    /// --show-info to list`, or `None` when nothing is folded.
+    fn hidden_note(&self) -> Option<String> {
+        if self.hidden() == 0 {
+            return None;
+        }
+        let mut totals = Vec::new();
+        if self.hidden_info > 0 {
+            totals.push(format!("{} info", self.hidden_info));
+        }
+        if self.hidden_hint > 0 {
+            totals.push(format!(
+                "{} hint{}",
+                self.hidden_hint,
+                if self.hidden_hint == 1 { "" } else { "s" }
+            ));
+        }
+        let kinds = self
+            .kinds
+            .iter()
+            .map(|(kind, n)| format!("{n} {kind}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "{} hidden: {kinds} — --show-info to list",
+            totals.join(" + ")
+        ))
+    }
+
+    /// The note wrapped for appending to a summary line, or empty.
+    pub(crate) fn hidden_suffix(&self) -> String {
+        self.hidden_note()
+            .map(|note| format!(" ({note})"))
+            .unwrap_or_default()
+    }
+
+    /// The all-folded summary body — the caller uses this instead of a
+    /// clean "0 diagnostics" claim, which would be the exact lie B090
+    /// exists to prevent.
+    pub(crate) fn all_hidden_summary(&self) -> Option<String> {
+        (self.visible.is_empty() && self.hidden() > 0).then(|| {
+            format!(
+                "0 errors/warnings ({})",
+                self.hidden_note().expect("hidden() > 0")
+            )
+        })
+    }
+}
+
+/// The kind a folded diagnostic counts under: the structured
+/// `data.unusedKind` (→ "unused function"), else the string `code`
+/// ("manifest"), else the severity name. Never the message — prose is
+/// for humans.
+fn hidden_kind(diagnostic: &Diagnostic) -> String {
+    if let Some(kind) = diagnostic
+        .data
+        .as_ref()
+        .and_then(|v| v.get("unusedKind"))
+        .and_then(|v| v.as_str())
+    {
+        return format!("unused {kind}");
+    }
+    if let Some(NumberOrString::String(code)) = &diagnostic.code {
+        return code.clone();
+    }
+    severity_label(diagnostic.severity).to_string()
+}
+
 /// gcc/clang-ish plain lines: `path:line:col: severity: message`
 fn format_plain(report: &CheckReport, color: bool) -> String {
     use crate::term;
 
+    let folded = FoldedDiagnostics::fold(report);
     let mut out = String::new();
     let mut n_err = 0usize;
     let mut n_warn = 0usize;
     let mut n_other = 0usize;
 
-    for item in &report.diagnostics {
+    for item in &folded.visible {
         let rel = item.path.strip_prefix(&report.root).unwrap_or(&item.path);
         let range = item.diagnostic.range;
         let line = range.start.line + 1;
@@ -1260,6 +1398,12 @@ fn format_plain(report: &CheckReport, color: bool) -> String {
 
     let summary = if report.diagnostics.is_empty() {
         term::ok(color, format!("0 diagnostics in {}", report.root.display()))
+    } else if let Some(all_hidden) = folded.all_hidden_summary() {
+        format!(
+            "{} in {}",
+            term::ok(color, all_hidden),
+            term::path(color, report.root.display().to_string())
+        )
     } else {
         let mut parts = Vec::new();
         if n_err > 0 {
@@ -1278,14 +1422,15 @@ fn format_plain(report: &CheckReport, color: bool) -> String {
             parts.push(term::info(color, format!("{n_other} other")));
         }
         format!(
-            "{} {} in {}",
-            term::bold(color, format!("{} diagnostics", report.diagnostics.len())),
+            "{} {} in {}{}",
+            term::bold(color, format!("{} diagnostics", folded.visible.len())),
             if parts.is_empty() {
                 String::new()
             } else {
                 format!("({})", parts.join(", "))
             },
-            term::path(color, report.root.display().to_string())
+            term::path(color, report.root.display().to_string()),
+            folded.hidden_suffix()
         )
     };
     out.push_str(&summary);
@@ -1401,6 +1546,16 @@ mod tests {
         assert!(CheckFormat::Pretty.use_pretty(false));
         assert!(CheckFormat::Auto.use_pretty(true));
         assert!(!CheckFormat::Auto.use_pretty(false));
+    }
+
+    /// B090: `--show-info` reveals the info/hint diagnostics the human
+    /// output folds into its summary by default.
+    #[test]
+    fn parse_check_args_show_info_flag() {
+        let opts = parse_check_args(&["--show-info".to_string(), ".".to_string()]).unwrap();
+        assert!(opts.show_info);
+        let opts = parse_check_args(&[".".to_string()]).unwrap();
+        assert!(!opts.show_info, "absent flag folds info by default");
     }
 
     #[test]
@@ -1584,6 +1739,7 @@ mod tests {
             type_db: None,
             errors: ErrorGroup::Off,
             targets: Vec::new(),
+            show_info: false,
         }
     }
 
@@ -1699,6 +1855,151 @@ mod tests {
         );
     }
 
+    /// B090: human output folds INFO and HINT into the summary by default —
+    /// their lines are absent, the trailer says how many are hidden and how
+    /// to reveal them, and `show_info` restores full output. JSON never
+    /// folds (machine contract). Unknown/absent severities stay visible:
+    /// weird data should be seen, not silently folded.
+    #[test]
+    fn human_output_folds_info_and_hint_by_default() {
+        let mut report = mixed_severity_report(ErrorGroup::Off);
+        for fmt in [CheckFormat::Plain, CheckFormat::Pretty] {
+            let out = format_check_report_with(&report, false, fmt);
+            assert!(
+                !out.contains("msg-info-a") && !out.contains("msg-hint-a"),
+                "{fmt:?} must fold info/hint: {out}"
+            );
+            for visible in ["msg-error-a", "msg-warn-a", "msg-missing-a", "msg-unknown-a"] {
+                assert!(out.contains(visible), "{fmt:?} keeps {visible}: {out}");
+            }
+            assert!(
+                out.contains("1 info + 1 hint hidden"),
+                "{fmt:?} trailer counts hidden: {out}"
+            );
+            assert!(out.contains("--show-info"), "{fmt:?} names the reveal flag: {out}");
+        }
+
+        let json = format_check_report_with(&report, false, CheckFormat::Json);
+        assert!(
+            json.contains("msg-info-a") && json.contains("msg-hint-a"),
+            "JSON never folds: {json}"
+        );
+
+        report.show_info = true;
+        for fmt in [CheckFormat::Plain, CheckFormat::Pretty] {
+            let out = format_check_report_with(&report, false, fmt);
+            assert!(
+                out.contains("msg-info-a") && out.contains("msg-hint-a"),
+                "{fmt:?} with show_info reveals: {out}"
+            );
+            assert!(
+                !out.contains("--show-info"),
+                "{fmt:?} with show_info has no hidden note: {out}"
+            );
+        }
+    }
+
+    /// B090 (Max): the hidden note breaks the count down by KIND — the
+    /// structured `data.unusedKind` where present, else the diagnostic
+    /// `code`, else the severity name.
+    #[test]
+    fn hidden_note_counts_kinds() {
+        use tower_lsp::lsp_types::{Diagnostic, NumberOrString};
+        let item = |sev: DiagnosticSeverity,
+                    code: Option<&str>,
+                    kind: Option<&str>,
+                    msg: &str| CliDiagnostic {
+            path: PathBuf::from("/tmp/plugin/src/Main.as"),
+            combos: Vec::new(),
+            versions: Vec::new(),
+            diagnostic: Diagnostic {
+                severity: Some(sev),
+                code: code.map(|c| NumberOrString::String(c.to_string())),
+                data: kind.map(|k| serde_json::json!({ "unusedKind": k })),
+                message: msg.to_string(),
+                ..Default::default()
+            },
+        };
+        let report = CheckReport {
+            root: PathBuf::from("/tmp/plugin"),
+            diagnostics: vec![
+                item(
+                    DiagnosticSeverity::INFORMATION,
+                    Some("unused-declaration"),
+                    Some("local variable"),
+                    "a local variable `x` is never used",
+                ),
+                item(
+                    DiagnosticSeverity::INFORMATION,
+                    Some("unused-declaration"),
+                    Some("local variable"),
+                    "a local variable `y` is never used",
+                ),
+                item(
+                    DiagnosticSeverity::INFORMATION,
+                    Some("unused-declaration"),
+                    Some("function"),
+                    "a function `F` is never used",
+                ),
+                item(DiagnosticSeverity::INFORMATION, Some("manifest"), None, "meta note"),
+                item(DiagnosticSeverity::HINT, None, None, "faded thing"),
+            ],
+            type_database_loaded: false,
+            type_db: None,
+            errors: ErrorGroup::Off,
+            targets: Vec::new(),
+            show_info: false,
+        };
+        for fmt in [CheckFormat::Plain, CheckFormat::Pretty] {
+            let out = format_check_report_with(&report, false, fmt);
+            assert!(
+                out.contains("4 info + 1 hint hidden"),
+                "{fmt:?} severity totals: {out}"
+            );
+            assert!(
+                out.contains("2 unused local variable, 1 unused function, 1 manifest, 1 hint"),
+                "{fmt:?} kind breakdown, count-desc then name: {out}"
+            );
+        }
+    }
+
+    /// B090: when everything is folded the summary must not claim a clean
+    /// "0 diagnostics" — that is the lie the ticket exists to prevent.
+    #[test]
+    fn all_hidden_summary_never_claims_zero_diagnostics() {
+        use tower_lsp::lsp_types::Diagnostic;
+        let info = CliDiagnostic {
+            path: PathBuf::from("/tmp/plugin/src/Main.as"),
+            combos: Vec::new(),
+            versions: Vec::new(),
+            diagnostic: Diagnostic {
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                message: "a function `F` is never used".to_string(),
+                ..Default::default()
+            },
+        };
+        let report = CheckReport {
+            root: PathBuf::from("/tmp/plugin"),
+            diagnostics: vec![info],
+            type_database_loaded: false,
+            type_db: None,
+            errors: ErrorGroup::Off,
+            targets: Vec::new(),
+            show_info: false,
+        };
+        for fmt in [CheckFormat::Plain, CheckFormat::Pretty] {
+            let out = format_check_report_with(&report, false, fmt);
+            assert!(
+                !out.contains("0 diagnostics"),
+                "{fmt:?} must not claim clean: {out}"
+            );
+            assert!(
+                out.contains("0 errors/warnings") && out.contains("1 info hidden"),
+                "{fmt:?} states what is hidden: {out}"
+            );
+        }
+    }
+
     fn mixed_severity_report(group: ErrorGroup) -> CheckReport {
         use tower_lsp::lsp_types::Diagnostic;
         let unknown: DiagnosticSeverity = serde_json::from_value(serde_json::json!(99)).unwrap();
@@ -1728,6 +2029,7 @@ mod tests {
             type_db: None,
             errors: group,
             targets: Vec::new(),
+            show_info: false,
         }
     }
 
@@ -1796,7 +2098,11 @@ mod tests {
             (ErrorGroup::First, first.as_slice()),
             (ErrorGroup::Off, analysis.as_slice()),
         ] {
-            let report = mixed_severity_report(group);
+            // B090: grouping is about ORDER; show_info keeps the folded
+            // info/hint lines visible so the order assertions still see
+            // every severity.
+            let mut report = mixed_severity_report(group);
+            report.show_info = true;
             for fmt in [CheckFormat::Plain, CheckFormat::Pretty] {
                 let out = format_check_report_with(&report, false, fmt);
                 assert_eq!(message_order(&out), want, "{group:?} {fmt:?} order: {out}");

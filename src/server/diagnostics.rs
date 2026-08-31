@@ -336,6 +336,10 @@ fn unused_to_diagnostic(
         ),
         source: Some("openplanet-lsp".to_string()),
         code: Some(NumberOrString::String("unused-declaration".to_string())),
+        // B090: the CLI summary's kind breakdown reads this — the kind must
+        // travel as data because parsing it back out of the message prose
+        // is forbidden (same doctrine as removed_api replacements).
+        data: Some(serde_json::json!({ "unusedKind": unused.kind })),
         // The UNNECESSARY tag — not the severity — is what makes a client
         // fade the range (VS Code gates the grey-out on `editor.showUnused`).
         // Sent at every level: it is orthogonal to severity, it is what keeps
@@ -664,6 +668,14 @@ mod tests {
                     diag.tags,
                     Some(vec![DiagnosticTag::UNNECESSARY]),
                     "{kind} {sev:?} must be tagged unnecessary"
+                );
+                // B090: the CLI summary's kind breakdown reads the
+                // structured kind — prose parsing is forbidden, so it must
+                // travel as data.
+                assert_eq!(
+                    diag.data,
+                    Some(serde_json::json!({ "unusedKind": kind })),
+                    "{kind} {sev:?} must carry the structured kind"
                 );
             }
         }
