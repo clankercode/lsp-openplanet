@@ -236,6 +236,110 @@ impl VersionCatalog {
     }
 }
 
+/// Version notes for symbols a target lacks: qualified name →
+/// `"added in Openplanet X"` / `"removed in Openplanet Y"`. Pure data —
+/// the checker renders these strings verbatim and performs no version
+/// comparison of its own (spec §4).
+#[derive(Debug, Clone, Default)]
+pub struct VersionNotes {
+    notes: std::collections::HashMap<String, String>,
+}
+
+impl VersionNotes {
+    pub fn get(&self, qualified: &str) -> Option<&str> {
+        self.notes.get(qualified).map(String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.notes.is_empty()
+    }
+}
+
+/// Qualified names (functions, classes, enums) present in one Core dump.
+/// A light scan — names only, no [`crate::typedb::TypeIndex`] build.
+fn symbol_set(core_json: &Path) -> Result<std::collections::HashSet<String>, String> {
+    let contents = std::fs::read_to_string(core_json)
+        .map_err(|e| format!("failed to read {}: {e}", core_json.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&contents)
+        .map_err(|e| format!("failed to parse {}: {e}", core_json.display()))?;
+    let mut set = std::collections::HashSet::new();
+    for section in ["functions", "classes", "enums"] {
+        let Some(items) = value.get(section).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for item in items {
+            let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let qualified = match item.get("ns").and_then(|v| v.as_str()) {
+                Some(ns) if !ns.is_empty() => format!("{ns}::{name}"),
+                _ => name.to_string(),
+            };
+            set.insert(qualified);
+        }
+    }
+    Ok(set)
+}
+
+impl VersionCatalog {
+    /// Notes for every symbol ABSENT from `target` but present in some
+    /// other catalog version. Rules over the sparse recorded set (T =
+    /// target version, C = versions containing the symbol):
+    ///
+    /// - `min(C) > T` → `added in Openplanet {min(C)}`
+    /// - `max(C) < T` → `removed in Openplanet {V}`, V = the smallest
+    ///   catalog version above `max(C)` (every version above `max(C)`
+    ///   lacks the symbol by construction, so the smallest is the
+    ///   earliest recorded sighting of the removal)
+    /// - presence straddles T → no note; with sparse data there is no
+    ///   honest single claim, and silence beats a wrong one
+    pub fn notes_for_target(&self, target: &CatalogEntry) -> Result<VersionNotes, String> {
+        use std::collections::{BTreeMap, HashSet};
+        // Union sets per version: an installed dump and a recorded
+        // snapshot of the same version answer as one.
+        let mut per_version: BTreeMap<OpVersion, HashSet<String>> = BTreeMap::new();
+        for entry in &self.entries {
+            let set = symbol_set(&entry.core_json)?;
+            per_version.entry(entry.version).or_default().extend(set);
+        }
+        let Some(target_set) = per_version.get(&target.version).cloned() else {
+            return Ok(VersionNotes::default());
+        };
+        let mut notes = std::collections::HashMap::new();
+        let versions: Vec<OpVersion> = per_version.keys().copied().collect();
+        let mut containing: std::collections::HashMap<&str, Vec<OpVersion>> =
+            std::collections::HashMap::new();
+        for (&version, set) in &per_version {
+            if version == target.version {
+                continue;
+            }
+            for symbol in set {
+                if !target_set.contains(symbol) {
+                    containing.entry(symbol.as_str()).or_default().push(version);
+                }
+            }
+        }
+        for (symbol, mut c) in containing {
+            c.sort();
+            let (min, max) = (c[0], *c.last().expect("non-empty by construction"));
+            if min > target.version {
+                notes.insert(symbol.to_string(), format!("added in Openplanet {min}"));
+            } else if max < target.version {
+                let removed_at = versions
+                    .iter()
+                    .copied()
+                    .find(|&v| v > max)
+                    .expect("target.version > max is such a version");
+                notes.insert(
+                    symbol.to_string(),
+                    format!("removed in Openplanet {removed_at}"),
+                );
+            }
+        }
+        Ok(VersionNotes { notes })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +558,134 @@ mod tests {
         let (_g, cat) = full_catalog("resolve-malformed");
         let err = cat.resolve_targets(Some("banana")).unwrap_err();
         assert!(err.contains("banana"), "{err}");
+    }
+
+    /// Snapshot whose Core dump carries the given function/class/enum
+    /// symbol JSON fragments verbatim.
+    fn write_snapshot_with(
+        root: &std::path::Path,
+        dir: &str,
+        version: &str,
+        functions: &str,
+        classes: &str,
+        enums: &str,
+    ) {
+        let d = root.join(dir);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("OpenplanetCore.json"),
+            format!(
+                r#"{{"op":"{version} (next, Public, 00000000)","functions":[{functions}],"classes":[{classes}],"enums":[{enums}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("OpenplanetNext.json"),
+            format!(r#"{{"op":"{version}","mp":"2026-02-03 03:51:19","ns":{{}}}}"#),
+        )
+        .unwrap();
+    }
+
+    fn notes_catalog(tag: &str, snapshots: &[(&str, &str, &str, &str)]) -> (crate::testing::TempDir, VersionCatalog) {
+        let dir = tmp(tag);
+        for (version, functions, classes, enums) in snapshots {
+            write_snapshot_with(dir.path(), version, version, functions, classes, enums);
+        }
+        let cat = VersionCatalog::build(None, Some(dir.path())).unwrap();
+        (dir, cat)
+    }
+
+    fn target<'c>(cat: &'c VersionCatalog, label: &str) -> &'c CatalogEntry {
+        cat.entries().iter().find(|e| e.label == label).unwrap()
+    }
+
+    #[test]
+    fn notes_added_in_later_version() {
+        let (_g, cat) = notes_catalog(
+            "notes-added",
+            &[
+                ("1.0.0", "", "", ""),
+                ("2.0.0", r#"{"ns":"Text","name":"Join"}"#, "", ""),
+            ],
+        );
+        let notes = cat.notes_for_target(target(&cat, "1.0.0")).unwrap();
+        assert_eq!(notes.get("Text::Join"), Some("added in Openplanet 2.0.0"));
+        // Present on target → no note.
+        let notes2 = cat.notes_for_target(target(&cat, "2.0.0")).unwrap();
+        assert_eq!(notes2.get("Text::Join"), None);
+    }
+
+    #[test]
+    fn notes_removed_names_earliest_lacking_version() {
+        let (_g, cat) = notes_catalog(
+            "notes-removed",
+            &[
+                ("1.0.0", r#"{"ns":"string","name":"Join"}"#, "", ""),
+                ("2.0.0", "", "", ""),
+                ("3.0.0", "", "", ""),
+            ],
+        );
+        let notes = cat.notes_for_target(target(&cat, "3.0.0")).unwrap();
+        assert_eq!(
+            notes.get("string::Join"),
+            Some("removed in Openplanet 2.0.0"),
+            "earliest lacking version after the last containing one"
+        );
+    }
+
+    #[test]
+    fn notes_cover_classes_enums_and_bare_names() {
+        let (_g, cat) = notes_catalog(
+            "notes-kinds",
+            &[
+                (
+                    "1.0.0",
+                    r#"{"name":"GlobalFn"}"#,
+                    r#"{"ns":"Net","name":"SecureSocket"}"#,
+                    "",
+                ),
+                ("2.0.0", "", "", r#"{"ns":"UI","name":"NewCond","values":{}}"#),
+            ],
+        );
+        let old = cat.notes_for_target(target(&cat, "1.0.0")).unwrap();
+        assert_eq!(old.get("UI::NewCond"), Some("added in Openplanet 2.0.0"));
+        let new = cat.notes_for_target(target(&cat, "2.0.0")).unwrap();
+        assert_eq!(new.get("Net::SecureSocket"), Some("removed in Openplanet 2.0.0"));
+        assert_eq!(new.get("GlobalFn"), Some("removed in Openplanet 2.0.0"));
+    }
+
+    #[test]
+    fn notes_silent_when_presence_straddles_target() {
+        // Present below AND above the target but not at it: sparse data,
+        // no honest single claim — stay silent.
+        let (_g, cat) = notes_catalog(
+            "notes-straddle",
+            &[
+                ("1.0.0", r#"{"ns":"Ns","name":"Flaky"}"#, "", ""),
+                ("2.0.0", "", "", ""),
+                ("3.0.0", r#"{"ns":"Ns","name":"Flaky"}"#, "", ""),
+            ],
+        );
+        let notes = cat.notes_for_target(target(&cat, "2.0.0")).unwrap();
+        assert_eq!(notes.get("Ns::Flaky"), None);
+    }
+
+    #[test]
+    fn real_fixtures_derive_text_join_added_and_string_join_removed() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb-versions");
+        let cat = VersionCatalog::build(None, Some(&root)).unwrap();
+        let v5 = target(&cat, "1.29.5");
+        let v14 = target(&cat, "1.29.14");
+        let notes5 = cat.notes_for_target(v5).unwrap();
+        assert_eq!(notes5.get("Text::Join"), Some("added in Openplanet 1.29.14"));
+        let notes14 = cat.notes_for_target(v14).unwrap();
+        assert_eq!(notes14.get("string::Join"), Some("removed in Openplanet 1.29.14"));
+        assert_eq!(
+            notes14.get("Net::SecureSocket"),
+            Some("removed in Openplanet 1.29.14")
+        );
+        assert_eq!(notes14.get("Text::Join"), None, "present on target → no note");
     }
 
     #[test]
