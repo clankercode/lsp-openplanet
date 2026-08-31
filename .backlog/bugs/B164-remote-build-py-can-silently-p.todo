@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T17:17:42Z"
+depends_on: []
+estimate_hours: 1
+id: B164
+priority: high
+status: pending
+tags: []
+title: 'remote-build.py can silently produce a stale baseline binary: run from a lane worktree, the master build is the pre-rebase artefact, and the sweep guard cannot see it because base != fixed is still true'
+updated_at: "2026-08-31T17:17:42Z"
+---
+
+remote-build.py can silently produce a stale baseline binary: run from a lane worktree, the master build is the pre-rebase artefact, and the sweep guard cannot see it because base != fixed is still true
