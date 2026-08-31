@@ -413,10 +413,63 @@ fn types_equal(a: &str, b: &str, scope: &GlobalScope) -> Option<bool> {
 
 /// Collapse a source type spelling to a comparable form: whitespace
 /// removed, so `const string &in` and `const string&in` are one thing.
+///
+/// `pub(crate)` since B112, so the interface-stub quick fix compares with
+/// the SAME rule instead of its own inline copy. It had one, and matching a
+/// canonicalised pooled type against a raw display string only worked while
+/// the display string happened to be canonicalised too — see
+/// `render_signature`, which no longer is.
 /// Deliberately NOT a semantic normalisation — the semantic question is
 /// handed to [`type_is_comparable`], which refuses rather than guesses.
-fn canonical_type(text: &str) -> String {
+pub(crate) fn canonical_type(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Render a source type spelling the way the ENGINE prints it:
+/// `const string &in` and `const string&in` both become `const string&in`.
+///
+/// SEPARATE FROM [`canonical_type`] on purpose, and B112 is what happens
+/// when they are not. That function collapses a spelling for COMPARISON —
+/// stripping whitespace wholesale is exactly right there, because
+/// `const string &in` and `const string&in` must compare equal. Reusing it
+/// to DISPLAY welds `const` to `string` and emits `conststring&in`, a token
+/// the engine never produces and no compile log contains, which defeats the
+/// one job [`MethodSig`]'s own doc claims for the field: mirroring the
+/// game's message so a user can match ours against a compile log. One
+/// function, two jobs, and the display job was the one being got wrong.
+///
+/// THE RULE: keep a space only where it SEPARATES TWO IDENTIFIER
+/// CHARACTERS. Whitespace anywhere else is spelling noise the engine does
+/// not print. That yields `const string&in` from every spacing of it,
+/// `int&out` from `int &out`, and `Thing@` from `Thing @` — and it needs no
+/// list of keywords or modifiers, so a modifier this module has never seen
+/// still renders correctly.
+///
+/// GROUND TRUTH is the measured table at the top of this module (OP 1.29.5,
+/// 2026-08-31, live engine): `Missing implementation of 'void I::M(const
+/// string&in)'`. Unlike the `void ()` / `void()` inconsistency this batch
+/// deliberately left alone, this spelling has a measurement to be right
+/// against rather than a preference to be argued about.
+fn render_type(text: &str) -> String {
+    fn is_ident_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space {
+            pending_space = false;
+            if out.chars().next_back().is_some_and(is_ident_char) && is_ident_char(c) {
+                out.push(' ');
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// True when a canonical spelling denotes a type this module is willing to
@@ -456,10 +509,12 @@ fn type_is_comparable(canonical: &str, scope: &GlobalScope) -> bool {
 /// `void I::M() const` for a const requirement — B101, the trailing `const`
 /// is exactly how the engine spelled it in the measured message.
 fn render_signature(interface: &str, m: &MethodSig) -> String {
-    let params: Vec<String> = m.param_types.iter().map(|t| canonical_type(t)).collect();
+    // B112: `render_type`, not `canonical_type` — the latter is the
+    // COMPARISON form and strips the space out of `const string`.
+    let params: Vec<String> = m.param_types.iter().map(|t| render_type(t)).collect();
     format!(
         "{} {}::{}({}){}",
-        m.return_type.trim(),
+        render_type(&m.return_type),
         interface,
         m.name,
         params.join(","),
@@ -538,13 +593,92 @@ mod tests {
         );
     }
 
+    /// B112: THE MESSAGE MUST BE MATCHABLE AGAINST A COMPILE LOG.
+    ///
+    /// The engine's spelling is recorded at the top of this module, measured
+    /// against the live game (OP 1.29.5, 2026-08-31, via `tm-control-mcp`,
+    /// each fixture its own compilation unit):
+    ///
+    ///     class C : I { void M(string) {} }
+    ///         -> Missing implementation of 'void I::M(const string&in)'
+    ///
+    /// A space after `const`, none before `&in`. We rendered
+    /// `conststring&in`, which is not a token the engine ever emits, so the
+    /// one job the field's own doc claims for it — "mirrors the game's own
+    /// message so a user can match ours against a compile log" — was
+    /// impossible. Unlike the `void ()` / `void()` question this batch
+    /// declined to touch, this one has a measured answer to be right
+    /// against, so it is not a matter of taste.
+    ///
+    /// Swept across the parameter shapes rather than pinned once, because
+    /// the defect was in a shared renderer and every shape went through it.
+    #[test]
+    fn a_rendered_signature_matches_the_engines_spelling() {
+        for (iface, klass, want) in [
+            // THE REPORTED CASE, verbatim from the measured table above.
+            (
+                "void M(const string &in s);",
+                "void M(string s) {}",
+                "void I::M(const string&in)",
+            ),
+            // The same spelling written WITHOUT the space in source must
+            // render identically — the renderer normalises, it does not
+            // merely echo.
+            (
+                "void M(const string&in s);",
+                "void M(string s) {}",
+                "void I::M(const string&in)",
+            ),
+            // Absurd but legal spacing collapses to the same thing.
+            (
+                "void M( const   string   &  in  s );",
+                "void M(string s) {}",
+                "void I::M(const string&in)",
+            ),
+            // A plain type keeps no spurious space.
+            ("void M(int a);", "void M(float a) {}", "void I::M(int)"),
+            // Reference modes: no space before `&`, and `const` still
+            // separated where it is its own word.
+            (
+                "void M(const int &in a);",
+                "void M(float a) {}",
+                "void I::M(const int&in)",
+            ),
+            (
+                "void M(int &out a);",
+                "void M(float a) {}",
+                "void I::M(int&out)",
+            ),
+            (
+                "void M(int &inout a);",
+                "void M(float a) {}",
+                "void I::M(int&inout)",
+            ),
+            // A handle: no space before `@`.
+            (
+                "void M(Thing @h);",
+                "void M(float a) {}",
+                "void I::M(Thing@)",
+            ),
+        ] {
+            let source =
+                format!("class Thing {{}}\ninterface I {{ {iface} }}\nclass C : I {{ {klass} }}\n");
+            assert_eq!(
+                missing(&source),
+                vec![want.to_string()],
+                "for interface `{iface}` against `{klass}`"
+            );
+        }
+    }
+
     #[test]
     fn a_by_value_parameter_against_const_ref_in_is_reported_as_missing() {
         assert_eq!(
             missing(
                 "interface I { void M(const string &in s); }\nclass C : I { void M(string s) {} }\n"
             ),
-            vec!["void I::M(conststring&in)"]
+            // B112: was `conststring&in`, which the engine never emits.
+            vec!["void I::M(const string&in)"]
         );
     }
 
@@ -680,7 +814,7 @@ mod tests {
             (
                 "void M(const string &in s) const;",
                 "void M(const string &in s) {}",
-                "void I::M(conststring&in) const",
+                "void I::M(const string&in) const",
             ),
             (
                 "void M(int &out a) const;",

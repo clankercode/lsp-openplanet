@@ -5712,3 +5712,72 @@ fn check_b108_a_callable_argument_prints_as_its_signature() {
         "a callable must never render as its return type:\n{joined}"
     );
 }
+
+/// B109 (REJECTED AS INVALID): `ArgTypeMismatch` does NOT flatten a callable
+/// argument to its return type. This pin exists to keep that true.
+///
+/// WHY IT PASSES ON MASTER, AND WHY IT IS STILL WORTH HAVING. A test that is
+/// green the moment it is written is normally the signature of a worthless
+/// one — this batch has rejected several. This is the exception, and the
+/// reason is that "the code is already correct here" IS the claim being
+/// made. B109 was filed on my report that this path had B108's defect. It
+/// does not, and the ticket was closed invalid; the test converts that
+/// verbal finding into an executable one, so the next person reads a passing
+/// assertion instead of a paragraph they have to trust.
+///
+/// It is also not the vacuous shape the absence rule warns about. That rule
+/// bites on assertions satisfied by everything being empty. This one asserts
+/// POSITIVE content — one exact string — and fails the moment `got` renders
+/// `bool` instead of `bool ()`, which is precisely the regression it guards.
+///
+/// HOW I CAME TO FILE A TICKET ON A BUG THAT WAS NOT THERE, recorded because
+/// the trap is in the codebase's shape rather than in one careless reading. A
+/// good bug-fix comment quotes the OLD, WRONG output — that is what makes it
+/// useful years later. The b025 fixture's header does exactly that:
+///
+///     // Before the fix the LSP typed these expressions as the method's
+///     // return type and emitted
+///     //   error: argument 1 of `CoroutineFunc`: expected `void ()`, got `void`
+///
+/// So the most valuable comments in this tree contain verbatim broken
+/// behaviour, separated from a description of CURRENT behaviour by nothing
+/// but the words "before the fix" — easiest to skim past exactly when the
+/// quoted error resembles the defect you are hunting. I read that as a live
+/// report. It was a record of the past.
+///
+/// The measurement that settled it, in full, so nobody repeats it:
+///
+///   * line 49, a bool-returning method reference -> `got 'bool ()'`, the
+///     SIGNATURE. This is the assertion below.
+///   * line 51, a void-returning method reference -> `got 'void ()'`.
+///   * line 53, a property READ -> `got 'string'`, where the type genuinely
+///     IS the interesting fact (B060).
+///
+/// And structurally, `check_funcdef_ctor_arg` guards on
+/// `clearly_not_fn || !sigs.is_empty()`, so the bare type display is reached
+/// only when the argument is PROVABLY not a callable. The other three
+/// `ArgTypeMismatch` emission sites cannot flatten a callable either: they
+/// are guarded to primitive-to-primitive or Named-to-Named pairs, and a
+/// callable types as `Funcdef(_)` or as a return type — `TypeRepr::Void` is
+/// its own variant, not a `Primitive`, and a bare function name is `Funcdef`,
+/// not `Named`. That is a proof over the whole family rather than a sample.
+#[test]
+fn check_b109_argtypemismatch_renders_a_callable_as_its_signature() {
+    let errors = repro_errors("b025-this-method-funcdef-ctor");
+    let joined = errors.join("\n");
+    assert!(
+        errors.iter().any(|l| l.contains("Main.as:49:")
+            && l.contains("expected `void ()`, got `bool ()`")),
+        "a bool-returning method reference must render as `bool ()`, not `bool`:\n{joined}"
+    );
+    // The other side of the same guard: a non-callable argument keeps its
+    // TYPE, because there its type is the fact. Without this the assertion
+    // above is satisfied by a renderer that prints a signature for
+    // everything, which is the over-reach B108 had to be narrowed out of.
+    assert!(
+        errors
+            .iter()
+            .any(|l| l.contains("Main.as:53:") && l.contains("got `string`")),
+        "a property read must keep its type:\n{joined}"
+    );
+}
