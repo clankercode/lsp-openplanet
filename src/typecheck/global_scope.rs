@@ -1813,17 +1813,6 @@ impl<'a> GlobalScope<'a> {
         out
     }
 
-    /// External typedb enum lookup by short name: the enum's qualified
-    /// name if `short` names an enum in the type database (absorbs the
-    /// former `scope.external` field read in the checker, GH #41).
-    pub fn external_enum_by_short_name(&self, short: &str) -> Option<String> {
-        let ext = self.external?;
-        ext.find_by_short_name(short)
-            .iter()
-            .find(|enum_name| ext.lookup_source_enum(enum_name).is_some())
-            .cloned()
-    }
-
     /// All members (fields + methods, typed) declared on `class_name`
     /// itself — NOT walking parents. Each method appears with its return
     /// type as the member type (same approximation the checker uses for

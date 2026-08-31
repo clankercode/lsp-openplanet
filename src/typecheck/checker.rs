@@ -4071,13 +4071,18 @@ impl<'a> Checker<'a> {
                 // an observable fix. Its exclusion of real funcdefs is right
                 // here too: step 5 above already owns that case.
                 //
-                // AND NOTE THIS GUARD MASKS B098, it does not fix it. The
-                // bare call form still resolves to a namespaced engine enum
-                // whenever the workspace declares nothing of that name — 436
-                // spellings the game rejects. The fleet sweep going from one
-                // delta to zero is the mask, not the rule being clean; that
-                // is the B084 shape, where B062's export rooting hid a
-                // crediting defect behind a green gate.
+                // THAT MASK IS NOW REDUNDANT, and this note is kept because
+                // the warning it replaces was right. This guard used to be
+                // the only thing standing between a bare call form and a
+                // namespaced engine enum, and it covered only the names the
+                // workspace happened to declare -- so the fleet sweep going
+                // from one delta to zero was the mask, not the rule being
+                // clean. B098 deleted the short-name rescue outright (see
+                // below), so the 436 spellings the game rejects no longer
+                // resolve here for any workspace. The guard still earns its
+                // place: it decides WHICH declaration wins when the
+                // workspace does declare the name, which is a different
+                // question from whether an engine enum may be reached bare.
                 if let Some(declared) = self.scope.workspace_shadowing_type_name(&name) {
                     // B084 parity, and this guard would otherwise UNDO it.
                     // The `has_global_ident` arm below credits every name
@@ -4092,10 +4097,23 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Named(declared);
                 }
-                if let Some(enum_name) = self.scope.external_enum_by_short_name(&name) {
-                    self.walk_args(args);
-                    return TypeRepr::Named(enum_name);
-                }
+                // B098: a bare short name used to reach a NAMESPACED engine
+                // enum here, via `external_enum_by_short_name` — so `Axis(1)`
+                // resolved to the Core enum `UI::Plot::Axis` and the call went
+                // silent. The game answers `Identifier 'Axis' is not a data
+                // type in global namespace`, measured for all 436 such bare
+                // spellings in the committed B052 corpus.
+                //
+                // The lookup is GONE rather than narrowed, because measurement
+                // showed it rescued nothing: all 62 bare spellings the game
+                // does accept are answered by `resolve_unqualified` on the
+                // line above and never reached it, while all 436 it rejects
+                // reached it and only it. A predicate whose entire contribution
+                // is false positives has no narrowing worth writing.
+                //
+                // B056 closed this same class in `resolve_unqualified`, which
+                // deliberately excludes enums from its short-name rescue. This
+                // was the second site that fix did not reach.
                 // B084: the top-level twin of the namespaced arm above,
                 // which has always done `record_value_use_variants`. This
                 // one silenced the undefined-identifier diagnostic and
@@ -12606,4 +12624,241 @@ void f() {
             );
         }
     }
+    // ── B098: a bare short name must not rescue a namespaced engine enum ────
+
+    /// Check `source` against a scope built ONCE by the caller. `check_with_typedb`
+    /// reloads the type index per call, which is fine for a single fixture and
+    /// costs minutes over a 436-row sweep.
+    fn check_against(scope: &GlobalScope, source: &str) -> Vec<TypeDiagnostic> {
+        let tokens = crate::lexer::tokenize_filtered(source);
+        let mut parser = crate::parser::Parser::new(&tokens, source);
+        let file = parser.parse_file();
+        let mut checker = Checker::new(source, scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    /// `(bare ACCEPTED, bare REJECTED)` spellings from the committed B052
+    /// corpus — the game's own verdict on each name written as a TYPE.
+    fn b052_bare_verdicts() -> (Vec<String>, Vec<String>) {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/probes/b052-qualified-enum-spellings.tsv");
+        let text = std::fs::read_to_string(&path).expect("the probe corpus must be committed");
+        let (mut acc, mut rej) = (Vec::new(), Vec::new());
+        for line in text.lines() {
+            if line.starts_with('#') || line.is_empty() || line.starts_with("spelling\t") {
+                continue;
+            }
+            let mut c = line.split('\t');
+            let spelling = c.next().expect("a spelling column");
+            let verdict = c.next().unwrap_or("");
+            if spelling.contains("::") {
+                continue;
+            }
+            match verdict {
+                "ACCEPTED" => acc.push(spelling.to_string()),
+                "REJECTED" => rej.push(spelling.to_string()),
+                _ => {}
+            }
+        }
+        (acc, rej)
+    }
+
+    /// B098. A bare short name reached a NAMESPACED engine enum through
+    /// `external_enum_by_short_name`, so `Axis(1)` resolved to the Core enum
+    /// `UI::Plot::Axis`. The game answers
+    /// `Identifier 'Axis' is not a data type in global namespace`.
+    ///
+    /// Driven over the whole committed corpus rather than one spelling,
+    /// because the blast radius is the point: **436** bare names the game
+    /// rejects, and 62 it accepts, all measured in the same run so the fix
+    /// cannot buy the rejections by breaking the acceptances.
+    ///
+    /// B056 closed this same class in `resolve_unqualified`, which now
+    /// deliberately excludes enums from its short-name rescue. This is the
+    /// second call site that fix did not reach — the third instance in this
+    /// batch of a rule living at one of N sites (B076, B073).
+    #[test]
+    fn every_bare_spelling_the_game_rejects_is_rejected_in_call_position() {
+        let index = typedb_fixture_index_checker();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+        let (accepted, rejected) = b052_bare_verdicts();
+
+        assert_eq!(rejected.len(), 436, "the corpus's bare REJECTED set changed size");
+        assert_eq!(accepted.len(), 62, "the corpus's bare ACCEPTED set changed size");
+
+        let mut wrongly_silent = Vec::new();
+        for name in &rejected {
+            if check_against(&scope, &format!("void zzzf() {{ {name}(1); }}\n")).is_empty() {
+                wrongly_silent.push(name.clone());
+            }
+        }
+        assert!(
+            wrongly_silent.is_empty(),
+            "{} bare spellings the game REJECTS are silent in call position: {:?}",
+            wrongly_silent.len(),
+            &wrongly_silent[..wrongly_silent.len().min(20)]
+        );
+
+        let mut wrongly_loud = Vec::new();
+        for name in &accepted {
+            let d = check_against(&scope, &format!("void zzzf() {{ {name}(1); }}\n"));
+            if !d.is_empty() {
+                wrongly_loud.push(format!("{name}: {:?}", d[0].kind));
+            }
+        }
+        assert!(
+            wrongly_loud.is_empty(),
+            "{} bare spellings the game ACCEPTS became errors: {:?}",
+            wrongly_loud.len(),
+            &wrongly_loud[..wrongly_loud.len().min(20)]
+        );
+    }
+
+    /// The internal-consistency half, and the strongest argument for the change
+    /// that needs no game at all: this crate ALREADY rejects all 436 in VALUE
+    /// position. Measured, not assumed — 0 of 436 were silent there.
+    ///
+    /// So call position was the outlier against the crate's OWN behaviour, and
+    /// the fix narrows toward what value position has always done rather than
+    /// inventing a rule. Asserting the two agree is what keeps them from
+    /// drifting apart again.
+    ///
+    /// Scoped to the names the game REJECTS, and the exclusion is not a
+    /// convenience. Call and value position legitimately differ for a name the
+    /// game ACCEPTS: `CGameCtnApp` is a class, so `CGameCtnApp(1)` is a
+    /// constructor while `"" + CGameCtnApp` is a type name used as a value and
+    /// should error. Demanding parity across the accepted set would assert
+    /// something untrue and would have to be relaxed by the first person to
+    /// read it. Those 62 are covered by the sweep above, which requires them
+    /// silent in call position.
+    #[test]
+    fn call_position_and_value_position_agree_on_every_rejected_bare_spelling() {
+        let index = typedb_fixture_index_checker();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+        let (_accepted, rejected) = b052_bare_verdicts();
+
+        let mut disagree = Vec::new();
+        let mut diagnosed_somewhere = 0usize;
+        for name in rejected.iter() {
+            let call = check_against(&scope, &format!("void zzzf() {{ {name}(1); }}\n"));
+            let value = check_against(&scope, &format!("void zzzf() {{ print(\"\" + {name}); }}\n"));
+            diagnosed_somewhere += usize::from(!call.is_empty() || !value.is_empty());
+            if call.is_empty() != value.is_empty() {
+                disagree.push(format!(
+                    "{name}: call {} / value {}",
+                    if call.is_empty() { "silent" } else { "errors" },
+                    if value.is_empty() { "silent" } else { "errors" },
+                ));
+            }
+        }
+        assert!(
+            diagnosed_somewhere >= 400,
+            "anti-vacuity: only {diagnosed_somewhere} names diagnosed in either \
+             position, so 'the two agree' would be near-vacuous"
+        );
+        assert!(
+            disagree.is_empty(),
+            "{} bare spellings resolve differently in call and value position: {:?}",
+            disagree.len(),
+            &disagree[..disagree.len().min(20)]
+        );
+    }
+
+    /// The shapes, per CLAUDE.md — the 436 are not homogeneous, and a fix that
+    /// happened to catch only one kind of engine enum would satisfy a sweep
+    /// while leaving the others. Each row is paired with the SILENCE that must
+    /// survive it, so the test cannot pass by rejecting everything.
+    #[test]
+    fn a_bare_engine_enum_needs_its_qualifier_in_every_shape() {
+        let index = typedb_fixture_index_checker();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&index));
+
+        // (shape, the bare spelling the game refuses, the qualified spelling it takes)
+        for (shape, bare, qualified) in [
+            ("a Core enum nested in a namespace", "Axis", "UI::Plot::Axis"),
+            ("a Core enum in a one-level namespace", "Cond", "UI::Cond"),
+            ("a Core enum under a nested namespace", "Align", "nvg::Align"),
+            (
+                "a Nadeo enum under a class scope",
+                "EMenuOrder",
+                "CGameMenu::EMenuOrder",
+            ),
+        ] {
+            for form in ["{N}(1)", "print(\"\" + {N})"] {
+                let src = format!("void zzzf() {{ {}; }}\n", form.replace("{N}", bare));
+                assert!(
+                    !check_against(&scope, &src).is_empty(),
+                    "{shape}: bare `{bare}` must not resolve — the game answers \
+                     `Identifier '{bare}' is not a data type in global namespace`"
+                );
+            }
+            let src = format!("void zzzf() {{ {qualified}(1); }}\n");
+            assert!(
+                check_against(&scope, &src).is_empty(),
+                "{shape}: the QUALIFIED spelling `{qualified}` must still work — \
+                 the game takes it, and a fix that broke it would satisfy every \
+                 rejection row above: {:?}",
+                check_against(&scope, &src)
+            );
+        }
+
+        // A genuinely GLOBAL engine enum is the control in the other direction:
+        // its source name IS its bare name, the game accepts it bare, and it
+        // must keep resolving in both positions.
+        for form in ["VirtualKey(1)", "print(\"\" + VirtualKey)"] {
+            let src = format!("void zzzf() {{ {form}; }}\n");
+            assert!(
+                check_against(&scope, &src).is_empty(),
+                "a globally visible engine enum stays usable bare: {:?}",
+                check_against(&scope, &src)
+            );
+        }
+    }
+
+    /// A workspace declaration of the same short name still wins, in both
+    /// positions. The workspace is the one authority a bare name legitimately
+    /// resolves against, and narrowing the ENGINE rescue must not touch it.
+    #[test]
+    fn a_workspace_declaration_of_the_short_name_still_resolves_bare() {
+        let index = typedb_fixture_index_checker();
+        for decl in [
+            "enum Axis { X, Y }\n",
+            "class Axis { int v; }\n",
+            "funcdef void Axis();\n",
+        ] {
+            let src = format!("{decl}void zzzf() {{ Axis@ a; }}\n");
+            let tokens = crate::lexer::tokenize_filtered(&src);
+            let mut parser = crate::parser::Parser::new(&tokens, &src);
+            let file = parser.parse_file();
+            let mut ws = SymbolTable::new();
+            let fid = ws.allocate_file_id();
+            let syms = SymbolTable::extract_symbols(fid, &src, &file);
+            ws.set_file_symbols(fid, syms);
+            let scope = GlobalScope::new(&ws, Some(&index));
+            let mut checker = Checker::new(&src, &scope);
+            checker.check_file(&file);
+            assert!(
+                checker.diagnostics.is_empty(),
+                "a workspace `{}` named `Axis` must resolve bare: {:?}",
+                decl.split_whitespace().next().unwrap(),
+                checker.diagnostics
+            );
+        }
+    }
+
+    /// The shipped type-DB fixtures, loaded once per test that needs them.
+    fn typedb_fixture_index_checker() -> crate::typedb::TypeIndex {
+        use crate::typedb::TypeIndex;
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
 }
