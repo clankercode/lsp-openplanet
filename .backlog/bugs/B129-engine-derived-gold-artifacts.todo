@@ -1,15 +1,14 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:20:50Z"
 depends_on: []
 estimate_hours: 4
 id: B129
 priority: medium
+started_at: null
 status: pending
-tags:
-    - probes
-    - fixtures
-    - tooling
+tags: []
 title: 'Engine-derived gold artifacts are not regenerable by one command: a game update means hand-rerunning each probe with no drift report'
 updated_at: "2026-08-31T14:20:50Z"
 ---
@@ -27,3 +26,21 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Requested by Max, 2026-09-01: any compiler output from the game (gold fixtures etc.) must be regenerable programmatically, so a whole suite can be rerun and results regenerated when AngelScript/Openplanet updates land. Expected cadence: a few times a year — optimise for auditability, not speed.
+
+INVENTORY of engine-derived artifacts as of filing:
+1. docs/probes/*.tsv — 8 corpora, each already naming its generating script (probe_enum_corpus.py, probe_export_binding.py, probe_shared_modifiers.py, probe_ns_binding.py, gen_b044_probe.py, issue_repro_game.py) with provenance in docs/probes/README.md. Individually regenerable today; NO single runner exists.
+2. tests/fixtures/typedb/ (OpenplanetCore.json, OpenplanetNext.json, Openplanet.h) and tests/fixtures/typedb-versions/{1.29.5,1.29.14} — game dumps. Verify during implementation whether a regeneration script exists or this is a manual export; document or script it. (Dump carries no deprecation metadata — GH #18 context.)
+3. Hand-transcribed measured tables in source comments/tests (10+ files incl. builtins.rs, repr.rs, interface_impl.rs — e.g. B112's spacing table, 'OP 1.29.5, live engine'). Not programmatically regenerable today.
+
+DELIVERABLE:
+a. One command (suggest 'just regen-golds') that enumerates every committed engine-derived artifact, reruns its generator against the live game (RemoteBuild port 30000 / tm-control-mcp, as the probes already do), writes fresh outputs, and prints a per-artifact drift report vs committed versions. Nothing auto-commits — a human reviews the diff and commits with a version-stamped message.
+b. A checked-in manifest mapping artifact -> generator command -> game+Openplanet version last run -> row count, so the runner is data-driven and a new corpus cannot be added without registering its regeneration path.
+c. typedb regeneration documented or scripted (implementer's call which).
+d. Design decision for the implementer, deliberately not pre-decided here: in-source hand-transcribed tables either (i) migrate their ground truth into generated fixtures the tests read, or (ii) stay manual but are enumerated in the manifest with a manual-re-verify flag so a game-update run lists them as UNCHECKED rather than silently skipping them. (ii) is an acceptable v1.
+e. The runner inherits the repo's probe discipline, mandatorily: selftests/nonvacuous checks run first and a probe that cannot discriminate FAILS the regen rather than overwriting golds with AMBIGUOUS; four-valued build_status per B118 (NOT-RUN is never a verdict); no stranded fixture in the game Plugins dir per B077.
+f. Every regenerated artifact records game + Openplanet version and date; the runner enforces the stamp, not convention.
+
+CONSTRAINTS: needs a live Trackmania + Openplanet session; runtime dominated by the b052 (1901 rows) and b053 (2989 rows) corpora.
+COORDINATION: probe harness is largely the peer fleet's construction (B068/B077/B097/B118 guard chain); unclaimed — either fleet may take it; schedule AFTER B122 (repo-wide fmt commit) to avoid churn.
