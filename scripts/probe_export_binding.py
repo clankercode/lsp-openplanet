@@ -347,13 +347,13 @@ def read_raw_window(mark: int) -> str:
     compile-relevant. This probe's evidence is a `print()` from a plugin and a
     runtime exception, so it reads the raw tail instead — a filter tuned for
     another question is how a probe ends up unable to see its own answer.
+
+    B118 promoted that reasoning into `fleet.read_log_window_raw`, after the
+    same filter cost a THIRD probe its answer. This now delegates: two private
+    copies of one primitive is how the next lane rediscovers the defect
+    instead of inheriting the fix.
     """
-    try:
-        with open(fleet.OP_LOG, "rb") as handle:
-            handle.seek(mark)
-            return handle.read().decode(errors="replace")
-    except OSError as exc:
-        return f"<log read failed: {exc}>"
+    return fleet.read_log_window_raw(mark)
 
 
 @dataclass

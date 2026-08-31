@@ -427,10 +427,104 @@ def read_log_window(mark: int, plugin_folder: str) -> str:
             lines.append(ln)
     return "\n".join(lines)
 
+# The ONE definition of "this log line carries a source location". Shared by
+# `parse_game_diagnostics` (which needs the captures) and `raw_build_errors`
+# (which needs the negation). Two copies of this pattern is how a located
+# error could be counted twice and a location-less one not at all.
+_LOCATED_DIAG = re.compile(r"\((\d+),\s*(\d+)\)\s*:\s*(ERR|WARN|INFO)\s*:\s*(.*)$")
+
+
+def read_log_window_raw(mark: int, _plugin_folder: str | None = None) -> str:
+    """Everything the log gained since `mark`, UNFILTERED (B118).
+
+    `read_log_window` above keeps only what looked compile-relevant to the
+    question it was written for, and drops every `[ TRAC]` line. But
+    `Starting build for "<id>"` and `Loaded plugin '<id>'` are BOTH TRAC, so a
+    consumer of the filtered window cannot see whether its build ran at all --
+    it can only see whether anything complained. That is the difference
+    between "clean" and "never happened", and the filter erases it.
+
+    Two probes had already worked around this privately
+    (`probe_export_binding.read_raw_window`, and B096 claim 2 injecting through
+    the `read_log_window_fn` seam) before it was recognised as one defect. This
+    is the shared primitive, so the third lane does not have to rediscover it.
+
+    Signature is deliberately `(mark, plugin_folder)`-compatible with
+    `read_log_window` so it drops into the same injection seam.
+    """
+    try:
+        with open(OP_LOG, "rb") as f:
+            f.seek(mark)
+            return f.read().decode(errors="replace")
+    except Exception as e:
+        return f"<log read failed: {e}>"
+
+
+BUILD_START = 'Starting build for "%s"'
+BUILD_LOADED = "Loaded plugin '%s'"
+BUILD_FAILED = "Script compilation failed!"
+
+
+def build_slice(window: str, fid: str) -> list[str]:
+    """The log lines of ONE build, bracketed by its own start/finish markers.
+
+    RemoteBuild serialises builds and brackets each with
+    `Starting build for "<fid>"` ... `Loaded plugin '<fid>'`, so the slice
+    belongs to that build and to nothing else. Slicing by MARKER rather than by
+    severity or by time is what makes this attribution instead of a guess: a
+    concurrent session's plugin cannot appear between another build's own two
+    markers.
+
+    The slice deliberately ENDS at the load line. Everything after it is
+    runtime, and a compile question that reads runtime errors as compile
+    errors is a different false verdict.
+
+    Returns [] when the build never started -- which callers MUST distinguish
+    from "started and produced nothing", because that is the whole defect.
+    """
+    lines = window.splitlines()
+    start = next((i for i, l in enumerate(lines) if BUILD_START % fid in l), None)
+    if start is None:
+        return []
+    marker = BUILD_LOADED % fid
+    end = next((i for i, l in enumerate(lines[start:], start) if marker in l),
+               len(lines) - 1)
+    return lines[start:end + 1]
+
+
+def raw_build_errors(window: str, fid: str) -> list[str]:
+    """Build `[ERROR]` lines carrying NO source location (B118).
+
+    `parse_game_diagnostics` matches only `path (line, col) : SEV : msg`, so an
+    engine error without a location matches nothing and is invisible to EVERY
+    bucket derived from it -- `game_errors`, `foreign_errors` and
+    `unattributed_errors` alike -- which leaves `contended` False as well. No
+    guard anywhere fires. Measured shape:
+
+        [ERROR] Couldn't find required plugin dependency "x" while loading
+                plugin "<fid>"
+        [ TRAC] Loaded plugin '<fid>' (version 0.1.0)
+
+    Under the pre-B118 oracle that scored a clean ACCEPT.
+
+    `Script compilation failed!` is excluded here and reported separately: it
+    is a SUMMARY of errors reported above it, so counting it as an error of its
+    own would double-count a located rejection and, worse, would make a genuine
+    REJECT indistinguishable from a location-less build failure.
+    """
+    return [
+        l.strip() for l in build_slice(window, fid)
+        if "[ERROR]" in l
+        and BUILD_LOADED % fid not in l
+        and BUILD_FAILED not in l
+        and not _LOCATED_DIAG.search(l)
+    ]
+
+
 def parse_game_diagnostics(window: str) -> list[dict]:
     """Extract `path (line, col) : SEV : msg` compile diagnostics from OP log."""
     diags = []
-    rx = re.compile(r"\((\d+),\s*(\d+)\)\s*:\s*(ERR|WARN|INFO)\s*:\s*(.*)$")
+    rx = _LOCATED_DIAG
     for ln in window.splitlines():
         m = rx.search(ln)
         if m:

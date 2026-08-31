@@ -423,7 +423,11 @@ def probe(
     alive = rb_alive_fn or fleet.game_alive
     route = rb_route_fn or fleet.game_route
     log_size = log_size_fn or fleet.log_size
-    read_log_window = read_log_window_fn or fleet.read_log_window
+    # B118: the RAW window by default. The filtered one drops every `[ TRAC]`
+    # line, and both build markers are TRAC, so a build that never ran was
+    # indistinguishable from one that ran clean. Same signature, so every
+    # existing injection seam is unchanged.
+    read_log_window = read_log_window_fn or fleet.read_log_window_raw
     sleep = sleep_fn or time.sleep
 
     if not _valid_probe_id(fid):
@@ -487,9 +491,40 @@ def probe(
                 rec["contended"] = bool(
                     rec["foreign_errors"] or rec["unattributed_errors"]
                 )
-                rec["compiled_clean"] = (
-                    not rec["game_errors"] and not load.get("error")
+                # --- B118: did this build actually HAPPEN? ---------------
+                # Three false-green channels, all with the same polarity: on a
+                # question whose subject is acceptance, silence read as ACCEPT.
+                #
+                #   1. the window dropped TRAC, so `Starting build` and
+                #      `Loaded plugin` were both invisible and "never ran"
+                #      looked exactly like "ran clean";
+                #   2. a location-less engine error matched no bucket at all;
+                #   3. `Loaded plugin` is logged even AFTER
+                #      `Script compilation failed!`, so its presence is
+                #      necessary and NOT sufficient.
+                slice_ = fleet.build_slice(window, fid)
+                rec["build_ran"] = bool(slice_)
+                rec["build_loaded"] = any(
+                    fleet.BUILD_LOADED % fid in l for l in slice_
                 )
+                rec["build_failed"] = any(fleet.BUILD_FAILED in l for l in slice_)
+                rec["raw_build_errors"] = fleet.raw_build_errors(window, fid)
+                # BUILD-ERR is kept DISTINCT from REJECTED on purpose. "The
+                # engine refused this construct" and "this build did not
+                # happen" are different answers, and collapsing them is what
+                # produced the original defect: a missing dependency was read
+                # as a verdict about the code under test.
+                if not rec["build_ran"]:
+                    rec["build_status"] = "NOT-RUN"
+                elif rec["game_errors"] or rec["build_failed"]:
+                    rec["build_status"] = "REJECTED"
+                elif rec["raw_build_errors"] or load.get("error"):
+                    rec["build_status"] = "BUILD-ERR"
+                elif not rec["build_loaded"]:
+                    rec["build_status"] = "BUILD-ERR"
+                else:
+                    rec["build_status"] = "CLEAN"
+                rec["compiled_clean"] = rec["build_status"] == "CLEAN"
             finally:
                 # Unload BEFORE the directory is removed. The reverse order
                 # deletes files the game still has open, so the removal fails
@@ -623,6 +658,11 @@ def _forbid_game_access() -> None:
     for name in doors:
         setattr(fleet, name, refuse)
     fleet.read_log_window = refuse
+    # B118 added a second log door. It reads a FILE rather than the socket, so
+    # it matches none of the `rb_`/`game_` patterns above and would have stayed
+    # open -- the same "a guard at one of N call sites" shape this function
+    # exists because of.
+    fleet.read_log_window_raw = refuse
     fleet.log_size = lambda: 0
 
 
@@ -872,6 +912,179 @@ def run_selftest() -> int:
         _STAGED.pop(failed_remove_dir, None)
         real_rmtree(failed_remove_dir)
 
+        # --- B118: the three false-green channels, measured as PAIRS -------
+        # The bug is a MISSING signal, so a red run cannot validate these on
+        # its own (docs/verification-hazards.md, "When the subject is an
+        # ABSENCE"). Asserting only that the bad half is caught would pass just
+        # as well for a guard that condemns EVERYTHING -- a guard that fires on
+        # both halves of a pair is as broken as one that fires on neither. So
+        # every case below measures BOTH halves and asserts they DIFFER.
+        #
+        # The log text is copied verbatim in shape from a real RemoteBuild
+        # session (2026-08-31, OP 1.29.14), not invented, so the parsing is
+        # tested against what the game actually emits.
+        SELFTEST_FID = "lsp-issue-repro-b077-selftest"
+
+        def log_line(sev, msg):
+            return f"[    ScriptEngine] [{sev}] [23:13:19.786] [RemoteBuild]  {msg}"
+
+        def game_log(fid, *, started=True, loaded=True, located_err=False,
+                     raw_err=False, failed=False, foreign_err=False):
+            out = []
+            if started:
+                out.append(log_line(" TRAC", f'Starting build for "{fid}"'))
+                out.append(log_line(" TRAC", "-- Add source: \"C:/users/steamuser"
+                                             f"/OpenplanetNext/Plugins/{fid}"
+                                             "/Main.as\" (322 bytes)"))
+            if located_err:
+                out.append(log_line("ERROR", "C:/users/steamuser/OpenplanetNext"
+                                             f"/Plugins/{fid}/Main.as (3, 34) :"
+                                             "  ERR : Shared type 'X' doesn't "
+                                             "match the declaration in module "
+                                             "'Editor'"))
+            if foreign_err:
+                out.append(log_line("ERROR", "C:/users/steamuser/OpenplanetNext"
+                                             "/Plugins/SomeOtherPlugin/Main.as "
+                                             "(5, 1) :  ERR : Identifier 'Q' is "
+                                             "not a data type"))
+            if raw_err:
+                out.append(log_line("ERROR", "Couldn't find required plugin "
+                                             f'dependency "ghosts-pp" while '
+                                             f'loading plugin "{fid}"'))
+            if failed:
+                out.append(log_line("ERROR", "Script compilation failed!"))
+            if loaded:
+                out.append(log_line(" TRAC", f"Loaded plugin '{fid}' (version 0.1.0)"))
+            return "\n".join(out)
+
+        def probe_log(window):
+            return probe(
+                fixture, plugins_dir=root,
+                rb_alive_fn=lambda: True,
+                rb_route_fn=lambda _r, _d, **_k: {"data": "ok"},
+                log_size_fn=lambda: 0,
+                read_log_window_fn=lambda _mark, _fid: window,
+                sleep_fn=lambda _delay: None,
+            )
+
+        clean = probe_log(game_log(SELFTEST_FID))
+        check("a build that ran clean is CLEAN", clean["build_status"], "CLEAN")
+        check("and compiled_clean agrees", clean["compiled_clean"], True)
+
+        # Every case here INJECTS a window, so none of them can see which
+        # reader `probe()` picks when nothing is injected -- and that default
+        # IS channel 1. Pin it directly: swap both log doors for sentinels and
+        # check which one the un-injected probe reaches for. Without this, a
+        # revert of the default to the TRAC-filtering reader passes the whole
+        # suite below.
+        picked = []
+        saved_raw, saved_filtered = fleet.read_log_window_raw, fleet.read_log_window
+        fleet.read_log_window_raw = lambda *_a, **_k: (
+            picked.append("raw") or game_log(SELFTEST_FID)
+        )
+        fleet.read_log_window = lambda *_a, **_k: (
+            picked.append("filtered") or ""
+        )
+        try:
+            probe(
+                fixture, plugins_dir=root,
+                rb_alive_fn=lambda: True,
+                rb_route_fn=lambda _r, _d, **_k: {"data": "ok"},
+                log_size_fn=lambda: 0,
+                sleep_fn=lambda _delay: None,
+            )
+        finally:
+            fleet.read_log_window_raw, fleet.read_log_window = saved_raw, saved_filtered
+        check("probe() defaults to the RAW log window, not the TRAC-filtered one",
+              picked, ["raw"])
+
+        # PAIR 1 -- channel 1. A build that never ran vs one that ran clean.
+        # Pre-B118 these were the SAME observation: the window was filtered
+        # down to "did anything complain", and neither had complained.
+        # NOT an empty window. `Openplanet.log` is shared, so a window in which
+        # OUR build never ran still contains other sessions' traffic -- and an
+        # empty string would let a broken `build_slice` look correct for free
+        # (mutation testing caught exactly that).
+        never = probe_log(game_log("lsp-issue-repro-some-other-lane"))
+        check("a build that never ran is NOT-RUN", never["build_status"], "NOT-RUN")
+        check("a build that never ran is not clean", never["compiled_clean"], False)
+        check("PAIR 1 discriminates: never-ran differs from ran-clean",
+              never["build_status"] != clean["build_status"], True)
+
+        # PAIR 2 -- channel 2. A located error vs a location-less one. BOTH
+        # must reach a bucket, and they must reach DIFFERENT ones: a located
+        # ERR is a verdict about the code, a location-less one is not.
+        located = probe_log(game_log(SELFTEST_FID, located_err=True, failed=True))
+        rawless = probe_log(game_log(SELFTEST_FID, raw_err=True))
+        check("a located error reaches game_errors", bool(located["game_errors"]), True)
+        check("a located error is REJECTED", located["build_status"], "REJECTED")
+        check("a location-less error reaches raw_build_errors",
+              bool(rawless["raw_build_errors"]), True)
+        check("a location-less error is BUILD-ERR", rawless["build_status"], "BUILD-ERR")
+        check("a location-less error is invisible to the LOCATED parser "
+              "(this is the defect, still true of that parser)",
+              rawless["game_errors"], [])
+        # The two buckets must PARTITION the errors, not overlap. If a located
+        # error also landed in the raw bucket, a plain REJECT would be
+        # reportable as a build failure and the distinction B118 exists to
+        # draw would be lost in the other direction.
+        check("a located error is NOT double-counted as a raw build error",
+              located["raw_build_errors"], [])
+        check("PAIR 2 discriminates: the two error kinds do not collapse",
+              located["build_status"] != rawless["build_status"], True)
+        check("and neither is mistaken for clean",
+              (located["compiled_clean"], rawless["compiled_clean"]), (False, False))
+
+        # PAIR 3 -- channel 3. `Loaded plugin` is logged even AFTER
+        # `Script compilation failed!`, so presence of the load line is
+        # necessary and NOT sufficient. A guard keying on it alone reads a
+        # failed compile as a successful one.
+        failed_then_loaded = probe_log(
+            game_log(SELFTEST_FID, located_err=True, failed=True, loaded=True)
+        )
+        check("a failed compile still logs Loaded plugin (the trap)",
+              failed_then_loaded["build_loaded"], True)
+        check("but it is not clean", failed_then_loaded["compiled_clean"], False)
+        check("PAIR 3 discriminates: failed-then-loaded differs from a real load",
+              failed_then_loaded["build_status"] != clean["build_status"], True)
+
+        # PAIR 3b -- `Script compilation failed!` as the ONLY signal. The case
+        # above pairs it with a located error, so the located error alone
+        # decided the verdict and the failure summary was never load-bearing
+        # (mutation testing caught that too). Here the located errors are
+        # absent from the window -- which happens for real, since the summary
+        # and its diagnostics can straddle a window boundary.
+        failed_only = probe_log(game_log(SELFTEST_FID, failed=True))
+        check("a compile failure with no located error is still not clean",
+              failed_only["compiled_clean"], False)
+        check("PAIR 3b discriminates: failure-summary-only differs from clean",
+              failed_only["build_status"] != clean["build_status"], True)
+
+        # PAIR 3c -- started but never finished: no errors, no `Loaded plugin`.
+        # A build that hangs or dies mid-compile looks exactly like a clean one
+        # to any guard that only counts errors.
+        started_only = probe_log(game_log(SELFTEST_FID, loaded=False))
+        check("a build that started but never loaded is not clean",
+              started_only["compiled_clean"], False)
+        check("and it is BUILD-ERR, not a verdict about the code",
+              started_only["build_status"], "BUILD-ERR")
+        check("PAIR 3c discriminates: started-but-unfinished differs from clean",
+              started_only["build_status"] != clean["build_status"], True)
+
+        # PAIR 4 -- the CONTROL that proves the harness is wired at all. This
+        # attribution already worked before B118; if it ever stops, the other
+        # three cases are measuring nothing.
+        foreign = probe_log(game_log(SELFTEST_FID, foreign_err=True))
+        ours = probe_log(game_log(SELFTEST_FID, located_err=True))
+        check("a foreign plugin's error is not attributed to us",
+              foreign["game_errors"], [])
+        check("a foreign plugin's error still marks the window contended",
+              foreign["contended"], True)
+        check("our own error IS attributed to us", bool(ours["game_errors"]), True)
+        check("PAIR 4 discriminates: foreign and own errors land differently",
+              (bool(foreign["game_errors"]), bool(ours["game_errors"])),
+              (False, True))
+
         # --- the sweep must NEVER delete something that is not ours --------
         # Prefix matching alone would delete a real plugin that happened to be
         # named `lsp-issue-repro-*`.  A marker alone cannot prove ownership
@@ -1118,7 +1331,11 @@ def main() -> int:
         if rec.get("skipped"):
             print(f"SKIP {rec['fixture']}: {rec['skipped']}")
             continue
-        status = "CLEAN" if rec["compiled_clean"] else f"{len(rec['game_errors'])} ERR"
+        status = rec.get("build_status") or (
+            "CLEAN" if rec.get("compiled_clean") else "?"
+        )
+        if status == "REJECTED":
+            status = f"REJECTED ({len(rec['game_errors'])} ERR)"
         print(f"{rec['fixture']}: game={status}")
         for d in rec["diagnostics"]:
             print(f"    ({d['line']},{d['col']}) {d['sev']}: {d['msg']}")
