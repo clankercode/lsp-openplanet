@@ -447,6 +447,52 @@ indistinguishable from "I am structurally incapable of seeing it".
   change big?" but "what is the worst thing this code can do to state it does
   not own?"**
 
+- **The equal-totals hazard fired for real, and the numbers collided by
+  coincidence rather than by staleness.** A lane measured master's baseline
+  instead of deriving it, and master came back at **2341 — identical to its own
+  branch total** at that moment. Reading that as "no change, therefore
+  agreement" would have been completely wrong: master had moved twice during
+  the gate, and a merge landed underneath adding **exactly 11 tests** while the
+  branch adds **exactly 11**. Two independent +11s.
+
+  This is the sharper form of the recorded rule. The earlier instance was equal
+  totals over *stale* content; this one is equal totals over genuinely
+  different content, where the collision is arithmetic luck. No amount of care
+  about freshness would have caught it.
+
+  **What saved it was measuring the base rather than deriving it from an
+  earlier reported number.** The prediction "master must be 2330" was correct
+  about the commit it was formed on and useless about the commit the lane
+  actually had. A baseline is a property of a specific tree, not a fact about
+  the project, and it expires the moment anything merges.
+
+- **`git checkout -- <file>` on uncommitted work is destructive with no undo,
+  and it silently produced a vacuous measurement several steps later.**
+  Building a half-fix variant matrix, a lane reverted each variant with
+  `git checkout -- <file>`. The work was **uncommitted**, so the revert went to
+  HEAD and destroyed the entire fix — implementation and all 11 tests.
+
+  The rework was not the expensive part. The next variant's patch script
+  targeted an anchor that no longer existed, so **variant 3 was never applied
+  and the run reported "all green"** — which would have been written into the
+  matrix as "no test pins the parent argument", the exact opposite of the truth
+  (four do). **An unapplied variant fails green, and green is the answer you
+  were hoping for.**
+
+  Two rules, both cheap:
+
+  - **Commit before building half-fix variants.** The revert step is
+    destructive by construction, and a variant matrix runs it repeatedly.
+  - **Assert that each variant actually applied.** The lane's patch script
+    asserted `count == 1` on its anchor and threw, which is the only reason
+    this was caught. A variant that no-ops discharges the obligation without
+    doing the work — the same shape as a test comment claiming more than the
+    test pins.
+
+  Note the compounding: a destructive mistake produced a **silent, plausible,
+  wrong measurement** several steps downstream, pointing the opposite way from
+  the truth. The deleted files were never the damage.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
