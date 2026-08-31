@@ -1521,7 +1521,16 @@ impl<'a> GlobalScope<'a> {
     /// `false` for a name the checker does not know, which keeps GH #47's
     /// guard for shapes it cannot see.
     pub fn names_a_known_non_callable_type(&self, qualified: &str) -> bool {
-        self.names_a_known_type(qualified) && self.lookup_funcdef(qualified).is_none()
+        if !self.names_a_known_type(qualified) {
+            return false;
+        }
+        // `lookup_funcdef` alone is not enough, and the reason is the very
+        // shadowing this ticket already fixed once: it falls through a
+        // workspace CLASS of that name to the Core funcdef, so a plugin's
+        // `class CoroutineFunc` read as a property looked "possibly
+        // callable" and its rejection was lost. The workspace declaration
+        // wins here exactly as it does everywhere else.
+        self.workspace_shadows_funcdef(qualified) || self.lookup_funcdef(qualified).is_none()
     }
 
     /// GH #38 shadowing, funcdef edition: true when the workspace declares
