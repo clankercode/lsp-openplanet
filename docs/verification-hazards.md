@@ -3384,3 +3384,42 @@ Both were true, and the conclusion drawn from them was still backwards. A
 symmetric relaxation — the obvious fix — would have been wrong in both
 directions, and only asking the reverse question (`T@ &in` at a `T@ const &in`
 funcdef: also REJECT) exposed that.
+
+## A dedup in an instrument silently changes what the number counts
+
+lane-enum's B146 red check reported *"56 of 61 params carry a `&`"*. The 56 was
+wrong: its own `dedup()` had collapsed five two-parameter methods. The true count
+was 61 of 61.
+
+**What makes this worth an entry is why the wrong number was believable.** 56 is
+ALSO the count of `&`-carrying MEMBERS, reached by a completely different route.
+So two derivations landed on one value — normally the strongest signal a number
+is right — and here it happened because one of them was measuring a different
+thing.
+
+**Two independent derivations agreeing is only evidence if they were measuring
+the same population.** A dedup, a filter, a `uniq`, a `set()`, or a group-by
+silently redefines the population, and the resulting number keeps the old name.
+
+The tell available here was the ratio: 56 of 61 invites "what are the other 5?",
+and the answer was "they do not exist". **When a count comes back as a
+near-miss of the total, ask what the remainder IS before accepting it as a
+finding** — a real remainder can be enumerated, an artefact cannot.
+
+This is the fifth instrument-lies-to-its-author entry in this batch, and the
+third where re-deriving a different way was what caught it.
+
+## A bit test is not the flag it is named after
+
+B146's first cut replaced `is_out`, which was `typeflags & 0b10`, with
+`direction == Some(Out)`. **Bit 1 is also set for `inout` (0b11)**, so the
+rewrite quietly LOOSENED the GH #47 rule for every `&inout` param — a
+false-negative introduced by a refactor that looked like a clean simplification.
+
+The lane caught it reading its own diff, and restored the semantics explicitly as
+`binds_by_reference() = Out | Inout`, with a test pinning it and a second test
+pinning the measured population (Core has exactly one `&inout` param).
+
+**When replacing a bit test with a typed enum, enumerate which bit patterns the
+old test accepted before deciding which variants the new one should.** A name
+like `is_out` describes the intent, not the mask, and the mask is what shipped.
