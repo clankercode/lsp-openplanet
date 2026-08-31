@@ -16,3 +16,39 @@ updated_at: "2026-08-31T16:44:53Z"
 ---
 
 cargo fmt drift recurs on every merge: three lanes have now landed unformatted files and each needed a central repair — nothing gates it
+
+
+## RULING by Max, 2026-09-01 — resolved as process, not as a gate
+
+> "tell agents to do it and if a worktree hasn't run fmt then you can do that
+> before merging it in."
+
+So the answer to the design question this ticket posed is **neither a gate nor a
+lane-side reminder alone — it is both halves, with the coordinator as the
+backstop:**
+
+1. **Lanes run `cargo fmt --all` before reporting work as ready.** Cheap, no
+   compilation, keeps a lane's diff reviewable.
+2. **The coordinator runs it before merging a branch that skipped it**, and
+   commits that repair **separately** from the lane's work.
+
+**Deliberately NOT a gate.** Per B122's reasoning, which is unchanged: a
+`--check` gate would fail every lane carrying a formatting nit mid-work, which is
+most of them most of the time. And the failure mode here is a *reviewability*
+problem, not a correctness one — it deserves a tidy-up, not a rejection.
+
+Recorded in `AGENTS.md` (which `CLAUDE.md` symlinks to), so every future lane
+inherits it without being told, and added to the coordinator's merge routine.
+
+## Why the backstop is the load-bearing half
+
+Three lanes landed unformatted work in one night (B146, B153, and one other), and
+each needed a central repair. **A reminder alone would have caught none of them**
+— every one of those lanes was diligent, and two had explicitly declined to
+reformat another lane's files, which was the right call. The gap was structural:
+nothing ran fmt on the merged result.
+
+Second-order effect worth naming: unformatted files on master mean
+`cargo fmt --all` **re-dirties them in every other lane's worktree**, so one
+lane's omission shows up as spurious diff noise in everyone else's tree. That is
+why this was recurring rather than incidental.
