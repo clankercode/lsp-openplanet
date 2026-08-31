@@ -111,3 +111,7 @@ B101, B111 (the two fixed instances), B087 (`shared_declaration_roots`), B094
 (the `abstract` measurement), B095 (the invisible breakage), and the hazards
 entry "'Add the field and see what breaks' cannot see a consumer that parses the
 rendered string".
+
+## Lane decision (2026-08-31, bl-fix-many batch B113-114)
+Serialized AFTER B113 in one worktree (.worktrees/pool) — B113 edits hover.rs, which is inside this ticket's consumer blast radius (SymbolKind patterns in 16 files). Implement only once B113 is committed in the lane.
+## Decision (coordinator): scope confirmed as add-fields + retire-all-three-sidecars, per the ticket's own deliverable statement. is_abstract carried for uniformity only (B094's pin stays authoritative). Completion visibility filtering (is_private consumer) is explicitly OUT of scope — this ticket makes it possible, a follow-up ships it.
