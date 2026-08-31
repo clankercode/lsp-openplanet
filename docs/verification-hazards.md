@@ -493,6 +493,40 @@ indistinguishable from "I am structurally incapable of seeing it".
   wrong measurement** several steps downstream, pointing the opposite way from
   the truth. The deleted files were never the damage.
 
+- **A relayed attribution acquires the relayer's authority without acquiring
+  their verification.** One lane reported a counting hazard and attributed the
+  observed figures to a second lane's gate: "that is what produced
+  lane-X's 2190/2218 against a true 2223". The numbers were real. **The
+  attribution was not**, and the coordinator wrote it into two tickets
+  unchecked.
+
+  The accused lane checked its own records and corrected it: its reported
+  totals were 2330/2331, and it had reported binary counts. The figures came
+  from the first lane's own crash investigation — and **the original record,
+  written hours earlier, names no lane at all.** It was in the same ticket the
+  coordinator was editing, a couple of hundred lines above the text being
+  added.
+
+  Three things make this worth recording rather than filing as a slip:
+
+  - **The measurement and its provenance travel together and are verified
+    separately.** "2190 against 2223" was checkable and true; "lane-X produced
+    it" was checkable and false. Accepting the first is no reason to accept the
+    second, and they arrive in one sentence.
+  - **Relaying launders confidence.** The second lane had no way to know the
+    claim was unverified once it appeared in a ticket under the coordinator's
+    name. A first-hand report carries its author's uncertainty; a relayed one
+    usually loses it.
+  - **It was an accusation.** The claim was that a specific, named lane had
+    reported an undercount. Getting that wrong is not a neutral error, and it
+    is the category where a relayer should verify *before* writing, not after
+    being corrected.
+
+  General form: **when a report about you turns out to be wrong, the error is
+  usually in the part nobody thought to check — the part that was not the
+  point.** The counting hazard was the point and it was right. The lane name
+  was scenery, and scenery is what goes unverified.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
