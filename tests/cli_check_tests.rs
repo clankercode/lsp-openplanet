@@ -4829,3 +4829,106 @@ fn check_command_issue_repro_b059_injected_methods_silences_only_the_legal_half(
         );
     }
 }
+
+/// B061: a read written in property syntax must credit the accessor that
+/// implements it, or the accessor is reported unused however many times it
+/// is read.
+///
+/// The defect was prefix placement. `record_value_use_variants` built
+/// `format!("get_{}", name)`, which for a qualified `Ns::P` yields
+/// `get_Ns::P` — a name nothing can ever match. `qualified_virtual_name`
+/// already builds `Ns::get_P` correctly, so the fix routes through it
+/// rather than adding a third recorder.
+///
+/// Two spellings, both pinned, because one fix covering both is not a
+/// reason to test one: the explicit `Ns::P` from outside, and a bare `P`
+/// resolved through the namespace ladder from inside `namespace Ns`. The
+/// ladder half needs the qualification too — `is_used` deliberately refuses
+/// to trust a bare tail as a suffix match, so a recorded `get_P` cannot
+/// reach a declared `Ns::get_P`.
+///
+/// THE CROSSED PAIR IS THE POINT. `Directives::Showing` is read while
+/// `Messages::Showing` is not, AND `Messages::PendingCount` is read while
+/// `Directives::PendingCount` is not. Same short name, opposite expected
+/// outcome, in both directions. Anything keyed on the bare name gets one of
+/// them wrong whichever way it guesses; only the qualified form splits
+/// them. The `set_` half matters for the same reason: if the defect were
+/// "getters are not credited" the setter would behave differently, and it
+/// does not, because both go through the same prefix placement.
+///
+/// Fixture: 13 warnings before the fix, 6 after.
+#[test]
+fn check_command_issue_repro_b061_property_read_credits_accessor() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b061-property-read-credits-accessor");
+    let warnings: Vec<&str> = stdout.lines().filter(|l| l.contains("warning:")).collect();
+
+    // Exactly these must SURVIVE — nothing reads them.
+    let expected = [
+        "Accessors.as:17", // Directives::get_PendingCount — crossed pair, unread side
+        "Accessors.as:25", // Messages::get_Showing        — crossed pair, unread side
+        "Accessors.as:39", // Quiet::get_Slot
+        "Accessors.as:40", // Quiet::set_Slot
+        "Main.as:11",      // free get_Lonely
+        "Main.as:17",      // C::get_Untouched
+    ];
+    assert_eq!(
+        warnings.len(),
+        expected.len(),
+        "expected exactly {} warnings; stdout={stdout:?} stderr={stderr:?}",
+        expected.len()
+    );
+    for line in expected {
+        assert!(
+            warnings.iter().any(|w| w.contains(line)),
+            "`{line}` must still warn — a fix that silences it is over-marking; stdout={stdout:?}"
+        );
+    }
+
+    // ... and exactly these must be CREDITED, i.e. gone.
+    let credited = [
+        (
+            "Accessors.as:14",
+            "Directives::get_Showing via qualified read",
+        ),
+        (
+            "Accessors.as:20",
+            "Directives::get_HistoryCount via qualified read",
+        ),
+        (
+            "Accessors.as:28",
+            "Messages::get_PendingCount via qualified read",
+        ),
+        (
+            "Accessors.as:33",
+            "Session::get_Status via read-modify-write",
+        ),
+        (
+            "Accessors.as:34",
+            "Session::set_Status via qualified write and RMW",
+        ),
+        (
+            "Ladder.as:8",
+            "Inner::get_Slot via a BARE read through the ladder",
+        ),
+        (
+            "Ladder.as:9",
+            "Inner::set_Slot via a BARE write through the ladder",
+        ),
+    ];
+    for (line, why) in credited {
+        assert!(
+            !warnings.iter().any(|w| w.contains(line)),
+            "`{line}` must be credited ({why}); stdout={stdout:?}"
+        );
+    }
+
+    // The forms that already worked before this fix, pinned so it cannot
+    // regress them: a global read/write (`G`) and a member read/write
+    // (`c.M`) never appear as unused on either side of the change.
+    for line in ["Main.as:6", "Main.as:7", "Main.as:15", "Main.as:16"] {
+        assert!(
+            !warnings.iter().any(|w| w.contains(line)),
+            "`{line}` is a global/member accessor that already worked; stdout={stdout:?}"
+        );
+    }
+}
