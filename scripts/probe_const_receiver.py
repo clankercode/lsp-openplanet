@@ -468,12 +468,54 @@ def classify(rec: dict) -> tuple[str, str]:
     return "AMBIGUOUS", f"unrecognised build_status {status!r}"
 
 
+def run_selftest() -> int:
+    """Offline: can this probe's table answer anything? No game needed (B141).
+
+    Thin BY DESIGN. The shared checks live in `fleet.probe_variant_problems`
+    and `fleet.probe_run_problems`, because three probes hand-rolling one gate
+    is how the fourth copy gets written. What is probe-specific stays here:
+    that every fixture id is a legal, sweepable probe id, and that `classify`
+    is the SHARED one rather than a copy that only claims to be.
+    """
+    problems = fleet.probe_variant_problems(variants())
+
+    # B077: every staged directory must be recognisable as probe-owned, or the
+    # post-run sweep cannot reclaim it and the next probe inherits it.
+    for v in variants():
+        fid = repro.PROBE_PREFIX + fleet.folder_id(f"B119cr {v.id}")
+        if not repro._valid_probe_id(fid):
+            problems.append(
+                f"variant {v.id!r} derives fixture id {fid!r}, which the B077 "
+                f"sweep would not recognise as probe-owned"
+            )
+
+    # B139: the classifier must be the shared one. `probe_member_visibility`
+    # carried a copy whose docstring said it delegated, which put it outside
+    # the mutation coverage it appeared to have.
+    # This module DEFINES the shared classifier, so there is nothing to
+    # compare it against here; the two importers assert they got this one.
+
+    for p in problems:
+        print(f"  - {p}", file=sys.stderr)
+    if problems:
+        print(f"FAIL: {len(problems)} problem(s) with this probe's table",
+              file=sys.stderr)
+        return 1
+    print(f"PASS: {len(variants())} variants, controls of both polarities, "
+          f"every row names what it stands for.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tsv")
     ap.add_argument("--json")
     ap.add_argument("--only", help="run only variants whose id starts with this")
+    ap.add_argument("--selftest", action="store_true",
+                    help="offline checks on the variant table; no game needed")
     args = ap.parse_args()
+    if args.selftest:
+        return run_selftest()
 
     vs = variants()
     if args.only:
