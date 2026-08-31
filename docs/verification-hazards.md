@@ -3745,3 +3745,69 @@ a file silently withdraws the engine's opinion on everything after it. That is
 the same shape as B068 (a parse error in a batched probe marking every other
 line ACCEPTED), reached from the opposite direction — there the missing verdicts
 read as approval, here they read as a clean bill of health.
+
+## The nothing-ran zero: this codebase's most common defect class
+
+Four independent instances in `lane/unused` alone, in one night, from four
+unrelated pieces of work. That is not four coincidences; it is one defect class
+that this codebase's tooling is structurally prone to, and it is worth naming
+above the individual war stories (each of which is recorded separately above).
+
+**THE SHARED SHAPE.** Every instrument here is a filter over a population —
+probes over a variant table, gates over changed files, audits over manifest
+rows, sweeps over a plugins directory, a replay over a commit's file list. The
+verdict is then computed the obvious way:
+
+```
+bad = [x for x in population if x is wrong]
+return 1 if bad else 0
+```
+
+When the population comes back **empty or truncated**, `bad` is empty, and the
+run reports success. The four instances differ only in how the population got
+lost:
+
+| how the set emptied | what it looked like |
+|---|---|
+| a shell construct that does not do what it looks like | `for f in $files` ran once over both names joined; `\|\| continue` ate the failure |
+| a selector matching nothing | `--only <substring>` selecting 0 of N artifacts |
+| a control set that was never populated | a run gate computing "controls that mismatched" over zero controls |
+| evidence truncated before the answer | `ps aux \| grep … \| head -5` cutting off the real process |
+
+**WHY IT IS HARDER TO SEE THAN A WRONG ANSWER.** A nothing-ran zero does not
+produce wrong output — it produces *less* output, with no error text in it. A
+shorter, quieter report reads as a cleaner one. Nothing in the run is
+false; the run simply never made a claim, and the absence of a claim is
+displayed in the same place a passing claim would be.
+
+**WHAT DISTINGUISHES A REAL ZERO FROM A NOTHING-RAN ZERO.** Only the
+denominator. `0 failures` is uninterpretable; `0 failures out of 63 examined`
+is a result. A zero is evidence **only when it is reported next to a non-zero
+population count that something else asserted.** This is the same rule as
+"design the instrument to report EXPOSURE, or a zero is uninterpretable",
+arrived at from the opposite direction: that entry is about a probe's reach,
+this one is about a gate's denominator, and both fail by reporting an
+unqualified zero.
+
+**THE DEFENCES, cheapest first.**
+
+1. **Always print the count of things examined.** A count check has caught this
+   repeatedly across this batch — including the zsh replay, where the tell was
+   simply that the output had fewer lines than there were files. It costs one
+   `print` and needs no design.
+2. **Assert the count, do not merely display it.** A presence assertion — "this
+   examined at least N" — turns a silent empty set into a failure. Prefer a
+   floor derived from something independent of the thing being counted.
+3. **A selector that matches nothing must REFUSE, not pass.** "Matched nothing"
+   and "matched things, all fine" are different answers and must exit
+   differently. Same for a glob, a filter, and a name-based test selector.
+4. **Never let an error-swallowing construct sit on the step that BUILDS the
+   population.** `|| continue`, `|| true`, `2>/dev/null`, a bare `except`, and a
+   pipe that discards an exit status are all fine on the step that *inspects* an
+   item and fatal on the step that *finds* the items.
+
+**THE POLARITY WORTH REMEMBERING.** Every one of these four failed toward
+green. That is not chance: the construct that loses a population is nearly
+always one that also suppresses the error explaining why, so the same defect
+that empties the set hides the reason it emptied. Assume any green produced by
+a filter is a nothing-ran zero until its denominator is on screen.
