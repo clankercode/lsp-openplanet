@@ -1473,3 +1473,52 @@ enough", naming the disputed class), `index.rs` on the module-name scope rule,
 and `global_scope.rs` on the `Foo::` provenance ("Probed on a plugin declaring
 `namespace Foo { namespace Bar { … } }`"). Grep for the answer before building
 an instrument to discover it.
+
+## Resolution of instance 1: the narrowing did blind the run, and widening it is what proved the mechanism
+
+Recorded 2026-08-31, when the re-probe above was actually carried out. Both
+shipped corpora were re-measured at `batch=1`: b052's 742 ACCEPTED rows and
+b053's 592. **Zero rows were fabricated by the batching defect** — b053 did not
+move at all, and b052's three movers were environmental.
+
+The prediction held, and it held **for the reason stated** rather than by luck,
+which is the thing to check before treating a confirmed prediction as evidence
+(see the entry on predictions that come true for the wrong reason). The
+ACCEPTED-only pass genuinely could not distinguish a fabricated ACCEPT from a
+changed question. What settled it was going **outside** the narrowing and
+re-probing the `*::ZZZNoSuch` context pins the original scope had excluded:
+
+    Foo::ZZZNoSuch       then: Identifier 'ZZZNoSuch' is not a data type in namespace 'Foo' or parent
+                         now : Namespace 'Foo' doesn't exist.
+    MathX::ZZZNoSuch     then: Identifier 'ZZZNoSuch' is not a data type in namespace 'MathX' or parent
+                         now : Identifier 'ZZZNoSuch' is not a data type in namespace 'MathX' or parent
+
+The **message form** carries the fact, not the verdict. "… in namespace 'Foo'
+or parent" can only be produced when the namespace exists. `Foo` produced that
+form then and the namespace-absent form now; `MathX` produced the same form in
+both runs. So the namespace vanished between the two runs — and since
+`build_source` declares no namespace anywhere, `Foo` was never the fixture's
+to begin with. It came from the machine's installed plugin set.
+
+Three consequences worth carrying:
+
+- **A REJECT row can be evidence about the environment even when it is worthless
+  as evidence about the defect.** The narrowing was right that an abort cannot
+  manufacture a REJECT. It did not follow that the REJECTs were uninformative —
+  they were the only rows describing the conditions the ACCEPTs were measured
+  under. *Uninformative about the defect* and *uninformative* are different.
+- **Two buckets, reported separately.** "Rows that moved" is not a finding. Split
+  it into *the defect fabricated this* (b052: 0) and *the environment changed*
+  (b052: 3), because a single delta count silently mixes a corpus error with a
+  corpus-provenance fact, and only one of them is a reason to touch the file.
+  Those three rows must NOT be "corrected" — they were valid measurements of a
+  machine where `Foo` existed.
+- **The shape of a delta is itself an argument.** An aborted batch fabricates
+  ACCEPTED for *every* surviving name in its unit, so a 200-name batch would
+  leave ~199 spurious rows. Three isolated spellings sharing one namespace
+  family is not that shape. Reason about the failure's signature, not only its
+  count — the signature discriminates causes the count cannot.
+
+The re-probe is now `probe_enum_corpus.py --reprobe`, with controls at start,
+every 100 names, and end, and `UNDETERMINED` kept distinct from `ACCEPTED`, so
+the next person re-measures rather than re-argues.
