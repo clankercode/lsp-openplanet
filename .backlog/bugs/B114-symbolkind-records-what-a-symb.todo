@@ -115,3 +115,15 @@ rendered string".
 ## Lane decision (2026-08-31, bl-fix-many batch B113-114)
 Serialized AFTER B113 in one worktree (.worktrees/pool) — B113 edits hover.rs, which is inside this ticket's consumer blast radius (SymbolKind patterns in 16 files). Implement only once B113 is committed in the lane.
 ## Decision (coordinator): scope confirmed as add-fields + retire-all-three-sidecars, per the ticket's own deliverable statement. is_abstract carried for uniformity only (B094's pin stays authoritative). Completion visibility filtering (is_private consumer) is explicitly OUT of scope — this ticket makes it possible, a follow-up ships it.
+
+Lane decisions recorded by coordinator (implementation complete on lane/pool, review in flight):
+
+1. PLACEMENT: DeclModifiers lives on Symbol, not per-variant in SymbolKind. Both designs were derived independently (this lane planned per-variant; the peer's stood-down resolver lane built Symbol-level in lane/resolver-b114-wip). Deciding argument: shared_declaration_roots asks one question of five kinds — at Symbol level its retirement is one expression; per-variant needs a five-arm match at the call site, recreating the 'same question through N shapes' defect this ticket targets. The per-variant objection (a Variable answering is_private:false when the parser dropped field visibility) survives the change of shape but not of layer: per-variant would only make the wrong answer unaskable, not right. Peer's WIP branch did not compile against current master (cut before B081 added a SymbolKind::Class construction site); fixed and re-measured rather than trusting inherited green.
+
+2. SCOPE: retire TWO sidecars, not three. ClassCtx.is_mixin stays — it reads the node the walker is descending into (lexical context), no name lookup, no cross-file question. Reached independently by this lane and by the ticket author's resolver lane. Decisive test: no case can be written that fails before and passes after, which by this repo's standard makes retiring it a refactor with a false story.
+
+3. get_/set_ aliasing trap (two independent derivations, confirmed): file_const_methods aliased the STRIPPED property name; the pool does not. workspace_method_is_const tries C::X then falls back through accessor spellings.
+
+4. Field visibility stays OUT (parser drops it at ClassMember::Field — no is_private on VarDecl). Pinned with a named RECORDED-NOT-FIXED test asserting the known-wrong value plus positive control. Peer is filing the parser-level fix as a separate ticket.
+
+Gate at checkpoint: SUITE-VERIFIED 2848/0/12, 33/33 binaries (= master 2807 + B113 21 + B114 20).
