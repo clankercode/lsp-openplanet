@@ -1633,6 +1633,73 @@ def run_selftest() -> int:
         check("B145: a tab inside an engine message does not shift the "
               "columns of every row after it",
               len(data.split("\t")), len(TSV_COLUMNS))
+
+        # A failed regeneration must never replace the last known-good
+        # evidence. The generator used to write first and validate second, so
+        # an UNMEASURED LSP or an engine probe that never ran destroyed the
+        # committed corpus immediately before returning 1. Exercise all three
+        # non-answer states rather than pinning only the incident's spelling.
+        original = b"last known-good corpus bytes\n"
+        saved_version = globals()["fleet_engine_version"]
+        saved_binary = globals()["lsp_cli_bin"]
+        saved_run_lsp = globals()["run_lsp_on_fixture"]
+        globals()["fleet_engine_version"] = lambda: "1.29.14"
+        globals()["lsp_cli_bin"] = lambda: Path(__file__)
+        try:
+            invalid_regens = (
+                ("NOT-RUN", rec_of("NOT-RUN", skipped="probe did not run"),
+                 {"count": 0}),
+                ("BUILD-ERR", rec_of("BUILD-ERR", skipped="transport failed"),
+                 {"count": 0}),
+                ("UNMEASURED", rec_of("CLEAN"), {"count": None}),
+            )
+            for label, rec, lsp_result in invalid_regens:
+                dest.write_bytes(original)
+                globals()["run_lsp_on_fixture"] = (
+                    lambda _fixture, result=lsp_result: result
+                )
+                rc = write_corpus(dest, [rec], all_fixtures=True)
+                check(f"B145: a failing {label} regeneration returns non-zero",
+                      rc, 1)
+                check(f"B145: a failing {label} regeneration leaves the "
+                      "existing corpus byte-identical",
+                      dest.read_bytes(), original)
+        finally:
+            globals()["fleet_engine_version"] = saved_version
+            globals()["lsp_cli_bin"] = saved_binary
+            globals()["run_lsp_on_fixture"] = saved_run_lsp
+
+        # Publication itself must be one same-directory rename. Simulate the
+        # rename failing after the complete replacement has been staged: the
+        # known-good destination must remain untouched and the temp must be
+        # cleaned. This is the filesystem failure half of the validation test
+        # above; either one alone leaves a destructive gap.
+        dest.write_bytes(original)
+        saved_replace = os.replace
+        replace_calls = []
+
+        def fail_replace(src, target):
+            replace_calls.append((Path(src), Path(target)))
+            raise OSError("simulated rename failure")
+
+        os.replace = fail_replace
+        rename_failed = False
+        try:
+            write_tsv(dest, rows, "1.29.14", "2026-09-01", "e" * 64)
+        except OSError:
+            rename_failed = True
+        finally:
+            os.replace = saved_replace
+        check("B145: corpus publication reaches one atomic rename",
+              rename_failed and len(replace_calls) == 1, True)
+        if replace_calls:
+            src, target = replace_calls[0]
+            check("B145: the replacement temp is in the destination directory",
+                  (src.parent, target.parent), (dest.parent, dest.parent))
+        check("B145: a failed atomic rename preserves the old corpus bytes",
+              dest.read_bytes(), original)
+        check("B145: a failed atomic rename removes its staged temp",
+              list(dest.parent.glob(f".{dest.name}.*.tmp")), [])
     finally:
         shutil.rmtree(_b145, ignore_errors=True)
 
@@ -2042,7 +2109,29 @@ def write_tsv(path: Path, rows: list[dict], engine_version: str,
     lines = preamble + ["\t".join(TSV_COLUMNS)]
     for row in rows:
         lines.append("\t".join(str(row[c]).replace("\t", " ") for c in TSV_COLUMNS))
-    path.write_text("\n".join(lines) + "\n")
+    payload = "\n".join(lines) + "\n"
+
+    # Publish with one rename in the destination directory. A direct
+    # write/truncate destroys the last known-good corpus if the process dies
+    # halfway through; a temp elsewhere cannot be renamed atomically across
+    # filesystems. Preserve the existing file's mode when replacing it.
+    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o644
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fd = -1
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp_path.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -2171,13 +2260,13 @@ def write_corpus(dest: Path, results: list[dict], *, all_fixtures: bool) -> int:
         for e in expired:
             print(f"  - {e}", file=sys.stderr)
     problems = agreement_problems(rows)
-    write_tsv(dest, rows, version, date, sha)
-    print(f"wrote {dest} ({len(rows)} rows, engine {version})")
     if problems:
         print(f"\n{len(problems)} row(s) need attention:", file=sys.stderr)
         for pr in problems:
             print(f"  - {pr}", file=sys.stderr)
         return 1
+    write_tsv(dest, rows, version, date, sha)
+    print(f"wrote {dest} ({len(rows)} rows, engine {version})")
     return 0
 
 

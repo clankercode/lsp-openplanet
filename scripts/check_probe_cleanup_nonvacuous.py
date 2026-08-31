@@ -264,6 +264,14 @@ MUTATIONS = [
     ("B145: the corpus header stops naming its columns",
      '    lines = preamble + ["\\t".join(TSV_COLUMNS)]',
      '    lines = preamble + ["fixture"]'),
+    ("B145: invalid rows are written before validation, destroying the last "
+     "known-good corpus on a failed regeneration",
+     "    problems = agreement_problems(rows)\n    if problems:",
+     "    problems = agreement_problems(rows)\n    if False:"),
+    ("B145: corpus publication truncates the destination instead of using an "
+     "atomic same-directory rename",
+     "        os.replace(tmp_path, path)",
+     "        path.write_text(tmp_path.read_text())"),
 ]
 
 def run(root: Path) -> int:

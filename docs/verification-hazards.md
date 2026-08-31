@@ -2232,13 +2232,16 @@ compiler as syntax.
 
 ### Refuse on the OPERATION, never on the tree
 
-The guard refuses on `MERGE_HEAD` / `REBASE_HEAD` / `rebase-merge/` /
-`rebase-apply/` / `CHERRY_PICK_HEAD` / `REVERT_HEAD`, and **never on a dirty
-tree**. Gating uncommitted work is the normal lane workflow — every lane does
-it on every run — so a guard that fired on dirty would be a far worse
-regression than the defect it fixed. `BISECT_LOG` is deliberately excluded: a
-bisect checks out real commits and cannot produce a conflict marker, so
-refusing there costs a legitimate workflow to prevent an impossible failure.
+The guard refuses on `MERGE_HEAD` / `rebase-merge/` / `rebase-apply/` /
+`CHERRY_PICK_HEAD` / `REVERT_HEAD`, and **never on a dirty tree**. `REBASE_HEAD`
+is deliberately excluded: git leaves it behind after a conflicted rebase
+succeeds, while the two rebase directories exist only while the operation is
+active (B169). Gating uncommitted work is the normal lane workflow — every lane
+does it on every run — so a guard that fired on dirty would be a far worse
+regression than the defect it fixed. `BISECT_LOG` is also deliberately
+excluded: a bisect checks out real commits and cannot produce a conflict
+marker, so refusing there costs a legitimate workflow to prevent an impossible
+failure.
 
 **Operation state is PER-WORKTREE and resolving it by hand would have been an
 outage.** A merge in the main checkout lives in `.git/`; a linked worktree's

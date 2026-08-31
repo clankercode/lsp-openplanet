@@ -110,7 +110,7 @@ LOCAL_ONLY_FLAGS = (
 
 # Options of THIS script that are deliberately NOT refused after the action,
 # because the remote command plausibly spells them the same way. Refusing these
-# would break the thing the tool exists to do -- `run -- cargo test -- 
+# would break the thing the tool exists to do -- `run -- cargo test --
 # --test-threads=4` is a normal invocation, and `--jobs`/`-v` are cargo's own.
 #
 # Every option must appear in exactly ONE of these two tuples, and the selftest
