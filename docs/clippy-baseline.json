@@ -6,23 +6,31 @@
       "clippy",
       "--locked",
       "--all-targets",
-      "--message-format=json",
-      "-j2"
+      "--message-format=json"
     ],
+    "command_as_run": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--all-targets",
+      "--message-format=json",
+      "-j24"
+    ],
+    "recorded_on": "x-alpha",
     "never": "-D warnings. It stops compilation at the first warning and truncates the diagnostic set: 129 raw / 39 fingerprints without it, 115 / 33 with it, measured on this tree 2026-08-31.",
     "features": "default \u2014 no --features, --all-features or --no-default-features",
     "profile": "dev (cargo clippy's default)",
     "toolchain": {
-      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
-      "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
-      "clippy": "clippy 0.1.97 (2d8144b788 2026-07-07)"
+      "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+      "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+      "clippy": "clippy 0.1.97 (8bab26f4f6 2026-07-14)"
     },
-    "recorded_at": "2026-08-31T09:05:30+00:00",
-    "git_commit": "47d792026cf57fbd2205335e855915cacb7fafb1",
-    "workspace_units_checked": 28
+    "recorded_at": "2026-08-31T09:42:50+00:00",
+    "git_commit": "5d2ecd1c6f574ebc4506433e84d1a3c235373c67",
+    "workspace_units_checked": 30
   },
   "totals": {
-    "raw": 130,
+    "raw": 131,
     "fingerprints": 40
   },
   "findings": [
@@ -30,6 +38,12 @@
       "file": "src/cli/mod.rs",
       "code": "clippy::field_reassign_with_default",
       "message": "field assignment outside of initializer for an instance created with Default::default()",
+      "count": 2
+    },
+    {
+      "file": "src/cli/mod.rs",
+      "code": "clippy::too_many_arguments",
+      "message": "this function has too many arguments (8/7)",
       "count": 2
     },
     {
@@ -199,12 +213,6 @@
       "code": "clippy::type_complexity",
       "message": "very complex type used. Consider factoring parts into `type` definitions",
       "count": 2
-    },
-    {
-      "file": "src/typecheck/resolver.rs",
-      "code": "clippy::type_complexity",
-      "message": "very complex type used. Consider factoring parts into `type` definitions",
-      "count": 1
     },
     {
       "file": "src/typedb/index.rs",

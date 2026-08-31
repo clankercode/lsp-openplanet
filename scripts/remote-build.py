@@ -335,7 +335,13 @@ def main() -> int:
         if rc == 0 and a.sync_back:
             dest = root / "target" / a.sync_back
             dest.parent.mkdir(parents=True, exist_ok=True)
-            src = f"{a.host}:{remote_target}/{a.sync_back}"
+            # The RELATIVE spelling, not `remote_target`. rsync does not run a
+            # shell on the remote path, so the `$HOME/...` form is taken
+            # literally and becomes `/home/user/$HOME/...` — exactly the trap
+            # this module's docstring names for `rsync_dest`, which sync-back
+            # was still walking into. Measured: `change_dir
+            # "/home/xertrov/$HOME/.remote-builds/..." failed`.
+            src = f"{a.host}:{rel_base}/target/{a.sync_back}"
             print(f"remote-build: fetching {a.sync_back}", file=sys.stderr)
             back = subprocess.run(["rsync", "-az", src, str(dest)]).returncode
             if back != 0:

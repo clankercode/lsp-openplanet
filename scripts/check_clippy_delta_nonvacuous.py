@@ -37,6 +37,7 @@ the paths it touched.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -71,6 +72,12 @@ fn probe_is_empty(v: &Vec<u8>) -> bool {
 """
 
 _TO_RESTORE: dict[Path, bytes | None] = {}
+# sha256 of every file this harness touched, taken BEFORE the first mutation.
+# The restore check compares against these rather than asking git, because
+# `.git` is not synced to the remote build host — a git-based check would
+# quietly stop checking the moment this harness ran over there, which is the
+# "the guard silently stopped applying" shape B077 scores as a MISS.
+_ORIGINAL_HASH: dict[Path, str | None] = {}
 
 
 def _restore_all() -> None:
@@ -88,8 +95,16 @@ def _restore_all() -> None:
 atexit.register(_restore_all)
 
 
+def digest(path: Path) -> str | None:
+    """sha256 of a file's bytes, or None when it does not exist."""
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def snapshot(path: Path) -> None:
     _TO_RESTORE[path] = path.read_bytes() if path.exists() else None
+    _ORIGINAL_HASH.setdefault(path, digest(path))
 
 
 def restore(path: Path) -> None:
@@ -415,15 +430,40 @@ def family_b(baseline: dict) -> tuple[int, int]:
     else:
         print("  restore verified: the gate is green again")
 
-    dirty = subprocess.run(
-        ["git", "status", "--porcelain", "--", "tests", "src"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if dirty:
-        print(f"  RESTORE FAILED: git reports\n{dirty}", file=sys.stderr)
+    # Byte-identity of exactly the files touched. Stronger than repo
+    # cleanliness, and it works on a machine that has no `.git`.
+    for path, before in _ORIGINAL_HASH.items():
+        after = digest(path)
+        if after != before:
+            print(
+                f"  RESTORE FAILED: {path} is not byte-identical to before "
+                f"({before} -> {after})",
+                file=sys.stderr,
+            )
+            missed += 1
+    if _ORIGINAL_HASH:
+        print(f"  restore verified by hash on {len(_ORIGINAL_HASH)} file(s)")
+    else:
+        # No file was ever snapshotted, so the check above passed over nothing.
+        print(
+            "  ANCHOR MISSING: no file was snapshotted, so the restore check "
+            "verified nothing",
+            file=sys.stderr,
+        )
         missed += 1
+
+    # Git, when it is here. Not the primary check: it is absent on the remote
+    # build host, and a check that can silently stop applying is not a check.
+    if (REPO_ROOT / ".git").exists():
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--", "tests", "src"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if dirty:
+            print(f"  RESTORE FAILED: git reports\n{dirty}", file=sys.stderr)
+            missed += 1
 
     return caught, missed
 
