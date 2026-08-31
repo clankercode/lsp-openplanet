@@ -17,3 +17,6 @@ updated_at: "2026-08-31T13:01:03Z"
 Deferred from B103 (which fixed definition): hover.rs shares the same member-lookup gap — hovering ID in obj.ID does not present the accessor pair. B103 built the shared seam (src/typecheck/access_position.rs + accessor lookups in global_scope.rs); this ticket is wiring hover to it plus a presentation decision (how to render a get/set pair in one hover).
 
 Note from B104: hover.rs:2252 asserts an override SHADOWS the declaration for class receivers — hover and definition now deliberately disagree (definition lists declaration+implementations; hover shows the effective one). Do NOT 'fix' hover to match definition; that shadowing behaviour is pinned and correct for hover's job.
+
+## Lane decision (2026-08-31, bl-fix-many batch B113-114)
+Serialized BEFORE B114 in one worktree (.worktrees/pool): B114's SymbolKind change ripples into hover.rs (16 consumer files), so parallel lanes would conflict there. This small hover fix lands first; B114's mechanical consumer updates then cover the new code too.
