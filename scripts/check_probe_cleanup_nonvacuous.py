@@ -176,6 +176,30 @@ MUTATIONS = [
     ("B145: folder_warnings picks up ERRORS too, double-counting them",
      '            if d.get("sev") == "WARN"',
      '            if d.get("sev") in ("WARN", "ERR")'),
+    # --- B145 follow-up: polarity agreement is not the same question -------
+    ("B145: the declaration-abort rule is removed, so an engine that never "
+     "reached a call site reads as agreeing with an LSP about call sites",
+     '            and str(row.get("engine_compiled", "")) == "0"',
+     "            and False"),
+    ("B145 OVER-CONDEMN: every REJECTED row demands a declaration note, "
+     "including the ones where the engine compiled the whole unit",
+     '            and str(row.get("engine_compiled", "")) == "0"',
+     "            and True"),
+    ("B145: a declaration-time abort still counts bodies as compiled, so the "
+     "rule can never fire",
+     '        if d.get("sev") == "INFO"\n        and str(d.get("msg", "")).startswith("Compiling ")',
+     '        if True\n        or str(d.get("msg", "")).startswith("Compiling ")'),
+    ("B145: another session's `Compiling` lines are counted as ours, which "
+     "inflates the count and hides an abort",
+     '        and str(d.get("file", "")).split("/")[0] == fid\n    )',
+     "        and True\n    )"),
+    ("B145: the compiled-body count is dropped from the record entirely",
+     '        "engine_compiled": folder_compiled(rec),',
+     '        "engine_compiled": 99,'),
+    ("B145: a REQUIRED declaration note is then condemned as a stale one, "
+     "which makes the row impossible to satisfy in either direction",
+     "        elif agrees and not needs_note and declared != \"-\":",
+     "        elif agrees and declared != \"-\":"),
     ("B145: engine/LSP disagreement is never reported",
      "        agrees = engine_silent == (lsp == \"CLEAN\")",
      "        agrees = True"),
@@ -188,8 +212,8 @@ MUTATIONS = [
      "        if False:"),
     ("B145: a STALE divergence note on a row that now agrees is not reported, "
      "so a fixed gap keeps being described as an open one",
-     '        if agrees and declared != "-":',
-     "        if False:"),
+     '        elif agrees and not needs_note and declared != "-":',
+     "        elif False:"),
     ("B145: hand-written divergence notes are dropped on regen, turning every "
      "explained gap into an unexplained one",
      "    if not dest.is_file():\n        return {}",

@@ -1287,6 +1287,86 @@ def run_selftest() -> int:
           tsv_row(rec_of("CLEAN"), {"count": None}, "1.29.14",
                   "2026-09-01")["lsp_today"], "UNMEASURED")
 
+    # --- B145 follow-up: polarity agreement is not the same question -------
+    # b102-array-sort-mismatched-callbacks declares `int &inout` at line 21,
+    # which is not declarable. The engine emitted two errors there, compiled
+    # ZERO bodies, and never verdicted one of the twelve Sort calls the fixture
+    # exists to measure -- while the LSP reported 12 diagnostics about exactly
+    # those calls. Recorded as REJECTED beside DIAGNOSES(12), the agreement
+    # check called it agreement. Five of 63 rows were in that state.
+    def reached_row(**kw):
+        base = {"fixture": "fx", "build_status": "REJECTED", "verdict": "REJECT",
+                "engine_compiled": "3", "lsp_today": "DIAGNOSES(12)",
+                "divergence": "-"}
+        base.update(kw)
+        return base
+
+    aborted = agreement_problems([reached_row(engine_compiled="0")])
+    if not aborted:
+        check("B145: an engine that compiled ZERO bodies beside an LSP "
+              "reporting call-site diagnostics is reported — both spoke, and "
+              "that is all the polarity check can see",
+              aborted, ["<a problem>"])
+    elif "same question" not in aborted[0]:
+        check("B145: the report says why polarity is not enough",
+              aborted, ["same question"])
+
+    # PAIR, and it is the one that matters: four of the five real rows are
+    # fixtures whose SUBJECT is a declaration, where a declaration-time
+    # rejection is the complete and correct answer. A note settles them, and a
+    # check that refused them regardless would be turned off within the week.
+    check("B145: a declared reason settles a declaration-time rejection",
+          agreement_problems([reached_row(
+              engine_compiled="0",
+              divergence="the fixture's subject IS the duplicate declaration")]),
+          [])
+    # PAIR: an engine that DID reach the call sites needs no note.
+    check("B145: an engine that compiled bodies is ordinary agreement",
+          agreement_problems([reached_row()]), [])
+    # PAIR: and zero bodies beside a SILENT LSP is a real disagreement already
+    # caught by the polarity check — it must not be re-reported as this.
+    silent = agreement_problems([reached_row(engine_compiled="0",
+                                             lsp_today="CLEAN")])
+    if len(silent) != 1 or "no divergence is declared" not in silent[0]:
+        check("B145: zero bodies beside a SILENT LSP stays the plain polarity "
+              "disagreement, reported once and not twice",
+              silent, ["<one polarity problem>"])
+    # PAIR: a CLEAN build compiles bodies or not; either way this rule is about
+    # REJECTED units only, or every clean fixture would demand a note.
+    check("B145: a CLEAN engine verdict is never asked for this note",
+          agreement_problems([reached_row(build_status="CLEAN",
+                                          verdict="ACCEPT",
+                                          engine_compiled="0",
+                                          lsp_today="CLEAN")]), [])
+
+    # The counter itself: attributed, and INFO-only.
+    _cr = {"folder_id": "lsp-issue-repro-fx", "diagnostics": [
+        {"file": "lsp-issue-repro-fx/Main.as", "sev": "INFO",
+         "msg": "Compiling void Main()"},
+        {"file": "lsp-issue-repro-fx/Main.as", "sev": "INFO",
+         "msg": "Compiling void Other()"},
+        {"file": "lsp-issue-repro-fx/Main.as", "sev": "INFO",
+         "msg": "Something else entirely"},
+        {"file": "someone-elses-plugin/Main.as", "sev": "INFO",
+         "msg": "Compiling void Theirs()"},
+        {"file": "lsp-issue-repro-fx/Main.as", "sev": "ERR",
+         "msg": "Compiling void NotAnInfoLine()"},
+    ]}
+    check("B145: only this folder's INFO `Compiling` lines are counted — the "
+          "log is shared, and another session's compile would inflate ours",
+          folder_compiled(_cr), 2)
+    check("B145: a record with no folder id counts nothing rather than "
+          "everything",
+          folder_compiled({"diagnostics": _cr["diagnostics"]}), 0)
+    aborted_rec = tsv_row(
+        {"fixture": "fx", "folder_id": "lsp-issue-repro-fx",
+         "build_status": "REJECTED", "diagnostics": [],
+         "game_errors": [{"file": "lsp-issue-repro-fx/Main.as", "line": 21,
+                          "col": 25, "sev": "ERR", "msg": "not declarable"}]},
+        {"count": 12}, "1.29.14", "2026-09-01")
+    check("B145: a declaration-time abort records ZERO compiled bodies",
+          aborted_rec["engine_compiled"], 0)
+
     # --- B145: measuring the LSP side, and refusing to guess ---------------
     # Every one of these returns "I could not measure", which the recorder
     # turns into UNMEASURED. A version that answered 0 instead would record a
@@ -1545,6 +1625,37 @@ def _engine_text(d: dict) -> str:
     return f"{leaf}({d['line']},{d['col']}): {d['msg']}"
 
 
+def folder_compiled(rec: dict) -> int:
+    """How many function bodies the engine actually COMPILED for this folder.
+
+    B145 follow-up, and it is the difference between a verdict and a verdict
+    about the thing you asked. Openplanet logs `Compiling <signature>` per
+    function body it reaches. A DECLARATION error -- an undeclarable parameter
+    mode, a name conflict, a parse failure -- aborts the unit before any body
+    is compiled, so the engine returns REJECTED having never looked at a single
+    call site.
+
+    Measured: `b102-array-sort-mismatched-callbacks` declares
+    `bool WrongModeInout(int &inout a, int &inout b)` at line 21. `int &inout`
+    is not declarable. The engine emitted exactly two errors, both at line 21,
+    and compiled ZERO bodies -- so it never returned a verdict on ANY of the
+    twelve `Sort` calls at lines 32-43, which are the entire subject of the
+    fixture. The row nevertheless recorded REJECTED beside an LSP reporting 12
+    diagnostics, and the agreement check called that agreement.
+
+    Both sides said something. They were not talking about the same code.
+    """
+    fid = rec.get("folder_id") or ""
+    if not fid:
+        return 0
+    return sum(
+        1 for d in rec.get("diagnostics", [])
+        if d.get("sev") == "INFO"
+        and str(d.get("msg", "")).startswith("Compiling ")
+        and str(d.get("file", "")).split("/")[0] == fid
+    )
+
+
 def folder_warnings(rec: dict) -> list[dict]:
     """WARN diagnostics attributed to THIS probe's folder.
 
@@ -1606,6 +1717,7 @@ def tsv_row(rec: dict, lsp: dict, engine_version: str, probe_date: str,
         "fixture": slug,
         "verdict": verdict,
         "build_status": status,
+        "engine_compiled": folder_compiled(rec),
         "engine_message": message,
         "lsp_today": lsp_says,
         "engine_version": engine_version,
@@ -1614,8 +1726,9 @@ def tsv_row(rec: dict, lsp: dict, engine_version: str, probe_date: str,
     }
 
 
-TSV_COLUMNS = ("fixture", "verdict", "build_status", "engine_message",
-               "lsp_today", "engine_version", "probe_date", "divergence")
+TSV_COLUMNS = ("fixture", "verdict", "build_status", "engine_compiled",
+               "engine_message", "lsp_today", "engine_version", "probe_date",
+               "divergence")
 
 
 def agreement_problems(rows: list[dict]) -> list[str]:
@@ -1655,7 +1768,44 @@ def agreement_problems(rows: list[dict]) -> list[str]:
         # not, because B118's four values are about errors.
         engine_silent = row.get("verdict") == "ACCEPT"
         agrees = engine_silent == (lsp == "CLEAN")
-        if agrees and declared != "-":
+
+        # AGREEING ON POLARITY IS NOT ANSWERING THE SAME QUESTION. When the
+        # engine rejected the unit at DECLARATION time it compiled no function
+        # bodies, so its verdict covers the declarations and nothing else --
+        # while the LSP's diagnostics may be entirely about call sites the
+        # engine never reached. Both said something; that is all polarity sees.
+        #
+        # Measured on b102-array-sort-mismatched-callbacks: `int &inout` at
+        # line 21 is not declarable, the engine emitted two errors there and
+        # compiled ZERO bodies, and so never verdicted one of the twelve Sort
+        # calls the fixture exists to measure. Recorded REJECTED beside
+        # DIAGNOSES(12), it read as agreement.
+        #
+        # A note is REQUIRED rather than the row refused, because for a fixture
+        # whose subject IS a declaration -- a duplicate function, an
+        # unimplemented interface, a reserved keyword -- a declaration-time
+        # rejection is the complete and correct answer, and four of the five
+        # rows in this state are exactly that. Which one this is cannot be
+        # derived from the log. Make the question unavoidable; do not infer the
+        # answer.
+        needs_note = (
+            agrees
+            and status == "REJECTED"
+            and str(row.get("engine_compiled", "")) == "0"
+            and lsp != "CLEAN"
+        )
+
+        if needs_note and declared == "-":
+            problems.append(
+                f"{slug}: the engine rejected this unit at DECLARATION time "
+                f"(0 function bodies compiled) and this LSP reports {lsp}. "
+                f"They agree on polarity, which is not evidence they are "
+                f"answering the same question -- the engine never reached a "
+                f"call site. Record in `divergence` either that the fixture's "
+                f"subject IS the declaration, so the engine's verdict is "
+                f"complete, or that the engine never verdicted what this "
+                f"fixture exists to measure.")
+        elif agrees and not needs_note and declared != "-":
             problems.append(
                 f"{slug}: a divergence is declared ({declared!r}) but the "
                 f"engine ({status}) and this LSP ({lsp}) now AGREE. A stale "
