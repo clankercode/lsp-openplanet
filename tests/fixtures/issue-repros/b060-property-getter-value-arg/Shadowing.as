@@ -181,3 +181,34 @@ namespace UI {
         InputText("##enum", t, 0, EnumCallback);
     }
 }
+
+// Round 8: the OTHER slot for the very same shadowed values.
+//
+// `SUse` above pins them in a VALUE slot, where shadowing means they must
+// stay SILENT: the plugin's own type wins, so the value is not a function
+// reference. This block pins the complement — the same reads into a FUNCDEF
+// slot, where the same conclusion makes each one an ERROR, because a value
+// of a plugin class/interface/enum/typedef is not callable.
+//
+// `names_a_known_non_callable_type` asked raw `lookup_funcdef`, which falls
+// through the workspace declaration to the Core funcdef of that name, so
+// these looked "possibly callable" and their rejections were lost. Master
+// reports all eight; the branch reported only the four controls until the
+// workspace declaration was made to win here too.
+//
+// Each collision is paired with its non-colliding CONTROL, and the controls
+// are the load-bearing half: they error on BOTH binaries, which proves this
+// block reaches the rejection path at all. Without them, four silences read
+// as "startnew accepts these" rather than "four diagnostics were lost" — a
+// probe written with names that collide with nothing agrees on both sides
+// and reports a false all-clear.
+void ShadowIntoFuncdefSlot() {
+    startnew(ShadowClassP);    // shadows Core `CoroutineFunc`
+    startnew(ControlClassP);   // control: same shape, no collision
+    startnew(ShadowIfaceP);    // shadows Core `CoroutineFuncUserdata`
+    startnew(ControlIfaceP);   // control
+    startnew(ShadowEnumP);     // shadows Core `CoroutineFuncUserdataBool`
+    startnew(ControlEnumP);    // control
+    startnew(ShadowAliasP);    // typedef shadows Core `CoroutineFuncUserdataInt64`
+    startnew(ControlAliasP);   // control
+}

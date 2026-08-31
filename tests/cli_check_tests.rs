@@ -1757,14 +1757,17 @@ fn check_command_issue_repro_b023_funcdef_slot_signatures() {
 ///
 /// The fixture pins BOTH sides of the line, because a fix that silences more
 /// than it should is indistinguishable from a correct one until something
-/// pins the boundary. Master reports 52 errors across the fixture, 33 of
-/// them false; the 11 true ones must survive, and the fix adds 2 more that
-/// master misses (a funcdef handle into a `uint` slot from a plain global,
-/// and a `uint` property value into a delegate ctor), plus 2 a namespaced
-/// funcdef masked by a same-named global class, and 3 that only survive
-/// because the shadowing guard refuses to let a same-named VARIABLE stand in
-/// for a type, and 6 where a workspace class or interface handle cannot bind
-/// a funcdef slot, and 1 for a Core enum value — 25 asserted below.
+/// pins the boundary. Counted by set comparison against a master binary
+/// rather than by adding up categories, because the categories overlap and
+/// an earlier version of this comment double-counted them: master reports
+/// 60 errors here, of which 34 are FALSE and this fix removes, and 26 are
+/// genuine and must survive. The branch adds 7 master misses — a funcdef
+/// handle into a `uint` slot from a plain global (`Main.as:118`), a `uint`
+/// property value into a delegate ctor (`126`), three where a workspace
+/// class or interface handle cannot bind a funcdef slot (`149`/`151`/`153`,
+/// the other three of that group master already catches), and a namespaced
+/// funcdef masked by a same-named global class (`Shadowing.as:116`/`117`).
+/// 26 + 7 = the 33 asserted below.
 ///
 /// DELIBERATE SCOPE ADDITION, engine-verified — do not "fix" the two
 /// `Main.as:126`/`127` lines by silencing them. Game probe (OP 1.29.5, each
@@ -1824,6 +1827,26 @@ fn check_command_issue_repro_b060_property_getter_value_arg() {
         // non-callable test to WORKSPACE classes left it unresolved and
         // neutral, losing a diagnostic master reports.
         "Shadowing.as:181",
+        // Round 8: the SAME shadowed values as `SUse` above, in the other
+        // slot. There a value slot must stay silent; here a funcdef slot
+        // must reject, because a value of a plugin class / interface /
+        // enum / typedef is not callable. `names_a_known_non_callable_type`
+        // asked raw `lookup_funcdef`, which falls through the workspace
+        // declaration to the Core funcdef of that name, so the four
+        // collisions looked possibly-callable and their rejections were
+        // lost. The four CONTROLS interleaved with them (207/209/211/213)
+        // are the load-bearing half: they error on master AND on the branch
+        // with or without the fix, which proves this block reaches the
+        // rejection path, so the four silences were lost diagnostics rather
+        // than a fixture that failed to compile.
+        "Shadowing.as:206", // class shadows Core `CoroutineFunc`
+        "Shadowing.as:207", // control: same shape, no collision
+        "Shadowing.as:208", // interface shadows `CoroutineFuncUserdata`
+        "Shadowing.as:209", // control
+        "Shadowing.as:210", // enum shadows `CoroutineFuncUserdataBool`
+        "Shadowing.as:211", // control
+        "Shadowing.as:212", // typedef shadows `CoroutineFuncUserdataInt64`
+        "Shadowing.as:213", // control
         // A workspace class / interface handle can never bind a funcdef
         // slot. Master catches only the property spelling, and only through
         // the `get_` widening this ticket removes; the plain-global
