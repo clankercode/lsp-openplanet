@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T09:49:33Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T10:12:58Z"
 complexity: medium
 created_at: "2026-08-31T08:14:24Z"
 depends_on: []
+duration_minutes: 23.4204640142
 estimate_hours: 1
 id: B090
 priority: high
 started_at: "2026-08-31T09:49:33Z"
-status: in_progress
+status: done
 tags: []
 title: config tui needs an option for setting serverity of unused/uncalled/etc functions/vars/etc. They should be info by default, not warning. In normal cli check run, we don't want to spam the log with lots of unused stuff. The info msgs should be hidden by default (showing only a summary) and then a cli flag lets you see them. This might not gel perfectly with existing design, so discuss with Max the new design first to make sure we get it working well, smoothyl, etc, and so it works well for me by default.
-updated_at: "2026-08-31T09:49:33Z"
+updated_at: "2026-08-31T10:12:58Z"
 ---
 
 config tui needs an option for setting serverity of unused/uncalled/etc functions/vars/etc. They should be info by default, not warning. In normal cli check run, we don't want to spam the log with lots of unused stuff. The info msgs should be hidden by default (showing only a summary) and then a cli flag lets you see them. This might not gel perfectly with existing design, so discuss with Max the new design first to make sure we get it working well, smoothyl, etc, and so it works well for me by default.
