@@ -131,7 +131,11 @@ fn parse_corpus() -> Vec<Row> {
 fn parse_lsp_count(out: &str) -> Option<usize> {
     for line in out.lines() {
         if let Some(idx) = line.find(" diagnostic") {
-            let head: String = line[..idx].chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+            let head: String = line[..idx]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
             if !head.is_empty() {
                 return head.chars().rev().collect::<String>().parse().ok();
             }
@@ -144,7 +148,9 @@ fn parse_lsp_count(out: &str) -> Option<usize> {
 }
 
 fn run_lsp(fixture: &str) -> Option<usize> {
-    let fx = repo_root().join("tests/fixtures/issue-repros").join(fixture);
+    let fx = repo_root()
+        .join("tests/fixtures/issue-repros")
+        .join(fixture);
     let typedb = repo_root().join("tests/fixtures/typedb");
     let out = Command::new(env!("CARGO_BIN_EXE_openplanet-lsp"))
         .env_remove("FORCE_COLOR")
@@ -156,8 +162,8 @@ fn run_lsp(fixture: &str) -> Option<usize> {
         .arg(&fx)
         .output()
         .expect("failed to run the LSP CLI");
-    let text = String::from_utf8_lossy(&out.stdout).to_string()
-        + &String::from_utf8_lossy(&out.stderr);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     parse_lsp_count(&text)
 }
 
@@ -240,8 +246,7 @@ fn every_row_carries_the_engine_message_and_a_version_stamp() {
             );
         }
         assert!(
-            row.engine_version == "UNKNOWN"
-                || row.engine_version.starts_with("1.29."),
+            row.engine_version == "UNKNOWN" || row.engine_version.starts_with("1.29."),
             "{}: engine_version {:?} is not a recognised Openplanet \
              generation; this repo already holds claims from three of them \
              and an unstamped one cannot be diffed against a later build",
@@ -284,7 +289,8 @@ fn a_verdict_the_probe_could_not_take_is_not_recorded_as_evidence() {
              is recorded. Say why it cannot be probed -- an artifact that \
              cannot be regenerated is a finding, and B129's manifest reports \
              one on every run rather than omitting it",
-            row.fixture, row.build_status
+            row.fixture,
+            row.build_status
         );
     }
 }

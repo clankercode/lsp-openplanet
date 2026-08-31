@@ -102,6 +102,26 @@ LOCAL_ONLY_FLAGS = (
     "--host",
     "--allow-low-disk",
     "--allow-unresolved",
+    # Found by the completeness guard below, not by a person: uncovered since
+    # B106 added it. THREE omissions in one hand-maintained list, by three
+    # different changes, is the list's problem and not any author's.
+    "--disk-floor",
+)
+
+# Options of THIS script that are deliberately NOT refused after the action,
+# because the remote command plausibly spells them the same way. Refusing these
+# would break the thing the tool exists to do -- `run -- cargo test -- 
+# --test-threads=4` is a normal invocation, and `--jobs`/`-v` are cargo's own.
+#
+# Every option must appear in exactly ONE of these two tuples, and the selftest
+# enforces it. The point is not that this classification is obviously right; it
+# is that adding a flag now forces the question instead of defaulting to
+# silence, which is how both of the gaps above happened.
+SHARED_SPELLING_FLAGS = (
+    "-h", "--help",          # every program has one
+    "--jobs",                # cargo -j
+    "--test-threads",        # libtest's own, passed after a second `--`
+    "-v", "--verbose",       # cargo's own
 )
 
 # Never sync these. `target` and the per-lane build caches dwarf the source
@@ -123,6 +143,48 @@ EXCLUDES = [
 # ones a before/after comparison script needs to branch on.
 SYNC_BACK_FAILED = 3      # asked for an artefact, did not get one
 SYNC_BACK_UNCHANGED = 4   # got one, and it is byte-identical to the old one
+
+
+def flag_classification_problems(parser_flags, local_only, shared) -> list[str]:
+    """Every option of this script must be classified, exactly once.
+
+    B147. `LOCAL_ONLY_FLAGS` is a hand-maintained second copy of a subset of
+    the parser's option strings, and a list cannot notice what is not in it.
+    THREE flags were missing from it, added by three different changes:
+    `--allow-unresolved` since B132, `--disk-floor` since B106, and
+    `--sync-back-must-change` from the hour in which the first omission was
+    being fixed. That is the list's problem, not any author's.
+
+    Pure, and separated from the parser on purpose: a check that only ever
+    looks at a correct classification cannot be shown to work, because its
+    answer is the empty list either way. Given synthetic bad input it has to
+    produce something, which is what makes it testable and what a mutation run
+    can therefore kill.
+    """
+    problems = []
+    classified = set(local_only) | set(shared)
+    unclassified = sorted(set(parser_flags) - classified)
+    if unclassified:
+        problems.append(
+            f"these options are in neither LOCAL_ONLY_FLAGS nor "
+            f"SHARED_SPELLING_FLAGS, so placing one after the action would "
+            f"hand it to the remote shell as `command not found` and nothing "
+            f"would say so: {unclassified}"
+        )
+    phantom = sorted(classified - set(parser_flags))
+    if phantom:
+        problems.append(
+            f"these are classified but are not options of this parser, so the "
+            f"classification is guarding a flag that no longer exists -- a "
+            f"rename leaves the REAL new spelling uncovered: {phantom}"
+        )
+    overlap = sorted(set(local_only) & set(shared))
+    if overlap:
+        problems.append(
+            f"these are classified BOTH ways, so the tuples no longer say "
+            f"anything: {overlap}"
+        )
+    return problems
 
 
 def die(msg: str, code: int = 2) -> "NoReturn":  # type: ignore[valid-type]
@@ -1440,6 +1502,77 @@ def run_selftest() -> int:
                 f"name the hash and the comparison it is protecting"
             )
 
+    # --- B147: the flag list must not be able to MISS a flag ----------------
+    # Two entries were missing from LOCAL_ONLY_FLAGS at once, for the ordinary
+    # reason: it is a hand-maintained second copy of a subset of the parser's
+    # own option strings, and a list has no way to notice what is not in it.
+    # `--allow-unresolved` had been missing since B132 added it; the author who
+    # found that omission then wrote `--sync-back-must-change` and omitted it
+    # too, in the same hour, in the same file.
+    #
+    # So: walk the parser, and require every option to be classified. This does
+    # not decide which side a new flag belongs on -- it makes not deciding
+    # impossible. Same shape as tonight's `use Border` / `use Borders` prefix
+    # collision in a completely different file: a container matched by exact
+    # spelling, silently not covering a longer name that starts with a covered
+    # one.
+    parser_flags = {
+        opt
+        for action in build_parser()._actions
+        for opt in action.option_strings
+    }
+    problems.extend(flag_classification_problems(
+        parser_flags, LOCAL_ONLY_FLAGS, SHARED_SPELLING_FLAGS))
+
+    # POSITIVE CONTROLS. The real classification is correct, so every check
+    # above returns the empty list -- and an empty list is what a check that
+    # does nothing returns too. Three of these were measured vacuous for
+    # exactly that reason before these cases existed: the guard cannot be shown
+    # to work by pointing it at a tree that is already right.
+    for label, args, want in (
+        ("a flag in NEITHER tuple",
+         ({"--a", "--new"}, ("--a",), ()), "neither"),
+        ("a classification for a flag the parser no longer has",
+         ({"--a"}, ("--a", "--renamed-away"), ()), "no longer exists"),
+        ("a flag classified BOTH ways",
+         ({"--a"}, ("--a",), ("--a",)), "BOTH ways"),
+    ):
+        got = flag_classification_problems(*args)
+        if not got:
+            problems.append(
+                f"the flag classification check does not report {label} -- it "
+                f"returns the empty list for a BROKEN classification, which is "
+                f"the same answer it gives for a correct one"
+            )
+        elif not any(want in g for g in got):
+            problems.append(
+                f"the report for {label} does not say why ({want!r}): {got}"
+            )
+    # PAIR: and a correct classification must produce NOTHING, or the guard
+    # would refuse every future flag and be turned off within the week.
+    if flag_classification_problems({"--a", "--b"}, ("--a",), ("--b",)):
+        problems.append(
+            "the flag classification check reports a problem for a COMPLETE "
+            "and non-overlapping classification"
+        )
+    # PAIR, and it is the over-condemn half: a flag the remote command
+    # plausibly shares must still get THROUGH. Refusing `--jobs` or
+    # `--test-threads` would break `run -- cargo test -- --test-threads=4`,
+    # which is an ordinary invocation of this tool.
+    for shared in SHARED_SPELLING_FLAGS:
+        if misplaced_flags(["cargo", "test", "--", shared]):
+            problems.append(
+                f"{shared} is refused after the action, but the remote command "
+                f"spells it the same way -- this would break a normal run"
+            )
+    # And every local-only flag must actually BE refused, in both spellings.
+    for local in LOCAL_ONLY_FLAGS:
+        if misplaced_flags(["cargo", "test", local]) != [local]:
+            problems.append(f"{local} is not refused after the action")
+        valued = f"{local}=x"
+        if misplaced_flags(["cargo", "test", valued]) != [valued]:
+            problems.append(f"{valued} is not refused after the action")
+
     if problems:
         print("FAIL: remote-build self-test", file=sys.stderr)
         for problem in problems:
@@ -1451,7 +1584,22 @@ def run_selftest() -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, built where a guard can enumerate it.
+
+    B147/B159. `LOCAL_ONLY_FLAGS` is a hand-maintained SECOND COPY of a subset
+    of these option strings, and a second place to remember is a place that
+    gets forgotten: `--allow-unresolved` was missing from it from the day B132
+    added it, and `--sync-back-must-change` was missing from the day it was
+    written, by the same author, in the same hour as the fix for the first one.
+    Neither is a typo. The list has no way to notice a flag that is not in it.
+
+    So the parser is built here rather than inline in `main`, and the selftest
+    walks its actions and requires EVERY option to be classified -- local-only,
+    or deliberately shared. A new flag that is neither fails the selftest by
+    name. That does not make the right answer obvious; it makes the QUESTION
+    unavoidable, which is the part that was missing.
+    """
     ap = argparse.ArgumentParser(
         prog="remote-build.py",
         description="Run builds and tests on a remote box instead of this one.",
@@ -1498,6 +1646,11 @@ def main() -> int:
     ap.add_argument("--allow-unresolved", action="store_true",
                     help="gate the tree even with an unresolved merge/rebase/"
                          "cherry-pick in progress (B132)")
+    return ap
+
+
+def main() -> int:
+    ap = build_parser()
     a = ap.parse_args()
     if not (a.host or "").strip():
         die("--host / $LSP_REMOTE_HOST is empty. An empty host is not a host: "

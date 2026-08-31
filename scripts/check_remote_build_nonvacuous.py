@@ -160,8 +160,40 @@ MUTATIONS = [
      '    "--sync-back-must-change",',
      '    "--sync-back-zzz",'),
     ("B147: --allow-unresolved is dropped from the local-only flag list",
-     '    "--allow-unresolved",\n)',
-     '    "--allow-unresolved-zzz",\n)'),
+     '    "--allow-unresolved",\n    # Found by',
+     '    "--allow-unresolved-zzz",\n    # Found by'),
+    ("B147: --disk-floor is dropped from the local-only flag list — the third "
+     "omission, and the one the completeness guard found rather than a person",
+     '    "--disk-floor",\n)',
+     '    "--disk-floor-zzz",\n)'),
+
+    # --- B147: the list must not be able to MISS a flag --------------------
+    # Three omissions by three different changes is the LIST's problem, not any
+    # author's. These mutate the guard that makes an omission impossible.
+    ("B147: the parser is no longer walked, so a flag in neither tuple is "
+     "silently uncovered again — this is the guard that found --disk-floor",
+     "    unclassified = sorted(set(parser_flags) - classified)",
+     "    unclassified = []"),
+    ("B147: a classification naming a flag that no longer exists is accepted, "
+     "so a RENAME leaves the real new spelling uncovered",
+     "    phantom = sorted(classified - set(parser_flags))",
+     "    phantom = []"),
+    ("B147: a flag classified BOTH ways is accepted, so the two tuples stop "
+     "saying anything",
+     "    overlap = sorted(set(local_only) & set(shared))",
+     "    overlap = []"),
+    ("B147 OVER-CONDEMN: a flag the remote command shares is moved to the "
+     "local-only list, which breaks `run -- cargo test -- --test-threads=4`",
+     '    "--test-threads",        # libtest\'s own, passed after a second `--`',
+     '    "--zzz-not-test-threads",'),
+    ("B147: misplaced_flags stops refusing anything, so every local-only flag "
+     "reaches the remote shell",
+     "        if any(x == flag or x.startswith(f\"{flag}=\") for flag in LOCAL_ONLY_FLAGS)",
+     "        if False"),
+    ("B147 OVER-CONDEMN: misplaced_flags refuses everything, so no remote "
+     "command can be run at all",
+     "        if any(x == flag or x.startswith(f\"{flag}=\") for flag in LOCAL_ONLY_FLAGS)",
+     "        if True"),
 
     # --- B147: the hash, which is what makes a comparison real -------------
     ("B147: file_sha256 fabricates a hash for a file that is not there, so "

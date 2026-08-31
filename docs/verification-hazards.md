@@ -4327,3 +4327,51 @@ test functions contained `b145`. A tidy wall of `ok` for a run that executed
 nothing. Same family as this batch's other zero-denominator greens, and the
 only reason it was caught is that a green with no numbers in it is now a thing
 to look at twice.
+
+## A hand-maintained list cannot notice what is not in it (B147, follow-up)
+
+`LOCAL_ONLY_FLAGS` names the options of `remote-build.py` that must be refused
+when they turn up after the action, because otherwise they are handed to the
+remote shell as `--allow-unresolved: command not found`. It is a second copy of
+a subset of the parser's own option strings.
+
+**Three flags were missing from it, added by three different changes:**
+`--allow-unresolved` since B132, `--disk-floor` since B106, and
+`--sync-back-must-change` from the very hour in which the first omission was
+being found and fixed, by the author who was finding it. Three independent
+omissions is not three mistakes; it is one defect in the container, which has no
+way to report what it does not contain.
+
+The instance fix is to add the three. **The shape fix is to make not-deciding
+impossible:** the parser is now built by a function a guard can walk, every
+option must appear in exactly one of `LOCAL_ONLY_FLAGS` or
+`SHARED_SPELLING_FLAGS`, and an option in neither fails the selftest by name.
+That does not make the right classification obvious — `--jobs` and
+`--test-threads` genuinely belong on the shared side, because
+`run -- cargo test -- --test-threads=4` is a normal invocation — it makes the
+question unavoidable. **The guard found `--disk-floor` on its first run**, which
+no reviewer had.
+
+This is the same shape as the `use Border` / `use Borders` prefix collision
+found in a different file the same night: a container matched by exact spelling,
+silently not covering a longer name that begins with a covered one. Whenever a
+list of names is matched with `==` or `startswith(name + sep)`, ask what tells
+you the list is COMPLETE.
+
+### And the guard for it was vacuous, for a reason worth naming
+
+The first version computed `unclassified`, `phantom` and `overlap` inline
+against the real tuples. All three mutations that neutered those computations
+were **MISSED** — because the real classification is correct, so each returns
+the empty list, and *the empty list is also what a check that does nothing
+returns*. Nothing distinguished them.
+
+**A check whose correct answer is "nothing wrong" cannot be validated against a
+tree that is already right.** It has to be a pure function given deliberately
+broken input, so that it must produce something. Extracting
+`flag_classification_problems(parser_flags, local_only, shared)` and handing it
+three synthetic bad classifications — plus one good one, so it cannot pass by
+condemning everything — took the same three mutations from MISSED to caught.
+
+This generalises past flag lists: it applies to every guard in this repo whose
+green output is an empty collection.
