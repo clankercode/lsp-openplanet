@@ -54,6 +54,14 @@ What this checks
 3. **A started binary that produced no summary**, which is the signature of a
    binary killed mid-run (see B078: an external instruction-fetch fault, not a
    defect in this crate).
+4. **The inventory** (B085, ``scripts/test_inventory.py``), run first, before
+   a single test executes. Everything above is binary-level and therefore
+   blind to a test that vanishes INSIDE a present, healthy, summary-producing
+   binary, and blind to a stale ``CARGO_BIN_EXE_*`` child process a test
+   spawns — which is not a test binary at all. Both were live during the false
+   B074 revert; both shrink the total while every check here stays green.
+   Running it first is deliberate: a suite measured against stale binaries
+   produces a number, and the number is about older code.
 
 Measured, on why point 2 is not the cheaper same-output check. B082's own Fix
 section proposes comparing ``Running`` + ``Doc-tests`` lines against
@@ -82,6 +90,8 @@ actually gate on.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
 import subprocess
@@ -89,6 +99,9 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_inventory  # noqa: E402  (path set above; sibling script, not a package)
 
 # `     Running unittests src/lib.rs (/abs/path/deps/openplanet_lsp-<hash>)`
 RUNNING = re.compile(r"^\s+Running\s+(?P<label>.+?)\s+\((?P<path>[^)]+)\)\s*$")
@@ -349,6 +362,21 @@ def reconcile(
 def run_gate(extra: list[str]) -> int:
     cargo_args, _libtest_args = split_cargo_args(extra)
     filtered = names_a_target(cargo_args)
+
+    # B085, first: the binaries about to run must contain the tests their
+    # sources declare, and nothing they measure may be older than the tree.
+    # A suite run against a stale binary still produces a total.
+    inventory_status, inventory_report = test_inventory.check(cargo_args)
+    print(inventory_report, file=sys.stderr if inventory_status else sys.stdout)
+    if inventory_status:
+        print(
+            "\nFAIL: the test inventory is not trustworthy, so the suite was not\n"
+            "run. Any total from these binaries would be about other code.",
+            file=sys.stderr,
+        )
+        return inventory_status
+    print(flush=True)
+
     expected = enumerate_expected_binaries(cargo_args)
     scope = "selected" if filtered else "expected"
     print(f"==> {len(expected)} test binaries {scope}\n", flush=True)
@@ -463,6 +491,42 @@ def run_selftest() -> int:
             "stop-early half of the check is not working"
         )
 
+    # B085 phase: a failed inventory must stop the gate BEFORE any test runs,
+    # and must never print the marker. The inventory is stubbed rather than a
+    # real binary being staled, because staling one means a rebuild; the
+    # inventory's own ability to detect real staleness is proved separately by
+    # `just test-inventory-selftest` and `just test-inventory-mutants`.
+    marker = "SYNTHETIC-INVENTORY-FAILURE"
+    real_check = test_inventory.check
+    captured_out, captured_err = io.StringIO(), io.StringIO()
+    test_inventory.check = lambda *_a, **_k: (1, f"FAIL: {marker}")
+    try:
+        with contextlib.redirect_stdout(captured_out), contextlib.redirect_stderr(
+            captured_err
+        ):
+            gate_status = run_gate([])
+    finally:
+        test_inventory.check = real_check
+    captured = captured_out.getvalue() + captured_err.getvalue()
+    if marker not in captured:
+        problems.append(
+            "the stubbed inventory never ran — this control proves nothing, so "
+            "the gate's inventory phase is untested here"
+        )
+    if gate_status == 0:
+        problems.append(
+            "a failed inventory did not fail the gate — a suite measured "
+            "against stale or incomplete binaries would still be reported"
+        )
+    if VERIFIED_MARKER in captured:
+        problems.append(
+            f"a failed inventory still printed `{VERIFIED_MARKER}`"
+        )
+    if "test result:" in captured:
+        problems.append(
+            "the gate ran tests after the inventory failed — it must stop first"
+        )
+
     if problems:
         print("\nFAIL: suite-gate self-test", file=sys.stderr)
         for problem in problems:
@@ -473,7 +537,8 @@ def run_selftest() -> int:
 
     print(
         "\nPASS: the gate turns red on a crashed binary, and does so because the\n"
-        "binary produced no summary — not merely because cargo exited non-zero."
+        "binary produced no summary — not merely because cargo exited non-zero.\n"
+        "A failed inventory (B085) stops it before a single test runs."
     )
     return 0
 

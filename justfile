@@ -33,8 +33,13 @@ install: build
 # total — cargo's exit code is checked, and every test binary must have reported
 # a `test result:` line, against a SEPARATE enumeration. A binary killed
 # mid-run emits no summary and cargo then stops, so both the crashed binary and
-# every later one vanish from the count without a single failed test. Extra args
-# are forwarded: `just test -- --test-threads=2`.
+# every later one vanish from the count without a single failed test.
+#
+# B085: runs `just test-inventory` first, so a test that vanished inside a
+# healthy binary, or a stale binary a test spawns as a child, stops the run
+# instead of quietly shrinking the total.
+#
+# Extra args are forwarded: `just test -- --test-threads=2`.
 test *ARGS:
     python3 scripts/test-suite.py {{ARGS}}
 
@@ -43,6 +48,35 @@ test *ARGS:
 # because no summary was produced — not merely because cargo exited non-zero.
 test-selftest:
     python3 scripts/test-suite.py --selftest
+
+# B085: the inventory check on its own, without running the suite. Per test
+# binary, `--list` count vs the `#[test]` count in the sources cargo's dep-info
+# says it was built from; plus every artifact's mtime against those sources,
+# INCLUDING the CARGO_BIN_EXE_* binary tests spawn as a child (not a test
+# binary, so `just test`'s binary-level reconciliation cannot see it). Runs as
+# the first phase of `just test`; this is for running it alone (`-v` lists
+# every binary's counts).
+#
+# B085: the per-binary content + freshness check `just test` cannot do.
+test-inventory *ARGS:
+    python3 scripts/test_inventory.py {{ARGS}}
+
+# Proves the check above can fail: injects every defect it claims to catch —
+# a vanished test, a stale spawned binary, a dead instrument — including both
+# ways it could pass by vacuity.
+#
+# Proves `just test-inventory` can fail (synthetic, fast).
+test-inventory-selftest:
+    python3 scripts/test_inventory.py --selftest
+
+# The same, end to end on the REAL tree and REAL artifacts: bumps a source
+# past the binary built from it, appends a `#[test]` the binary cannot
+# contain, and neuters each instrument in a throwaway copy. Restores
+# everything, and verifies the restore.
+#
+# Proves `just test-inventory` can fail (real artifacts, slower).
+test-inventory-mutants:
+    python3 scripts/check_test_inventory_nonvacuous.py
 
 # B045: same suite, but every test binary runs with HOME/USERPROFILE pointed at
 # an empty dir — a test that depends on this machine's Openplanet install or
