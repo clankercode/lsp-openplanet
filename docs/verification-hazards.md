@@ -211,6 +211,36 @@ indistinguishable from "I am structurally incapable of seeing it".
   python for anything whose failure would be silent. Four instances is enough
   to stop treating each as a surprise.
 
+- **Two lanes, two clippy baselines, both correct, and comparing them would
+  have invented a regression.** One lane reported clippy **77** on master; a
+  second reported **129** on a master differing only by docs. Neither number is
+  wrong. The first counted unique diagnostics
+  (`--message-format=json | jq | sort -u`); the second counted raw warnings,
+  which include the same diagnostic reported once per target (lib, test, each
+  integration binary). 129 raw against 77 unique is the expected shape.
+
+  The hazard is not the numbers. It is that **a baseline is meaningless without
+  its method attached**, and the method was never stated by either lane —
+  because to each of them it was obvious. Merge the two branches in sequence
+  and the next lane inherits whichever baseline it happens to read, then
+  reports a 52-warning regression or a 52-warning improvement, neither of which
+  happened. It would then hunt for a cause that does not exist, and the hunt
+  would look completely reasonable.
+
+  **A count is a measurement, and a measurement without its instrument is not
+  comparable to anything.** This is the counterpart to the "equal totals do not
+  prove equal content" rule elsewhere in this document, and it runs the other
+  way: **unequal totals do not prove a difference either.** Both directions
+  have the same fix, which is to compare by SET DIFF — which diagnostics
+  appeared, which disappeared — rather than by total. A set diff is immune to
+  the instrument, because a duplicate reported twice under one method and once
+  under another is the same member of the set either way.
+
+  Caught here only because one coordinator happened to read two lanes' reports
+  in the same sitting. **That is not a control, it is a coincidence** — the
+  general fix is that any number handed across a lane boundary carries the
+  command that produced it.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
