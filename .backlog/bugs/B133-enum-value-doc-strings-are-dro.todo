@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T16:19:38Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T19:30:53Z"
 complexity: medium
 created_at: "2026-08-31T14:43:15Z"
 depends_on: []
+duration_minutes: 191.25124552526665
 estimate_hours: 1
 id: B133
 priority: high
 started_at: "2026-08-31T16:19:38Z"
-status: in_progress
+status: done
 tags: []
 title: 'Enum value doc strings are dropped: the ''d'' key is present on 206 of 929 enum values and nothing reads it'
-updated_at: "2026-08-31T16:19:38Z"
+updated_at: "2026-08-31T19:30:53Z"
 ---
 
 Enum value doc strings are dropped: the 'd' key is present on 206 of 929 enum values and nothing reads it
