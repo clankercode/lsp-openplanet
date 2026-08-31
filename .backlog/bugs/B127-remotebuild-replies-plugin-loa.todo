@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:12:59Z"
 depends_on: []
 estimate_hours: 1
 id: B127
 priority: high
+started_at: null
 status: pending
 tags: []
 title: RemoteBuild replies 'Plugin loaded' with an empty error even when the engine could not resolve the plugin's dependencies, so B097's fail-fast guard in run_batch never fires
@@ -12,3 +14,65 @@ updated_at: "2026-08-31T14:12:59Z"
 ---
 
 RemoteBuild replies 'Plugin loaded' with an empty error even when the engine could not resolve the plugin's dependencies, so B097's fail-fast guard in run_batch never fires
+
+
+## Measured by lane-resolver during B123, 2026-09-01
+
+## The observation
+
+`probe_enum_corpus.run_batch` guards with:
+
+    if loaded.get("error"): raise SystemExit(...)
+
+That guard was added by B097 so a failed load STOPS the run rather than looking
+merely inconclusive. Measured today, for a plugin whose dependency cannot be
+resolved, RemoteBuild replies:
+
+    {"error": "", "data": "Plugin loaded"}
+
+while the engine logs the dependency failure **and** `Loaded plugin` anyway. So
+the guard never fires, no name is analysed, and the run produces exactly the
+outcome the guard exists to prevent — through the one door it does not cover.
+
+## The general shape, and why this is worth its own ticket
+
+**"I delivered your request" and "your build succeeded" are different
+propositions.** The transport is answering the first; the guard is reading it as
+the second.
+
+They were conflated for an honest reason: **before B097 the load reply was inert
+and carried no information at all**, because `load_plugin` had never once
+worked. It became load-bearing the day the transport started working, and **not
+one line of the consumer changed.** A value that was decoration becoming
+meaningful is a contract change that no diff records and no test fails on.
+
+This is the same family as B118's "the engine refused this" vs "this build did
+not happen", and it is the second time in one batch that a newly-working
+transport silently promoted a dead value into a live one.
+
+## Where the fix belongs — and where it does NOT
+
+**Do not fix this by tightening the guard alone.** The reply is genuinely
+truthful about what it reports: the plugin WAS loaded. The defect is that load
+success is being used as a proxy for build success, and B118 already built the
+thing that answers the real question — four-valued `build_status` sliced by the
+build's own markers. Route the decision through that.
+
+If a plugin-side change to RemoteBuild's reply looks attractive, note that
+`~/src/tm-remote-build` and `~/src/openplanet/my-plugins/tm-remote-build` are
+**Max's, with uncommitted work, and are not ours to edit.** Read only. Fix this
+on our side.
+
+## Test axes
+
+The subject is a MISSING failure, so build the pairs and mutation-test each
+guard — see the hazards catalogue, and note that B118 found 4 of 9 such guards
+vacuous because an earlier check had already decided the case.
+
+- Dependency unresolvable vs. dependency present. Must differ.
+- Compile failure with `Loaded plugin` logged after it, vs. a real clean load.
+  Must differ.
+- Load genuinely refused (if any route still produces that) vs. load accepted.
+- A run where the guard SHOULD fire and one where it should not — an over-condemn
+  mutation that fails everything must be caught, exactly as
+  `just enum-probe-mutants` now catches for B123.
