@@ -772,6 +772,40 @@ indistinguishable from "I am structurally incapable of seeing it".
   not a finding — the full listing has three. **`head` is not a filter, and a
   truncated list is not evidence of absence.**
 
+- **A stale test binary hid a real regression, and the binary-count gate could
+  not see it — because no binary was missing, only a test inside one.** Two
+  disjoint branches were merged and gated once. The gate reported **25/25
+  binaries reported, 2358 passed, 0 failed**. Green, reconciled, and wrong: the
+  `cli_check_tests` binary was stale and held **52** issue-repro tests where the
+  source had **54**. A newly merged test simply was not in it, so the regression
+  it would have caught never fired.
+
+  **The counting gate is exactly the wrong shape for this.** It verifies that
+  every expected *binary* produced a summary — and every binary did. A test that
+  vanishes *inside* a present, healthy, summary-producing binary is invisible to
+  it. The two failure modes look nothing alike and only one was guarded.
+
+  What caught it was **a prediction**: 2353 + 6 = 2359, against a reported 2358.
+  One test. The converse of the rule recorded above did the work — **a total
+  that misses your prediction by one deserves the same investigation as a
+  crash.** Without the prediction, "2358 passed, 0 failed, 25/25" would have
+  been accepted by anyone, including the person who wrote the gate.
+
+  Forcing a rebuild took the binary from 52 tests to 54, and the merged tree
+  then went **red**: a genuine regression, bisected to one of the two merges by
+  running the single test at each merge commit in a detached worktree. That
+  merge was reverted and master returned to green.
+
+  Two rules follow:
+
+  - **A total that drops, or fails to rise as predicted, is a defect signal
+    rather than noise.** It is the only symptom this class of staleness
+    produces.
+  - **Merge two branches separately, or predict the combined total exactly and
+    treat any deviation as blocking.** Merging two and gating once saves one
+    suite run and costs the ability to attribute a failure — and here it also
+    created the window in which a stale artifact could be believed.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
