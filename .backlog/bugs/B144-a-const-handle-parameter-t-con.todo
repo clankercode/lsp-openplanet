@@ -28,8 +28,11 @@ The declaration at `src/Interface.as:616`:
 
     bool SortGhosts(const Json::Value@ const &in a, const Json::Value@ const &in b)
 
-called on a `Json::Value@[]`. **This is the only error the checker reports for
-that plugin** (plus 2 signed/unsigned warnings and 118 hidden info).
+called on a `Json::Value@[]`. **At the B144 measurement point this was the only
+error the checker reported for that plugin** (plus 2 signed/unsigned warnings
+and 118 hidden info). The standing post-fix baseline is now **0 errors, 1
+signed/unsigned warning and 118 hidden info**; B166 records the dated command,
+engine version, exact surviving location, and why the second warning vanished.
 
 ## Minimal repro — the discriminator is the TRAILING `const`
 
