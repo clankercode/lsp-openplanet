@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-31T17:44:20Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T17:44:20Z"
 complexity: medium
 created_at: "2026-08-31T17:30:56Z"
 depends_on: []
+duration_minutes: 0.003724257733333333
 estimate_hours: 1
 id: B169
 priority: high
 started_at: "2026-08-31T17:44:20Z"
-status: in_progress
+status: done
 tags: []
 title: 'REBASE_HEAD is not an unresolved-rebase sentinel: it survives a successful conflicted rebase, so the gate refuses to run for exactly the lane that just resolved a conflict, and the escape hatch it names does not work through just rtest'
 updated_at: "2026-08-31T17:44:20Z"
