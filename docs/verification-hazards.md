@@ -2736,3 +2736,36 @@ Note the polarity difference from a normal sweep, because it inverts the
 expectation: for a rule that TIGHTENS, a non-zero fleet delta is a reason to
 stop and read. For a rule that WIDENS, a zero delta is the reason to stop and
 check the instrument — and the check is exposure, not emits.
+
+## A shell feature that does not exist reads exactly like a negative result
+
+lane-unused reported the game as down and the RemoteBuild port as closed. Both
+readings were wrong, and both instruments failed **toward absence**:
+
+1. **`/dev/tcp/127.0.0.1/30000` is a bash feature and does not exist in zsh.**
+   The redirect failed, so the `|| echo CLOSED` fired unconditionally. *A shell
+   feature that is not there is indistinguishable from a closed port.*
+2. **`ps aux | grep -i trackmania | head -5`** — the five lines shown were
+   node/herdr/lsp processes and the real hit (`Z:\...\Trackmania.exe`) was below
+   the cut.
+
+`python3 socket.connect` said OPEN and `pgrep -af Trackmania` found the process.
+
+**Two lessons, and the second is the less obvious one.**
+
+The pipe-to-`head`/`tail` hazard is already in this catalogue for GATES. Here it
+bit **discovery** instead — the same mechanism, a context nobody had thought to
+apply it to, and the consequence was a lane standing down from work it could
+have done. The rule is not "do not pipe gates"; it is **do not truncate any
+output you are about to draw a conclusion from.**
+
+And this shell is zsh. Bash-only constructs — `/dev/tcp`, `mapfile`, `$?` where
+`$status` is meant, `${PIPESTATUS[0]}` — do not error usefully; they fail in
+whatever direction the surrounding logic assumes. The same lane later had two
+fleet sweeps silently produce `0 dirs / 0 results` (a stray path, then `mapfile`
+not existing) and **both would have read as "no delta"**. It caught them only by
+proving the instrument could report a difference first: a synthetic case that
+must give 1, run before trusting any 0.
+
+**Never accept a negative result from an instrument you have not seen produce a
+positive one.**
