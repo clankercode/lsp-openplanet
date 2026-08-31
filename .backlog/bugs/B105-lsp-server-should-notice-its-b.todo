@@ -64,3 +64,8 @@ older than what was on disk.)
 - Related plumbing: src/update.rs (self-update already knows how the
   swap is performed — reuse its knowledge of the swap shape rather than
   guessing).
+
+## Decisions (2026-08-31, bl-fix-many batch B103-105)
+- Restart mechanism: option (b) custom notification to the extension as primary, (a) clean-exit-when-idle as fallback when the client did not advertise the capability — per the ticket rec. Server side is this ticket's bar.
+- Detection: poll current_exe() PATH metadata (mtime/len/inode) on ~30s timer behind a testable seam; no fs watcher.
+- Extension-side handling (../lsp-openplanet-ext) is a follow-up in that repo — separate repo, not covered by this batch's automerge; server must behave sanely (exit-when-idle fallback) without it.
