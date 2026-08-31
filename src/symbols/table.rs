@@ -1096,6 +1096,250 @@ mod tests {
         ));
     }
 
+    // ── B114: every declaration modifier reaches the pool ─────────────
+    //
+    // B101 and B111 each added ONE modifier, one ticket at a time, and each
+    // was found by the false output it caused rather than by anyone noticing
+    // a field was missing. B114 pools the rest at once. These assert the
+    // pooled bit DIRECTLY rather than only through a consumer, which is what
+    // B111 established: a consumer test passes for free if the consumer
+    // never asks.
+
+    /// The modifiers of the pooled symbol named `name`.
+    fn pooled_modifiers(src: &str, name: &str) -> DeclModifiers {
+        let symbols = extract(src);
+        symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} must be pooled in `{src}`"))
+            .modifiers
+    }
+
+    /// `shared` is the modifier with the widest reach — five declaration
+    /// kinds carry it, and B087 had to walk the AST for it because the pool
+    /// dropped it from all five. Both directions per kind: lost and
+    /// invented are equally wrong.
+    #[test]
+    fn the_shared_modifier_is_pooled_for_every_declaration_kind() {
+        for (kind, shared, plain) in [
+            ("class", "shared class X {}", "class X {}"),
+            ("interface", "shared interface X {}", "interface X {}"),
+            ("enum", "shared enum X { A }", "enum X { A }"),
+            (
+                "funcdef",
+                "shared funcdef void X();",
+                "funcdef void X();",
+            ),
+            ("function", "shared void X() {}", "void X() {}"),
+        ] {
+            assert!(
+                pooled_modifiers(shared, "X").is_shared,
+                "shared lost for a {kind}: `{shared}`"
+            );
+            assert!(
+                !pooled_modifiers(plain, "X").is_shared,
+                "shared invented for a {kind}: `{plain}`"
+            );
+        }
+    }
+
+    /// `shared` beside the neighbours the same modifier loop eats, and
+    /// inside a namespace where the symbol pools under its long name.
+    #[test]
+    fn the_shared_modifier_survives_its_neighbours() {
+        for (src, name) in [
+            ("shared abstract class X {}", "X"),
+            ("shared mixin class X {}", "X"),
+            ("shared mixin abstract class X {}", "X"),
+            ("namespace N { shared class X {} }", "N::X"),
+            ("namespace N { shared void X() {} }", "N::X"),
+            ("namespace N { shared enum X { A } }", "N::X"),
+        ] {
+            assert!(
+                pooled_modifiers(src, name).is_shared,
+                "shared lost for `{src}`"
+            );
+        }
+    }
+
+    /// `abstract`, on a class.
+    ///
+    /// Carried for UNIFORMITY only. B094 measured that `abstract` does NOT
+    /// exempt a class from implementing the interface it names, and
+    /// `an_abstract_class_is_not_exempt` pins that behaviour; pooling the
+    /// bit does not license changing it.
+    #[test]
+    fn the_abstract_modifier_is_pooled() {
+        for (src, want) in [
+            ("abstract class X {}", true),
+            ("shared abstract class X {}", true),
+            ("mixin abstract class X {}", true),
+            ("class X {}", false),
+            ("shared class X {}", false),
+            ("mixin class X {}", false),
+        ] {
+            assert_eq!(
+                pooled_modifiers(src, "X").is_abstract,
+                want,
+                "wrong is_abstract for `{src}`"
+            );
+        }
+    }
+
+    /// The four method modifiers, each on its own, both directions.
+    #[test]
+    fn every_method_modifier_is_pooled() {
+        for (name, src, read) in [
+            (
+                "override",
+                "class C { void M() override {} }",
+                (|m: DeclModifiers| m.is_override) as fn(DeclModifiers) -> bool,
+            ),
+            ("final", "class C { void M() final {} }", |m| m.is_final),
+            (
+                "private",
+                "class C { private void M() {} }",
+                |m| m.is_private,
+            ),
+            (
+                "protected",
+                "class C { protected void M() {} }",
+                |m| m.is_protected,
+            ),
+        ] {
+            assert!(read(pooled_modifiers(src, "C::M")), "{name} lost: `{src}`");
+            assert!(
+                !read(pooled_modifiers("class C { void M() {} }", "C::M")),
+                "{name} invented for a plain method"
+            );
+        }
+    }
+
+    /// The modifiers are INDEPENDENT: one written must not set another, and
+    /// several written together must all survive. `const`, `override` and
+    /// `final` share one trailing modifier loop, which is exactly what could
+    /// let one swallow the next.
+    #[test]
+    fn method_modifiers_do_not_leak_into_each_other() {
+        let m = pooled_modifiers("class C { private void M() const override final {} }", "C::M");
+        assert!(m.is_private, "private lost");
+        assert!(m.is_const, "const lost");
+        assert!(m.is_override, "override lost");
+        assert!(m.is_final, "final lost");
+        assert!(!m.is_protected, "protected invented");
+        assert!(!m.is_shared, "shared invented");
+        assert!(!m.is_mixin && !m.is_abstract, "a method is not a class");
+
+        let plain = pooled_modifiers("class C { void M() {} }", "C::M");
+        assert_eq!(plain, DeclModifiers::default(), "a plain method declares nothing");
+    }
+
+    /// `private` and `protected` are mutually exclusive in the parser — it
+    /// only looks for `protected` when `private` was absent — so pin that
+    /// each excludes the other rather than both landing true.
+    #[test]
+    fn private_and_protected_are_exclusive() {
+        let private = pooled_modifiers("class C { private void M() {} }", "C::M");
+        assert!(private.is_private && !private.is_protected);
+        let protected = pooled_modifiers("class C { protected void M() {} }", "C::M");
+        assert!(protected.is_protected && !protected.is_private);
+    }
+
+    /// An interface method carries the same modifiers a class method does.
+    #[test]
+    fn interface_method_modifiers_are_pooled() {
+        assert!(pooled_modifiers("interface I { void M() const; }", "I::M").is_const);
+        assert_eq!(
+            pooled_modifiers("interface I { void M(); }", "I::M"),
+            DeclModifiers::default(),
+            "a plain interface method declares nothing"
+        );
+    }
+
+    /// A visibility modifier written before a CONSTRUCTOR or DESTRUCTOR
+    /// reaches the pool too — the parser eats it before it knows which
+    /// member kind follows, and threads it into the synthesized
+    /// `FunctionDecl`.
+    #[test]
+    fn constructor_and_destructor_visibility_is_pooled() {
+        let symbols = extract("class C { private C() {} }");
+        let ctor = symbols.iter().find(|s| s.name == "C::C").unwrap();
+        assert!(ctor.modifiers.is_private, "a private constructor is private");
+        assert!(!ctor.modifiers.is_const, "a constructor is never const");
+    }
+
+    /// A symbol nothing declared — an `import` alias — carries no modifiers
+    /// at all. All-false here is the honest answer, not a dropped one.
+    #[test]
+    fn an_import_alias_declares_no_modifiers() {
+        assert_eq!(
+            pooled_modifiers("import void F() from \"Plugin\";", "F"),
+            DeclModifiers::default()
+        );
+    }
+
+    /// THE POINT OF THE TICKET: a modifier survives for a symbol declared in
+    /// a DIFFERENT file from the consumer asking about it.
+    ///
+    /// This is what no AST sidecar could ever answer — a sidecar is built
+    /// per document, while the pool is the cross-file surface — and it is
+    /// the property every sidecar retirement rests on.
+    #[test]
+    fn pooled_modifiers_survive_across_a_file_boundary() {
+        let mut table = SymbolTable::new();
+        for src in [
+            "shared class Far { void M() const {} }",
+            "void Near() { }",
+        ] {
+            let fid = table.allocate_file_id();
+            let tokens = lexer::tokenize_filtered(src);
+            let mut parser = Parser::new(&tokens, src);
+            let file = parser.parse_file();
+            table.set_file_symbols(fid, SymbolTable::extract_symbols(fid, src, &file));
+        }
+        let far = table.lookup("Far");
+        assert_eq!(far.len(), 1, "the far class must be pooled once");
+        assert!(
+            far[0].modifiers.is_shared,
+            "`shared` must survive for a class declared in another file"
+        );
+        let method = table.lookup("Far::M");
+        assert_eq!(method.len(), 1, "the far method must be pooled once");
+        assert!(
+            method[0].modifiers.is_const,
+            "`const` must survive for a method declared in another file"
+        );
+    }
+
+    /// RECORDED, NOT FIXED — a gap one layer EARLIER than this ticket.
+    ///
+    /// Visibility on a class FIELD is dropped by the PARSER, before pooling
+    /// can see it: `parse_class_member` eats `private` / `protected` and
+    /// threads them into every `FunctionDecl` it builds, but
+    /// `ClassMember::Field` holds a `VarDeclStmt`, which has no field to put
+    /// them in. So the pooled answer for a private field is `false` — known
+    /// wrong, asserted here so it reads as a recorded gap rather than as
+    /// intent, and so the parser ticket that closes it has a test to flip.
+    ///
+    /// Consequence for the feature this ticket unblocks: completion
+    /// visibility filtering will be correct for METHODS and half-blind for
+    /// FIELDS until that lands.
+    #[test]
+    fn a_private_field_loses_its_visibility_at_parse_time() {
+        let m = pooled_modifiers("class C { private int x; }", "C::x");
+        assert!(
+            !m.is_private,
+            "KNOWN GAP: if this now passes the visibility, the parser was \
+             fixed — delete this test and pin the true value instead"
+        );
+        // The METHOD beside it, in the same class, does keep its visibility
+        // — so this is a field-shaped hole, not a broken modifier.
+        assert!(
+            pooled_modifiers("class C { private void M() {} }", "C::M").is_private,
+            "a private METHOD must keep its visibility"
+        );
+    }
+
     /// Parameter-mode variants, per CLAUDE.md: `&in` / `&out` / `&inout`,
     /// a bare reference, a handle and a const handle must all survive into
     /// the stored type text exactly as a class method's would.

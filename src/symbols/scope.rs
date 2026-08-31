@@ -29,6 +29,23 @@ use crate::lexer::Span;
 ///   `mixin` variable. That is accepted: the alternative duplicates
 ///   `is_shared` across five variants, and an always-false bool is a
 ///   cheaper wrong than a fivefold repetition.
+///
+/// # One value here is KNOWN WRONG, and it is not this ticket's to fix
+///
+/// Visibility on a class FIELD is dropped by the PARSER, one layer earlier
+/// than pooling: `parse_class_member` eats `private` / `protected` and
+/// threads them into every `FunctionDecl` it builds, but
+/// `ClassMember::Field` holds a `VarDeclStmt`, which has no field to put
+/// them in. So `is_private` on a pooled FIELD reads `false` even for
+/// `private int x;` — an absence indistinguishable from a "no". Methods are
+/// correct; fields are not.
+///
+/// Do not read field visibility off this until the parser records it.
+/// `a_private_field_loses_its_visibility_at_parse_time` pins the gap so it
+/// stays visible rather than reading as intent, and names the test to flip
+/// when the parser change lands. The consequence for the feature this
+/// unblocks: completion visibility filtering will be right for methods and
+/// half-blind for fields until then.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DeclModifiers {
     /// `shared` — the cross-plugin entity mechanism, on a function, class,
