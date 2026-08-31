@@ -3203,3 +3203,51 @@ sweeps returning `0 dirs / 0 results` from a stray path and a missing `mapfile`,
 grep matching a local variable of the same name and producing a whole ticket on a
 false premise, and now this. **Re-reading finds typos. Re-deriving finds wrong
 questions.**
+
+## Making a field `Option` is only half the work — the other half is writing `None`
+
+B138 built an audit for loader-side hardcoded values: a `bool` initialised to a
+literal ASSERTS something, an `Option` initialised to `None` merely says
+"absent". The audit's first real run found B142 by itself, which is the outcome
+you want from a structural fix.
+
+**Then its own red check passed.** Reverting the fixed field to `Some(false)` was
+accepted by the audit — because a literal wrapped in `Some` asserts exactly as
+much as a bare `false` while LOOKING like the fix.
+
+An audit that cannot tell `Some(false)` from `None` would have made every future
+occurrence invisible: **the exact defect class it exists to catch, reintroduced
+inside the catcher.** `Some(false)` and `Some(true)` are now findings.
+
+It surfaced only because the author re-ran the red check after changing the
+scanner and asked WHY it passed. That is the third time in this batch that *a
+passing red check looks identical to a working fix* has been the thing that
+mattered.
+
+**The general rule: changing a type does not change a claim.** `Option<bool>`
+gives you somewhere to put "I do not know"; it does not put it there. Any audit
+of this kind must score the VALUE WRITTEN, not the type declared.
+
+A second, smaller shape from the same scanner: it silently skipped
+`String::new(), // comment` — a trailing comment defeated the value parse — and
+that was found only because the expected table disagreed with the count. **A
+scanner needs a table it must match, not just a list it produces.**
+
+## A verification step whose INPUT silently did not update
+
+lane-enum's first before/after fleet comparison reported **IDENTICAL** while both
+sweeps ran **the same stale binary**. `--sync-back` had failed, did not exit
+non-zero, and the sweep ran anyway on the old artefact.
+
+The comparison was perfectly honest: two identical inputs give an identical
+answer. **Nothing told it the inputs were supposed to differ.**
+
+It was caught because the diagnostic count did not match a number seen an hour
+earlier — luck, not process. The fix the lane applied by hand, and the one worth
+building in: **hash the fetched artefact and assert the two differ before
+comparing their output.**
+
+This is the pipe-eats-the-status family one layer further out. That family says a
+command's STATUS can be lost; this says a command's EFFECT can be lost, with the
+downstream step reporting success on stale state. Both produce a green that
+describes something other than what you asked about.
