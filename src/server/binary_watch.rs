@@ -297,9 +297,7 @@ impl BinaryWatch {
         // instant a Windows swap passes through — the running image renamed
         // aside, its replacement not yet in place. Waiting costs one more
         // tick; getting it wrong costs the editor its language server.
-        let Some(current) = current else {
-            return None;
-        };
+        let current = current?;
 
         match &self.baseline {
             // First stamp we have ever managed to take: that is what we are
