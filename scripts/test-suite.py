@@ -104,6 +104,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_inventory  # noqa: E402  (path set above; sibling script, not a package)
+import test_set_diff  # noqa: E402  (same)
 
 # `     Running unittests src/lib.rs (/abs/path/deps/openplanet_lsp-<hash>)`
 RUNNING = re.compile(r"^\s+Running\s+(?P<label>.+?)\s+\((?P<path>[^)]+)\)\s*$")
@@ -883,8 +884,40 @@ def run_gate(extra: list[str]) -> int:
                 f"Attach that, not a tail, if you report this. An intermittent "
                 f"is the one case you cannot re-run to recover."
             )
-    print(report, file=sys.stderr if status else sys.stdout)
-    return status
+    # B163, last and deliberately AFTER the run: the total above cannot see an
+    # even swap. A test disabled while another is added reconciles exactly --
+    # +1 and -1 cancel -- so the arithmetic comes out precisely right over a
+    # disabled test, and being precisely right is what retires the question.
+    # The set diff is the only thing here that compares NAMES.
+    if filtered:
+        # A cargo target selector narrows what was BUILT, so most binaries do
+        # not exist this run and every test in them would read as REMOVED.
+        # Handing a lane that alarm for narrowing its own run would train it to
+        # ignore the one message that must never be ignored.
+        print(report, file=sys.stderr if status else sys.stdout)
+        print(
+            "\n==> test-set diff SKIPPED: this run names a cargo target, so only\n"
+            "    some binaries were built. Run `just rtest` with no target to\n"
+            "    check the test set.",
+            flush=True,
+        )
+        return status
+    setdiff_status, setdiff_report = test_set_diff.check(cargo_args)
+    if setdiff_status and not status:
+        # The total really did reconcile, but B163 exists because that is not a
+        # verified SUITE: an even name swap preserves the number exactly. Do
+        # not leave the established success marker in a run this phase rejects;
+        # it is too easy to grep/tail that one cheerful line and miss the later
+        # refusal. Keep the narrower fact, explicitly labelled as insufficient.
+        report = report.replace(
+            VERIFIED_MARKER,
+            "SUITE-TOTAL-ONLY (test-set diff rejected this run)",
+            1,
+        )
+    print(report, file=sys.stderr if status or setdiff_status else sys.stdout)
+    print("", flush=True)
+    print(setdiff_report, file=sys.stderr if setdiff_status else sys.stdout)
+    return status or setdiff_status
 
 
 def run_selftest() -> int:
@@ -1449,6 +1482,91 @@ def run_selftest() -> int:
             "the gate ran tests after the inventory failed — it must stop first"
         )
 
+    # B163 wiring: a suite total can be perfectly green while the test NAME set
+    # has suffered an even swap, so the set-diff failure must survive all the
+    # way through run_gate(). Stub the expensive phases with a healthy run and
+    # make the new phase fail by name. This is deliberately an entry-point
+    # control: test_set_diff's own selftest proves its decision, but cannot prove
+    # the suite ever asks for that decision.
+    set_marker = "SYNTHETIC-TEST-SET-REMOVAL"
+    real_inventory_check = test_inventory.check
+    real_expected = enumerate_expected_binaries
+    real_run = run_and_capture
+    real_reconcile = reconcile
+    real_set_check = test_set_diff.check
+    try:
+        test_inventory.check = lambda *_a, **_k: (0, "inventory ok", {})
+        globals()["enumerate_expected_binaries"] = lambda *_a, **_k: {
+            "/synthetic/test-bin": "synthetic"
+        }
+        globals()["run_and_capture"] = lambda *_a, **_k: (0, [])
+        globals()["reconcile"] = lambda *_a, **_k: (
+            0,
+            f"{VERIFIED_MARKER}: synthetic total",
+        )
+        test_set_diff.check = lambda *_a, **_k: (1, f"FAIL: {set_marker}")
+
+        set_out, set_err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(set_out), contextlib.redirect_stderr(set_err):
+            set_status = run_gate([])
+        set_captured = set_out.getvalue() + set_err.getvalue()
+        if set_marker not in set_captured:
+            problems.append(
+                "the stubbed test-set diff never ran — removing the phase from "
+                "run_gate would leave this control green"
+            )
+        if set_status == 0:
+            problems.append(
+                "a removed test did not fail the gate when the suite total was green"
+            )
+        if VERIFIED_MARKER in set_captured:
+            problems.append(
+                f"the suite printed `{VERIFIED_MARKER}` after the test-set phase failed"
+            )
+        if "SUITE-TOTAL-ONLY" not in set_captured:
+            problems.append(
+                "a reconciled total was not relabelled as total-only after the "
+                "test-set phase rejected it"
+            )
+
+        # POSITIVE CONTROL: the same healthy synthetic suite with a matching
+        # test set must pass, or the wiring could satisfy the check above by
+        # condemning every full run.
+        test_set_diff.check = lambda *_a, **_k: (
+            0,
+            f"{test_set_diff.VERIFIED_MARKER}: synthetic match",
+        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+            io.StringIO()
+        ):
+            clean_set_status = run_gate([])
+        if clean_set_status != 0:
+            problems.append(
+                "a healthy suite with a matching test set was refused — the "
+                "B163 phase would make every full gate red"
+            )
+
+        # A cargo target selector deliberately skips the all-binary set diff.
+        # Calling it there would report every unbuilt binary as removed and
+        # train lanes to ignore the real alarm.
+        test_set_diff.check = lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("set diff called for a targeted run")
+        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+            io.StringIO()
+        ):
+            targeted_status = run_gate(["--test", "synthetic"])
+        if targeted_status != 0:
+            problems.append(
+                "a healthy targeted run was refused by the all-binary set diff"
+            )
+    finally:
+        test_inventory.check = real_inventory_check
+        globals()["enumerate_expected_binaries"] = real_expected
+        globals()["run_and_capture"] = real_run
+        globals()["reconcile"] = real_reconcile
+        test_set_diff.check = real_set_check
+
     if problems:
         print("\nFAIL: suite-gate self-test", file=sys.stderr)
         for problem in problems:
@@ -1460,7 +1578,8 @@ def run_selftest() -> int:
     print(
         "\nPASS: the gate turns red on a crashed binary, and does so because the\n"
         "binary produced no summary — not merely because cargo exited non-zero.\n"
-        "A failed inventory (B085) stops it before a single test runs."
+        "A failed inventory (B085) stops it before a single test runs, and a\n"
+        "failed test-set diff (B163) survives a perfectly green suite total."
     )
     return 0
 

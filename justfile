@@ -104,6 +104,18 @@ test-inventory *ARGS:
 test-inventory-selftest:
     python3 scripts/test_inventory.py --selftest
 
+# B163: the even swap a suite total cannot see, both ways a test gets
+# disabled, and the three population zeros each drive a case here.
+#
+# Proves the test-SET diff can fail (offline, no cargo).
+test-set-diff-selftest:
+    python3 scripts/test_set_diff.py --selftest
+
+# Proves the selftest above is non-vacuous by removing each production guard
+# in a throwaway copy, including the independent `--list --ignored` path.
+test-set-diff-mutants:
+    python3 scripts/check_test_set_diff_nonvacuous.py
+
 # The same, end to end on the REAL tree and REAL artifacts: bumps a source
 # past the binary built from it, appends a `#[test]` the binary cannot
 # contain, and neuters each instrument in a throwaway copy. Restores
@@ -423,6 +435,24 @@ rclippy-delta-record:
     LSP_REMOTE_HOST="${LSP_REMOTE_HOST:-x-tuf}" python3 scripts/remote-build.py --sync-back clippy-baseline.json run -- python3 scripts/clippy_delta.py --record --baseline @target --commit "$(git rev-parse HEAD)"
     cp target/clippy-baseline.json docs/clippy-baseline.json
     @echo "docs/clippy-baseline.json updated from x-tuf (rustc 1.97.0, same as local)"
+
+# B163: re-record the committed test baseline from the remote.
+#
+# Same shape as `rclippy-delta-record` above, and the same flag-order note
+# applies: options go BEFORE `run`. The tool writes into the remote
+# CARGO_TARGET_DIR, `--sync-back` fetches it, and only then does the committed
+# file get replaced — so a failed remote run cannot leave a half-written
+# baseline, which for THIS file would mean a short list that reports zero
+# removals forever.
+#
+# Re-recording does not conceal a removal, it RENDERS it: the deleted test
+# becomes a deleted line in your diff, next to the change that caused it.
+#
+# Re-record the test-set baseline from the remote, after an intended change.
+rtest-baseline-record:
+    python3 scripts/remote-build.py --sync-back test-baseline.txt run -- python3 scripts/test_set_diff.py --record --baseline @target
+    cp target/test-baseline.txt docs/test-baseline.txt
+    @echo "docs/test-baseline.txt updated — review the diff before committing"
 
 # The non-vacuity harness, on the remote. It mutates the tree, so it runs
 # WHOLLY over there against one synced copy — never split across machines.
