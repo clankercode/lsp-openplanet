@@ -1394,3 +1394,242 @@ mod omitted_own_module_usage {
         );
     }
 }
+
+/// B084: a global function that is CALLED must be credited by the ordinary
+/// "referenced anywhere" pass, entirely independently of any export surface.
+///
+/// The defect these tests pin is OVERLOAD-SHAPED. `Checker::call_type`
+/// credits a bare call through `GlobalScope::lookup_function_return`, whose
+/// workspace fallback (`lookup_workspace_function_property`) returns `None`
+/// the moment TWO function symbols share the name — the "ambiguous, say
+/// nothing" arm. With no return type the call fell through the ladder to
+/// `has_global_ident`, which SILENCES the undefined-identifier diagnostic
+/// without recording anything, so every overload was reported unused.
+///
+/// That is why the symptom was invisible on master: `CoordToPos` in
+/// tm-editor-plus-plus is overloaded three ways AND has an export stub, so
+/// B062's export rooting hid it. Nothing here is exported.
+#[cfg(test)]
+mod called_global_functions_are_credited {
+    use super::test_support::{names, snap_of};
+    use super::*;
+    use std::collections::HashSet as StdHashSet;
+
+    fn report(files: &[(&str, &str)]) -> Vec<String> {
+        names(&unused_declarations(
+            &snap_of(files),
+            None,
+            &StdHashSet::new(),
+        ))
+    }
+
+    /// Baseline control: a single, NON-overloaded global function called
+    /// from file scope has always been credited. If this ever goes red the
+    /// whole family below is measuring something else.
+    #[test]
+    fn single_global_function_called_from_file_scope_is_credited() {
+        assert_eq!(
+            report(&[("a.as", "void Ping(int a) {}\nvoid Main() { Ping(1); }\n")]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// The red case. Two overloads, both called, nothing exported.
+    #[test]
+    fn overloaded_global_function_called_from_file_scope_is_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping(int a) {}\nvoid Ping(float a) {}\nvoid Main() { Ping(1); Ping(1.0f); }\n",
+            )]),
+            Vec::<String>::new(),
+            "both overloads are called; neither may be reported unused"
+        );
+    }
+
+    /// Three overloads — the tm-editor-plus-plus `CoordToPos` arity.
+    #[test]
+    fn three_overloads_called_from_file_scope_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "int Conv(int a) { return a; }\nint Conv(float a) { return int(a); }\nint Conv(bool a) { return a ? 1 : 0; }\nvoid Main() { print(\"\" + Conv(1) + Conv(1.0f) + Conv(true)); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloads that differ only by ARITY, not by parameter type — the
+    /// other way a name gets two symbols.
+    #[test]
+    fn arity_overloads_called_from_file_scope_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping() {}\nvoid Ping(int a) {}\nvoid Main() { Ping(); Ping(1); }\n"
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Cross-file: declarations in one file, the only calls in another.
+    #[test]
+    fn overloads_called_from_another_file_are_credited() {
+        assert_eq!(
+            report(&[
+                ("a.as", "void Ping(int a) {}\nvoid Ping(float a) {}\n"),
+                ("b.as", "void Main() { Ping(1); Ping(1.0f); }\n"),
+            ]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Called from inside a class method rather than a free function.
+    #[test]
+    fn overloads_called_from_a_class_method_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping(int a) {}\nvoid Ping(float a) {}\nclass C { void Go() { Ping(1); Ping(1.0f); } }\nvoid Main() { C c; c.Go(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Called from inside a namespace block, as a BARE name. The bare
+    /// spelling reaches the global through the namespace ladder's
+    /// fall-through, which is the arm that never recorded.
+    #[test]
+    fn overloads_called_bare_from_inside_a_namespace_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping(int a) {}\nvoid Ping(float a) {}\nnamespace N { void Go() { Ping(1); Ping(1.0f); } }\nvoid Main() { N::Go(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloads DECLARED inside a namespace and called under their
+    /// qualified spelling from file scope.
+    #[test]
+    fn namespaced_overloads_called_qualified_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "namespace N { void Ping(int a) {} void Ping(float a) {} }\nvoid Main() { N::Ping(1); N::Ping(1.0f); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloads declared inside a namespace and called BARE from a
+    /// sibling function in the same namespace.
+    #[test]
+    fn namespaced_overloads_called_bare_from_same_namespace_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "namespace N { void Ping(int a) {} void Ping(float a) {} void Go() { Ping(1); Ping(1.0f); } }\nvoid Main() { N::Go(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloads called from a DIFFERENT namespace, qualified.
+    #[test]
+    fn namespaced_overloads_called_from_another_namespace_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "namespace N { void Ping(int a) {} void Ping(float a) {} }\nnamespace M { void Go() { N::Ping(1); N::Ping(1.0f); } }\nvoid Main() { M::Go(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloaded CLASS METHODS called on a typed receiver — the same
+    /// two-symbols-one-name shape, on the member path.
+    #[test]
+    fn overloaded_class_methods_called_on_a_receiver_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "class C { void Ping(int a) {} void Ping(float a) {} }\nvoid Main() { C c; c.Ping(1); c.Ping(1.0f); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A global funcdef HANDLE invoked as a call (`g_cb()`) reaches the
+    /// same fall-through: `has_global_ident` is true via the Variable arm,
+    /// the diagnostic is silenced, and nothing was recorded. The
+    /// namespaced twin of this arm already credits it.
+    #[test]
+    fn an_invoked_global_funcdef_handle_is_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "funcdef void CB();\nvoid Impl() {}\nCB@ g_cb = CB(Impl);\nvoid Main() { g_cb(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A workspace CLASS constructed by a bare constructor call at global
+    /// scope. `has_type` returns `Named(name)` there without recording,
+    /// while the namespaced twin one screen up does `record_use`.
+    #[test]
+    fn a_class_constructed_by_a_bare_ctor_call_is_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "class Thing { Thing(int a) {} int Val() { return 1; } }\nvoid Main() { auto t = Thing(1); print(\"\" + t.Val()); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// THE OVER-ROOTING GATE. A genuinely uncalled overload pair must
+    /// STILL be reported — a fix that credits every name it cannot
+    /// resolve passes every assertion above and this one catches it.
+    #[test]
+    fn uncalled_overloads_are_still_reported() {
+        let out = report(&[(
+            "a.as",
+            "void Dead(int a) {}\nvoid Dead(float a) {}\nvoid Main() {}\n",
+        )]);
+        assert_eq!(
+            out,
+            vec!["Dead", "Dead"],
+            "two uncalled overloads, two findings: {out:?}"
+        );
+    }
+
+    /// The truly-dead control living BESIDE a credited overload pair, so
+    /// silence and reporting are measured in one fixture.
+    #[test]
+    fn a_dead_overload_pair_beside_a_called_one_is_still_reported() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping(int a) {}\nvoid Ping(float a) {}\nvoid Dead(int a) {}\nvoid Dead(float a) {}\nvoid Main() { Ping(1); Ping(1.0f); }\n",
+            )]),
+            vec!["Dead", "Dead"]
+        );
+    }
+
+    /// THE MASKING ASSERTION, per the ticket. `CoordToPos` was silent on
+    /// master for two independent reasons — it is called, and it has an
+    /// export stub. Removing the export must not resurrect the warning.
+    /// The pair below is the closest in-module analogue: the identical
+    /// source, once with the calls and once without, must differ.
+    #[test]
+    fn calling_alone_silences_an_overload_without_any_export_surface() {
+        let called =
+            "void Ping(int a) {}\nvoid Ping(float a) {}\nvoid Main() { Ping(1); Ping(1.0f); }\n";
+        let uncalled = "void Ping(int a) {}\nvoid Ping(float a) {}\nvoid Main() {}\n";
+        assert_eq!(report(&[("a.as", called)]), Vec::<String>::new());
+        assert_eq!(report(&[("a.as", uncalled)]), vec!["Ping", "Ping"]);
+    }
+}
