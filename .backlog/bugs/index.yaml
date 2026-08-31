@@ -146,3 +146,4 @@ bugs:
     - file: B145-game-ground-truth-for-issue-re.todo
     - file: B146-nadeo-params-are-recorded-as-n.todo
     - file: B147-remote-build-sync-back-reports.todo
+    - file: B148-b067-and-b071-corpora-are-stam.todo
