@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T17:30:56Z"
 depends_on: []
 estimate_hours: 1
 id: B169
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'REBASE_HEAD is not an unresolved-rebase sentinel: it survives a successful conflicted rebase, so the gate refuses to run for exactly the lane that just resolved a conflict, and the escape hatch it names does not work through just rtest'
@@ -12,3 +14,80 @@ updated_at: "2026-08-31T17:30:56Z"
 ---
 
 REBASE_HEAD is not an unresolved-rebase sentinel: it survives a successful conflicted rebase, so the gate refuses to run for exactly the lane that just resolved a conflict, and the escape hatch it names does not work through just rtest
+
+FOUND by lane-tooling while re-gating B162, blocking the merge until worked
+around. Measured from scratch, not inferred.
+
+THE REFUSAL. `just rtest` refused with "the working tree has an unresolved
+rebase" on a tree where the rebase had reported success and `git status` was
+clean. Three independent checks say there is no unresolved operation:
+  - no `rebase-merge/` or `rebase-apply/` in the worktree gitdir, the common dir,
+    or ANY worktree in the repo
+  - `git status` clean, 0 unmerged paths
+  - git's own verdict: `git rebase --continue` -> `fatal: no rebase in progress`
+
+What IS present is `REBASE_HEAD`, which `GIT_OPERATION_SENTINELS` treats as an
+unresolved-rebase sentinel.
+
+REPRODUCED IN A THROWAWAY REPO:
+
+                        rebase-merge/    REBASE_HEAD
+  mid-conflict          present          present
+  after SUCCESSFUL
+    conflicted rebase   absent           STILL PRESENT
+  after CLEAN rebase    absent           absent
+
+So `REBASE_HEAD` marks "a rebase happened and had conflicts", not "a rebase is
+unresolved". It survives completion. The clean-rebase row explains why this never
+fired across ~8 clean rebases tonight and fired on the first conflicted one.
+
+IT IS THE ODD ONE OUT, AND THAT IS THE ROOT CAUSE. `MERGE_HEAD` is present
+mid-conflict and REMOVED BY GIT ON RESOLUTION. The sentinel list conflates "git
+writes this during the operation" with "git writes this only while unresolved",
+and those two differ for exactly one of the four HEAD-style entries.
+
+THE SELFTEST PINS THE WRONG PREMISE RATHER THAN MISSING IT.
+`remote-build.py:864` hardcodes `("REBASE_HEAD", "rebase")` DELIBERATELY
+independent of the table, with a comment saying the hardcoding exists so an
+omission cannot hide. Same shape as B106's selftest asserting exit 0 for the
+input B162 turned out to be about: the guard is well-built around a false
+premise, so its own test defends the defect. Fixing the table without fixing
+that assertion will fail, and fixing the assertion without understanding why it
+was hardcoded will lose the omission protection it was written for.
+
+THE REMEDIATION ADVICE IS UNUSABLE AS WRITTEN -- measured, not assumed. The
+message says "Pass --allow-unresolved". Through `just rtest`, the command every
+lane is told to run, flags land after the action and never reach the flag parser,
+so `just rtest --allow-unresolved` reprints THE IDENTICAL REFUSAL. A reader
+following the advice literally loops. Same class as B162's unreachable-repair
+trap, in the same file, found the same night. The working form is
+`python3 scripts/remote-build.py --allow-unresolved test`.
+
+IMPACT. It fires on precisely the lane that resolved a conflict and is
+re-gating -- the workflow this batch mandates -- and the escape hatch it names
+does not work through the documented entry point. Four lanes hit conflicted
+rebases tonight.
+
+THE WORK:
+  1. Remove `REBASE_HEAD` from the sentinel set; detect an unresolved rebase by
+     `rebase-merge/` or `rebase-apply/`, which is what git itself uses.
+  2. Fix the `remote-build.py:864` assertion, and preserve the omission
+     protection it was written for by some means that does not require the
+     premise to be true.
+  3. Make the remediation advice reachable from `just rtest`, or say the
+     `python3 scripts/remote-build.py ...` form explicitly in the message. Do not
+     print advice that cannot be followed through the documented entry point.
+  4. Audit the other three HEAD-style sentinels against the same
+     during-vs-unresolved distinction. `MERGE_HEAD` is known correct; the others
+     have not been checked and share this one's provenance.
+
+REQUIRED EVIDENCE: RED is the throwaway-repo table above, re-run. GREEN is a
+successful conflicted rebase followed by `just rtest` proceeding. POSITIVE
+CONTROL is a genuinely mid-conflict tree still being refused -- without it the
+fix could be "never refuse", and the red/green would look identical.
+
+NOTE: `REBASE_HEAD` was deliberately NOT deleted from the affected worktree, so
+the defect stays reproducible. Do not "fix" a lane by deleting it.
+
+Related: B162 (the unreachable-repair trap), B168 (a guard well-built around a
+false premise, whose own test defends it).
