@@ -241,6 +241,36 @@ indistinguishable from "I am structurally incapable of seeing it".
   general fix is that any number handed across a lane boundary carries the
   command that produced it.
 
+- **A private predicate behind a public wrapper that embeds it is not
+  private.** Designing the fix for B079 (callers reaching for the wrong member
+  of a set of near-identical predicates), the obvious move was to make the
+  dangerous one, `TypeIndex::scope_exists`, `pub(crate)` so distant modules
+  could not reach it. A lane measured the callers before doing it and found
+  that **the move would not have prevented the defect it was designed to
+  prevent**: hover never called `scope_exists` at all. It reached the same
+  index-only scope test *through* `source_reference_key`, which is separately
+  public and embeds it.
+
+  So the encapsulation boundary was drawn around the *name* rather than around
+  the *capability*, and a second public function handed that capability out
+  from behind it. Both had to be demoted; demoting either alone accomplishes
+  nothing.
+
+  **Transferable: when you restrict access to a function, enumerate what else
+  exposes its behaviour, not just what else calls it by name.** A wrapper, a
+  convenience helper, a `Deref`, a trait impl, or a public field can each
+  re-export a capability you believe you have just closed off. The check is
+  cheap — ask which other public entry points produce the same observable
+  effect — and skipping it yields a fix that looks structural, reviews well,
+  and changes nothing.
+
+  Note the shape it shares with the rest of this document: the failure would
+  have been **silent and congratulatory**. The demotion compiles, the tests
+  pass, the diff reads as real hardening, and the hole stays open. Nothing
+  would have contradicted it. It was caught only because the lane measured the
+  call sites instead of reasoning about them — the same move that killed three
+  wrong diagnoses in B078.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
