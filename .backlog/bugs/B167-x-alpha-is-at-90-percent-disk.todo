@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T17:23:21Z"
+depends_on: []
+estimate_hours: 1
+id: B167
+priority: high
+status: pending
+tags: []
+title: 'x-alpha is at 90 percent disk with 45G free and six per-lane target dirs holding 82G: the B106 ENOSPC false-green route is one concurrent lane away from reopening'
+updated_at: "2026-08-31T17:23:21Z"
+---
+
+x-alpha is at 90 percent disk with 45G free and six per-lane target dirs holding 82G: the B106 ENOSPC false-green route is one concurrent lane away from reopening
