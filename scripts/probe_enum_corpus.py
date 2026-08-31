@@ -323,6 +323,21 @@ def write_b052(enums: list[dict], dest: Path, batch: int = 200) -> int:
     return undetermined
 
 
+def value_verdict(msg: str | None) -> str:
+    """B053's vocabulary. Module level so a re-probe scores rows the SAME way
+    the corpus was written; a private copy in a checker is how two readings of
+    one file quietly diverge."""
+    if msg is None:
+        return "UNDETERMINED"  # analysis never ran for this name (B068)
+    if not msg:
+        return "ACCEPTED"
+    if "multiple matching enum values" in msg:
+        return "AMBIGUOUS"
+    if msg.startswith("No matching symbol"):
+        return "NO_SYMBOL"
+    return "OTHER"
+
+
 def write_b053(enums: list[dict], dest: Path, batch: int = 200) -> int:
     by_value: dict[str, list[str]] = collections.defaultdict(list)
     for e in enums:
@@ -357,17 +372,7 @@ def write_b053(enums: list[dict], dest: Path, batch: int = 200) -> int:
         for value, _ in e["values"]:
             global_owners[value].add(short)
 
-    def verdict(msg: str | None) -> str:
-        if msg is None:
-            return "UNDETERMINED"  # analysis never ran for this name (B068)
-        if not msg:
-            return "ACCEPTED"
-        if "multiple matching enum values" in msg:
-            return "AMBIGUOUS"
-        if msg.startswith("No matching symbol"):
-            return "NO_SYMBOL"
-        return "OTHER"
-
+    verdict = value_verdict
     rows = [
         "# B053 probe corpus - every bare value name of a NAMED enum.\n",
         "# global_enum_owners: distinct NAMES of globally visible enums carrying it\n",
@@ -671,6 +676,15 @@ def run_selftest() -> int:
     )
 
     # The verdict mapping must carry the third state all the way to the corpus.
+    check("b053: UNDETERMINED survives", value_verdict(None), "UNDETERMINED")
+    check("b053: accept", value_verdict(""), "ACCEPTED")
+    check("b053: no symbol", value_verdict("No matching symbol 'X'"), "NO_SYMBOL")
+    check(
+        "b053: ambiguous",
+        value_verdict("Found multiple matching enum values"),
+        "AMBIGUOUS",
+    )
+    check("b053: other", value_verdict("something else"), "OTHER")
     check("UNDETERMINED reaches the corpus", type_verdict(None), "UNDETERMINED")
     check("an accept is still ACCEPTED", type_verdict(""), "ACCEPTED")
     check("a reject is still REJECTED", type_verdict("Expected identifier"), "REJECTED")

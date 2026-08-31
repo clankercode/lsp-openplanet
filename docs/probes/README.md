@@ -351,8 +351,29 @@ spelling, so the defect can only invent an ACCEPTED. Every "the LSP must reject
 this" assertion built on these files was always sound, and B056's narrowing
 claim is unaffected.
 
-**`b053-bare-enum-values.tsv` has NOT been re-probed** — its 592 ACCEPTED rows
-remain open work under B068.
+### b053 has been re-probed too. Nothing changed at all.
+
+All **592 ACCEPTED rows** of `b053-bare-enum-values.tsv` were re-measured at
+`batch=1` on the same day. **592 unchanged, 0 changed, 0 UNDETERMINED** —
+both buckets empty, including the environmental one.
+
+Bare value names have their own version of the `Foo` drift: a plugin declaring
+a *global* enum with a value named `X` makes bare `X` compile, and if that
+plugin goes away `X` stops compiling. Sampled `NO_SYMBOL` rows were re-probed
+as context pins to detect it (`AAAA`, `Nadeo`, plus two fabricated names) and
+all came back unchanged, so no value-level drift touched this corpus between
+the two runs.
+
+The run asserts its own batch size. `--batch 1` is an intention; the driver
+wraps `run_batch` and records the unit size actually reached — `[1]` — into the
+checkpoint artifact. That check exists because `--batch` was once accepted,
+documented, and ignored by both corpus writers, so a re-probe could have run at
+200 while reporting 1, reproducing the defect it was built to detect and
+returning a clean bill of health. A knob wired to nothing looks identical from
+the outside.
+
+**Both corpora are now re-measured and sound.** Across 1334 ACCEPTED rows, zero
+were fabricated by the batching defect.
 
 **A verdict this document does not yet contain: `UNDETERMINED`.** If a
 regenerated corpus carries one, `global_scope.rs` panics on it by design, but
