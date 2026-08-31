@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T13:55:40Z"
 depends_on: []
 estimate_hours: 1
 id: B122
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'cargo fmt --check is red repo-wide on master: 77 diffs across five files, so any lane that runs cargo fmt makes its own diff unreviewable'
@@ -12,3 +14,46 @@ updated_at: "2026-08-31T13:55:40Z"
 ---
 
 cargo fmt --check is red repo-wide on master: 77 diffs across five files, so any lane that runs cargo fmt makes its own diff unreviewable
+
+
+## Flagged by lane-enum during B120, 2026-08-31
+
+`cargo fmt --check` is red **repo-wide on master**: 77 diffs across
+`src/cli/mod.rs`, `src/server/completion.rs`, `interface_impl.rs`,
+`relocate_symbol.rs`, and ~40 pre-existing spots in `src/typecheck/checker.rs`.
+
+It is **not a gate**, so nothing is failing. The problem is the trap it sets.
+
+## Why this is a ticket and not a one-line fix
+
+**Anyone who "just runs `cargo fmt`" inside a lane makes their own diff
+unreviewable** — 77 unrelated hunks land in a lane commit alongside the three
+files the lane actually touched, and the reviewer cannot separate them. That is
+the same shape as the `git add -A` and `reset --soft master` hazards already in
+`docs/verification-hazards.md`: one command that sweeps in work the author did
+not do, produces a commit that applies cleanly, and defeats review rather than
+any test.
+
+lane-enum did the right thing — hand-fixed the single nit that was its own,
+verified its new module was fmt-clean, and left the other 77 alone.
+
+## The fix, and the ordering constraint that makes it awkward
+
+Run `cargo fmt` on master as **one commit that does nothing else**, then
+optionally add `--check` to a gate so it cannot drift again.
+
+**Do it when no lane is in flight.** A repo-wide reformat is a merge-conflict
+generator: every lane branch touching those five files gets a conflict in
+territory neither side meaningfully edited. Coordinate, or the cure costs more
+than the disease. `src/typecheck/checker.rs` is the most-contended file in this
+batch and carries 40-odd of the 77.
+
+Add the resulting commit SHA to `.git-blame-ignore-revs` so `git blame` still
+works through it.
+
+## Decide deliberately, do not assume
+
+Check whether the repo has a `rustfmt.toml` and whether the 77 diffs are
+default-rustfmt opinions or a config the project deliberately does not follow.
+"The formatter disagrees" and "the code is misformatted" are different findings,
+and only the second justifies rewriting five files.
