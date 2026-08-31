@@ -809,6 +809,11 @@ fn add_shortcut_completions(
                         filter_text: Some(value.clone()),
                         sort_text: Some(SHORTCUT_SORT_TEXT.to_string()),
                         detail: Some(format!("{} = {}", spelling, int_value)),
+                        documentation: info
+                            .value_docs
+                            .get(value)
+                            .cloned()
+                            .map(Documentation::String),
                         ..Default::default()
                     });
                 }
@@ -2236,7 +2241,7 @@ mod b133_enum_value_docs {
         let db: crate::typedb::core_format::CoreDatabase =
             serde_json::from_value(serde_json::json!({
                 "op": "1.0",
-                "enums": [{"name": "E", "values": {
+                "enums": [{"ns": "UI", "name": "E", "values": {
                     "Documented": {"v": 1, "d": "The documented value."},
                     "Plain": {"v": 2}
                 }}]
@@ -2249,7 +2254,7 @@ mod b133_enum_value_docs {
     #[test]
     fn core_enum_completion_documents_one_value_and_leaves_the_common_fallback_plain() {
         let idx = core_index();
-        let items = complete_namespace_members("E", Some(&idx), None);
+        let items = complete_namespace_members("UI::E", Some(&idx), None);
         let documented = items.iter().find(|i| i.label == "Documented").unwrap();
         assert_eq!(
             documented.documentation,
@@ -2257,6 +2262,21 @@ mod b133_enum_value_docs {
         );
         let plain = items.iter().find(|i| i.label == "Plain").unwrap();
         assert_eq!(plain.documentation, None);
+    }
+
+    #[test]
+    fn shortcut_enum_value_completion_carries_the_same_doc() {
+        let idx = core_index();
+        let mut items = Vec::new();
+        add_shortcut_completions(&mut items, &idx, &["UI".into()], true, "doc");
+        let documented = items
+            .iter()
+            .find(|i| i.label == "UI::E::Documented")
+            .expect("shortcut enum value");
+        assert_eq!(
+            documented.documentation,
+            Some(Documentation::String("The documented value.".into()))
+        );
     }
 
     #[test]
