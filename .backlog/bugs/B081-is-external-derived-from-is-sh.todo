@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T12:55:53Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T13:16:43Z"
 complexity: medium
 created_at: "2026-08-31T03:23:05Z"
 depends_on: []
+duration_minutes: 20.847882874316667
 estimate_hours: 1
 id: B081
 priority: high
 started_at: "2026-08-31T12:55:53Z"
-status: in_progress
+status: done
 tags: []
 title: is_external_derived_from is shadow-blind by construction and indistinguishable from is_external_type at the call site
-updated_at: "2026-08-31T12:55:53Z"
+updated_at: "2026-08-31T13:16:43Z"
 ---
 Split out of B079 (2026-08-31) because neither of B079's two moves can reach
 it, and it needs a different mechanism.
