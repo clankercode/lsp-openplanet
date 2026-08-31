@@ -2580,19 +2580,42 @@ impl<'a> Checker<'a> {
                 // behaviour. Use the legacy helpers so existing tests keep
                 // passing byte-for-byte.
                 self.check_arg_count(display_name, qualified, args.len(), callee_span);
+                let (arg_tys, arg_literals) = self.type_args_once(args);
                 if let Some(params) = self.scope.lookup_function_params(qualified) {
-                    self.walk_args_and_check_types(display_name, args, &params);
-                } else {
-                    self.walk_args(args);
+                    self.check_arg_types_against_params(display_name, args, &arg_tys, &params);
                 }
+                // B089: the funcdef-slot check the external call path has had
+                // since B023. `lookup_function_params` returns the declared
+                // param TEXT, which is what `slot_funcdef` needs, but the
+                // primitive check above discards everything that is not a
+                // primitive — a funcdef-typed parameter fell straight through
+                // it.
+                self.report_workspace_funcdef_slot_failure(
+                    qualified,
+                    args,
+                    &arg_tys,
+                    &arg_literals,
+                    &overloads,
+                );
                 fallback_ret
             }
             _ => {
                 // 2+ overloads: walk args once, run real resolution.
                 // Named-arg overload resolution is not implemented yet —
                 // bind types in call order (positional) for matching.
-                let arg_tys: Vec<TypeRepr> =
-                    args.iter().map(|a| self.expr_type(&a.value)).collect();
+                let (arg_tys, arg_literals) = self.type_args_once(args);
+                // B089: run BEFORE `resolve_overload`, and independently of
+                // its verdict — the set-level rule is "every arity-compatible
+                // candidate is rejected by a funcdef slot", which is a
+                // different question from whether any candidate wins on
+                // primitive conversions.
+                self.report_workspace_funcdef_slot_failure(
+                    qualified,
+                    args,
+                    &arg_tys,
+                    &arg_literals,
+                    &overloads,
+                );
                 match resolve_overload(&overloads, &arg_tys) {
                     OverloadMatch::Unique(sig) => {
                         // A unique winner means every primitive arg either
@@ -2734,6 +2757,43 @@ impl<'a> Checker<'a> {
             _ => return None,
         };
         self.scope.lookup_funcdef(&name)
+    }
+
+    /// B089: [`Self::slot_funcdef`], resolved in the DECLARING SCOPE of
+    /// `owner_qualified`.
+    ///
+    /// Workspace parameter text is the source spelling, so a funcdef declared
+    /// in `namespace NS` and used by a function in the same namespace is
+    /// stored as `Maker@`, not `NS::Maker@`. `lookup_funcdef` takes a
+    /// qualified name and does no ancestor walk, so that slot resolved to
+    /// nothing and the parameter was treated as a non-funcdef — silent in
+    /// exactly the way that reads as "checked, and fine". It is the
+    /// namespaced half of this ticket's generalisation and it passed the
+    /// qualified spelling of the same test.
+    ///
+    /// External parameter text is already fully qualified, which is why the
+    /// typedb path does not need this.
+    fn slot_funcdef_in_scope(&self, param_text: &str, owner_qualified: &str) -> Option<FuncdefSig> {
+        if let Some(fd) = self.slot_funcdef(param_text) {
+            return Some(fd);
+        }
+        let name = match Self::peel_const_handle(&TypeRepr::parse_type_string(param_text.trim())) {
+            TypeRepr::Named(n) | TypeRepr::Funcdef(n) => n.clone(),
+            _ => return None,
+        };
+        // A written qualifier is the author's own answer about scope; walking
+        // past it would resolve a name they did not write.
+        if name.contains("::") {
+            return None;
+        }
+        let mut owner = owner_qualified;
+        while let Some((prefix, _)) = owner.rsplit_once("::") {
+            if let Some(fd) = self.scope.lookup_funcdef(&format!("{prefix}::{name}")) {
+                return Some(fd);
+            }
+            owner = prefix;
+        }
+        None
     }
 
     /// B076: the funcdef bind check, reached from a DECLARATION or an
@@ -3634,37 +3694,155 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Walk each argument expression and, for primitive-typed args whose
-    /// corresponding declared parameter type is also a primitive, emit an
-    /// `ArgTypeMismatch` when they differ. Non-primitive arg types, unknown
-    /// param types (non-primitive text), and error types are all silently
-    /// skipped — this is deliberately conservative, mirroring
-    /// `ReturnTypeMismatch`'s primitive-only strategy.
+    /// Type every argument expression exactly once, returning the types and
+    /// a parallel "was this a literal?" flag.
+    ///
+    /// Split out because three workspace call paths need the SAME arg types
+    /// for two different checks, and `expr_type` is not idempotent — it
+    /// pushes the nested diagnostics of the argument subtree, so a second
+    /// pass duplicates every one of them.
+    fn type_args_once(&mut self, args: &[CallArg]) -> (Vec<TypeRepr>, Vec<bool>) {
+        let mut arg_tys = Vec::with_capacity(args.len());
+        let mut arg_literals = Vec::with_capacity(args.len());
+        for a in args {
+            arg_tys.push(self.expr_type(&a.value));
+            arg_literals.push(matches!(
+                a.value.kind,
+                ExprKind::BoolLit(_)
+                    | ExprKind::IntLit(_)
+                    | ExprKind::HexLit(_)
+                    | ExprKind::FloatLit(_)
+                    | ExprKind::StringLit
+            ));
+        }
+        (arg_tys, arg_literals)
+    }
+
+    /// B089: B023's funcdef-slot bind test, run over a call to a WORKSPACE
+    /// callable.
+    ///
+    /// Nothing here re-implements the comparison. [`Self::slot_funcdef`]
+    /// resolves a parameter whose text names a funcdef and
+    /// [`Self::arg_fails_funcdef_slot`] carries B023's false-positive guards;
+    /// both already ran on the external call path and at B076's four
+    /// declaration positions. The gap this closes is purely POSITIONAL —
+    /// `Maker(MakeDistinct)` and `Maker@ b = MakeDistinct;` were rejected
+    /// while `Take(MakeDistinct)` was accepted, so the LSP gave two answers
+    /// for one binding depending on where it was written.
+    ///
+    /// **An overload set is not a declaration, and that is the whole reason
+    /// this is not simply the external check.** A candidate rejecting the
+    /// argument is not the call being wrong: only when EVERY arity-compatible
+    /// candidate is rejected does anything get reported. B060 is the standing
+    /// demonstration of getting that backwards — widening the
+    /// function-shaped rule there killed whole overload sets on one
+    /// candidate's verdict, and the test that pins this lives in the same
+    /// fixture as the errors.
+    ///
+    /// It is deliberately NARROWER than the external path in a second way: a
+    /// candidate is only ever rejected here by a FUNCDEF slot. A
+    /// function-shaped argument meeting a non-funcdef parameter leaves the
+    /// candidate neutral, so a set with no funcdef parameter at that position
+    /// can never fire. That is less than the engine does; widening it is
+    /// B023's scope decision to reopen, and B060 is what widening it cost.
+    ///
+    /// Never walks `args` — callers pass the types from
+    /// [`Self::type_args_once`].
+    fn report_workspace_funcdef_slot_failure(
+        &mut self,
+        qualified_name: &str,
+        args: &[CallArg],
+        arg_tys: &[TypeRepr],
+        arg_literals: &[bool],
+        overloads: &[OverloadSig],
+    ) {
+        let mut evidence: Option<Span> = None;
+        let mut any_candidate = false;
+        for sig in overloads
+            .iter()
+            .filter(|sig| args.len() >= sig.min_args && args.len() <= sig.param_types.len())
+        {
+            any_candidate = true;
+            let mut rejected: Option<Span> = None;
+            let mut next_positional = 0usize;
+            for (i, arg) in args.iter().enumerate() {
+                let named = arg.name.as_ref().map(|n| n.text(self.source));
+                let ArgBind::Index(slot) =
+                    call_site::bind_arg(named, &sig.param_names, &mut next_positional)
+                else {
+                    continue;
+                };
+                let Some(param_text) = sig.param_types.get(slot) else {
+                    continue;
+                };
+                let Some(arg_ty) = arg_tys.get(i) else {
+                    continue;
+                };
+                if arg_ty.is_error() {
+                    continue;
+                }
+                let Some(fd) = self.slot_funcdef_in_scope(param_text, qualified_name) else {
+                    continue;
+                };
+                if self.arg_fails_funcdef_slot(&fd, &arg.value, arg_ty) {
+                    rejected = Some(arg.value.span);
+                }
+            }
+            match rejected {
+                Some(span) => evidence = evidence.or(Some(span)),
+                // A candidate that no funcdef slot rejects keeps the whole
+                // call alive. Bail immediately rather than accumulate.
+                None => return,
+            }
+        }
+        if !any_candidate {
+            return;
+        }
+        if let Some(span) = evidence {
+            self.diagnostics.push(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::NoMatchingSignatures {
+                    text: render_no_matching_sig(qualified_name, arg_tys, arg_literals),
+                },
+            });
+        }
+    }
+
+    /// For primitive-typed args whose corresponding declared parameter type
+    /// is also a primitive, emit an `ArgTypeMismatch` when they differ.
+    /// Non-primitive arg types, unknown param types (non-primitive text),
+    /// and error types are all silently skipped — this is deliberately
+    /// conservative, mirroring `ReturnTypeMismatch`'s primitive-only strategy.
     ///
     /// Binding rules (AngelScript):
     /// - Unnamed (positional) args bind left-to-right to successive parameters.
     /// - Named args (`name: value`) bind to the matching parameter by name and
     ///   may skip optional/defaulted parameters.
     ///
-    /// Walks each arg exactly once so callers must NOT pre-walk.
-    fn walk_args_and_check_types(
+    /// Takes already-computed arg types (B089): the caller walks once via
+    /// [`Self::type_args_once`] and shares the result with the funcdef-slot
+    /// check, because typing an argument twice duplicates the nested
+    /// diagnostics of its subtree.
+    fn check_arg_types_against_params(
         &mut self,
         display_name: &str,
         args: &[CallArg],
+        arg_tys: &[TypeRepr],
         params: &[(String, String)],
     ) {
         let mut next_positional = 0usize;
-        for arg in args {
+        for (i, arg) in args.iter().enumerate() {
             let named = arg.name.as_ref().map(|n| n.text(self.source));
             match call_site::bind_arg_workspace(named, params, &mut next_positional) {
                 ArgBind::UnknownName => {
-                    // Unknown parameter name — still type the value for
-                    // nested diagnostics, but don't emit ArgTypeMismatch.
-                    let _ = self.expr_type(&arg.value);
+                    // Unknown parameter name — no ArgTypeMismatch. The value
+                    // was already typed, so its nested diagnostics stand.
                     continue;
                 }
                 ArgBind::Index(param_index) => {
-                    let arg_ty = self.expr_type(&arg.value);
+                    let Some(arg_ty) = arg_tys.get(i).cloned() else {
+                        continue;
+                    };
                     let Some((_, param_text)) = params.get(param_index) else {
                         continue;
                     };
@@ -3932,7 +4110,29 @@ impl<'a> Checker<'a> {
                     self.check_arity_against_ranges(&member_name, &ranges, args.len(), callee.span);
                     self.walk_args(args);
                 } else {
-                    self.walk_args(args);
+                    // B089: a WORKSPACE class method. `callables_method` is
+                    // typedb-only, so this arm has always been the "nothing
+                    // known about the parameters" fallback — but the workspace
+                    // symbol table does know them, and a funcdef-typed
+                    // parameter on a plugin's own method was the one binding
+                    // position with no check of any kind.
+                    //
+                    // Only the funcdef-slot rule is run here. Turning this arm
+                    // into a general workspace-method arg-type check is a much
+                    // larger change with its own false-positive surface, and
+                    // this ticket's scope is the slot check's missing
+                    // positions.
+                    let qualified_method = format!("{type_name}::{member_name}");
+                    let method_overloads =
+                        self.method_overloads_including_inherited(&qualified_method);
+                    let (arg_tys, arg_literals) = self.type_args_once(args);
+                    self.report_workspace_funcdef_slot_failure(
+                        &qualified_method,
+                        args,
+                        &arg_tys,
+                        &arg_literals,
+                        &method_overloads,
+                    );
                 }
                 // AC19: when the receiver is a const object, a non-const
                 // method's return value inherits `Const(_)` so that
