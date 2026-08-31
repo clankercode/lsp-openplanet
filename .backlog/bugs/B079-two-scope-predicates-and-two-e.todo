@@ -279,3 +279,65 @@ lane-b060-b062's merge.
 **Nothing here is urgent.** There is no outstanding live defect; the argument
 for acting is the rate, not any instance. Do not let that licence a wider
 refactor of predicate handling.
+
+
+## Reframing: visibility is not a tool here (lane-b057, 2026-08-31)
+
+The first cut approved for this ticket — `pub(crate)` demotions — **does not
+work**, and the correction changes what this ticket is.
+
+**This is one crate.** `typedb`, `typecheck` and `server` are sibling
+top-level modules in `src/lib.rs`. So:
+
+- `pub(crate)` on a `TypeIndex` method restricts nothing from `server::hover`.
+- `pub(in crate::typecheck)` is **illegal** on an item in
+  `crate::typedb::index`: that path must name an ancestor module.
+
+The demotion would have compiled, passed the full suite, read in review as
+real hardening, and closed nothing. It is the same failure shape as the
+`source_reference_key` finding one level up: the boundary drawn around the
+NAME rather than the CAPABILITY.
+
+**Scale, so this is not re-proposed later.** Twelve files under `src/server/`
+hold a `TypeIndex`; 28 function signatures take one directly. There is no
+boundary to tighten.
+
+**So the ticket is not "tighten visibility". It is: delete what can be
+deleted, type-gate what cannot.**
+
+- **Delete.** Where a wide predicate has few enough callers, remove it rather
+  than hide it. `source_reference_key` had exactly one production reference
+  and no internal callers, so it did not need a keyword — it needed to not
+  exist. Done in Move 1.
+- **Type-gate.** In a single crate, **witness and newtype types are the only
+  category of mechanism that generalises**, because they bind regardless of
+  module boundaries. That is why Move 2 (the `Accepted` witness on
+  `canonical_enum_key`) is the primary general mechanism rather than the
+  secondary one, and it is an independent argument for B081's newtype beyond
+  "names failed a careful reader": the newtype is not merely stronger there,
+  it is the only kind of fix that can bind at all.
+
+**A crate split** would make visibility real — `typedb` as its own crate makes
+`pub(crate)` meaningful. Deliberately NOT proposed for this ticket: a large
+mechanical change contending with every open lane, to satisfy a ticket with no
+outstanding live defect. If it is ever worth doing, it should be filed on its
+own merits and B079 should not be cited as the reason.
+
+## Move 1 result: the refactor was not behaviour-preserving on the first try
+
+Worth recording because the failure is instructive about the pair this ticket
+is named for. `source_reference_key` wrapped TWO things: a direct
+spelling-to-key map with no scope test, and an ancestor walk gated on the
+index-only `scope_exists`. Replacing it with the direct map plus a resolver
+retry looked strictly wider and was not.
+
+`canonical_enum_key` answers `None` when the spelling ALREADY IS the key —
+true of a Nadeo module-level enum whose synthetic module happens to coincide
+with a real Core scope, e.g. `Meta::EPlugSurfaceGameplayId`. Ten such
+spellings silently stopped resolving. The corpus sweep failed and named all
+ten.
+
+The general point: **"None" from a canonicalizer means "already canonical",
+not "not found"** — and a caller that reads it as absence loses exactly the
+inputs that needed no work. That is the same confusion this ticket catalogues,
+in the return value rather than in the choice of function.
