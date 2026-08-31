@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from collections import Counter
@@ -83,14 +84,38 @@ DEFAULT_BASELINE = REPO_ROOT / "docs" / "clippy-baseline.json"
 
 # The exact command the baseline is defined by. Changing it invalidates every
 # recorded number, which is why it is compared, not merely documented.
+#
+# `-j` is deliberately NOT part of that identity and is filtered out of the
+# comparison: build parallelism cannot change WHICH lints fire, and pinning it
+# would mean a baseline recorded on a 48-core remote could never be compared
+# against anything. Every other flag is load-bearing — `--all-targets` alone
+# moves this tree from 28 fingerprints to 39.
 CLIPPY_CMD = [
     "cargo",
     "clippy",
     "--locked",
     "--all-targets",
     "--message-format=json",
-    "-j2",
 ]
+
+
+def build_jobs() -> str:
+    """`-jN`, from the environment the remote wrapper sets, else the repo's 2.
+
+    The repo's etiquette rule is two jobs locally on a shared 16-core box; the
+    remote build host sets CARGO_BUILD_JOBS and has 48.
+    """
+    env = os.environ.get("CARGO_BUILD_JOBS", "").strip()
+    return f"-j{env}" if env.isdigit() and int(env) > 0 else "-j2"
+
+
+def invocation() -> list[str]:
+    return [*CLIPPY_CMD, build_jobs()]
+
+
+def identity(command: list[str] | None) -> list[str]:
+    """A recorded command with its parallelism removed, for comparison."""
+    return [a for a in (command or []) if not a.startswith(("-j", "--jobs"))]
 
 VERIFIED_MARKER = "CLIPPY-DELTA-VERIFIED"
 
@@ -134,7 +159,7 @@ def run_clippy(extra: list[str] | None = None) -> tuple[Counter, int]:
             )
 
     proc = subprocess.run(
-        [*CLIPPY_CMD, *(extra or [])],
+        [*invocation(), *(extra or [])],
         cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -188,7 +213,16 @@ def _rel(path: Path) -> str:
         return str(path)
 
 
+# Set by --commit when recording somewhere without a `.git` — the remote build
+# host, which is deliberately synced without it. An empty commit in the
+# baseline silently disables the staleness report, so it is passed in rather
+# than left blank.
+COMMIT_OVERRIDE: str | None = None
+
+
 def git_commit() -> str:
+    if COMMIT_OVERRIDE:
+        return COMMIT_OVERRIDE
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=REPO_ROOT,
@@ -214,6 +248,8 @@ def build_baseline(counts: Counter, units: int) -> dict:
         ),
         "method": {
             "command": CLIPPY_CMD,
+            "command_as_run": invocation(),
+            "recorded_on": os.uname().nodename,
             "never": (
                 "-D warnings. It stops compilation at the first warning and "
                 "truncates the diagnostic set: 129 raw / 39 fingerprints without "
@@ -293,13 +329,15 @@ def evaluate(
     # is invisible in a count, which is why the count is not what is checked.
     method_problems: list[str] = []
     method = baseline.get("method", {})
-    if method.get("command") != CLIPPY_CMD:
+    if identity(method.get("command")) != identity(CLIPPY_CMD):
         method_problems.append(
             f"METHOD MISMATCH — refusing to compare: the baseline was recorded "
             f"with {' '.join(method.get('command') or ['(unrecorded)'])!r} and "
             f"this gate runs {' '.join(CLIPPY_CMD)!r}. Different commands "
             f"produce different diagnostic sets, so any difference would be "
-            f"about the flags, not about your change. Re-record on master."
+            f"about the flags, not about your change. Re-record on master. "
+            f"(`-j` is excluded from this comparison: parallelism cannot change "
+            f"which lints fire.)"
         )
     recorded_toolchain = method.get("toolchain", {})
     if recorded_toolchain != current_toolchain:
@@ -525,6 +563,19 @@ def run_selftest() -> int:
     cmd_problems, cmd_added, cmd_removed = evaluate(
         wrong_cmd, Counter({A: 20, B: 6, C: 1}), 26, TC
     )
+    # A baseline recorded with a different -j must STILL compare: it is the one
+    # flag that cannot change the diagnostic set, and refusing it would make a
+    # remote-recorded baseline useless everywhere else.
+    diff_jobs = _base({A: 20, B: 6}, command=[*CLIPPY_CMD, "-j24"])
+    jobs_problems, _, _ = evaluate(diff_jobs, healthy, 26, TC)
+    if any(p.startswith("METHOD MISMATCH") for p in jobs_problems):
+        failures.append(
+            "a baseline recorded with a different -j was refused; parallelism "
+            "cannot change which lints fire, and pinning it makes a "
+            "remote-recorded baseline uncomparable everywhere"
+        )
+    else:
+        print("  ok: -j differences do not block comparison")
     if not any(p.startswith("METHOD MISMATCH") for p in cmd_problems):
         failures.append("MISSED: a baseline recorded with a different command was accepted")
     elif cmd_added or cmd_removed:
@@ -605,6 +656,14 @@ def main() -> int:
     )
     parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     parser.add_argument(
+        "--commit",
+        help=(
+            "the commit this baseline describes. Required when recording on a "
+            "machine without `.git` — the remote build host is synced without "
+            "it, and a blank commit disables the staleness report."
+        ),
+    )
+    parser.add_argument(
         "--command-override",
         help=(
             "comma-separated clippy command, for RECORDING a baseline by a "
@@ -623,7 +682,15 @@ def main() -> int:
     if args.selftest:
         return run_selftest()
 
-    global CLIPPY_CMD
+    if str(args.baseline) == "@target":
+        target = os.environ.get("CARGO_TARGET_DIR")
+        if not target:
+            sys.exit("--baseline @target needs CARGO_TARGET_DIR in the environment")
+        args.baseline = Path(target) / "clippy-baseline.json"
+
+    global CLIPPY_CMD, COMMIT_OVERRIDE
+    if args.commit:
+        COMMIT_OVERRIDE = args.commit
     if args.command_override:
         if not args.record:
             sys.exit("--command-override is only meaningful with --record")
@@ -638,6 +705,12 @@ def main() -> int:
                 "baseline would say the tree is clean when nothing was looked at."
             )
         args.baseline.parent.mkdir(parents=True, exist_ok=True)
+        if not git_commit():
+            sys.exit(
+                "refusing to record without a commit: this baseline could never "
+                "report its own staleness. Pass --commit <sha> (the remote build "
+                "host is synced without `.git`)."
+            )
         args.baseline.write_text(json.dumps(build_baseline(counts, units), indent=2) + "\n")
         print(
             f"recorded {sum(counts.values())} raw / {len(counts)} fingerprints "

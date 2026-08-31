@@ -47,17 +47,49 @@ STATE_FILE = Path(os.environ.get("FLEET_STATE_FILE", str(STATE_FILE)))
 
 # ---- RemoteBuild minimal client --------------------------------------------
 def rb_route(route: str, data: dict, timeout=8) -> dict:
+    """One RemoteBuild call, reading the LENGTH-PREFIXED reply properly (B097).
+
+    The previous version did a single `recv(65536)` and `json.loads(raw[4:])`.
+    That works for a one-frame reply like `get_status` and fails for any reply
+    that arrives as two frames: the second frame's own 4-byte header lands
+    inside the text handed to `json.loads`, which raises
+    `Extra data: line 1 column 40`. Loud, so it never produced a wrong verdict
+    — but it masked the far more important defect behind a parse error.
+
+    Note what this does NOT fix. RemoteBuild's own read loop calls `Json::Parse`
+    on each raw socket read and `Net::Socket::ReadRaw` returns at most 64 bytes,
+    so any REQUEST over 64 bytes is unreachable and `load_plugin` (72 bytes with
+    an empty id) has never worked. That is a plugin-side fix; see B097 and
+    docs/probes/README.md. Drive the game through `tm-control-mcp` instead.
+    """
+    sock = None
     try:
-        s = socket.create_connection((RB_HOST, RB_PORT), timeout=timeout)
-        s.sendall(json.dumps({"route": route, "data": data}).encode())
-        time.sleep(0.2)
-        raw = s.recv(65536)
-        s.close()
-        # first 4 bytes are a length header
-        txt = raw[4:].decode(errors="replace") if len(raw) > 4 else raw.decode(errors="replace")
-        return json.loads(txt)
+        sock = socket.create_connection((RB_HOST, RB_PORT), timeout=timeout)
+        sock.sendall(json.dumps({"route": route, "data": data}).encode())
+
+        def recv_exactly(n: int) -> bytes:
+            buf = b""
+            while len(buf) < n:
+                chunk = sock.recv(n - len(buf))
+                if not chunk:
+                    # A short read is reported, never silently returned as
+                    # partial JSON: half a reply that happens to parse is the
+                    # shape this whole batch keeps finding.
+                    raise ConnectionError(
+                        f"connection closed after {len(buf)}/{n} bytes")
+                buf += chunk
+            return buf
+
+        length = int.from_bytes(recv_exactly(4), "little")
+        if not 0 < length <= 8 * 1024 * 1024:
+            return {"error": f"rb_route {route}: implausible frame length {length}",
+                    "data": ""}
+        return json.loads(recv_exactly(length).decode(errors="replace"))
     except Exception as e:
         return {"error": f"rb_route {route} failed: {e}", "data": ""}
+    finally:
+        if sock is not None:
+            sock.close()
 
 def rb_alive() -> bool:
     return rb_route("get_status", {}).get("data") == "Alive"

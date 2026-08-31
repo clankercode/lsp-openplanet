@@ -285,38 +285,54 @@ with the test is not a control, it is a second test.
 
 Two consequences worth knowing before you spend an afternoon on it:
 
-1. `scripts/issue_repro_game.py` is blocked by this, and its `--selftest` is
-   offline-only, so it stays green.
-   `scripts/probe_enum_corpus.py` is believed **NOT** blocked, and this is worth
-   knowing before you rewrite it: it IGNORES `load_plugin`'s result, sleeps, and
-   reads the game log, so Openplanet's own file watcher is what compiles the
-   staged folder. B068's sentinel makes a silent non-compile impossible to
-   mistake for success — every name returns UNDETERMINED unless the sentinel
-   diagnostic proves analysis reached the last line. That is also how the
-   shipped corpora were produced at all, given `load_plugin` never worked.
-   Verify before relying on it.
+1. **Both `scripts/issue_repro_game.py` AND `scripts/probe_enum_corpus.py` are
+   blocked.** `issue_repro_game.py`'s `--selftest` is offline-only, so it stays
+   green regardless.
 
-   **Verified statically, 2026-08-31 (lane-resolver), and it holds — the code
-   path cannot see the failure.** `fleet.rb_route` (`scripts/fleet_dogfood.py`)
-   wraps its whole body in `try/except Exception` and RETURNS an error dict; it
-   never raises. `probe_enum_corpus.py`'s `run_batch` then calls it for
-   `load_plugin` and **discards the return value entirely** — no assignment, no
-   check — before sleeping 3s and reading the log window. So a split payload,
-   a `Not implemented:` reply and a refused connection are all indistinguishable
-   from success to this harness, and the watcher is what does the work.
+   `probe_enum_corpus.py` was believed NOT blocked, on the reasoning that it
+   ignores `load_plugin`'s result, sleeps, and reads the game log — so
+   Openplanet's own file watcher would compile the staged folder. **Measured
+   2026-08-31, and that is false.** A fresh folder staged into `Plugins/` and
+   left for 8 seconds with no load call produced nothing in the log; the same
+   folder loaded explicitly through `tm-control-mcp` produced its deliberate
+   compile error immediately. The positive control is what makes the negative
+   readable — without it, "no diagnostic" is indistinguishable from "the probe
+   cannot see diagnostics".
 
-   Two things that stay unverified, because neither can be settled from disk:
-   whether the watcher picks up a NEWLY CREATED plugin directory as opposed to a
-   modified file in an already-loaded one, and therefore whether a probe run
-   would actually produce verdicts today. The shipped corpora are the evidence
-   that it does.
+   Confirmed end to end: `echo 'UI::VirtualKey' | scripts/probe_enum_corpus.py
+   --names - --template TYPE` — a spelling the shipped b052 corpus records as
+   ACCEPTED — comes back **UNDETERMINED** today.
 
-   **What makes trying it cheap is the shape of the failure, not confidence
-   that it works.** With the sentinel, a watcher that never fires yields no
-   diagnostics, so no name is ACCEPTED and every one comes back UNDETERMINED —
-   and `resolver.rs` reading UNDETERMINED as REJECTED is exactly why the
-   generator refuses to write such a corpus to its real path. The downside of
-   an attempt is a wasted minute, not a wrong row.
+   **B068's sentinel is what makes that visible rather than catastrophic.** The
+   probe did not record a false ACCEPT; it reported "analysis did not reach the
+   end", re-probed in isolation, and refused to certify. This is the guard
+   working in production, on exactly the failure it was built for.
+
+   What this does NOT say: the shipped b052/b053 corpora are still a valid
+   record of what the game said on 2026-08-30. What it does say is that the
+   EXPLANATION above for how they were produced is wrong, so how they were
+   produced is an open question — and that re-probing does not work today
+   without routing through `tm-control-mcp`.
+
+   **Why the harness could not tell you this itself** — verified statically by
+   lane-resolver, and still true; it is the mechanism behind the measurement
+   above rather than a competing account. `fleet.rb_route`
+   (`scripts/fleet_dogfood.py`) wraps its whole body in `try/except Exception`
+   and RETURNS an error dict; it never raises. `probe_enum_corpus.py`'s
+   `run_batch` then calls it for `load_plugin` and **discards the return value
+   entirely** — no assignment, no check — before sleeping and reading the log
+   window. So a split payload, a `Not implemented:` reply and a refused
+   connection are all indistinguishable from success to this harness. That is
+   why the watcher theory survived as long as it did: nothing in the code path
+   could contradict it.
+
+   **The two findings compose, and the order they landed in is the lesson.**
+   The static read established that the harness is blind to its own failure;
+   the measurement established that the thing it is blind to is actually
+   happening. Neither alone is the answer — a code path that cannot see a
+   failure is not evidence the failure occurs, and lane-resolver said so at the
+   time, labelling the watcher question as unverifiable from disk. Reasoning
+   found the blindness; only the probe found the dark.
 2. The `unload_plugin` that follows a failed load is split the same way, so
    `holder.preserve()` fires — correctly — and **leaves the fixture installed**.
    That blocks every later probe from every lane until someone removes it by

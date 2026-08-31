@@ -56,6 +56,20 @@ test *ARGS:
 test-selftest:
     python3 scripts/test-suite.py --selftest
 
+# The inventory non-vacuity harness, on the remote. It runs WHOLLY over there
+# and is never split across machines: its whole subject is the mtime
+# relationship between sources and the artifacts built from them on ONE
+# filesystem. Sync a tree and you rewrite that relationship, so a split run
+# would measure rsync rather than the tree.
+#
+# Proves `just test-inventory` can fail (real artifacts, on the remote).
+rtest-inventory-mutants:
+    python3 scripts/remote-build.py run -- python3 scripts/check_test_inventory_nonvacuous.py
+
+# The inventory check alone, on the remote.
+rtest-inventory *ARGS:
+    python3 scripts/remote-build.py run -- python3 scripts/test_inventory.py {{ARGS}}
+
 # B085: the inventory check on its own, without running the suite. Per test
 # binary, `--list` count vs the `#[test]` count in the sources cargo's dep-info
 # says it was built from; plus every artifact's mtime against those sources,
@@ -218,12 +232,50 @@ tui-showcase-shots:
 clippy:
     cargo clippy --all-targets -- -D warnings
 
+# B083 on the remote host — THE DEFAULT PATH. The baseline is pinned to the
+# remote toolchain (rustc 1.97.1; local is 1.97.0) because that is where the
+# expensive runs live now, and `just clippy-delta` run locally will correctly
+# REFUSE against it rather than report a toolchain difference as a code change.
+# Runs the whole gate over there: the baseline is part of the synced tree.
+#
+# The clippy gate, on the remote build host. Use this one.
+rclippy-delta *ARGS:
+    python3 scripts/remote-build.py run -- python3 scripts/clippy_delta.py {{ARGS}}
+
+# Re-record docs/clippy-baseline.json from the remote. Run ON MASTER. Writes
+# into the remote CARGO_TARGET_DIR (`@target` is resolved over there, since a
+# shell-quoted `$CARGO_TARGET_DIR` would arrive as a literal), fetches it back,
+# and only then replaces the committed file — so a failed remote run cannot
+# leave a half-written baseline behind.
+#
+# NOTE the flag order: remote-build.py's `rest` is an argparse.REMAINDER, so an
+# option placed AFTER the action word is swallowed and handed to the remote
+# shell verbatim (`--sync-back: command not found`). Options go before `run`.
+#
+# Re-record the clippy baseline from the remote (master only).
+rclippy-delta-record:
+    python3 scripts/remote-build.py --sync-back clippy-baseline.json run -- python3 scripts/clippy_delta.py --record --baseline @target --commit "$(git rev-parse HEAD)"
+    cp target/clippy-baseline.json docs/clippy-baseline.json
+    @echo "docs/clippy-baseline.json updated from the remote toolchain"
+
+# The non-vacuity harness, on the remote. It mutates the tree, so it runs
+# WHOLLY over there against one synced copy — never split across machines.
+#
+# Proves `just rclippy-delta` can fail (real lints, on the remote).
+rclippy-delta-mutants:
+    python3 scripts/remote-build.py run -- python3 scripts/check_clippy_delta_nonvacuous.py
+
 # B083: did MY change add a clippy finding? A multiset difference of
 # (file, lint, message) fingerprints against docs/clippy-baseline.json, with
 # line numbers normalised out and NEVER `-D warnings`. Answers the question a
 # lane actually has, on a tree that is red for everyone.
 #
-# The clippy gate that works on a red tree: did I add a lint?
+# LOCAL run. Expect it to REFUSE: the committed baseline is recorded on the
+# remote toolchain (1.97.1) and local rustc is 1.97.0, which is a method
+# mismatch by design. Kept for a machine with no remote access, where you would
+# record your own baseline first.
+#
+# The clippy gate, locally — refuses against the remote-recorded baseline.
 clippy-delta *ARGS:
     python3 scripts/clippy_delta.py {{ARGS}}
 

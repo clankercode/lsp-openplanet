@@ -37,6 +37,7 @@ the paths it touched.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -71,6 +72,12 @@ fn probe_is_empty(v: &Vec<u8>) -> bool {
 """
 
 _TO_RESTORE: dict[Path, bytes | None] = {}
+# sha256 of every file this harness touched, taken BEFORE the first mutation.
+# The restore check compares against these rather than asking git, because
+# `.git` is not synced to the remote build host — a git-based check would
+# quietly stop checking the moment this harness ran over there, which is the
+# "the guard silently stopped applying" shape B077 scores as a MISS.
+_ORIGINAL_HASH: dict[Path, str | None] = {}
 
 
 def _restore_all() -> None:
@@ -88,8 +95,16 @@ def _restore_all() -> None:
 atexit.register(_restore_all)
 
 
+def digest(path: Path) -> str | None:
+    """sha256 of a file's bytes, or None when it does not exist."""
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def snapshot(path: Path) -> None:
     _TO_RESTORE[path] = path.read_bytes() if path.exists() else None
+    _ORIGINAL_HASH.setdefault(path, digest(path))
 
 
 def restore(path: Path) -> None:
@@ -143,8 +158,13 @@ GUARD_MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "baseline command mismatch guard",
-        '    if method.get("command") != CLIPPY_CMD:',
+        '    if identity(method.get("command")) != identity(CLIPPY_CMD):',
         "    if False:",
+    ),
+    (
+        "`-j` is excluded from the command identity",
+        '    return [a for a in (command or []) if not a.startswith(("-j", "--jobs"))]',
+        "    return list(command or [])",
     ),
     (
         "toolchain mismatch guard",
@@ -259,6 +279,15 @@ def method_mismatch_case(baseline: dict) -> tuple[int, int]:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         wrong = Path(handle.name)
     try:
+        # Its OWN target dir, and this is not a tidiness choice. Measured on
+        # the remote: `cargo clippy` NARROWER than the warm tree's last build
+        # emits zero artifacts and zero messages and exits 0 — so recording
+        # into the shared dir produced an empty baseline, which the gate's
+        # zero-units guard then correctly refused. A cold dir makes cargo
+        # actually run, which is what this fixture needs it to do.
+        alt_target = Path(
+            os.environ.get("CARGO_TARGET_DIR", str(REPO_ROOT / "target"))
+        ) / "b083-altmethod"
         rc = subprocess.run(
             [
                 sys.executable,
@@ -266,14 +295,18 @@ def method_mismatch_case(baseline: dict) -> tuple[int, int]:
                 "--record",
                 "--baseline",
                 str(wrong),
-                # Capture WITHOUT --all-targets by overriding the command.
+                "--commit",
+                "0" * 40,
+                # Capture WITHOUT --all-targets by overriding the command. No
+                # `-j` here: the script appends its own from CARGO_BUILD_JOBS.
                 "--command-override",
-                "cargo,clippy,--locked,--message-format=json,-j2",
+                "cargo,clippy,--locked,--message-format=json",
             ],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
             timeout=3600,
+            env={**os.environ, "CARGO_TARGET_DIR": str(alt_target)},
         )
         if rc.returncode != 0 or not wrong.exists():
             print(
@@ -415,15 +448,40 @@ def family_b(baseline: dict) -> tuple[int, int]:
     else:
         print("  restore verified: the gate is green again")
 
-    dirty = subprocess.run(
-        ["git", "status", "--porcelain", "--", "tests", "src"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if dirty:
-        print(f"  RESTORE FAILED: git reports\n{dirty}", file=sys.stderr)
+    # Byte-identity of exactly the files touched. Stronger than repo
+    # cleanliness, and it works on a machine that has no `.git`.
+    for path, before in _ORIGINAL_HASH.items():
+        after = digest(path)
+        if after != before:
+            print(
+                f"  RESTORE FAILED: {path} is not byte-identical to before "
+                f"({before} -> {after})",
+                file=sys.stderr,
+            )
+            missed += 1
+    if _ORIGINAL_HASH:
+        print(f"  restore verified by hash on {len(_ORIGINAL_HASH)} file(s)")
+    else:
+        # No file was ever snapshotted, so the check above passed over nothing.
+        print(
+            "  ANCHOR MISSING: no file was snapshotted, so the restore check "
+            "verified nothing",
+            file=sys.stderr,
+        )
         missed += 1
+
+    # Git, when it is here. Not the primary check: it is absent on the remote
+    # build host, and a check that can silently stop applying is not a check.
+    if (REPO_ROOT / ".git").exists():
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--", "tests", "src"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if dirty:
+            print(f"  RESTORE FAILED: git reports\n{dirty}", file=sys.stderr)
+            missed += 1
 
     return caught, missed
 

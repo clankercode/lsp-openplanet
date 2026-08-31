@@ -370,6 +370,9 @@ def main() -> int:
         if rc == 0 and a.sync_back:
             dest = root / "target" / a.sync_back
             dest.parent.mkdir(parents=True, exist_ok=True)
+            # Measured failure this fixes, from lane-tooling hitting it in
+            # anger: change_dir "/home/xertrov/$HOME/.remote-builds/..."
+            # failed. Two lanes found it independently within the hour.
             src = f"{a.host}:{rsync_target}/{a.sync_back}"
             print(f"remote-build: fetching {a.sync_back}", file=sys.stderr)
             back = subprocess.run(["rsync", "-az", src, str(dest)]).returncode
