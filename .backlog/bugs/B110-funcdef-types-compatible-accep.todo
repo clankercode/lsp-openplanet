@@ -28,3 +28,64 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Filed from lane-enum's B100 report, 2026-08-31, measured not reasoned.
+
+## Measured on a MASTER build, both sides, both positions
+
+  * `double MakeDouble()` and `float MakeFloat()` bind an `int()` slot --
+    SILENT, at the argument position AND at `IntMaker@ d = MakeDouble;`
+  * `void TakeDouble(double)` binds a `void(int)` slot -- SILENT, same two
+    positions
+  * CONTROL in the same probe: `string()` at an `int()` slot IS rejected, so
+    the check is running rather than absent
+
+## Why it is wrong
+
+`funcdef_types_compatible`'s `(Primitive, Primitive) => a == b ||
+is_convertible(...)` treats a function pointer's parameter and return types as
+if they were VALUES being converted. They are not. The engine cannot insert a
+numeric conversion into a delegate's call path -- the delegate is called with
+the caller's types directly -- so a `double()` cannot stand in for an `int()`.
+
+## Why it is worth doing properly
+
+One predicate, reached by B023, B076, B089, B102, B091 and B100 alike. Fixing
+it once fixes every funcdef position; getting it wrong breaks all six. That is
+the good version of the "a rule living at one of N sites" shape this repo keeps
+hitting -- here the rule is already at ONE site, so keep it that way.
+
+## The risk polarity, and it is the tight one
+
+This TIGHTENS a check, so every change is a candidate false ERROR on code that
+compiles today. Before landing, sweep the fleet and confirm the delta is either
+zero or explicable line by line. A non-zero delta here is not automatically a
+win -- it may be plugins that legitimately compile.
+
+Note the value-conversion rules elsewhere are NOT wrong and must not be
+disturbed: `int x = someDouble;` is a real conversion. The claim is narrowly
+that a funcdef SIGNATURE match is not a conversion site.
+
+## Unmeasurable half, state it rather than guess
+
+Whether the engine rejects `double()` at an `int()` slot is REASONED from how
+delegates are called, not probed -- B097 blocks probing. That reasoning is
+strong (a delegate has no conversion seam) but it is reasoning, and the ticket
+should say so where it lands, as B102 did for const-ness. If the sweep shows
+real plugins relying on the current leniency, that is evidence AGAINST the
+reasoning and should stop the change rather than be worked around.
+
+## Tests
+
+Generalise per repo CLAUDE.md across the primitive lattice in both directions
+(int/uint/int64/float/double, widening and narrowing), for the RETURN type and
+each PARAMETER, at every position the predicate is reached from -- argument,
+declaration initializer, assignment, and the B102 template-member slot. Include
+exact-match positive controls for each, or a predicate that rejects everything
+scores as a pass.
+
+## Related
+
+B100 (where it was found), B027 (parameter MODE comparison, the sibling axis --
+do not duplicate it), B102 (const-ness peeled deliberately; check the two do
+not now disagree), B023/B076/B089/B091 (the other reachers).
