@@ -567,9 +567,12 @@ mod tests {
     #[test]
     fn render_lists_every_persisted_setting() {
         let (_dir, mut app) = temp_app("render");
-        // 19 settings + chrome needs more than 24 rows to show the full
-        // catalog (GH #18 added openplanet_version / typedb_versions_dir).
-        let out = frame_size(&mut app, 80, 32);
+        // Tall enough for the WHOLE catalog plus chrome, derived from
+        // SETTINGS so adding a key can never silently clip this test into
+        // asserting on a scrolled-off view (a hardcoded 32 went stale the
+        // moment B143 added `plugin_files_search_paths`).
+        let height = SETTINGS.len() as u16 + 12;
+        let out = frame_size(&mut app, 80, height);
         let _ = std::fs::write("/tmp/opl-config-tui-frame.txt", &out);
         for spec in SETTINGS {
             assert!(
@@ -581,6 +584,35 @@ mod tests {
         assert!(
             out.contains("openplanet-lsp config"),
             "title missing:\n{out}"
+        );
+    }
+
+    /// B143: the new key is reachable by the spec-driven navigation and its
+    /// list editor persists a comma-separated value like every other
+    /// `StringList` key — no special-casing anywhere in this TUI.
+    #[test]
+    fn plugin_files_search_paths_is_navigable_and_editable() {
+        let (dir, mut app) = temp_app("b143-key");
+        let mut guard = 0;
+        while app.selected_spec().key != "plugin_files_search_paths" {
+            handle_key(&mut app, press(KeyCode::Char('j')));
+            guard += 1;
+            assert!(
+                guard < SETTINGS.len() * 2,
+                "key never reached by navigation"
+            );
+        }
+        handle_key(&mut app, press(KeyCode::Enter));
+        for ch in "src, Source".chars() {
+            handle_key(&mut app, press(KeyCode::Char(ch)));
+        }
+        handle_key(&mut app, press(KeyCode::Enter));
+        let written = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(
+            written.contains("plugin_files_search_paths")
+                && written.contains("src")
+                && written.contains("Source"),
+            "expected the list to persist:\n{written}"
         );
     }
 

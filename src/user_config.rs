@@ -314,6 +314,13 @@ pub const SETTINGS: &[SettingSpec] = &[
         },
     },
     SettingSpec {
+        key: "plugin_files_search_paths",
+        help: "Extra root-relative dirs to resolve info.toml export entries through (default: src)",
+        kind: SettingKind::StringList {
+            example: "src, Source",
+        },
+    },
+    SettingSpec {
         key: "shortcut_namespaces",
         help: "Custom completion-shortcut namespaces (replaces UX/MathX)",
         kind: SettingKind::StringList {

@@ -166,6 +166,12 @@ pub struct LspConfig {
     /// Blocklist of root-relative dirs to skip (from `.openplanet-lsp.toml`
     /// `ignore_paths`). Only consulted when `source_paths` is `None`.
     pub ignore_paths: Option<Vec<PathBuf>>,
+    /// B143: extra root-relative dirs an `info.toml` export entry may be
+    /// resolved through (`.openplanet-lsp.toml` `plugin_files_search_paths`).
+    /// `None` = unset → the built-in `["src"]`. Applied by
+    /// [`crate::workspace::load::DependencySearch::finalize_with_config`]; a
+    /// CLI `--plugin-files-search-path` wins over it.
+    pub plugin_files_search_paths: Option<Vec<PathBuf>>,
     /// GH #60: skip `.as` files excluded by `.gitignore` rules at or below
     /// the plugin root during discovery (`honor_gitignore`). Tri-state so a
     /// workspace `.openplanet-lsp.toml` beats the user global; `None` =
@@ -264,6 +270,7 @@ impl Default for LspConfig {
             define_overrides: Vec::new(),
             source_paths: None,
             ignore_paths: None,
+            plugin_files_search_paths: None,
             honor_gitignore: None,
             plugin_roots: Vec::new(),
             extra_plugins_dirs: Vec::new(),
@@ -312,6 +319,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "default_mode",
     "source_paths",
     "ignore_paths",
+    "plugin_files_search_paths",
     "honor_gitignore",
     "shortcut_namespaces",
     "shortcut_disable_default_namespaces",
@@ -481,6 +489,12 @@ struct ConfigFile {
     /// (e.g. `["OtherPacks", "vendor"]`). Only used when `source_paths` is
     /// absent. Absent (and no `source_paths`) → check every `.as` under root.
     ignore_paths: Option<Vec<String>>,
+    /// B143: extra root-relative dirs to resolve `info.toml` export entries
+    /// through (e.g. `["src", "Source"]`). Absent → the built-in `["src"]`.
+    /// Applies in BOTH directions: a bare entry is looked up under each of
+    /// these, and an entry that carries one as a prefix is also tried with
+    /// that prefix stripped (Max's `src/` <-> root moves).
+    plugin_files_search_paths: Option<Vec<String>>,
     /// GH #60: honor `.gitignore` during `.as` discovery. Default `true`
     /// (absent = enabled). Workspace `.openplanet-lsp.toml` wins over the
     /// user config; CLI `--no-gitignore` wins over both.
@@ -741,6 +755,7 @@ impl ConfigFile {
             ),
             source_paths: r.string_list("source_paths"),
             ignore_paths: r.string_list("ignore_paths"),
+            plugin_files_search_paths: r.string_list("plugin_files_search_paths"),
             honor_gitignore: r.boolean("honor_gitignore"),
             shortcut_namespaces: r.string_list("shortcut_namespaces"),
             shortcut_disable_default_namespaces: r.boolean("shortcut_disable_default_namespaces"),
@@ -2054,6 +2069,9 @@ impl LspConfig {
         }
         if let Some(ignore_paths) = cfg.ignore_paths {
             self.ignore_paths = Some(ignore_paths.into_iter().map(PathBuf::from).collect());
+        }
+        if let Some(paths) = cfg.plugin_files_search_paths {
+            self.plugin_files_search_paths = Some(paths.into_iter().map(PathBuf::from).collect());
         }
         if let Some(honor) = cfg.honor_gitignore {
             self.honor_gitignore = Some(honor);
@@ -4433,6 +4451,14 @@ shortcut_match_enums = true
                 want_user: "Some([\"vendor\"])",
             },
             LadderCase {
+                key: "plugin_files_search_paths",
+                user: "plugin_files_search_paths = [\"from-user\"]",
+                workspace: "plugin_files_search_paths = [\"from-workspace\"]",
+                render: |c| format!("{:?}", c.plugin_files_search_paths),
+                want_workspace: "Some([\"from-workspace\"])",
+                want_user: "Some([\"from-user\"])",
+            },
+            LadderCase {
                 key: "honor_gitignore",
                 user: "honor_gitignore = true",
                 workspace: "honor_gitignore = false",
@@ -4881,6 +4907,16 @@ shortcut_match_enums = true
                 all_invalid: "ignore_paths = [7, true]",
                 empty: "ignore_paths = []",
                 render: |c| format!("{:?}", c.ignore_paths),
+                lower_rendered: "Some([\"lower\"])",
+                empty_rendered: "Some([])",
+            },
+            Case {
+                key: "plugin_files_search_paths",
+                lower: "plugin_files_search_paths = [\"lower\"]",
+                mixed: "plugin_files_search_paths = [\"partial\", 7]",
+                all_invalid: "plugin_files_search_paths = [7, true]",
+                empty: "plugin_files_search_paths = []",
+                render: |c| format!("{:?}", c.plugin_files_search_paths),
                 lower_rendered: "Some([\"lower\"])",
                 empty_rendered: "Some([])",
             },

@@ -125,6 +125,20 @@ default_mode = "tui"   # or "lsp"
 # source_paths = ["src"]
 # ignore_paths = ["OtherPacks", "vendor"]
 
+# Root-relative search roots for the files listed in info.toml `exports` /
+# `shared_exports` (default: ["src"]). An entry resolves as written, then under
+# each search root, then with a leading search root STRIPPED -- so `Export.as`
+# finds src/Export.as, and `src/Export.as` still finds Export.as after the file
+# is moved up to the plugin root. Any deeper path in the entry is preserved
+# (`src/Ex/Shared.as` -> `Ex/Shared.as`). This is what keeps a plugin that
+# shuffles sources between src/ and the root from reporting "Export file not
+# found" -- and, because export files are exempt from unused-declaration
+# reporting, from reporting its whole public API as unused. Workspace
+# .openplanet-lsp.toml wins over the user config; the CLI flag
+# `check --plugin-files-search-path DIR` (repeatable) wins over both and
+# REPLACES the list rather than adding to it.
+# plugin_files_search_paths = ["src"]
+
 # Honor .gitignore during .as discovery (default true). Files excluded by
 # .gitignore rules at or below the plugin root -- plus a root-local
 # .git/info/exclude -- are not parsed or diagnosed, matching what other
