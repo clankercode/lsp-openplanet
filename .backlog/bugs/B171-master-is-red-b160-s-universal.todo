@@ -88,3 +88,62 @@ because the sampling frame was uniform.
 
 Related: B160 (the decision), B155 (the pin that caught it), B145 (the corpus
 that refuted it), B165 (merged alongside B160).
+
+MEASURED 2026-09-01 against live Openplanet 1.29.14, 16 variants, both controls
+green, B077 sweep clean. Generator: scripts/probe_conversion_target_spelling.py.
+
+BOTH CANDIDATE RULES ARE REFUTED. The ticket offered H-TYPE (the & tracks the
+target type's category) and H-SLOT (it tracks whether the slot is a reference).
+Neither survives:
+
+  AMP+DOT  r1   enum L1 -> L2, var init        'L1' -> 'L2&'.
+  AMP+DOT  r2   nat3 -> int3, var init         'nat3&' -> 'int3&'.
+  AMP+DOT  r10  quat -> vec3, var init         'quat&' -> 'vec3&'.
+  AMP+DOT  r11  vec3 -> int3, var init         'vec3&' -> 'int3&'.
+  AMP+DOT  r12  A@ -> B@, var init             'A@&' -> 'B@&'.
+  DOT      r6   nat3 -> int3, RETURN slot      'nat3&' -> 'int3'.
+  DOT      r8   class -> int, var init         'C&' -> 'int'.
+  DOT      r9   string -> int, var init        'string' -> 'int'.
+  DOT      r13  CONST nat3 -> int3, var init   'const nat3' -> 'int3'.
+  DOT      r14  const nat3& -> int3, var init  'const nat3&' -> 'int3'.
+
+r2 AND r13 ARE THE SAME CONVERSION INTO THE SAME TARGET TYPE IN THE SAME
+SYNTACTIC SLOT, and they disagree. The only variable is the SOURCE's constness.
+H-TYPE cannot explain that pair; H-SLOT cannot explain r6 (a non-const reference
+source whose target is unsuffixed because the slot is a return).
+
+r13 reproduces B145's refuting row EXACTLY -- `'const nat3' to 'int3'.` -- from
+a plain const local, so the original was not an artefact of CGameCtnChallenge
+.Size being a property.
+
+THE RULE THAT FITS ALL TEN. The target carries `&` iff ALL THREE hold:
+  1. the SOURCE is non-const            (r13, r14 fail this)
+  2. the TARGET type is not a primitive (r8, r9 fail this; enum counts as
+                                         non-primitive here, per r1)
+  3. the slot is an assignable variable, not a return (r6 fails this)
+
+r3/r4/r5/r7 produced `No matching signatures` or the &inout diagnostic rather
+than a conversion message, so they constrain nothing about spelling and are
+recorded as n/a rather than scored as unsuffixed.
+
+WHY THIS SETTLES THE PRODUCT QUESTION. Two of those three conditions -- source
+constness and slot kind -- are not available at our diagnostic site, and
+reproducing them means modelling AngelScript's value categories and const
+propagation. That is a large change which would still be wrong wherever the
+model is wrong, and being wrong in a NEW way is not an improvement on being
+wrong in a uniform one.
+
+AND THE UNSUFFIXED FORM IS THE COMMON REAL-WORLD CASE, not the exotic one:
+condition 1 excludes every conversion from a const source, which is what every
+engine property read is. B145's row is `int3 size = map.Size;` -- the shape a
+plugin author actually writes.
+
+DECISION: revert the `&`, KEEP the full stop. `Can't implicitly convert from
+'{from}' to '{to}'.` That is byte-exact with the engine for const sources,
+return slots and primitive targets, and differs by one character in the
+non-const-source object-target case. B160's full-stop half was never in doubt:
+all 10 measured messages end with `.`, as did all 22 before them.
+
+This is a narrowing of B160, not a revert of it. Recorded here rather than
+reopening B160, which is closed and whose measurement was correct for its
+sample.
