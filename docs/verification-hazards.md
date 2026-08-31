@@ -3464,3 +3464,47 @@ Worth watching for wherever a test reaches into real repo state to find its
 subject: the greener the repo gets, the fewer such subjects remain, and the test
 degrades from "verifies the branch" to "cannot run" — with a red that reads like
 a regression rather than like a fixture that has run out.
+
+## A check that keeps passing while you loosen it is measuring something else
+
+B151 wrote a retention check three times, **each looser than the last**, and every
+version said the same artifact was safe:
+
+1. "a store exists"
+2. "a store holds the live version"
+3. "a store holds some version"
+
+**All three were claims about a DIFFERENT artifact than the one being checked.**
+The loosening was invisible because the answer never changed — and an answer that
+survives three weakenings of its own question is not robust, it is unrelated.
+
+The version that works asks the narrow question the policy actually makes: **is
+THIS artifact's CURRENT version archived?** That is the only form that separates
+"the pin is deliberate" from "a regen destroys the only copy".
+
+**When you weaken a check and the verdict holds, that is not reassurance — find
+the input that should have flipped.** Here the fix was to test an artifact
+archived in only ONE store; two of six mutations had survived precisely because
+every real row was archived in both.
+
+The sibling failure from the same ticket: **a validator that was never exercised
+because every row it read was already valid.** Green, permanently, and it would
+have stayed green through any future invalid value. Fixed by feeding an invalid
+value through the real parse path — the positive control that a validator needs
+and almost never gets.
+
+## B077's guard cannot tell "abandoned" from "another lane is mid-run"
+
+A stranded fixture in the Plugins directory means either a probe crashed and left
+litter, or a probe is running right now. **The guard sees the same thing in both
+cases.**
+
+The correct response is therefore always to WAIT, never to sweep. B151 blocked on
+two attempts rather than deleting another lane's fixture, and both its eventual
+runs swept clean. A sweep would have corrupted a live run in a different process,
+with the damage appearing as inexplicable AMBIGUOUS rows in someone else's
+report — the same failure-and-false-reading-in-different-processes shape recorded
+above.
+
+With several lanes sharing one game, this is not a hypothetical: it happened
+twice in one night.
