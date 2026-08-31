@@ -331,6 +331,14 @@ clean:
 rdoctor:
     python3 scripts/remote-build.py doctor
 
+# Proves the remote wrapper's own guards can fail: the $HOME spelling rule that
+# rsync and ssh disagree about, the B106 free-space floor, df parsing, flag
+# order, and per-worktree slug isolation. Pure — no ssh, no remote, instant.
+#
+# Proves `remote-build.py`'s pre-flight guards can fail (offline).
+remote-selftest:
+    python3 scripts/remote-build.py selftest
+
 # Full gated suite on the remote — the same `just test` gate, run over there
 rtest *ARGS:
     python3 scripts/remote-build.py test -- {{ARGS}}

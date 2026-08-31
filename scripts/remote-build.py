@@ -37,6 +37,13 @@ pass. To select a binary you want cargo's flag, before the `--`:
     just rrun cargo test --test b089_funcdef_call_site
     just rtest -- some_test_name        # name substring: works as expected
 
+B106 pre-flight: the remote's free space is checked BEFORE anything is synced
+or built, and a host under the floor (10 GiB, or $LSP_REMOTE_DISK_FLOOR_GB) is
+refused by name. A full build box does not fail as "no room" -- rsync, cargo
+and rustc each report it in their own dimension, and the one an operator
+usually reads is cargo's `could not compile ... due to 1 previous error`, which
+blames the code. `--allow-low-disk` skips the check.
+
 `.git` is NOT synced by default. Nothing in the test suite reads repository git
 state, and copying it while a lane is mid-commit could send a torn index. Pass
 --with-git if you add something that needs it.
@@ -56,6 +63,32 @@ from pathlib import Path
 
 DEFAULT_HOST = os.environ.get("LSP_REMOTE_HOST", "x-alpha")
 REMOTE_ROOT = ".remote-builds"
+
+# B106. x-alpha reached 0 bytes free during a batch and every lane building
+# there got `error: could not compile ... due to 1 previous error` -- a message
+# about the CODE, for a failure of the MACHINE. A box below this floor is not a
+# build box. Overridable because 10 GiB is a judgement, not a fact -- and note
+# what it buys: one lane's target dir on this tree MEASURED 7.5 GiB, so 10 GiB
+# is room for the lane you are about to start and nothing else.
+DEFAULT_DISK_FLOOR_GB = float(os.environ.get("LSP_REMOTE_DISK_FLOOR_GB", "10"))
+
+# Named in the low-disk message so it points somewhere the caller is not
+# already. Suggesting the host that just failed is worse than suggesting
+# nothing: it reads as a tool that did not notice where it was.
+KNOWN_HOSTS = ("x-alpha", "x-tuf", "x-19")
+
+# Flags of THIS script that no cargo, just or shell command also accepts, so
+# one seen inside the remote command is unambiguously a misplaced flag rather
+# than part of the command. `-v`, `--jobs` and `--test-threads` are deliberately
+# NOT here: `just rrun cargo build -v` is legitimate and a check that rejected
+# it would be wrong more often than right.
+LOCAL_ONLY_FLAGS = (
+    "--sync-back",
+    "--no-sync",
+    "--with-git",
+    "--host",
+    "--allow-low-disk",
+)
 
 # Never sync these. `target` and the per-lane build caches dwarf the source
 # tree; `.worktrees` would recursively copy every other lane's checkout.
@@ -185,6 +218,123 @@ def capture_ssh(host: str, script: str) -> tuple[int, str]:
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
+def remote_paths(slug: str) -> dict[str, str]:
+    """Every remote path this script uses, in ONE place, in both spellings.
+
+    ssh runs a shell, so ``$HOME`` expands there. rsync does NOT run a shell on
+    its remote path: it passes it literally, so ``$HOME/x`` becomes the absurd
+    ``/home/user/$HOME/x``. rsync's remote paths are already relative to the
+    login directory, so the bare relative form is the correct one for it.
+
+    That one rule has been got wrong twice, once per direction, by two
+    different people. It is now one function and one selftest assertion: no
+    value whose key starts with ``rsync_`` may contain ``$HOME``.
+    """
+    rel_base = f"{REMOTE_ROOT}/{slug}"
+    base = f"$HOME/{rel_base}"
+    return {
+        "rel_base": rel_base,
+        "base": base,
+        "ssh_src": f"{base}/src",
+        "ssh_target": f"{base}/target",
+        "rsync_src": f"{rel_base}/src",
+        "rsync_target": f"{rel_base}/target",
+    }
+
+
+def exit_status(rc: int) -> tuple[int, str | None]:
+    """A shell-style status, plus a note when the remote session was SIGNALLED.
+
+    ``subprocess`` reports a signal death as a NEGATIVE returncode, and
+    ``sys.exit(-15)`` is taken modulo 256, so a killed ssh surfaces as 241 --
+    nonzero, therefore safe, but naming nothing. Convert to the shell's own
+    128+N and say which signal, so a session the network dropped is
+    distinguishable from a remote command that chose to exit 143. B106 is about
+    statuses that survive; a status that survives but lies about its cause is
+    only half of that.
+    """
+    if rc < 0:
+        return 128 - rc, f"the remote session was killed by signal {-rc}"
+    return rc, None
+
+
+def _other_host(host: str) -> str:
+    """A build box that is NOT the one that just failed."""
+    return next((h for h in KNOWN_HOSTS if h != host), "<another-box>")
+
+
+def disk_floor_verdict(
+    free_bytes: int | None, floor_gb: float, host: str, path: str
+) -> str | None:
+    """``None`` when the remote has room; otherwise the message to die with.
+
+    An unreadable ``df`` returns a message too. "I could not measure it" and
+    "there is room" are different states; rendering both as ``None`` is the
+    silence-equals-success mistake this whole file exists to avoid.
+    """
+    if free_bytes is None:
+        return (
+            f"could not read free space on {host}:{path}. That is NOT the same "
+            f"as having room. Pass --allow-low-disk to build there anyway."
+        )
+    if free_bytes >= floor_gb * (1024 ** 3):
+        return None
+    return (
+        f"{host} has {free_bytes / 1024 ** 3:.1f} GiB free on the filesystem "
+        f"holding {path}, under the {floor_gb:g} GiB floor.\n"
+        f"  A build there dies with `No space left on device`, and cargo "
+        f"reports that as `could not compile ... due to 1 previous error` -- a "
+        f"message about your code (B106).\n"
+        f"  Free some: `just rclean` drops THIS worktree's remote tree; other "
+        f"lanes' trees are under ~/{REMOTE_ROOT}/ on {host}.\n"
+        f"  Or use another box:  LSP_REMOTE_HOST={_other_host(host)} "
+        f"just <recipe>\n"
+        f"  Or override:         --allow-low-disk, "
+        f"or LSP_REMOTE_DISK_FLOOR_GB=<n>."
+    )
+
+
+def misplaced_flags(inner: list[str]) -> list[str]:
+    """Flags of this script that ended up inside the remote command."""
+    return [
+        x
+        for x in inner
+        if any(x == flag or x.startswith(f"{flag}=") for flag in LOCAL_ONLY_FLAGS)
+    ]
+
+
+def parse_df_avail(output: str) -> int | None:
+    """Available bytes from one ``df -Pk`` data line, or None if unreadable."""
+    for line in reversed(output.strip().splitlines()):
+        fields = line.split()
+        # POSIX -P: Filesystem 1024-blocks Used Available Capacity Mounted-on
+        if len(fields) >= 4 and fields[3].isdigit() and fields[1].isdigit():
+            return int(fields[3]) * 1024
+    return None
+
+
+def remote_free_bytes(host: str, rel_base: str) -> int | None:
+    """Free bytes on the remote filesystem that will hold this lane's TARGET.
+
+    The target dir is what fills -- one measured 7.5 GiB against a 23 MiB
+    source tree -- and it may be a different filesystem from the source, so
+    measure that path specifically rather than the tree root.
+
+    Measures the deepest EXISTING ancestor of it: neither the target nor the
+    tree exists on a first run, and a check that skips itself then is absent
+    exactly when the directory is about to be created.
+    """
+    script = (
+        'cd "$HOME" || exit 1; d=' + shlex.quote(f"{rel_base}/target") + '; '
+        'while [ ! -d "$d" ]; do d=$(dirname "$d"); done; '
+        'df -Pk "$d" 2>/dev/null'
+    )
+    rc, out = capture_ssh(host, script)
+    if rc != 0:
+        return None
+    return parse_df_avail(out)
+
+
 def sync_up(host: str, root: Path, remote_src: str, with_git: bool, verbose: bool) -> None:
     args = ["rsync", "-az", "--delete", "--delete-excluded"]
     for pat in EXCLUDES:
@@ -251,6 +401,17 @@ def doctor(host: str, root: Path) -> int:
         print("  WARN  rustc versions differ. Builds are fine, but a clippy")
         print("        baseline recorded on one will not match the other.")
 
+    free = remote_free_bytes(host, f"{REMOTE_ROOT}/{slug}")
+    verdict = disk_floor_verdict(free, DEFAULT_DISK_FLOOR_GB, host, f"~/{REMOTE_ROOT}")
+    if free is None:
+        print("  WARN  free space could not be read (B106 pre-flight will refuse)")
+    elif verdict:
+        print(f"  FAIL  disk {free / 1024 ** 3:.1f}GB free, under the "
+              f"{DEFAULT_DISK_FLOOR_GB:g}GB floor — builds here will hit ENOSPC")
+        failed.append("disk space")
+    else:
+        print(f"  ok    disk {free / 1024 ** 3:.1f}GB free")
+
     rc, cores = capture_ssh(host, "nproc")
     rc2, mem = capture_ssh(host, "free -g | awk '/^Mem:/{print $2}'")
     if rc == 0:
@@ -265,6 +426,144 @@ def doctor(host: str, root: Path) -> int:
     return 0
 
 
+def run_selftest() -> int:
+    """Prove this script's own guards can fail, and are not passing by vacuity.
+
+    Everything here is pure: no ssh, no rsync, no remote. The guards that
+    matter in this file are all decisions made from strings and numbers before
+    anything is executed, which is exactly the part that has been wrong three
+    times (twice on `$HOME`, once on flag order).
+    """
+    problems: list[str] = []
+    gib = 1024 ** 3
+
+    # The $HOME rule, in both directions. rsync passes its remote path
+    # literally; ssh runs a shell. Getting this backwards produced
+    # `/home/user/$HOME/...` twice, once per direction.
+    paths = remote_paths("demo-0000abcd")
+    for key, value in sorted(paths.items()):
+        if key.startswith("rsync_") and "$HOME" in value:
+            problems.append(
+                f"{key} = {value!r} contains $HOME — rsync does not run a "
+                f"shell, so it would try to chdir into /home/user/$HOME/..."
+            )
+    # Positive control: the ssh spellings MUST have it, or the assertion above
+    # is satisfied by a function that simply never emits $HOME anywhere.
+    for key in ("ssh_src", "ssh_target"):
+        if "$HOME" not in paths[key]:
+            problems.append(
+                f"{key} has no $HOME — the rsync assertion above would then "
+                f"pass for a function that cannot produce the bug at all"
+            )
+    if paths["ssh_target"].endswith(paths["rsync_target"]) is False:
+        problems.append("the two spellings no longer name the same directory")
+
+    # B106 disk floor: three states, three renderings.
+    if disk_floor_verdict(40 * gib, 10, "h", "/p") is not None:
+        problems.append("40 GiB free was refused against a 10 GiB floor")
+    low = disk_floor_verdict(int(1.5 * gib), 10, "x-alpha", "/p")
+    if low is None:
+        problems.append("1.5 GiB free passed a 10 GiB floor")
+    elif "x-alpha" not in low or "LSP_REMOTE_HOST" not in low:
+        problems.append(
+            "the low-disk message does not name the host or an escape route — "
+            "a refusal with no way forward reads as a broken tool"
+        )
+    if disk_floor_verdict(None, 10, "h", "/p") is None:
+        problems.append(
+            "an unreadable `df` rendered as room — 'could not measure' and "
+            "'there is space' must not be the same silence"
+        )
+    for host in KNOWN_HOSTS:
+        message = disk_floor_verdict(1 * gib, 10, host, "/p")
+        assert message is not None
+        suggested = _other_host(host)
+        if suggested == host or f"LSP_REMOTE_HOST={host} " in message:
+            problems.append(
+                f"the low-disk message for {host} suggests moving to {host} — "
+                f"it points the caller at the box that just failed"
+            )
+    if _other_host("not-a-known-box") not in KNOWN_HOSTS:
+        problems.append("an unknown host got no alternative suggested")
+    exact = disk_floor_verdict(10 * gib, 10, "h", "/p")
+    if exact is not None:
+        problems.append("exactly the floor was refused; the floor is a minimum")
+
+    # df parsing, including the shapes that must NOT be read as a number.
+    df = ("Filesystem     1024-blocks      Used Available Capacity Mounted on\n"
+          "/dev/nvme0n1p2   480579748 435118596  20964512      96% /")
+    if parse_df_avail(df) != 20964512 * 1024:
+        problems.append(f"df parsing is wrong: {parse_df_avail(df)}")
+    if parse_df_avail("df: /x: No such file or directory") is not None:
+        problems.append("a df error message was parsed as a free-space number")
+    if parse_df_avail("") is not None:
+        problems.append("empty df output was parsed as a free-space number")
+
+    # Flag-order detection, and the control that it does not reject commands.
+    for flag in LOCAL_ONLY_FLAGS:
+        if misplaced_flags(["cargo", "build", flag]) != [flag]:
+            problems.append(f"a misplaced `{flag}` was not caught")
+    if misplaced_flags(["cargo", "test", "--sync-back=debug/x"]) != [
+        "--sync-back=debug/x"
+    ]:
+        problems.append("the `--flag=value` spelling slips past the check")
+    legitimate = ["cargo", "build", "-v", "-j4", "--release", "--all-targets",
+                  "--", "--test-threads=2", "--nocapture"]
+    if misplaced_flags(legitimate):
+        problems.append(
+            f"a legitimate remote command was rejected as a misplaced flag: "
+            f"{misplaced_flags(legitimate)} — the check would block `just rrun "
+            f"cargo build -v`, so it cannot be trusted to mean anything"
+        )
+
+    # Signal deaths. A negative returncode taken mod 256 is nonzero by luck,
+    # not by design, and names nothing.
+    if exit_status(0) != (0, None) or exit_status(101) != (101, None):
+        problems.append("an ordinary exit status was rewritten")
+    killed, note = exit_status(-9)
+    if killed != 137 or not note or "signal 9" not in note:
+        problems.append(
+            f"a session killed by SIGKILL reported {killed} with note {note!r} "
+            f"— the shell's own 128+N spelling and the signal number are what "
+            f"make it readable as a kill rather than a chosen exit code"
+        )
+    if exit_status(-15)[0] % 256 == 0:
+        problems.append(
+            "a signalled session mapped to a status that is ZERO mod 256 — it "
+            "would surface as success"
+        )
+
+    # Per-worktree isolation. Two lanes sharing a slug share a target dir, and
+    # the failures that produces look like real ones.
+    # The collision the hash exists for is SAME BASENAME, different parent --
+    # every lane worktree under .worktrees/ is a candidate. A first version of
+    # this check compared /a/b with /a/c, which differ by basename alone and so
+    # stayed distinct even with the hash removed: the mutation survived.
+    if slug_for(Path("/one/lane/tooling")) == slug_for(Path("/two/lane/tooling")):
+        problems.append(
+            "two worktrees with the same basename share a remote slug — they "
+            "would share a target dir, and the failures that produces look "
+            "exactly like real ones"
+        )
+    if slug_for(Path("/a/b")) != slug_for(Path("/a/b")):
+        problems.append("the slug is not stable for one worktree")
+    if "tooling" not in slug_for(Path("/one/lane/tooling")):
+        problems.append(
+            "the slug dropped the readable part — a directory listing on the "
+            "build box would no longer say which lane owns which tree"
+        )
+
+    if problems:
+        print("FAIL: remote-build self-test", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
+    print("PASS: remote-build guards — $HOME spelling, disk floor, df parsing,\n"
+          "flag order and slug isolation each reject the bad case and accept\n"
+          "the good one.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="remote-build.py",
@@ -274,10 +573,12 @@ def main() -> int:
     )
     ap.add_argument(
         "action",
-        choices=["test", "check", "clippy", "build", "run", "doctor", "shell", "clean"],
+        choices=["test", "check", "clippy", "build", "run", "doctor", "shell",
+                 "clean", "selftest"],
         help="test/check/clippy/build run the obvious thing; "
         "run takes an arbitrary command after --; "
-        "doctor verifies the remote; shell opens one; clean removes the remote tree",
+        "doctor verifies the remote; shell opens one; clean removes the remote "
+        "tree; selftest proves this script's own guards can fail",
     )
     ap.add_argument("rest", nargs=argparse.REMAINDER,
                     help="extra args, after --, passed to the remote command")
@@ -296,28 +597,33 @@ def main() -> int:
                     help="after a successful run, copy this path back from the "
                          "remote target dir (e.g. debug/openplanet-lsp)")
     ap.add_argument("-v", "--verbose", action="store_true", help="show sync stats")
+    ap.add_argument("--disk-floor", type=float, default=DEFAULT_DISK_FLOOR_GB,
+                    metavar="GB",
+                    help=f"refuse to build on a remote with less free space "
+                         f"(default: {DEFAULT_DISK_FLOOR_GB:g}, "
+                         "or $LSP_REMOTE_DISK_FLOOR_GB)")
+    ap.add_argument("--allow-low-disk", action="store_true",
+                    help="skip the free-space pre-flight (B106)")
     a = ap.parse_args()
+
+    if a.action == "selftest":
+        return run_selftest()
 
     root = local_root()
     if a.action == "doctor":
         return doctor(a.host, root)
 
     slug = slug_for(root)
-    # Two spellings of the same place, and they are not interchangeable.
-    # ssh runs a shell, so `$HOME` expands there. rsync does NOT run a shell on
-    # its remote path -- it passes it literally, so `$HOME/x` becomes the absurd
-    # `/home/user/$HOME/x`. rsync's remote paths are already relative to the
-    # login directory, so the bare relative form is the correct one for it.
-    rel_base = f"{REMOTE_ROOT}/{slug}"
-    base = f"$HOME/{rel_base}"
-    remote_src = f"{base}/src"
-    remote_target = f"{base}/target"
-    rsync_dest = f"{rel_base}/src"
-    # rsync does NOT run a shell on the remote path, so `$HOME` would arrive
-    # literally and rsync would try to chdir into `/home/user/$HOME/...`.
-    # Every rsync-side path must therefore be relative to the remote home,
-    # which is rsync's own default cwd. Only the ssh-side paths may use $HOME.
-    rsync_target = f"{rel_base}/target"
+    # Two spellings of the same place, and they are not interchangeable. The
+    # rule, and the reason, live in remote_paths -- one place, one selftest
+    # assertion, because this was got wrong once per direction.
+    paths = remote_paths(slug)
+    rel_base = paths["rel_base"]
+    base = paths["base"]
+    remote_src = paths["ssh_src"]
+    remote_target = paths["ssh_target"]
+    rsync_dest = paths["rsync_src"]
+    rsync_target = paths["rsync_target"]
 
     # argparse.REMAINDER keeps a leading "--"; drop it.
     rest = list(a.rest)
@@ -340,8 +646,28 @@ def main() -> int:
         jobs = a.jobs if a.jobs else min(remote_cores, 24)
         tthreads = a.test_threads if a.test_threads else max(2, jobs // 2)
 
+        # B106, before anything expensive or destructive. A build box with no
+        # room does not fail as "no room": rsync, cargo and rustc each report
+        # it in their own dimension, and the one the operator reads is usually
+        # cargo's, which blames the code.
+        if not a.allow_low_disk:
+            verdict = disk_floor_verdict(
+                remote_free_bytes(a.host, rel_base), a.disk_floor, a.host,
+                remote_target,
+            )
+            if verdict:
+                die(verdict)
+
         if not a.no_sync:
-            run_ssh(a.host, f"mkdir -p {remote_src} {remote_target}", quiet=True)
+            # This return status used to be discarded, AND `quiet=True` ate the
+            # message with it. MEASURED on a full filesystem: the remote said
+            # `mkdir: No space left on device` and the wrapper carried on to
+            # rsync as though the tree existed. B106 is about statuses that do
+            # not survive; this was one of them, in this file.
+            rc, out = capture_ssh(a.host, f"mkdir -p {remote_src} {remote_target}")
+            if rc != 0:
+                die(f"could not create the remote tree on {a.host} "
+                    f"(mkdir exited {rc}):\n  {out}", rc)
             sync_up(a.host, root, rsync_dest, a.with_git, a.verbose)
 
         if a.action == "test":
@@ -366,12 +692,15 @@ def main() -> int:
         # command. Without this check a misplaced flag is shipped to the remote
         # shell and comes back as `bash: --sync-back: command not found`, which
         # names the wrong dimension entirely -- it reads as a broken remote
-        # rather than as a local argument-order mistake.
-        stray = [x for x in inner if x.startswith("--sync-back")]
+        # rather than as a local argument-order mistake. Generalised from
+        # `--sync-back` alone after `-v` was made the same mistake with (exit
+        # 127, same misleading message); see LOCAL_ONLY_FLAGS for why the
+        # ambiguous flags are deliberately left out.
+        stray = misplaced_flags(inner)
         if stray:
             die(f"`{stray[0]}` came after the action, so it was treated as part "
                 f"of the remote command. Flags go first:\n"
-                f"  remote-build.py --sync-back SUBPATH {a.action} -- <cmd>")
+                f"  remote-build.py {stray[0]} ... {a.action} -- <cmd>")
 
         cmd = " ".join(shlex.quote(x) for x in inner)
         script = (
@@ -397,10 +726,13 @@ def main() -> int:
               f"j={jobs} :: {cmd}", file=sys.stderr)
         t0 = time.monotonic()
         rc = run_ssh(a.host, script)
-        print(f"remote-build: exit {rc} in {time.monotonic() - t0:.1f}s",
+        status, note = exit_status(rc)
+        if note:
+            print(f"remote-build: {note}", file=sys.stderr)
+        print(f"remote-build: exit {status} in {time.monotonic() - t0:.1f}s",
               file=sys.stderr)
 
-        if rc == 0 and a.sync_back:
+        if status == 0 and a.sync_back:
             dest = root / "target" / a.sync_back
             dest.parent.mkdir(parents=True, exist_ok=True)
             # Measured failure this fixes, from lane-tooling hitting it in
@@ -413,7 +745,7 @@ def main() -> int:
                 die(f"sync-back failed (exit {back})", back)
             print(f"remote-build: wrote {dest}", file=sys.stderr)
 
-        return rc
+        return status
 
 
 if __name__ == "__main__":

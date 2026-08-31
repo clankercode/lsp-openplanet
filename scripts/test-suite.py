@@ -131,6 +131,15 @@ PROCESS_STATUS = re.compile(
 )
 SIGNAL_IN_STATUS = re.compile(r"signal:\s*(?P<num>\d+)(?:,\s*(?P<name>SIG\w+))?")
 
+# B106. A write that failed for want of space is an OUTCOME of the run, in the
+# run's own output, in the same way `filtered out` is. It is NOT inferable from
+# the exit code: cargo can finish 0 over a build script whose `cargo:warning=`
+# lines carry the ENOSPC, and a run whose artifacts were silently lost still
+# reconciles section-for-section against an enumeration taken from the same
+# damaged tree. Both errnos, because a quota'd home fails the same way a full
+# disk does and reads differently in the log.
+DISK_FULL = re.compile(r"No space left on device|Disk quota exceeded")
+
 # Signals that mean the code did something wrong, versus ones that mean
 # something outside the process killed it. The distinction is the whole point
 # of the post-mortem: a SIGSEGV on an idle box and a SIGKILL under load average
@@ -240,7 +249,15 @@ def enumerate_expected_binaries(cargo_args: list[str] | None = None) -> dict[str
         check=False,
     )
     if proc.returncode != 0:
-        sys.exit(f"error: `cargo test --no-run` failed (exit {proc.returncode})")
+        # B106: the diagnostics are in the JSON on stdout that this function
+        # reads for artifacts, and dropping them left `could not compile ...
+        # due to 1 previous error` as the whole story on a disk-full box. One
+        # implementation, in test_inventory, because both enumerations parse
+        # the same stream the same way.
+        sys.exit(
+            f"error: `cargo test --no-run` failed (exit {proc.returncode})\n"
+            f"{test_inventory.build_failure_report(proc.stdout)}"
+        )
 
     found: dict[str, str] = {}
     for line in proc.stdout.splitlines():
@@ -297,6 +314,35 @@ def run_and_capture(
     if watch is not None:
         watch.sample(force=True)
     return exit_code, lines
+
+
+def build_preamble(lines: list[str]) -> list[str]:
+    """Cargo's own output, up to the first test section.
+
+    ``cargo test`` builds every target and only then starts running them, so
+    everything before the first ``Running`` / ``Doc-tests`` line came from
+    cargo, rustc, a build script or the linker. Everything after it is a test
+    binary's own stdout, which may legitimately contain any string at all --
+    including an errno a test asserts on.
+
+    This split is what makes the disk-full check discriminate. Without it the
+    check reads the suite's own output as evidence about the machine, and its
+    "a test named after the errno must not fail the run" control passes for
+    free: a FIRST attempt here excluded libtest's lines by shape instead, and
+    the mutation that removed the exclusion stayed GREEN, because a test NAME
+    cannot contain the spaces in `No space left on device` and so never
+    matched either way. The control was vacuous and the mutation caught it.
+
+    A doctest that failed to compile for want of space lands after
+    ``Doc-tests`` and is therefore outside this window -- deliberately: cargo
+    scores that as a failed test, which the gate already reports.
+    """
+    preamble: list[str] = []
+    for line in lines:
+        if RUNNING.match(line) or DOCTESTS.match(line):
+            break
+        preamble.append(line)
+    return preamble
 
 
 def split_sections(lines: list[str]) -> list[Section]:
@@ -425,6 +471,65 @@ class LoadWatch:
         )
 
 
+# --------------------------------------------------------------------------
+# B106: say the disk is nearly full BEFORE the build fails on it
+# --------------------------------------------------------------------------
+
+# Deliberately a WARNING and not a refusal. MEASURED: a fully built tree with
+# 712 KiB free on its target filesystem ran the whole suite and earned a
+# genuine `SUITE-VERIFIED: 2601 passed ... 30/30`, because a fresh tree writes
+# almost nothing. Failing that run would be a false NEGATIVE on a total that
+# was complete and correct, which is the mislabelling this gate already avoids
+# for a deliberately filtered run. What the operator needs is the reason
+# in advance; the hard stop belongs on the OUTCOME (see DISK_FULL).
+DISK_WARN_MB = int(os.environ.get("LSP_SUITE_DISK_WARN_MB", "2048"))
+
+
+def free_space(path: Path) -> tuple[int, Path] | None:
+    """``(free bytes, the path measured)`` for the fs holding ``path``.
+
+    Walks up to the nearest existing ancestor: the target dir does not exist
+    yet on a first run, and a check that silently skips itself in that case is
+    a check that is absent exactly when the tree is new.
+    """
+    probe = path
+    while not probe.exists():
+        if probe.parent == probe:
+            return None
+        probe = probe.parent
+    try:
+        stat = os.statvfs(probe)
+    except OSError:
+        return None
+    return stat.f_bavail * stat.f_frsize, probe
+
+
+def disk_warning(measured: tuple[int, Path] | None, floor_mb: int) -> str | None:
+    """The pre-flight line, or None when there is room.
+
+    An unmeasurable filesystem returns a line too. "I could not read it" and
+    "there is room" are different states and must not render as the same
+    silence -- that equivalence is the failure this whole document family is
+    about.
+    """
+    if measured is None:
+        return (
+            "==> disk: could not read free space for the target dir. That is "
+            "NOT the same as having room; a build failure here may be ENOSPC."
+        )
+    free, where = measured
+    if free >= floor_mb * 1024 * 1024:
+        return None
+    return (
+        f"==> DISK LOW: {free / 1024 / 1024:.0f} MiB free on the filesystem "
+        f"holding {where} (floor {floor_mb} MiB).\n"
+        f"    A run that has to build anything will fail with `No space left "
+        f"on device`.\n"
+        f"    On a remote lane: `just rclean` drops this worktree's remote "
+        f"tree, or set LSP_REMOTE_HOST to a box with room."
+    )
+
+
 def reconcile(
     exit_code: int,
     lines: list[str],
@@ -465,6 +570,23 @@ def reconcile(
     )
     if filtered_out:
         filtered = True
+
+    # B106. Deliberately NOT gated on the exit code, and deliberately a hard
+    # problem rather than a withheld marker: a run that could not write is not
+    # a run whose total means anything, however neatly its sections reconciled.
+    # Scoped to the BUILD PREAMBLE -- see build_preamble for why that is the
+    # line between "cargo could not write" and "a test printed a string".
+    write_failures = [
+        line.strip() for line in build_preamble(lines) if DISK_FULL.search(line)
+    ]
+    if write_failures:
+        problems.append(
+            f"the run could not WRITE — {len(write_failures)} line(s) report a "
+            f"full filesystem or an exhausted quota. Artifacts may be missing "
+            f"or truncated, so neither the coverage nor the total below is "
+            f"about a tree that finished building.\n"
+            f"      first: {write_failures[0][:200]}"
+        )
 
     for section in started_without_summary:
         name = Path(section.path or "?").name
@@ -605,6 +727,14 @@ def save_full_output(lines: list[str], report: str) -> Path | None:
 def run_gate(extra: list[str]) -> int:
     cargo_args, _libtest_args = split_cargo_args(extra)
     filtered = names_a_target(cargo_args)
+
+    # B106, before anything expensive: a build box at 0 bytes free reports its
+    # ENOSPC as `could not compile ... due to 1 previous error`, which reads as
+    # a broken tree. Say the real dimension first, while it is still cheap.
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR") or (REPO_ROOT / "target"))
+    low = disk_warning(free_space(target_dir), DISK_WARN_MB)
+    if low:
+        print(low, file=sys.stderr, flush=True)
 
     # B085, first: the binaries about to run must contain the tests their
     # sources declare, and nothing they measure may be older than the tree.
@@ -754,6 +884,178 @@ def run_selftest() -> int:
         problems.append(
             "an unfiltered clean run withheld the marker — the filtered-out "
             "check rejects every run, so it proves nothing"
+        )
+
+    # B106, THE DANGEROUS INPUT. Not "the build produced nothing" -- that case
+    # withholds the marker already, because the missing binaries are visible.
+    # This is a run that reconciles PERFECTLY: every expected binary reported,
+    # zero failures, cargo exit 0, a real total -- while a write failed
+    # underneath it. Coverage and totals were both measured on cargo's OUTPUT,
+    # and neither axis can see that the machine could not store the artifacts
+    # the output describes. The evidence is in the same stream as the verdict.
+    #
+    # The errno sits BEFORE the first `Running` line because that is where
+    # cargo emits it: `cargo test` builds every target and only then runs them.
+    enospc_line = (
+        f"error: could not write output to {one}.rcgu.o: No space left on device"
+    )
+    # The clean run carries ORDINARY build lines, not just a section. A first
+    # version started at `Running`, so its preamble was EMPTY -- and the
+    # mutation that made the check flag every preamble line stayed GREEN,
+    # because there were none to flag. Third vacuous control in this one fix.
+    build_lines = [
+        "   Compiling openplanet-lsp v0.6.0 (/t/src)",
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.53s",
+    ]
+    ok_section = [
+        *build_lines,
+        f"     Running tests/one.rs ({one})",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; "
+        "0 filtered out; finished in 0.01s",
+    ]
+    ds_status, ds_report = reconcile(
+        0, [build_lines[0], enospc_line, *ok_section[1:]], {one: "one"}
+    )
+    if VERIFIED_MARKER in ds_report:
+        problems.append(
+            f"a run that hit `No space left on device` printed "
+            f"`{VERIFIED_MARKER}` — a total taken off a tree that could not "
+            "finish being written would read as a verified suite"
+        )
+    if ds_status == 0:
+        problems.append("a run whose writes failed for want of space was green")
+    if "could not WRITE" not in ds_report:
+        problems.append("the disk-full verdict does not name the dimension")
+    quota = [
+        build_lines[0],
+        "error: failed to write bytecode: Disk quota exceeded",
+        *ok_section[1:],
+    ]
+    if reconcile(0, quota, {one: "one"})[0] == 0:
+        problems.append(
+            "an exhausted quota was accepted where a full disk was rejected — "
+            "the same failure on a quota'd home would still be reported green"
+        )
+    # Positive control 1: the SAME sections without the write failure must
+    # still earn the marker, or the check passes by rejecting every run.
+    if VERIFIED_MARKER not in reconcile(0, ok_section, {one: "one"})[1]:
+        problems.append(
+            "the identical run WITHOUT the disk error withheld the marker — "
+            "the disk check rejects everything and therefore proves nothing"
+        )
+    # Positive control 2, and the one that matters: the BYTE-IDENTICAL string,
+    # moved. After the first `Running` line it is a test binary's own stdout --
+    # a test that asserts on this errno -- and must not fail the suite. The
+    # first version of this control put the string in a test NAME instead,
+    # which cannot contain spaces and so never matched the pattern in either
+    # direction: it passed with the guard removed. Only the POSITION differs
+    # now, which is exactly what the guard reads.
+    printed_by_a_test = [
+        *build_lines,
+        ok_section[2],
+        "test io::reports_a_full_disk ... ok",
+        enospc_line,
+        ok_section[3],
+    ]
+    if VERIFIED_MARKER not in reconcile(0, printed_by_a_test, {one: "one"})[1]:
+        problems.append(
+            "the errno PRINTED BY A TEST failed the suite — the disk check is "
+            "reading the suite's own output as evidence about the machine"
+        )
+    if build_preamble(["a", "b", f"     Running x ({one})", "c"]) != ["a", "b"]:
+        problems.append("the build preamble does not stop at the first section")
+    if build_preamble(["a", "   Doc-tests openplanet_lsp", "b"]) != ["a"]:
+        problems.append("the build preamble does not stop at Doc-tests")
+    if build_preamble(["only", "build", "output"]) != ["only", "build", "output"]:
+        problems.append(
+            "a run that never reached a section had an empty preamble — a "
+            "build that died before running anything is exactly the case "
+            "whose diagnostics must still be read"
+        )
+
+    # B106: a failed build must say WHY. Measured symptom: `could not compile
+    # ... due to 1 previous error` with the ENOSPC nowhere in the output,
+    # because rustc's message was in the JSON this gate parses for artifacts.
+    diag = json.dumps({
+        "reason": "compiler-message",
+        "message": {
+            "level": "error",
+            "message": "couldn't write output",
+            "rendered": "error: could not write output to /t/x.rcgu.o: "
+                        "No space left on device\n",
+        },
+    })
+    rendered = test_inventory.build_failure_report(
+        "\n".join(["   Compiling openplanet-lsp v0.6.0", diag, "not json"])
+    )
+    if "No space left on device" not in rendered:
+        problems.append(
+            "a build failure did not surface rustc's own diagnostic — the "
+            "reader is told the tree does not compile when the disk is full"
+        )
+    silent = test_inventory.build_failure_report("{}\nnot json\n")
+    if not silent.strip() or "MACHINE" not in silent:
+        problems.append(
+            "a build that failed with NO compiler diagnostics rendered as "
+            "empty — 'nothing to report' and 'the failure is not in the code' "
+            "are different findings and must not read the same"
+        )
+    # Elision keeps BOTH ends. A 10 KB linker diagnostic is mostly one `cc`
+    # command line, and the reason sits at the top AND at the bottom
+    # (`collect2: fatal error: ...`). Head-only truncation loses the second.
+    long_diag = json.dumps({
+        "reason": "compiler-message",
+        "message": {"level": "error", "rendered":
+                    "error: linking with `cc` failed\n"
+                    + "\n".join(f"  = note: object-{i}.o" for i in range(200))
+                    + "\ncollect2: fatal error: ld terminated"},
+    })
+    elided = test_inventory.build_failure_report(long_diag)
+    if "error: linking with `cc` failed" not in elided:
+        problems.append("elision dropped the diagnostic's headline")
+    if "collect2: fatal error" not in elided:
+        problems.append(
+            "elision dropped the diagnostic's TAIL — the linker says what went "
+            "wrong on its last line, and head-only truncation loses it"
+        )
+    if "elided" not in elided or len(elided.splitlines()) > 40:
+        problems.append(
+            f"a 200-line diagnostic was not elided ({len(elided.splitlines())} "
+            "lines) — one disk-full build emits one of these per target"
+        )
+    short = "error: could not write output: No space left on device"
+    if test_inventory.elide(short) != short:
+        problems.append("a short diagnostic was elided; there is nothing to cut")
+    artifact_only = json.dumps({"reason": "compiler-artifact", "executable": "/t/x"})
+    if "MACHINE" not in test_inventory.build_failure_report(artifact_only):
+        problems.append(
+            "artifact records were mistaken for diagnostics — the report "
+            "would echo the build's successes as its failure reason"
+        )
+
+    # B106 pre-flight. Three states, three renderings: room, no room, and
+    # unmeasurable. The third existing at all is the point.
+    gib = 1024 * 1024 * 1024
+    if disk_warning((8 * gib, Path("/t")), 2048) is not None:
+        problems.append("a filesystem with 8 GiB free was reported as low")
+    tight = disk_warning((10 * 1024 * 1024, Path("/t")), 2048)
+    if tight is None or "DISK LOW" not in tight or "/t" not in tight:
+        problems.append(
+            "10 MiB free under a 2 GiB floor was not flagged, or the warning "
+            "does not name the filesystem it measured"
+        )
+    unknown = disk_warning(None, 2048)
+    if unknown is None or "NOT the same" not in unknown:
+        problems.append(
+            "an unmeasurable filesystem rendered as silence, which is what "
+            "having room renders as"
+        )
+    deep = free_space(REPO_ROOT / "no" / "such" / "dir" / "at" / "all")
+    if deep is None or deep[0] <= 0:
+        problems.append(
+            "free space could not be measured through a path that does not "
+            "exist yet — the check would be absent on a first run, which is "
+            "exactly when the target dir is missing"
         )
 
     if not names_a_target(["--test", "foo"]) or names_a_target(["-j2"]):
