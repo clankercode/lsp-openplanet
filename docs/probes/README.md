@@ -286,21 +286,59 @@ known-answer controls re-run every 100 names. Result:
 | flipped to REJECTED | 3 |
 | UNDETERMINED | 0 |
 
-**None of the three flips is a B068 artefact**, and no conclusion moves. They
-are `Foo::Bar::VirtualKey`, `Foo::ESceneCharVisNotice` and `Foo::VirtualKey`,
-all now `Namespace 'Foo' doesn't exist.` — the plugin-namespace effect this
-document already warns about, not a fabricated verdict. All three are already
-the first three entries of `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which
-forces them to "must not resolve" regardless of the corpus verdict, so the Rust
-suite's expectations are unchanged.
+The delta MUST be read in two buckets, because they mean opposite things:
 
-The full artefact list splits cleanly along the same line, which is what
-identifies the mechanism: the three `Foo::*` spellings flipped, while all nine
-`GameData::*`, `MLFeed::*`, `MLHook::*`, `MathX::*` and `VehicleState::*`
-spellings still accept. The plugin declaring `namespace Foo` is no longer
-installed; the others still are. That is environmental drift between two
-machines-in-time, and it independently CONFIRMS the exclusion list a previous
-lane had reasoned out rather than measured.
+| bucket | rows | meaning |
+|---|---|---|
+| **A — batching fabricated an ACCEPT** | **0** | the real B068 result |
+| **B — the probing environment changed** | **3** | a corpus-provenance fact, not a corpus error |
+
+**Bucket A is empty. Not one row was fabricated by the batching defect.**
+
+The three bucket-B rows are `Foo::Bar::VirtualKey`, `Foo::ESceneCharVisNotice`
+and `Foo::VirtualKey`. **Do not "correct" them.** They were valid measurements
+of a machine on which the namespace `Foo` existed; it does not exist here.
+
+That is proven, not inferred, by the REJECTED rows that pin the context — and
+those are exactly the rows an ACCEPTED-only re-probe would never look at:
+
+```
+Foo::ZZZNoSuch       then: Identifier 'ZZZNoSuch' is not a data type in namespace 'Foo' or parent
+                     now : Namespace 'Foo' doesn't exist.
+Foo::Bar::ZZZNoSuch  then: Identifier 'ZZZNoSuch' is not a data type in namespace 'Foo::Bar' or parent
+                     now : Namespace 'Foo::Bar' doesn't exist.
+MathX::ZZZNoSuch     then: Identifier 'ZZZNoSuch' is not a data type in namespace 'MathX' or parent
+                     now : Identifier 'ZZZNoSuch' is not a data type in namespace 'MathX' or parent
+```
+
+The *is-a-scope* message form ("… in namespace 'Foo' or parent") can only be
+produced when the namespace exists. `Foo` produced it then and produces the
+namespace-absent form now; `MathX` produces the same form in both runs. The
+namespace, not the verdict logic, is what changed.
+
+`build_source` declares no namespace anywhere, so `Foo` was never supplied by
+the probe fixture — it came from the game's own loaded plugin set. A plugin
+declaring `namespace Foo` was installed when the corpus was generated and is
+not installed now. That is precisely the plugin-namespace effect documented
+above, and precisely why those three spellings are already the first three
+entries of `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which forces them to
+"must not resolve" whatever the corpus says. **No test expectation and no
+documented conclusion moves.**
+
+The whole twelve-entry artefact list splits along the same line, which is what
+identifies the mechanism rather than merely asserting it: the three `Foo::*`
+spellings flipped, while all nine `GameData::*`, `MLFeed::*`, `MLHook::*`,
+`MathX::*` and `VehicleState::*` spellings still accept — and the matching
+`::ZZZNoSuch` probes confirm those namespaces still exist. The re-probe
+therefore CONFIRMS an exclusion list a previous lane had reasoned out rather
+than measured.
+
+**Carry this forward when re-measuring anything here.** Restricting a re-probe
+to the rows a known defect could affect also blinds it to every defect you were
+not thinking about. ACCEPTED-only was correct for B068 — an abort cannot
+manufacture a REJECT — and it excluded the `*::ZZZNoSuch` rows that are the
+only witnesses to the environment changing underneath the corpus. Re-probe the
+context-pinning REJECTs too, whatever the narrowing.
 
 The shape of the result is itself the argument that B068 never fired here: an
 aborted batch fabricates ACCEPTED for *every* surviving name in the unit, so a
@@ -313,8 +351,45 @@ spelling, so the defect can only invent an ACCEPTED. Every "the LSP must reject
 this" assertion built on these files was always sound, and B056's narrowing
 claim is unaffected.
 
-**`b053-bare-enum-values.tsv` has NOT been re-probed** — its 592 ACCEPTED rows
-remain open work under B068.
+### b053 has been re-probed too. Nothing changed at all.
+
+All **592 ACCEPTED rows** of `b053-bare-enum-values.tsv` were re-measured at
+`batch=1` on the same day. **592 unchanged, 0 changed, 0 UNDETERMINED** —
+both buckets empty, including the environmental one.
+
+Bare value names have their own version of the `Foo` drift: a plugin declaring
+a *global* enum with a value named `X` makes bare `X` compile, and if that
+plugin goes away `X` stops compiling. Sampled `NO_SYMBOL` rows were re-probed
+as context pins to detect it (`AAAA`, `Nadeo`, plus two fabricated names) and
+all came back unchanged, so no value-level drift touched this corpus between
+the two runs.
+
+The run asserts its own batch size. `--batch 1` is an intention; the driver
+wraps `run_batch` and records the unit size actually reached — `[1]` — into the
+checkpoint artifact. That check exists because `--batch` was once accepted,
+documented, and ignored by both corpus writers, so a re-probe could have run at
+200 while reporting 1, reproducing the defect it was built to detect and
+returning a clean bill of health. A knob wired to nothing looks identical from
+the outside.
+
+**Both corpora are now re-measured and sound.** Across 1334 ACCEPTED rows, zero
+were fabricated by the batching defect.
+
+### Re-measuring a corpus yourself
+
+    scripts/probe_enum_corpus.py --reprobe b052   # or b053
+    scripts/probe_enum_corpus.py --reprobe b052 --checkpoint path.jsonl
+
+Resumable — every verdict is fsynced before the next probe, so an interrupted
+run costs the remainder, not the whole. Needs the live game. It runs the
+corpus's own controls at the start, every 100 names and at the end, aborting
+rather than writing verdicts if any drifts; re-probes the context pins; scores
+with the same `type_verdict` / `value_verdict` the writers use; and records the
+unit size it actually achieved.
+
+Sort any change into **two buckets and never merge them**: rows the batching
+defect fabricated, and rows that changed because the probing environment did.
+The context pins tell you which — see the `Foo` case above.
 
 **A verdict this document does not yet contain: `UNDETERMINED`.** If a
 regenerated corpus carries one, `global_scope.rs` panics on it by design, but
