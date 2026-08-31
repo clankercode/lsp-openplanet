@@ -281,6 +281,7 @@ pub(super) fn test_diag(
     CliDiagnostic {
         path: path.into(),
         combos: Vec::new(),
+        versions: Vec::new(),
         diagnostic: Diagnostic {
             range: Range {
                 start: Position {
@@ -355,6 +356,7 @@ mod tests {
                 type_database_loaded: false,
                 type_db: None,
                 errors: crate::config::ErrorGroup::Off,
+                targets: Vec::new(),
             };
 
             let out = format_check_report_with(&report, false, CheckFormat::Pretty);
@@ -389,6 +391,7 @@ mod tests {
             type_database_loaded: false,
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
+            targets: Vec::new(),
         };
 
         let out = format_check_report_with(&report, false, CheckFormat::Plain);
@@ -423,6 +426,7 @@ mod tests {
             type_database_loaded: false,
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
+            targets: Vec::new(),
         };
 
         // color=false, format=pretty → pretty layout, no ANSI
@@ -473,6 +477,7 @@ mod tests {
             type_database_loaded: true,
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
+            targets: Vec::new(),
         };
 
         let plainish = format_check_report_with(&report, false, CheckFormat::Auto);
@@ -501,6 +506,7 @@ mod tests {
             type_database_loaded: true,
             type_db: None,
             errors: crate::config::ErrorGroup::Off,
+            targets: Vec::new(),
         };
         let out = format_check_report_with(&report, false, CheckFormat::Pretty);
         assert!(

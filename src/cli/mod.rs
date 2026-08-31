@@ -11,6 +11,7 @@ use crate::config::{
     ArchTarget, ErrorGroup, LspConfig, OsTarget, SignatureMode, UnusedLevel, UserPrefs,
 };
 use crate::server::diagnostics;
+use crate::typedb::catalog::VersionCatalog;
 use crate::typedb::TypeIndex;
 use crate::workspace::load::{load_plugin_workspace, DependencySearch};
 use crate::workspace::manifest::ManifestWorkspace;
@@ -304,6 +305,10 @@ pub struct CheckReport {
     /// Grouping applied to human (plain/pretty) output only. JSON keeps
     /// `diagnostics` in analysis order regardless of this field.
     pub errors: ErrorGroup,
+    /// GH #18: labels of the resolved target versions, in request order.
+    /// Empty on a legacy single-target run (no `--openplanet-version` /
+    /// `--typedb-versions-dir`), so existing output stays byte-identical.
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +318,11 @@ pub struct CliDiagnostic {
     /// sorted define list; `[]` = the base combo). Empty = single-combo
     /// (non-matrix) run — formatters render no label in that case.
     pub combos: Vec<Vec<String>>,
+    /// GH #18: the target Openplanet versions this diagnostic fired on.
+    /// Empty on a single-target run, and on a multi-target run when it
+    /// fired on EVERY target (firing everywhere is not version news) —
+    /// formatters render no label in either case.
+    pub versions: Vec<String>,
     pub diagnostic: Diagnostic,
 }
 
@@ -777,12 +787,67 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         config.defines.insert(define.clone());
     }
 
-    let type_index = load_type_index(&config, options.no_typedb)?;
+    // GH #18: one target per requested Openplanet version. Without either
+    // version flag this is a single unlabeled target holding exactly the
+    // index `load_type_index` resolves today, so legacy runs stay
+    // byte-identical.
+    struct Target {
+        /// `None` on the legacy path; `Some(version)` when the catalog
+        /// resolved it (a lone catalog target is still labeled in the
+        /// report, but only multi-target runs label diagnostics).
+        label: Option<String>,
+        index: Option<TypeIndex>,
+    }
+    let targets: Vec<Target> = if options.openplanet_version.is_none()
+        && options.typedb_versions_dir.is_none()
+    {
+        vec![Target {
+            label: None,
+            index: load_type_index(&config, options.no_typedb)?,
+        }]
+    } else {
+        let installed = config.core_json.as_deref().zip(config.game_json.as_deref());
+        let catalog =
+            VersionCatalog::build(installed, options.typedb_versions_dir.as_deref())
+                .map_err(CliError::Check)?;
+        let resolved = catalog
+            .resolve_targets(options.openplanet_version.as_deref())
+            .map_err(CliError::Check)?;
+        if resolved.is_empty() {
+            // A versions root but no request and no installed dump: the run
+            // proceeds without a typedb, exactly like discovery finding
+            // nothing today.
+            vec![Target {
+                label: None,
+                index: None,
+            }]
+        } else {
+            resolved
+                .into_iter()
+                .map(|entry| {
+                    let index = TypeIndex::load(&entry.core_json, &entry.game_json).map_err(
+                        |e| CliError::Check(format!("failed to load type database: {e}")),
+                    )?;
+                    Ok(Target {
+                        label: Some(entry.label.clone()),
+                        index: Some(index),
+                    })
+                })
+                .collect::<Result<Vec<_>, CliError>>()?
+        }
+    };
+    let multi_target = targets.len() > 1;
     // GH #59: stamp the run with the DB build it judged the code against.
     // B064: out of the index, not out of a second read of the files — the
     // report has to name the database the diagnostics came from, and a re-read
-    // names whatever is on disk when the run finishes instead.
-    let type_db = type_index.as_ref().map(|index| index.versions().clone());
+    // names whatever is on disk when the run finishes instead. Multi-target
+    // runs keep the first target's stamps here (back-compat single slot);
+    // `targets` names every version.
+    let type_db = targets
+        .iter()
+        .find_map(|t| t.index.as_ref())
+        .map(|index| index.versions().clone());
+    let type_database_loaded = targets.iter().any(|t| t.index.is_some());
 
     let mut search = DependencySearch {
         plugins_dirs: options.plugins_dirs.clone(),
@@ -813,35 +878,58 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         combo_config.defines.extend(combo.iter().cloned());
 
         // One snapshot per combo: `#if` masking is define-dependent, so
-        // parsing + symbol pooling must re-run (GH #39 / GH #57).
+        // parsing + symbol pooling must re-run (GH #39 / GH #57). The
+        // snapshot is version-independent, so targets share it (GH #18).
         let snapshot = AnalysisSnapshot::from_load(&load, &combo_config);
-        let pass_start = cli_diagnostics.len();
-        collect_pass_diagnostics(
-            &load,
-            &snapshot,
-            &combo_config,
-            type_index.as_ref(),
-            &manifest_path,
-            &search.plugin_files_search_paths,
-            &mut cli_diagnostics,
-        );
-        if matrix_run {
-            for diag in &mut cli_diagnostics[pass_start..] {
-                diag.combos.push(combo.clone());
+        for target in &targets {
+            let pass_start = cli_diagnostics.len();
+            collect_pass_diagnostics(
+                &load,
+                &snapshot,
+                &combo_config,
+                target.index.as_ref(),
+                &manifest_path,
+                &search.plugin_files_search_paths,
+                &mut cli_diagnostics,
+            );
+            if matrix_run {
+                for diag in &mut cli_diagnostics[pass_start..] {
+                    diag.combos.push(combo.clone());
+                }
+            }
+            if multi_target {
+                let label = target
+                    .label
+                    .clone()
+                    .expect("multi-target entries come from the catalog, which labels them");
+                for diag in &mut cli_diagnostics[pass_start..] {
+                    diag.versions.push(label.clone());
+                }
             }
         }
     }
 
     // GH #57: a diagnostic firing in several combos is reported once,
-    // labeled with every combo it fired in.
-    let cli_diagnostics = matrix::merge_combo_diagnostics(cli_diagnostics);
+    // labeled with every combo it fired in. GH #18: likewise across target
+    // versions.
+    let mut cli_diagnostics = matrix::merge_combo_diagnostics(cli_diagnostics);
+    if multi_target {
+        // Firing on EVERY target is not version news — drop the label so
+        // only version-specific findings carry one.
+        for diag in &mut cli_diagnostics {
+            if diag.versions.len() == targets.len() {
+                diag.versions.clear();
+            }
+        }
+    }
 
     Ok(CheckReport {
         root: load.root,
         diagnostics: cli_diagnostics,
-        type_database_loaded: type_index.is_some(),
+        type_database_loaded,
         type_db,
         errors: config.errors,
+        targets: targets.iter().filter_map(|t| t.label.clone()).collect(),
     })
 }
 
@@ -864,6 +952,7 @@ fn collect_pass_diagnostics(
             cli_diagnostics.push(CliDiagnostic {
                 path: manifest_path.to_path_buf(),
                 combos: Vec::new(),
+                versions: Vec::new(),
                 diagnostic,
             });
         }
@@ -885,6 +974,7 @@ fn collect_pass_diagnostics(
                 cli_diagnostics.push(CliDiagnostic {
                     path: manifest_path.to_path_buf(),
                     combos: Vec::new(),
+                    versions: Vec::new(),
                     diagnostic,
                 });
             }
@@ -928,6 +1018,7 @@ fn collect_pass_diagnostics(
             cli_diagnostics.push(CliDiagnostic {
                 path: item.path.clone(),
                 combos: Vec::new(),
+                versions: Vec::new(),
                 diagnostic,
             });
         }
@@ -947,6 +1038,7 @@ fn collect_pass_diagnostics(
                 cli_diagnostics.push(CliDiagnostic {
                     path: item.path.clone(),
                     combos: Vec::new(),
+                    versions: Vec::new(),
                     diagnostic,
                 });
             }
@@ -1037,6 +1129,7 @@ fn report_for_human_format(report: &CheckReport) -> CheckReport {
         type_database_loaded: report.type_database_loaded,
         type_db: report.type_db.clone(),
         errors: report.errors,
+        targets: report.targets.clone(),
     }
 }
 
@@ -1441,6 +1534,7 @@ mod tests {
             .map(|_| CliDiagnostic {
                 path: PathBuf::from("/tmp/plugin/src/Main.as"),
                 combos: Vec::new(),
+                versions: Vec::new(),
                 diagnostic: Diagnostic {
                     severity: Some(DiagnosticSeverity::ERROR),
                     message: "boom".to_string(),
@@ -1454,6 +1548,7 @@ mod tests {
             type_database_loaded: false,
             type_db: None,
             errors: ErrorGroup::Off,
+            targets: Vec::new(),
         }
     }
 
@@ -1575,6 +1670,7 @@ mod tests {
         let item = |sev: Option<DiagnosticSeverity>, msg: &str| CliDiagnostic {
             path: PathBuf::from("/tmp/plugin/src/Main.as"),
             combos: Vec::new(),
+            versions: Vec::new(),
             diagnostic: Diagnostic {
                 severity: sev,
                 message: msg.to_string(),
@@ -1596,6 +1692,7 @@ mod tests {
             type_database_loaded: false,
             type_db: None,
             errors: group,
+            targets: Vec::new(),
         }
     }
 

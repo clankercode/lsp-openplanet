@@ -149,9 +149,10 @@ pub fn combo_prefix(combos: &[Vec<String>]) -> String {
     }
 }
 
-/// Merge duplicate diagnostics across combos: identical (path, line, col,
-/// severity, message) diagnostics are reported ONCE with the combined
-/// combo list. First-seen order and first-seen Diagnostic payload win.
+/// Merge duplicate diagnostics across combos — and, GH #18, across target
+/// versions: identical (path, line, col, severity, message) diagnostics
+/// are reported ONCE with the combined combo and version lists.
+/// First-seen order and first-seen Diagnostic payload win.
 pub fn merge_combo_diagnostics(diags: Vec<CliDiagnostic>) -> Vec<CliDiagnostic> {
     #[derive(PartialEq, Eq, Hash)]
     struct Key {
@@ -178,6 +179,11 @@ pub fn merge_combo_diagnostics(diags: Vec<CliDiagnostic>) -> Vec<CliDiagnostic> 
                 for combo in diag.combos {
                     if !out[idx].combos.contains(&combo) {
                         out[idx].combos.push(combo);
+                    }
+                }
+                for version in diag.versions {
+                    if !out[idx].versions.contains(&version) {
+                        out[idx].versions.push(version);
                     }
                 }
             }
@@ -217,6 +223,7 @@ mod tests {
         CliDiagnostic {
             path: PathBuf::from(path),
             combos,
+            versions: Vec::new(),
             diagnostic: Diagnostic {
                 range: Range::new(Position::new(line, col), Position::new(line, col + 1)),
                 severity: Some(DiagnosticSeverity::ERROR),
