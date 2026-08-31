@@ -1,38 +1,42 @@
 # bl-fix-many batch state — 2026-08-31, updated 21:50 AEST
 
-## Now — 22:30 AEST
+## Now — 22:50 AEST
 
-Master **b580565**, **SUITE-VERIFIED 2720 passed; 0 failed; 12 ignored; 32/32
-binaries**, gated on **x-tuf** from the main checkout.
+Master **2745 passed; 0 failed; 12 ignored; 33/33 binaries** on x-alpha, and
+**CLIPPY-DELTA-VERIFIED** on x-tuf. Both gates green.
 
-Closed since the 21:05 restart: **B091, B093, B099, B101, B106, B107, B108**,
-plus **B105** from the peer session. **B109 rejected as invalid** — it was filed
-on a misread comment and no code needed changing. Suite 2601 -> 2720.
+Closed since the 21:05 restart: **B091, B093, B099, B100, B101, B106, B107,
+B108, B110, B111, B112** plus **B105** from the peer session. **B109 rejected**
+as invalid. Suite 2601 -> 2745.
 
-Lanes running: enum (B110), resolver (B111 committed, gating), tooling (B097
-in-repo half), unused (B112). Five tickets were FILED from lane findings
-tonight — B107, B108, B110, B111, B112 — all found while doing something else
-and deliberately not folded in.
+**8 open.** Lanes: resolver on **B114**, enum on **B081**. unused and tooling
+idle. B096/B097 blocked on Max; B103/B104/B113 belong to the peer session.
 
-### B097 needs Max
+### Where the two gates run, and why
 
-Its fix lives in Max's game-plugin fork, and the ticket records that
-authorisation for a lane to edit it was WITHDRAWN ("two agents editing Max's
-game plugin is worse than neither"). I have NOT lifted that — it protects his
-game environment, it was his call, and there are now four lanes plus a peer
-session rather than the two when it was written. lane-tooling has the
-unambiguously in-repo half instead (`fleet_dogfood.py`'s reader, hoisting the
-correct implementation that already exists in `probe_export_binding.py`). That
-will not close B097. **Game probing stays blocked until Max rules.**
+- **Suite -> x-alpha.** 48 cores, measured 64s against x-tuf's 206s.
+- **Clippy delta -> x-tuf.** The baseline is recorded there and x-tuf's rustc
+  1.97.0 matches this desktop, so the delta runs remotely AND locally.
+  `clippy_delta.py` refuses across a toolchain difference; that refusal is the
+  tool working, never something to loosen.
 
-### B111 is the one to look at first in the morning
+### B097 still needs Max
 
-A live false ERROR on shipped code: B094 flags `mixin class X : I` for not
-implementing `I`, and 8 of 11 corpus findings were that, in two plugins that
-ship and compile. A mixin's members are copied into including classes; the
-mixin never owes the interface. It is the exact outcome B094's four fail-silent
-bails exist to prevent, arriving by a route none cover — the bails guard the
-COMPARISON, nothing guarded the APPLICABILITY.
+Its fix lives in Max's game-plugin fork and authorisation for a lane to edit it
+was WITHDRAWN. Not mine to lift. lane-tooling did the in-repo half (one wire
+reader instead of two, and a transport router that picks by MEASURED request
+size, so the day RemoteBuild is fixed it starts using it again with no edit).
+That does NOT close B097 — `load_plugin` is 73 bytes against a 64-byte ceiling
+and nothing rescues it. **Game probing remains blocked**, and B096 behind it.
+
+### B114 is the biggest open item
+
+`SymbolKind` records what a symbol IS, not what it was DECLARED AS. Every
+modifier is dropped at pooling; three AST sidecars work around it; sidecars are
+per-DOCUMENT while the pool is the CROSS-FILE surface. B101 and B111 were both
+instances, each found by the false output it caused rather than by anyone
+noticing a field was missing. `is_private` is the one waiting — completion has
+no visibility filtering and cannot get it without pooled visibility.
 
 ## Gate discipline, hard-won today
 
