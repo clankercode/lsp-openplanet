@@ -236,12 +236,19 @@ def main() -> int:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 
-    bad = [r for r in rows if r["expect"] != "UNKNOWN" and r["verdict"] != r["expect"]]
-    if bad:
-        print("\nCONTROL FAILED — no row here is evidence:", file=sys.stderr)
-        for r in bad:
-            print(f"  {r['id']}: expected {r['expect']}, got {r['verdict']} ({r['reason']})",
-                  file=sys.stderr)
+    # B077: this probe had NO post-run sweep, so it could exit 0 having left a
+    # fixture installed -- and a stranded fixture turns every LATER probe's
+    # rows into skipped/AMBIGUOUS. One lane's infrastructure failure becoming
+    # the next lane's "measurement" is the same class as the rest of B139.
+    left = repro.probe_dirs_present(fleet.OPN_PLUGINS)
+    print()
+    print(f"B077 sweep: {'clean' if not left else 'STRANDED: ' + repr(left)}")
+
+    problems = fleet.probe_run_problems(rows)
+    if problems:
+        print("THE RUN IS NOT EVIDENCE:", file=sys.stderr)
+        for pr in problems:
+            print(f"  - {pr}", file=sys.stderr)
 
     if args.json:
         Path(args.json).write_text(json.dumps(rows, indent=1))
@@ -250,7 +257,7 @@ def main() -> int:
             "id\tquestion\texpect\tverdict\treason\n"
             + "".join(f"{r['id']}\t{r['question']}\t{r['expect']}\t{r['verdict']}\t{r['reason']}\n"
                       for r in rows))
-    return 1 if bad else 0
+    return 1 if (problems or left) else 0
 
 
 if __name__ == "__main__":

@@ -61,7 +61,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath as PurePosix
 
 # `.get(name, default)` returns "" for a SET-BUT-EMPTY variable, which is a
 # routine shell accident (`LSP_REMOTE_HOST= just ...`, an unset-looking export,
@@ -392,7 +392,98 @@ def exit_status(rc: int) -> tuple[int, str | None]:
     """
     if rc < 0:
         return 128 - rc, f"the remote session was killed by signal {-rc}"
+    if rc == 255:
+        # B139. ssh's OWN failure status: host unreachable, auth refused, DNS
+        # gone. Reported as a bare `exit 255` it reads as a verdict about the
+        # command, which is the batch's recurring shape -- the tool naming
+        # what it saw rather than why it could not see. A NOTE and not a
+        # refusal: 255 is a status a remote command may legitimately choose,
+        # so this is data for the reader, not a decision taken from them.
+        return rc, ("255 is ssh's own failure status — the remote command may "
+                    "never have started. Check connectivity to the host "
+                    "before reading this as a result")
     return rc, None
+
+
+# Top-level directories of the SOURCE tree. `--sync-back` resolves under the
+# remote CARGO_TARGET_DIR, so naming one of these is always a mistake -- and
+# the mistake is worth naming, because rsync's own answer to it is
+# `Broken pipe (32)`.
+SOURCE_TREE_DIRS = ("src", "scripts", "tests", "docs", "benches", "examples",
+                    "assets", "fixtures", ".github")
+
+
+def sync_back_verdict(subpath: str | None) -> str | None:
+    """Refuse a `--sync-back` path that cannot mean what the caller intends.
+
+    B140. `--sync-back` is resolved under the remote CARGO_TARGET_DIR at one
+    end and the local `target/` at the other, because its purpose is to fetch
+    a BUILD ARTEFACT. Hand it a source path and rsync is asked for a file that
+    was never going to be there; what comes back is
+    `rsync: Broken pipe (32)`, which names the transport and says nothing
+    about the mistake. Same family as B106 and B132: an infrastructure-shaped
+    error standing in for a condition the tool could have recognised.
+
+    Checked BEFORE the remote command runs. Refusing after a successful
+    five-minute build would be correct and useless.
+
+    Absolute paths and `..` are refused for a different reason: `Path("/a/b")
+    / "/etc/x"` is `/etc/x`, so an absolute subpath silently relocates the
+    destination OUT of `target/`, and the module docstring's promise that
+    nothing is ever written over your source would quietly stop being true.
+    """
+    if subpath is None:
+        return None
+    if not subpath.strip():
+        return ("--sync-back was given an empty path. It takes a path under "
+                "the remote target dir, e.g. `--sync-back debug/openplanet-lsp`.")
+    if PurePosix(subpath).is_absolute():
+        return (
+            f"--sync-back {subpath!r} is an absolute path. It is resolved under "
+            f"the LOCAL `target/` directory, and joining an absolute path "
+            f"discards that prefix entirely -- so this would write to "
+            f"{subpath!r} itself, outside the target dir and potentially over "
+            f"your source. Pass a path relative to the target dir, e.g. "
+            f"`debug/openplanet-lsp`."
+        )
+    if ".." in PurePosix(subpath).parts:
+        return (
+            f"--sync-back {subpath!r} contains `..`, which escapes the target "
+            f"directory it is resolved under. Pass a path relative to the "
+            f"target dir, e.g. `debug/openplanet-lsp`."
+        )
+    head = PurePosix(subpath).parts[0]
+    if head in SOURCE_TREE_DIRS:
+        return (
+            f"--sync-back {subpath!r} looks like a SOURCE path, but "
+            f"--sync-back is resolved under the remote CARGO_TARGET_DIR -- it "
+            f"fetches build artefacts, not sources. `{head}/` does not exist "
+            f"there, and rsync reports that as `Broken pipe (32)`, which names "
+            f"the transport rather than the mistake.\n\n"
+            f"If you meant a build artefact, name it relative to the target "
+            f"dir (e.g. `debug/openplanet-lsp`). This gate never writes over "
+            f"your source tree; syncing is one-way, local -> remote."
+        )
+    return None
+
+
+def sync_back_missing_verdict(subpath: str, host: str, remote_path: str) -> str:
+    """`--sync-back` named something the remote does not have (B140).
+
+    The static check above catches the shapes that are wrong by construction.
+    This is the residual: a plausible target-relative path that simply is not
+    there -- a binary that was not built, a stale name, the wrong profile.
+    Asking `test -e` first turns rsync's `Broken pipe (32)` into the path that
+    was looked for.
+    """
+    return (
+        f"--sync-back {subpath!r} does not exist on {host}:\n"
+        f"    {remote_path}\n\n"
+        f"The path is resolved under the remote CARGO_TARGET_DIR, so it names "
+        f"a build artefact. Check the profile (`debug/` vs `release/`) and "
+        f"that the run actually produced it -- a `cargo check` builds no "
+        f"binary. Nothing was written locally."
+    )
 
 
 def _other_host(host: str) -> str:
@@ -896,6 +987,59 @@ def run_selftest() -> int:
                     "guard fires on a clean tree"
                 )
 
+    # --- B140: --sync-back resolves under the TARGET dir --------------------
+    # Its failure mode was `rsync: Broken pipe (32)`, which names the transport
+    # and not the mistake. PAIRS: artefact paths must proceed, or this guard
+    # would make the flag unusable.
+    for good in ("debug/openplanet-lsp", "release/openplanet-lsp",
+                 "doc/openplanet_lsp/index.html", None):
+        if sync_back_verdict(good) is not None:
+            problems.append(
+                f"--sync-back {good!r} is a legitimate target-relative path "
+                f"and was refused — the guard would make the flag unusable"
+            )
+    for bad, why in (
+        ("src/main.rs", "a source path"),
+        ("scripts/x.py", "a source path"),
+        ("tests/fixtures/a", "a source path"),
+        ("/tmp/evil", "an absolute path, which would escape target/"),
+        ("../../etc/passwd", "a `..` traversal"),
+        ("", "an empty path"),
+    ):
+        msg = sync_back_verdict(bad)
+        if not msg:
+            problems.append(f"--sync-back {bad!r} ({why}) was not refused")
+        elif "sync-back" not in msg:
+            problems.append(f"the refusal for {bad!r} does not name the flag")
+    # The absolute-path case is not cosmetic: `Path('/a/b') / '/etc/x'` is
+    # `/etc/x`, so it would relocate the destination out of `target/` entirely.
+    if Path("/repo/target") / "/etc/x" != Path("/etc/x"):
+        problems.append(
+            "pathlib no longer discards the prefix on an absolute join, so the "
+            "reason --sync-back refuses absolute paths needs rechecking"
+        )
+    missing = sync_back_missing_verdict("debug/nope", "x-alpha", "/t/debug/nope")
+    for want in ("debug/nope", "x-alpha", "/t/debug/nope"):
+        if want not in missing:
+            problems.append(
+                f"the sync-back not-found message omits {want!r} — the whole "
+                f"point is to name the path rsync could not fetch"
+            )
+
+    # --- B139: ssh's own failure status must not read as a verdict ----------
+    _, note255 = exit_status(255)
+    if not note255 or "ssh" not in note255:
+        problems.append(
+            "exit 255 carries no note — it is ssh's own failure status and a "
+            "bare `exit 255` reads as a result from the remote command"
+        )
+    for ordinary in (0, 1, 101):
+        if exit_status(ordinary)[1] is not None:
+            problems.append(
+                f"exit {ordinary} gained a note it should not have — a note on "
+                f"every status is one nobody reads"
+            )
+
     if problems:
         print("FAIL: remote-build self-test", file=sys.stderr)
         for problem in problems:
@@ -937,8 +1081,9 @@ def main() -> int:
     ap.add_argument("--with-git", action="store_true",
                     help="also sync .git (off by default; see module docstring)")
     ap.add_argument("--sync-back", metavar="SUBPATH", default=None,
-                    help="after a successful run, copy this path back from the "
-                         "remote target dir (e.g. debug/openplanet-lsp)")
+                    help="after a successful run, copy this path back from "
+                         "the remote target dir. Relative to CARGO_TARGET_DIR, "
+                         "NOT the source tree (e.g. debug/openplanet-lsp)")
     ap.add_argument("-v", "--verbose", action="store_true", help="show sync stats")
     ap.add_argument("--disk-floor", type=float, default=DEFAULT_DISK_FLOOR_GB,
                     metavar="GB",
@@ -955,6 +1100,13 @@ def main() -> int:
         die("--host / $LSP_REMOTE_HOST is empty. An empty host is not a host: "
             "ssh would be handed `:path` and fail in a dimension that has "
             "nothing to do with the empty variable.")
+
+    # B140, and deliberately the FIRST thing after argument validation: this
+    # is a pure check on a string, and refusing after a successful five-minute
+    # remote build would be correct and useless.
+    bad_sync_back = sync_back_verdict(a.sync_back)
+    if bad_sync_back:
+        die(bad_sync_back)
 
     if a.action == "selftest":
         return run_selftest()
@@ -1112,6 +1264,15 @@ def main() -> int:
             # anger: change_dir "/home/xertrov/$HOME/.remote-builds/..."
             # failed. Two lanes found it independently within the hour.
             src = f"{a.host}:{rsync_target}/{a.sync_back}"
+            # B140: ask whether it is THERE before asking rsync to fetch it.
+            # rsync's answer to a missing remote path is `Broken pipe (32)`,
+            # which names the transport and not the path, and that is the
+            # whole defect -- an infrastructure-shaped error standing in for a
+            # condition we can simply look up.
+            remote_path = f"{remote_target}/{a.sync_back}"
+            probe_rc, _ = capture_ssh(a.host, f"test -e {shlex.quote(remote_path)}")
+            if probe_rc != 0:
+                die(sync_back_missing_verdict(a.sync_back, a.host, remote_path))
             print(f"remote-build: fetching {a.sync_back}", file=sys.stderr)
             back = subprocess.run(["rsync", "-az", src, str(dest)]).returncode
             if back != 0:

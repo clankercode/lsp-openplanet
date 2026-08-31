@@ -556,6 +556,63 @@ def raw_build_errors(window: str, fid: str) -> list[str]:
     ]
 
 
+def probe_run_problems(rows: list[dict], ambiguous: str = "AMBIGUOUS") -> list[str]:
+    """Is this probe RUN evidence at all? (B139)
+
+    `build_verdict` answers the per-row question -- did THIS build happen. This
+    answers the run-level one, which every probe had been hand-rolling as
+
+        bad = [r for r in rows if r["expect"] != "UNKNOWN"
+               and r["verdict"] != r["expect"]]
+        return 1 if bad else 0
+
+    and that shape exits 0 for a run that measured NOTHING. Two ways:
+
+    * `--only <subset>` can select rows that carry no control. `bad` is then
+      computed over an EMPTY control set, is empty, and the run writes its
+      corpus and exits 0 having verified no channel at all. An oracle that was
+      never shown to say ACCEPT cannot mean anything by REJECT.
+    * the transport can die MIDWAY. Every later row becomes AMBIGUOUS
+      ("RemoteBuild not alive"), no control mismatches because controls that
+      never ran cannot mismatch, and a full column of AMBIGUOUS is exported as
+      the measured answer with a success status.
+
+    THE RULE, and the reason this is not simply "AMBIGUOUS is fatal": refuse on
+    the condition that makes the MEASUREMENT meaningless, and report everything
+    else as data. A single ambiguous row beside passing controls is a real,
+    honest result -- B096 claim 2 shipped two of them, correctly. A run with no
+    controls, or with nothing but ambiguity, is not a result at all.
+    """
+    problems: list[str] = []
+    if not rows:
+        return ["the run produced no rows at all, so nothing was measured"]
+
+    controls = [r for r in rows if r.get("expect", "UNKNOWN") != "UNKNOWN"]
+    if not controls:
+        problems.append(
+            "this run contains NO control rows, so nothing established that "
+            "the channel can produce a verdict at all. An oracle never shown "
+            "to say the affirmative cannot mean anything by the negative "
+            "(narrow with --only, and the controls can be filtered out with "
+            "everything else)."
+        )
+    for r in controls:
+        if r["verdict"] != r["expect"]:
+            problems.append(
+                f"control {r.get('id', '?')!r} expected {r['expect']} and got "
+                f"{r['verdict']}: {str(r.get('reason', ''))[:120]}"
+            )
+
+    measured = [r for r in rows if r.get("expect", "UNKNOWN") == "UNKNOWN"]
+    if measured and all(r["verdict"] == ambiguous for r in measured):
+        problems.append(
+            f"every one of the {len(measured)} measured rows came back "
+            f"{ambiguous}. That is a dead channel reported as a table, not a "
+            f"finding -- an empty result is not a clean result."
+        )
+    return problems
+
+
 BUILD_STATUSES = ("CLEAN", "REJECTED", "BUILD-ERR", "NOT-RUN")
 
 
@@ -995,6 +1052,44 @@ def run_selftest() -> int:
     check("and a verified one carries no marker",
           v(0, {"diagnostics": [], "build_status": "CLEAN"}).endswith("build=?"),
           False)
+
+    # --- B139: is a probe RUN evidence at all? -----------------------------
+    # Four probes hand-rolled this gate as "did any CONTROL row mismatch",
+    # which exits 0 for a run that measured nothing: `--only` can filter the
+    # controls out, and a transport that dies midway leaves every later row
+    # AMBIGUOUS with no control able to mismatch because none ran.
+    #
+    # Pairs, as always. The PROCEED half is the one that stops the cure being
+    # worse than the disease: a single ambiguous row beside passing controls
+    # is an honest result -- B096 claim 2 shipped two of them.
+    def row(rid, verdict, expect="UNKNOWN"):
+        return {"id": rid, "verdict": verdict, "expect": expect, "reason": ""}
+
+    healthy = [row("c", "ACCEPT", "ACCEPT"), row("a", "ACCEPT"),
+               row("b", "AMBIGUOUS")]
+    check("a healthy run with one ambiguous row PROCEEDS — refusing here "
+          "would break every honest partial result",
+          probe_run_problems(healthy), [])
+    for label, rows_, want in [
+        ("no rows at all", [], "nothing was measured"),
+        ("controls filtered out by --only",
+         [row("a", "ACCEPT"), row("b", "ACCEPT")], "NO control rows"),
+        ("a control mismatched",
+         [row("c", "REJECT", "ACCEPT"), row("a", "ACCEPT")], "control 'c'"),
+        ("every measured row ambiguous",
+         [row("c", "ACCEPT", "ACCEPT"), row("a", "AMBIGUOUS"),
+          row("b", "AMBIGUOUS")], "dead channel"),
+    ]:
+        got = probe_run_problems(rows_)
+        if not got:
+            check(f"B139 [{label}] is refused", got, ["<a refusal>"])
+        elif not any(want in g for g in got):
+            check(f"B139 [{label}] names the condition ({want!r})", got, [want])
+    # A control that is itself ambiguous must not pass as a working control:
+    # it did not demonstrate the channel, it failed to.
+    check("an AMBIGUOUS control is a failed control, not a passing one",
+          bool(probe_run_problems(
+              [row("c", "AMBIGUOUS", "ACCEPT"), row("a", "ACCEPT")])), True)
 
     # --- B128: this reader must stay test-only ---------------------------
     # A docstring saying "nothing calls this" is a claim that rots the first

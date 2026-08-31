@@ -526,13 +526,11 @@ def main() -> int:
     print()
     print(f"B077 sweep: {'clean' if not left else 'STRANDED: ' + repr(left)}")
 
-    controls = [r for r in rows if r["expect"] != "UNKNOWN"]
-    bad = [r for r in controls if r["verdict"] != r["expect"]]
-    if bad:
-        print("CONTROLS FAILED -- the run is not evidence:", file=sys.stderr)
-        for r in bad:
-            print(f"  {r['id']}: got {r['verdict']}, expected {r['expect']}"
-                  f" :: {r['reason']}", file=sys.stderr)
+    problems = fleet.probe_run_problems(rows)
+    if problems:
+        print("THE RUN IS NOT EVIDENCE:", file=sys.stderr)
+        for pr in problems:
+            print(f"  - {pr}", file=sys.stderr)
 
     if args.tsv:
         p = Path(args.tsv)
@@ -547,7 +545,7 @@ def main() -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(rows, indent=2))
 
-    return 1 if (bad or left) else 0
+    return 1 if (problems or left) else 0
 
 
 if __name__ == "__main__":

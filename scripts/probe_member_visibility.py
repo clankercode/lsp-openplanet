@@ -67,6 +67,13 @@ sys.path.insert(0, str(HERE))
 
 import fleet_dogfood as fleet  # noqa: E402
 import issue_repro_game as repro  # noqa: E402
+# B139: IMPORTED, not copied. This file previously carried a
+# hand-rolled duplicate of `classify` whose docstring claimed to
+# delegate. A copy sits outside the mutation coverage the shared
+# one has (`just probe-cleanup-mutants`), so a future fix to the
+# classifier would silently not reach this probe -- the same
+# two-copies-of-one-primitive shape B118 found in the log readers.
+from probe_const_receiver import classify  # noqa: E402
 
 TOKEN = "B117MV"
 
@@ -295,35 +302,6 @@ def write_fixture(root: Path, v: V) -> Path:
     return plugin
 
 
-def classify(rec: dict) -> tuple[str, str]:
-    """Delegates to B118's four-way `build_status`; see probe_const_receiver."""
-    if rec.get("skipped"):
-        return "AMBIGUOUS", rec["skipped"]
-    if rec.get("contended"):
-        return "AMBIGUOUS", (
-            f"log window contended: {len(rec.get('foreign_errors', []))} foreign "
-            f"and {len(rec.get('unattributed_errors', []))} unattributed ERR"
-        )
-    status = rec.get("build_status")
-    if status == "REJECTED":
-        errs = rec.get("game_errors", [])
-        if errs:
-            return "REJECT", "; ".join(
-                f"{e['file']}({e['line']},{e['col']}): {e['msg']}" for e in errs[:3]
-            )
-        return "REJECT", "Script compilation failed! (no located diagnostic)"
-    if status == "BUILD-ERR":
-        raw = rec.get("raw_build_errors") or []
-        return "BUILD-ERR", "; ".join(
-            r.split("]", 3)[-1].strip() for r in raw[:2]
-        ) or "build error with no verdict about the code"
-    if status == "NOT-RUN":
-        return "AMBIGUOUS", "the build never ran; silence is not an ACCEPT"
-    if status == "CLEAN":
-        return "ACCEPT", "compiled and loaded, no error attributed to this folder"
-    return "AMBIGUOUS", f"unrecognised build_status {status!r}"
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tsv")
@@ -370,12 +348,11 @@ def main() -> int:
     left = repro.probe_dirs_present(fleet.OPN_PLUGINS)
     print()
     print(f"B077 sweep: {'clean' if not left else 'STRANDED: ' + repr(left)}")
-    bad = [r for r in rows if r["expect"] != "UNKNOWN" and r["verdict"] != r["expect"]]
-    if bad:
-        print("CONTROLS FAILED -- the run is not evidence:", file=sys.stderr)
-        for r in bad:
-            print(f"  {r['id']}: got {r['verdict']}, expected {r['expect']}"
-                  f" :: {r['reason']}", file=sys.stderr)
+    problems = fleet.probe_run_problems(rows)
+    if problems:
+        print("THE RUN IS NOT EVIDENCE:", file=sys.stderr)
+        for pr in problems:
+            print(f"  - {pr}", file=sys.stderr)
     if args.tsv:
         p = Path(args.tsv)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -388,7 +365,7 @@ def main() -> int:
         print(f"wrote {p}")
     if args.json:
         Path(args.json).write_text(json.dumps(rows, indent=2))
-    return 1 if (bad or left) else 0
+    return 1 if (problems or left) else 0
 
 
 if __name__ == "__main__":
