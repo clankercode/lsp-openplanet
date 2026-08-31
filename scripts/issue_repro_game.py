@@ -46,8 +46,10 @@ Two more traps, both of which have already produced wrong numbers here:
 Full write-up, and the committed verdict corpora: docs/probes/README.md
 """
 from __future__ import annotations
-import argparse, atexit, json, os, re, shutil, signal, subprocess, sys, tempfile, time
+import argparse, atexit, contextlib, io, json, os, re, secrets, shutil, signal, stat, subprocess, sys, tempfile, time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -83,28 +85,65 @@ def is_probe_dir(name: str) -> bool:
     return name.startswith(PROBE_DIR_PREFIXES)
 
 
-def owned_by_us(d: Path) -> bool:
-    """Safe to delete: we marked it, or it is empty.
+def _path_present(d: Path) -> bool:
+    """Like exists(), but a dangling symlink is still present and unsafe."""
+    return os.path.lexists(d)
 
-    The empty case is for directories stranded before the marker existed --
-    the two this ticket found were empty, and an empty directory declares
-    nothing so it cannot have contaminated anything either.
+
+def _valid_probe_id(fid: str) -> bool:
+    """A fixture id must name one direct child of the Plugins directory."""
+    return (
+        is_probe_dir(fid)
+        and Path(fid).name == fid
+        and not any(sep in fid for sep in ("/", "\\"))
+        and fid not in {".", ".."}
+    )
+
+
+def _marker_record(d: Path) -> tuple[int, str] | None:
+    """Parse a marker strictly; malformed marker text is never an ownership proof."""
+    try:
+        parts = (d / OWNER_MARKER).read_text().strip().split()
+        if len(parts) != 2:
+            return None
+        pid, token = int(parts[0]), parts[1]
+        if pid <= 0 or not re.fullmatch(r"[0-9a-f]{32}", token):
+            return None
+        return pid, token
+    except (OSError, ValueError):
+        return None
+
+
+def is_empty_dir(d: Path) -> bool:
+    """Only an empty real directory is safe to sweep without a lease."""
+    try:
+        return d.is_dir() and not d.is_symlink() and not any(d.iterdir())
+    except OSError:
+        return False
+
+
+def claim_owner(dest: Path, pid: int | None = None, token: str | None = None) -> str:
+    """Write an opaque per-stage lease marker and return its token.
+
+    A marker is useful for diagnostics and for validating *this process's*
+    cleanup.  It is deliberately not considered sufficient evidence to sweep
+    a non-empty directory from an earlier process: a user can create the same
+    filename, and preserving a suspicious fixture is safer than deleting a
+    real plugin.
     """
-    if (d / OWNER_MARKER).exists():
-        return True
-    return not any(d.iterdir())
-
-
-def claim_owner(dest: Path, pid: int | None = None) -> None:
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / OWNER_MARKER).write_text(f"{pid if pid is not None else os.getpid()}\n")
+    if dest.is_symlink() or not dest.is_dir():
+        raise ValueError(f"refusing to mark non-directory probe path: {dest}")
+    token = token if token is not None else secrets.token_hex(16)
+    (dest / OWNER_MARKER).write_text(
+        f"{pid if pid is not None else os.getpid()} {token}\n"
+    )
+    return token
 
 
 def owner_pid(d: Path) -> int | None:
-    try:
-        return int((d / OWNER_MARKER).read_text().strip())
-    except (OSError, ValueError):
-        return None
+    record = _marker_record(d)
+    return record[0] if record is not None else None
 
 
 def pid_alive(pid: int) -> bool:
@@ -136,8 +175,9 @@ def sweep_stale(plugins_dir: Path, allow: set[str] | None = None) -> list[str]:
     B065 showed to be insufficient, and here it is worse than insufficient: the
     run that does the sweeping is the one that was contaminated, so by the time
     it tidies up it has already been at risk. The real fix is that an
-    interrupted run cannot leave state (see `staged`); this catches SIGKILL and
-    power loss, which nothing in-process can.
+    interrupted run cannot leave state (see `staged`); for SIGKILL and power
+    loss, which nothing in-process can clean, it leaves non-empty remains in
+    place so every later probe fails closed instead of measuring beside them.
     """
     removed, refused = [], []
     for name in probe_dirs_present(plugins_dir, allow):
@@ -149,11 +189,21 @@ def sweep_stale(plugins_dir: Path, allow: set[str] | None = None) -> list[str]:
             # damage this ticket is about, pointed the other way.
             refused.append(f"{name} (in use by live pid {pid})")
             continue
-        if not owned_by_us(d):
-            refused.append(f"{name} (not ours: no {OWNER_MARKER} and not empty)")
+        # A stale marker cannot prove ownership across process restarts: it can
+        # be copied, forged, or refer to a reused PID.  Sweep only empty legacy
+        # directories; a non-empty one is left in place so probe_dirs_present()
+        # will block a later measurement rather than deleting a user's plugin.
+        if not is_empty_dir(d):
+            marker = _marker_record(d)
+            detail = (
+                "untrusted or malformed marker"
+                if marker is None
+                else "non-empty marked directory"
+            )
+            refused.append(f"{name} ({detail})")
             continue
         remove_tree(d)
-        if d.exists():
+        if _path_present(d):
             refused.append(f"{name} (removal failed)")
         else:
             removed.append(name)
@@ -167,14 +217,33 @@ def sweep_stale(plugins_dir: Path, allow: set[str] | None = None) -> list[str]:
     return removed
 
 
-# Paths this process has staged and not yet removed. Registered BEFORE any
-# filesystem work, so a crash midway through copying is still cleaned up: the
-# old code assigned `dest` only on success, so a `stage()` that died partway
-# left a half-populated directory that the `finally` never saw.
-_STAGED: set[Path] = set()
+# Paths this process has staged and not yet removed. Registered before any
+# source bytes are copied, so a crash midway through copying is still cleaned
+# up: the old code assigned `dest` only on success, so a `stage()` that died
+# partway left a half-populated directory that the `finally` never saw.
+@dataclass(frozen=True)
+class StageLease:
+    pid: int
+    token: str | None
+    device: int
+    inode: int
 
 
-def remove_tree(d: Path, attempts: int = 3) -> bool:
+_STAGED: dict[Path, StageLease] = {}
+
+
+def _lease_matches(d: Path, lease: StageLease) -> bool:
+    """Only delete the exact directory we created, never a replacement."""
+    try:
+        st = d.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode) or (st.st_dev, st.st_ino) != (lease.device, lease.inode):
+        return False
+    return lease.token is None or _marker_record(d) == (lease.pid, lease.token)
+
+
+def remove_tree(d: Path, attempts: int = 3, lease: StageLease | None = None) -> bool:
     """Remove `d`, retrying, and REPORT whether it worked.
 
     `shutil.rmtree(ignore_errors=True)` swallows a permission error or a file
@@ -182,12 +251,21 @@ def remove_tree(d: Path, attempts: int = 3) -> bool:
     successful one -- the exact silent-success shape this batch keeps finding.
     """
     for i in range(attempts):
-        shutil.rmtree(d, ignore_errors=True)
-        if not d.exists():
+        if not _path_present(d):
+            return True
+        if lease is not None and not _lease_matches(d, lease):
+            return False
+        try:
+            # Never use ignore_errors here.  The return value is an output of
+            # the safety protocol, not merely best-effort housekeeping.
+            shutil.rmtree(d)
+        except Exception:
+            pass
+        if not _path_present(d):
             return True
         if i + 1 < attempts:
             time.sleep(0.5)
-    return not d.exists()
+    return not _path_present(d)
 
 
 def _cleanup_staged(*_args) -> None:
@@ -200,9 +278,14 @@ def _cleanup_staged(*_args) -> None:
     this commit removed, minus the possibility of noticing.
     """
     stuck = []
-    for dest in list(_STAGED):
-        if remove_tree(dest):
-            _STAGED.discard(dest)
+    for dest, lease in list(_STAGED.items()):
+        try:
+            removed = remove_tree(dest, lease=lease)
+        except Exception as exc:
+            stuck.append(f"{dest} ({exc})")
+            continue
+        if removed:
+            _STAGED.pop(dest, None)
         else:
             stuck.append(str(dest))
     if stuck:
@@ -234,23 +317,46 @@ def _install_teardown_handlers() -> None:
 class staged:
     """Stage a fixture so that NO exit path can leave it installed."""
 
-    removed = False
-
     def __init__(self, fixture: Path, fid: str, plugins_dir: Path | None = None):
+        if not _valid_probe_id(fid):
+            raise ValueError(f"unsafe probe fixture id: {fid!r}")
         self.fixture, self.fid = fixture, fid
         root = plugins_dir if plugins_dir is not None else fleet.OPN_PLUGINS
-        self.dest = root / fid
+        self.root = Path(root)
+        self.dest = self.root / fid
+        self.lease: StageLease | None = None
+        self.removed = False
+        self.preserved = False
+
+    def preserve(self) -> None:
+        """Leave a visible blocker when RemoteBuild may still have us loaded."""
+        self.preserved = True
+        _STAGED.pop(self.dest, None)
 
     def __enter__(self) -> Path:
-        # Register first. Registering after staging is the bug: the window
-        # between "directory exists with files in it" and "we recorded that we
-        # made it" is exactly when an interrupted run strands a fixture.
-        _STAGED.add(self.dest)
-        # Claim ownership BEFORE copying anything, so even a fixture stranded
-        # mid-copy is identifiable as ours and safe for a later sweep to
-        # remove. An unmarked directory is never deleted unless it is empty.
+        # mkdir without exist_ok is the reservation.  A concurrent probe of the
+        # same fixture must fail closed; it must never copy over or remove the
+        # other process's live directory.
         try:
-            claim_owner(self.dest)
+            self.root.mkdir(parents=True, exist_ok=True)
+            if self.root.is_symlink() or not self.root.is_dir():
+                raise ValueError(f"refusing non-directory Plugins root: {self.root}")
+            self.dest.mkdir()
+        except FileExistsError as exc:
+            raise FileExistsError(
+                f"probe fixture is already reserved or installed: {self.dest}"
+            ) from exc
+
+        st = self.dest.lstat()
+        self.lease = StageLease(os.getpid(), None, st.st_dev, st.st_ino)
+        try:
+            # Claim ownership and register BEFORE copying anything, so a
+            # signal during the copy still has an exact directory lease to
+            # clean up.  A marker is never used to sweep a future non-empty
+            # directory; it validates only this lease's cleanup.
+            token = claim_owner(self.dest, pid=os.getpid())
+            self.lease = StageLease(os.getpid(), token, st.st_dev, st.st_ino)
+            _STAGED[self.dest] = self.lease
             # An explicit root rather than reassigning `fleet.OPN_PLUGINS`:
             # a module global mutated for the duration is not safe under
             # concurrency or re-entrancy, and it is how the first version of
@@ -261,40 +367,68 @@ class staged:
             # raises, so a failure partway through copying would otherwise
             # leave exactly the half-populated directory this class exists to
             # prevent. That was the original bug's shape.
-            remove_tree(self.dest)
-            _STAGED.discard(self.dest)
+            if self.lease is not None and remove_tree(self.dest, lease=self.lease):
+                _STAGED.pop(self.dest, None)
             raise
         return self.dest
 
     def __exit__(self, *_exc) -> bool:
-        self.removed = remove_tree(self.dest)
+        if self.preserved:
+            return False
+        self.removed = (
+            self.lease is not None and remove_tree(self.dest, lease=self.lease)
+        )
         if self.removed:
-            _STAGED.discard(self.dest)
+            _STAGED.pop(self.dest, None)
         return False
 
 
-def rb_alive_with_retry(attempts: int = 3, delay: float = 2.0) -> bool:
+def rb_alive_with_retry(
+    attempts: int = 3,
+    delay: float = 2.0,
+    alive: Callable[[], bool] | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> bool:
     """RemoteBuild can wedge briefly (accepts then drops). Retry before
     declaring it dead so a single flaky probe doesn't skip a fixture."""
     for i in range(attempts):
-        if fleet.rb_alive():
+        if (alive or fleet.rb_alive)():
             return True
         if i + 1 < attempts:
-            time.sleep(delay)
+            (sleep_fn or time.sleep)(delay)
     return False
 
 
-def probe(fixture: Path) -> dict:
+def probe(
+    fixture: Path,
+    *,
+    plugins_dir: Path | None = None,
+    rb_alive_fn: Callable[[], bool] | None = None,
+    rb_route_fn: Callable[..., dict] | None = None,
+    log_size_fn: Callable[[], int] | None = None,
+    read_log_window_fn: Callable[[int, str], str] | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> dict:
     """Stage -> load -> capture -> unload + remove. Returns a result record."""
     info = fleet.read_info(fixture / "info.toml")
     name = info.get("name") or fixture.name
     fid = PROBE_PREFIX + fleet.folder_id(name)
     rec: dict = {"fixture": fixture.name, "folder_id": fid}
+    root = Path(plugins_dir) if plugins_dir is not None else fleet.OPN_PLUGINS
+    alive = rb_alive_fn or fleet.rb_alive
+    route = rb_route_fn or fleet.rb_route
+    log_size = log_size_fn or fleet.log_size
+    read_log_window = read_log_window_fn or fleet.read_log_window
+    sleep = sleep_fn or time.sleep
+
+    if not _valid_probe_id(fid):
+        rec["skipped"] = f"unsafe probe id derived from fixture name: {fid!r}"
+        return rec
 
     # A stranded fixture from an earlier run declares the very names this
     # probe is about to ask about, so an ACCEPT measured beside one is not
     # evidence. Refuse rather than record it.
-    strays = probe_dirs_present(fleet.OPN_PLUGINS, allow={fid})
+    strays = probe_dirs_present(root, allow={fid})
     if strays:
         rec["skipped"] = (
             f"probe-owned plugin(s) already installed: {', '.join(strays)}. "
@@ -303,28 +437,28 @@ def probe(fixture: Path) -> dict:
         )
         return rec
 
-    if not rb_alive_with_retry():
+    if not rb_alive_with_retry(alive=alive, sleep_fn=sleep):
         rec["skipped"] = "RemoteBuild not alive"
         return rec
 
     # Refuse to clobber anything already present (a probe id should never
     # collide with a real install, but check anyway).
-    dest_root = fleet.OPN_PLUGINS / fid
-    if dest_root.exists() or (fleet.OPN_PLUGINS / f"{fid}.op").exists():
+    dest_root = root / fid
+    if dest_root.exists() or (root / f"{fid}.op").exists():
         rec["skipped"] = f"probe id {fid} already present in Plugins dir"
         return rec
 
-    mark = fleet.log_size()
-    holder = staged(fixture, fid)
+    mark = log_size()
+    holder = staged(fixture, fid, plugins_dir=root)
     try:
         with holder:
             try:
-                load = fleet.rb_route(
+                load = route(
                     "load_plugin", {"id": fid, "source": "user", "type": "folder"},
                     timeout=15,
                 )
-                time.sleep(2.5)  # let compile finish + log flush
-                window = fleet.read_log_window(mark, fid)
+                sleep(2.5)  # let compile finish + log flush
+                window = read_log_window(mark, fid)
                 rec["load_response"] = load
                 rec["diagnostics"] = fleet.parse_game_diagnostics(window)
                 rec["raw_window"] = window[-4000:]
@@ -357,14 +491,29 @@ def probe(fixture: Path) -> dict:
                 # -- silently, under the old `ignore_errors=True` -- and leaves
                 # exactly the stranded fixture this ticket is about. Master had
                 # this order right and the first version of the fix broke it.
-                fleet.rb_route("unload_plugin", {"id": fid}, timeout=15)
+                try:
+                    unload = route("unload_plugin", {"id": fid}, timeout=15)
+                except Exception as exc:
+                    unload = {"error": f"unload_plugin raised: {exc}"}
+                rec["unload_response"] = unload
+                if unload.get("error"):
+                    # If RemoteBuild did not acknowledge the unload, deleting
+                    # the files would hide a plugin that may still be loaded.
+                    # Preserve the marked fixture so every later probe refuses
+                    # rather than turning that stale namespace into an ACCEPT.
+                    holder.preserve()
+                    rec["unload_error"] = str(unload["error"])
+    except Exception as exc:
+        rec["run_error"] = str(exc)
+        rec["skipped"] = f"probe failed before a trustworthy verdict: {exc}"
     finally:
-        rec["restored"] = holder.removed and not (fleet.OPN_PLUGINS / fid).exists()
+        rec["restored"] = holder.removed and not _path_present(root / fid)
         if not rec["restored"]:
             # Recorded AND acted on. A teardown that failed must not read as a
             # successful probe.
+            detail = rec.get("unload_error", "could not remove staged fixture")
             rec["skipped"] = (
-                f"could not remove staged fixture {fid}; it is still installed "
+                f"teardown incomplete for {fid}: {detail}; it is still installed "
                 "and will contaminate later probes (B077)"
             )
     return rec
@@ -378,10 +527,11 @@ def _selftest_child() -> int:
     mode = os.environ["B077_SELFTEST_CHILD"]
     _install_teardown_handlers()
 
-    if mode == "sigterm":
+    if mode in {"sigterm", "sighup"}:
+        sig = signal.SIGTERM if mode == "sigterm" else signal.SIGHUP
         with staged(fixture, "lsp-issue-repro-selftest", plugins_dir=root):
             assert (root / "lsp-issue-repro-selftest" / "Main.as").exists()
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), sig)
             time.sleep(5)
         return 0
 
@@ -390,11 +540,20 @@ def _selftest_child() -> int:
         # nobody is left to inspect a return value, so stderr is the only
         # channel by which the operator can learn a fixture is still live in
         # their game.
-        shutil.rmtree = lambda *a, **k: None
+        shutil.rmtree = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("emergency teardown exploded")
+        )
         staged(fixture, "lsp-issue-repro-stuck-child", plugins_dir=root).__enter__()
         os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(5)
         return 0
+
+    if mode == "atexit-stuck":
+        shutil.rmtree = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("atexit teardown exploded")
+        )
+        staged(fixture, "lsp-issue-repro-atexit-stuck", plugins_dir=root).__enter__()
+        sys.exit(4)
 
     # `atexit` mode: enter WITHOUT a `with`, so no `__exit__` will ever run,
     # then exit normally. This is the only path the signal handlers do not
@@ -404,9 +563,40 @@ def _selftest_child() -> int:
     sys.exit(3)
 
 
+def _forbid_game_access() -> None:
+    """Revoke the selftest's ability to reach the game AT ALL.
+
+    Injecting `rb_alive_fn` / `rb_route_fn` fixes the cases that remember to
+    pass them, but `probe()` defaults to `fleet.rb_alive`, so a future case
+    written by someone who did not know the parameters were load-bearing gets
+    the LIVE game. That is precisely how this selftest -- documented as offline
+    -- came to round-trip a shared RemoteBuild twelve times per mutation run.
+
+    It survived because a running game makes the wrong code WORK: the symptom
+    was noise in a log belonging to a system this suite does not own and never
+    reads, so there was no red test to find and there could not have been. When
+    the failure mode is "nothing goes red", the fix has to be the thing that
+    makes something go red. Hence revocation rather than a patched call site:
+    injection still wins where it is supplied, and everything else now raises.
+    """
+    def refuse(*_a, **_k):
+        raise AssertionError(
+            "--selftest must not touch the game: RemoteBuild access attempted. "
+            "This suite is offline by construction (B077). Inject "
+            "rb_alive_fn/rb_route_fn/read_log_window_fn; if a case genuinely "
+            "needs a game verdict it does not belong in --selftest."
+        )
+    fleet.rb_alive = refuse
+    fleet.rb_route = refuse
+    fleet.read_log_window = refuse
+    fleet.log_size = lambda: 0
+
+
 def run_selftest() -> int:
-    """Offline. No game, no RemoteBuild -- the staging lifetime is filesystem
-    work, and that is the part B077 is about."""
+    """Offline BY CONSTRUCTION. Game access is revoked, not merely unused --
+    see `_forbid_game_access`. The staging lifetime is filesystem work, and
+    that is the part B077 is about."""
+    _forbid_game_access()
     failures: list[str] = []
 
     def check(what, got, want):
@@ -441,6 +631,46 @@ def run_selftest() -> int:
         check("guard excludes the one we staged ourselves",
               probe_dirs_present(root, allow={"lsp-issue-repro-stray"}), [])
         shutil.rmtree(root / "lsp-issue-repro-stray")
+
+        # --- reservation cannot escape or follow a link -------------------
+        # The fixture name is user-controlled when this script is given a path,
+        # so it must never turn into a path outside Plugins.
+        rejected = False
+        try:
+            staged(fixture, "lsp-issue-repro-../../escaped", plugins_dir=root)
+        except ValueError:
+            rejected = True
+        check("a path-traversal fixture id is rejected before staging", rejected, True)
+
+        target = Path(tmp) / "not-plugins"
+        target.mkdir()
+        link = root / "lsp-issue-repro-symlink"
+        link.symlink_to(target, target_is_directory=True)
+        rejected = False
+        try:
+            with staged(fixture, link.name, plugins_dir=root):
+                pass
+        except FileExistsError:
+            rejected = True
+        check("a pre-existing destination symlink is rejected", rejected, True)
+        check("staging never writes through that symlink", (target / OWNER_MARKER).exists(), False)
+        check("or copies fixture bytes through that symlink", (target / "Main.as").exists(), False)
+        link.unlink()
+
+        # --- same-id concurrent probes cannot clobber one another ----------
+        # The second reservation must fail before it can copy over or remove
+        # the live first probe.  This is the destructive race the old
+        # check-then-mkdir path left open.
+        with staged(fixture, "lsp-issue-repro-concurrent", plugins_dir=root) as first:
+            contender_rejected = False
+            try:
+                with staged(fixture, "lsp-issue-repro-concurrent", plugins_dir=root):
+                    pass
+            except FileExistsError:
+                contender_rejected = True
+            check("a same-id concurrent stage is rejected", contender_rejected, True)
+            check("the first live fixture survives the rejected contender", first.is_dir(), True)
+            check("the first fixture bytes also survive", (first / "Main.as").exists(), True)
 
         # --- happy path leaves nothing ------------------------------------
         with staged(fixture, "lsp-issue-repro-happy", plugins_dir=root) as dest:
@@ -481,30 +711,102 @@ def run_selftest() -> int:
         # --- the ACCEPT guard REFUSES rather than measuring ----------------
         # The ticket's anti-vacuity test: a stranded fixture declaring
         # ZZZProbeOwnedNamespace must make the tool refuse, not report ACCEPT.
-        real_root = fleet.OPN_PLUGINS
-        fleet.OPN_PLUGINS = root
+        (root / "lsp-issue-repro-stranded").mkdir()
+        (root / "lsp-issue-repro-stranded" / "Main.as").write_text(
+            "namespace ZZZProbeOwnedNamespace { enum E { Foo } }\n"
+        )
+        rec = probe(
+            fixture,
+            plugins_dir=root,
+            rb_alive_fn=lambda: (_ for _ in ()).throw(
+                AssertionError("the stray guard must run before RemoteBuild")
+            ),
+        )
+        check("a stranded fixture makes the probe REFUSE",
+              "lsp-issue-repro-stranded" in rec.get("skipped", ""), True)
+        check("and it reports no verdict at all", "compiled_clean" in rec, False)
+        shutil.rmtree(root / "lsp-issue-repro-stranded")
+        # With no stray, the injectable liveness check gives the no-game
+        # result.  The assertion above makes this selftest fail if it opens a
+        # RemoteBuild connection before handling the stray.
+        rec = probe(
+            fixture,
+            plugins_dir=root,
+            rb_alive_fn=lambda: False,
+            sleep_fn=lambda _delay: None,
+        )
+        check("with nothing stranded, that refusal does not fire",
+              rec.get("skipped"), "RemoteBuild not alive")
+
+        # --- unload happens before removal and failures block future probes -
+        events = []
+
+        def clean_route(route, _data, **_kwargs):
+            events.append((route, (root / "lsp-issue-repro-b077-selftest").is_dir()))
+            return {"data": "ok"}
+
+        rec = probe(
+            fixture,
+            plugins_dir=root,
+            rb_alive_fn=lambda: True,
+            rb_route_fn=clean_route,
+            log_size_fn=lambda: 0,
+            read_log_window_fn=lambda _mark, _fid: "",
+            sleep_fn=lambda _delay: None,
+        )
+        check("load and unload both see the staged directory", events,
+              [("load_plugin", True), ("unload_plugin", True)])
+        check("successful unload removes only after the route returns", rec["restored"], True)
+        check("successful teardown is not skipped", "skipped" in rec, False)
+
+        def failing_unload(route, _data, **_kwargs):
+            if route == "unload_plugin":
+                return {"error": "RemoteBuild did not acknowledge unload"}
+            return {"data": "ok"}
+
+        rec = probe(
+            fixture,
+            plugins_dir=root,
+            rb_alive_fn=lambda: True,
+            rb_route_fn=failing_unload,
+            log_size_fn=lambda: 0,
+            read_log_window_fn=lambda _mark, _fid: "",
+            sleep_fn=lambda _delay: None,
+        )
+        failed_unload_dir = root / "lsp-issue-repro-b077-selftest"
+        check("an unload failure is reported as a skipped probe",
+              "did not acknowledge unload" in rec.get("skipped", ""), True)
+        check("an unload failure leaves a visible blocker", failed_unload_dir.is_dir(), True)
+        shutil.rmtree(failed_unload_dir)
+
+        # A filesystem teardown failure is just as untrustworthy as an unload
+        # failure: it must reach the result record, not merely stderr.
+        real_rmtree = shutil.rmtree
+        shutil.rmtree = lambda *a, **k: None
         try:
-            (root / "lsp-issue-repro-stranded").mkdir()
-            (root / "lsp-issue-repro-stranded" / "Main.as").write_text(
-                "namespace ZZZProbeOwnedNamespace { enum E { Foo } }\n"
+            rec = probe(
+                fixture,
+                plugins_dir=root,
+                rb_alive_fn=lambda: True,
+                rb_route_fn=clean_route,
+                log_size_fn=lambda: 0,
+                read_log_window_fn=lambda _mark, _fid: "",
+                sleep_fn=lambda _delay: None,
             )
-            rec = probe(fixture)
-            check("a stranded fixture makes the probe REFUSE",
-                  "lsp-issue-repro-stranded" in rec.get("skipped", ""), True)
-            check("and it reports no verdict at all", "compiled_clean" in rec, False)
-            shutil.rmtree(root / "lsp-issue-repro-stranded")
-            # And with the dir gone it must NOT refuse for that reason -- or the
-            # guard would just be a permanent "no" and prove nothing.
-            rec = probe(fixture)
-            check("with nothing stranded, that refusal does not fire",
-                  "already installed" in rec.get("skipped", ""), False)
         finally:
-            fleet.OPN_PLUGINS = real_root
+            shutil.rmtree = real_rmtree
+        failed_remove_dir = root / "lsp-issue-repro-b077-selftest"
+        check("a removal failure is reported as a skipped probe", "skipped" in rec, True)
+        check("a removal failure is not reported restored", rec["restored"], False)
+        check("a removal failure leaves the fixture visible", failed_remove_dir.is_dir(), True)
+        _STAGED.pop(failed_remove_dir, None)
+        real_rmtree(failed_remove_dir)
 
         # --- the sweep must NEVER delete something that is not ours --------
         # Prefix matching alone would delete a real plugin that happened to be
-        # named `lsp-issue-repro-*`. Deleting a user's plugin is far worse than
-        # refusing to run, so ownership needs a marker, not a name.
+        # named `lsp-issue-repro-*`.  A marker alone cannot prove ownership
+        # after a restart either: it can be copied, malformed, or point at a
+        # reused PID.  Deleting a user's plugin is far worse than refusing.
         impostor = root / "lsp-issue-repro-someones-real-plugin"
         impostor.mkdir()
         (impostor / "Main.as").write_text("void Main() {}\n")
@@ -512,8 +814,12 @@ def run_selftest() -> int:
         check("sweep refuses an unmarked non-empty dir", removed, [])
         check("and leaves it on disk", impostor.is_dir(), True)
         claim_owner(impostor)
-        check("but removes it once it carries our marker", sweep_stale(root),
-              ["lsp-issue-repro-someones-real-plugin"])
+        check("a plausible marker still cannot authorize a sweep", sweep_stale(root), [])
+        check("the marked impostor remains intact", impostor.is_dir(), True)
+        (impostor / OWNER_MARKER).write_text("not a valid owner record\n")
+        check("a malformed marker also cannot authorize a sweep", sweep_stale(root), [])
+        check("the malformed-marker impostor remains intact", impostor.is_dir(), True)
+        shutil.rmtree(impostor)
 
         # An empty unmarked dir is still safe to remove: it declares nothing,
         # and it is the shape of the two this ticket found.
@@ -522,10 +828,9 @@ def run_selftest() -> int:
               ["lsp-issue-repro-legacy-empty"])
 
         # --- a LIVE probe's fixture must survive another process's sweep ----
-        # A genuinely OTHER live process. Using our own pid would not test
-        # this: the sweep deliberately reclaims our own leftovers, since a
-        # directory this process owns and is no longer using is exactly what
-        # should be cleaned.
+        # A genuinely OTHER live process is never removed.  Once it exits, the
+        # marker still does not authorize sweeping a non-empty directory: PID
+        # reuse makes a stale liveness value unsuitable as ownership proof.
         sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         live = root / "lsp-issue-repro-live-elsewhere"
         claim_owner(live, pid=sleeper.pid)
@@ -534,9 +839,75 @@ def run_selftest() -> int:
         check("and it is still there", live.is_dir(), True)
         sleeper.kill()
         sleeper.wait()
-        claim_owner(live, pid=2**22)  # a pid that cannot exist
-        check("but sweeps it once the owner is gone", sweep_stale(root),
-              ["lsp-issue-repro-live-elsewhere"])
+        claim_owner(live, pid=os.getpid())  # indistinguishable from PID reuse
+        check("a reused pid cannot authorize deleting a non-empty fixture", sweep_stale(root), [])
+        check("the reused-pid fixture remains intact", live.is_dir(), True)
+        shutil.rmtree(live)
+
+        # The live-pid branch does NOT decide this outcome, and the mutation
+        # harness is what established that: disabling it left the suite green.
+        # Proof it is unreachable as a protection --
+        #     owner_pid(d) non-None  <=>  the marker file exists
+        #     marker exists          =>   the directory is non-empty
+        #     non-empty              =>   refused by the later branch anyway
+        # so "empty AND marked" cannot occur and the branch never changes the
+        # DECISION. It is not dead, though: it changes the WARNING, and telling
+        # an operator "another probe is using this right now" versus a generic
+        # refusal is the difference between waiting and investigating.
+        #
+        # So assert what it actually does. A guard tested through a path where
+        # a different guard answers first is not tested at all -- that is why
+        # the non-empty assertions above could not see it.
+        sleeper2 = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            busy = root / "lsp-issue-repro-busy"
+            claim_owner(busy, pid=sleeper2.pid)
+            (busy / "Main.as").write_text("void Main() {}\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                swept = sweep_stale(root)
+            check("a live owner's fixture is not swept", swept, [])
+            check("and the warning names the live pid, not a generic refusal",
+                  f"in use by live pid {sleeper2.pid}" in err.getvalue(), True)
+        finally:
+            sleeper2.kill(); sleeper2.wait()
+        shutil.rmtree(busy)
+
+        # --- a marker lost during a current run fails closed ---------------
+        # This case DOES strand a fixture, deliberately, and the test must show
+        # the whole cost rather than assert the survival and tidy it away. A
+        # test that removes the leak it just demonstrated can never go red for
+        # it, which is the shape this ticket keeps finding.
+        #
+        # The trade is defensible: refusing to delete a directory whose marker
+        # we cannot verify protects against an inode reused at the same path,
+        # and the strand is safe because everything downstream refuses. But
+        # "safe because everything downstream refuses" is a claim about the
+        # chain, so the chain is what gets asserted.
+        missing_marker = root / "lsp-issue-repro-marker-lost"
+        with staged(fixture, missing_marker.name, plugins_dir=root) as dest:
+            (dest / OWNER_MARKER).unlink()
+        check("a lease whose marker disappeared is not removed blindly",
+              missing_marker.is_dir(), True)
+        check("and the fixture really is left installed -- this is a STRAND",
+              (missing_marker / "Main.as").exists(), True)
+        # 1. the sweep must not silently adopt and delete it either
+        check("the sweep also refuses it", sweep_stale(root), [])
+        check("so it is still on disk", missing_marker.is_dir(), True)
+        # 2. and nothing may measure beside it. This is what makes the strand
+        #    safe: it costs an operator a manual cleanup, never a false ACCEPT.
+        rec = probe(
+            fixture,
+            plugins_dir=root,
+            rb_alive_fn=lambda: (_ for _ in ()).throw(
+                AssertionError("must refuse before reaching RemoteBuild")
+            ),
+        )
+        check("a later probe REFUSES beside the strand",
+              missing_marker.name in rec.get("skipped", ""), True)
+        check("and emits no verdict", "compiled_clean" in rec, False)
+        _STAGED.pop(missing_marker, None)
+        shutil.rmtree(missing_marker)
 
         # --- a removal that FAILS must not report success ------------------
         stuck = root / "lsp-issue-repro-stuck"
@@ -545,6 +916,11 @@ def run_selftest() -> int:
         shutil.rmtree = lambda *a, **k: None  # silently does nothing
         try:
             check("remove_tree reports failure instead of swallowing it",
+                  remove_tree(stuck, attempts=1), False)
+            shutil.rmtree = lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("teardown implementation exploded")
+            )
+            check("remove_tree also reports an unexpected teardown exception",
                   remove_tree(stuck, attempts=1), False)
         finally:
             shutil.rmtree = real_rmtree
@@ -565,12 +941,21 @@ def run_selftest() -> int:
         check("the SIGTERM child did not exit cleanly", proc.returncode != 0, True)
         check("SIGTERM leaves no residue", probe_dirs_present(root), [])
 
+        proc = run_child("sighup")
+        check("the SIGHUP child did not exit cleanly", proc.returncode != 0, True)
+        check("SIGHUP leaves no residue", probe_dirs_present(root), [])
+
         # A normal interpreter exit with something still staged. The signal
         # handlers cannot see this one, so it is what makes the atexit hook
         # load-bearing rather than decorative.
         proc = run_child("atexit")
         check("the atexit child exited normally", proc.returncode, 3)
         check("a normal exit leaves no residue", probe_dirs_present(root), [])
+
+        proc = run_child("atexit-stuck")
+        check("an atexit teardown exception is reported", "STILL INSTALLED" in proc.stderr, True)
+        check("the atexit exception leaves the fixture visible", (root / "lsp-issue-repro-atexit-stuck").is_dir(), True)
+        real_rmtree(root / "lsp-issue-repro-atexit-stuck")
 
         # --- an emergency teardown that FAILS must SAY SO -------------------
         # The same silent-success shape as `remove_tree`, on the one path where
@@ -588,12 +973,29 @@ def run_selftest() -> int:
               (root / "lsp-issue-repro-stuck-child").is_dir(), True)
         real_rmtree(root / "lsp-issue-repro-stuck-child")
 
+        # --- the suite cannot reach the game even by accident -------------
+        # The incident was not a decision; it was the absence of one. The code
+        # took a shared resource while its docstring said it did not, so the
+        # only durable check is on the CALL, not on the outcome: an outcome
+        # assertion cannot tell "never touched it" from "touched it and got the
+        # expected answer".
+        # Overwriting `fleet.rb_alive` with a recorder would destroy the very
+        # guard under test, so the assertion is on the REFUSAL, which is the
+        # observable form of "the call was not made".
+        refused = None
+        try:
+            probe(fixture, plugins_dir=root)   # no injection: the incident's shape
+        except AssertionError as exc:
+            refused = str(exc)
+        check("an un-injected probe is refused rather than reaching the game",
+              refused is not None and "must not touch the game" in refused, True)
+
     if failures:
         print(f"FAIL: {len(failures)} check(s) failed", file=sys.stderr)
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return 1
-    print("PASS: no exit path leaves a probe fixture installed.")
+    print("PASS: cleanup, isolation, and fail-closed guards verified.")
     return 0
 
 

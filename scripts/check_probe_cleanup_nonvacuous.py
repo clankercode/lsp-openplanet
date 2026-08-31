@@ -23,7 +23,8 @@ SRC = Path(__file__).resolve().parent.parent
 # (label, old, new)
 MUTATIONS = [
     ("__enter__ cleanup on partial stage",
-     "            remove_tree(self.dest)\n            _STAGED.discard(self.dest)\n            raise",
+     "            if self.lease is not None and remove_tree(self.dest, lease=self.lease):\n"
+     "                _STAGED.pop(self.dest, None)\n            raise",
      "            raise"),
     ("signal handlers",
      "    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):",
@@ -35,23 +36,31 @@ MUTATIONS = [
      'PROBE_DIR_PREFIXES = (PROBE_PREFIX, "lsp-enum-corpus-probe")',
      'PROBE_DIR_PREFIXES = (PROBE_PREFIX,)'),
     ("early registration in __enter__",
-     "        _STAGED.add(self.dest)\n        # Claim ownership",
-     "        # Claim ownership"),
+     "            _STAGED[self.dest] = self.lease",
+     "            pass  # registration removed"),
     ("contamination guard in probe()",
-     "    strays = probe_dirs_present(fleet.OPN_PLUGINS, allow={fid})",
+     "    strays = probe_dirs_present(root, allow={fid})",
      "    strays = []"),
-    ("marker-based ownership (prefix is enough)",
-     "    if (d / OWNER_MARKER).exists():\n        return True\n    return not any(d.iterdir())",
-     "    return True"),
+    ("empty-only sweeping (any dir looks empty)",
+     "        return d.is_dir() and not d.is_symlink() and not any(d.iterdir())",
+     "        return True"),
     ("live-pid protection",
      "        if pid is not None and pid != os.getpid() and pid_alive(pid):",
      "        if False:"),
     ("removal verification in remove_tree",
-     "    return not d.exists()",
+     "    return not _path_present(d)",
      "    return True"),
-    ("non-empty-unowned protection",
-     "        if not owned_by_us(d):",
+    ("non-empty-dir protection in sweep",
+     "        if not is_empty_dir(d):",
      "        if False:"),
+    # NOTE: this mutation makes the guard PERMIT rather than deleting it.
+    # Deleting the call would let the un-injected probe reach the REAL game
+    # during mutation testing -- the exact defect under test, committed by the
+    # harness that checks for it. `fleet.rb_alive` stays replaced; it just
+    # stops refusing. Same red, zero traffic.
+    ("selftest game-access revocation (guard permits instead of refusing)",
+     "    def refuse(*_a, **_k):\n        raise AssertionError(",
+     "    def refuse(*_a, **_k):\n        return False\n        raise AssertionError("),
     ("emergency-teardown failure report",
      '    if stuck:\n        print(',
      '    if False:\n        print('),
