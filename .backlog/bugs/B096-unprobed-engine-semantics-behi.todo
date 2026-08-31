@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-31T13:39:51Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T13:39:51Z"
 complexity: medium
 created_at: "2026-08-31T08:55:50Z"
 depends_on: []
+duration_minutes: 0.005632980333333333
 estimate_hours: 1
 id: B096
 priority: high
 started_at: "2026-08-31T13:39:51Z"
-status: in_progress
+status: done
 tags: []
 title: 'Unprobed engine semantics behind B087: does the engine bind an import to a namespaced body, and does it accept shared interface/enum/funcdef'
 updated_at: "2026-08-31T13:39:51Z"
