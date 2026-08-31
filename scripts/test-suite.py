@@ -16,18 +16,30 @@ back out of it. The habit across this batch was::
 
 A pipeline reports the status of its LAST command, so ``cargo``'s 101 is
 discarded and ``awk`` prints a smaller number with no failure anywhere in
-sight. That is not hypothetical: lane-b060-b062 reported 2190/2218 against a
-true 2223 after a SIGSEGV in ``multi_root_tests``, and totals were accepted
-from five lanes on that basis for a day.
+sight. Not hypothetical: totals of **2190 and 2218 against a true 2223** were
+observed during the B078 investigation, on ``multi_root_tests``. The whole
+batch, and the coordinator accepting its numbers, was reporting totals on this
+basis for a day.
 
-Two things go wrong at once when a binary dies, and a total hides both:
+Two INDEPENDENT mechanisms produce it, and a fix has to close both:
 
-* the crashed binary contributes **no** ``test result:`` line, so its tests
-  vanish from the sum rather than appearing as failures; and
-* cargo stops at the first failing binary, so every binary after it never runs
-  and never reports either.
+1. **A crashed binary emits no summary.** Its tests vanish from the sum rather
+   than appearing as failures, and cargo then stops, so every binary after it
+   never runs and never reports either.
+2. **A pipeline discards cargo's exit code.** ``cargo test | grep ... > file``
+   leaves the shell holding *grep's* status. The crash signal is simply not in
+   the variable that gets checked.
 
-Both shrink the total. Neither shows up as a failed test.
+Both shrink the total. Neither shows up as a failed test. The error always
+points the same way — **fewer tests, still green** — which is the direction
+nobody investigates.
+
+Mechanism 2 cannot be fixed from inside a script: any caller may still pipe
+this program's output and drop its exit code. So the total is instead made
+*absent* rather than wrong. ``SUITE-VERIFIED`` (see ``VERIFIED_MARKER``) is the
+only line here that ever carries a total, and it is printed only on a run that
+passed every check. A gate that greps for it gets nothing at all from a broken
+run instead of a smaller number.
 
 What this checks
 ----------------
@@ -42,6 +54,15 @@ What this checks
 3. **A started binary that produced no summary**, which is the signature of a
    binary killed mid-run (see B078: an external instruction-fetch fault, not a
    defect in this crate).
+
+Measured, on why point 2 is not the cheaper same-output check. B082's own Fix
+section proposes comparing ``Running`` + ``Doc-tests`` lines against
+``test result:`` lines, both taken from the run's output. That catches a
+crashed binary — but it cannot tell a COMPLETE run from a deliberately partial
+one. On ``cargo test --locked --test b044_narrowed_surfaces`` it reports
+``expected=1 reported=1 RECONCILED, 4 passed``: internally consistent, and 2348
+tests short of the suite. The independent enumeration fails that same run and
+names the 24 binaries that never ran. Internal consistency is not completeness.
 
 Only then does it print a total, because a total is trustworthy only alongside
 proof that every binary reported one.
@@ -73,6 +94,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNING = re.compile(r"^\s+Running\s+(?P<label>.+?)\s+\((?P<path>[^)]+)\)\s*$")
 # `   Doc-tests openplanet_lsp`
 DOCTESTS = re.compile(r"^\s+Doc-tests\s+(?P<crate>\S+)\s*$")
+# The single greppable token that means "this total is complete". A lane may
+# grep for this line; it must never appear on a run that failed any check.
+VERIFIED_MARKER = "SUITE-VERIFIED"
+
 SUMMARY = re.compile(
     r"^test result: \S+\. (?P<passed>\d+) passed; (?P<failed>\d+) failed; "
     r"(?P<ignored>\d+) ignored"
@@ -200,19 +225,32 @@ def reconcile(exit_code: int, lines: list[str], expected: dict[str, str]) -> tup
 
     report: list[str] = []
     report.append("")
-    report.append(
-        f"==> {len(reported_paths)}/{len(expected)} binaries reported, "
-        f"{len(sections)} sections, {passed} passed, {failed} failed, {ignored} ignored"
-    )
     if not problems:
         report.append(
-            f"PASS: {passed} passed, and every one of the {len(expected)} expected "
-            "binaries reported a result."
+            f"==> {len(reported_paths)}/{len(expected)} binaries reported, "
+            f"{len(sections)} sections"
+        )
+        # VERIFIED_MARKER is the only line this script ever prints that carries
+        # a total, and it is printed only on a run that passed every check.
+        # That is what makes the gate survive the second mechanism: a lane
+        # whose pipeline discards the exit code still gets NOTHING from a
+        # broken run rather than a smaller number, because the line it greps
+        # for is absent. Do not print a total anywhere else.
+        report.append(
+            f"{VERIFIED_MARKER}: {passed} passed; {failed} failed; {ignored} ignored; "
+            f"{len(reported_paths)}/{len(expected)} binaries reported"
         )
         return 0, "\n".join(report)
 
+    # Deliberately NOT phrased as "N passed": a fragment must not match the
+    # shape a gate greps for. See VERIFIED_MARKER above.
+    report.append(
+        f"==> INCOMPLETE RUN: {len(reported_paths)} of {len(expected)} binaries "
+        f"reported. The counts below are a fragment, not a total."
+    )
+    report.append(f"    fragment: {passed} pass / {failed} fail / {ignored} ignored")
     report.append("")
-    report.append("FAIL: this total is NOT trustworthy.")
+    report.append("FAIL: this run did not produce a trustworthy total.")
     for problem in problems:
         report.append(f"  - {problem}")
     report.append("")
@@ -256,6 +294,11 @@ def run_selftest() -> int:
     print(report)
 
     problems: list[str] = []
+    if VERIFIED_MARKER in report:
+        problems.append(
+            f"a failed run printed `{VERIFIED_MARKER}` — the marker no longer means "
+            "'complete', so a gate grepping for it would accept a truncated run"
+        )
     if exit_code == 0:
         problems.append(
             "the canary did not crash cargo (exit 0) — it is no longer aborting, "
