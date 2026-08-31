@@ -559,6 +559,34 @@ fn lookup_workspace_property_site<'a>(
     explicitly_qualified.then(|| PropertySite::Ordinary(Vec::new()))
 }
 
+/// Virtual-property accessors for a NON-member site — a bare `Thing` or a
+/// qualified `Ns::Thing` — resolved through the very ladder
+/// [`goto_definition`] uses, so hover and definition can never disagree about
+/// which property a spelling names (B113).
+///
+/// `None` when the site is not a virtual property: no accessor at any valid
+/// lexical level, or an ordinary declaration owns the spelling — which must
+/// keep winning, and which the caller renders by its own ordinary path. An
+/// empty vec means a property owns the spelling at that level but declares no
+/// accessor for this access position (reading a setter-only property); the
+/// caller has nothing to show and must NOT widen the search outward.
+///
+/// Deliberately excludes member accesses: `obj.Thing` belongs to the
+/// receiver's type and nowhere else, so it goes through
+/// [`GlobalScope::lookup_virtual_property_accessor_symbols`] instead.
+pub(crate) fn workspace_property_accessors<'a>(
+    scope: &'a GlobalScope<'_>,
+    analysis: &DocumentAnalysis,
+    name: &str,
+    use_offset: u32,
+    position: AccessPosition,
+) -> Option<Vec<&'a Symbol>> {
+    match lookup_workspace_property_site(scope, analysis, name, use_offset, position) {
+        Some(PropertySite::Accessors(accessors)) => Some(accessors),
+        Some(PropertySite::Ordinary(_)) | None => None,
+    }
+}
+
 /// Which kind of thing a workspace-level site resolved to.
 ///
 /// The distinction matters at the call site and nowhere else: an ORDINARY

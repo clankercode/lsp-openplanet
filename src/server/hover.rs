@@ -26,6 +26,7 @@ use crate::server::diagnostics::position_to_offset;
 use crate::server::navigation;
 use crate::server::scope_query;
 use crate::symbols::scope::{Symbol, SymbolKind};
+use crate::typecheck::access_position::access_position_at;
 use crate::typecheck::repr::TypeRepr;
 use crate::typecheck::GlobalScope;
 use crate::typedb::index::{FunctionInfo, MethodInfo, ParamInfo, TypeInfo};
@@ -60,12 +61,21 @@ pub fn hover(
         .to_string();
     let offset = position_to_offset(source, position) as u32;
 
+    // The identifier token itself. Its SPAN (not just the offset) is what
+    // classifies the site as a read, a write or a compound assign, which
+    // decides which accessor a virtual property means (B113).
+    let ident: Option<(usize, crate::lexer::Span)> = navigation::ident_index_at(analysis, position)
+        .map(|(tok_idx, tok_span, _)| (tok_idx, tok_span));
+    let is_member = ident.is_some_and(|(tok_idx, _)| is_member_access(analysis, tok_idx));
+
     // 0) `receiver.member`: the name belongs to the receiver's type, so
     //    resolve it there before any by-name ladder below can match an
     //    unrelated symbol that merely shares the name.
-    if let Some(tok_idx) = navigation::ident_token_index_at(analysis, position) {
-        if is_member_access(analysis, tok_idx) {
-            if let Some(md) = member_hover(analysis, checked, scope, tok_idx, offset, &bare) {
+    if let Some((tok_idx, tok_span)) = ident {
+        if is_member {
+            if let Some(md) =
+                member_hover(analysis, checked, scope, tok_idx, tok_span, offset, &bare)
+            {
                 return Some(markdown_hover(md));
             }
             if let Some(md) = recorded_type_label(checked, offset, &bare) {
@@ -128,6 +138,34 @@ pub fn hover(
                 let cls_name = cls.name.text(source);
                 let md = fence(&format!("(field) {}::{}: {}", cls_name, bare, ty_text));
                 return Some(markdown_hover(md));
+            }
+        }
+    }
+
+    // 2b) A workspace-level VIRTUAL PROPERTY (B113): `Thing` or `Ns::Thing`
+    //     backed by a `get_`/`set_` pair rather than by any declaration of
+    //     its own. Resolved through navigation's exact lexical ladder, so
+    //     hover and goto-definition always name the same property — and so
+    //     an ordinary declaration at any level keeps winning, which is what
+    //     that helper answering `None` for an ordinary site means here.
+    //
+    //     Placed BEFORE step 3 for the same reason goto-definition places
+    //     it there: step 3 widens an exact miss to root/tail matches, which
+    //     would jump to an unrelated symbol whose namespace differs — and a
+    //     virtual property's namespace is part of its identity.
+    //
+    //     Member accesses are excluded: `obj.Thing` belongs to the
+    //     receiver's type and was already answered at step 0. Letting one
+    //     fall through to here is the over-reach B054 removed.
+    if !is_member {
+        if let Some((_, tok_span)) = ident {
+            let access = access_position_at(&analysis.file, tok_span);
+            if let Some(accessors) = navigation::workspace_property_accessors(
+                scope, analysis, &qualified, offset, access,
+            ) {
+                if let Some(md) = property_block(&accessors) {
+                    return Some(markdown_hover(md));
+                }
             }
         }
     }
@@ -295,11 +333,17 @@ fn overload_block(mut sigs: Vec<HoverSig>) -> Option<String> {
     }
     let body: Vec<&str> = sigs.iter().map(|s| s.text.as_str()).collect();
     out.push_str(&fence(&body.join("\n")));
+    append_distinct_docs(&mut out, &sigs);
+    Some(out)
+}
 
-    // Distinct docs only: overloads of the same function usually repeat one
-    // description, and repeating it once per signature is noise.
+/// Append each signature's doc comment below a rendered block, skipping
+/// repeats: overloads of one function — and the two halves of one virtual
+/// property — usually carry the same description, and printing it once per
+/// signature is noise.
+fn append_distinct_docs(out: &mut String, sigs: &[HoverSig]) {
     let mut docs: Vec<&str> = Vec::new();
-    for sig in &sigs {
+    for sig in sigs {
         let Some(doc) = sig.doc.as_deref().map(str::trim) else {
             continue;
         };
@@ -311,6 +355,46 @@ fn overload_block(mut sigs: Vec<HoverSig>) -> Option<String> {
         out.push_str("\n\n");
         out.push_str(doc);
     }
+}
+
+/// Render a virtual property's accessors as ONE hover (B113).
+///
+/// AngelScript exposes a `get_X` / `set_X` pair as a property `X`, so hovering
+/// `X` must present the accessor(s) the site actually calls. Both halves share
+/// a single code block in the order the access performs them — getter first,
+/// which is the order [`GlobalScope::lookup_virtual_property_accessor_symbols`]
+/// returns — each labelled with the half it is, so the reader can tell which
+/// signature belongs to reading and which to writing.
+///
+/// Deliberately NOT routed through [`overload_block`]: a getter and a setter
+/// are two halves of one property, not a choice of signatures, so that
+/// formatter's `*2 overloads*` header would claim the site offers an
+/// alternative it does not have. (Its arity sort would also be a coincidence
+/// here — a getter takes no arguments and a setter takes one, so it happens to
+/// agree, but the order is meant to be the access order, not the shorter
+/// signature first.)
+///
+/// `None` when nothing renders — an empty accessor list, or symbols that are
+/// not functions and therefore cannot be accessors.
+fn property_block(accessors: &[&Symbol]) -> Option<String> {
+    let sigs: Vec<HoverSig> = accessors
+        .iter()
+        .filter_map(|sym| {
+            let bare = sym.name.rsplit("::").next().unwrap_or(sym.name.as_str());
+            let label = if bare.starts_with("set_") {
+                "(property set)"
+            } else {
+                "(property get)"
+            };
+            workspace_function_sig(sym, Some(label))
+        })
+        .collect();
+    if sigs.is_empty() {
+        return None;
+    }
+    let body: Vec<&str> = sigs.iter().map(|s| s.text.as_str()).collect();
+    let mut out = fence(&body.join("\n"));
+    append_distinct_docs(&mut out, &sigs);
     Some(out)
 }
 
@@ -460,10 +544,28 @@ fn member_hover(
     checked: Option<&CheckedFile<'_>>,
     scope: &GlobalScope<'_>,
     tok_idx: usize,
+    tok_span: crate::lexer::Span,
     offset: u32,
     bare: &str,
 ) -> Option<String> {
     let owner = navigation::receiver_type_name(analysis, checked, tok_idx, offset)?;
+    // B113: a type that declares NO member spelled `bare` may still declare
+    // it as a VIRTUAL PROPERTY — a `get_`/`set_` pair. The emptiness test is
+    // over the member lookup itself, not over what
+    // `method_or_member_hover` manages to RENDER, because a real field is a
+    // member that renders through a different arm: gating on the rendering
+    // would let a field named `ID` hover as `get_ID`. Same precedence
+    // goto-definition uses (B103) — a declared member always wins.
+    if scope
+        .lookup_member_symbols_with_inheritance(&owner, bare)
+        .is_empty()
+    {
+        let position = access_position_at(&analysis.file, tok_span);
+        let accessors = scope.lookup_virtual_property_accessor_symbols(&owner, bare, position);
+        if let Some(md) = property_block(&accessors) {
+            return Some(md);
+        }
+    }
     method_or_member_hover(scope, &owner, bare)
 }
 
@@ -476,6 +578,14 @@ fn method_or_member_hover(scope: &GlobalScope<'_>, owner: &str, member: &str) ->
         .filter_map(|s| workspace_function_sig(s, Some("(method)")))
         .collect();
     if let Some(md) = overload_block(workspace) {
+        return Some(md);
+    }
+    // A member that is a FIELD, not a callable. Without this the receiver
+    // path fell through to the `(local) T name` last resort, which is a
+    // mislabel — `obj.Speed` is not a local — and, since B113, leaves the
+    // negative control ("a real field must hover as the field, never as its
+    // same-named accessors") with nothing positive to assert.
+    if let Some(md) = field_member_hover(scope, owner, member) {
         return Some(md);
     }
     let index = scope.external()?;
@@ -507,6 +617,28 @@ fn method_or_member_hover(scope: &GlobalScope<'_>, owner: &str, member: &str) ->
             prop.type_name, owner_key, prop.name
         )),
         prop.doc.as_ref(),
+    ))
+}
+
+/// Render a member FIELD of `owner` — the nearest declaration in the
+/// inheritance chain, which is the one that hides the rest. Labelled and
+/// qualified like the method arm above, so `(field) int C::Speed` reads
+/// beside `(method) void C::Go()`.
+fn field_member_hover(scope: &GlobalScope<'_>, owner: &str, member: &str) -> Option<String> {
+    let symbols = scope.lookup_member_symbols_with_inheritance(owner, member);
+    let sym = symbols.iter().find_map(|sym| match &sym.kind {
+        SymbolKind::Variable { type_name } => Some((*sym, type_name)),
+        _ => None,
+    });
+    let (sym, type_name) = sym?;
+    let ty = if type_name.is_empty() {
+        "?"
+    } else {
+        type_name.as_str()
+    };
+    Some(with_doc(
+        fence(&format!("(field) {} {}", ty, sym.name)),
+        sym.doc.as_ref(),
     ))
 }
 
@@ -2317,6 +2449,327 @@ mod tests {
         assert!(
             md.contains("Ns::I::Go"),
             "expected the namespaced interface method, got {md:?}"
+        );
+    }
+
+    // === B113: virtual properties on hover ================================
+    //
+    // AngelScript exposes a `get_X` / `set_X` pair as a property `X`, so
+    // `obj.X` and `Ns::X` are real references to code even though nothing is
+    // declared with that spelling. B103 taught goto-definition to resolve
+    // them; hover shared the same gap and reported the recorded type (or
+    // nothing at all) instead of the accessors that implement the property.
+    //
+    // Presentation: both halves share ONE code block, getter first — the
+    // order the access performs them in — each labelled `(property get)` /
+    // `(property set)`. Deliberately NOT `overload_block`: a getter and a
+    // setter are two halves of one property, not a choice of signatures, so
+    // the `*2 overloads*` header would be a lie.
+
+    /// Hover that may legitimately have no answer at all.
+    fn hover_checked_opt(src: &str, needle: &str, occurrence: usize) -> Option<String> {
+        let tw = TestWorkspace::one_file("hover.as", src);
+        let scope = tw.scope();
+        let checked = tw
+            .snapshot
+            .checked_file(&tw.uri(), &scope)
+            .expect("checked view");
+        let pos = pos_of(src, needle, occurrence);
+        hover(tw.analysis(), Some(&checked), pos, &scope).map(md_of)
+    }
+
+    #[test]
+    fn hover_virtual_property_read_presents_the_getter() {
+        let md = hover_checked(
+            "class C { int get_Speed() { return 1; } }\nvoid f(C@ c) { int v = c.Speed; }\n",
+            "Speed",
+            2,
+        );
+        assert!(
+            md.contains("(property get) int C::get_Speed()"),
+            "expected the getter accessor, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_virtual_property_write_presents_the_setter() {
+        let md = hover_checked(
+            "class C { void set_Speed(int v) {} }\nvoid f(C@ c) { c.Speed = 3; }\n",
+            "Speed",
+            2,
+        );
+        assert!(
+            md.contains("(property set) void C::set_Speed(int v)"),
+            "expected the setter accessor, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_virtual_property_compound_assign_presents_both_accessors() {
+        // `c.Speed += 1` reads and then writes, so it genuinely touches both
+        // accessors — the case the `ReadOnlyProperty` diagnostic spells out.
+        let md = hover_checked(
+            "class C { int get_Speed() { return 1; } void set_Speed(int v) {} }\nvoid f(C@ c) { c.Speed += 1; }\n",
+            "Speed",
+            3,
+        );
+        assert!(
+            md.contains("(property get) int C::get_Speed()")
+                && md.contains("(property set) void C::set_Speed(int v)"),
+            "expected both accessors, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_virtual_property_pair_orders_the_getter_first() {
+        let md = hover_checked(
+            "class C { int get_Speed() { return 1; } void set_Speed(int v) {} }\nvoid f(C@ c) { c.Speed += 1; }\n",
+            "Speed",
+            3,
+        );
+        let get = md.find("get_Speed").expect("getter in {md:?}");
+        let set = md.find("set_Speed").expect("setter in {md:?}");
+        assert!(get < set, "getter must render first, got {md:?}");
+    }
+
+    #[test]
+    fn hover_virtual_property_pair_is_not_labelled_an_overload_set() {
+        // Two halves of one property are not a choice of signatures.
+        let md = hover_checked(
+            "class C { int get_Speed() { return 1; } void set_Speed(int v) {} }\nvoid f(C@ c) { c.Speed += 1; }\n",
+            "Speed",
+            3,
+        );
+        assert!(
+            !md.contains("overloads"),
+            "accessors must not render as overloads, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_virtual_property_getter_only_read() {
+        let md = hover_checked(
+            "class C { int get_Speed() { return 1; } }\nvoid f(C@ c) { int v = c.Speed; }\n",
+            "Speed",
+            2,
+        );
+        assert!(
+            md.contains("get_Speed") && !md.contains("set_Speed"),
+            "a getter-only property offers only the getter, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_virtual_property_setter_only_write() {
+        let md = hover_checked(
+            "class C { void set_Speed(int v) {} }\nvoid f(C@ c) { c.Speed = 3; }\n",
+            "Speed",
+            2,
+        );
+        assert!(
+            md.contains("set_Speed") && !md.contains("get_Speed"),
+            "a setter-only property offers only the setter, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_write_to_a_getter_only_property_falls_back_to_the_getter() {
+        // The checker reports the bad write on its own; hover still has
+        // somewhere useful to point, because the getter is where the
+        // property is declared. Mirrors the goto-definition fallback.
+        let md = hover_checked(
+            "class C { int get_Speed() { return 1; } }\nvoid f(C@ c) { c.Speed = 3; }\n",
+            "Speed",
+            2,
+        );
+        assert!(
+            md.contains("get_Speed"),
+            "expected the getter as the fallback, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_virtual_property_inherited_from_a_base_class() {
+        let md = hover_checked(
+            "class B { int get_Speed() { return 1; } }\nclass D : B {}\nvoid f(D@ d) { int v = d.Speed; }\n",
+            "Speed",
+            2,
+        );
+        assert!(
+            md.contains("(property get) int B::get_Speed()"),
+            "expected the inherited accessor, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_virtual_property_declared_on_an_interface() {
+        let md = hover_checked(
+            "interface I { int get_Speed(); }\nvoid f(I@ i) { int v = i.Speed; }\n",
+            "Speed",
+            2,
+        );
+        assert!(
+            md.contains("(property get) int I::get_Speed()"),
+            "expected the interface-declared accessor, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_virtual_property_on_a_this_receiver() {
+        let md = hover_checked(
+            "class C { int get_Speed() { return 1; } void Go() { int v = this.Speed; } }\n",
+            "Speed",
+            2,
+        );
+        assert!(
+            md.contains("get_Speed"),
+            "expected the accessor through `this`, got {md:?}"
+        );
+    }
+
+    // --- negative controls: a real declaration always wins ----------------
+
+    #[test]
+    fn hover_a_real_field_beats_a_same_named_accessor_pair() {
+        let md = hover_checked(
+            "class C { int Speed; int get_Speed() { return 1; } }\nvoid f(C@ c) { int v = c.Speed; }\n",
+            "Speed",
+            3,
+        );
+        assert!(
+            md.contains("(field) int C::Speed"),
+            "a real field must hover as the field, got {md:?}"
+        );
+        assert!(
+            !md.contains("get_Speed"),
+            "a real field must never hover as an accessor, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_a_real_field_beats_a_full_accessor_pair_on_a_write() {
+        // The write position is the one that would otherwise select
+        // `set_Speed`; the field still owns the spelling.
+        let md = hover_checked(
+            "class C { int Speed; int get_Speed() { return 1; } void set_Speed(int v) {} }\nvoid f(C@ c) { c.Speed = 3; }\n",
+            "Speed",
+            4,
+        );
+        assert!(
+            md.contains("(field) int C::Speed"),
+            "a real field must hover as the field, got {md:?}"
+        );
+        assert!(
+            !md.contains("set_Speed") && !md.contains("get_Speed"),
+            "a real field must never hover as an accessor, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_an_inherited_field_beats_a_same_named_accessor_pair() {
+        let md = hover_checked(
+            "class B { int Speed; }\nclass D : B { int get_Speed() { return 1; } }\nvoid f(D@ d) { int v = d.Speed; }\n",
+            "Speed",
+            3,
+        );
+        assert!(
+            md.contains("(field) int B::Speed") && !md.contains("get_Speed"),
+            "an inherited field must beat the accessor pair, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_a_real_method_beats_a_same_named_accessor_pair() {
+        let md = hover_checked(
+            "class C { int Speed() { return 1; } int get_Speed() { return 1; } }\nvoid f(C@ c) { int v = c.Speed(); }\n",
+            "Speed",
+            3,
+        );
+        assert!(
+            md.contains("C::Speed") && !md.contains("get_Speed"),
+            "a real method must never hover as an accessor, got {md:?}"
+        );
+    }
+
+    // --- namespace / global level ----------------------------------------
+
+    #[test]
+    fn hover_namespace_level_virtual_property_read() {
+        let md = hover_checked_opt(
+            "namespace Ns { int get_Thing() { return 1; } }\nvoid f() { int v = Ns::Thing; }\n",
+            "Thing",
+            2,
+        )
+        .expect("hover on a namespace-level virtual property");
+        assert!(
+            md.contains("(property get) int Ns::get_Thing()"),
+            "expected the namespaced accessor, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_namespace_level_virtual_property_write() {
+        let md = hover_checked_opt(
+            "namespace Ns { void set_Thing(int v) {} }\nvoid f() { Ns::Thing = 3; }\n",
+            "Thing",
+            2,
+        )
+        .expect("hover on a namespace-level virtual property write");
+        assert!(
+            md.contains("(property set) void Ns::set_Thing(int v)"),
+            "expected the namespaced setter, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_bare_virtual_property_inside_its_own_namespace() {
+        let md = hover_checked(
+            "namespace Ns { int get_Thing() { return 1; }\nvoid f() { int v = Thing; } }\n",
+            "Thing",
+            2,
+        );
+        assert!(
+            md.contains("(property get) int Ns::get_Thing()"),
+            "expected the enclosing namespace's accessor, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_global_virtual_property_read() {
+        let md = hover_checked(
+            "int get_Thing() { return 1; }\nvoid f() { int v = Thing; }\n",
+            "Thing",
+            2,
+        );
+        assert!(
+            md.contains("(property get) int get_Thing()"),
+            "expected the global accessor, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_global_virtual_property_compound_assign_presents_both() {
+        let md = hover_checked(
+            "int get_Thing() { return 1; }\nvoid set_Thing(int v) {}\nvoid f() { Thing += 1; }\n",
+            "Thing",
+            3,
+        );
+        assert!(
+            md.contains("get_Thing") && md.contains("set_Thing"),
+            "expected both global accessors, got {md:?}"
+        );
+    }
+
+    #[test]
+    fn hover_a_real_global_beats_a_same_named_accessor_pair() {
+        let md = hover_checked(
+            "int Thing = 1;\nint get_Thing() { return 5; }\nvoid f() { int v = Thing; }\n",
+            "Thing",
+            3,
+        );
+        assert!(
+            !md.contains("get_Thing"),
+            "a real global must never hover as an accessor, got {md:?}"
         );
     }
 }
