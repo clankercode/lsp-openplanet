@@ -68,3 +68,49 @@ from the other end -- that one keeps the assertion and removes the population,
 this one removes the assertion and keeps the population, and both then report a
 zero indistinguishable from a real one. Both belong to lane-tooling; do B162
 first, it is smaller and its positive-control discipline is the same.
+
+MEASURED ON THIS TREE (lane-unused, 2026-09-01). Three findings; the third is a
+constraint, not a detail.
+
+1. FORMAT. `--list` emits `<name>: test` per line, a blank line, then
+   `N tests, M benchmarks`. Lib tests are fully module-qualified
+   (`analysis::tests::analyze_parses_simple_function`); integration tests are
+   bare. Confirmed not interleaved with test-body output.
+
+2. `#[ignore]` IS A BLIND SPOT AND IT IS CHEAPLY CLOSABLE. Ignored tests still
+   appear in the plain `--list` -- verified: `config::tests::unused_callbacks_
+   load_wiring_child` appears in both `--list` and `--list --ignored`. So a name-
+   set diff catches the B158 defect (the attribute is swallowed, the function
+   stops being a test, it vanishes from the list) but would NOT catch a test
+   disabled by adding `#[ignore]`. That is a real way to disable a test and we
+   have 12 ignored already.
+
+   Compare TWO sets: `--list` and `--list --ignored`. A test going active ->
+   ignored is then unchanged in the first and newly present in the second.
+   Whichever way this is resolved, state the blindness explicitly in the tool's
+   own output or docs: a check whose gap is undocumented gets trusted past its
+   range, which is how the suite total came to be trusted as a set check.
+
+3. THE BINARY-ENUMERATION STEP IS ITSELF A NOTHING-RAN ZERO, AND IT WAS HIT
+   WHILE MEASURING THIS TICKET. A first probe selected
+   `target/debug/deps/openplanet_lsp-d408a682e854e302`, ran `--list`, and got
+   0 tests -- one step from the conclusion "the lib harness lists nothing". The
+   real harness was `-418c7f45a6ea779a` with 2176. `deps/` holds several
+   artifacts matching a crate name: stale harnesses, rlibs, non-test
+   executables. A glob or a newest-first pick can silently select one listing
+   zero.
+
+   SO: take binary paths from `cargo test --no-run --message-format=json`, which
+   names each executable exactly. NEVER from a `deps/` glob.
+
+   The reason this is a hard constraint and not a preference: a set diff over
+   zero binaries reports zero removals and reconciles perfectly. The instrument
+   built to backstop a vacuous check would acquire a vacuous first step -- the
+   exact recursion this ticket exists to stop, arriving in the replacement.
+
+   It was caught the same way as B162's original: the count was wrong for a
+   reason the output did not state. A 0 from a binary that should hold thousands
+   is only suspicious if you already know the denominator you expected.
+
+None of this weakens the `--list` design -- 2 and 3 are both fixable at the
+source rather than by hardening a parser, which is the argument for it.
