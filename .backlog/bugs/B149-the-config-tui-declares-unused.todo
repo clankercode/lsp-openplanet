@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-31T16:35:05Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T16:35:05Z"
 complexity: medium
 created_at: "2026-08-31T15:49:59Z"
 depends_on: []
+duration_minutes: 0.012935218133333334
 estimate_hours: 1
 id: B149
 priority: high
 started_at: "2026-08-31T16:35:05Z"
-status: in_progress
+status: done
 tags: []
 title: 'The config TUI declares unused with default warn, but B090 changed the actual default to info: a stale display default'
 updated_at: "2026-08-31T16:35:05Z"
