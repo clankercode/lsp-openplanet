@@ -111,3 +111,4 @@ bugs:
     - file: B110-funcdef-types-compatible-accep.todo
     - file: B111-b094-false-error-on-mixin-clas.todo
     - file: B112-render-signature-strips-all-wh.todo
+    - file: B113-hover-on-a-virtual-property-ac.todo
