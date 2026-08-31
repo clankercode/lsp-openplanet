@@ -14,6 +14,13 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Added
+- **Openplanet-injected methods are offered everywhere the LSP describes a
+  type** (B063) — `MwAddRef`, `MwRelease`, `GetCurrentEntityID` and
+  `GetManialinkPages` are registered by Openplanet rather than listed in the
+  Nadeo dump, so member completion, hover, go-to-definition and signature help
+  all behaved as though they did not exist. They are now known to all four.
+  A plugin that declares its own type shadowing an engine one (say
+  `class CSmPlayer {}`) is correctly *not* offered the engine methods.
 - **Colour swatches and a colour picker** (B041) — the server now advertises
   `color_provider`, so VS Code shows an editable swatch beside the two forms
   Openplanet code actually uses: `vec3`/`vec4` literals in the game's 0..1
@@ -168,6 +175,11 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **Namespace-shortcut completion offered raw storage keys** (B069) — for a
+  configured Nadeo module the shortcut surface listed the internal storage key
+  instead of the spelling that appears in source, so accepting a completion
+  inserted a name the compiler does not recognise. It now offers the source
+  spelling.
 - **`openplanet.regenerateTypeDb` can no longer report a database it did not
   load (B064)** — the `after` stamps described whatever was on disk when the
   answer was written, not the database that had just been parsed into memory.
