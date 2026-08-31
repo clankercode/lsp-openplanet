@@ -2074,3 +2074,57 @@ had just made, which was trivially re-applied.
 - Never silence a command whose failure should stop the chain, and never follow
   a merge/rebase with an unconditional `git add -A`. Check for markers first —
   `git status` reports `both modified`, and `git diff --check` finds them.
+
+## When the subject is an ABSENCE, the red run cannot validate the test
+
+Found by lane-unused during B107, and it unifies three things this document had
+been recording as separate incidents.
+
+Red/green is the repo's standard defence against a test that proves nothing: if
+the test does not fail before the fix, it is not testing the fix. That defence
+has a hole, and the hole is exactly the class of test we write most often here.
+
+`a_workspace_class_is_not_a_namespace` PASSED during the red run. Not because
+it held — because before the fix, `Holder::` offered nothing, `Ns::` offered
+nothing, and *everything* offered nothing. An assertion that a class does not
+spill its members into namespace completion is satisfied for free by a world
+where nothing completes at all.
+
+**The mechanism, stated generally.** When a test's subject is an absence — "no
+diagnostic", "offers nothing", "this name is not in the list" — the pre-fix
+state is absence *everywhere*, so the assertion passes for a reason that has
+nothing to do with the property it names. And a test that passes in both the
+red and the green state is indistinguishable, by inspection, from one that
+genuinely holds. Red/green cannot separate them, because red/green's whole
+signal is the transition, and these tests never transition.
+
+That is the same mechanism as:
+
+- **B088's vacuous silence** — the ctor/dtor filter could be deleted with the
+  whole suite staying green, because no discriminating input existed.
+- **B097's non-discriminating control** — `zzz_no_such_route` failed through the
+  same 64-byte truncation as every route it was controlling for.
+- **B071's first regression test** — written where `compute_diagnostics` runs no
+  unused analysis at all, so it could not fail either way.
+
+Three incidents that read as three coincidences are one defect in the method.
+
+**The operational rule, which is the valuable half.** Do not try to judge which
+absence-assertions are suspicious — that requires the insight you are trying to
+check. Instead:
+
+> **After a red run, mutation-test every test that PASSED.**
+
+The red run hands you the list for free. Those are precisely the tests whose
+teeth are undemonstrated, and the set is usually small. For each, break the
+thing it guards and confirm that test — specifically that one — goes red. In
+B107 the mutation was replacing the `namespace_is_declared` gate with `true`,
+which made `Holder::` spill `[("Method", Function), ("field", Variable)]`, and
+exactly one test caught it: the one that had passed vacuously.
+
+This is mechanical, needs no judgement about which assertions look weak, and
+costs one mutation per free-passing test. That is why it will actually get done,
+which is more than can be said for "think harder about your silence tests".
+
+**Corollary for reviewers.** A red/green report saying "11 failed, 4 passed" is
+not fully good news. The 4 are the ones to ask about.
