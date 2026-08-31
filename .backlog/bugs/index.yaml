@@ -96,3 +96,4 @@ bugs:
     - file: B095-extension-should-have-suggesti.todo
     - file: B096-unprobed-engine-semantics-behi.todo
     - file: B097-remotebuild-payloads-can-be-sp.todo
+    - file: B098-external-enum-by-short-name-re.todo
