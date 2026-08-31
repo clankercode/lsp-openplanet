@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T11:34:20Z"
 depends_on: []
 estimate_hours: 1
 id: B107
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Completion after a WORKSPACE namespace offers nothing at all: Helper:: has no producer, only the typedb route exists'
@@ -24,3 +26,64 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by lane-unused while doing B099, 2026-08-31. Reported as a SEPARATE gap
+rather than folded in, which was the right call -- B099 is a mislabelled
+producer, this is a MISSING one, and they have nothing in common but the
+completion entry point.
+
+## What it is
+
+`complete_namespace_members` resolves `Ns::` through
+`TypeIndex::source_scope_members`, and that function is TYPEDB-ONLY. There is
+no workspace route into it at all. So given a plugin that declares
+
+    namespace Helper { void DoThing() {} }
+
+typing `Helper::` offers **nothing**. Not a mislabelled entry, not a partial
+list -- zero completions.
+
+## Why the B099 ticket was wrong about this, and why that matters
+
+B099's test plan asked for "a workspace namespace" as a third route into
+`source_scope_members` alongside the typedb routes. That route does not exist.
+The lane MEASURED that rather than working around it, and pinned the emptiness
+with a PREMISE ASSERTION -- the test first proves the workspace really declares
+the member, so the empty completion list cannot be a setup failure quietly
+passing as a finding. That is the correct shape for a test whose subject is an
+absence, and whoever fixes B107 should keep it: the moment a producer exists,
+that test must be updated deliberately rather than silently starting to pass
+for the wrong reason.
+
+## Related, and worth reading before starting
+
+- B099 (just landed): `source_scope_members` now returns
+  `(String, ScopeMemberKind)`, so a new workspace producer must supply a kind
+  rather than defaulting everything to FUNCTION -- the exact defect B099 fixed.
+  Do not reintroduce it on the new path.
+- B099 also surfaced a real collision to respect: `UI::Font` is BOTH a class
+  and a namespace (`UI::Font::Default` hangs three accessors off it).
+  Declaration wins, spelled as explicit `or_insert` precedence in fixed source
+  order rather than relying on loop order. A workspace producer merging into
+  the same map has to honour that precedence, and a workspace/typedb collision
+  on the same name is the case to think about first.
+- B013 closed "unknown namespaced symbols in user namespaces stay silent"
+  (GH #58) on the CHECKING side. This is the same blind spot on the COMPLETION
+  side, so B013's resolution machinery is the obvious place to look for an
+  existing workspace-namespace member enumeration to reuse rather than write a
+  second one. A rule living at one of N sites is the recurring defect shape in
+  this repo (B073, B076, B098).
+- B088: enum values reached `::` completion by a branch that runs BEFORE the
+  scope walk, because an enum is not a scope. Confirmed by lane-unused as a
+  genuinely separate path, not a second half of this one -- so do not try to
+  unify them without measuring.
+
+## Test shapes to generalise (per repo CLAUDE.md)
+
+A one-level workspace namespace; a nested one (`A::B::`); a workspace namespace
+whose name also exists in the typedb (collision, both directions); a namespace
+containing a function, a class, an enum, an interface, a nested namespace, and
+a global -- each asserted with its CORRECT kind, not merely present; a
+namespace declared across two files; one behind the GH #58 closure fence; and a
+negative control where nothing is declared, so a producer that returns
+everything unconditionally does not score as a pass.
