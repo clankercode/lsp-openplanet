@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T16:11:40Z"
+depends_on: []
+estimate_hours: 1
+id: B152
+priority: high
+status: pending
+tags: []
+title: 'Tighten funcdef signature matching to the engine''s measured const exactness: the engine is exact on all four const positions in both directions, and array Sort wants const T@ const &in for handle element types'
+updated_at: "2026-08-31T16:11:40Z"
+---
+
+Tighten funcdef signature matching to the engine's measured const exactness: the engine is exact on all four const positions in both directions, and array Sort wants const T@ const &in for handle element types
