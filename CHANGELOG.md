@@ -14,6 +14,19 @@ GitHub Release body to match this section (gh release edit).
 ## [Unreleased]
 
 ### Fixed
+- **The implicit-conversion message no longer invents a `&` on the target**
+  (B171) — B160 adopted `to 'VirtualKey&'.` as the engine's universal spelling
+  from a measured 22-of-22, but both corpora it had available happened to carry
+  non-const object targets in variable slots: the sample was uniform because the
+  sampling frame was. Measured across 10 more conversion messages
+  (`docs/probes/b171-conversion-target-spelling.tsv`), the engine suffixes the
+  target only when the source is non-const AND the target type is not a
+  primitive AND the slot is an assignable variable rather than a return. Two of
+  those are invisible at our diagnostic site, and the unsuffixed form is exactly
+  right for the commonest real case — a conversion from a const source, which is
+  what every engine property read such as `int3 size = map.Size;` is. We now
+  emit `Can't implicitly convert from 'const nat3' to 'int3'.`, byte-exact with
+  the engine there. B160's trailing full stop was never in doubt and stays.
 - **`MwRefBuffer<T>` indexes to `T`, and `MwFastBufferCat<T>` no longer
   pretends to** (B156) — the array-generic list had drifted from the
   shipped typedb in both directions at once. `MwRefBuffer` registers

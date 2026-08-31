@@ -4417,3 +4417,60 @@ condemning everything — took the same three mutations from MISSED to caught.
 
 This generalises past flag lists: it applies to every guard in this repo whose
 green output is an empty collection.
+
+---
+
+## A sample can be uniform because the SAMPLING FRAME is uniform (B171)
+
+**B160 measured 22 of 22 and got a universal that was false.** Every measured
+`Can't implicitly convert` message named its target with a trailing `&` and
+ended with a full stop — no exceptions, across two independent corpora. The
+ticket said so explicitly, and drew the reasonable conclusion: *"22/22 uniformity
+means there is no per-case judgement"*, so adopting the spelling is one decision
+rather than a rule with conditions. The renderer was changed to append `&`
+unconditionally.
+
+It was wrong for a large and common class. B145's corpus, merged twenty minutes
+later, carried `Can't implicitly convert from 'const nat3' to 'int3'.` — full
+stop, no ampersand. B171 then measured the actual rule: the target carries `&`
+only when the source is non-const AND the target is not a primitive AND the slot
+is an assignable variable rather than a return.
+
+**THE DEFECT IS NOT THE SAMPLE SIZE. It is that the population was inherited
+rather than designed.** Both corpora existed to answer other questions — b071
+enum conversions, b144 funcdef handles — and both happened to hold non-const
+object targets in variable slots. Every case in the frame agreed because the
+frame varied nothing along the axis in question. Adding a hundred more rows from
+those same two corpora would have produced 122 of 122 and been no better.
+
+**A uniformity claim is only as strong as the VARIATION in the sample, never the
+count.** Before reading N-of-N as a rule, ask what the rows differ in — and
+specifically whether any of them differ along the axis the rule is about. If the
+answer is "they were all collected for a different purpose", the number is
+measuring the collection, not the engine. B171's probe found the answer with
+**ten** messages rather than twenty-two, because it was built to vary source
+constness, target category and slot kind deliberately; its decisive pair is two
+rows that differ in exactly one variable and disagree.
+
+**The related tell: a rule with no stated conditions, derived from data nobody
+selected.** B160's own counter-argument was about readability (`VirtualKey&`
+leaks engine internals), not about whether the rule was true — so the review
+argued the merits of a universal without anyone asking whether it was one.
+
+### What caught it, and why that was luck worth keeping
+
+`corpus_files()` in `b155_engine_wording_divergence.rs` **globs every `.tsv` in
+`docs/probes/`** rather than naming the two it was written against. So the moment
+a third corpus landed, the uniformity assertion was re-tested against a
+population its author never saw, and failed. That is an instrument that widens
+its own denominator without being asked, and it turned a wrong belief into a red
+build inside one merge instead of a user-visible wrong message for months.
+
+**The tempting repair was to narrow the glob to the two original corpora.** It
+would have restored green immediately and deleted the finding. Prefer the
+instrument that can be surprised by data it was not designed around; a gate that
+only ever sees its author's examples is a gate that can only confirm them.
+
+See also: *predict the count before the run* (a prediction that cannot be
+contradicted is not a check), and *a detector that cannot see the counterexample
+gives a confident wrong answer*.

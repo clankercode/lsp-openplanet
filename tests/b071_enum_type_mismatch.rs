@@ -30,10 +30,20 @@
 //! No matching symbol 'LocalOne::NoSuchValueZZZ'
 //! ```
 //!
-//! Ours deliberately drops the `&` and the full stop, so the assertions in
-//! this file spell the target unsuffixed. (This block previously quoted a
-//! third spelling — `to 'LocalTwo'.` — that matched neither side, which is
-//! what B155 was opened on.)
+//! Ours adopts the full stop and deliberately drops the `&`, so the assertions
+//! in this file spell the target unsuffixed WITH a trailing stop. (This block
+//! previously quoted a third spelling — `to 'LocalTwo'.` — that at the time
+//! matched neither side, which is what B155 was opened on. It is now our
+//! spelling, for a measured reason rather than by accident.)
+//!
+//! B171: the engine's `&` above is CONDITIONAL, not universal. B160 read
+//! 22-of-22 as a universal because every corpus then available carried
+//! non-const object targets in variable slots — the sample was uniform because
+//! the sampling frame was. Measured in
+//! `docs/probes/b171-conversion-target-spelling.tsv`, the target carries `&`
+//! iff the source is non-const AND the target type is not a primitive AND the
+//! slot is an assignable variable rather than a return. Two of those three are
+//! invisible at our diagnostic site, so we do not guess at them.
 //!
 //! # Why the two silences live in the acceptance fixture
 //!
@@ -204,12 +214,12 @@ void Acceptance() {
 fn acceptance_six_required_diagnostics() {
     let msgs = messages(ACCEPTANCE);
     let required = [
-        "Can't implicitly convert from 'VirtualKey' to 'UI::MouseButton&'.",
-        "Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.",
+        "Can't implicitly convert from 'VirtualKey' to 'UI::MouseButton'.",
+        "Can't implicitly convert from 'LocalOne' to 'LocalTwo'.",
         "No matching symbol 'LocalOne::NoSuchValueZZZ'",
         "No matching symbol 'VirtualKey::NoSuchValueZZZ'",
-        "Can't implicitly convert from 'int' to 'LocalOne&'.",
-        "Can't implicitly convert from 'int' to 'VirtualKey&'.",
+        "Can't implicitly convert from 'int' to 'LocalOne'.",
+        "Can't implicitly convert from 'int' to 'VirtualKey'.",
     ];
     for needle in required {
         assert!(
@@ -305,7 +315,7 @@ fn position_local_var_decl() {
         enum LocalTwo { Y }
         void Use() { LocalOne a = LocalOne::X; LocalTwo b = a; print("" + int(b)); }
         "#,
-        "Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.",
+        "Can't implicitly convert from 'LocalOne' to 'LocalTwo'.",
         "a cross-enum LOCAL declaration",
     );
 }
@@ -320,7 +330,7 @@ fn position_global_var_decl() {
         LocalTwo g_b = g_a;
         void Use() { print("" + int(g_b)); }
         "#,
-        "Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.",
+        "Can't implicitly convert from 'LocalOne' to 'LocalTwo'.",
         "a cross-enum GLOBAL declaration",
     );
 }
@@ -334,7 +344,7 @@ fn position_class_field_initializer() {
         class Holder { LocalTwo f = LocalOne::X; }
         void Use() { Holder h; print("" + int(h.f)); }
         "#,
-        "Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.",
+        "Can't implicitly convert from 'LocalOne' to 'LocalTwo'.",
         "a cross-enum CLASS FIELD initializer",
     );
 }
@@ -352,7 +362,7 @@ fn position_assignment() {
             print("" + int(b));
         }
         "#,
-        "Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.",
+        "Can't implicitly convert from 'LocalOne' to 'LocalTwo'.",
         "a cross-enum ASSIGNMENT",
     );
 }
@@ -396,7 +406,7 @@ fn position_int_to_enum_at_all_four_positions() {
     for (position, source) in cases {
         assert_rejected(
             source,
-            "Can't implicitly convert from 'int' to 'LocalOne&'.",
+            "Can't implicitly convert from 'int' to 'LocalOne'.",
             &format!("int -> enum in {position} position"),
         );
     }
@@ -417,7 +427,7 @@ fn variant_const_target_still_rejects() {
         enum LocalTwo { Y }
         void Use() { LocalOne a = LocalOne::X; const LocalTwo b = a; print("" + int(b)); }
         "#,
-        "Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.",
+        "Can't implicitly convert from 'LocalOne' to 'LocalTwo'.",
         "a `const` cross-enum declaration",
     );
 }
@@ -431,7 +441,7 @@ fn variant_const_source_still_rejects() {
         enum LocalTwo { Y }
         void Use() { const LocalOne a = LocalOne::X; LocalTwo b = a; print("" + int(b)); }
         "#,
-        "Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.",
+        "Can't implicitly convert from 'LocalOne' to 'LocalTwo'.",
         "a `const`-sourced cross-enum declaration",
     );
 }
@@ -458,7 +468,7 @@ fn variant_parameter_reference_modes() {
         );
         assert_rejected(
             &source,
-            "to 'LocalTwo&'.",
+            "to 'LocalTwo'.",
             &format!("a cross-enum assignment from a `{mode}` parameter"),
         );
     }
@@ -475,7 +485,7 @@ fn variant_namespaced_workspace_enum() {
         enum Outer { Y }
         void Use() { N::Inner a = N::Inner::X; Outer b = a; print("" + int(b)); }
         "#,
-        "to 'Outer&'.",
+        "to 'Outer'.",
         "a namespaced workspace enum assigned to a global one",
     );
     assert_accepted(
@@ -582,7 +592,7 @@ fn variant_shadowing_does_not_disable_the_check() {
         enum Other { Y }
         void Use() { Axis a = Axis::X; Other b = a; print("" + int(b)); }
         "#,
-        "Can't implicitly convert from 'Axis' to 'Other&'.",
+        "Can't implicitly convert from 'Axis' to 'Other'.",
         "a cross-enum assignment where one enum shadows an engine short name",
     );
 }

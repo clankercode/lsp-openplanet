@@ -38,8 +38,16 @@ use tower_lsp::lsp_types::{DiagnosticSeverity, Url};
 /// B160's inverse of B155's transform: take the former local spelling and add
 /// a reference marker to the target plus the final full stop. Already-adopted
 /// text passes through unchanged, which keeps this helper safe for controls.
-fn legacy_local_text_to_engine(local: &str) -> String {
-    let mut out = local.to_string();
+/// OUR spelling, derived FROM a measured engine row rather than typed out.
+///
+/// B171 inverted this. It used to add both marks, because B160 believed the
+/// engine's `&` was universal and we had adopted it. The `&` is conditional on
+/// facts invisible at our diagnostic site, so ours now keeps the engine's full
+/// stop and drops the target's `&`. This function is the single place that
+/// relationship is written down, and the tests below derive from it rather than
+/// hardcoding our text — so the divergence cannot drift without this changing.
+fn engine_text_to_our_spelling(engine: &str) -> String {
+    let mut out = engine.to_string();
     if !out.ends_with('.') {
         out.push('.');
     }
@@ -47,8 +55,8 @@ fn legacy_local_text_to_engine(local: &str) -> String {
         .strip_suffix('.')
         .and_then(|s| s.rfind('\''))
         .expect("conversion diagnostic must end with a quoted target");
-    if !out[..target_quote].ends_with('&') {
-        out.insert(target_quote, '&');
+    if out[..target_quote].ends_with('&') {
+        out.remove(target_quote - 1);
     }
     out
 }
@@ -140,12 +148,21 @@ fn our_errors(source: &str) -> Vec<String> {
 // The engine's side, read off the corpora
 // ---------------------------------------------------------------------------
 
-/// The engine suffixes EVERY measured conversion target with `&` and ends the
-/// message with `.`. Uniform, across two corpora — so there is no judgement
-/// about when it applies, which is what makes the divergence a single
-/// decision rather than a per-case one.
+/// The engine ends EVERY measured conversion message with `.`, and suffixes the
+/// target with `&` only CONDITIONALLY.
+///
+/// B160 measured 22 of 22 carrying both marks and read that as a universal. It
+/// was not: both corpora it had available carried non-const object targets in
+/// variable slots, so the sample was uniform because the SAMPLING FRAME was.
+/// B145's corpus refuted it within the hour and B171 measured the rule — the
+/// target carries `&` iff the source is non-const AND the target type is not a
+/// primitive AND the slot is an assignable variable rather than a return.
+///
+/// We reproduce the full stop and deliberately not the `&`: two of those three
+/// conditions are invisible at our diagnostic site. See `NoImplicitConversion`
+/// in `src/typecheck/checker.rs` and `docs/probes/b171-conversion-target-spelling.tsv`.
 #[test]
-fn the_engine_suffixes_every_measured_conversion_target() {
+fn the_engine_suffixes_the_target_only_sometimes_and_always_ends_with_a_stop() {
     let msgs = measured_engine_messages();
     assert!(
         msgs.len() >= 22,
@@ -153,15 +170,54 @@ fn the_engine_suffixes_every_measured_conversion_target() {
          the extractor is broken, not the engine: {msgs:?}",
         msgs.len()
     );
-    let no_amp: Vec<_> = msgs.iter().filter(|m| !m.contains("&'")).collect();
-    assert!(
-        no_amp.is_empty(),
-        "some measured engine messages do NOT suffix the target: {no_amp:?}"
-    );
+
+    // The trailing full stop IS unconditional. 22 measured by B160, 10 more by
+    // B171's probe, no exceptions in either.
     let no_stop: Vec<_> = msgs.iter().filter(|m| !m.ends_with('.')).collect();
     assert!(
         no_stop.is_empty(),
         "some measured engine messages do NOT end with a full stop: {no_stop:?}"
+    );
+
+    // The `&` is NOT. B160 read 22 of 22 as a universal because both corpora it
+    // had happened to carry non-const object targets; B145 refuted it and
+    // B171's probe measured the actual rule. BOTH populations must be present
+    // here, or this test has stopped being able to see the thing it exists for.
+    let suffixed = msgs.iter().filter(|m| m.contains("&'")).count();
+    let bare = msgs.len() - suffixed;
+    assert!(
+        suffixed > 0,
+        "no measured message suffixes its target — the extractor is broken: {msgs:?}"
+    );
+    assert!(
+        bare > 0,
+        "no measured message leaves its target bare. Either a corpus was \
+         narrowed or B171's was dropped — and with only suffixed rows present \
+         this file would once again read a confounded sample as a universal. \
+         That is exactly how B160 happened: {msgs:?}"
+    );
+}
+
+/// The specific pair that refutes every single-variable rule, pinned by value
+/// rather than by count.
+///
+/// `r2` and `r13` are the SAME conversion into the SAME target type in the SAME
+/// syntactic slot. They differ only in whether the source is `const`, and they
+/// disagree about the target's `&`. Any future "simplification" of the renderer
+/// that reintroduces a single unconditional spelling has to delete one of these
+/// two lines to go green.
+#[test]
+fn the_decisive_pair_disagrees_on_the_ampersand() {
+    let msgs = measured_engine_messages();
+    assert!(
+        msgs.iter()
+            .any(|m| m == "Can't implicitly convert from 'nat3&' to 'int3&'."),
+        "B171 r2 (non-const source) must be present: {msgs:?}"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m == "Can't implicitly convert from 'const nat3' to 'int3'."),
+        "B171 r13 / B145's refuting row (const source) must be present: {msgs:?}"
     );
 }
 
@@ -217,9 +273,16 @@ fn the_extractor_reads_measurements_and_not_prose() {
 // Our side, and its exact relationship to the measured engine spelling
 // ---------------------------------------------------------------------------
 
-/// Our renderer adopts both engine marks at every site producing this message.
+/// Our renderer adopts the full stop at every site producing this message, and
+/// deliberately leaves the target BARE.
+///
+/// B171: the engine's `&` is conditional on facts this diagnostic site does not
+/// have (the source's constness, and whether the slot is a return). Emitting it
+/// unconditionally was wrong for every conversion from a const source — which is
+/// what an engine property read like `map.Size` is, i.e. the shape a plugin
+/// author actually writes.
 #[test]
-fn our_diagnostic_uses_the_reference_marker_and_the_full_stop() {
+fn our_diagnostic_is_bare_targeted_and_ends_with_the_full_stop() {
     let sources = [
         // enum -> different enum (workspace)
         "enum LocalOne { X }\nenum LocalTwo { Y }\n\
@@ -234,7 +297,11 @@ fn our_diagnostic_uses_the_reference_marker_and_the_full_stop() {
                 continue;
             }
             seen += 1;
-            assert!(m.contains("&'"), "ours must suffix the target: {m:?}");
+            assert!(
+                !m.contains("&'"),
+                "ours must NOT suffix the target — the engine's `&` is \
+                 conditional and we cannot see the conditions: {m:?}"
+            );
             assert!(m.ends_with('.'), "ours must end with a full stop: {m:?}");
         }
     }
@@ -245,26 +312,25 @@ fn our_diagnostic_uses_the_reference_marker_and_the_full_stop() {
     );
 }
 
-/// The load-bearing one: the inverse transform must reconstruct the measured
-/// engine row, and our live renderer must equal that row character for
-/// character. The transform stays checked rather than being deleted now that
-/// the two sides agree.
+/// The load-bearing one: our live renderer must equal, character for character,
+/// the measured engine row with the target's `&` removed — and nothing else
+/// changed. Derived from the corpus, never from hardcoded expectations, so the
+/// day the engine's wording moves this fails instead of quietly agreeing with
+/// a spelling nobody measured.
 #[test]
 fn the_renderer_is_exactly_the_corpus_derived_engine_spelling() {
     let cases = [
         (
             "Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.",
-            "Can't implicitly convert from 'LocalOne' to 'LocalTwo'",
             "enum LocalOne { X }\nenum LocalTwo { Y }\n\
              void f() { LocalOne c = LocalOne::X; LocalTwo d = c; print('' + int(d)); }",
         ),
         (
             "Can't implicitly convert from 'int' to 'VirtualKey&'.",
-            "Can't implicitly convert from 'int' to 'VirtualKey'",
             "void f() { int a = 0; VirtualKey b = a; print('' + int(b)); }",
         ),
     ];
-    for (engine, legacy_local, src) in cases {
+    for (engine, src) in cases {
         // The engine string is not hardcoded folklore: it must be one the
         // corpora actually measured.
         assert!(
@@ -272,10 +338,11 @@ fn the_renderer_is_exactly_the_corpus_derived_engine_spelling() {
             "{engine:?} is not in any probe corpus — update the case, do not \
              invent engine text"
         );
-        let expected = legacy_local_text_to_engine(legacy_local);
-        assert_eq!(
+        let expected = engine_text_to_our_spelling(engine);
+        assert_ne!(
             expected, engine,
-            "the inverted transform must reproduce the measured engine row"
+            "these cases carry a suffixed target, so the transform MUST change \
+             them — an identity here would make the assertion below vacuous"
         );
         let ours = our_errors(src);
         assert!(
@@ -291,12 +358,23 @@ fn the_renderer_is_exactly_the_corpus_derived_engine_spelling() {
 #[test]
 fn the_inverted_transform_actually_transforms() {
     assert_eq!(
-        legacy_local_text_to_engine("Can't implicitly convert from 'int' to 'VirtualKey'"),
-        "Can't implicitly convert from 'int' to 'VirtualKey&'."
+        engine_text_to_our_spelling("Can't implicitly convert from 'int' to 'VirtualKey&'."),
+        "Can't implicitly convert from 'int' to 'VirtualKey'.",
+        "a suffixed engine target must lose its `&` and keep its full stop"
     );
+    // B171: the engine leaves the target BARE whenever the source is const, so
+    // this is a real engine row and not a hypothetical -- it is B145's refuting
+    // message. It must pass through untouched, or the transform would be
+    // corrupting the very rows that refuted the universal rule.
     assert_eq!(
-        legacy_local_text_to_engine("Can't implicitly convert from 'A' to 'B&'."),
-        "Can't implicitly convert from 'A' to 'B&'.",
-        "an already-adopted message must pass through unchanged"
+        engine_text_to_our_spelling("Can't implicitly convert from 'const nat3' to 'int3'."),
+        "Can't implicitly convert from 'const nat3' to 'int3'.",
+        "an already-bare engine target must pass through unchanged"
+    );
+    // The `&` inside a SOURCE must survive: only the target's is dropped.
+    assert_eq!(
+        engine_text_to_our_spelling("Can't implicitly convert from 'nat3&' to 'int3&'."),
+        "Can't implicitly convert from 'nat3&' to 'int3'.",
+        "only the TARGET's `&` is dropped; the source keeps its own"
     );
 }
