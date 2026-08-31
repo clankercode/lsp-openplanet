@@ -108,3 +108,4 @@ bugs:
     - file: B107-completion-after-a-workspace-n.todo
     - file: B108-render-no-matching-sig-renders.todo
     - file: B109-argtypemismatch-renders-a-call.todo
+    - file: B110-funcdef-types-compatible-accep.todo
