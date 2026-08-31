@@ -38,11 +38,18 @@ full under "Which rows are the probing machine's?" below.
   edit, and say so in the commit.
 
   Two groups of rows are deliberately NOT expected to resolve here, and both
-  are named in that test rather than silently skipped: the 13 spellings that
-  compiled only because of the probing machine's installed plugins (see the
-  asymmetry below — `GameData::EGameInventoryItemClass` is the subtle one,
-  since `GameData` is *also* a Nadeo module name), and the 4 `string::` rows,
-  which are a lexer gap rather than a resolution one.
+  are named in that test rather than silently skipped: the 13 spellings whose
+  leading scope this crate does not have, and the 4 `string::` rows, which are
+  a lexer gap rather than a resolution one.
+
+  Those 13 are no longer hand-listed. They are DERIVED from
+  `b052-scope-provenance.tsv` (B080), which splits them by reason: **9** whose
+  scope was a foreign plugin's (`Foo`, `Foo::Bar`, `MathX`, `MLFeed`, `MLHook`,
+  `VehicleState`) and **4** whose scope the engine really has while neither
+  shipped database records it (all four `GameData::*`). The hand-maintained
+  lists had that split wrong — they called three of the four `GameData` rows
+  plugin artefacts while the same file's prose called `GameData` an engine
+  scope — which is the drift that motivated the sidecar.
 - **B057** (landed) — the 2373 bare value names the LSP used to accept and the
   game answers `No matching symbol` for. Filter `b053-bare-enum-values.tsv`
   for `verdict == NO_SYMBOL`.
@@ -440,6 +447,14 @@ spellings flipped, while all nine `GameData::*`, `MLFeed::*`, `MLHook::*`,
 `::ZZZNoSuch` probes confirm those namespaces still exist. The re-probe
 therefore CONFIRMS an exclusion list a previous lane had reasoned out rather
 than measured.
+
+**Two corrections to that paragraph, from B080.** It says the `::ZZZNoSuch`
+probes confirm those namespaces: they confirm four of the six — `MLHook` and
+`VehicleState` have no pin row in this corpus at all, so nothing in it witnesses
+their scope-hood in either direction. And "artefact" is wrong for `GameData`,
+which no installed plugin declares; all four of its rows are an engine scope
+neither database records. Both are now recorded per scope in
+`b052-scope-provenance.tsv` instead of in prose, and both are asserted.
 
 **Carry this forward when re-measuring anything here.** Restricting a re-probe
 to the rows a known defect could affect also blinds it to every defect you were

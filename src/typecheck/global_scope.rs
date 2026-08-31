@@ -537,9 +537,9 @@ impl<'a> GlobalScope<'a> {
     /// flip: `Audio::VirtualKey`, `Crypto::VirtualKey`, `Dev::VirtualKey`,
     /// `Display::VirtualKey`, `Fids::VirtualKey`. A namespace the workspace
     /// itself declares is a real scope in its own compilation unit and reaches
-    /// global by the same walk. Do not re-cite the `Foo::*` rows for it; they
-    /// are listed in `PLUGIN_NAMESPACE_ARTEFACTS` precisely because they must
-    /// NOT resolve when nothing declares them.
+    /// global by the same walk. Do not re-cite the `Foo::*` rows for it: the
+    /// b052 provenance sidecar records `Foo` as HOST — a foreign plugin's —
+    /// precisely so those rows must NOT resolve when nothing declares them.
     pub fn scope_exists(&self, path: &str) -> bool {
         if path.is_empty() {
             return false;

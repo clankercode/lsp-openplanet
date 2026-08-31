@@ -200,7 +200,7 @@ Display	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped data
 Fids	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 Foo	SCOPE	HOST	MEASURED: pinned SCOPE when this corpus was written and ABSENT on the 2026-08-31 re-probe, and no installed plugin declares it now - the scope came and went with a plugin
 Foo::Bar	SCOPE	HOST	MEASURED: pinned SCOPE when this corpus was written and ABSENT on the 2026-08-31 re-probe, and no installed plugin declares it now - the scope came and went with a plugin
-GameData	SCOPE	HOST	INFERRED: carried unchanged from PLUGIN_NAMESPACE_ARTEFACTS. Contested - UNEXPLAINED_ENGINE_SCOPES in the same file says GameData is an engine scope that neither database records, and no installed plugin declares it
+GameData	SCOPE	ENGINE_UNMODELLED	MEASURED: pinned SCOPE both when this corpus was written and on the 2026-08-31 re-probe, and nothing under Plugins/ (44 entries plus .op archives) declares the namespace or a type of that name; a previous lane also searched DisabledPlugins, Scripts and Extract and found only Openplanet.h. Neither shipped database records it as a scope, so this crate cannot resolve the rows either. Why GameData is a live scope when Game, Hms, Plug and Scene are not is an open question - see UNEXPLAINED_ENGINE_SCOPES
 GmFunc	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 IO	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 Icons	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies

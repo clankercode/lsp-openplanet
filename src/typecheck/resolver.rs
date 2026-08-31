@@ -331,6 +331,15 @@ mod tests {
     /// prove the switch changed nothing. Do not add to them; classify the scope
     /// in the sidecar instead.
     ///
+    /// The SPLIT below is wrong and is left wrong on purpose, because that is
+    /// what makes it a baseline. Three `GameData::*` spellings are here while
+    /// the fourth is in [`UNEXPLAINED_ENGINE_SCOPES`] and the doc comment there
+    /// says `GameData` is an engine scope, not a plugin one — a hand-maintained
+    /// list that drifted from prose in its own file. The sidecar puts all four
+    /// on the engine side; the union is unchanged, and
+    /// `the_derived_exclusion_set_reproduces_the_hand_maintained_one` asserts
+    /// both the union and the corrected 9/4 split.
+    ///
     /// Spellings the game ACCEPTED that are NOT engine facts, and so must not
     /// be read as evidence about this crate. `docs/probes/README.md` explains
     /// the asymmetry: a game REJECT is solid evidence about the engine, but a
@@ -1205,6 +1214,40 @@ mod tests {
              that is a FINDING about the sidecar's labels, not a test to adjust"
         );
         assert_eq!(derived.len(), 13, "anti-vacuity: the set is the known size");
+
+        // The SPLIT is where the hand-maintained lists were wrong, and the
+        // split is not visible in the union above, so it is asserted
+        // separately. The frozen constants say 12 plugin artefacts and 1
+        // unmodelled engine scope; the sidecar says 9 and 4, because all four
+        // `GameData::*` rows belong on the engine side and only one of them was
+        // there. Same thirteen spellings, same expected verdict for every one —
+        // this is a relabelling, not a behaviour change, and the equality above
+        // is the proof.
+        let provenance = b052_scope_provenance();
+        let by_origin = |want: &str| -> usize {
+            derived
+                .iter()
+                .filter(|spelling| {
+                    let (prefix, _) = split_scope_prefix(spelling);
+                    provenance.get(prefix).is_some_and(|p| p.origin == want)
+                })
+                .count()
+        };
+        assert_eq!(
+            by_origin("HOST"),
+            9,
+            "spellings a foreign plugin's scope carried"
+        );
+        assert_eq!(
+            by_origin("ENGINE_UNMODELLED"),
+            4,
+            "spellings the engine really has and neither database records"
+        );
+        assert_eq!(
+            by_origin("HOST") + by_origin("ENGINE_UNMODELLED"),
+            derived.len(),
+            "every excluded spelling is excluded for one of the two recorded reasons"
+        );
     }
 
     /// The sidecar's `pin` column is a RESTATEMENT of rows in the corpus, so it
@@ -1343,7 +1386,7 @@ mod tests {
             .collect();
         assert_eq!(
             inferred.len(),
-            2,
+            1,
             "origins resting on reasoning rather than an instrument: {:?}",
             inferred
         );
