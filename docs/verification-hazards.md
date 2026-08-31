@@ -1860,3 +1860,61 @@ failed through the same 64-byte truncation as every route it was controlling
 for, so it could not discriminate). Both are the same underlying error — an
 assertion that cannot distinguish the world where the code is right from the
 world where it is broken.
+
+## A gate can measure coverage and totals on different axes, and pass on both
+
+The suite gate withholds `SUITE-VERIFIED` from a filtered run, on the correct
+reasoning that a subset is not a suite total. It detects filtering with
+`names_a_target`, which inspects **cargo's** flags.
+
+`just rtest -- --test b089_funcdef_call_site` passes no cargo flags at all.
+Everything after `--` goes to **libtest**, which reads `--test` as a test-NAME
+substring. Nothing matches it. Every one of the 30 binaries still launches,
+still runs zero tests, and still prints a summary. So:
+
+- coverage: 30/30 binaries reported — complete
+- failures: 0 — clean
+- exit code: 0 — clean
+- total: **0 passed**
+
+and the gate printed `SUITE-VERIFIED: 0 passed; 0 failed; 12 ignored; 30/30
+binaries reported`. Every individual check was correct. The run was complete,
+was clean, and was worth nothing.
+
+**The mechanism is that completeness and the total were measured on different
+axes.** Coverage was measured per-binary (did each one report?) and the total
+was measured per-test (how many ran?). A name filter moves only the second.
+Any check that reads one axis is blind to a failure that lives in the other,
+and `names_a_target` was reading a third axis again — the caller's *intent*,
+inferred from cargo's argv — rather than either measurement.
+
+The honest signal was already in the output and unparsed: libtest prints
+`37 filtered out` on every summary line, and the gate's `SUMMARY` regex stopped
+at `ignored`. The data that contradicted the verdict was in the same string as
+the verdict.
+
+**Why this one is worth more than an ordinary bug.** A gate's whole job is to
+be the thing you trust when you cannot check for yourself, and this failure is
+in the direction that gets trusted. A red gate gets investigated. A gate that
+says `0 passed` in the same breath as `SUITE-VERIFIED` gets quoted into a merge
+commit — and would have been, had a lane not mentioned it as an aside after
+declining to fix it.
+
+**Generalisation.** Wherever a gate reports both a *scope* and a *magnitude*,
+check that a single defect cannot move only one of them. Ask specifically: what
+input makes the magnitude zero while the scope stays complete? If the answer is
+"a filter the scope check cannot see", the scope check is measuring intent
+rather than outcome.
+
+**Countermeasure that survives.** Detection now comes from libtest's own
+`filtered out` count — an *outcome* of the run, not an inference from its argv
+— so it cannot be defeated by a caller that filters through a channel the gate
+does not know about. The selftest carries the mutation (disable the detection,
+the check goes red with the exact message) and a positive control (an
+unfiltered clean run must still EARN the marker), so a future change cannot
+make the check pass by rejecting every run — the failure mode this document
+records under vacuity.
+
+Related: "Mechanism 4: the presentation dropped the rows, and the presentation
+looked fine" — same family, one level up. There the rows existed and were not
+shown; here the number existed and was not read.
