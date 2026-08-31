@@ -420,134 +420,22 @@ def classify(variant: Variant, window: str, fid: str, load: dict) -> Result:
     )
 
 
-def rb_route(route: str, data: dict, timeout: float = 20.0) -> dict:
-    """RemoteBuild call that reads the LENGTH-PREFIXED frame properly.
-
-    `fleet.rb_route` does one `recv(65536)` and then `json.loads(raw[4:])`.
-    That is fine for `get_status` (31 bytes, one frame) and wrong for
-    `load_plugin`, whose reply arrives as two frames: the second frame's own
-    4-byte header lands inside the text handed to `json.loads`, which raises
-    `Extra data: line 1 column 40`. Measured here on 2026-08-31 — the first
-    load this probe ever attempted failed that way.
-
-    The failure is loud, so it never produced a wrong verdict. It would have
-    produced a run with no verdicts at all, which is why this reads the frame
-    the way the protocol defines it: four little-endian length bytes, then
-    exactly that many bytes, looping until both are complete.
-    """
-    try:
-        sock = socket.create_connection((fleet.RB_HOST, fleet.RB_PORT), timeout=timeout)
-    except OSError as exc:
-        return {"error": f"rb_route {route} could not connect: {exc}", "data": ""}
-    try:
-        sock.sendall(json.dumps({"route": route, "data": data}).encode())
-
-        def recv_exactly(n: int) -> bytes:
-            buf = b""
-            while len(buf) < n:
-                chunk = sock.recv(n - len(buf))
-                if not chunk:
-                    raise ConnectionError(f"connection closed after {len(buf)}/{n} bytes")
-                buf += chunk
-            return buf
-
-        length = int.from_bytes(recv_exactly(4), "little")
-        if not 0 < length <= 8 * 1024 * 1024:
-            return {"error": f"rb_route {route}: implausible frame length {length}", "data": ""}
-        return json.loads(recv_exactly(length).decode(errors="replace"))
-    except Exception as exc:
-        return {"error": f"rb_route {route} failed: {exc}", "data": ""}
-    finally:
-        sock.close()
-
-
-# `Net::Socket::ReadRaw` returns at most this many bytes per call, measured
-# directly off the game's own `Read payload:` trace rather than inferred from
-# whether a request parsed. See `measure_read_cap()`.
-READ_CAP = 64
-
-CONTROL_MCP = Path.home() / "src/openplanet/my-plugins/tm-control-mcp"
+# HOISTED (B097). This file used to carry its own copy of the length-prefixed
+# reader and its own tm-control-mcp client, and its docstring asserted that
+# `fleet.rb_route` was the broken one. That stopped being true when fleet's was
+# fixed, and a stale comment claiming a sibling is broken is worse than none.
+# Two readers of one wire format, one of them right, is the shape this batch
+# keeps finding -- so there is now ONE, in fleet_dogfood, and these are names
+# for it. Nothing here changes behaviour; it removes the second copy.
+rb_route = fleet.rb_route
+control_mcp = fleet.control_mcp
+measure_read_cap = fleet.measure_read_cap
+READ_CAP = fleet.READ_CAP
+CONTROL_MCP = fleet.CONTROL_MCP
 
 
 def load_plugin_payload(fid: str) -> dict:
     return {"id": fid, "source": "user", "type": "folder"}
-
-
-def measure_read_cap(trials: int = 1) -> int | None:
-    """Measure ReadRaw's per-call cap from the game log. Returns None if unclear.
-
-    This is deliberately NOT "pad a request until it stops parsing", which is
-    how an earlier version of this file got the wrong number. That method
-    measures whether a particular payload survives being cut, not where the cut
-    falls: padding `{"route":"get_status","data":{"p":"AAA..."}}` to 65 and 66
-    bytes leaves the first 64 ending in `"}` and `"` respectively, still
-    lenient-parseable with `route` intact, so both answered `Alive` and the
-    boundary read as 66/67. The cut was at 64 the whole time.
-
-    The game traces `Read payload:` verbatim per read, so the length of the
-    FIRST read is the cap, directly. An instrument that reports the thing
-    asked about beats one that reports a consequence of it.
-    """
-    log = Path(fleet.OP_LOG)
-    try:
-        mark = log.stat().st_size
-    except OSError:
-        return None
-    payload = '{"route":"get_status","data":{"p":"' + "A" * 100 + '"}}'
-    try:
-        sock = socket.create_connection((fleet.RB_HOST, fleet.RB_PORT), timeout=8)
-    except OSError:
-        return None
-    try:
-        sock.sendall(payload.encode())
-        time.sleep(3.0)
-    finally:
-        sock.close()
-    try:
-        with open(log, "rb") as handle:
-            handle.seek(mark)
-            window = handle.read().decode(errors="replace")
-    except OSError:
-        return None
-    reads = [
-        line.split("Read payload: ", 1)[1]
-        for line in window.splitlines()
-        if "Read payload: " in line
-    ]
-    return len(reads[0]) if reads else None
-
-
-def control_mcp(action: str, **fields) -> dict:
-    """Drive the plugin through `tm-control-mcp`, which reassembles its socket.
-
-    RemoteBuild cannot be driven at all (see `preflight_request_size`), and
-    `tm-control-mcp` has RemoteBuild parity plus one property that matters more
-    here than convenience: it returns the compile log INLINE, attributed to the
-    build this call triggered. Collecting diagnostics by severity out of the
-    shared `Openplanet.log` picks up whatever another session happened to load
-    in the same second.
-    """
-    payload = json.dumps({"action": action, **fields}, separators=(",", ":"))
-    proc = subprocess.run(
-        [sys.executable, "tools/call.py", "ControlPlugin", payload],
-        cwd=CONTROL_MCP,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                envelope = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            result = envelope.get("data", {}).get("result", {})
-            if result.get("success") is False:
-                return {"error": result.get("error") or result.get("code") or "failed",
-                        "result": result}
-            return {"error": "", "result": result}
-    return {"error": f"no JSON reply from tm-control-mcp: {proc.stdout[-300:]}{proc.stderr[-300:]}"}
 
 
 def load_plugin(fid: str) -> dict:

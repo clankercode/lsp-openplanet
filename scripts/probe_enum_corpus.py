@@ -199,8 +199,15 @@ def type_accepts(msg: str | None) -> bool | None:
 
 def run_batch(names: list[str], template: str) -> dict[str, str | None]:
     """Submit one batch; return name -> the game's message ('' when accepted)."""
-    if not fleet.rb_alive():
-        raise SystemExit("RemoteBuild is not alive — is the game running?")
+    # B097: `rb_alive` is a liveness check that does not exercise the failing
+    # path -- `get_status` is 32 bytes, fits inside READ_CAP, and answers
+    # Alive on an install where every route this probe needs is unreachable.
+    if not fleet.game_alive():
+        raise SystemExit(
+            "no transport can drive the game — is it running, and is "
+            "tm-control-mcp loaded? (RemoteBuild alone cannot carry a "
+            "load_plugin request; see B097)"
+        )
     dest = fleet.OPN_PLUGINS / PROBE_ID
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
@@ -210,14 +217,25 @@ def run_batch(names: list[str], template: str) -> dict[str, str | None]:
     (dest / "Main.as").write_text(src)
     mark = fleet.log_size()
     try:
-        fleet.rb_route(
+        # The return value used to be DISCARDED, on the theory that
+        # Openplanet's file watcher compiles a staged folder and the call was
+        # decoration. That theory is REFUTED (B097, measured with a positive
+        # control): a fresh folder staged into Plugins/ and left 8 seconds
+        # produced nothing in the log, while the same folder loaded through
+        # tm-control-mcp produced its compile error immediately. So the load is
+        # load-bearing and a failed one must stop the batch -- otherwise every
+        # name comes back UNDETERMINED and the run looks merely inconclusive
+        # rather than broken.
+        loaded = fleet.game_route(
             "load_plugin", {"id": PROBE_ID, "source": "user", "type": "folder"}, timeout=25
         )
+        if loaded.get("error"):
+            raise SystemExit(f"the probe plugin was not loaded: {loaded['error']}")
         time.sleep(3.0)
         diags = fleet.parse_game_diagnostics(fleet.read_log_window(mark, PROBE_ID))
         return attribute(names, first_line, diags, sentinel_line)
     finally:
-        fleet.rb_route("unload_plugin", {"id": PROBE_ID}, timeout=15)
+        fleet.game_route("unload_plugin", {"id": PROBE_ID}, timeout=15)
         time.sleep(0.5)
         shutil.rmtree(dest, ignore_errors=True)
 
@@ -735,9 +753,14 @@ def run_selftest() -> int:
         seen_batches.append(batch)
         return real_probe(names, template, batch=batch, runner=clean)
 
-    real_route = fleet.rb_route
+    # Both doors. `run_batch` now goes through `game_route`, so stubbing only
+    # `rb_route` would have let this offline selftest reach a live game --
+    # the same one-of-N-call-sites gap B097's own fix had to close in
+    # issue_repro_game._forbid_game_access.
+    real_route, real_game = fleet.rb_route, fleet.game_route
     globals()["probe"] = _recording_probe
     fleet.rb_route = lambda *a, **k: {"data": "selftest"}
+    fleet.game_route = lambda *a, **k: {"error": "", "data": "selftest"}
     try:
         with tempfile.TemporaryDirectory(prefix="b068-batch-") as tmp:
             enums = [{"anonymous": False, "key": "Meta::Foo", "values": [("A", 0)]}]
@@ -748,7 +771,49 @@ def run_selftest() -> int:
             check("write_b053 forwards --batch", seen_batches[0], 9)
     finally:
         globals()["probe"] = real_probe
-        fleet.rb_route = real_route
+        fleet.rb_route, fleet.game_route = real_route, real_game
+
+    # B097. `run_batch` used to DISCARD the load result, on the file-watcher
+    # theory that the call was decoration. That theory is refuted, so a failed
+    # load must stop the batch -- and this is the check that proves it does.
+    # Driven entirely against stubs, with OPN_PLUGINS redirected at a temp dir,
+    # because the real one is the game's live Plugins folder (B077).
+    saved = (fleet.OPN_PLUGINS, fleet.game_route, fleet.log_size,
+             fleet.read_log_window)
+    with tempfile.TemporaryDirectory(prefix="b097-load-") as tmp:
+        fleet.OPN_PLUGINS = Path(tmp)
+        fleet.log_size = lambda: 0
+        fleet.read_log_window = lambda *_a, **_k: ""
+        try:
+            fleet.game_route = lambda route, data, **_k: (
+                {"error": "no transport could carry load_plugin", "data": ""}
+                if route == "load_plugin" else {"error": "", "data": ""}
+            )
+            failed_loudly = False
+            try:
+                run_batch(["Meta::Zzz"], "TYPE")
+            except SystemExit as exc:
+                failed_loudly = "not loaded" in str(exc)
+            check("a failed load stops the batch instead of reporting "
+                  "UNDETERMINED for every name", failed_loudly, True)
+            # Positive control: the SAME call with the load succeeding must NOT
+            # raise. Without it the check above passes for a run_batch that
+            # simply always raises, which would be no better.
+            fleet.game_route = lambda *_a, **_k: {"error": "", "data": ""}
+            survived = True
+            try:
+                run_batch(["Meta::Zzz"], "TYPE")
+            except SystemExit:
+                survived = False
+            check("a successful load does not stop the batch", survived, True)
+            # And the staged folder is gone either way -- the `finally` in
+            # run_batch is what keeps a probe fixture from becoming an
+            # installed plugin declaring the names later runs ask about (B077).
+            check("the staged probe folder is removed",
+                  list(Path(tmp).iterdir()), [])
+        finally:
+            (fleet.OPN_PLUGINS, fleet.game_route, fleet.log_size,
+             fleet.read_log_window) = saved
 
     # The one integration the synthetic fixtures cannot reach: the real log
     # format must actually produce the `file` value the filter demands. This

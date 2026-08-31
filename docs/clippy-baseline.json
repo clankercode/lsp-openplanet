@@ -14,24 +14,24 @@
       "--locked",
       "--all-targets",
       "--message-format=json",
-      "-j24"
+      "-j8"
     ],
-    "recorded_on": "x-alpha",
+    "recorded_on": "x-tuf",
     "never": "-D warnings. It stops compilation at the first warning and truncates the diagnostic set: 129 raw / 39 fingerprints without it, 115 / 33 with it, measured on this tree 2026-08-31.",
     "features": "default \u2014 no --features, --all-features or --no-default-features",
     "profile": "dev (cargo clippy's default)",
     "toolchain": {
-      "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
-      "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
-      "clippy": "clippy 0.1.97 (8bab26f4f6 2026-07-14)"
+      "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+      "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+      "clippy": "clippy 0.1.97 (2d8144b788 2026-07-07)"
     },
-    "recorded_at": "2026-08-31T09:42:50+00:00",
-    "git_commit": "5d2ecd1c6f574ebc4506433e84d1a3c235373c67",
-    "workspace_units_checked": 30
+    "recorded_at": "2026-08-31T12:32:49+00:00",
+    "git_commit": "42938c77a9c3d1ab956d3de9879355c618ef0175",
+    "workspace_units_checked": 34
   },
   "totals": {
-    "raw": 131,
-    "fingerprints": 40
+    "raw": 134,
+    "fingerprints": 41
   },
   "findings": [
     {
@@ -44,6 +44,12 @@
       "file": "src/cli/mod.rs",
       "code": "clippy::too_many_arguments",
       "message": "this function has too many arguments (8/7)",
+      "count": 2
+    },
+    {
+      "file": "src/cli/mod.rs",
+      "code": "clippy::unnecessary_sort_by",
+      "message": "consider using `sort_by_key`",
       "count": 2
     },
     {
@@ -167,12 +173,6 @@
       "count": 2
     },
     {
-      "file": "src/typecheck/call_site.rs",
-      "code": "unused_imports",
-      "message": "unused import: `super::repr::ParamMode`",
-      "count": 1
-    },
-    {
       "file": "src/typecheck/checker.rs",
       "code": "clippy::collapsible_match",
       "message": "this `if` can be collapsed into the outer `match`",
@@ -200,6 +200,12 @@
       "file": "src/typecheck/checker.rs",
       "code": "clippy::type_complexity",
       "message": "very complex type used. Consider factoring parts into `type` definitions",
+      "count": 2
+    },
+    {
+      "file": "src/typecheck/checker.rs",
+      "code": "unused_variables",
+      "message": "unused variable: `arg_literals`",
       "count": 2
     },
     {

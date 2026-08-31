@@ -392,7 +392,7 @@ def rb_alive_with_retry(
     """RemoteBuild can wedge briefly (accepts then drops). Retry before
     declaring it dead so a single flaky probe doesn't skip a fixture."""
     for i in range(attempts):
-        if (alive or fleet.rb_alive)():
+        if (alive or fleet.game_alive)():
             return True
         if i + 1 < attempts:
             (sleep_fn or time.sleep)(delay)
@@ -415,8 +415,13 @@ def probe(
     fid = PROBE_PREFIX + fleet.folder_id(name)
     rec: dict = {"fixture": fixture.name, "folder_id": fid}
     root = Path(plugins_dir) if plugins_dir is not None else fleet.OPN_PLUGINS
-    alive = rb_alive_fn or fleet.rb_alive
-    route = rb_route_fn or fleet.rb_route
+    # B097: default to the transport ROUTER, not to RemoteBuild directly.
+    # `load_plugin`/`unload_plugin` for a probe id exceed READ_CAP and can
+    # never reach RemoteBuild's router; game_route carries them over
+    # tm-control-mcp instead. Same signature, so both injection seams and
+    # every existing caller are unchanged.
+    alive = rb_alive_fn or fleet.game_alive
+    route = rb_route_fn or fleet.game_route
     log_size = log_size_fn or fleet.log_size
     read_log_window = read_log_window_fn or fleet.read_log_window
     sleep = sleep_fn or time.sleep
@@ -563,6 +568,12 @@ def _selftest_child() -> int:
     sys.exit(3)
 
 
+# Game-access doors on `fleet` that do not follow the `rb_`/`game_` prefix.
+# Keep this next to nothing else: the prefix rule carries the general case and
+# this is only for the names that predate it.
+GAME_DOORS = {"control_mcp", "measure_read_cap"}
+
+
 def _forbid_game_access() -> None:
     """Revoke the selftest's ability to reach the game AT ALL.
 
@@ -586,8 +597,31 @@ def _forbid_game_access() -> None:
             "rb_alive_fn/rb_route_fn/read_log_window_fn; if a case genuinely "
             "needs a game verdict it does not belong in --selftest."
         )
-    fleet.rb_alive = refuse
-    fleet.rb_route = refuse
+    # DERIVED, not listed. B097 added `game_route`/`game_alive`/`control_mcp`
+    # as the default path, and a hand-written list would have revoked only the
+    # two doors that existed when this was written -- the same "a guard at one
+    # of N call sites" failure this function exists because of, recurring
+    # inside its own fix. A list is only ever correct on the day it is typed.
+    #
+    # So: anything on `fleet` named `rb_*`, `game_*`, `control_mcp` or
+    # `measure_read_cap` is a way to reach the game, and all of them are
+    # revoked by name pattern. A door added later inherits the convention and
+    # is closed the day it appears, with no edit here.
+    doors = [
+        name
+        for name in dir(fleet)
+        if (name.startswith(("rb_", "game_")) or name in GAME_DOORS)
+        and callable(getattr(fleet, name, None))
+    ]
+    if len(doors) < 4:
+        # Vacuity: a pattern that matches nothing revokes nothing and this
+        # whole function becomes a no-op that reads as protection.
+        raise AssertionError(
+            f"the game-door pattern matched only {doors} — it no longer names "
+            f"the transport functions, so --selftest is not actually offline"
+        )
+    for name in doors:
+        setattr(fleet, name, refuse)
     fleet.read_log_window = refuse
     fleet.log_size = lambda: 0
 
@@ -602,6 +636,42 @@ def run_selftest() -> int:
     def check(what, got, want):
         if got != want:
             failures.append(f"{what}\n    got  {got!r}\n    want {want!r}")
+
+    def raises(fn) -> bool:
+        try:
+            fn("get_status", {})
+        except AssertionError:
+            return True
+        except Exception:
+            return True
+        return False
+
+    # B097. The revocation above is the thing that makes this suite offline, so
+    # it is itself under test. Named doors first -- if any one of these still
+    # reaches the network, "offline by construction" is a claim and not a fact.
+    for door in ("rb_route", "rb_alive", "game_route", "game_alive",
+                 "control_mcp", "measure_read_cap"):
+        check(f"the `{door}` door is revoked", raises(getattr(fleet, door)), True)
+    # And the door NOBODY has written yet. A hand-listed revocation passes this
+    # loop and fails this line, which is the whole difference between the two
+    # designs: a new transport function must be closed WITHOUT an edit here.
+    fleet.game_zzz_future_transport = lambda *_a, **_k: "REACHED THE GAME"
+    try:
+        _forbid_game_access()
+        check(
+            "a transport added later is revoked without editing the guard",
+            raises(fleet.game_zzz_future_transport),
+            True,
+        )
+    finally:
+        del fleet.game_zzz_future_transport
+    # Vacuity control: the pattern must actually be matching things. A rule
+    # that matches nothing revokes nothing and reads exactly like protection.
+    matched = [n for n in dir(fleet)
+               if (n.startswith(("rb_", "game_")) or n in GAME_DOORS)
+               and callable(getattr(fleet, n, None))]
+    check("the door pattern matches the transport surface",
+          len(matched) >= 6, True)
 
     with tempfile.TemporaryDirectory(prefix="b077-") as tmp:
         root = Path(tmp) / "Plugins"
