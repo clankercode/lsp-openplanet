@@ -375,6 +375,22 @@ the outside.
 **Both corpora are now re-measured and sound.** Across 1334 ACCEPTED rows, zero
 were fabricated by the batching defect.
 
+### Re-measuring a corpus yourself
+
+    scripts/probe_enum_corpus.py --reprobe b052   # or b053
+    scripts/probe_enum_corpus.py --reprobe b052 --checkpoint path.jsonl
+
+Resumable — every verdict is fsynced before the next probe, so an interrupted
+run costs the remainder, not the whole. Needs the live game. It runs the
+corpus's own controls at the start, every 100 names and at the end, aborting
+rather than writing verdicts if any drifts; re-probes the context pins; scores
+with the same `type_verdict` / `value_verdict` the writers use; and records the
+unit size it actually achieved.
+
+Sort any change into **two buckets and never merge them**: rows the batching
+defect fabricated, and rows that changed because the probing environment did.
+The context pins tell you which — see the `Foo` case above.
+
 **A verdict this document does not yet contain: `UNDETERMINED`.** If a
 regenerated corpus carries one, `global_scope.rs` panics on it by design, but
 `resolver.rs` computes `verdict == "ACCEPTED"` and would silently read it as

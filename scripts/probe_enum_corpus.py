@@ -737,6 +737,48 @@ def run_selftest() -> int:
             "Identifier 'ZZZNoSuchEnumName' is not a data type",
         )
 
+    # ---- the --reprobe mode -----------------------------------------------
+
+    # It must score with the SAME functions that wrote the corpus. A re-probe
+    # carrying its own copy of the verdict vocabulary is two readings of one
+    # file, and they diverge silently.
+    check("reprobe scores TYPE with type_verdict", _score(REPROBE_CORPORA["b052"], ""), "ACCEPTED")
+    check(
+        "reprobe scores VALUE with value_verdict",
+        _score(REPROBE_CORPORA["b053"], "No matching symbol 'X'"),
+        "NO_SYMBOL",
+    )
+    check(
+        "reprobe carries the unknown state through",
+        _score(REPROBE_CORPORA["b052"], None),
+        "UNDETERMINED",
+    )
+
+    # Every corpus must carry context pins. Their whole purpose is to catch the
+    # probing environment changing, and a target-only run is blind without them
+    # -- that is how three environmental changes nearly got reported as
+    # fabricated rows on b052.
+    for name, cfg in REPROBE_CORPORA.items():
+        check(f"{name} declares context pins", bool(cfg["context_pins"]), True)
+        check(f"{name} declares controls", bool(cfg["controls"]), True)
+        check(
+            f"{name} pins are NOT the target verdict (or they prove nothing)",
+            all(p not in cfg["controls"] for p in cfg["context_pins"]),
+            True,
+        )
+
+    # The corpus reader must skip comments and the header, or every count is
+    # off by the number of banner lines.
+    with tempfile.TemporaryDirectory(prefix="b068-rows-") as tmp:
+        f = Path(tmp) / "c.tsv"
+        f.write_text(
+            "# banner\n# more banner\nspelling\tverdict\tgame_message\n"
+            "A::B\tACCEPTED\t\nC::D\tREJECTED\tnope\n"
+        )
+        rows = _corpus_rows(f)
+        check("reader takes only data rows", sorted(rows), ["A::B", "C::D"])
+        check("reader keeps the verdict column", rows["C::D"][1], "REJECTED")
+
     if failures:
         print(f"FAIL: {len(failures)} selftest check(s) failed", file=sys.stderr)
         for f in failures:
@@ -744,6 +786,199 @@ def run_selftest() -> int:
         return 1
     print("PASS: attribution never reports ACCEPTED on unproven silence.")
     return 0
+
+
+# ---- re-probe (B068 work item 2) --------------------------------------------
+# Re-measure a committed corpus one name per compilation unit and diff against
+# the file. This lives here, beside the code that WROTE the corpora, because a
+# method that produced ground truth and then vanished is not reproducible: the
+# next person to doubt a row needs the same instrument, not a description of it.
+
+REPROBE_CORPORA = {
+    "b052": {
+        "path": "docs/probes/b052-qualified-enum-spellings.tsv",
+        "template": "TYPE",
+        "target": "ACCEPTED",
+        "controls": {
+            "ZZZNoSuchNamespace::ZZZNoSuchName": "REJECTED",
+            "CMwNod::ZZZNoSuchName": "REJECTED",
+            "UI::VirtualKey": "ACCEPTED",
+        },
+        # Rows whose verdict is NOT the one under re-probe. They exist to catch
+        # the probing ENVIRONMENT changing under the corpus, and they are
+        # exactly what a target-only narrowing filters out: on the 2026-08-31
+        # b052 run these were the only witnesses that the plugin-supplied
+        # namespace `Foo` had disappeared, which is what stopped three
+        # environmental changes being reported as fabricated rows.
+        "context_pins": ["Foo::ZZZNoSuch", "Foo::Bar::ZZZNoSuch", "MathX::ZZZNoSuch"],
+    },
+    "b053": {
+        "path": "docs/probes/b053-bare-enum-values.tsv",
+        "template": "VALUE",
+        "target": "ACCEPTED",
+        # Value-position controls; the b052 set is type-position and would not
+        # exercise the VALUE template at all.
+        "controls": {"ZZZB068NoSuchValueName": "NO_SYMBOL", "Accept": "ACCEPTED"},
+        # The value-level twin of the `Foo` drift: a plugin declaring a GLOBAL
+        # enum with value `X` makes bare `X` compile.
+        "context_pins": ["AAAA", "Nadeo"],
+    },
+}
+
+CONTROL_EVERY = 100
+_OBSERVED_UNIT_SIZES: set[int] = set()
+
+
+def _instrument_unit_size() -> None:
+    """Record how many names actually reach each compilation unit.
+
+    `batch=1` is an INTENTION. `--batch` was once accepted, documented as a
+    speed knob, and ignored by both corpus writers, so a re-probe could run at
+    200 while reporting 1 -- reproducing the defect it exists to detect and
+    returning a clean bill of health. This wraps the real `run_batch` so the
+    artifact carries an observation instead of a claim.
+    """
+    global run_batch
+    real = run_batch
+
+    def wrapper(names: list[str], template: str) -> dict[str, str | None]:
+        _OBSERVED_UNIT_SIZES.add(len(names))
+        return real(names, template)
+
+    run_batch = wrapper
+
+
+def _corpus_rows(path: Path) -> dict[str, list[str]]:
+    rows = {}
+    for line in path.read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2 or parts[1] == "verdict":
+            continue
+        rows[parts[0]] = parts
+    return rows
+
+
+def _score(cfg: dict, msg: str | None) -> str:
+    """Score with the SAME function that wrote the corpus, never a copy."""
+    return type_verdict(msg) if cfg["template"] == "TYPE" else value_verdict(msg)
+
+
+def _probe_one(cfg: dict, name: str, attempts: int = 12) -> str | None:
+    """One name, retrying transient RemoteBuild unavailability.
+
+    The game's periodic `PluginManager` update check makes RemoteBuild briefly
+    unresponsive; `rb_alive()` then returns False and `run_batch` exits. Over a
+    45-minute run that fires repeatedly -- 30 times on the b052 run. Retrying
+    cannot manufacture data: `run_batch` raises BEFORE it attributes anything,
+    so a failed attempt records nothing. The controls remain the check on
+    whether answers are SOUND; this only handles whether the call got through.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return probe([name], cfg["template"], batch=1)[name]
+        except SystemExit as exc:
+            if attempt == attempts:
+                raise SystemExit(f"RemoteBuild unavailable on {name!r}: {exc}") from exc
+            wait = min(5 * attempt, 30)
+            print(f"  transient on {name}, retry {attempt} in {wait}s", file=sys.stderr)
+            time.sleep(wait)
+    raise AssertionError("unreachable")
+
+
+def _controls(cfg: dict, tag: str) -> None:
+    for name, want in cfg["controls"].items():
+        got = _score(cfg, _probe_one(cfg, name))
+        if got != want:
+            sys.exit(
+                f"CONTROL FAILED at {tag}: {name} -> {got}, expected {want}. "
+                "A drifting oracle is a broken instrument, not a result; "
+                "nothing further written."
+            )
+    print(f"  controls OK at {tag}", file=sys.stderr)
+
+
+def reprobe(which: str, checkpoint: Path) -> int:
+    """Re-measure `which` at batch=1 and report the delta in two buckets."""
+    cfg = REPROBE_CORPORA[which]
+    rows = _corpus_rows(REPO / cfg["path"])
+    targets = [n for n, r in rows.items() if r[1] == cfg["target"]]
+
+    done: dict[str, dict] = {}
+    if checkpoint.exists():
+        for line in checkpoint.read_text().splitlines():
+            if line.strip():
+                rec = json.loads(line)
+                done[rec.get("name", "__summary__")] = rec
+
+    _instrument_unit_size()
+    todo = [n for n in targets if n not in done]
+    print(
+        f"{which}: {len(targets)} {cfg['target']} rows, {len(todo)} left to probe",
+        file=sys.stderr,
+    )
+
+    def record(rec: dict) -> None:
+        with checkpoint.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+    if todo:
+        _controls(cfg, "start")
+        for name in cfg["context_pins"]:
+            was = rows.get(name, ["", "(absent)", ""])
+            msg = _probe_one(cfg, name)
+            print(
+                f"  PIN {name}: {was[1]} -> {_score(cfg, msg)}\n"
+                f"      then: {was[2] if len(was) > 2 else ''}\n      now : {msg}",
+                file=sys.stderr,
+            )
+        for i, name in enumerate(todo, start=1):
+            msg = _probe_one(cfg, name)
+            record({"name": name, "msg": msg, "verdict": _score(cfg, msg)})
+            if i % CONTROL_EVERY == 0:
+                _controls(cfg, f"after {i}")
+            if i % 25 == 0 or i == len(todo):
+                print(f"  {i}/{len(todo)}", file=sys.stderr)
+        _controls(cfg, "end")
+        record({"observed_unit_sizes": sorted(_OBSERVED_UNIT_SIZES)})
+        if _OBSERVED_UNIT_SIZES != {1}:
+            sys.exit(
+                f"EFFECTIVE BATCH WAS NOT 1: {sorted(_OBSERVED_UNIT_SIZES)}. A "
+                "silently batching re-probe reproduces the defect it exists to "
+                "detect; results are void."
+            )
+        done = {}
+        for line in checkpoint.read_text().splitlines():
+            if line.strip():
+                rec = json.loads(line)
+                done[rec.get("name", "__summary__")] = rec
+
+    changed = [
+        (n, rows[n], done[n]) for n in targets if n in done and done[n]["verdict"] != cfg["target"]
+    ]
+    print(f"\n=== {which} {cfg['target']} re-probe (batch=1) ===")
+    print(f"re-probed  : {sum(1 for n in targets if n in done)}/{len(targets)}")
+    print(f"unchanged  : {sum(1 for n in targets if n in done) - len(changed)}")
+    print(f"CHANGED    : {len(changed)}")
+    summary = done.get("__summary__")
+    if summary:
+        print(f"unit sizes : {summary['observed_unit_sizes']}")
+    for name, was, now in changed:
+        print(f"  CHANGED {name}: {cfg['target']} -> {now['verdict']}")
+        print(f"      then: {was[2] if len(was) > 2 else ''}")
+        print(f"      now : {now['msg']}")
+        if len(was) > 3 and was[3]:
+            print(f"      owners: {was[3]}")
+    if changed:
+        print(
+            "\nSort these into TWO buckets and never merge them: rows the "
+            "batching defect fabricated, and rows that changed because the "
+            "probing environment did. Check the context pins above first."
+        )
+    return len(changed)
 
 
 def main() -> None:
@@ -761,6 +996,8 @@ def main() -> None:
         "sentinel makes any size safe, so this is a speed knob, not a "
         "correctness one)",
     )
+    ap.add_argument("--reprobe", choices=sorted(REPROBE_CORPORA), help="re-measure a committed corpus at batch=1 and diff")
+    ap.add_argument("--checkpoint", type=Path, help="resumable checkpoint for --reprobe")
     ap.add_argument(
         "--selftest",
         action="store_true",
@@ -773,6 +1010,12 @@ def main() -> None:
 
     if a.selftest:
         sys.exit(run_selftest())
+
+    if a.reprobe:
+        ckpt = a.checkpoint or (REPO / "target" / f"reprobe-{a.reprobe}.jsonl")
+        ckpt.parent.mkdir(parents=True, exist_ok=True)
+        reprobe(a.reprobe, ckpt)
+        return
 
     if a.names:
         text = sys.stdin.read() if a.names == "-" else Path(a.names).read_text()
