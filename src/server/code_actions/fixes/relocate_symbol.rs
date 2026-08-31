@@ -34,8 +34,10 @@
 //! [`SymbolHint::Relocation`]; the short form: the `Draw::*` rows name a
 //! namespace missing from every snapshot in the repo, so no dump diff can
 //! reach them; the rows a diff *could* reach are still ambiguous by simple
-//! name (`Join` lives in `Path` and `string` on 1.29.5); and the dumps carry
-//! no deprecation metadata at all — a removed symbol just vanishes.
+//! name (`Join` lives in `Path` and `string` on 1.29.5); and the CORE dump
+//! carries no usable deprecation metadata — a removed symbol just vanishes,
+//! and its enum-value migration prose is unusable for a measured, structural
+//! reason (B134, tabulated on [`SymbolHint::Relocation`]).
 //!
 //! # Why the span text is checked before it is replaced
 //!

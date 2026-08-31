@@ -291,6 +291,20 @@ typedb-refresh-apply:
 typedb-guard:
     cargo test --locked --lib typedb_shape_guard
 
+# B134: how much deprecation information is really in Core enum-value doc
+# strings? Measured and REJECTED — the prose is attached to a VALUE, and a
+# deprecated flag and its replacement are aliases sharing one value, so both
+# names carry the identical string and a matcher would warn on the symbol you
+# are supposed to adopt. Kept so a future dump can re-run it, not re-derive it.
+enum-doc-migrations:
+    python3 scripts/measure_enum_doc_migrations.py
+
+# Proves the categoriser can tell correct / wrong-polarity / not-a-migration
+# apart, and can say each. Includes the substring trap: `use Borders` contains
+# `use Border`, which scored the deprecated member as its own replacement.
+enum-doc-migrations-selftest:
+    python3 scripts/measure_enum_doc_migrations.py --selftest
+
 # B129: every engine-derived gold artifact in one report. AUDIT ONLY — needs no
 # game, changes nothing, and reports each artifact's status against
 # docs/probes/MANIFEST.tsv. Nothing here ever auto-commits.

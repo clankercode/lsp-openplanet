@@ -3745,3 +3745,182 @@ a file silently withdraws the engine's opinion on everything after it. That is
 the same shape as B068 (a parse error in a batched probe marking every other
 line ACCEPTED), reached from the opposite direction — there the missing verdicts
 read as approval, here they read as a clean bill of health.
+
+## The nothing-ran zero: this codebase's most common defect class
+
+Four independent instances in `lane/unused` alone, in one night, from four
+unrelated pieces of work. That is not four coincidences; it is one defect class
+that this codebase's tooling is structurally prone to, and it is worth naming
+above the individual war stories (each of which is recorded separately above).
+
+**THE SHARED SHAPE.** Every instrument here is a filter over a population —
+probes over a variant table, gates over changed files, audits over manifest
+rows, sweeps over a plugins directory, a replay over a commit's file list. The
+verdict is then computed the obvious way:
+
+```
+bad = [x for x in population if x is wrong]
+return 1 if bad else 0
+```
+
+When the population comes back **empty or truncated**, `bad` is empty, and the
+run reports success. The four instances differ only in how the population got
+lost:
+
+| how the set emptied | what it looked like |
+|---|---|
+| a shell construct that does not do what it looks like | `for f in $files` ran once over both names joined; `\|\| continue` ate the failure |
+| a selector matching nothing | `--only <substring>` selecting 0 of N artifacts |
+| a control set that was never populated | a run gate computing "controls that mismatched" over zero controls |
+| evidence truncated before the answer | `ps aux \| grep … \| head -5` cutting off the real process |
+
+**WHY IT IS HARDER TO SEE THAN A WRONG ANSWER.** A nothing-ran zero does not
+produce wrong output — it produces *less* output, with no error text in it. A
+shorter, quieter report reads as a cleaner one. Nothing in the run is
+false; the run simply never made a claim, and the absence of a claim is
+displayed in the same place a passing claim would be.
+
+**WHAT DISTINGUISHES A REAL ZERO FROM A NOTHING-RAN ZERO.** Only the
+denominator. `0 failures` is uninterpretable; `0 failures out of 63 examined`
+is a result. A zero is evidence **only when it is reported next to a non-zero
+population count that something else asserted.** This is the same rule as
+"design the instrument to report EXPOSURE, or a zero is uninterpretable",
+arrived at from the opposite direction: that entry is about a probe's reach,
+this one is about a gate's denominator, and both fail by reporting an
+unqualified zero.
+
+**THE DEFENCES, cheapest first.**
+
+1. **Always print the count of things examined.** A count check has caught this
+   repeatedly across this batch — including the zsh replay, where the tell was
+   simply that the output had fewer lines than there were files. It costs one
+   `print` and needs no design.
+2. **Assert the count, do not merely display it.** A presence assertion — "this
+   examined at least N" — turns a silent empty set into a failure. Prefer a
+   floor derived from something independent of the thing being counted.
+3. **A selector that matches nothing must REFUSE, not pass.** "Matched nothing"
+   and "matched things, all fine" are different answers and must exit
+   differently. Same for a glob, a filter, and a name-based test selector.
+4. **Never let an error-swallowing construct sit on the step that BUILDS the
+   population.** `|| continue`, `|| true`, `2>/dev/null`, a bare `except`, and a
+   pipe that discards an exit status are all fine on the step that *inspects* an
+   item and fatal on the step that *finds* the items.
+
+**THE POLARITY WORTH REMEMBERING.** Every one of these four failed toward
+green. That is not chance: the construct that loses a population is nearly
+always one that also suppresses the error explaining why, so the same defect
+that empties the set hides the reason it emptied. Assume any green produced by
+a filter is a nothing-ran zero until its denominator is on screen.
+
+## A reconciling suite total cannot distinguish a set from its cardinality
+
+lane-enum inserted a test and the insertion landed **between `#[test]` and an
+existing test**. That silently disabled `hover_rejects_nadeo_class_storage_key`
+and double-registered one of its own. **The suite total reconciled exactly** —
+`+1` duplicate and `−1` disabled cancelled — so the delta arithmetic this batch
+runs on produced a clean, correct-looking green over a disabled test. Nothing in
+the suite could see it. `cargo clippy` found it, via `dead_code` and
+`duplicate_macro_attributes`.
+
+**The rule: a reconciling total is a NECESSARY check and never a SUFFICIENT
+one.** A count is the cardinality of a set, and cardinality is preserved by any
+even-numbered swap. The cheapest such swap — one test disabled while one is
+added — is also **the likeliest**, because it is exactly what a misplaced
+insertion produces by default.
+
+**THE EXACTNESS IS WHAT MADE IT DANGEROUS.** A total that came out *near* the
+expected number would have been investigated. Coming out precisely right retired
+the question. So this hazard gets **worse as a team's arithmetic discipline
+improves**: it specifically defeats lanes that reconcile carefully and leaves
+sloppy ones untouched. Every "+11, +1 binary, reconciles exactly" in this batch
+is the state in which this defect is invisible.
+
+### Name the mechanism, because it has no type-system consequence
+
+The defect is **an insertion between an attribute and the item it decorates**.
+That is a text-editing failure mode, not a semantic one: the result compiles,
+because a second `#[test]` on one function and a now-attributeless function are
+both legal Rust. Nothing in a normal build objects. Only a lint sees it.
+
+**This is the concrete argument for the clippy delta being a GATE rather than a
+courtesy.** It is the first time in this batch the delta caught something the
+suite **structurally could not** — not something the suite happened to miss, but
+a class of defect no count over test results can ever detect. A gate that only
+ever agrees with the suite is redundant; this one earned its place by
+disagreeing.
+
+### The fix is set comparison — and the set comparison needs its own proof
+
+Compare the SET of test names across the rebase, not the count. But a set check
+built by scraping test output is not automatically trustworthy, and lane-enum's
+first pass proved it: it reported a phantom tenth added test **in a file it never
+touched**, because a stderr warning from a parallel test had interleaved into an
+`... ok` line and defeated its `^test` anchor.
+
+**A log-scraping check over PARALLEL test output is vulnerable to interleaving —
+which is the same shape as the failure it was written to detect.** The pairing is
+the lesson, not the anecdote: an instrument built to catch a silent set change
+was itself silently reporting a wrong set. And note the polarity that did not
+happen: the interleave landed on an unrelated line and produced a phantom
+ADDITION, which is merely confusing. Had it landed on one of the lane's own
+lines it would have reported a test **removed** — and that is the alarm a lane
+would have believed and acted on.
+
+So: prove the set check the same way anything else here is proven — feed it a
+known-disabled test and require it to say so — before its zero counts.
+
+### Where this sits among the others
+
+A disabled test and a nothing-ran filter are **the same loss reached from
+opposite ends**: an assertion that did not execute. One removes the assertion
+and keeps the population; the other keeps the assertion and removes the
+population. Both then report a zero that is indistinguishable from a real one,
+which is the rule recorded under the nothing-ran entry and, for a probe's reach
+rather than a gate's denominator, under the EXPOSURE entry.
+
+The illustration from the same night, kept short because it is an illustration:
+lane-unused read ten commits on master as ten merges landed, having never asked
+what the commits touched — the denominator was on screen, the units were not,
+and one `git log --name-only` distinguished them.
+
+## Write the expected count down BEFORE the run
+
+Three instrument defects were caught in this batch by their author, and every one
+was found **while building or measuring an instrument — never while reviewing
+output.** That is not luck. It follows from the polarity recorded under the
+nothing-ran entry: a defect that empties a population also suppresses the error
+explaining why, so it leaves a reviewer nothing to notice. It surfaces only when
+somebody is holding an expected number and the arriving number contradicts it.
+
+**The rule: predict the count before the run, not after.** A number written down
+in advance can be contradicted. A number explained afterwards almost never is,
+because any number that arrives has a story available — and the story is
+constructed by the same person who wants the run to have worked.
+
+**Prediction beats reconciliation even when reconciliation is exact.** The
+misplaced-`#[test]` incident recorded above is the proof: the suite total
+reconciled *perfectly* and was still wrong, because +1 duplicate and −1 disabled
+cancel. **Reconciliation checks arithmetic. Prediction checks understanding.**
+The two are not degrees of the same rigour; a reconciliation cannot fail for the
+reason a prediction fails.
+
+**A STRUCTURAL prediction is stronger than a numeric one.** In B134 the alias
+pairing made a 4/4 split *structurally necessary* — four deprecated names, four
+replacements, one shared doc string each — so a 3/5 was **impossible**, not
+merely surprising, and the substring bug behind it had nowhere to hide. A
+predicted *range* can absorb a bad result; a predicted *structure* cannot. This
+distinction is worth stating because "predict the number" invites a soft guess,
+and a soft guess is precisely what a wrong result hides inside. Prefer a
+prediction that some arithmetic or invariant forces over one you merely expect.
+
+**When you cannot predict it, say so.** This is the honest and common case: a new
+corpus, an unfamiliar dump, a first run. The failure is not the absence of a
+prediction — it is letting the number arrive and treating it as confirmation
+anyway. Report the run as **uncalibrated** and act accordingly. An unpredicted
+number is data; it is not a check, and it must not be cited later as though a
+check had passed.
+
+The corollary for reports: a count quoted without the expectation it was measured
+against carries no information about whether anything was verified. The habit
+that survives from this batch is one line written before the command runs —
+"this should report N, because …" — where the *because* is doing the work.

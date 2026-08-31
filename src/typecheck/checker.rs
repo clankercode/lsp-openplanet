@@ -48,12 +48,62 @@ pub enum SymbolHint {
     /// search across the new dump is a coin flip between `Path::Join` and
     /// `Text::Join`, and only the much stronger "added in exactly this
     /// adjacent delta" filter disambiguates — which needs both neighbouring
-    /// snapshots, precisely what the `Draw` rows do not have. And the dumps
-    /// carry no deprecation metadata at all: a removed symbol simply
-    /// vanishes. `Net::SecureSocket` settles it from the third side — its
+    /// snapshots, precisely what the `Draw` rows do not have. And the CORE
+    /// dump carries no usable deprecation metadata: a removed symbol simply
+    /// vanishes. (The NADEO dump is different — B158 found structured,
+    /// joinable member notes in `NadeoType.d`. The old claim covered "the
+    /// dumps" and was only ever measured on Core.)
+    /// `Net::SecureSocket` settles it from the third side — its
     /// real migration is `Net::Socket` plus a `Connect(secure: true)`
     /// argument, a shape change no name map can express, and it is knowable
     /// only from prose in the install's `Scripts/Compatibility.as`.
+    ///
+    /// # Core enum-value doc strings: MEASURED AND REJECTED (B134)
+    ///
+    /// A subset of Core enum-value `d` strings read as migration hints
+    /// ("Please use Borders instead"), and they are the only
+    /// deprecation-shaped text in that dump. B134 recorded them as a LEAD and
+    /// asked for the population to be measured before anyone matched on them.
+    /// Measured by `scripts/measure_enum_doc_migrations.py`, which is kept so
+    /// a future dump can re-run it rather than re-derive this:
+    ///
+    /// | | 1.29.5 | 1.29.14 |
+    /// |---|---|---|
+    /// | enum values with a doc string | 206 | 208 |
+    /// | ...containing a migration cue | 14 | 15 |
+    /// | genuinely deprecated | 4 | 4 |
+    /// | **the REPLACEMENT, flagged as deprecated** | **4** | **4** |
+    /// | ordinary prose, not a migration | 6 | 7 |
+    ///
+    /// **The information is not recoverable, and the reason is structural
+    /// rather than statistical.** A doc string is attached to a VALUE, and a
+    /// deprecated flag and its replacement are ALIASES SHARING ONE NUMERIC
+    /// VALUE, so both names carry the identical string:
+    ///
+    /// ```text
+    /// UI::ChildFlags::Border   v=1  "Please use Borders instead, as Border is deprecated"
+    /// UI::ChildFlags::Borders  v=1  "Please use Borders instead, as Border is deprecated"
+    /// ```
+    ///
+    /// `Borders` is the name you are being told to ADOPT, and its own
+    /// documentation says it is deprecated. All four migration pairs have this
+    /// shape, so a matcher would warn on exactly the symbol the user should
+    /// migrate TO — the polarity this crate treats as the expensive kind of
+    /// wrong. Parsing the English harder does not help: the prose names the
+    /// REPLACEMENT, never which of the two aliases was actually written.
+    ///
+    /// The stability question B134 asked has a different answer than it
+    /// expected. Deprecation wording is STABLE — 0 of the shared cue hits
+    /// changed between the two versions. What drifts is ordinary prose moving
+    /// INTO the cue set: `UI::InputTextFlags::EnterReturnsTrue` was never
+    /// deprecated, and gained a cue when upstream rewrote "Consider looking at
+    /// the X function" as "Consider using X instead!". One engine bump, one
+    /// new false positive, on a 206-string population. The failure mode is
+    /// precision decay, not recall decay.
+    ///
+    /// So: **do not build a matcher on Core enum prose.** For deprecation data
+    /// that can be trusted, use the Nadeo dump's structured member notes
+    /// (B158) — 259 migration hints with a join key and a named replacement.
     Relocation(String),
     /// The nearest name under the namespace by edit distance (<= 2). A
     /// GUESS, offered to catch typos; it may name the wrong symbol.
