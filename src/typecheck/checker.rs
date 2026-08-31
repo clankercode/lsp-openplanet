@@ -4695,6 +4695,36 @@ impl<'a> Checker<'a> {
                             object_type: type_name.clone(),
                         },
                     });
+                    // B120: propagate the receiver's constness into the
+                    // return type, exactly as the same-file arm does, so a
+                    // downstream write (`c.GetArr()[0] = 5`) fires
+                    // `ConstViolation` on both sides of the file boundary.
+                    // Without this the two halves of one rule disagreed
+                    // about how far const travels: the CALL was diagnosed
+                    // cross-file (B116) but nothing derived from it was.
+                    //
+                    // The read is `workspace_class_member`, the WORKSPACE
+                    // half of the merged view — the same structural
+                    // provenance as the constness decision above, rather
+                    // than a filter applied afterwards that a later edit
+                    // could quietly drop.
+                    //
+                    // Propagation is deliberately confined to the arm that
+                    // already emitted. That is the measured boundary, not a
+                    // shortcut. AC19 wraps the result of a call that is
+                    // ALREADY an error, so the cascade only ever lands on
+                    // code the game would reject anyway. Widening it breaks
+                    // parity in the other direction: on the 151-plugin fleet
+                    // an EXTERNAL-receiver variant produced 10 false
+                    // `ConstViolation`s across 7 plugins, every one an
+                    // engine method returning a FRESH value rather than a
+                    // view into the receiver (`const string &in s` then
+                    // `s.Replace(..)` / `s.ToLower()` / `s.Split(..)`). The
+                    // typedb cannot tell those apart, which is what "no
+                    // const-qualifier metadata yet" costs in practice.
+                    if let Some(t) = self.scope.workspace_class_member(&type_name, &member_name) {
+                        return Self::apply_receiver_const(t, true);
+                    }
                 }
                 if let Some(t) = self.scope.lookup_method_return(&type_name, &member_name) {
                     // External types: no const-qualifier metadata yet, so
@@ -13854,5 +13884,280 @@ mod b116_cross_file_const_receiver_tests {
             "namespaced cross-file class must diagnose, got {:?}",
             diags
         );
+    }
+}
+
+// ── B120: const propagation through a CROSS-FILE method return type ─────────
+//
+// B116 made the const-receiver CALL check cross the file boundary. It did not
+// make the const travel any further: the same-file arm calls
+// `apply_receiver_const` on the method's return type, the cross-file arm did
+// not, so `c.GetArr()[0] = 5` fired `ConstViolation` when `C` was in this file
+// and stayed silent when it was next door.
+//
+// Every case is stated as a same-file / cross-file PAIR and asserts the two
+// diagnostic sets are EQUAL. That is the assertion that matters: it pins the
+// halves together without hardcoding what either produces, so a later change
+// to the AC19 propagation model moves both or fails loudly. Hardcoded
+// expectations would let the halves drift apart again while both tests still
+// passed.
+#[cfg(test)]
+mod b120_cross_file_const_propagation_tests {
+    use super::*;
+    use crate::lexer::tokenize_filtered;
+    use crate::parser::Parser;
+    use crate::symbols::SymbolTable;
+
+    fn check_ws(main: &str, siblings: &[&str]) -> Vec<TypeDiagnostic> {
+        let mut ws = SymbolTable::new();
+        for sib in siblings {
+            let tokens = tokenize_filtered(sib);
+            let mut parser = Parser::new(&tokens, sib);
+            let file = parser.parse_file();
+            let fid = ws.allocate_file_id();
+            let syms = SymbolTable::extract_symbols(fid, sib, &file);
+            ws.set_file_symbols(fid, syms);
+        }
+        let tokens = tokenize_filtered(main);
+        let mut parser = Parser::new(&tokens, main);
+        let file = parser.parse_file();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, main, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, None);
+        let mut checker = Checker::new(main, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    /// The diagnostic KINDS produced, sorted — the comparable summary. The
+    /// pair assertion is on kinds rather than spans because the same-file
+    /// and cross-file sources differ in length, so spans cannot match even
+    /// when the behaviour does.
+    fn kinds(diags: &[TypeDiagnostic]) -> Vec<String> {
+        let mut v: Vec<String> = diags
+            .iter()
+            .map(|d| match &d.kind {
+                TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. } => {
+                    "NonConstMethodOnConstReceiver".to_string()
+                }
+                TypeDiagnosticKind::ConstViolation { .. } => "ConstViolation".to_string(),
+                other => format!("{:?}", std::mem::discriminant(other)),
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// `(label, class_body, use_body)`. The class is spelled once and placed
+    /// either in the main file or in a sibling; nothing else differs between
+    /// the two halves of a pair.
+    ///
+    /// Return-type axes per the ticket: a handle, a bare value, an array by
+    /// value, an array handle, and a class handle whose FIELD is then
+    /// written — each in both a non-const and a const flavour, since the
+    /// non-const flavour is the one that propagates and the const flavour is
+    /// the one that must not.
+    const CASES: &[(&str, &str, &str)] = &[
+        (
+            "nonconst returning array handle, element written",
+            "class C { array<int>@ GetArr() { return null; } }",
+            "void f(const C@ c) { c.GetArr()[0] = 5; }",
+        ),
+        (
+            "const returning array handle, element written",
+            "class C { array<int>@ GetArr() const { return null; } }",
+            "void f(const C@ c) { c.GetArr()[0] = 5; }",
+        ),
+        (
+            "nonconst returning array by value, element written",
+            "class C { array<int> GetVals() { array<int> a; return a; } }",
+            "void f(const C@ c) { c.GetVals()[0] = 5; }",
+        ),
+        (
+            "const returning array by value, element written",
+            "class C { array<int> GetVals() const { array<int> a; return a; } }",
+            "void f(const C@ c) { c.GetVals()[0] = 5; }",
+        ),
+        (
+            "nonconst returning a value into auto, then reassigned",
+            "class C { string Name() { return \"\"; } }",
+            "void f(const C@ c) { auto s = c.Name(); s = \"x\"; }",
+        ),
+        (
+            "const returning a value into auto, then reassigned",
+            "class C { string Name() const { return \"\"; } }",
+            "void f(const C@ c) { auto s = c.Name(); s = \"x\"; }",
+        ),
+        (
+            "nonconst returning class handle, field written",
+            "class P { int x; } class C { P@ Get() { return null; } }",
+            "void f(const C@ c) { c.Get().x = 1; }",
+        ),
+        (
+            "const returning class handle, field written",
+            "class P { int x; } class C { P@ Get() const { return null; } }",
+            "void f(const C@ c) { c.Get().x = 1; }",
+        ),
+        (
+            "nonconst returning void, result unused",
+            "class C { void Poke() {} }",
+            "void f(const C@ c) { c.Poke(); }",
+        ),
+        (
+            "const returning void, result unused",
+            "class C { void Poke() const {} }",
+            "void f(const C@ c) { c.Poke(); }",
+        ),
+        // The ticket's named axis: an overload set carrying BOTH a const and
+        // a non-const member. `workspace_own_method_is_const` answers
+        // `Some(true)` because a const overload exists and the engine would
+        // select it — so the call is legal and NOTHING propagates. This is
+        // where "any const overload makes the call legal" and "the return
+        // type of the one that matched" can diverge, so the halves being
+        // equal is the property under test.
+        (
+            "const + nonconst overload, array handle element written",
+            "class C { array<int>@ Get() { return null; } array<int>@ Get() const { return null; } }",
+            "void f(const C@ c) { c.Get()[0] = 5; }",
+        ),
+        (
+            "nonconst + const overload declared in the other order",
+            "class C { array<int>@ Get() const { return null; } array<int>@ Get() { return null; } }",
+            "void f(const C@ c) { c.Get()[0] = 5; }",
+        ),
+        (
+            "overload set differing in ARITY, all non-const",
+            "class C { array<int>@ Get() { return null; } array<int>@ Get(int i) { return null; } }",
+            "void f(const C@ c) { c.Get()[0] = 5; }",
+        ),
+    ];
+
+    /// The property B120 exists to establish: for every case, the same-file
+    /// and cross-file halves produce the SAME diagnostics.
+    #[test]
+    fn const_propagation_agrees_across_the_file_boundary() {
+        for (label, class_body, use_body) in CASES {
+            let same = check_ws(&format!("{class_body} {use_body}"), &[]);
+            let split = check_ws(use_body, &[class_body]);
+            assert_eq!(
+                kinds(&same),
+                kinds(&split),
+                "`{label}` must not depend on the file boundary:\n  same-file {:?}\n  cross-file {:?}",
+                same,
+                split
+            );
+        }
+    }
+
+    /// NON-VACUITY. The pair assertion above is satisfied by two empty sets,
+    /// so on its own it would still pass with the propagation deleted. This
+    /// pins the case that must actually produce BOTH diagnostics on BOTH
+    /// sides — the ticket's repro — so the equality above is known to be
+    /// comparing something.
+    #[test]
+    fn the_repro_case_really_produces_both_diagnostics_on_both_sides() {
+        let class_body = "class C { array<int>@ GetArr() { return null; } }";
+        let use_body = "void f(const C@ c) { c.GetArr()[0] = 5; }";
+        let want = vec![
+            "ConstViolation".to_string(),
+            "NonConstMethodOnConstReceiver".to_string(),
+        ];
+        let same = check_ws(&format!("{class_body} {use_body}"), &[]);
+        assert_eq!(kinds(&same), want, "same-file half, got {:?}", same);
+        let split = check_ws(use_body, &[class_body]);
+        assert_eq!(kinds(&split), want, "cross-file half, got {:?}", split);
+    }
+
+    /// A LEGAL call must stay completely silent on both sides. Paired with
+    /// the test above this brackets the rule from both directions: the error
+    /// case produces two diagnostics, the legal case produces none.
+    #[test]
+    fn a_const_method_call_stays_silent_on_both_sides() {
+        let class_body = "class C { array<int>@ GetArr() const { return null; } }";
+        let use_body = "void f(const C@ c) { c.GetArr()[0] = 5; }";
+        for (half, diags) in [
+            (
+                "same-file",
+                check_ws(&format!("{class_body} {use_body}"), &[]),
+            ),
+            ("cross-file", check_ws(use_body, &[class_body])),
+        ] {
+            assert!(
+                diags.is_empty(),
+                "{half}: a const method on a const receiver is legal and its \
+                 result must not inherit const, got {:?}",
+                diags
+            );
+        }
+    }
+
+    /// THE FALSE-POSITIVE GUARD, and the reason the propagation is confined
+    /// to the arm that already emitted. An ENGINE method reached through a
+    /// const receiver returns a FRESH value, not a view into the receiver —
+    /// `const string &in s` then `s.Replace(..)` yields a new string that is
+    /// perfectly assignable. The typedb has no metadata to tell a view from
+    /// a fresh value, so nothing here may propagate.
+    ///
+    /// Measured: allowing it produced 10 false `ConstViolation`s across 7
+    /// fleet plugins on shipped, compiling code — tm-cotd-hud/Color.as:356,
+    /// tm-match-recorder/Main.as:162-163, tm-birds/Filter.as:65,
+    /// tm-archivist/HttpServer.as:313 and others, every one this shape.
+    #[test]
+    fn engine_receiver_return_values_never_inherit_const() {
+        use crate::typedb::TypeIndex;
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let idx = TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load");
+        // The exact shapes the fleet sweep flagged.
+        for src in [
+            "string f(const string &in raw) { auto r = raw.Replace(\"a\", \"b\"); r = r.Replace(\"c\", \"d\"); return r; }",
+            "string f(const string &in s) { auto x = s.ToLower(); x = \"y\"; return x; }",
+            "void f(const string &in term) { auto parts = term.Split(\" \"); parts[0] = \"x\"; }",
+        ] {
+            let tokens = tokenize_filtered(src);
+            let mut parser = Parser::new(&tokens, src);
+            let file = parser.parse_file();
+            let mut ws = SymbolTable::new();
+            let fid = ws.allocate_file_id();
+            let syms = SymbolTable::extract_symbols(fid, src, &file);
+            ws.set_file_symbols(fid, syms);
+            let scope = GlobalScope::new(&ws, Some(&idx));
+            let mut checker = Checker::new(src, &scope);
+            checker.check_file(&file);
+            let bad: Vec<_> = checker
+                .diagnostics
+                .iter()
+                .filter(|d| matches!(&d.kind, TypeDiagnosticKind::ConstViolation { .. }))
+                .collect();
+            assert!(
+                bad.is_empty(),
+                "engine method returns a fresh value, not a const view: {src}\n  got {:?}",
+                bad
+            );
+        }
+    }
+
+    /// The propagation must read the WORKSPACE half only. A class that is
+    /// nowhere — not in this file, not in the pool — must not acquire a
+    /// return type or a const from anywhere.
+    #[test]
+    fn unknown_class_propagates_nothing() {
+        let diags = check_ws("void f(const Nope@ n) { n.Whatever()[0] = 5; }", &[]);
+        let bad: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::ConstViolation { .. }
+                        | TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .collect();
+        assert!(bad.is_empty(), "unknown class, got {:?}", diags);
     }
 }
