@@ -5392,18 +5392,29 @@ fn b102_mismatched_sort_callbacks_are_reported() {
     let errors = repro_errors("b102-array-sort-mismatched-callbacks");
     let joined = errors.join("\n");
     for (line, what) in [
-        (32, "wrong arity, one parameter"),
-        (33, "wrong arity, three parameters"),
-        (34, "wrong return type, void"),
-        (35, "wrong return type, int"),
-        (36, "wrong element type, string comparer on int[]"),
-        (37, "wrong element type, Item comparer on int[]"),
-        (38, "wrong parameter mode, &out"),
-        (39, "wrong parameter mode, &inout"),
-        (40, "wrong parameter mode, by value"),
-        (43, "wrong element type, int comparer on Item@[]"),
-        (45, "the SortNonConst slot checks the same way"),
-        (48, "a funcdef HANDLE of the wrong shape"),
+        (49, "wrong arity, one parameter"),
+        (50, "wrong arity, three parameters"),
+        (51, "wrong return type, void"),
+        (52, "wrong return type, int"),
+        (53, "wrong element type, string comparer on int[]"),
+        (54, "wrong element type, Item comparer on int[]"),
+        (55, "wrong parameter mode, &out"),
+        (56, "wrong parameter mode, &inout"),
+        (57, "wrong parameter mode, by value"),
+        (60, "wrong element type, int comparer on Item@[]"),
+        // B144: the same four axes again, each carried on a CONST HANDLE.
+        // Before B144 these lines DID report — but for the wrong reason: the
+        // const handle was parsed out of the stored signature as a type
+        // literally named "Item@ const", so every comparison against it
+        // failed and the row would have passed even if arity, return type,
+        // element type and mode were all ignored. They are here to prove the
+        // const handle did not become a wildcard when it started parsing.
+        (61, "B144: wrong arity, on a const handle"),
+        (62, "B144: wrong return type, on a const handle"),
+        (63, "B144: wrong parameter mode, on a const handle"),
+        (64, "B144: wrong element type, on a const handle"),
+        (66, "the SortNonConst slot checks the same way"),
+        (69, "a funcdef HANDLE of the wrong shape"),
     ] {
         assert!(
             joined.contains(&format!("Main.as:{line}:")),
@@ -5415,7 +5426,7 @@ fn b102_mismatched_sort_callbacks_are_reported() {
     // this the per-line loop is satisfied by a rule that rejects everything.
     assert_eq!(
         errors.len(),
-        12,
+        16,
         "unexpected extra diagnostics beyond the listed rows:\n{joined}"
     );
 }
@@ -5434,7 +5445,7 @@ fn b102_a_funcdef_handle_of_the_wrong_shape_is_reported() {
     assert!(
         errors
             .iter()
-            .any(|l| l.contains("Main.as:48:") && l.contains("array::Sort(StringLess@)")),
+            .any(|l| l.contains("Main.as:69:") && l.contains("array::Sort(StringLess@)")),
         "a funcdef handle whose signature does not match the element type \
          must be rejected like a bare function name: {errors:#?}"
     );
@@ -5645,8 +5656,8 @@ fn check_b108_only_a_method_reference_is_rewritten() {
     let b102 = repro_errors("b102-array-sort-mismatched-callbacks");
     let b102_joined = b102.join("\n");
     for (line, expected, what) in [
-        (32, "array::Sort(WrongArityOne)", "a bare function name"),
-        (48, "array::Sort(StringLess@)", "a funcdef-typed value"),
+        (49, "array::Sort(WrongArityOne)", "a bare function name"),
+        (69, "array::Sort(StringLess@)", "a funcdef-typed value"),
     ] {
         assert!(
             b102.iter()

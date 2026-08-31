@@ -3011,17 +3011,42 @@ impl<'a> Checker<'a> {
     /// given the same synthesised treatment rather than read from that
     /// declaration, so the two slots cannot drift apart.
     ///
-    /// WHAT THIS DELIBERATELY DOES NOT DECIDE. Whether the engine accepts a
-    /// non-const comparator at the const slot is UNMEASURED -- B097 makes game
-    /// probing impossible repo-wide, so there is no verdict to be had, and a
-    /// guess would false-positive on every plugin that guessed the other way.
-    /// Const-ness is therefore neutral by CONSTRUCTION rather than by a
-    /// carve-out a later edit could drop: `funcdef_types_compatible` peels
-    /// `const` before comparing. What is left is wrong under EVERY reading of
-    /// the missing declaration -- arity, return type, element type, parameter
-    /// mode. The mode half is not a guess either: B027 measured
+    /// WHAT THIS DELIBERATELY DOES NOT DECIDE, AND WHY THAT IS NOW A CHOICE
+    /// RATHER THAN AN ABSENCE. Const-ness is neutral by CONSTRUCTION rather
+    /// than by a carve-out a later edit could drop: `funcdef_types_compatible`
+    /// peels `const` before comparing. What is left is wrong under EVERY
+    /// reading of the missing declaration -- arity, return type, element type,
+    /// parameter mode. The mode half is not a guess either: B027 measured
     /// `Can't create delegate` on any plain/&in/&out/&inout mismatch, and this
     /// reuses that comparison rather than adding a second one.
+    ///
+    /// B102 recorded the const axis as UNMEASURED because B097 blocked game
+    /// probing repo-wide. B097 is fixed and B144 MEASURED IT (2026-09-01,
+    /// OP 1.29.14, `docs/probes/b144-const-handle-funcdef.tsv`). The engine
+    /// prints its own slot signature whenever a bind fails, so it answers
+    /// directly rather than by inference:
+    ///
+    /// ```text
+    /// Where 'less' is 'bool int[]::less(const int&in, const int&in)'
+    /// Where 'less_nonconst' is 'bool int[]::less_nonconst(int&in, int&in)'
+    /// Where 'less' is 'bool Item@[]::less(const Item@const&in, const Item@const&in)'
+    /// ```
+    ///
+    /// Two things follow that this synthesis does NOT yet act on.
+    ///
+    /// * The engine is EXACT on const-ness, both directions: `int &in` at
+    ///   `Sort` is rejected, and `const int &in` at `SortNonConst` is
+    ///   rejected. The neutrality above is therefore a KNOWN false negative,
+    ///   not an open question. Tightening it fires on all four const
+    ///   positions at once -- including the LEADING one B110 guards -- with
+    ///   the opposite risk polarity to B144, so it wants its own ticket and
+    ///   its own fleet sweep.
+    /// * For a HANDLE element type the engine's comparator carries BOTH
+    ///   consts (`const T@ const &in`), where `elem.display()` below emits a
+    ///   bare `T@`. That difference is invisible today because the comparison
+    ///   peels const, and it is left alone for the same reason: changing it
+    ///   changes no verdict, so it belongs with the tightening rather than
+    ///   ahead of it.
     fn synth_template_member_funcdef(
         &self,
         param_text: &str,

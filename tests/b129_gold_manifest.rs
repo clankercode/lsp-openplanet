@@ -25,12 +25,12 @@ use std::path::PathBuf;
 /// Data rows currently expected. Not a target to edit freely: raising it is
 /// how a new corpus gets registered, and LOWERING it is how one gets deleted,
 /// so both directions are a reviewed change.
-const EXPECTED_MANIFEST_ROWS: usize = 14;
+const EXPECTED_MANIFEST_ROWS: usize = 15;
 
 /// `.tsv` corpora expected in `docs/probes/`. Separate from the manifest row
 /// count because the manifest also carries TYPEDB and PRIMARY rows that are
 /// not files in that directory.
-const EXPECTED_TSV_CORPORA: usize = 10;
+const EXPECTED_TSV_CORPORA: usize = 11;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -118,8 +118,8 @@ fn parse_manifest() -> Vec<Row> {
 /// Every `.tsv` in `docs/probes/` except the manifest itself.
 fn tsv_corpora_on_disk() -> BTreeSet<String> {
     let dir = repo_root().join("docs/probes");
-    let entries = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    let entries =
+        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
 
     let found: BTreeSet<String> = entries
         .filter_map(|e| e.ok())
@@ -168,8 +168,7 @@ fn every_corpus_on_disk_is_registered_in_the_manifest() {
         "corpus count on disk changed; a new corpus must also be added to the manifest",
     );
 
-    let registered: BTreeSet<String> =
-        parse_manifest().into_iter().map(|r| r.artifact).collect();
+    let registered: BTreeSet<String> = parse_manifest().into_iter().map(|r| r.artifact).collect();
 
     let unregistered: Vec<&String> = on_disk.difference(&registered).collect();
     assert!(
@@ -192,8 +191,7 @@ fn every_manifest_artifact_exists_on_disk() {
         }
     }
     assert_eq!(
-        checked,
-        EXPECTED_MANIFEST_ROWS,
+        checked, EXPECTED_MANIFEST_ROWS,
         "checked {checked} artifacts, expected {EXPECTED_MANIFEST_ROWS}",
     );
     assert!(
@@ -257,14 +255,26 @@ fn every_row_answers_a_question() {
 
 #[test]
 fn every_row_declares_a_known_kind_and_diff_mode() {
-    let kinds: BTreeSet<&str> = ["CORPUS", "SIDECAR", "TYPEDB", "PRIMARY"].into_iter().collect();
+    let kinds: BTreeSet<&str> = ["CORPUS", "SIDECAR", "TYPEDB", "PRIMARY"]
+        .into_iter()
+        .collect();
     let diffs: BTreeSet<&str> = ["STRING", "STRUCTURED", "MANUAL"].into_iter().collect();
     let rows = parse_manifest();
     let mut checked = 0usize;
     for r in &rows {
         checked += 1;
-        assert!(kinds.contains(r.kind.as_str()), "{}: unknown kind {:?}", r.artifact, r.kind);
-        assert!(diffs.contains(r.diff.as_str()), "{}: unknown diff mode {:?}", r.artifact, r.diff);
+        assert!(
+            kinds.contains(r.kind.as_str()),
+            "{}: unknown kind {:?}",
+            r.artifact,
+            r.kind
+        );
+        assert!(
+            diffs.contains(r.diff.as_str()),
+            "{}: unknown diff mode {:?}",
+            r.artifact,
+            r.diff
+        );
     }
     assert_eq!(checked, EXPECTED_MANIFEST_ROWS);
 }
@@ -282,8 +292,16 @@ fn a_primary_row_is_manual_in_both_senses() {
         "no PRIMARY rows — this test would pass vacuously",
     );
     for r in primary {
-        assert_eq!(r.generator, "MANUAL", "{}: PRIMARY must not claim a generator", r.artifact);
-        assert_eq!(r.diff, "MANUAL", "{}: PRIMARY cannot be machine-diffed", r.artifact);
+        assert_eq!(
+            r.generator, "MANUAL",
+            "{}: PRIMARY must not claim a generator",
+            r.artifact
+        );
+        assert_eq!(
+            r.diff, "MANUAL",
+            "{}: PRIMARY cannot be machine-diffed",
+            r.artifact
+        );
     }
 }
 
@@ -337,7 +355,10 @@ fn dependents_named_by_the_manifest_exist() {
         "only {checked} dependent edges checked — the fan-out column is the reason \
          in-source tables stay manual, so an empty column is a regression",
     );
-    assert!(missing.is_empty(), "manifest points at files that do not exist: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "manifest points at files that do not exist: {missing:?}"
+    );
 }
 
 #[test]
@@ -346,7 +367,9 @@ fn engine_versions_are_a_known_generation_or_explicitly_unknown() {
     // legitimate value and is NOT quietly treated as "current": the runner
     // refuses to diff an UNKNOWN artifact against a live run rather than
     // reporting a drift it cannot attribute.
-    let known: BTreeSet<&str> = ["1.29.5", "1.29.9", "1.29.14", "UNKNOWN"].into_iter().collect();
+    let known: BTreeSet<&str> = ["1.29.5", "1.29.9", "1.29.14", "UNKNOWN"]
+        .into_iter()
+        .collect();
     let rows = parse_manifest();
     let mut unknown_count = 0usize;
     for r in &rows {
@@ -377,6 +400,9 @@ fn the_manifest_covers_every_kind_it_defines() {
         m
     });
     for k in ["CORPUS", "SIDECAR", "TYPEDB", "PRIMARY"] {
-        assert!(kinds.contains_key(k), "manifest has no {k} row; kinds present: {kinds:?}");
+        assert!(
+            kinds.contains_key(k),
+            "manifest has no {k} row; kinds present: {kinds:?}"
+        );
     }
 }

@@ -28,6 +28,22 @@ GitHub Release body to match this section (gh release edit).
   squiggle.
 
 ### Fixed
+- **A `const` HANDLE parameter (`T@ const &in`) no longer breaks every
+  funcdef signature match** (B144) — reported by Max against a shipped
+  plugin that compiles in the game, where it was the ONLY error:
+  `No matching signatures to 'array::Sort(SortGhosts)'` for
+  `bool SortGhosts(const Json::Value@ const &in a, ...)`. AngelScript
+  spells two different qualifiers with one keyword — a LEADING `const`
+  makes the pointed-to OBJECT read-only, a TRAILING one makes the HANDLE
+  read-only — and the type-string parser knew only the leading form. A
+  trailing `const` fell through to the type NAME, producing a type
+  literally called `Json::Value@ const` that matched nothing, so the
+  funcdef constructor, implicit handle assignment, argument passing and
+  `array<T>::Sort` all rejected it alike. It now parses as the const
+  handle it is, and `display()` prints it back as `T@ const` instead of
+  collapsing it onto the other qualifier. Across the 152-plugin corpus
+  three false errors disappear and none appear — every const-handle
+  parameter site in the corpus, all three of them.
 - **Export entries survive a `src/` -> root move in BOTH directions**
   (B143) — resolution already fell back from `Export.as` to
   `src/Export.as`, but not the reverse: an entry that still read
