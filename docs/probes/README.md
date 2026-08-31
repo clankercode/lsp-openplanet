@@ -544,13 +544,45 @@ namespace-absent form now; `MathX` produces the same form in both runs. The
 namespace, not the verdict logic, is what changed.
 
 `build_source` declares no namespace anywhere, so `Foo` was never supplied by
-the probe fixture — it came from the game's own loaded plugin set. A plugin
-declaring `namespace Foo` was installed when the corpus was generated and is
-not installed now. That is precisely the plugin-namespace effect documented
-above, and precisely why those three spellings are already the first three
-entries of `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which forces them to
-"must not resolve" whatever the corpus says. **No test expectation and no
-documented conclusion moves.**
+the probe fixture. Those three spellings are excluded from what this crate is
+asked to resolve — recorded in `b052-scope-provenance.tsv`, which is where that
+decision lives now. **No test expectation and no documented conclusion moves.**
+
+### Two claims here, and only one of them is proven (corrected 2026-08-31, B080)
+
+An earlier revision of this paragraph — merged, and merged *because* it proved
+rather than asserted — went on to say `Foo` "came from the game's own loaded
+plugin set" and that "a plugin declaring `namespace Foo` was installed when the
+corpus was generated". The first half of that is proven. The second is an
+attribution the same evidence does not carry, and it is demoted.
+
+**PROVEN, and it stands.** `Foo` existed as a namespace when the corpus was
+generated and does not exist now. The message forms establish it directly: the
+is-a-scope form cannot be produced when the namespace is absent, `Foo` gave that
+form then and the namespace-absent form now, and `MathX` gives the same form in
+both runs as the control.
+
+**NOT PROVEN, and demoted.** That an *installed plugin* supplied it. What is
+actually established is only that the engine did not and this repo's probe
+templates did not — the templates emit no `namespace` in either form, and no
+committed repo fixture declares one either. An installed plugin, a hand-staged
+fixture, and **another client's staged probe** are indistinguishable from
+anything recorded. That third one stopped being hypothetical when B097's
+investigation showed this port has had two clients; for a scope literally named
+`Foo::Bar`, it is the obvious candidate. So the sidecar records `Foo` and
+`Foo::Bar` as `HOST_UNATTRIBUTED`, not `HOST_PLUGIN`.
+
+**B068's conclusion is untouched, and read the demotion as narrowing the
+attribution rather than weakening the result.** Those rows are still not
+batching fabrications, and the pins are why: a fabricated ACCEPT means the
+namespace never existed, in which case `Foo::ZZZNoSuch` in that same run would
+have answered `Namespace 'Foo' doesn't exist.` It answered the is-a-scope form,
+and a REJECT cannot be fabricated by an abort. **Zero rows fabricated stands.**
+Only *whose* namespace it was loses strength.
+
+The general shape, since it caught two readers including the one who wrote it:
+**the message form is evidence about a namespace's EXISTENCE, not about its
+SUPPLIER.** One instrument, two questions, and it only answers the first.
 
 The whole twelve-entry artefact list splits along the same line, which is what
 identifies the mechanism rather than merely asserting it: the three `Foo::*`
