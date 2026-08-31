@@ -1958,7 +1958,7 @@ fn declares_type(kind: &SymbolKind) -> bool {
     )
 }
 
-fn qualified_virtual_name(name: &str, prefix: &str) -> String {
+pub(crate) fn qualified_virtual_name(name: &str, prefix: &str) -> String {
     if let Some((head, tail)) = name.rsplit_once("::") {
         format!("{}::{}{}", head, prefix, tail)
     } else {

@@ -11,7 +11,7 @@
 
 use super::builtins;
 use super::call_site::{self, ArgBind};
-use super::global_scope::{FuncdefSig, GlobalScope, OverloadSig};
+use super::global_scope::{qualified_virtual_name, FuncdefSig, GlobalScope, OverloadSig};
 use super::repr::{param_mode_from_text, ParamMode, PrimitiveType, TypeRepr};
 use super::resolver::TypeResolver;
 use crate::lexer::token::TokenKind;
@@ -805,8 +805,38 @@ impl<'a> Checker<'a> {
             return;
         }
         self.record_use(name);
-        self.record_use(&format!("get_{}", name));
-        self.record_use(&format!("set_{}", name));
+        // B061: the accessor prefix belongs on the LAST segment, not the
+        // front of the whole path. `format!("get_{}", "Ns::P")` produced
+        // `get_Ns::P`, a name nothing can ever match, so a qualified
+        // property read never credited `Ns::get_P` and the accessor was
+        // reported unused however many times it was read.
+        //
+        // The namespace ladder needs the same treatment for the other
+        // spelling: a bare `P` written inside `namespace Ns` records
+        // `get_P`, and `is_used` deliberately refuses to trust a bare tail
+        // as a suffix match, so it cannot reach `Ns::get_P` either.
+        // Recording every enclosing depth over-marks rather than
+        // under-marks, which is this module's stated preference — a false
+        // "unused" is far worse than a missed warning.
+        for spelling in self.value_use_spellings(name) {
+            self.record_use(&qualified_virtual_name(&spelling, "get_"));
+            self.record_use(&qualified_virtual_name(&spelling, "set_"));
+        }
+    }
+
+    /// Every name under which a written value reference could have been
+    /// declared: as written, then qualified by each enclosing namespace
+    /// depth, innermost outward.
+    fn value_use_spellings(&self, name: &str) -> Vec<String> {
+        let mut out = vec![name.to_string()];
+        for depth in (1..=self.namespace_stack.len()).rev() {
+            out.push(format!(
+                "{}::{}",
+                self.namespace_stack[..depth].join("::"),
+                name
+            ));
+        }
+        out
     }
 
     /// Record member usage for an explicit receiver whose base class name

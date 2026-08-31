@@ -175,6 +175,18 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **A property-syntax read now credits its accessor** (B061) — reading
+  `Directives::Showing`, where `bool get_Showing()` implements it, did not
+  mark `Directives::get_Showing` used, so the accessor was reported
+  `a function 'get_Showing' is never used` however many times it was read.
+  The accessor prefix was placed on the front of the whole path instead of on
+  its last segment, producing `get_Ns::Showing` — a name nothing can match.
+  Both spellings are fixed: an explicit `Ns::P` from outside the namespace,
+  and a bare `P` resolved through the namespace ladder from inside it.
+  Qualified writes and read-modify-writes credit `set_` on the same footing.
+  An accessor with no reader still warns, and the global and member forms are
+  unchanged. Across the repo's own fixtures this clears 24 false warnings
+  (22 in tm-editor-plus-plus, 2 in tm-dips-plus-plus), adding none.
 - **An explicit `openplanet_dir` was silently replaced by the variant probe**
   (B066) — the guard deciding whether to re-probe was always true, so a
   directory you set explicitly in config was overwritten by whatever the probe
