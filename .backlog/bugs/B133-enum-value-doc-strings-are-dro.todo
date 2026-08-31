@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:43:15Z"
 depends_on: []
 estimate_hours: 1
 id: B133
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Enum value doc strings are dropped: the ''d'' key is present on 206 of 929 enum values and nothing reads it'
@@ -12,3 +14,42 @@ updated_at: "2026-08-31T14:43:15Z"
 ---
 
 Enum value doc strings are dropped: the 'd' key is present on 206 of 929 enum values and nothing reads it
+
+
+## Measured by lane-enum during B131's struct audit, 2026-09-01
+
+The `d` key is present on **206 of 929** enum values in the typedb dumps and the
+loader drops it entirely. It is the value's doc string.
+
+## Do not fix this yet
+
+lane-enum deliberately did not consume it, applying B125's rule: **trace the
+consumer first.** There is no consumer today, and adding the field without one
+produces B125's other half — a populated field nobody reads, which is how
+`is_const` sat wrong for as long as it did.
+
+**So this ticket is: build the consumer and the field together, or leave it.**
+The obvious consumer is hover and completion for enum values, which currently
+show a bare name where the engine ships prose.
+
+## Scope note
+
+929 values with 206 documented means **78% have nothing**, so any UI must render
+gracefully with no doc string — that is the common case, not the edge case. A
+design that treats the doc as usually-present will look broken on most enums.
+
+## Test axes
+
+- A value WITH a doc string and one WITHOUT, in the same enum — the pair is the
+  point; either alone proves nothing about the fallback.
+- Hover and completion both, since they are separate render paths.
+- A doc string containing characters that need escaping in the markdown hover
+  payload.
+- An enum from each half of the typedb (Core and Nadeo), since the audit found
+  key population differs between them.
+
+## Related
+
+`B134` covers a subset of these strings that read as migration hints. Do not
+conflate them: this ticket is about surfacing the prose at all, that one is about
+whether any of it is machine-readable.
