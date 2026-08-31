@@ -20,6 +20,20 @@
 # only 38 of the 233 scopes below carry a pin. A consumer that treated
 # an absent pin as "engine" would read a foreign plugin's row as an engine fact,
 # which is exactly the failure this file exists to stop.
+#
+# METHOD PRECONDITION: these verdicts require EXCLUSIVE access to the game's
+# RemoteBuild port. Two clients on the port is not merely a scheduling problem.
+# The plugin's read loop has been observed splitting one request across two
+# socket reads and parsing each half as a payload, so a request can be answered
+# as a question nobody asked -- and a truncated script is still a script, so it
+# can compile. A contaminated FIXTURE leaves the transaction intact and only
+# makes an ACCEPT untrustworthy; a mangled PAYLOAD returns a clean, plausible,
+# wrong verdict with nothing in the output marking it as damaged. Neither B068's
+# sentinel nor B077's cleanup guard watches that door.
+#
+# The corpus cannot express whether a row was measured under exclusive access.
+# Until it can, a re-measured row is only as good as the operator's word that
+# nothing else held the port, and that belongs in the commit that changes it.
 prefix	pin	origin	evidence
 Audio	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 Auth	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
@@ -198,18 +212,18 @@ Dev	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped database
 Discord	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 Display	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 Fids	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
-Foo	SCOPE	HOST	MEASURED: pinned SCOPE when this corpus was written and ABSENT on the 2026-08-31 re-probe, and no installed plugin declares it now - the scope came and went with a plugin
-Foo::Bar	SCOPE	HOST	MEASURED: pinned SCOPE when this corpus was written and ABSENT on the 2026-08-31 re-probe, and no installed plugin declares it now - the scope came and went with a plugin
+Foo	SCOPE	HOST_UNATTRIBUTED	MEASURED: pinned SCOPE when this corpus was written and ABSENT on the 2026-08-31 re-probe; the probe templates emit no namespace, no committed repo fixture declares it, and no installed plugin declares it now. Something supplied the scope and it was not the fixture and not the engine - which of an installed plugin, a hand-staged fixture or another client on the port is NOT distinguishable from anything recorded
+Foo::Bar	SCOPE	HOST_UNATTRIBUTED	MEASURED: pinned SCOPE when this corpus was written and ABSENT on the 2026-08-31 re-probe; the probe templates emit no namespace, no committed repo fixture declares it, and no installed plugin declares it now. Something supplied the scope and it was not the fixture and not the engine - which of an installed plugin, a hand-staged fixture or another client on the port is NOT distinguishable from anything recorded
 GameData	SCOPE	ENGINE_UNMODELLED	MEASURED: pinned SCOPE both when this corpus was written and on the 2026-08-31 re-probe, and nothing under Plugins/ (44 entries plus .op archives) declares the namespace or a type of that name; a previous lane also searched DisabledPlugins, Scripts and Extract and found only Openplanet.h. Neither shipped database records it as a scope, so this crate cannot resolve the rows either. Why GameData is a live scope when Game, Hms, Plug and Scene are not is an open question - see UNEXPLAINED_ENGINE_SCOPES
 GmFunc	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 IO	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 Icons	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 Import	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 Json	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
-MLFeed	SCOPE	HOST	MEASURED: declared by installed plugin(s) MLFeedRaceData.op, MLHook.op; neither shipped database has it
-MLHook	UNPINNED	HOST	MEASURED: declared by installed plugin(s) MLHook.op; neither shipped database has it
+MLFeed	SCOPE	HOST_PLUGIN	MEASURED: declared by installed plugin(s) MLFeedRaceData.op, MLHook.op; neither shipped database has it
+MLHook	UNPINNED	HOST_PLUGIN	MEASURED: declared by installed plugin(s) MLHook.op; neither shipped database has it
 Math	SCOPE	ENGINE	MEASURED: also declared by installed plugin(s) better-totd-dev, but the shipped databases resolve every ACCEPTED row it qualifies, so the engine supplies it
-MathX	SCOPE	HOST	MEASURED: declared by installed plugin(s) Editor, ghosts-pp, ghosts-pp.op, map-together, test-draw-dev; neither shipped database has it
+MathX	SCOPE	HOST_PLUGIN	MEASURED: declared by installed plugin(s) Editor, ghosts-pp, ghosts-pp.op, map-together, test-draw-dev; neither shipped database has it
 Meta	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 NGameLoadProgress	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 NGameMediaBlockEntity_SuperSKeyVal	UNPINNED	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
@@ -248,7 +262,7 @@ Time	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databas
 UI	SCOPE	ENGINE	MEASURED: also declared by installed plugin(s) better-totd-dev, tournament-station, but the shipped databases resolve every ACCEPTED row it qualifies, so the engine supplies it
 UI::Font	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 UI::Plot	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
-VehicleState	UNPINNED	HOST	INFERRED: two installed plugins declare dependencies = ["VehicleState"], but nothing under Plugins/ declares the namespace or a type of that name and this corpus has no pin - not measured, see B080
+VehicleState	UNPINNED	HOST_UNATTRIBUTED	MEASURED: the corpus accepted a row qualified by it, so something supplied the scope; neither shipped database records it; nothing under Plugins/ declares the namespace or a type of that name, though two installed plugins declare dependencies = ["VehicleState"]; and this corpus carries no pin. Supplier unidentified - a probe of VehicleState::ZZZNoSuch is what would narrow it, and an is-a-scope answer would still not say WHICH supplier
 XML	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 mat3	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies
 mat4	SCOPE	ENGINE	MEASURED: no installed plugin declares it; the shipped databases resolve every ACCEPTED row it qualifies

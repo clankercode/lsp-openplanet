@@ -338,7 +338,7 @@ mod tests {
     /// list that drifted from prose in its own file. The sidecar puts all four
     /// on the engine side; the union is unchanged, and
     /// `the_derived_exclusion_set_reproduces_the_hand_maintained_one` asserts
-    /// both the union and the corrected 9/4 split.
+    /// both the union and the corrected 5 / 4 / 0 / 4 split.
     ///
     /// Spellings the game ACCEPTED that are NOT engine facts, and so must not
     /// be read as evidence about this crate. `docs/probes/README.md` explains
@@ -1165,20 +1165,30 @@ mod tests {
     /// them, derived from the recorded provenance of the scope each one is
     /// qualified by.
     ///
-    /// Two origins land here and they mean different things, which is why the
-    /// sidecar keeps them apart:
+    /// Four origins land here, and the sidecar keeps them apart because they
+    /// differ in whether the row can be RE-MEASURED, not merely in wording:
     ///
-    /// * `HOST` — the scope was the probing machine's, supplied by an
-    ///   installed plugin. The row is a valid measurement of THAT machine and
-    ///   says nothing about the engine. A workspace with none of those plugins
-    ///   must reject it, and does.
+    /// * `HOST_PLUGIN` — an installed plugin declares the scope, and the
+    ///   evidence names it. Environment-dependent and reproducible: install
+    ///   that plugin and the row comes back.
+    /// * `HOST_FIXTURE` — the probe run's own fixture declared it. Also
+    ///   reproducible. Provably empty for these corpora; the probe templates
+    ///   emit no `namespace`, which the harness selftest checks.
+    /// * `HOST_UNATTRIBUTED` — not the engine, supplier not identified. The
+    ///   three host cases are indistinguishable from a verdict alone, and one
+    ///   of them is ANOTHER CLIENT sharing the RemoteBuild port, which is not
+    ///   reproducible at all. A scope sits here until an instrument separates
+    ///   them.
     /// * `ENGINE_UNMODELLED` — the engine really does have the scope, but
     ///   neither shipped database records it, so this crate cannot know. The
     ///   row is environment-INDEPENDENT and still unresolvable here.
     ///
-    /// Both are excluded from the corpus sweep; conflating them is what let a
-    /// list of twelve spellings carry three that its own file says are engine
-    /// facts.
+    /// All four are excluded from the corpus sweep, and every one of the
+    /// distinctions is load-bearing somewhere: conflating the host cases with
+    /// `ENGINE_UNMODELLED` is what let a list of twelve spellings carry three
+    /// that its own file calls engine facts, and conflating the host cases
+    /// with each other is what makes "just re-probe it" an answer that may be
+    /// impossible.
     fn b052_environment_dependent_spellings(
         corpus: &[(String, String)],
         provenance: &std::collections::BTreeMap<String, ScopeProvenance>,
@@ -1190,11 +1200,26 @@ mod tests {
                 let (prefix, _) = split_scope_prefix(spelling);
                 provenance
                     .get(prefix)
-                    .is_some_and(|p| p.origin == "HOST" || p.origin == "ENGINE_UNMODELLED")
+                    .is_some_and(|p| EXCLUDING_ORIGINS.contains(&p.origin.as_str()))
             })
             .map(|(spelling, _)| spelling.clone())
             .collect()
     }
+
+    /// Origins whose rows this crate must not be asked to resolve. Matched as
+    /// an explicit set rather than by a `HOST` prefix test, so a new origin
+    /// value has to be classified here deliberately instead of inheriting a
+    /// meaning from how it was spelled.
+    const EXCLUDING_ORIGINS: [&str; 4] = [
+        "HOST_PLUGIN",
+        "HOST_FIXTURE",
+        "HOST_UNATTRIBUTED",
+        "ENGINE_UNMODELLED",
+    ];
+
+    /// The host half of [`EXCLUDING_ORIGINS`] — the scope came from the
+    /// probing session rather than from the engine.
+    const HOST_ORIGINS: [&str; 3] = ["HOST_PLUGIN", "HOST_FIXTURE", "HOST_UNATTRIBUTED"];
 
     /// B080, the switch itself: reading the exclusion set out of the corpus's
     /// provenance sidecar reproduces the hand-maintained lists EXACTLY.
@@ -1245,9 +1270,21 @@ mod tests {
                 .count()
         };
         assert_eq!(
-            by_origin("HOST"),
-            9,
-            "spellings a foreign plugin's scope carried"
+            by_origin("HOST_PLUGIN"),
+            5,
+            "spellings a NAMED installed plugin's scope carried"
+        );
+        assert_eq!(
+            by_origin("HOST_UNATTRIBUTED"),
+            4,
+            "spellings whose scope was not the engine's and whose supplier is \
+             not identified"
+        );
+        assert_eq!(
+            by_origin("HOST_FIXTURE"),
+            0,
+            "the probe templates emit no `namespace`, so no scope here can be \
+             the fixture's"
         );
         assert_eq!(
             by_origin("ENGINE_UNMODELLED"),
@@ -1255,9 +1292,12 @@ mod tests {
             "spellings the engine really has and neither database records"
         );
         assert_eq!(
-            by_origin("HOST") + by_origin("ENGINE_UNMODELLED"),
+            EXCLUDING_ORIGINS
+                .iter()
+                .map(|o| by_origin(o))
+                .sum::<usize>(),
             derived.len(),
-            "every excluded spelling is excluded for one of the two recorded reasons"
+            "every excluded spelling is excluded for one of the recorded reasons"
         );
     }
 
@@ -1379,7 +1419,7 @@ mod tests {
 
         let unpinned_hosts: Vec<&String> = provenance
             .iter()
-            .filter(|(_, p)| p.origin == "HOST" && p.pin == "UNPINNED")
+            .filter(|(_, p)| HOST_ORIGINS.contains(&p.origin.as_str()) && p.pin == "UNPINNED")
             .map(|(k, _)| k)
             .collect();
         assert_eq!(
@@ -1390,6 +1430,13 @@ mod tests {
             unpinned_hosts
         );
 
+        // No origin in this file rests on reasoning alone. It is a property
+        // worth holding rather than a coincidence: the one row that used to be
+        // INFERRED (`VehicleState`) stopped being so not by measuring more but
+        // by moving its uncertainty out of the prose and into the origin value
+        // `HOST_UNATTRIBUTED`, where a consumer can act on it. The `INFERRED:`
+        // grammar stays enforced above, so a future scope that genuinely needs
+        // it goes red here and someone decides deliberately.
         let inferred: Vec<&String> = provenance
             .iter()
             .filter(|(_, p)| p.evidence.starts_with("INFERRED:"))
@@ -1397,7 +1444,7 @@ mod tests {
             .collect();
         assert_eq!(
             inferred.len(),
-            1,
+            0,
             "origins resting on reasoning rather than an instrument: {:?}",
             inferred
         );
@@ -1427,7 +1474,7 @@ mod tests {
         let provenance = b052_scope_provenance();
         let hosts: Vec<&String> = provenance
             .iter()
-            .filter(|(_, p)| p.origin == "HOST")
+            .filter(|(_, p)| HOST_ORIGINS.contains(&p.origin.as_str()))
             .map(|(k, _)| k)
             .collect();
         assert!(

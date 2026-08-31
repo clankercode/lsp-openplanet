@@ -50,10 +50,12 @@ full under "Which rows are the probing machine's?" below.
   a lexer gap rather than a resolution one.
 
   Those 13 are no longer hand-listed. They are DERIVED from
-  `b052-scope-provenance.tsv` (B080), which splits them by reason: **9** whose
-  scope was a foreign plugin's (`Foo`, `Foo::Bar`, `MathX`, `MLFeed`, `MLHook`,
-  `VehicleState`) and **4** whose scope the engine really has while neither
-  shipped database records it (all four `GameData::*`). The hand-maintained
+  `b052-scope-provenance.tsv` (B080), which splits them by reason: **5** whose
+  scope a NAMED installed plugin declares (`MathX`, `MLFeed`, `MLHook`), **4**
+  whose scope was not the engine's and whose supplier is not identified (`Foo`,
+  `Foo::Bar`, `VehicleState`), and **4** whose scope the engine really has while
+  neither shipped database records it (all four `GameData::*`). The
+  hand-maintained
   lists had that split wrong — they called three of the four `GameData` rows
   plugin artefacts while the same file's prose called `GameData` an engine
   scope — which is the drift that motivated the sidecar.
@@ -104,19 +106,64 @@ scope prefix:
 |---|---|
 | `prefix` | a leading scope some ACCEPTED row depends on |
 | `pin` | `SCOPE` / `ABSENT` / `UNPINNED` — **recomputed** from the corpus's own pin rows by `scripts/probe_enum_corpus.py --scope-provenance`; do not hand-edit |
-| `origin` | `ENGINE` / `HOST` / `ENGINE_UNMODELLED` / `UNKNOWN` — recorded, and carried forward across regenerations |
-| `evidence` | what supports `origin`, opening `MEASURED:` (an instrument answered) or `INFERRED:` (someone reasoned) |
+| `origin` | `ENGINE` / `HOST_PLUGIN` / `HOST_FIXTURE` / `HOST_UNATTRIBUTED` / `ENGINE_UNMODELLED` / `UNKNOWN` — recorded, and carried forward across regenerations |
+| `evidence` | what supports `origin`, opening `MEASURED:` (an instrument answered) or `INFERRED:` (someone reasoned). No row currently needs `INFERRED:`, and a test holds that |
 
 A consumer reads it as:
 
-- `HOST` → **environment-dependent.** A valid measurement of that machine,
-  saying nothing about the engine.
+- `ENGINE` → environment-independent.
 - `ENGINE_UNMODELLED` → environment-INdependent; the engine has the scope but
   neither shipped database records it, so this crate cannot resolve the row
-  either. Kept separate from `HOST` because conflating them is how a list of
-  twelve spellings came to carry three that the same file calls engine facts.
-- `ENGINE` → environment-independent.
+  either. Kept separate from the host cases because conflating them is how a
+  list of twelve spellings came to carry three that the same file calls engine
+  facts.
+- `HOST_*` → **environment-dependent.** A valid measurement of that session,
+  saying nothing about the engine.
 - `UNKNOWN` → nobody has classified it. The generator exits non-zero.
+
+### Three host channels, and why they are not one value
+
+A probe compile can reach a scope the engine does not have by three routes,
+and they do not behave the same on RE-MEASUREMENT:
+
+| origin | supplier | re-measurable? |
+|---|---|---|
+| `HOST_PLUGIN` | an installed plugin, NAMED in the evidence | yes — install it and the row returns |
+| `HOST_FIXTURE` | the probe run's own fixture | yes — stage it and the row returns |
+| `HOST_UNATTRIBUTED` | not the engine, supplier not identified | unknown |
+
+`HOST_FIXTURE` is **provably empty** for these corpora: `build_source` emits no
+`namespace` in either template, checked by `probe_enum_corpus.py --selftest`
+rather than asserted in prose. That negative is what lets `Foo` be attributed
+away from the fixture — and what leaves the remaining two routes
+indistinguishable, which is why `Foo` is `HOST_UNATTRIBUTED` rather than
+`HOST_PLUGIN`.
+
+The third route is the one worth naming out loud: **another client sharing the
+RemoteBuild port**, whose staged fixture is an installed plugin declaring the
+names your run is asking about. A verdict cannot distinguish it, and unlike the
+other two it cannot be reproduced. Spelling all three `HOST` would say a row is
+environment-dependent while hiding whether anyone could ever check it again.
+
+### These verdicts require EXCLUSIVE port access
+
+Not a scheduling nicety. The RemoteBuild plugin's read loop has been observed
+splitting one request across two socket reads and parsing each half as its own
+payload while a second client was active. Two failure modes, and the second is
+much worse:
+
+- a contaminated **fixture** leaves the transaction intact and only makes an
+  ACCEPT untrustworthy — which is what the whole "a REJECT is evidence, an
+  ACCEPT may not be" rule above is for;
+- a mangled **payload** can have the game answer a question nobody asked, and a
+  truncated script is still a script, so it can compile. The result is a clean,
+  plausible, WRONG verdict with nothing in the output marking it as damaged.
+
+B068's sentinel proves analysis reached the end of a unit; B077's guard proves
+no fixture was stranded. Neither watches this door. **The corpus cannot express
+whether a row was measured under exclusive access**, so that claim belongs in
+the commit that writes the row, and a re-measured row is only as good as the
+operator's word that nothing else held the port.
 
 ### `UNPINNED` is a measured gap, not a tidying job
 
@@ -137,8 +184,8 @@ Not review. Four tests, each mutation-checked:
 
 | a wrong label | what goes red |
 |---|---|
-| a `HOST` scope labelled `ENGINE` | `every_probed_type_spelling_matches_the_games_verdict` — the row stays asserted, and the crate rejects it |
-| an `ENGINE` scope labelled `HOST` | the same sweep (the row is excluded but the crate resolves it) **and** `no_scope_the_engine_declares_is_labelled_host` |
+| a `HOST_*` scope labelled `ENGINE` | `every_probed_type_spelling_matches_the_games_verdict` — the row stays asserted, and the crate rejects it |
+| an `ENGINE` scope labelled `HOST_*` | the same sweep (the row is excluded but the crate resolves it) **and** `no_scope_the_engine_declares_is_labelled_host` |
 | a hand-edited `pin` cell | `the_recorded_pins_match_the_corpuss_own_pin_rows`, which recomputes them from the corpus |
 | a new or unevidenced scope | `every_scope_an_accepted_row_depends_on_is_classified_with_evidence` |
 
