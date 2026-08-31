@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T11:03:19Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T12:18:00Z"
 complexity: medium
 created_at: "2026-08-31T10:44:45Z"
 depends_on: []
+duration_minutes: 74.69669075561667
 estimate_hours: 2
 id: B106
 priority: high
 started_at: "2026-08-31T11:03:19Z"
-status: in_progress
+status: done
 tags: []
 title: just rtest reports exit 0 when the remote build actually failed (x-alpha ENOSPC false green)
-updated_at: "2026-08-31T11:03:19Z"
+updated_at: "2026-08-31T12:18:00Z"
 ---
 ## Observed (2026-08-31, live incident)
 
