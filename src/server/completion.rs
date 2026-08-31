@@ -12,6 +12,8 @@
 //!    scope, enclosing class members, workspace globals, external top-level
 //!    namespaces and functions.
 
+use std::collections::BTreeMap;
+
 use tower_lsp::lsp_types::*;
 
 use crate::parser::ast::{ClassMember, SourceFile};
@@ -138,26 +140,76 @@ fn complete_namespace_members(
             .map(|v| make_item(v, CompletionItemKind::ENUM_MEMBER))
             .collect();
     }
-    let Some(index) = type_index else {
-        return Vec::new();
-    };
-    if let Some(info) = index
-        .source_name_key(namespace)
-        .and_then(|key| index.lookup_source_enum(key))
-    {
-        return info
-            .values
-            .iter()
-            .map(|(name, _)| make_item(name, CompletionItemKind::ENUM_MEMBER))
-            .collect();
+    // B107: this used to `return Vec::new()` with no typedb, which dropped
+    // the workspace members below along with the engine ones.
+    if let Some(index) = type_index {
+        if let Some(info) = index
+            .source_name_key(namespace)
+            .and_then(|key| index.lookup_source_enum(key))
+        {
+            return info
+                .values
+                .iter()
+                .map(|(name, _)| make_item(name, CompletionItemKind::ENUM_MEMBER))
+                .collect();
+        }
     }
-    // B099: the index says what each member IS; before it did not, and
-    // everything here was emitted as FUNCTION.
-    index
-        .source_scope_members(namespace)
+    // B107: both producers, merged. A namespace is OPEN and additive in
+    // AngelScript — a plugin may add to `namespace UI` while still calling
+    // the engine's API — so this is a union, not a choice of source.
+    //
+    // WORKSPACE FIRST, because the workspace SHADOWS the engine: that is the
+    // precedence the resolver uses and the one the enum branches above
+    // already follow. `or_insert` spells it out rather than leaving it to
+    // loop order, exactly as B099 did for the class-versus-nested-namespace
+    // collision inside the typedb half.
+    let mut members: BTreeMap<String, CompletionItemKind> = BTreeMap::new();
+    if let Some(ws) = workspace {
+        // Gated on `ns` really being a namespace: a class's members are
+        // pooled as `Class::member` too, and AngelScript has no statics.
+        if ws.namespace_is_declared(namespace) {
+            for sym in ws.namespace_member_symbols(namespace) {
+                let Some(name) = sym.name.rsplit("::").next() else {
+                    continue;
+                };
+                members
+                    .entry(name.to_string())
+                    .or_insert_with(|| workspace_symbol_completion_kind(&sym.kind));
+            }
+        }
+    }
+    if let Some(index) = type_index {
+        // B099: the index says what each member IS; before it did not, and
+        // everything here was emitted as FUNCTION.
+        for (name, kind) in index.source_scope_members(namespace) {
+            members
+                .entry(name)
+                .or_insert_with(|| scope_member_completion_kind(kind));
+        }
+    }
+    members
         .into_iter()
-        .map(|(name, kind)| make_item(&name, scope_member_completion_kind(kind)))
+        .map(|(name, kind)| make_item(&name, kind))
         .collect()
+}
+
+/// The editor-facing kind for a WORKSPACE declaration.
+///
+/// One mapping, shared by identifier-position completion and the `Ns::`
+/// producer. Extracted at B107 rather than copied: a second copy is how the
+/// `Ns::` path would drift back to labelling everything a function, which is
+/// the defect B099 had just fixed on the engine side.
+fn workspace_symbol_completion_kind(kind: &SymbolKind) -> CompletionItemKind {
+    match kind {
+        SymbolKind::Function { .. } => CompletionItemKind::FUNCTION,
+        SymbolKind::Class { .. } => CompletionItemKind::CLASS,
+        SymbolKind::Interface { .. } => CompletionItemKind::INTERFACE,
+        SymbolKind::Enum { .. } => CompletionItemKind::ENUM,
+        SymbolKind::EnumValue { .. } => CompletionItemKind::ENUM_MEMBER,
+        SymbolKind::Namespace => CompletionItemKind::MODULE,
+        SymbolKind::Variable { .. } => CompletionItemKind::VARIABLE,
+        SymbolKind::Funcdef { .. } => CompletionItemKind::INTERFACE,
+    }
 }
 
 /// The editor-facing kind for a scope member (B099).
@@ -458,17 +510,7 @@ fn complete_identifier(
             if sym.name.contains("::") {
                 continue;
             }
-            let kind = match &sym.kind {
-                SymbolKind::Function { .. } => CompletionItemKind::FUNCTION,
-                SymbolKind::Class { .. } => CompletionItemKind::CLASS,
-                SymbolKind::Interface { .. } => CompletionItemKind::INTERFACE,
-                SymbolKind::Enum { .. } => CompletionItemKind::ENUM,
-                SymbolKind::EnumValue { .. } => CompletionItemKind::ENUM_MEMBER,
-                SymbolKind::Namespace => CompletionItemKind::MODULE,
-                SymbolKind::Variable { .. } => CompletionItemKind::VARIABLE,
-                SymbolKind::Funcdef { .. } => CompletionItemKind::INTERFACE,
-            };
-            items.push(make_item(&sym.name, kind));
+            items.push(make_item(&sym.name, workspace_symbol_completion_kind(&sym.kind)));
         }
     }
 
@@ -2260,28 +2302,32 @@ mod b099_namespace_member_kinds {
         assert!(!after_scope("UI", &idx).is_empty(), "positive control");
     }
 
-    /// The ticket's test plan asks for a WORKSPACE namespace as a third
-    /// route into `source_scope_members`. MEASURED: there is none. That
-    /// function is typedb-only, and a plugin's own `namespace Helper {}`
-    /// falls through the enum branch, then `source_name_key`, then
-    /// `scope_exists`, and comes out empty — so `Helper::` offers nothing at
-    /// all, with or without a kind.
+    /// B099 pinned here that a WORKSPACE namespace reached this path not at
+    /// all — `Helper::` offered nothing, with a premise assertion proving the
+    /// workspace really declared the member so the emptiness could not be a
+    /// setup failure passing as a finding.
     ///
-    /// A real gap, but a DIFFERENT one: a missing producer, not a
-    /// mislabelled one. Pinned here so the next reader finds the measurement
-    /// rather than repeating it, and so that whoever adds that producer sees
-    /// this test go red and knows to update it.
+    /// B107 built that missing producer, so this test was REPLACED rather
+    /// than left to start passing on its own: the inverted assertion and the
+    /// same premise now live in
+    /// `b107_workspace_namespace_members::the_workspace_namespace_that_used_to_offer_nothing_now_offers_its_member`.
+    /// What remains here is the half that is still B099's business — the
+    /// typedb route keeps its kinds when a workspace producer is merged
+    /// alongside it.
     #[test]
-    fn a_workspace_namespace_reaches_this_path_not_at_all() {
+    fn the_typedb_route_keeps_its_kinds_when_a_workspace_is_present() {
         let idx = real_index();
-        let src = "namespace Helper { void DoThing() {} }\nvoid f() { Helper:: }";
-        let ws = crate::server::test_support::TestWorkspace::one_file("compl.as", src);
-        let byte = src.find("Helper:: }").expect("marker") + "Helper::".len();
+        let ws = crate::server::test_support::TestWorkspace::one_file(
+            "compl.as",
+            "namespace Helper { void DoThing() {} }\nvoid f() { UI:: }",
+        );
+        let src = "namespace Helper { void DoThing() {} }\nvoid f() { UI:: }";
+        let byte = src.find("UI:: }").expect("marker") + "UI::".len();
         let prefix = &src[..byte];
         let line = prefix.matches('\n').count() as u32;
         let col = prefix.rfind('\n').map_or(byte, |nl| byte - nl - 1) as u32;
         let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
-        let items = complete(
+        let items: Vec<(String, CompletionItemKind)> = complete(
             &analysis,
             None,
             Position::new(line, col),
@@ -2289,21 +2335,430 @@ mod b099_namespace_member_kinds {
             Some(ws.snapshot.symbols()),
             &[],
             false,
-        );
+        )
+        .into_iter()
+        .map(|i| (i.label, i.kind.expect("kind")))
+        .collect();
+        for (label, want) in [
+            ("Plot", CompletionItemKind::MODULE),
+            ("Cond", CompletionItemKind::ENUM),
+            ("Font", CompletionItemKind::CLASS),
+            ("InputTextCallback", CompletionItemKind::INTERFACE),
+            ("Begin", CompletionItemKind::FUNCTION),
+        ] {
+            assert_eq!(
+                kind_of(&items, label),
+                Some(want),
+                "`UI::{label}` should still be {want:?} with a workspace loaded"
+            );
+        }
+    }
+}
+
+/// B107: `Helper::` offered NOTHING — a workspace namespace had no producer
+/// at all, only the typedb route existed.
+///
+/// Found while doing B099 and reported rather than folded in: B099 was a
+/// MISLABELLED producer, this is a MISSING one, and they share nothing but
+/// the entry point.
+///
+/// THE DELIBERATE UPDATE. B099 pinned the emptiness with
+/// `a_workspace_namespace_reaches_this_path_not_at_all`, whose premise
+/// assertion proved the workspace really declared the member so that an
+/// empty list could not be a setup failure passing as a finding. That test
+/// is now REPLACED, on purpose, by
+/// `the_workspace_namespace_that_used_to_offer_nothing_now_offers_its_member`
+/// — which keeps the same premise assertion and inverts only the conclusion.
+/// It did not silently start passing for the wrong reason.
+///
+/// NOT gated on the GH #58 dependency-closure fence, and that asymmetry is
+/// the point. The fence guards a DIAGNOSTIC that asserts a symbol does not
+/// exist, where an unread module file could make the claim false. Completion
+/// asserts nothing: offering a member we can see is additive, and an
+/// incomplete list is the normal state of an editor suggestion. Reusing the
+/// fence here would be the B079 mistake — two similar-looking predicates
+/// picked wrongly at a call site — so it is deliberately not consulted.
+#[cfg(test)]
+mod b107_workspace_namespace_members {
+    use super::*;
+
+    fn real_index() -> crate::typedb::TypeIndex {
+        let fixtures =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        crate::typedb::TypeIndex::load(
+            &fixtures.join("OpenplanetCore.json"),
+            &fixtures.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
+    /// Completion at the `::` in `marker`, with a workspace built from
+    /// `files` and (optionally) the real typedb.
+    fn complete_after(
+        files: &[(&str, &str)],
+        probe_file: usize,
+        marker: &str,
+        idx: Option<&crate::typedb::TypeIndex>,
+    ) -> Vec<(String, CompletionItemKind)> {
+        let ws = crate::server::test_support::TestWorkspace::files(files);
+        let src = files[probe_file].1;
+        let byte = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("marker {marker:?} not in {src:?}"))
+            + marker.len();
+        let prefix = &src[..byte];
+        let line = prefix.matches('\n').count() as u32;
+        let col = prefix.rfind('\n').map_or(byte, |nl| byte - nl - 1) as u32;
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(src);
+        complete(
+            &analysis,
+            None,
+            Position::new(line, col),
+            idx,
+            Some(ws.snapshot.symbols()),
+            &[],
+            false,
+        )
+        .into_iter()
+        .map(|i| (i.label, i.kind.expect("every item carries a kind")))
+        .collect()
+    }
+
+    fn kind_of(
+        items: &[(String, CompletionItemKind)],
+        label: &str,
+    ) -> Option<CompletionItemKind> {
+        items.iter().find(|(l, _)| l == label).map(|(_, k)| *k)
+    }
+
+    fn declares(files: &[(&str, &str)], qualified: &str) -> bool {
+        let ws = crate::server::test_support::TestWorkspace::files(files);
+        let found = ws
+            .snapshot
+            .symbols()
+            .all_symbols()
+            .any(|sym| sym.name == qualified);
+        found
+    }
+
+    /// THE REPORT, and the deliberate inversion of B099's emptiness pin.
+    /// The premise assertion is carried over verbatim in spirit: the
+    /// workspace really declares the member, so this cannot pass by
+    /// accident of setup.
+    #[test]
+    fn the_workspace_namespace_that_used_to_offer_nothing_now_offers_its_member() {
+        let files = [(
+            "compl.as",
+            "namespace Helper { void DoThing() {} }\nvoid f() { Helper:: }",
+        )];
         assert!(
-            items.is_empty(),
-            "`Helper::` offers nothing today; got {:?}",
-            items.iter().map(|i| &i.label).collect::<Vec<_>>()
-        );
-        // Not vacuous: the workspace really does declare the member, and the
-        // same call shape really does produce items for a typedb scope.
-        assert!(
-            ws.snapshot
-                .symbols()
-                .all_symbols()
-                .any(|sym| sym.name == "Helper::DoThing"),
+            declares(&files, "Helper::DoThing"),
             "test premise: the workspace declares Helper::DoThing"
         );
-        assert!(!after_scope("UI", &idx).is_empty(), "positive control");
+        let items = complete_after(&files, 0, "Helper::", Some(&real_index()));
+        assert_eq!(
+            kind_of(&items, "DoThing"),
+            Some(CompletionItemKind::FUNCTION),
+            "`Helper::` must offer DoThing; got {items:?}"
+        );
+    }
+
+    /// Every declaration kind a namespace can hold, each asserted with its
+    /// OWN kind — B099's defect is exactly what would come back if the new
+    /// producer defaulted to FUNCTION.
+    #[test]
+    fn each_member_kind_is_labelled_correctly() {
+        let files = [(
+            "compl.as",
+            "namespace Bag {\n\
+               void Fn() {}\n\
+               class Cls {}\n\
+               interface Iface { void M(); }\n\
+               enum Kind { Alpha, Beta }\n\
+               funcdef void Cb(int);\n\
+               int g_Global = 1;\n\
+               namespace Inner { void Deep() {} }\n\
+             }\n\
+             void f() { Bag:: }",
+        )];
+        let items = complete_after(&files, 0, "Bag::", Some(&real_index()));
+        for (label, want) in [
+            ("Fn", CompletionItemKind::FUNCTION),
+            ("Cls", CompletionItemKind::CLASS),
+            ("Iface", CompletionItemKind::INTERFACE),
+            ("Kind", CompletionItemKind::ENUM),
+            ("Cb", CompletionItemKind::INTERFACE),
+            ("g_Global", CompletionItemKind::VARIABLE),
+            ("Inner", CompletionItemKind::MODULE),
+        ] {
+            assert_eq!(
+                kind_of(&items, label),
+                Some(want),
+                "`Bag::{label}` should be {want:?}; got {items:?}"
+            );
+        }
+        // An enum's VALUES are not members of the enclosing namespace — the
+        // B088 separation, which this new producer must not blur.
+        assert!(
+            kind_of(&items, "Alpha").is_none(),
+            "`Bag::` must not offer an enum value; got {items:?}"
+        );
+    }
+
+    /// A nested workspace namespace, addressed at its full path.
+    #[test]
+    fn a_nested_workspace_namespace_offers_its_own_members() {
+        let files = [(
+            "compl.as",
+            "namespace A { namespace B { void Deep() {} } }\nvoid f() { A::B:: }",
+        )];
+        assert!(declares(&files, "A::B::Deep"), "test premise");
+        let items = complete_after(&files, 0, "A::B::", Some(&real_index()));
+        assert_eq!(
+            kind_of(&items, "Deep"),
+            Some(CompletionItemKind::FUNCTION),
+            "got {items:?}"
+        );
+        // The outer namespace offers the inner one, not the inner's members.
+        let outer = complete_after(&files, 0, "A::", Some(&real_index()));
+        assert_eq!(kind_of(&outer, "B"), Some(CompletionItemKind::MODULE));
+        assert!(kind_of(&outer, "Deep").is_none(), "got {outer:?}");
+    }
+
+    /// A namespace declared across TWO files contributes from both —
+    /// AngelScript namespaces are open and additive.
+    #[test]
+    fn a_namespace_split_across_two_files_offers_both_halves() {
+        let files = [
+            ("one.as", "namespace Split { void FromOne() {} }"),
+            (
+                "two.as",
+                "namespace Split { void FromTwo() {} }\nvoid f() { Split:: }",
+            ),
+        ];
+        let items = complete_after(&files, 1, "Split::", Some(&real_index()));
+        assert_eq!(kind_of(&items, "FromOne"), Some(CompletionItemKind::FUNCTION));
+        assert_eq!(kind_of(&items, "FromTwo"), Some(CompletionItemKind::FUNCTION));
+    }
+
+    /// THE COLLISION, both directions. A plugin adding to `namespace UI`
+    /// must see its own member AND the engine's — namespaces are additive,
+    /// so this is a MERGE, not a choice of source.
+    #[test]
+    fn a_workspace_namespace_that_shadows_an_engine_one_merges_with_it() {
+        let files = [(
+            "compl.as",
+            "namespace UI { void MyHelper() {} }\nvoid f() { UI:: }",
+        )];
+        let items = complete_after(&files, 0, "UI::", Some(&real_index()));
+        assert_eq!(
+            kind_of(&items, "MyHelper"),
+            Some(CompletionItemKind::FUNCTION),
+            "the plugin's own member must be offered"
+        );
+        assert_eq!(
+            kind_of(&items, "Begin"),
+            Some(CompletionItemKind::FUNCTION),
+            "the engine's members must survive the merge"
+        );
+        assert_eq!(
+            kind_of(&items, "Cond"),
+            Some(CompletionItemKind::ENUM),
+            "B099's kinds must survive the merge"
+        );
+        assert_eq!(
+            kind_of(&items, "Plot"),
+            Some(CompletionItemKind::MODULE),
+            "…including the nested-namespace kind"
+        );
+    }
+
+    /// The other direction of the collision: the workspace and the typedb
+    /// declare the SAME name under the same namespace with DIFFERENT kinds.
+    /// The workspace wins — that is the shadowing order the resolver uses
+    /// and the one B088 already follows for enums — and there is exactly
+    /// ONE entry, not two.
+    #[test]
+    fn a_name_declared_by_both_resolves_to_the_workspace_once() {
+        let files = [(
+            "compl.as",
+            "namespace UI { class Cond {} }\nvoid f() { UI:: }",
+        )];
+        let items = complete_after(&files, 0, "UI::", Some(&real_index()));
+        let conds: Vec<_> = items.iter().filter(|(l, _)| l == "Cond").collect();
+        assert_eq!(conds.len(), 1, "one entry for `UI::Cond`, got {conds:?}");
+        assert_eq!(
+            conds[0].1,
+            CompletionItemKind::CLASS,
+            "the workspace declaration shadows the engine enum"
+        );
+        // Not vacuous: the engine really does call this an enum.
+        let engine_only = complete_after(&[("empty.as", "void f() { UI:: }")], 0, "UI::", Some(&real_index()));
+        assert_eq!(kind_of(&engine_only, "Cond"), Some(CompletionItemKind::ENUM));
+    }
+
+    /// The GH #58 closure fence gates a DIAGNOSTIC, not a suggestion.
+    /// Completion must work whether or not the dependency closure is
+    /// complete — asserted from both sides so nobody later "fixes" this by
+    /// reusing the checker's gate.
+    #[test]
+    fn completion_does_not_consult_the_dependency_closure_fence() {
+        let source = "namespace Fenced { void Thing() {} }\nvoid f() { Fenced:: }";
+        let idx = real_index();
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(source);
+        let byte = source.find("Fenced:: }").expect("marker") + "Fenced::".len();
+        let prefix = &source[..byte];
+        let line = prefix.matches('\n').count() as u32;
+        let col = prefix.rfind('\n').map_or(byte, |nl| byte - nl - 1) as u32;
+
+        for complete_closure in [false, true] {
+            let mut ws = SymbolTable::new();
+            let fid = ws.allocate_file_id();
+            let syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
+            ws.set_file_symbols(fid, syms);
+            if complete_closure {
+                ws.mark_dependency_closure_complete();
+            }
+            let items: Vec<_> = complete(
+                &analysis,
+                None,
+                Position::new(line, col),
+                Some(&idx),
+                Some(&ws),
+                &[],
+                false,
+            )
+            .into_iter()
+            .map(|i| (i.label, i.kind.expect("kind")))
+            .collect();
+            assert_eq!(
+                kind_of(&items, "Thing"),
+                Some(CompletionItemKind::FUNCTION),
+                "closure_complete={complete_closure} must not change completion; got {items:?}"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL. A producer that returns everything unconditionally
+    /// would pass every test above; this is what it fails. An undeclared
+    /// namespace offers nothing, and a declared one in the same workspace
+    /// does not leak its members into it.
+    #[test]
+    fn an_undeclared_namespace_still_offers_nothing() {
+        let files = [(
+            "compl.as",
+            "namespace Helper { void DoThing() {} }\nvoid f() { Nope:: }",
+        )];
+        let items = complete_after(&files, 0, "Nope::", Some(&real_index()));
+        assert!(
+            items.is_empty(),
+            "`Nope::` declares nothing and must offer nothing; got {items:?}"
+        );
+        // Positive control: the same workspace, the namespace that exists.
+        let ok = complete_after(
+            &[(
+                "compl.as",
+                "namespace Helper { void DoThing() {} }\nvoid f() { Helper:: }",
+            )],
+            0,
+            "Helper::",
+            Some(&real_index()),
+        );
+        assert_eq!(kind_of(&ok, "DoThing"), Some(CompletionItemKind::FUNCTION));
+    }
+
+    /// A workspace CLASS is not a namespace. AngelScript has no statics, so
+    /// `MyClass::` must not spill the class's members — the same fence the
+    /// checker's GH #58 rule keeps (decision 4).
+    #[test]
+    fn a_workspace_class_is_not_a_namespace() {
+        let files = [(
+            "compl.as",
+            "class Holder { void Method() {} int field; }\nvoid f() { Holder:: }",
+        )];
+        assert!(declares(&files, "Holder::Method"), "test premise");
+        let items = complete_after(&files, 0, "Holder::", Some(&real_index()));
+        assert!(
+            items.is_empty(),
+            "`Holder::` is a class, not a namespace; got {items:?}"
+        );
+    }
+
+    /// B101 added `is_const` to `SymbolKind::Function`, and this producer
+    /// projects `SymbolKind` into a completion kind — so a qualifier riding
+    /// along on the variant must not change the answer.
+    ///
+    /// Not a hypothetical: `ast::Item::Function` pools `is_const` straight
+    /// from the parser, and a namespace-level function goes through that
+    /// exact arm, so a const-qualified one really can reach here. The
+    /// mapping matches `Function { .. }`, which absorbs new fields silently
+    /// — silently is the problem, so it is pinned rather than trusted. Both
+    /// spellings must land on FUNCTION, and neither may fall through.
+    #[test]
+    fn a_const_qualifier_on_a_namespace_function_does_not_change_its_kind() {
+        let files = [(
+            "compl.as",
+            "namespace Q { void Plain() {} void Qualified() const {} }\nvoid f() { Q:: }",
+        )];
+        let items = complete_after(&files, 0, "Q::", Some(&real_index()));
+        assert_eq!(
+            kind_of(&items, "Plain"),
+            Some(CompletionItemKind::FUNCTION),
+            "got {items:?}"
+        );
+        assert_eq!(
+            kind_of(&items, "Qualified"),
+            Some(CompletionItemKind::FUNCTION),
+            "a const-qualified function is still a function; got {items:?}"
+        );
+        // Premise: the two really are distinguishable in the pool, so this
+        // is not two identical symbols agreeing with themselves.
+        let ws = crate::server::test_support::TestWorkspace::files(&files);
+        let consts: Vec<bool> = ["Q::Plain", "Q::Qualified"]
+            .iter()
+            .map(|name| {
+                ws.snapshot
+                    .symbols()
+                    .lookup(name)
+                    .iter()
+                    .any(|sym| matches!(sym.kind, SymbolKind::Function { is_const: true, .. }))
+            })
+            .collect();
+        assert_eq!(
+            consts,
+            vec![false, true],
+            "test premise: B101 records the qualifier, so the pool distinguishes them"
+        );
+    }
+
+    /// The enumeration this producer uses is the SAME one the checker's
+    /// GH #58 near-name hint uses. Pinned so the two cannot drift into two
+    /// walks of the same data — the defect shape B073/B076/B098 all were.
+    #[test]
+    fn the_checker_and_completion_enumerate_the_same_members() {
+        let source = "namespace Shared { void A() {} class B {} enum C { V } }";
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(source);
+        let mut ws = SymbolTable::new();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, analysis.masked_source(), &analysis.file);
+        ws.set_file_symbols(fid, syms);
+
+        let scope = crate::typecheck::GlobalScope::new(&ws, None);
+        let checker_names = scope.workspace_namespace_member_names("Shared");
+        let mut producer_names: Vec<String> = ws
+            .namespace_member_symbols("Shared")
+            .into_iter()
+            .map(|sym| sym.name.rsplit("::").next().unwrap().to_string())
+            .collect();
+        producer_names.sort();
+        producer_names.dedup();
+        assert_eq!(
+            checker_names, producer_names,
+            "the checker hint and the completion producer must read one enumeration"
+        );
+        assert!(
+            checker_names.contains(&"A".to_string()),
+            "test premise: the enumeration is non-empty, got {checker_names:?}"
+        );
     }
 }
