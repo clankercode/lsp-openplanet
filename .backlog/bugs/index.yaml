@@ -93,3 +93,4 @@ bugs:
     - file: B092-just-test-reported-incomplete.todo
     - file: B093-no-quick-fix-for-nomatchingsym.todo
     - file: B094-when-a-class-c-implements-an-i.todo
+    - file: B095-extension-should-have-suggesti.todo

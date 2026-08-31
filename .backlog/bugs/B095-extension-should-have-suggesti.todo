@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T08:50:48Z"
+depends_on: []
+estimate_hours: 1
+id: B095
+priority: high
+status: pending
+tags: []
+title: Extension should have suggestions for implementing missing methods on classes that implement an interface
+updated_at: "2026-08-31T08:50:48Z"
+---
+
+Extension should have suggestions for implementing missing methods on classes that implement an interface
