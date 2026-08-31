@@ -574,6 +574,7 @@ mod tests {
         CodeActionRequest {
             uri,
             analysis,
+            defines: crate::server::code_actions::no_defines(),
             range: whole_doc(&analysis.source),
             context,
             workspace,
@@ -1236,6 +1237,7 @@ mod tests {
             let actions: Vec<_> = crate::server::code_actions::code_actions(&CodeActionRequest {
                 uri: &uri,
                 analysis: &analysis,
+                defines: crate::server::code_actions::no_defines(),
                 range: diagnostics[0].range,
                 context: &context,
                 workspace: &workspace,
@@ -1500,6 +1502,7 @@ mod tests {
             let action = crate::server::code_actions::code_actions(&CodeActionRequest {
                 uri: &uri,
                 analysis: &analysis,
+                defines: crate::server::code_actions::no_defines(),
                 // The cursor sits on the squiggle, as it does in an editor.
                 range: diagnostic.range,
                 context: &context,
