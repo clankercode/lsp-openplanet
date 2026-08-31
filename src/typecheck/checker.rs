@@ -2596,7 +2596,7 @@ impl<'a> Checker<'a> {
                 if !external.is_empty() {
                     let ranges = call_site::arity_ranges(&external);
                     self.check_arity_against_ranges(display_name, &ranges, args.len(), callee_span);
-                    self.check_external_call_arg_types(display_name, qualified, args, &external);
+                    self.check_external_call_arg_types(display_name, qualified, args, &external, None);
                 } else if let Some(ranges) =
                     self.scope.lookup_external_function_arity_ranges(qualified)
                 {
@@ -2789,6 +2789,82 @@ impl<'a> Checker<'a> {
             _ => return None,
         };
         self.scope.lookup_funcdef(&name)
+    }
+
+    /// B102: resolve `array<T>`'s TEMPLATE-MEMBER funcdef slot by
+    /// substituting the receiver's element type.
+    ///
+    /// `void Sort(T[]::less&in, uint startAt = 0, uint count = uint(-1))` is
+    /// the only slot in the typedb whose expected signature is not fixed: the
+    /// comparator's parameters ARE the array's element type, so the signature
+    /// has to be computed per call site. Every other funcdef check in this
+    /// file compares against one declared signature.
+    ///
+    /// SYNTHESISED, because there is nothing to look up. `T[]::less` is
+    /// typeid 67108888, referenced by `Sort`'s argument list and DECLARED
+    /// NOWHERE, and the template parameter `T` (67112305) dangles the same
+    /// way -- re-measured against the 1.29.5 and 1.29.14 fixture dumps and
+    /// this machine's live 1.29.14 install, all three identical, so it is a
+    /// stable dump gap rather than a version artefact. Only
+    /// `bool less_nonconst(T&in a, T&in b)` is declared; `SortNonConst` is
+    /// given the same synthesised treatment rather than read from that
+    /// declaration, so the two slots cannot drift apart.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT DECIDE. Whether the engine accepts a
+    /// non-const comparator at the const slot is UNMEASURED -- B097 makes game
+    /// probing impossible repo-wide, so there is no verdict to be had, and a
+    /// guess would false-positive on every plugin that guessed the other way.
+    /// Const-ness is therefore neutral by CONSTRUCTION rather than by a
+    /// carve-out a later edit could drop: `funcdef_types_compatible` peels
+    /// `const` before comparing. What is left is wrong under EVERY reading of
+    /// the missing declaration -- arity, return type, element type, parameter
+    /// mode. The mode half is not a guess either: B027 measured
+    /// `Can't create delegate` on any plain/&in/&out/&inout mismatch, and this
+    /// reuses that comparison rather than adding a second one.
+    fn synth_template_member_funcdef(
+        &self,
+        param_text: &str,
+        elem: Option<&TypeRepr>,
+    ) -> Option<FuncdefSig> {
+        let elem = elem?;
+        if elem.is_error() {
+            return None;
+        }
+        // Strip the SLOT's own decoration: `&in`/`const` here describe how the
+        // comparator HANDLE is passed to `Sort`, and say nothing about the
+        // comparator's own parameters.
+        let bare = param_text
+            .trim()
+            .trim_start_matches("const ")
+            .split('&')
+            .next()?
+            .trim();
+        // Matched in full rather than by a `::less` tail: a workspace type
+        // could end that way, and this must fire only for the engine's two
+        // array comparator slots.
+        if !matches!(bare, "T[]::less" | "T[]::less_nonconst") {
+            return None;
+        }
+        let elem_text = elem.display();
+        Some(FuncdefSig {
+            qualified: bare.to_string(),
+            return_type: "bool".to_string(),
+            param_types: vec![elem_text.clone(), elem_text],
+            param_modes: vec![ParamMode::In, ParamMode::In],
+        })
+    }
+
+    /// [`Self::slot_funcdef`], falling back to the template-member
+    /// substitution above. `elem` is the receiver's array element type and is
+    /// `None` at every call site that is not an array method, so the
+    /// substitution can only fire where there is a `T` to substitute.
+    fn slot_funcdef_templated(
+        &self,
+        param_text: &str,
+        elem: Option<&TypeRepr>,
+    ) -> Option<FuncdefSig> {
+        self.slot_funcdef(param_text)
+            .or_else(|| self.synth_template_member_funcdef(param_text, elem))
     }
 
     /// B089: [`Self::slot_funcdef`], resolved in the DECLARING SCOPE of
@@ -3423,6 +3499,7 @@ impl<'a> Checker<'a> {
         qualified_name: &str,
         args: &[CallArg],
         overload: &OverloadSig,
+        elem: Option<&TypeRepr>,
     ) {
         // Compute each argument's type once (this also walks the args for
         // nested diagnostics — callers must not pre-walk).
@@ -3497,7 +3574,7 @@ impl<'a> Checker<'a> {
                     // the CoroutineFunc decay below. A provably
                     // non-function arg is `No matching signatures`
                     // (GH #47 style).
-                    if let Some(fd) = self.slot_funcdef(param_text) {
+                    if let Some(fd) = self.slot_funcdef_templated(param_text, elem) {
                         if self.arg_fails_funcdef_slot(&fd, &arg.value, arg_ty) {
                             self.diagnostics.push(TypeDiagnostic {
                                 span: arg.value.span,
@@ -3604,11 +3681,18 @@ impl<'a> Checker<'a> {
         qualified_name: &str,
         args: &[CallArg],
         overloads: &[OverloadSig],
+        elem: Option<&TypeRepr>,
     ) {
         if let Some(sig) = call_site::unique_overload_for_argc(overloads, args.len()) {
-            self.walk_args_and_check_external_param_types(display_name, qualified_name, args, sig);
+            self.walk_args_and_check_external_param_types(
+                display_name,
+                qualified_name,
+                args,
+                sig,
+                elem,
+            );
         } else {
-            self.check_external_overload_set(qualified_name, args, overloads);
+            self.check_external_overload_set(qualified_name, args, overloads, elem);
         }
     }
 
@@ -3624,6 +3708,7 @@ impl<'a> Checker<'a> {
         qualified_name: &str,
         args: &[CallArg],
         overloads: &[OverloadSig],
+        elem: Option<&TypeRepr>,
     ) {
         // Compute each argument's type once (this also walks the args for
         // nested diagnostics — callers must not pre-walk).
@@ -3700,7 +3785,7 @@ impl<'a> Checker<'a> {
                 // bind test); a provably non-function arg rejects the
                 // candidate outright. Named/unknown shapes stay neutral
                 // (arg_fails_funcdef_slot's FP guard).
-                if let Some(fd) = self.slot_funcdef(param_text) {
+                if let Some(fd) = self.slot_funcdef_templated(param_text, elem) {
                     if self.arg_fails_funcdef_slot(&fd, &args[i].value, arg_ty) {
                         compatible = false;
                         evidence_span = Some(args[i].value.span);
@@ -4218,11 +4303,18 @@ impl<'a> Checker<'a> {
                     let ranges = call_site::arity_ranges(&overloads);
                     self.check_arity_against_ranges(&member_name, &ranges, args.len(), callee.span);
                     let qualified_method = format!("{type_name}::{member_name}");
+                    // B102: the only site with a `T` to substitute. An
+                    // `array<T>` receiver carries the element type that
+                    // `T[]::less` needs; everywhere else passes `None`, so
+                    // the synthesised comparator signature cannot fire
+                    // where there is nothing to substitute.
+                    let elem = obj_ty.array_element_type().cloned();
                     self.check_external_call_arg_types(
                         &member_name,
                         &qualified_method,
                         args,
                         &overloads,
+                        elem.as_ref(),
                     );
                 } else if let Some(ranges) = self
                     .scope
@@ -4392,7 +4484,7 @@ impl<'a> Checker<'a> {
                             .map(|s| (s.min_args, s.param_types.len()))
                             .collect();
                         self.check_arity_against_ranges(display, &ranges, args.len(), callee.span);
-                        self.check_external_call_arg_types(display, &qual, args, &overloads);
+                        self.check_external_call_arg_types(display, &qual, args, &overloads, None);
                         return t;
                     }
                     if let Some(ranges) = self.scope.lookup_external_function_arity_ranges(&qual) {

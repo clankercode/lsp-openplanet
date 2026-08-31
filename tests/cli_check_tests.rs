@@ -5320,3 +5320,121 @@ fn check_command_issue_repro_b062_manifest_exports_root_unused() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// B102: array<T>::Sort / SortNonConst callbacks.
+//
+// `void Sort(T[]::less&in, uint startAt = 0, uint count = uint(-1))` is the
+// only TEMPLATE-MEMBER funcdef slot in the typedb: its parameter types are the
+// ARRAY'S ELEMENT TYPE, so the expected signature is computed per call site by
+// substituting T rather than compared against one fixed declaration.
+//
+// WHAT IS MEASURED AND WHAT IS NOT. The const funcdef is DANGLING in every
+// shipped dump — typeid 67108888 is referenced by `Sort`'s arg list and never
+// declared, and so is the template parameter `T` (67112305); re-measured here
+// against 1.29.5 and 1.29.14 and the live install, all three the same. Only
+// `bool less_nonconst(T&in a, T&in b)` exists. So the const form's signature
+// is SYNTHESISED, and whether the engine accepts a non-const callback at the
+// const slot is UNMEASURED: B097 makes game probing impossible repo-wide, so
+// there is no verdict to have. The rule is therefore scoped to what is wrong
+// under EVERY reading of that signature — arity, return type, element type
+// and parameter mode — and stays neutral on const-ness by construction, since
+// `funcdef_types_compatible` peels `const`. The neutrality is pinned as a
+// required silence in the correct-callbacks fixture.
+//
+// Parameter MODE is not a guess: B027 measured `Can't create delegate` on any
+// plain/&in/&out/&inout mismatch (OP 1.29.5, 2026-08-29), and this reuses that
+// comparison rather than adding a second one.
+//
+// NO FLEET SWEEP IS OFFERED FOR THIS TICKET, deliberately. `.Sort(` with a
+// callback appears ZERO times across the whole 151-plugin corpus and so does
+// `.SortNonConst(` — every plugin that sorts uses SortAsc/SortDesc or
+// hand-rolls a quicksort over its own workspace funcdef, which is B089's path.
+// A zero delta there is guaranteed whether this code works or not, so it would
+// be evidence of nothing.
+
+/// Error lines only. The mismatch fixture declares helpers it never calls, so
+/// unused-declaration warnings would swamp an unfiltered assertion there.
+fn repro_errors(slug: &str) -> Vec<String> {
+    let (_ok, stdout, _stderr) = run_issue_repro_typedb(slug);
+    stdout
+        .lines()
+        .filter(|l| l.contains(": error:"))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// THE NEGATIVE CONTROL, and it comes first on purpose: a rule that rejects
+/// every `.Sort(cb)` passes the mismatch fixture below on its own.
+///
+/// Asserted on ALL diagnostics rather than errors alone. The fixture is
+/// deliberately clean enough to hold that line — every declaration in it is
+/// used — which makes the control strictly stronger: collateral WARNINGS from
+/// a future change to this path fail here too, instead of hiding behind an
+/// error-only filter.
+#[test]
+fn b102_correct_sort_callbacks_stay_silent() {
+    let (_ok, stdout, _stderr) = run_issue_repro_typedb("b102-array-sort-correct-callbacks");
+    let diagnostics: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains(": error:") || l.contains(": warning:"))
+        .collect();
+    assert!(
+        diagnostics.is_empty(),
+        "every callback in this fixture is correct for its element type: {diagnostics:#?}"
+    );
+}
+
+/// Each mismatched bind must be reported. Asserted per LINE rather than as a
+/// count, so a failure names the row that regressed instead of moving a total.
+#[test]
+fn b102_mismatched_sort_callbacks_are_reported() {
+    let errors = repro_errors("b102-array-sort-mismatched-callbacks");
+    let joined = errors.join("\n");
+    for (line, what) in [
+        (32, "wrong arity, one parameter"),
+        (33, "wrong arity, three parameters"),
+        (34, "wrong return type, void"),
+        (35, "wrong return type, int"),
+        (36, "wrong element type, string comparer on int[]"),
+        (37, "wrong element type, Item comparer on int[]"),
+        (38, "wrong parameter mode, &out"),
+        (39, "wrong parameter mode, &inout"),
+        (40, "wrong parameter mode, by value"),
+        (43, "wrong element type, int comparer on Item@[]"),
+        (45, "the SortNonConst slot checks the same way"),
+        (48, "a funcdef HANDLE of the wrong shape"),
+    ] {
+        assert!(
+            joined.contains(&format!("Main.as:{line}:")),
+            "no diagnostic on line {line} ({what}):\n{joined}"
+        );
+    }
+    // Every `.Sort`/`.SortNonConst` in the fixture is a listed row, so an
+    // extra error means the rule fired somewhere it should not have. Without
+    // this the per-line loop is satisfied by a rule that rejects everything.
+    assert_eq!(
+        errors.len(),
+        12,
+        "unexpected extra diagnostics beyond the listed rows:\n{joined}"
+    );
+}
+
+/// Line 48 of the mismatch fixture, called out because it is what makes the
+/// sibling fixture's correct-handle row falsifiable.
+///
+/// A funcdef-typed VARIABLE at the slot is a different code path from a bare
+/// function name. Measured directly before pinning it: retyping the correct
+/// fixture's `MyLess` to a string comparer turned its `xs.Sort(viaHandle)`
+/// from silent into `No matching signatures to 'array::Sort(MyLess@)'`. So
+/// the silence over there is the check passing, not the check being absent.
+#[test]
+fn b102_a_funcdef_handle_of_the_wrong_shape_is_reported() {
+    let errors = repro_errors("b102-array-sort-mismatched-callbacks");
+    assert!(
+        errors.iter().any(|l| l.contains("Main.as:48:")
+            && l.contains("array::Sort(StringLess@)")),
+        "a funcdef handle whose signature does not match the element type \
+         must be rejected like a bare function name: {errors:#?}"
+    );
+}
