@@ -1,0 +1,71 @@
+---
+complexity: medium
+created_at: "2026-08-31T04:29:03Z"
+depends_on: []
+estimate_hours: 1
+id: B084
+priority: high
+status: pending
+tags: []
+title: A called global function is reported unused, and B062's export rooting masks it rather than fixing it
+updated_at: "2026-08-31T04:29:03Z"
+---
+Found 2026-08-31 by lane-b060-b062 while verifying B062's removals, and
+explicitly flagged as NOT that lane's to chase. Not investigated.
+
+## Observation
+
+On master before B062, `CoordToPos` in tm-editor-plus-plus is reported unused —
+but production files call it:
+
+    Editor/WFC.as:472
+    Editor/CacheMapBounds.as:7
+
+A function with live call sites should be credited by the ordinary
+"referenced anywhere" pass, entirely independently of any export surface.
+
+## Why it is still worth a ticket even though the symptom is gone
+
+B062 silences this warning, but **for the wrong reason** — `CoordToPos` also
+has an export stub, so it is now rooted as part of the export surface. The FP
+gate is clean either way, which is precisely the problem: **the export rooting
+masks a call-site crediting defect rather than fixing it.**
+
+So the latent bug survives for every function that is called but NOT exported.
+Nothing currently in the suite would notice.
+
+## Where to look
+
+B061-adjacent. That ticket fixed property-syntax reads not crediting their
+`get_`/`set_` accessor, via `record_value_use_variants` and
+`qualified_virtual_name`. This is a plain function call not crediting its
+callee, which is a different path — but the family is the same: a real
+reference that `is_used` cannot match to the declaration, usually because the
+recorded spelling and the declared spelling are qualified differently.
+
+Worth checking first whether the call sites are inside a namespace, a class
+method, or reached through the namespace ladder — B061 found that `is_used`
+deliberately refuses to trust a bare tail as a suffix match, requiring two
+`::` segments, and that is exactly the kind of asymmetry that produces this.
+
+## Test plan (TDD, red first)
+
+Red: a global function called from an ordinary production function, in a
+fixture where it is NOT exported, asserted silent. Confirm it currently warns.
+
+Variants, per repo CLAUDE.md — sweep the spellings rather than pinning one:
+
+- called from file scope vs from inside `namespace N`
+- called as a bare name vs qualified `N::F`
+- called from a class method
+- called from another namespace entirely
+- a genuinely uncalled global still warns (the over-rooting gate)
+- an exported-and-called function stays silent for BOTH reasons, so removing
+  the export must not resurrect the warning — that is the assertion that would
+  have caught this masking
+
+## Related
+
+B061 (property reads not crediting accessors — same family, different path),
+B062 (whose export rooting masks this), tm-editor-plus-plus
+`Editor/WFC.as`, `Editor/CacheMapBounds.as`.
