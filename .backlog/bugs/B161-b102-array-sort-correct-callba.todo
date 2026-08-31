@@ -52,3 +52,39 @@ RISK POLARITY
 
 DEPENDS ON B145 being merged (the corpus and its verdict column are the
 evidence). Assign to lane-const, which owns the B144/B152 const-exactness seam.
+
+FIXED BY B152 (lane-const, commit b2610d8) — but verify it at the NEW location.
+
+B152's const tightening makes the checker reject exactly what the engine rejects
+here. Confirmed on the committed tree:
+
+  Main.as:108:13: error: No matching signatures to 'array::Sort(LessIntNonConst)'
+  Main.as:110:16: error: No matching signatures to 'array::Sort(LessItemHandle)'
+  Main.as:113:16: error: No matching signatures to 'array::Sort(LessDict)'
+
+THE TRAP, raised by lane-const and worth recording because the wrong check looks
+like a pass: those three rows are NO LONGER IN b102-array-sort-correct-callbacks.
+B152 moved them to b102-array-sort-mismatched-callbacks, because once the
+engine's verdict was known they are mismatches and the "correct" fixture had no
+business asserting silence on them.
+
+So re-probing the CORRECT fixture and diffing engine-vs-LSP now yields agreement
+(engine CLEAN, LSP 0 diagnostics) for a COMPOUND reason: the checker got stricter
+AND the rows moved. That reads as a pass without isolating which half did the
+work, and if the tightening were reverted the same fixture would still agree.
+A green from a compound cause is not evidence for either half of it.
+
+THE ISOLATING CHECK is the mismatched fixture at lines 108/110/113, where the LSP
+errors and the engine rejects at the same three lines — engine offsets (108,8),
+(110,11), (113,11) in the 2026-09-01 probe. Cite that. Behaviour is additionally
+pinned independent of any fixture's line numbers by the B152 tests
+`the_sort_slot_wants_the_engines_own_comparator_spelling` and
+`a_value_parameters_single_const_position_is_exact`.
+
+OPEN QUESTION FOR THE B145 CORPUS REGENERATION (lane-resolver, merging after
+const): B161 was found because that corpus compared engine-vs-LSP across every
+fixture. If it holds OTHER engine-reject/LSP-silent rows, some may also have been
+closed by B152 and some may not. Diff the regenerated corpus against the pre-B152
+one and read the differences as findings, not as cleanup — each row that changed
+is either a bug B152 fixed or a bug it introduced, and the diff is the only place
+that distinction is visible.
