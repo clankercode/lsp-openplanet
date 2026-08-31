@@ -688,6 +688,45 @@ indistinguishable from "I am structurally incapable of seeing it".
   not since some more recent point, and never merely because the change under
   test is inert.
 
+- **`None` from a canonicalizer means "already canonical", not "not found".** A
+  lane replaced a deleted helper with what it called a "strictly wider"
+  resolver path. It was not wider. `canonical_enum_key` returns `None` when the
+  spelling **already is** the key — true of a Nadeo module-level enum whose
+  synthetic module coincides with a real Core scope — so a caller written as
+  `if let Some(key) = …` silently dropped exactly the inputs that needed no
+  work. Ten `Meta::*` spellings stopped resolving.
+
+  **The two meanings of `None` are opposites here**: "I could not do this" and
+  "this needed nothing done". A function that conflates them forces every
+  caller to guess, and the guess fails on precisely the well-behaved inputs —
+  the ones least likely to appear in a test fixture, because nothing about them
+  is interesting.
+
+  Prefer a type that cannot be misread: `Cow`-like "borrowed means unchanged",
+  or an explicit `enum { Canonical, Rewritten(String) }`, or return the input
+  unchanged so absence genuinely means absence. **If a sentinel has two
+  readings and both are plausible, the API is the defect, not the caller.**
+
+  Note what caught it: a **1403-spelling corpus sweep**, which failed and named
+  all ten. Not review, not the type system, not the suite — the totals were
+  identical before and after, which is the correct signature for a refactor and
+  also the signature of this bug.
+
+- **Comparing two sets requires the same extraction on both sides, and an
+  implausible number is the only alarm you get.** The same lane generated a
+  clippy baseline with `sort -u` over five fields and the branch with plain
+  `sort` over four — deduplicated against raw, four fields against five — and
+  the comparison reported **27 spurious additions**. Nothing errored. It was
+  caught because "39 unique" was implausible beside a 77 baseline.
+
+  This is the third distinct clippy-comparison failure recorded here (raw vs
+  unique totals; a set diff keyed on line numbers; now mismatched extraction),
+  and they share one cause: **the instrument was fine and the two sides were
+  not comparable.** A diff is a claim about two things measured the same way,
+  and nothing in the tooling checks that they were. Generate both sides with
+  **one script, in one run**, or the comparison is unverified regardless of how
+  careful the diff is.
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
