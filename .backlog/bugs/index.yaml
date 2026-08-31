@@ -136,3 +136,4 @@ bugs:
     - file: B135-hover-and-navigation-do-not-co.todo
     - file: B136-a-leading-const-binds-to-the-f.todo
     - file: B137-the-nadeo-loader-hardcodes-is.todo
+    - file: B138-b131-s-struct-audit-checks-dum.todo
