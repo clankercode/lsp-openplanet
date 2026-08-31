@@ -69,6 +69,12 @@ probe-selftest:
 repro-selftest:
     python3 scripts/issue_repro_game.py --selftest
 
+# Prove repro-selftest is non-vacuous: neuter each cleanup guard in a
+# throwaway copy and require the selftest to go red for every one. A green
+# suite with the protection removed would be worse than no suite (B077).
+probe-cleanup-mutants:
+    python3 scripts/check_probe_cleanup_nonvacuous.py
+
 # Fast unit tests only
 test-lib:
     cargo test --lib

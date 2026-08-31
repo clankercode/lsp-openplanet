@@ -191,9 +191,28 @@ def remove_tree(d: Path, attempts: int = 3) -> bool:
 
 
 def _cleanup_staged(*_args) -> None:
+    """Emergency unstage. REPORTS anything it could not remove.
+
+    This is the one teardown path with no caller left to inspect a return
+    value -- the handler runs and the process dies -- so stderr is the only
+    channel by which the operator learns that a fixture is still live in their
+    game. A silent failure here is the same shape as the `ignore_errors=True`
+    this commit removed, minus the possibility of noticing.
+    """
+    stuck = []
     for dest in list(_STAGED):
         if remove_tree(dest):
             _STAGED.discard(dest)
+        else:
+            stuck.append(str(dest))
+    if stuck:
+        print(
+            "ERROR: could not remove staged probe fixture(s): "
+            + ", ".join(stuck)
+            + " -- they are STILL INSTALLED in the game and will contaminate "
+            "later probes (B077). Remove them by hand.",
+            file=sys.stderr,
+        )
 
 
 def _install_teardown_handlers() -> None:
@@ -364,6 +383,17 @@ def _selftest_child() -> int:
             assert (root / "lsp-issue-repro-selftest" / "Main.as").exists()
             os.kill(os.getpid(), signal.SIGTERM)
             time.sleep(5)
+        return 0
+
+    if mode == "sigterm-stuck":
+        # Stage, make removal impossible, then die by signal. On this path
+        # nobody is left to inspect a return value, so stderr is the only
+        # channel by which the operator can learn a fixture is still live in
+        # their game.
+        shutil.rmtree = lambda *a, **k: None
+        staged(fixture, "lsp-issue-repro-stuck-child", plugins_dir=root).__enter__()
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)
         return 0
 
     # `atexit` mode: enter WITHOUT a `with`, so no `__exit__` will ever run,
@@ -541,6 +571,22 @@ def run_selftest() -> int:
         proc = run_child("atexit")
         check("the atexit child exited normally", proc.returncode, 3)
         check("a normal exit leaves no residue", probe_dirs_present(root), [])
+
+        # --- an emergency teardown that FAILS must SAY SO -------------------
+        # The same silent-success shape as `remove_tree`, on the one path where
+        # no caller is left to check a return value: the handler runs, cannot
+        # remove, and the process dies. Without a message the operator's game
+        # is left with a live fixture in it and nothing said so.
+        proc = run_child("sigterm-stuck")
+        check("a failed emergency teardown names the directory it could not remove",
+              "lsp-issue-repro-stuck-child" in proc.stderr, True)
+        check("and says the fixture is STILL INSTALLED",
+              "still installed" in proc.stderr.lower(), True)
+        # Proves the scenario is real rather than a test that merely fails to
+        # print: the child genuinely left the fixture installed.
+        check("and the stuck child really did leave it installed",
+              (root / "lsp-issue-repro-stuck-child").is_dir(), True)
+        real_rmtree(root / "lsp-issue-repro-stuck-child")
 
     if failures:
         print(f"FAIL: {len(failures)} check(s) failed", file=sys.stderr)
