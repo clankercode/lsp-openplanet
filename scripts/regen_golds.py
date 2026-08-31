@@ -66,12 +66,25 @@ MANIFEST = REPO / "docs/probes/MANIFEST.tsv"
 
 COLUMNS = [
     "artifact", "kind", "question", "generator",
-    "engine_version", "probe_date", "rows", "diff", "dependents",
+    "engine_version", "probe_date", "rows", "diff", "dependents", "volatility",
 ]
 
 CLEAN, DRIFT, UNCHECKED, ERROR = "CLEAN", "DRIFT", "UNCHECKED", "ERROR"
-KNOWN_KINDS = {"CORPUS", "SIDECAR", "TYPEDB", "PRIMARY"}
+KNOWN_KINDS = {"CORPUS", "SIDECAR", "TYPEDB", "PRIMARY", "VERSIONS"}
 KNOWN_DIFFS = {"STRING", "STRUCTURED", "MANUAL"}
+
+# B151. How to READ this artifact's drift, not new machinery: the axes are
+# already separated by scripts/diff_probe_corpus.py at comparison time.
+SURFACE, SEMANTICS, HYBRID = "SURFACE", "SEMANTICS", "HYBRID"
+KNOWN_VOLATILITY = {SURFACE, SEMANTICS, HYBRID}
+
+# Where SURFACE artifacts keep their retained per-version history. TWO stores,
+# because they hold different things: the type DUMPS the game ships, and the
+# CORPORA this repo probes out of it. One store cannot stand in for the other
+# -- a report claiming b052's surface was retained because the typedb store
+# held 1.29.14 was false, and is what prompted `is_retained` to check for an
+# actual copy rather than a matching version label.
+VERSION_STORES = ("tests/fixtures/typedb-versions", "docs/probes/versions")
 
 
 @dataclass
@@ -85,6 +98,7 @@ class Row:
     rows: str
     diff: str
     dependents: str
+    volatility: str
 
 
 @dataclass
@@ -125,6 +139,11 @@ def parse_manifest(path: Path = MANIFEST) -> list[Row]:
             raise ManifestError(f"{path}:{n} unknown kind {row.kind!r}")
         if row.diff not in KNOWN_DIFFS:
             raise ManifestError(f"{path}:{n} unknown diff mode {row.diff!r}")
+        if row.volatility not in KNOWN_VOLATILITY:
+            raise ManifestError(
+                f"{path}:{n} unknown volatility {row.volatility!r}; expected one of "
+                f"{sorted(KNOWN_VOLATILITY)}"
+            )
         out.append(row)
     if not out:
         raise ManifestError(f"{path} parsed to zero data rows")
@@ -208,6 +227,114 @@ def live_engine_build(log: Path | None = None) -> str | None:
         return None
     found = VERSION_LINE.findall(log.read_text(encoding="utf8", errors="replace"))
     return found[-1][1] if found else None
+
+
+def retained_versions() -> list[str]:
+    """Versions held in any SURFACE version store.
+
+    Read from the DIRECTORIES, never from a list: both stores document an
+    "adding a version" procedure done by hand, and a hand-kept index of a
+    hand-filled directory is two places to fall out of step.
+    """
+    out: set[str] = set()
+    for name in VERSION_STORES:
+        store = REPO / name
+        if store.is_dir():
+            out |= {d.name for d in store.iterdir() if d.is_dir()}
+    return sorted(out)
+
+
+def archived_versions_of(row: Row) -> list[str]:
+    """Versions of THIS artifact that a store actually holds a copy of.
+
+    Deliberately per-artifact and not per-store. Three successive versions of
+    this report were wrong in the same direction, each looser than the last:
+    "a store exists", then "a store holds the live version", then "a store
+    holds some version". All three said b052's surface was safe because the
+    TYPEDB store held 1.29.14 -- a claim about a different artifact entirely.
+    The guarantee the policy actually makes is narrow: regenerating this
+    artifact must not destroy the answers it holds RIGHT NOW, which is true
+    only if THIS artifact's CURRENT version is archived somewhere.
+    """
+    out: list[str] = []
+    src = REPO / row.artifact
+    for store_name in VERSION_STORES:
+        store = REPO / store_name
+        if not store.is_dir():
+            continue
+        for d in sorted(store.iterdir()):
+            if not d.is_dir():
+                continue
+            held = {f.name for f in d.iterdir()}
+            if src.is_dir():
+                hit = bool({f.name for f in src.iterdir()} & held)
+            else:
+                hit = src.name in held
+            if hit:
+                out.append(d.name)
+    return sorted(set(out))
+
+
+def is_retained(row: Row) -> bool:
+    """Does the version store actually hold a copy of THIS artifact?
+
+    Not "is the store non-empty" and not "does the store know this version".
+    The store holds Openplanet type DUMPS, so it retains
+    `tests/fixtures/typedb` and retains nothing about a corpus that merely
+    DESCRIBES the surface. Asserting the weaker thing produced a report saying
+    b052's surface "IS retained" when regenerating it would lose the 1.29.5
+    answers entirely.
+    """
+    if row.kind == "VERSIONS":
+        return True
+    names: set[str] = set()
+    for store_name in VERSION_STORES:
+        store = REPO / store_name
+        if not store.is_dir():
+            continue
+        names |= {f.name for d in store.iterdir() if d.is_dir() for f in d.iterdir()}
+    if not names:
+        return False
+    src = REPO / row.artifact
+    if src.is_dir():
+        return bool({f.name for f in src.iterdir()} & names)
+    return src.name in names
+
+
+def surface_retention_problems(rows: list[Row], live: str | None) -> list[str]:
+    """Is SURFACE history actually being kept, or only declared?
+
+    A retention POLICY that nothing checks is a comment. The policy says a
+    SURFACE artifact's previous version must survive a refresh of the primary
+    fixture, so the question with teeth is whether the store holds BOTH the
+    version the artifact currently carries AND the live one. If it does, a
+    refresh loses nothing and the primary fixture's pin is a deliberate choice;
+    if it does not, refreshing would destroy surface no probe can recover --
+    the same irreversibility as B148's preamble, at a much larger scale.
+    """
+    problems: list[str] = []
+    held = set(retained_versions())
+    if not held:
+        return [f"{' and '.join(VERSION_STORES)} hold no versions at all; SURFACE "
+                f"retention is declared by the manifest and implemented by nothing"]
+    for r in rows:
+        if r.volatility != SURFACE or r.kind == "VERSIONS":
+            continue
+        mine = archived_versions_of(r)
+        if not mine:
+            problems.append(
+                f"{r.artifact} is SURFACE but NOTHING archives it: regenerating it "
+                f"replaces the only copy. Copy it into "
+                f"docs/probes/versions/<its stamped version>/ before the next run."
+            )
+            continue
+        if r.engine_version != "UNKNOWN" and r.engine_version not in mine:
+            problems.append(
+                f"{r.artifact} is stamped {r.engine_version} but the only archived "
+                f"copies are {mine}: regenerating it would destroy the version it "
+                f"currently holds"
+            )
+    return problems
 
 
 def classify_without_running(row: Row) -> Result:
@@ -365,6 +492,44 @@ def run(regen: bool, only: str | None, engine_version: str | None = None) -> int
             print("  A rerun RESTAMPS these. Their content differing from the live game is")
             print("  a version change, not drift, and the runner will not call it drift.")
 
+    # SURFACE RETENTION (B151). Declared in the manifest, checked here.
+    held = retained_versions()
+    surface = [r for r in results if r.row.volatility == SURFACE]
+    if surface:
+        print()
+        print(f"SURFACE RETENTION — stores hold {held or 'NOTHING'}:")
+        for r in surface:
+            v = r.row.engine_version
+            if r.row.kind == "VERSIONS":
+                note = "the store itself"
+            else:
+                mine = archived_versions_of(r.row)
+                if not mine:
+                    note = f"stamped {v}; NOT ARCHIVED — a regen destroys this copy"
+                elif v == "UNKNOWN":
+                    note = f"UNSTAMPED; archived copies exist for {mine}"
+                elif v in mine:
+                    note = (f"at {v}, archived; a regen to {live or 'a new version'} "
+                            f"keeps these answers")
+                else:
+                    note = f"stamped {v} but only {mine} archived"
+            print(f"  {r.row.artifact:<46} {note}")
+    retention = surface_retention_problems(rows, live)
+    if retention:
+        print()
+        print("SURFACE RETENTION PROBLEMS:")
+        for pr in retention:
+            print(f"  {pr}")
+
+    hybrids = [r.row.artifact for r in results if r.row.volatility == HYBRID]
+    if hybrids:
+        print()
+        print("HYBRID artifacts — a language rule measured over a game-surface")
+        print("enumeration. ROW-ADDED/ROW-REMOVED is EXPECTED on a game update and is")
+        print("not a language finding; BEHAVIOUR-CHANGED still is:")
+        for h in hybrids:
+            print(f"  {h}")
+
     counts = {s: sum(1 for r in results if r.status == s) for s in (CLEAN, DRIFT, UNCHECKED, ERROR)}
     print()
     print("  " + "  ".join(f"{k}={v}" for k, v in counts.items()))
@@ -439,7 +604,7 @@ def _selftest() -> int:
             artifact=probe_ctl.relative_to(REPO).as_posix(), kind="CORPUS",
             question="does check_row_count detect a mismatch?", generator="NONE",
             engine_version="1.29.5", probe_date="2026-09-01", rows="99",
-            diff="STRING", dependents="-",
+            diff="STRING", dependents="-", volatility="SEMANTICS",
         )
         got = check_row_count(ctl_row)
         check("row-count mismatch is detected", got is not None and got.status == DRIFT,
@@ -486,12 +651,27 @@ def _selftest() -> int:
         check(f"audit reason present {r.artifact}", bool(res.reason), "UNCHECKED with no reason")
 
     # An UNKNOWN version refuses to diff even with a live game present.
-    unk = next((r for r in rows if r.engine_version == "UNKNOWN" and r.generator not in ("NONE", "MANUAL")), None)
-    check("an UNKNOWN-version corpus exists to test", unk is not None, "none found")
-    if unk is not None:
-        res = regenerate(unk, live="1.29.14")
-        check("UNKNOWN version refuses", res.status == UNCHECKED and res.reason == "version-unknown",
-              f"got {res.status}/{res.reason}")
+    #
+    # SYNTHETIC, for the reason B148 hit and B151 hit again: a test that reaches
+    # into real repo state to find its subject has a SHELF LIFE, and it expires
+    # ON SUCCESS. This check originally selected a real UNKNOWN-stamped row;
+    # B151 restamped b117 and b119, and every restamp brings the day the
+    # subject runs out and the check goes red like a regression. The guard is
+    # about the CODE PATH, so it supplies its own subject.
+    unk = Row(
+        artifact="docs/probes/b117-member-visibility.tsv", kind="CORPUS",
+        question="does an unstamped artifact refuse to diff against a live game?",
+        generator="python3 scripts/probe_member_visibility.py", engine_version="UNKNOWN",
+        probe_date="2026-09-01", rows="-", diff="STRING", dependents="-",
+        volatility="SEMANTICS",
+    )
+    res = regenerate(unk, live="1.29.14")
+    check("UNKNOWN version refuses", res.status == UNCHECKED and res.reason == "version-unknown",
+          f"got {res.status}/{res.reason}")
+    # The count of real UNKNOWNs is REPORTED instead, so progress is visible
+    # without a test depending on the repo staying broken.
+    real_unknown = [r.artifact for r in rows if r.engine_version == "UNKNOWN"]
+    print(f"  manifest rows still engine_version=UNKNOWN: {len(real_unknown)} {real_unknown}")
 
     # A version MISMATCH refuses to diff, and says restamp rather than drift.
     known = next((r for r in rows if r.engine_version == "1.29.5" and r.generator not in ("NONE", "MANUAL")), None)
@@ -516,7 +696,7 @@ def _selftest() -> int:
         artifact="docs/probes/b052-scope-provenance.tsv", kind="CORPUS",
         question="does the no-generator branch report its own reason?",
         generator="NONE", engine_version="1.29.14", probe_date="2026-09-01",
-        rows="-", diff="STRING", dependents="-",
+        rows="-", diff="STRING", dependents="-", volatility="SURFACE",
     )
     check("orphan reason", classify_without_running(synthetic_orphan).reason == "no-generator",
           f"got {classify_without_running(synthetic_orphan).reason!r}")
@@ -571,7 +751,7 @@ def _selftest() -> int:
             artifact=scratch.relative_to(REPO).as_posix(), kind="CORPUS",
             question="does the subprocess path classify correctly?", generator=gen,
             engine_version="1.29.14", probe_date="2026-09-01", rows="-",
-            diff="STRING", dependents="-",
+            diff="STRING", dependents="-", volatility="SEMANTICS",
         )
 
     try:
@@ -604,6 +784,79 @@ def _selftest() -> int:
     finally:
         scratch.unlink(missing_ok=True)
     check("scratch artifact removed", not scratch.exists(), "a selftest fixture was stranded (B077)")
+
+    # SURFACE RETENTION (B151). The policy is only worth the check behind it.
+    check("a version store exists", bool(retained_versions()),
+          "no store holds any version; SURFACE retention would be declared and "
+          "implemented by nothing")
+    # Both stores must be read, and the version SET cannot show that: they both
+    # hold 1.29.5 and 1.29.14, so dropping one left the check green and the
+    # mutation harness called the guard vacuous. An artifact archived ONLY in
+    # the corpus store does distinguish them.
+    b052 = next((r for r in rows
+                 if r.artifact == "docs/probes/b052-qualified-enum-spellings.tsv"), None)
+    check("b052 row exists", b052 is not None, "")
+    if b052 is not None:
+        check("both stores are read", archived_versions_of(b052) != [],
+              "b052 is archived only in docs/probes/versions, so an empty result "
+              "means that store is not being read at all")
+
+    # An artifact the stores DO archive, and one they do not. Both directions,
+    # because a retention check that only ever says "fine" is not a check.
+    typedb_row = next((r for r in rows if r.artifact == "tests/fixtures/typedb"), None)
+    check("typedb row exists", typedb_row is not None, "")
+    if typedb_row is not None:
+        check("an archived artifact is detected", "1.29.5" in archived_versions_of(typedb_row),
+              f"got {archived_versions_of(typedb_row)}")
+
+    absent = Row(
+        artifact="docs/probes/b119-const-receiver.tsv", kind="CORPUS",
+        question="is an unarchived SURFACE artifact reported?", generator="x",
+        engine_version="1.29.14", probe_date="2026-09-01", rows="-",
+        diff="STRING", dependents="-", volatility=SURFACE,
+    )
+    check("an unarchived artifact is detected", archived_versions_of(absent) == [],
+          f"a corpus no store holds reported archives {archived_versions_of(absent)}")
+    check("an unarchived SURFACE artifact is a problem",
+          any("NOTHING archives it" in p for p in surface_retention_problems([absent], "1.29.14")),
+          "an unarchived SURFACE artifact produced no retention problem")
+
+    # A SEMANTICS artifact is deliberately NOT retained, and must not be
+    # reported as a problem — otherwise the label would be decoration and every
+    # semantics corpus would demand an archive nobody wants.
+    sem = Row(**{**absent.__dict__, "volatility": SEMANTICS})
+    check("a SEMANTICS artifact needs no archive",
+          surface_retention_problems([sem], "1.29.14") == [],
+          "a SEMANTICS artifact was told to keep per-version history")
+
+    # Volatility is validated, not merely stored.
+    check("volatility vocabulary is closed", KNOWN_VOLATILITY == {SURFACE, SEMANTICS, HYBRID})
+    # An INVALID volatility must be refused at parse time. Reading the value off
+    # an already-valid manifest cannot test the validator: disabling it left
+    # every check above green, and the mutation harness reported the guard
+    # vacuous.
+    with tempfile.NamedTemporaryFile("w", suffix=".tsv", delete=False) as fh:
+        fh.write("\t".join(COLUMNS) + "\n")
+        fh.write("\t".join(["docs/probes/x.tsv", "CORPUS", "does it?", "NONE",
+                            "1.29.5", "2026-09-01", "-", "STRING", "-",
+                            "WHENEVER"]) + "\n")
+        badvol = Path(fh.name)
+    try:
+        why = None
+        try:
+            parse_manifest(badvol)
+        except ManifestError as e:
+            why = str(e)
+        check("bad volatility raises", why is not None and "unknown volatility" in why,
+              f"an unrecognised volatility was accepted: {why}")
+    finally:
+        badvol.unlink()
+    for r in rows:
+        check(f"volatility {r.artifact}", r.volatility in KNOWN_VOLATILITY, r.volatility)
+    check("the manifest uses every volatility",
+          {r.volatility for r in rows} == KNOWN_VOLATILITY,
+          f"only {sorted({r.volatility for r in rows})} present; a vocabulary with an "
+          f"unused value is untested")
 
     # A malformed manifest is an ERROR, not an empty clean run.
     with tempfile.NamedTemporaryFile("w", suffix=".tsv", delete=False) as fh:

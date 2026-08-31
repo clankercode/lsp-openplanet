@@ -135,6 +135,32 @@ def diff(old_rows: list[dict], new_rows: list[dict], key: str,
     return out
 
 
+# B151. `volatility` does not change how a row is CLASSIFIED -- the categories
+# above are properties of the comparison and are the same for every artifact.
+# It changes how the resulting report should be READ, which is a per-artifact
+# fact and the reason the label lives in the manifest rather than per-column.
+SURFACE, SEMANTICS, HYBRID = "SURFACE", "SEMANTICS", "HYBRID"
+
+ROW_SET_READING = {
+    SURFACE: (
+        "ROW-ADDED / ROW-REMOVED is THE PRODUCT here: this artifact records what "
+        "the game exposes, and a member appearing or disappearing between versions "
+        "is the finding you kept both versions to see."
+    ),
+    SEMANTICS: (
+        "ROW-ADDED / ROW-REMOVED is UNEXPECTED here: this artifact's row set is "
+        "defined by its own variant table, not by the game, so a changed key set "
+        "means THE PROBE changed rather than the engine."
+    ),
+    HYBRID: (
+        "ROW-ADDED / ROW-REMOVED is EXPECTED here and is NOT a language finding: "
+        "this artifact measures a language rule over an enumeration of game names, "
+        "so a game update that adds or removes a class moves the row set for a "
+        "SURFACE reason. BEHAVIOUR-CHANGED on a surviving row is still a finding."
+    ),
+}
+
+
 def selftest() -> int:
     failures = []
 
@@ -198,6 +224,25 @@ def selftest() -> int:
     got = diff(dup, dup, "name,set", "verdict", "message")
     check("composite diff compares both rows", len(got) == 2, f"compared {len(got)}")
 
+    # Every volatility has a reading, and the three differ. A label that mapped
+    # to the same sentence for each would be decoration.
+    check("every volatility has a reading",
+          set(ROW_SET_READING) == {SURFACE, SEMANTICS, HYBRID}, "missing a value")
+    check("the readings differ", len(set(ROW_SET_READING.values())) == 3,
+          "two volatilities give the same guidance, so the label decides nothing")
+    # HYBRID must not describe a row-set change as a language finding.
+    check("hybrid reading disclaims a language finding",
+          "NOT a language finding" in ROW_SET_READING[HYBRID], "")
+    # Classification is volatility-INDEPENDENT: the label reads the report, it
+    # does not alter it. If it altered classification, two artifacts with the
+    # same diff would disagree about what happened.
+    r_old = [{"name": "a", "verdict": "SCOPE", "message": "m"}]
+    r_new = [{"name": "b", "verdict": "SCOPE", "message": "m"}]
+    base = diff(r_old, r_new, "name", "verdict", "message")
+    check("classification is independent of volatility",
+          {c for _, c, _ in base} == {ADDED, REMOVED},
+          f"got {[c for _, c, _ in base]}")
+
     print(f"diff_probe_corpus selftest: {len(failures)} failure(s)")
     for f in failures:
         print(f"  FAIL {f}")
@@ -212,6 +257,10 @@ def main() -> int:
     ap.add_argument("--verdict", default="verdict")
     ap.add_argument("--message", default="message")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--volatility", choices=[SURFACE, SEMANTICS, HYBRID],
+                    default=SEMANTICS,
+                    help="how to READ the report; from the artifact's manifest row. "
+                         "Does not change how any row is classified.")
     a = ap.parse_args()
     if a.selftest:
         return selftest()
@@ -233,6 +282,11 @@ def main() -> int:
 
     print()
     print("  " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+
+    if counts.get(ADDED) or counts.get(REMOVED):
+        print()
+        print(f"volatility={a.volatility}: {ROW_SET_READING[a.volatility]}")
+
     if counts.get(INSTRUMENT):
         print()
         print("INSTRUMENT-BROKEN rows are NOT a finding about the engine's behaviour.")

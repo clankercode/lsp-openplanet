@@ -25,7 +25,7 @@ use std::path::PathBuf;
 /// Data rows currently expected. Not a target to edit freely: raising it is
 /// how a new corpus gets registered, and LOWERING it is how one gets deleted,
 /// so both directions are a reviewed change.
-const EXPECTED_MANIFEST_ROWS: usize = 15;
+const EXPECTED_MANIFEST_ROWS: usize = 17;
 
 /// `.tsv` corpora expected in `docs/probes/`. Separate from the manifest row
 /// count because the manifest also carries TYPEDB and PRIMARY rows that are
@@ -53,6 +53,7 @@ struct Row {
     diff: String,
     #[allow(dead_code)]
     dependents: String,
+    volatility: String,
 }
 
 /// Parse the manifest, or panic with the reason. A silent empty parse is the
@@ -81,6 +82,7 @@ fn parse_manifest() -> Vec<Row> {
             "rows",
             "diff",
             "dependents",
+            "volatility",
         ],
         "manifest column set changed; the runner and these tests read it positionally",
     );
@@ -90,8 +92,8 @@ fn parse_manifest() -> Vec<Row> {
             let c: Vec<&str> = l.split('\t').collect();
             assert_eq!(
                 c.len(),
-                9,
-                "manifest row has {} columns, expected 9: {l}",
+                10,
+                "manifest row has {} columns, expected 10: {l}",
                 c.len()
             );
             Row {
@@ -104,6 +106,7 @@ fn parse_manifest() -> Vec<Row> {
                 rows: c[6].to_string(),
                 diff: c[7].to_string(),
                 dependents: c[8].to_string(),
+                volatility: c[9].to_string(),
             }
         })
         .collect();
@@ -255,7 +258,7 @@ fn every_row_answers_a_question() {
 
 #[test]
 fn every_row_declares_a_known_kind_and_diff_mode() {
-    let kinds: BTreeSet<&str> = ["CORPUS", "SIDECAR", "TYPEDB", "PRIMARY"]
+    let kinds: BTreeSet<&str> = ["CORPUS", "SIDECAR", "TYPEDB", "PRIMARY", "VERSIONS"]
         .into_iter()
         .collect();
     let diffs: BTreeSet<&str> = ["STRING", "STRUCTURED", "MANUAL"].into_iter().collect();
@@ -410,10 +413,140 @@ fn the_manifest_covers_every_kind_it_defines() {
         *m.entry(r.kind.clone()).or_insert(0) += 1;
         m
     });
-    for k in ["CORPUS", "SIDECAR", "TYPEDB", "PRIMARY"] {
+    for k in ["CORPUS", "SIDECAR", "TYPEDB", "PRIMARY", "VERSIONS"] {
         assert!(
             kinds.contains_key(k),
             "manifest has no {k} row; kinds present: {kinds:?}"
         );
     }
+}
+
+/// B151: `volatility` says how to READ an artifact's drift, and a vocabulary
+/// that is never validated is a free-text field.
+#[test]
+fn every_row_declares_a_known_volatility() {
+    let known: BTreeSet<&str> = ["SURFACE", "SEMANTICS", "HYBRID"].into_iter().collect();
+    let rows = parse_manifest();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for r in &rows {
+        assert!(
+            known.contains(r.volatility.as_str()),
+            "{}: unknown volatility {:?}",
+            r.artifact,
+            r.volatility,
+        );
+        seen.insert(r.volatility.clone());
+    }
+    // A vocabulary with an unused value is an untested value. HYBRID exists
+    // because b067 measures a language rule over 41 GAME CLASS NAMES, so one
+    // label per file would have lied about it; if that row ever loses the
+    // label, the distinction has quietly stopped being expressed.
+    assert_eq!(
+        seen.len(),
+        3,
+        "the manifest uses only {seen:?}; every volatility value must be exercised",
+    );
+}
+
+/// B151: SURFACE means "retained per version", and a retention policy that
+/// nothing checks is a comment. An artifact is retained only if a store holds a
+/// copy of THAT artifact — not merely if a store exists, and not if some other
+/// artifact's version happens to match.
+#[test]
+fn every_surface_artifact_is_archived_or_explicitly_unstamped() {
+    let stores = ["tests/fixtures/typedb-versions", "docs/probes/versions"];
+    let mut archived: BTreeSet<String> = BTreeSet::new();
+    let mut store_versions = 0usize;
+    for st in stores {
+        let dir = repo_root().join(st);
+        assert!(dir.is_dir(), "version store {st} is missing");
+        for v in std::fs::read_dir(&dir).expect("read store").flatten() {
+            if !v.path().is_dir() {
+                continue;
+            }
+            store_versions += 1;
+            for f in std::fs::read_dir(v.path()).expect("read version").flatten() {
+                archived.insert(f.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    assert!(
+        store_versions >= 3,
+        "only {store_versions} version directories across {stores:?}; SURFACE \
+         retention would be declared and implemented by almost nothing",
+    );
+
+    let rows = parse_manifest();
+    let mut checked = 0usize;
+    let mut unretained = Vec::new();
+    for r in &rows {
+        if r.volatility != "SURFACE" || r.kind == "VERSIONS" {
+            continue;
+        }
+        checked += 1;
+        let src = repo_root().join(&r.artifact);
+        let hit = if src.is_dir() {
+            std::fs::read_dir(&src)
+                .map(|d| {
+                    d.flatten()
+                        .any(|f| archived.contains(&f.file_name().to_string_lossy().to_string()))
+                })
+                .unwrap_or(false)
+        } else {
+            src.file_name()
+                .map(|n| archived.contains(&n.to_string_lossy().to_string()))
+                .unwrap_or(false)
+        };
+        // An UNSTAMPED artifact cannot be filed under a version without
+        // asserting one nobody measured — the exact error B148 found in b067,
+        // where a plausible stamp had been copied from a sibling corpus. It is
+        // allowed to be unarchived, and `just regen-golds` reports it every run.
+        if !hit && r.engine_version != "UNKNOWN" {
+            unretained.push(r.artifact.clone());
+        }
+    }
+    assert!(
+        checked >= 3,
+        "only {checked} SURFACE artifacts checked; this test would pass vacuously",
+    );
+    assert!(
+        unretained.is_empty(),
+        "these SURFACE artifacts are stamped but nothing archives them, so \
+         regenerating one destroys the only copy: {unretained:?}",
+    );
+}
+
+/// An archived copy is HISTORY, not a current artifact: registering one would
+/// make `just regen-golds` try to regenerate a snapshot that is immutable by
+/// design.
+#[test]
+fn archived_copies_are_not_registered_as_artifacts() {
+    let registered: BTreeSet<String> = parse_manifest().into_iter().map(|r| r.artifact).collect();
+    let mut found = 0usize;
+    let store = repo_root().join("docs/probes/versions");
+    for v in std::fs::read_dir(&store)
+        .expect("read corpus store")
+        .flatten()
+    {
+        if !v.path().is_dir() {
+            continue;
+        }
+        for f in std::fs::read_dir(v.path()).expect("read version").flatten() {
+            let rel = f
+                .path()
+                .strip_prefix(repo_root())
+                .expect("under repo")
+                .to_string_lossy()
+                .to_string();
+            found += 1;
+            assert!(
+                !registered.contains(&rel),
+                "{rel} is an immutable archived copy and must not be a manifest row",
+            );
+        }
+    }
+    assert!(
+        found > 0,
+        "the corpus store holds nothing; this check is vacuous"
+    );
 }

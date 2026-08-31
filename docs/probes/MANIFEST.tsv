@@ -37,6 +37,54 @@
 #                              structure under it to miss.
 #                   STRUCTURED parsed and compared field-wise.
 #                   MANUAL     no machine diff; the runner reports UNCHECKED.
+#   volatility      HOW TO READ THIS ARTIFACT'S DRIFT. Three values:
+#
+#                   SURFACE    the artifact describes what the game EXPOSES.
+#                              Retained PER VERSION: a regen adds a version
+#                              rather than replacing one, because the diff
+#                              BETWEEN versions is the product (that is the
+#                              deprecation/ABI story -- GH #18, B094, B124).
+#                              The store already exists and is now registered:
+#                              tests/fixtures/typedb-versions.
+#                   SEMANTICS  the artifact describes how the COMPILER BEHAVES.
+#                              One current version, replaced in place. Git holds
+#                              the history and nothing diffs an old language
+#                              rule; keeping them live side by side costs review
+#                              noise and invites someone citing the stale one.
+#                   HYBRID     a language RULE measured over a GAME-SURFACE
+#                              enumeration, so its two axes move for different
+#                              reasons and are read differently. See b067.
+#
+# WHY VOLATILITY IS PER-ARTIFACT AND NOT PER-COLUMN.
+#
+# b067 forced the question: it measures a language rule -- can a class name
+# qualify a type? -- over an enumeration of 41 GAME CLASS NAMES. A game update
+# removing `CGxLightBall` changes a row for a SURFACE reason inside an artifact
+# whose verdicts are pure SEMANTICS. B144's `engine_messages` column raises the
+# same shape independently, since the column sets already differ per artifact.
+#
+# Per-column volatility was considered and rejected, for two reasons:
+#
+#   1. It cannot live in a flat TSV. It needs a per-artifact column map, which
+#      is a SECOND hand-maintained list -- the exact shape that let B131's
+#      struct audit cover 7 of 11 structs while passing, and that let three
+#      corpora sit unregistered in docs/probes/ until B148.
+#   2. IT IS ALREADY EXPRESSED, AND BETTER, BY THE DIFF. scripts/
+#      diff_probe_corpus.py separates the axes at COMPARISON time, where the
+#      columns actually are: a verdict change is BEHAVIOUR-CHANGED, a message
+#      change is WORDING-CHANGED, a key-set change is ROW-ADDED/ROW-REMOVED,
+#      and an unclassifiable row is INSTRUMENT-BROKEN. The columns do not need
+#      labelling; the REPORT needs interpreting.
+#
+# So `volatility` says which of those categories is EXPECTED and which is a
+# FINDING for this artifact -- a per-artifact fact -- and adds no machinery:
+#
+#   SURFACE    ROW-ADDED / ROW-REMOVED is the product. Retain both versions.
+#   SEMANTICS  BEHAVIOUR-CHANGED is the finding. Replace in place.
+#   HYBRID     ROW-ADDED / ROW-REMOVED is expected on a game update and is NOT
+#              a language finding; BEHAVIOUR-CHANGED still is. b067 is the only
+#              one today, and it is why one label per file would have lied.
+#
 #   dependents      source sites that RESTATE this artifact's facts in prose,
 #                   `;`-separated, or `-`. Regenerating an artifact updates
 #                   NONE of these, so the runner lists them UNCHECKED whenever
@@ -59,19 +107,21 @@
 # `... to 'VirtualKey&'.` Same verdict, different prose -- which is why the
 # question column for a message-text corpus says so explicitly.
 #
-artifact	kind	question	generator	engine_version	probe_date	rows	diff	dependents
-docs/probes/b052-qualified-enum-spellings.tsv	CORPUS	for a qualified TYPE spelling (Scene::ESceneCharVisNotice, UI::VirtualKey), does the game accept it, and if not what does it say?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b052-qualified-enum-spellings.tsv	1.29.5	2026-08-30	1901	STRING	src/typecheck/resolver.rs;src/typecheck/global_scope.rs
-docs/probes/b053-bare-enum-values.tsv	CORPUS	for a bare VALUE name of a named enum (Turbo, GlassSmash), does the game accept it, reject it as unknown, or reject it as ambiguous?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b053-bare-enum-values.tsv	1.29.5	2026-08-30	2989	STRING	src/typecheck/global_scope.rs;src/typedb/index.rs
-docs/probes/b052-scope-provenance.tsv	SIDECAR	for each SCOPE an ACCEPTED b052 row depends on: did it exist on the probing machine, and did the ENGINE supply it or that machine's plugins?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b052-scope-provenance.tsv	UNKNOWN	UNKNOWN	233	STRING	src/typecheck/global_scope.rs
-docs/probes/b067-class-position-scopes.tsv	CORPUS	in TYPE position, is <name> a scope? Paired discriminator: "Namespace 'X' doesn't exist." means NOT a scope; "Identifier 'ZZZNoSuchName' is not a data type in ..." means it IS. THE VERDICT IS DERIVED FROM ENGINE PROSE, so a reworded message reports UNRECOGNISED (instrument failure) rather than a flipped verdict (behaviour change).	python3 scripts/probe_class_scopes.py --tsv docs/probes/b067-class-position-scopes.tsv	1.29.14	2026-09-01	63	STRING	src/typecheck/global_scope.rs;src/typecheck/resolver.rs
-docs/probes/b071-enum-conversion.tsv	CORPUS	which enum conversions and enum-member accesses does the live game accept, and what did this LSP report at commit a586825? HYBRID: the generator owns game_verdict and game_message only; lsp_today is this repo's own frozen history and row 3 is a deliberately retained INVALID measurement, neither regenerable.	python3 scripts/probe_enum_conversion.py --tsv docs/probes/b071-enum-conversion.tsv	1.29.14	2026-09-01	8	STRING	src/typecheck/checker.rs
-docs/probes/b086-export-stub-binding.tsv	CORPUS	given a [script] exports stub and a body, does the engine BIND them, and by what rule? Binding is a RUNTIME property, so the probe CALLS the import.	python3 scripts/probe_export_binding.py --tsv docs/probes/b086-export-stub-binding.tsv	1.29.14	2026-08-31	18	STRING	src/workspace/project.rs
-docs/probes/b096-namespaced-export-binding.tsv	CORPUS	does export-stub binding survive a NAMESPACE, and does the placement of body versus stub change the answer?	python3 scripts/probe_ns_binding.py --tsv docs/probes/b096-namespaced-export-binding.tsv	1.29.14	2026-08-31	6	STRING	src/workspace/project.rs
-docs/probes/b096-shared-modifiers.tsv	CORPUS	do shared interface / enum / funcdef / function compile, at top level and namespaced, in a shared_exports file and a plain one - and is shared semantically live?	python3 scripts/probe_shared_modifiers.py --tsv docs/probes/b096-shared-modifiers.tsv	1.29.14	2026-08-31	24	STRING	src/parser/ast.rs
-docs/probes/b117-member-visibility.tsv	CORPUS	at which ACCESS SITES does the engine allow a private or protected member - own class, derived class, unrelated class, across a file boundary?	python3 scripts/probe_member_visibility.py --tsv docs/probes/b117-member-visibility.tsv	UNKNOWN	2026-09-01	39	STRING	src/server/completion.rs;src/server/symbols.rs;src/server/hover.rs
-docs/probes/b119-const-receiver.tsv	CORPUS	for a CONST receiver, does the engine reject a non-const method that is INHERITED, and does const T@[]@ make its ELEMENTS const?	python3 scripts/probe_const_receiver.py --tsv docs/probes/b119-const-receiver.tsv	UNKNOWN	2026-09-01	23	STRING	src/parser/parser.rs;src/typecheck/checker.rs
-docs/probes/b144-const-handle-funcdef.tsv	CORPUS	which const POSITIONS are interchangeable at a funcdef slot - leading const (handle to a const object) versus trailing const (a const handle) - and what is the engine's own synthesised array<T>::Sort comparator per element type?	python3 scripts/probe_const_handle_funcdef.py --tsv docs/probes/b144-const-handle-funcdef.tsv	1.29.14	2026-09-01	51	STRING	src/typecheck/repr.rs;src/typecheck/checker.rs;tests/b144_const_handle_funcdef.rs;tests/fixtures/issue-repros/b102-array-sort-correct-callbacks/Main.as
-tests/fixtures/typedb	TYPEDB	what types, methods, properties and enums does this Openplanet build expose to a plugin?	just typedb-refresh-apply	1.29.5	2026-02-03	-	STRUCTURED	src/typedb/catalog.rs;src/typedb/core_format.rs;src/typedb/header_format.rs;src/typedb/index.rs
-src/typecheck/interface_impl.rs	PRIMARY	when a class fails to implement an interface method, what does the engine say - and is a same-name-different-SIGNATURE method reported differently from a MISSING one?	MANUAL	1.29.5	2026-08-31	-	MANUAL	src/symbols/scope.rs;src/symbols/table.rs;src/analysis/unused.rs
-src/config.rs	PRIMARY	which preprocessor symbols does a Wine run define - does it define BOTH WINDOWS and the Linux symbol?	MANUAL	UNKNOWN	2026-08-29	-	MANUAL	-
-src/server/mod.rs	PRIMARY	what does the engine do with a strict module declaration, measured live over RemoteBuild?	MANUAL	UNKNOWN	2026-08-30	-	MANUAL	-
+artifact	kind	question	generator	engine_version	probe_date	rows	diff	dependents	volatility
+docs/probes/b052-qualified-enum-spellings.tsv	CORPUS	for a qualified TYPE spelling (Scene::ESceneCharVisNotice, UI::VirtualKey), does the game accept it, and if not what does it say?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b052-qualified-enum-spellings.tsv	1.29.5	2026-08-30	1901	STRING	src/typecheck/resolver.rs;src/typecheck/global_scope.rs	SURFACE
+docs/probes/b053-bare-enum-values.tsv	CORPUS	for a bare VALUE name of a named enum (Turbo, GlassSmash), does the game accept it, reject it as unknown, or reject it as ambiguous?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b053-bare-enum-values.tsv	1.29.5	2026-08-30	2989	STRING	src/typecheck/global_scope.rs;src/typedb/index.rs	SURFACE
+docs/probes/b052-scope-provenance.tsv	SIDECAR	for each SCOPE an ACCEPTED b052 row depends on: did it exist on the probing machine, and did the ENGINE supply it or that machine's plugins?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b052-scope-provenance.tsv	UNKNOWN	UNKNOWN	233	STRING	src/typecheck/global_scope.rs	SURFACE
+docs/probes/b067-class-position-scopes.tsv	CORPUS	in TYPE position, is <name> a scope? Paired discriminator: "Namespace 'X' doesn't exist." means NOT a scope; "Identifier 'ZZZNoSuchName' is not a data type in ..." means it IS. THE VERDICT IS DERIVED FROM ENGINE PROSE, so a reworded message reports UNRECOGNISED (instrument failure) rather than a flipped verdict (behaviour change).	python3 scripts/probe_class_scopes.py --tsv docs/probes/b067-class-position-scopes.tsv	1.29.14	2026-09-01	63	STRING	src/typecheck/global_scope.rs;src/typecheck/resolver.rs	HYBRID
+docs/probes/b071-enum-conversion.tsv	CORPUS	which enum conversions and enum-member accesses does the live game accept, and what did this LSP report at commit a586825? HYBRID: the generator owns game_verdict and game_message only; lsp_today is this repo's own frozen history and row 3 is a deliberately retained INVALID measurement, neither regenerable.	python3 scripts/probe_enum_conversion.py --tsv docs/probes/b071-enum-conversion.tsv	1.29.14	2026-09-01	8	STRING	src/typecheck/checker.rs	SEMANTICS
+docs/probes/b086-export-stub-binding.tsv	CORPUS	given a [script] exports stub and a body, does the engine BIND them, and by what rule? Binding is a RUNTIME property, so the probe CALLS the import.	python3 scripts/probe_export_binding.py --tsv docs/probes/b086-export-stub-binding.tsv	1.29.14	2026-08-31	18	STRING	src/workspace/project.rs	SEMANTICS
+docs/probes/b096-namespaced-export-binding.tsv	CORPUS	does export-stub binding survive a NAMESPACE, and does the placement of body versus stub change the answer?	python3 scripts/probe_ns_binding.py --tsv docs/probes/b096-namespaced-export-binding.tsv	1.29.14	2026-08-31	6	STRING	src/workspace/project.rs	SEMANTICS
+docs/probes/b096-shared-modifiers.tsv	CORPUS	do shared interface / enum / funcdef / function compile, at top level and namespaced, in a shared_exports file and a plain one - and is shared semantically live?	python3 scripts/probe_shared_modifiers.py --tsv docs/probes/b096-shared-modifiers.tsv	1.29.14	2026-08-31	24	STRING	src/parser/ast.rs	SEMANTICS
+docs/probes/b117-member-visibility.tsv	CORPUS	at which ACCESS SITES does the engine allow a private or protected member - own class, derived class, unrelated class, across a file boundary?	python3 scripts/probe_member_visibility.py --tsv docs/probes/b117-member-visibility.tsv	1.29.14	2026-09-01	39	STRING	src/server/completion.rs;src/server/symbols.rs;src/server/hover.rs	SEMANTICS
+docs/probes/b119-const-receiver.tsv	CORPUS	for a CONST receiver, does the engine reject a non-const method that is INHERITED, and does const T@[]@ make its ELEMENTS const?	python3 scripts/probe_const_receiver.py --tsv docs/probes/b119-const-receiver.tsv	1.29.14	2026-09-01	23	STRING	src/parser/parser.rs;src/typecheck/checker.rs	SEMANTICS
+docs/probes/b144-const-handle-funcdef.tsv	CORPUS	which const POSITIONS are interchangeable at a funcdef slot - leading const (handle to a const object) versus trailing const (a const handle) - and what is the engine's own synthesised array<T>::Sort comparator per element type?	python3 scripts/probe_const_handle_funcdef.py --tsv docs/probes/b144-const-handle-funcdef.tsv	1.29.14	2026-09-01	51	STRING	src/typecheck/repr.rs;src/typecheck/checker.rs;tests/b144_const_handle_funcdef.rs;tests/fixtures/issue-repros/b102-array-sort-correct-callbacks/Main.as	SEMANTICS
+tests/fixtures/typedb	TYPEDB	what types, methods, properties and enums does this Openplanet build expose to a plugin?	just typedb-refresh-apply	1.29.5	2026-02-03	-	STRUCTURED	src/typedb/catalog.rs;src/typedb/core_format.rs;src/typedb/header_format.rs;src/typedb/index.rs	SURFACE
+src/typecheck/interface_impl.rs	PRIMARY	when a class fails to implement an interface method, what does the engine say - and is a same-name-different-SIGNATURE method reported differently from a MISSING one?	MANUAL	1.29.5	2026-08-31	-	MANUAL	src/symbols/scope.rs;src/symbols/table.rs;src/analysis/unused.rs	SEMANTICS
+src/config.rs	PRIMARY	which preprocessor symbols does a Wine run define - does it define BOTH WINDOWS and the Linux symbol?	MANUAL	UNKNOWN	2026-08-29	-	MANUAL	-	SEMANTICS
+src/server/mod.rs	PRIMARY	what does the engine do with a strict module declaration, measured live over RemoteBuild?	MANUAL	UNKNOWN	2026-08-30	-	MANUAL	-	SEMANTICS
+tests/fixtures/typedb-versions	VERSIONS	which Openplanet version exposed which types, methods, properties and enums? One immutable directory per version, so a refresh of the primary fixture never loses the previous version's surface.	MANUAL	1.29.14	2026-08-31	-	STRUCTURED	tests/fixtures/typedb;src/typedb/index.rs	SURFACE
+docs/probes/versions	VERSIONS	which Openplanet version produced which SURFACE corpus? Immutable per-version copies, so regenerating a surface corpus never destroys the previous version's answers.	MANUAL	1.29.5	2026-08-30	-	STRING	docs/probes/b052-qualified-enum-spellings.tsv;docs/probes/b053-bare-enum-values.tsv	SURFACE

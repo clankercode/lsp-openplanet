@@ -146,6 +146,44 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "        dependents_unchecked=[],",
         "DRIFT carries its dependents",
     ),
+    (
+        "volatility-vocabulary-is-closed",
+        "an unvalidated label is a free-text field, and B151's whole mechanism is the label",
+        "        if row.volatility not in KNOWN_VOLATILITY:",
+        "        if False:",
+        "bad volatility raises",
+    ),
+    (
+        "retention-detects-an-archived-artifact",
+        "if nothing is ever found archived, the policy silently demands archives that exist",
+        "            if hit:\n                out.append(d.name)",
+        "            if False:\n                out.append(d.name)",
+        "an archived artifact is detected",
+    ),
+    (
+        "retention-detects-an-UNARCHIVED-artifact",
+        "B151's finding was three SURFACE corpora nothing archived; a check that "
+        "never says so would have reported the policy as implemented",
+        "    return sorted(set(out))",
+        '    return sorted(set(out)) or ["1.29.5"]',
+        "an unarchived artifact is detected",
+    ),
+    (
+        "semantics-artifacts-are-exempt",
+        "if SEMANTICS also demanded archives, the label would decide nothing and "
+        "every language corpus would grow a version store nobody diffs",
+        "        if r.volatility != SURFACE or r.kind == \"VERSIONS\":",
+        "        if r.kind == \"VERSIONS\":",
+        "a SEMANTICS artifact needs no archive",
+    ),
+    (
+        "both-version-stores-are-read",
+        "one store holds type dumps and the other holds corpora; reading only one "
+        "made the report claim b052 was retained because typedb was",
+        'VERSION_STORES = ("tests/fixtures/typedb-versions", "docs/probes/versions")',
+        'VERSION_STORES = ("tests/fixtures/typedb-versions",)',
+        "both stores are read",
+    ),
     # ---- OVER-CONDEMN ----
     (
         "OVER-CONDEMN every-artifact-errors",
@@ -153,6 +191,14 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         '    CLEAN: not having looked is not agreement.\n    \"\"\"',
         '    CLEAN: not having looked is not agreement.\n    \"\"\"\n    return Result(row, ERROR, "condemned", "over-condemn mutant")',
         "healthy corpus is not condemned",
+    ),
+    (
+        "OVER-CONDEMN nothing-is-ever-archived",
+        "a retention check that condemns every SURFACE artifact is as useless as one "
+        "that clears them all, and looks more diligent",
+        "def archived_versions_of(row: Row) -> list[str]:",
+        "def archived_versions_of(row: Row) -> list[str]:\n    return []",
+        "an archived artifact is detected",
     ),
     (
         "OVER-CONDEMN every-row-count-drifts",
