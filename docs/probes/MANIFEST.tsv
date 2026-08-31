@@ -45,18 +45,26 @@
 #                   fan-out, not staleness of a single file, is why in-source
 #                   tables stay manual.
 #
-# TWO ARTIFACTS HAVE NO GENERATOR. b067 (63 rows) and b071 (8 rows) are fully
-# stamped engine gold with a documented method in their own preambles and no
-# script anywhere in the repo. They are listed as NONE rather than omitted:
-# an artifact that cannot be regenerated is a FINDING, and the runner reports
-# it as one on every run.
+# EVERY CORPUS NOW HAS A GENERATOR (B148). b067 and b071 shipped as orphans --
+# stamped engine gold with a documented method and no script anywhere in the
+# repo -- and the runner reported them as a finding on every run until scripts
+# existed. `generator=NONE` remains a legal value and is still reported that
+# way; it is simply currently unused.
+#
+# WHAT THE FIRST REGENERATION FOUND. b067 came back byte-identical at 1.29.14,
+# so its old 1.29.5 stamp was mislabelled and no conclusion drawn from it was
+# wrong. b071 came back with three WORDING-CHANGED rows and ZERO behaviour
+# changes: the engine now names an assignment target as a reference, so
+# `Can't implicitly convert from 'int' to 'VirtualKey'.` is today
+# `... to 'VirtualKey&'.` Same verdict, different prose -- which is why the
+# question column for a message-text corpus says so explicitly.
 #
 artifact	kind	question	generator	engine_version	probe_date	rows	diff	dependents
 docs/probes/b052-qualified-enum-spellings.tsv	CORPUS	for a qualified TYPE spelling (Scene::ESceneCharVisNotice, UI::VirtualKey), does the game accept it, and if not what does it say?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b052-qualified-enum-spellings.tsv	1.29.5	2026-08-30	1901	STRING	src/typecheck/resolver.rs;src/typecheck/global_scope.rs
 docs/probes/b053-bare-enum-values.tsv	CORPUS	for a bare VALUE name of a named enum (Turbo, GlassSmash), does the game accept it, reject it as unknown, or reject it as ambiguous?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b053-bare-enum-values.tsv	1.29.5	2026-08-30	2989	STRING	src/typecheck/global_scope.rs;src/typedb/index.rs
 docs/probes/b052-scope-provenance.tsv	SIDECAR	for each SCOPE an ACCEPTED b052 row depends on: did it exist on the probing machine, and did the ENGINE supply it or that machine's plugins?	python3 scripts/probe_enum_corpus.py --tsv docs/probes/b052-scope-provenance.tsv	UNKNOWN	UNKNOWN	233	STRING	src/typecheck/global_scope.rs
-docs/probes/b067-class-position-scopes.tsv	CORPUS	in TYPE position, is <name> a scope? Paired discriminator: "Namespace 'X' doesn't exist." means NOT a scope; "Identifier 'ZZZNoSuchName' is not a data type in ..." means it IS.	NONE	1.29.5	2026-08-31	63	STRING	-
-docs/probes/b071-enum-conversion.tsv	CORPUS	which enum conversions and enum-member accesses does the live game accept, and what does this LSP report for the same case today?	NONE	1.29.5	2026-08-31	8	STRING	src/typecheck/checker.rs
+docs/probes/b067-class-position-scopes.tsv	CORPUS	in TYPE position, is <name> a scope? Paired discriminator: "Namespace 'X' doesn't exist." means NOT a scope; "Identifier 'ZZZNoSuchName' is not a data type in ..." means it IS. THE VERDICT IS DERIVED FROM ENGINE PROSE, so a reworded message reports UNRECOGNISED (instrument failure) rather than a flipped verdict (behaviour change).	python3 scripts/probe_class_scopes.py --tsv docs/probes/b067-class-position-scopes.tsv	1.29.14	2026-09-01	63	STRING	src/typecheck/global_scope.rs;src/typecheck/resolver.rs
+docs/probes/b071-enum-conversion.tsv	CORPUS	which enum conversions and enum-member accesses does the live game accept, and what did this LSP report at commit a586825? HYBRID: the generator owns game_verdict and game_message only; lsp_today is this repo's own frozen history and row 3 is a deliberately retained INVALID measurement, neither regenerable.	python3 scripts/probe_enum_conversion.py --tsv docs/probes/b071-enum-conversion.tsv	1.29.14	2026-09-01	8	STRING	src/typecheck/checker.rs
 docs/probes/b086-export-stub-binding.tsv	CORPUS	given a [script] exports stub and a body, does the engine BIND them, and by what rule? Binding is a RUNTIME property, so the probe CALLS the import.	python3 scripts/probe_export_binding.py --tsv docs/probes/b086-export-stub-binding.tsv	1.29.14	2026-08-31	18	STRING	src/workspace/project.rs
 docs/probes/b096-namespaced-export-binding.tsv	CORPUS	does export-stub binding survive a NAMESPACE, and does the placement of body versus stub change the answer?	python3 scripts/probe_ns_binding.py --tsv docs/probes/b096-namespaced-export-binding.tsv	1.29.14	2026-08-31	6	STRING	src/workspace/project.rs
 docs/probes/b096-shared-modifiers.tsv	CORPUS	do shared interface / enum / funcdef / function compile, at top level and namespaced, in a shared_exports file and a plain one - and is shared semantically live?	python3 scripts/probe_shared_modifiers.py --tsv docs/probes/b096-shared-modifiers.tsv	1.29.14	2026-08-31	24	STRING	src/parser/ast.rs

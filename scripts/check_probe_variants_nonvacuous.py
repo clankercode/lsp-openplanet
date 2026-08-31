@@ -24,7 +24,43 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent.parent
 
 PROBES = ("probe_const_receiver", "probe_member_visibility",
-          "probe_engine_const_receiver")
+          "probe_engine_const_receiver", "probe_class_scopes",
+          "probe_enum_conversion")
+
+
+# A probe mutation-checked by a DIFFERENT harness. Named, not assumed: the
+# point of the discovery check below is that coverage is asserted somewhere,
+# and an unexplained exemption is indistinguishable from an oversight.
+COVERED_ELSEWHERE = {
+    "probe_enum_corpus": "just enum-probe-mutants (check_enum_probe_nonvacuous.py)",
+}
+
+# Probes with a `--selftest` and NO mutation coverage ANYWHERE. Each is a real
+# gap. They are listed so the gap is REPORTED on every run rather than silently
+# exempted — the same treatment B129 gives a corpus with no generator, because
+# a known hole that nothing prints is a hole nobody closes.
+UNCOVERED = {
+    "probe_export_binding":
+        "B086's export-binding probe. Its selftest is the one this repo cites as "
+        "the shape a probe oracle should have, and nothing proves that selftest "
+        "can fail. Surfaced by the discovery check added in B148.",
+}
+
+
+def discovered_probes() -> set[str]:
+    """Every `probe_*.py` in scripts/ that offers a `--selftest`.
+
+    PROBES above is a hand-written list, and a hand-written list does not fail
+    when it falls behind — it just covers less while still reporting a clean
+    sweep. That is how B131's struct audit came to cover 7 of 11 structs while
+    passing, and how b067 and b071 sat unregistered in docs/probes/ (B148).
+    So the list is CHECKED against the directory rather than trusted.
+    """
+    found = set()
+    for f in sorted((SRC / "scripts").glob("probe_*.py")):
+        if "--selftest" in f.read_text(encoding="utf8", errors="replace"):
+            found.add(f.stem)
+    return found
 
 # Drop every control row: the table can then no longer require two rows to
 # disagree, which is the B086 "oracle cannot discriminate" defect.
@@ -38,6 +74,59 @@ DROP_CONTROLS = (
 
 # (label, file, old, new, which selftest must go red)
 MUTATIONS = [
+    # B148: a generator that emits an EMPTY corpus measures nothing while
+    # exiting 0. The variant table is where that starts.
+    ("B148 [probe_class_scopes]: the variant table is emptied, so the probe "
+     "would write a corpus of zero rows and report success",
+     "probe_class_scopes.py",
+     "def variants() -> list[V]:\n    v: list[V] = []",
+     "def variants() -> list[V]:\n    return []\n\n"
+     "def _unused_variants() -> list[V]:\n    v: list[V] = []",
+     "probe_class_scopes"),
+
+    # B148: a generator that marks EVERY row the same verdict looks confident
+    # and has measured nothing. For a message-text probe the natural way to do
+    # that is to make the discriminator default to a side instead of reporting
+    # UNRECOGNISED — which is exactly the failure that would turn an engine
+    # rewording into 63 flipped rows.
+    ("B148 [probe_class_scopes]: the discriminator defaults to NOT_SCOPE "
+     "instead of reporting UNRECOGNISED, so a reworded engine message would "
+     "read as every row changing behaviour",
+     "probe_class_scopes.py",
+     "    return UNRECOGNISED, msg",
+     "    return NOT_SCOPE, msg",
+     "probe_class_scopes"),
+
+    ("B148 [probe_enum_conversion]: a REJECTED build with no attributed "
+     "message is recorded as a measurement, though the corpus's value IS the "
+     "message",
+     "probe_enum_conversion.py",
+     '            return AMBIGUOUS, "REJECTED with no attributed message; cannot say why"',
+     '            return REJECT, ""',
+     "probe_enum_conversion"),
+
+    # NOTE ON POLARITY. The first version of this mutation neutered the GUARD
+    # (`True or "3" in committed`) so it always passed, and the harness
+    # correctly reported it MISSED: a check that cannot fail cannot turn a
+    # selftest red. To prove a guard RUNS you must break the thing it WATCHES.
+    # Both mutations below drop something a regeneration can never recover,
+    # which is exactly the disaster the guard exists to prevent.
+    ("B148 [probe_enum_conversion]: the retained INVALID row 3 is dropped on "
+     "load, so a regeneration would silently delete the record that this "
+     "corpus was once wrong",
+     "probe_enum_conversion.py",
+     '        out[r["row"]] = r\n    return out',
+     '        out[r["row"]] = r\n    out.pop("3", None)\n    return out',
+     "probe_enum_conversion"),
+
+    ("B148 [probe_enum_conversion]: the frozen lsp_today column is blanked on "
+     "load, so a regeneration would erase this repo's own pre-fix history — "
+     "the evidence B071 was opened on, and unrecoverable from any game",
+     "probe_enum_conversion.py",
+     '        out[r["row"]] = r\n    return out',
+     '        r["lsp_today"] = ""\n        out[r["row"]] = r\n    return out',
+     "probe_enum_conversion"),
+
     *[(f"B141/B086 [{p}]: every control row dropped, so no two rows are "
        f"required to disagree", f"{p}.py", *DROP_CONTROLS, p) for p in PROBES],
 
@@ -87,6 +176,39 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="b141-mut-") as tmp:
         work = Path(tmp) / "wt"
         shutil.copytree(SRC / "scripts", work / "scripts")
+        # A probe's selftest may read committed corpora, not just its own
+        # source: probe_enum_conversion checks that b071's frozen `lsp_today`
+        # column and its retained INVALID row are still present, because it
+        # regenerates only the engine columns. Copying scripts/ alone made its
+        # baseline fail in here for a missing-file reason that had nothing to
+        # do with any mutation.
+        shutil.copytree(SRC / "docs" / "probes", work / "docs" / "probes")
+
+        # REGISTRATION ENFORCEMENT, before any baseline: a probe with a
+        # selftest that nobody listed here is a probe whose guards are never
+        # mutation-checked, and this harness would report a clean sweep
+        # without ever having looked at it.
+        missing = discovered_probes() - set(PROBES) - set(COVERED_ELSEWHERE) - set(UNCOVERED)
+        if missing:
+            print(
+                f"UNREGISTERED PROBE(S) {sorted(missing)}: they offer a --selftest "
+                f"but are absent from PROBES, so their guards are never "
+                f"mutation-checked. Add them.",
+                file=sys.stderr,
+            )
+            return 2
+        stale = (set(PROBES) | set(COVERED_ELSEWHERE) | set(UNCOVERED)) - discovered_probes()
+        if stale:
+            print(f"PROBES names {sorted(stale)}, which no longer exist or lost "
+                  f"their --selftest", file=sys.stderr)
+            return 2
+
+        if UNCOVERED:
+            print("PROBES WITH A SELFTEST AND NO MUTATION COVERAGE ANYWHERE:")
+            for name, why in sorted(UNCOVERED.items()):
+                print(f"  {name}: {why}")
+            print("  Reported every run. A selftest nothing can prove is not evidence.")
+            print()
 
         for probe in PROBES:
             if run(work, probe) != 0:

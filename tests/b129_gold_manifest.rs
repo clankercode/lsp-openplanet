@@ -307,6 +307,14 @@ fn a_primary_row_is_manual_in_both_senses() {
 
 #[test]
 fn artifacts_without_a_generator_are_declared_not_omitted() {
+    // B148 EMPTIED THIS SET. b067 and b071 now have generators, so the
+    // expected orphan list is empty — which is the deliberate shortening this
+    // test's own failure message asked for.
+    //
+    // An empty expectation could be satisfied by an empty or unparsed
+    // manifest, so the count of generator-BEARING rows is asserted alongside
+    // it. Otherwise this test would keep passing after the thing it checks
+    // stopped existing.
     // b067 and b071 are fully stamped engine gold with no script anywhere in
     // the repo. An artifact that cannot be regenerated is a FINDING, so the
     // manifest states it and the runner reports it on every run. This test
@@ -317,17 +325,20 @@ fn artifacts_without_a_generator_are_declared_not_omitted() {
         .filter(|r| r.generator == "NONE")
         .map(|r| r.artifact.clone())
         .collect();
-    let expected: BTreeSet<String> = [
-        "docs/probes/b067-class-position-scopes.tsv",
-        "docs/probes/b071-enum-conversion.tsv",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect();
+    let expected: BTreeSet<String> = BTreeSet::new();
+    let with_generator = rows
+        .iter()
+        .filter(|r| r.generator != "NONE" && r.generator != "MANUAL")
+        .count();
+    assert!(
+        with_generator >= 10,
+        "only {with_generator} artifacts declare a runnable generator; an empty \
+         orphan set means nothing if the manifest lost its generators",
+    );
     assert_eq!(
         orphans, expected,
-        "the set of generator-less artifacts changed; writing a generator for one is \
-         progress and wants this list shortened deliberately",
+        "an artifact lost its generator, or a new one landed without a script; \
+         `generator=NONE` is legal but must be a deliberate, reported finding",
     );
 }
 

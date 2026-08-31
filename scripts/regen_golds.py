@@ -506,10 +506,26 @@ def _selftest() -> int:
 
     # Orphans and PRIMARY rows are UNCHECKED with their own distinct reasons,
     # never folded into not-run.
-    orphan = next((r for r in rows if r.generator == "NONE"), None)
-    check("an orphan exists to test", orphan is not None, "none found")
-    if orphan is not None:
-        check("orphan reason", classify_without_running(orphan).reason == "no-generator", "")
+    # The no-generator branch is exercised with a SYNTHETIC row rather than by
+    # requiring the manifest to contain a real orphan. B148 gave b067 and b071
+    # generators, which emptied the orphan set and made the original form of
+    # this check fail for a good reason — the guard was fine, its SUBJECT had
+    # gone. A guard whose test depends on the repo currently being broken
+    # stops being testable exactly when the repo gets fixed.
+    synthetic_orphan = Row(
+        artifact="docs/probes/b052-scope-provenance.tsv", kind="CORPUS",
+        question="does the no-generator branch report its own reason?",
+        generator="NONE", engine_version="1.29.14", probe_date="2026-09-01",
+        rows="-", diff="STRING", dependents="-",
+    )
+    check("orphan reason", classify_without_running(synthetic_orphan).reason == "no-generator",
+          f"got {classify_without_running(synthetic_orphan).reason!r}")
+    check("orphan is UNCHECKED, not CLEAN",
+          classify_without_running(synthetic_orphan).status == UNCHECKED, "")
+    # And the manifest's real orphan count is REPORTED, so emptying it is a
+    # visible event rather than a silent one.
+    real_orphans = [r.artifact for r in rows if r.generator == "NONE"]
+    print(f"  manifest orphans (generator=NONE): {len(real_orphans)} {real_orphans}")
     primary = next((r for r in rows if r.kind == "PRIMARY"), None)
     if primary is not None:
         check("primary reason", classify_without_running(primary).reason == "manual-re-verify", "")

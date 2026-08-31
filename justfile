@@ -162,6 +162,32 @@ probe-variant-selftests:
     python3 scripts/probe_const_receiver.py --selftest
     python3 scripts/probe_member_visibility.py --selftest
     python3 scripts/probe_engine_const_receiver.py --selftest
+    python3 scripts/probe_class_scopes.py --selftest
+    python3 scripts/probe_enum_conversion.py --selftest
+    python3 scripts/diff_probe_corpus.py --selftest
+
+# B067/B148: is a CLASS name usable as a SCOPE in type position? Regenerates
+# docs/probes/b067-class-position-scopes.tsv. Needs the game. The verdict is
+# derived by MATCHING ENGINE PROSE, so a reworded message reports UNRECOGNISED
+# rather than a flipped verdict — an instrument failure is not a finding.
+probe-class-scopes *ARGS:
+    python3 scripts/probe_class_scopes.py {{ARGS}}
+
+# B071/B148: enum conversion and enum-member verdicts. Regenerates ONLY the
+# engine columns of docs/probes/b071-enum-conversion.tsv — `lsp_today` is this
+# repo's own frozen history and row 3 is a retained INVALID measurement, so
+# the generator carries both forward and refuses to run without the committed
+# file. Needs the game.
+probe-enum-conversion *ARGS:
+    python3 scripts/probe_enum_conversion.py {{ARGS}}
+
+# Diff two probe corpora and say WHY each row differs: BEHAVIOUR-CHANGED (the
+# engine decides differently), WORDING-CHANGED (same verdict, new prose), or
+# INSTRUMENT-BROKEN (the probe could not classify what it saw). The last is
+# checked FIRST, because an unclassifiable row also has a changed verdict and
+# would otherwise be reported as the alarming reading of a cosmetic rewording.
+diff-probe-corpus *ARGS:
+    python3 scripts/diff_probe_corpus.py {{ARGS}}
 
 # Prove those three selftests are non-vacuous: drop every control row, blank
 # what a row stands in for, or restore the duplicated classifier, and each
