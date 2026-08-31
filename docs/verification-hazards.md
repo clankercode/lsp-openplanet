@@ -2129,6 +2129,80 @@ which is more than can be said for "think harder about your silence tests".
 **Corollary for reviewers.** A red/green report saying "11 failed, 4 passed" is
 not fully good news. The 4 are the ones to ask about.
 
+## The pre-flight sweep: every gate, asked what its silence means (B139)
+
+Three infrastructure conditions in one batch were reported as code defects —
+B106's full disk as "your code does not compile", a name-filtered run as a
+green summary, B132's peer merge as diff-marker noise. **The fix was never in
+the checker that fired.** So every gate and probe entry point was swept against
+one question: *what condition could make this measure nothing, or the wrong
+thing, and still return a verdict?*
+
+Recording the entry points that turned out FINE matters as much as the fixes:
+without it the next sweep re-derives the same conclusions, and "we checked" is
+not a durable artefact.
+
+| entry point | verdict | basis |
+|---|---|---|
+| `clippy_delta.py` | **no finding** | already refuses on zero workspace units, an empty baseline, zero findings against a non-empty baseline, a command mismatch, and a toolchain mismatch — the toolchain is *enforced*, not merely recorded |
+| `test-suite.py` | **no finding** | zero-binary exit, green-zero refusal, per-binary reconciliation against an enumeration from the same run, `filtered out` detection. HOME isolation is `test-hermetic.py` by design, and the boundary is documented |
+| the Rust suite | **no finding** | grepped for tests that self-skip on a missing fixture (`if !path.exists() { return }`): **zero**. A silent skip would be invisible in a green total |
+| `remote-build.py` | fixed | ssh's own `255` carried no note, so a connection failure read as a verdict from the remote command |
+| `probe_const_receiver` | fixed | run-level gate |
+| `probe_member_visibility` | fixed | run-level gate; also a **copied** `classify` whose docstring claimed to delegate |
+| `probe_engine_const_receiver` | fixed | run-level gate; **no post-run stranded-fixture sweep at all** |
+| `probe_shared_modifiers` | fixed | run-level gate (same shape; mine) |
+| `issue_repro_game`, `probe_enum_corpus`, `probe_export_binding` | already hardened | B118 / B123 / B127 |
+
+### The row-level oracle was fine; the RUN-level gate was not
+
+All four probes are exempt per-row: `build_verdict` requires two positive
+markers, so a build that never happened yields AMBIGUOUS, never ACCEPT. **The
+exposure was one level up.** Each hand-rolled its run gate as
+
+    bad = [r for r in rows if r["expect"] != "UNKNOWN"
+           and r["verdict"] != r["expect"]]
+    return 1 if bad else 0
+
+which exits 0 for a run that measured nothing, two ways:
+
+- **`--only <subset>` can filter the controls out.** `bad` is then computed
+  over an empty control set, is empty, and the run writes its corpus and exits
+  0 having verified no channel at all.
+- **The transport can die midway.** Every later row becomes AMBIGUOUS,
+  *no control mismatches because controls that never ran cannot mismatch*, and
+  a full column of AMBIGUOUS is exported as the measured answer with a success
+  status.
+
+That second clause is the sharp one: **a control proves nothing by not
+failing.** An absent control and a passing control are the same value in that
+expression.
+
+Now one shared `fleet.probe_run_problems`, refusing on: no rows, no control
+rows, a mismatched control, an ambiguous control, or every measured row
+ambiguous.
+
+### What it deliberately does NOT refuse
+
+**A single ambiguous row beside passing controls proceeds.** B096 claim 2
+shipped two of them and they were honest results. Making AMBIGUOUS fatal would
+have been the cure-worse-than-disease trap: it passes any suite that only
+checks that bad runs get refused, and it destroys every legitimate partial
+result. Both halves are pinned, and an over-condemn mutation for each is in
+`check_fleet_verdict_nonvacuous.py`.
+
+The same judgement elsewhere in this sweep: ssh's `255` gets a **note, not a
+refusal**, because 255 is a status a remote command may legitimately choose —
+data for the reader, not a decision taken from them.
+
+### One lane's infrastructure failure was another lane's measurement
+
+`probe_engine_const_receiver` had no post-run stranded-fixture sweep, so it
+could exit 0 having left a `lsp-issue-repro-*` fixture installed — which turns
+every *subsequent* probe's rows into skipped/AMBIGUOUS (B077). The failure and
+the false reading were in different processes, hours apart, which is why no
+single run looked wrong.
+
 ## The remote gate cannot see the git index — it copies FILES (B132)
 
 Found by incident, not review. A peer session began merging its lane into the

@@ -54,6 +54,30 @@ MUTATIONS = [
     ("B118 ch3: build_slice stops distinguishing 'never started'",
      "    if start is None:\n        return []",
      "    if start is None:\n        start = 0"),
+    # --- B139: the run-level gate ------------------------------------------
+    ("B139: the no-controls case stops being refused, so a --only run that "
+     "filtered out every control exits 0 having verified no channel",
+     "    if not controls:",
+     "    if False:"),
+    ("B139: an all-ambiguous run stops being refused, so a transport that "
+     "died midway exports a table of AMBIGUOUS as the measured answer",
+     "    if measured and all(r[\"verdict\"] == ambiguous for r in measured):",
+     "    if False:"),
+    ("B139: control mismatches stop being reported",
+     '        if r["verdict"] != r["expect"]:',
+     "        if False:"),
+    ("B139: an empty run is no longer refused",
+     '        return ["the run produced no rows at all, so nothing was measured"]',
+     "        return []"),
+    ("B139 OVER-CONDEMN: every run refused, which would fail the honest "
+     "partial results this gate exists to preserve",
+     "    problems: list[str] = []\n    if not rows:",
+     '    problems: list[str] = ["always"]\n    if not rows:'),
+    ("B139 OVER-CONDEMN: any ambiguous row at all is fatal, which would have "
+     "failed B096 claim 2's two legitimately ambiguous rows",
+     "    if measured and all(r[\"verdict\"] == ambiguous for r in measured):",
+     "    if measured and any(r[\"verdict\"] == ambiguous for r in measured):"),
+
     # --- B128: the filtered reader must stay test-only --------------------
     # The guard here is a static scan, so the mutation reintroduces the thing
     # it guards against -- a real production caller -- rather than neutering
