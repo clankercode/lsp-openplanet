@@ -122,6 +122,81 @@ pub struct NadeoMember {
     pub m: Option<u32>,
 }
 
+/// One note the dump attaches to a member: its text, and whether the dump
+/// classifies it as migration advice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NadeoMemberNote {
+    pub message: String,
+    /// `kind == 1` in the dump. Verified against all 829 notes rather than a
+    /// sample: of the 259 marked, the ones that do not match a crude
+    /// "use X instead" regex are still migration advice phrased without it
+    /// ("Use Track_Context_MenuStart"), and of the 570 unmarked, every regex
+    /// hit is a false one ("desires to spectate instead of playing"). So the
+    /// flag discriminates and the regex does not — which is why this reads
+    /// the flag.
+    pub is_migration: bool,
+}
+
+impl NadeoType {
+    /// The class description from `d.d`, or `None` when absent or empty.
+    ///
+    /// 143 classes carry the key and 133 a non-empty string; the other 10 are
+    /// `""`, which is an absent description written a different way and must
+    /// not reach hover as an empty doc block.
+    pub fn class_description(&self) -> Option<&str> {
+        let text = self.d.as_ref()?.get("d")?.as_str()?.trim();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Member notes from `d.o`, keyed by the member's `i`.
+    ///
+    /// THE KEY IS `i`, NEVER THE POSITION. 176 members have an `i` that
+    /// differs from their index and 59 notes land on one of them, so a
+    /// positional join does not merely miss those notes — it attaches
+    /// someone else's, which is worse than dropping them.
+    ///
+    /// Parsed defensively on purpose: a malformed or reshaped entry is
+    /// skipped rather than failing the load. Every note in both shipped
+    /// dumps is a 4-element `[i, message, kind, _]`, and that shape is
+    /// pinned by a test, so a change shows up there rather than by taking
+    /// the language server offline.
+    pub fn member_notes(&self) -> HashMap<u32, NadeoMemberNote> {
+        let mut out = HashMap::new();
+        let Some(entries) = self
+            .d
+            .as_ref()
+            .and_then(|d| d.get("o"))
+            .and_then(|o| o.as_array())
+        else {
+            return out;
+        };
+        for entry in entries {
+            let Some(fields) = entry.as_array() else {
+                continue;
+            };
+            let (Some(i), Some(message)) = (
+                fields.first().and_then(|v| v.as_u64()),
+                fields.get(1).and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            let message = message.trim();
+            if message.is_empty() {
+                continue;
+            }
+            let is_migration = fields.get(2).and_then(|v| v.as_u64()) == Some(1);
+            out.insert(
+                i as u32,
+                NadeoMemberNote {
+                    message: message.to_string(),
+                    is_migration,
+                },
+            );
+        }
+        out
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct NadeoEnumEntry {
     pub n: String,
@@ -320,12 +395,39 @@ mod b153_nadeo_dump_field_audit {
 
     /// Every `pub struct` in this file, parsed from source, so a struct added
     /// later joins the audit without anyone remembering to add it.
+    /// Only structs serde DESERIALIZES from the dump, identified by the
+    /// `Deserialize` derive immediately above them.
+    ///
+    /// B158 added `NadeoMemberNote`, which is derived from the dump rather
+    /// than read out of it, and the coverage test failed — correctly, on the
+    /// rule as first written, but for the wrong reason. A type nobody
+    /// deserializes has no dump keys to audit, so the question the audit asks
+    /// does not apply to it. The derive is the discriminator, read from the
+    /// source, so this stays honest as types are added either way.
     fn all_struct_names() -> Vec<String> {
-        SRC.lines()
-            .filter_map(|l| l.trim().strip_prefix("pub struct "))
-            .filter_map(|r| r.split_whitespace().next())
-            .map(|s| s.trim_end_matches('{').to_string())
-            .collect()
+        let mut out = Vec::new();
+        let mut derives_deserialize = false;
+        for line in SRC.lines() {
+            let t = line.trim();
+            if t.starts_with("#[derive(") {
+                derives_deserialize = t.contains("Deserialize");
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("pub struct ") {
+                if derives_deserialize {
+                    if let Some(name) = rest.split_whitespace().next() {
+                        out.push(name.trim_end_matches('{').to_string());
+                    }
+                }
+                derives_deserialize = false;
+            }
+        }
+        assert!(
+            out.len() >= 4,
+            "parsed only {} deserialized structs — the parser has drifted",
+            out.len()
+        );
+        out
     }
 
     fn nadeo() -> serde_json::Value {
@@ -471,19 +573,6 @@ mod b153_nadeo_dump_field_audit {
              replaces with String::new() behind a false \"uses type IDs\" \
              comment; consuming it changes call-expression types",
         ),
-        (
-            "NadeoType",
-            "d",
-            "OPEN FINDING, tracked: 190 class descriptions and 829 member \
-             notes, 259 of them deprecation/migration advice; needs a \
-             hover/diagnostic consumer to land with it",
-        ),
-        (
-            "NadeoMember",
-            "i",
-            "OPEN FINDING, tracked: the join key for `d.o` notes above; \
-             it becomes load-bearing exactly when `d` is consumed",
-        ),
     ];
 
     /// The structs the audit knows about, in the order their objects nest.
@@ -524,6 +613,9 @@ mod b153_nadeo_dump_field_audit {
         ("NadeoMember", "n", "member.n.clone()"),
         ("NadeoMember", "e", "self.e.is_some()"),
         ("NadeoEnumEntry", "n", "type_name, en.n"),
+        // B158 consumed both of these; they were OPEN FINDING rows until then.
+        ("NadeoType", "d", "self.d.as_ref()?.get(\"d\")"),
+        ("NadeoMember", "i", "notes.get(&member.i?)"),
     ];
 
     /// Direction 1 — THE DEFECT THIS FILE HAD. Every key the dump carries

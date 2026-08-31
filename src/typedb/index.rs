@@ -3,7 +3,9 @@ use std::path::Path;
 
 use super::core_format::{CoreClass, CoreDatabase};
 use super::header_format::HeaderDatabase;
-use super::nadeo_format::{NadeoDatabase, NadeoEnumEntry, NadeoMemberKind, NadeoType};
+use super::nadeo_format::{
+    NadeoDatabase, NadeoEnumEntry, NadeoMember, NadeoMemberKind, NadeoMemberNote, NadeoType,
+};
 
 /// The engine header, read from the same directory as the game dump for the
 /// module-level enums the dump cannot express (B046).
@@ -1433,6 +1435,10 @@ impl TypeIndex {
                 let mut methods = Vec::new();
                 let mut properties = Vec::new();
 
+                // B158: the class's member notes, keyed by `i` (never by
+                // position — 176 members diverge and 59 notes sit on one).
+                let notes = nadeo_type.member_notes();
+
                 // Anonymous member enums are registered *after* this type's
                 // named nested enums, so a nested `enum` block always keeps
                 // the plain `Module::Class::Name` key (B016).
@@ -1444,7 +1450,7 @@ impl TypeIndex {
                             properties.push(PropertyInfo {
                                 name: member.n.clone(),
                                 type_name: member.type_name().unwrap_or("").to_string(),
-                                doc: None,
+                                doc: member_note_doc(member, &notes),
                                 // Nadeo format exposes no accessor info;
                                 // assume writable (conservative — we only
                                 // hard-error on Core's proven get-only set).
@@ -1507,7 +1513,7 @@ impl TypeIndex {
                                 // The Nadeo dump stores no declaration text
                                 // — measured above, not inherited.
                                 decl: None,
-                                doc: None,
+                                doc: member_note_doc(member, &notes),
                             });
                         }
                         NadeoMemberKind::Enum => {
@@ -1543,7 +1549,7 @@ impl TypeIndex {
                                 properties.push(PropertyInfo {
                                     name: member.n.clone(),
                                     type_name: type_name.to_string(),
-                                    doc: None,
+                                    doc: member_note_doc(member, &notes),
                                     // Nadeo enum members: no accessor info —
                                     // assume writable (conservative).
                                     writable: true,
@@ -1583,7 +1589,7 @@ impl TypeIndex {
                     // The Nadeo dump carries no behaviors — engine classes are
                     // reference types with no constructor conversions.
                     ctor_conversions: Vec::new(),
-                    doc: None,
+                    doc: nadeo_type.class_description().map(str::to_string),
                     source: TypeSource::Nadeo,
                 };
                 // Don't overwrite Core types — they have richer metadata
@@ -2240,6 +2246,28 @@ fn render_return(return_type: &str) -> &str {
     } else {
         return_type
     }
+}
+
+/// B158: the note attached to this member, joined by `i`.
+///
+/// `notes.get(&member.i?)` is the whole join and it is deliberately the only
+/// place it happens: three call sites doing it inline is three chances to
+/// reach for the position instead.
+fn member_note_doc(
+    member: &NadeoMember,
+    notes: &std::collections::HashMap<u32, NadeoMemberNote>,
+) -> Option<String> {
+    notes.get(&member.i?).map(render_member_note)
+}
+
+/// `kind == 1` is migration advice, and hover must say so — the message alone
+/// ("MaxLine has no effet since manilink version >= 3") does not always read
+/// as one. A message that already announces itself is not prefixed twice.
+fn render_member_note(note: &NadeoMemberNote) -> String {
+    if !note.is_migration || note.message.to_ascii_lowercase().starts_with("deprecated") {
+        return note.message.clone();
+    }
+    format!("**Deprecated:** {}", note.message)
 }
 
 fn render_params(params: &[ParamInfo]) -> String {
@@ -6470,5 +6498,216 @@ mod b146_nadeo_param_direction_is_unknown {
             by_value.len(),
             &by_value[..by_value.len().min(4)]
         );
+    }
+}
+
+/// B158: the Nadeo dump's per-member notes, joined by `NadeoMember.i`.
+///
+/// `NadeoType.d` is `{d: <class description>, o: [[member_i, message, kind,
+/// _]]}` — 190 classes, 133 with a non-empty description, 829 member notes of
+/// which 259 carry `kind == 1`, migration advice naming a replacement ("Use
+/// TextSizeReal instead"). The loader parsed none of it, which is why the
+/// standing claim that the dumps carry no deprecation metadata was true for
+/// Core and false here.
+///
+/// The join is on `i`, never on position: 176 members have an `i` that
+/// differs from their index, and 59 notes land on one of them.
+#[cfg(test)]
+mod b158_nadeo_member_notes {
+    use super::*;
+
+    fn fixtures() -> TypeIndex {
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("fixtures must load")
+    }
+
+    fn ty<'a>(idx: &'a TypeIndex, short: &str) -> &'a TypeInfo {
+        let suffix = format!("::{short}");
+        let q = idx
+            .find_by_short_name(short)
+            .iter()
+            .find(|h| h.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("{short} must exist in the fixture"))
+            .clone();
+        idx.lookup_type(&q)
+            .unwrap_or_else(|| panic!("{short} must resolve"))
+    }
+
+    fn method_doc(idx: &TypeIndex, class: &str, method: &str) -> Option<String> {
+        ty(idx, class)
+            .methods
+            .iter()
+            .find(|m| m.name == method)
+            .unwrap_or_else(|| panic!("{class}::{method} must exist"))
+            .doc
+            .clone()
+    }
+
+    fn prop_doc(idx: &TypeIndex, class: &str, prop: &str) -> Option<String> {
+        ty(idx, class)
+            .properties
+            .iter()
+            .find(|p| p.name == prop)
+            .unwrap_or_else(|| panic!("{class}::{prop} must exist"))
+            .doc
+            .clone()
+    }
+
+    /// The class description reaches `TypeInfo.doc`, which hover already
+    /// renders for Core.
+    #[test]
+    fn a_class_description_is_loaded() {
+        let idx = fixtures();
+        assert_eq!(
+            ty(&idx, "CGameScoreAndLeaderBoardManagerScript")
+                .doc
+                .as_deref(),
+            Some("Score and leaderboard manager.")
+        );
+    }
+
+    /// THE JOIN KEY TEST. `Map_GetRecord_v2` sits at POSITION 6 but has
+    /// `i == 7`, and both indices carry a note — so a positional
+    /// implementation does not merely miss the note, it attaches the WRONG
+    /// one. Asserting the right text alone would pass on a positional
+    /// build for every member before the divergence; this asserts the
+    /// wrong text is absent too.
+    #[test]
+    fn a_note_is_joined_by_i_not_by_position() {
+        let idx = fixtures();
+        let doc = method_doc(
+            &idx,
+            "CGameScoreAndLeaderBoardManagerScript",
+            "Map_GetRecord_v2",
+        );
+        assert_eq!(
+            doc.as_deref(),
+            Some("Returns the user record time for a map."),
+            "the note for i=7 must land on the member whose i is 7"
+        );
+        let at_position_6 = "Get respawn count and time from a compressed platform score";
+        assert!(
+            !doc.as_deref().unwrap_or("").contains(at_position_6),
+            "this is the note for i=6; a positional join would put it here"
+        );
+    }
+
+    /// The pair: a member WITH a note and one WITHOUT, in the same class.
+    /// Either alone proves nothing about the fallback, and 78% of members
+    /// have no note at all, so the empty case is the common one.
+    #[test]
+    fn a_documented_and_an_undocumented_member_of_one_class() {
+        let idx = fixtures();
+        let documented = prop_doc(&idx, "CGameManialinkEntry", "TextSize");
+        assert!(
+            documented
+                .as_deref()
+                .is_some_and(|d| d.contains("Use TextSizeReal instead")),
+            "got {documented:?}"
+        );
+        assert_eq!(
+            prop_doc(&idx, "CGameManialinkEntry", "Value"),
+            None,
+            "a member with no note must stay undocumented, not inherit one"
+        );
+    }
+
+    /// `kind == 1` is migration advice and is marked as such, so hover
+    /// distinguishes "here is what this does" from "stop using this".
+    #[test]
+    fn a_migration_note_is_marked_and_a_plain_note_is_not() {
+        let idx = fixtures();
+        let migration = prop_doc(&idx, "CGameManialinkEntry", "TextSize").expect("note");
+        assert!(
+            migration.starts_with("**Deprecated:**"),
+            "kind 1 must be marked: {migration:?}"
+        );
+        let plain =
+            prop_doc(&idx, "CGameScoreAndLeaderBoardManagerScript", "TaskResults").expect("note");
+        assert_eq!(plain, "Array of task results.", "kind 0 must be verbatim");
+    }
+
+    /// A class with a description and no member notes, and one with member
+    /// notes and no description — neither shape may lose the half it has.
+    #[test]
+    fn description_without_notes_and_notes_without_description() {
+        let idx = fixtures();
+        let desc_only = ty(&idx, "CSmArenaScore");
+        assert_eq!(
+            desc_only.doc.as_deref(),
+            Some("Scoring info for ShootMania players.")
+        );
+        assert!(
+            desc_only.properties.iter().all(|p| p.doc.is_none()),
+            "CSmArenaScore carries no member notes"
+        );
+        let notes_only = ty(&idx, "CGameManialinkFrame");
+        assert_eq!(
+            notes_only.doc, None,
+            "an empty description string must be None, not Some(\"\")"
+        );
+        assert!(
+            notes_only.properties.iter().any(|p| p.doc.is_some()),
+            "CGameManialinkFrame carries member notes"
+        );
+    }
+
+    /// NEGATIVE CONTROL: a class carrying no `d` at all renders exactly as
+    /// it does today — nothing invented, nothing inherited from a sibling.
+    #[test]
+    fn a_class_with_no_doc_block_gains_nothing() {
+        let idx = fixtures();
+        let bare = ty(&idx, "CMwEngine");
+        assert_eq!(bare.doc, None);
+        assert!(bare.methods.iter().all(|m| m.doc.is_none()));
+        assert!(bare.properties.iter().all(|p| p.doc.is_none()));
+    }
+
+    /// The `kind` fields' distinct values, pinned. A new kind in a future
+    /// dump then shows up as a failing test rather than silently taking
+    /// whichever branch the match arm happens to default to.
+    #[test]
+    fn the_note_kind_values_are_pinned() {
+        let raw = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/typedb/OpenplanetNext.json"),
+        )
+        .expect("fixture");
+        let db: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+        let mut kinds = std::collections::BTreeSet::new();
+        let mut fourth = std::collections::BTreeSet::new();
+        let mut lengths = std::collections::BTreeSet::new();
+        let mut notes = 0usize;
+        for ns in db["ns"].as_object().expect("ns").values() {
+            for class in ns.as_object().expect("classes").values() {
+                let Some(o) = class
+                    .get("d")
+                    .and_then(|d| d.get("o"))
+                    .and_then(|o| o.as_array())
+                else {
+                    continue;
+                };
+                for entry in o {
+                    let a = entry.as_array().expect("note is an array");
+                    notes += 1;
+                    lengths.insert(a.len());
+                    kinds.insert(a[2].as_u64().expect("kind"));
+                    fourth.insert(a[3].as_u64().expect("fourth"));
+                }
+            }
+        }
+        assert_eq!(notes, 829, "note population");
+        assert_eq!(lengths, [4].into_iter().collect(), "every note is 4 long");
+        assert_eq!(kinds, [0, 1].into_iter().collect(), "note kinds");
+        // The fourth field's meaning is UNDETERMINED — it spreads across all
+        // three member kinds for each of its values, so it is not a member
+        // kind. It is pinned, deliberately not interpreted (B153's rule for
+        // `m` and `c`: a bit whose meaning nobody measured is not a fact).
+        assert_eq!(fourth, [0, 1, 2].into_iter().collect(), "fourth field");
     }
 }
