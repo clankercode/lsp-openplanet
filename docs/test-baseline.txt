@@ -1037,6 +1037,16 @@ openplanet_lsp::server::call_hierarchy::tests::test_prepare_on_call_site
 openplanet_lsp::server::call_hierarchy::tests::test_prepare_on_call_site_inside_namespace
 openplanet_lsp::server::call_hierarchy::tests::test_prepare_on_function_declaration
 openplanet_lsp::server::call_hierarchy::tests::test_prepare_on_non_function_returns_empty
+openplanet_lsp::server::code_actions::define_actions::tests::command_only_action_never_mutates_source_when_the_client_has_no_handler
+openplanet_lsp::server::code_actions::define_actions::tests::compound_conditions_offer_each_literal_state_without_preference
+openplanet_lsp::server::code_actions::define_actions::tests::directive_tokens_preserve_case_utf16_and_ignore_comments
+openplanet_lsp::server::code_actions::define_actions::tests::elif_is_preferred_only_when_the_toggle_really_selects_that_arm
+openplanet_lsp::server::code_actions::define_actions::tests::foreign_stale_and_non_quickfix_requests_are_safe
+openplanet_lsp::server::code_actions::define_actions::tests::inactive_simple_if_offers_preferred_enable_command
+openplanet_lsp::server::code_actions::define_actions::tests::live_directive_identifier_offers_literal_disable
+openplanet_lsp::server::code_actions::define_actions::tests::negated_if_and_simple_else_offer_the_sufficient_literal_toggle
+openplanet_lsp::server::code_actions::define_actions::tests::nested_inactive_region_uses_only_the_nearest_controlling_arm
+openplanet_lsp::server::code_actions::define_actions::tests::repeated_define_occurrences_deduplicate_the_body_action
 openplanet_lsp::server::code_actions::fix::tests::fix_all_materializes_auto_descriptors_only
 openplanet_lsp::server::code_actions::fix::tests::kind_selected_matches_dotted_prefix
 openplanet_lsp::server::code_actions::fix::tests::kind_selected_matches_exactly
@@ -1503,6 +1513,9 @@ openplanet_lsp::server::completion::b117_member_visibility_tests::an_unresolvabl
 openplanet_lsp::server::completion::b117_member_visibility_tests::private_and_protected_are_distinguishable_at_the_derived_site
 openplanet_lsp::server::completion::b117_member_visibility_tests::the_declaring_class_is_offered_every_member_it_declares
 openplanet_lsp::server::completion::b117_member_visibility_tests::the_file_boundary_does_not_change_any_verdict
+openplanet_lsp::server::completion::b133_enum_value_docs::core_enum_completion_documents_one_value_and_leaves_the_common_fallback_plain
+openplanet_lsp::server::completion::b133_enum_value_docs::nadeo_enum_completion_without_value_docs_stays_usable_and_plain
+openplanet_lsp::server::completion::b133_enum_value_docs::shortcut_enum_value_completion_carries_the_same_doc
 openplanet_lsp::server::completion::tests::completion_namespace_still_works
 openplanet_lsp::server::completion::tests::completion_offers_dot_members
 openplanet_lsp::server::completion::tests::completion_offers_enclosing_class_members
@@ -1590,8 +1603,11 @@ openplanet_lsp::server::hover::tests::hover_answers_exactly_the_enum_spellings_t
 openplanet_lsp::server::hover::tests::hover_answers_for_a_global_enum_through_a_workspace_namespace
 openplanet_lsp::server::hover::tests::hover_bare_virtual_property_inside_its_own_namespace
 openplanet_lsp::server::hover::tests::hover_class_implementation_wins_over_the_interface_it_satisfies
+openplanet_lsp::server::hover::tests::hover_documented_global_enum_value_through_a_real_ancestor_scope
 openplanet_lsp::server::hover::tests::hover_enum_values_render_the_same_on_both_paths
 openplanet_lsp::server::hover::tests::hover_external_enum_alias_order_is_deterministic
+openplanet_lsp::server::hover::tests::hover_external_enum_value_shows_its_doc_without_interpreting_it_as_markdown
+openplanet_lsp::server::hover::tests::hover_external_enum_value_without_a_doc_still_shows_the_value
 openplanet_lsp::server::hover::tests::hover_external_funcdef_shows_signature
 openplanet_lsp::server::hover::tests::hover_external_function_shows_doc
 openplanet_lsp::server::hover::tests::hover_external_member_method_lists_overloads
@@ -1641,6 +1657,7 @@ openplanet_lsp::server::hover::tests::hover_namespaced_interface_method
 openplanet_lsp::server::hover::tests::hover_namespaced_symbol_bare_reference
 openplanet_lsp::server::hover::tests::hover_on_an_undocumented_nadeo_member_is_unchanged
 openplanet_lsp::server::hover::tests::hover_overload_order_is_deterministic
+openplanet_lsp::server::hover::tests::hover_plain_global_enum_value_through_a_workspace_ancestor_scope
 openplanet_lsp::server::hover::tests::hover_rejects_nadeo_class_storage_key
 openplanet_lsp::server::hover::tests::hover_rejects_nadeo_enum_storage_key
 openplanet_lsp::server::hover::tests::hover_rejects_qualified_header_enum_spelling
@@ -1674,6 +1691,7 @@ openplanet_lsp::server::hover::tests::hover_workspace_unnamed_param_renders_plac
 openplanet_lsp::server::hover::tests::hover_workspace_void_call_shows_return_type_not_error
 openplanet_lsp::server::hover::tests::hover_workspace_zero_param_function_has_empty_parens
 openplanet_lsp::server::hover::tests::hover_write_to_a_getter_only_property_falls_back_to_the_getter
+openplanet_lsp::server::hover::tests::workspace_enum_shadow_blocks_a_core_only_value_and_its_doc
 openplanet_lsp::server::hover::tests::workspace_import_alias_does_not_duplicate_its_definition
 openplanet_lsp::server::hover::tests::workspace_symbol_doc_renders_below_the_signature
 openplanet_lsp::server::hover::tests::workspace_variable_doc_renders_below_the_declaration
