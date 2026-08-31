@@ -5310,10 +5310,24 @@ impl<'a> Checker<'a> {
         let ExprKind::Member { object, member } = &lhs.kind else {
             return;
         };
-        // Compute the receiver type directly (the check-mode pass does not
-        // populate the span map). Member-access typing is read-only and
-        // idempotent, so walking the object again is safe.
+        // Compute the receiver type directly, because the check-mode pass does
+        // not populate the span map.
+        //
+        // B126. The previous comment here read "member-access typing is
+        // read-only and idempotent, so walking the object again is safe" —
+        // true of the TYPE it returns, false of its SIDE EFFECT. `expr_type`
+        // pushes diagnostics, so re-walking an object that is a CALL emits
+        // that call's diagnostics a second time: `c.Get().x = 1` produced two
+        // `NonConstMethodOnConstReceiver` at the identical span. Idempotent in
+        // its result is not idempotent in its effects, and only the first half
+        // was checked.
+        //
+        // The sole caller has already typed `lhs`, which types this same
+        // object, so everything this walk emits is a duplicate of a
+        // diagnostic already recorded. Type here, keep nothing.
+        let mark = self.diagnostics.len();
         let obj_ty = self.expr_type(object);
+        self.diagnostics.truncate(mark);
         let Some(type_name) = Self::base_type_name(&obj_ty) else {
             return;
         };
@@ -14696,17 +14710,20 @@ mod b121_return_aliasing_tests {
     fn only_aliasing_returns_inherit_receiver_const_same_file() {
         for (label, class_body, use_body, want) in CASES {
             let d = check_ws(&format!("{class_body} {use_body}"), &[], None);
-            // `>= 1`, not `== 1`. A write THROUGH a call (`c.Get().x = 1`)
-            // walks the callee twice — once to type the assignment target,
-            // once for the value — so the call diagnostic is emitted twice
-            // at the same span. Pre-existing and unrelated to B121: that row
-            // takes the identical path to master, which only differs in what
-            // is returned AFTER the emit. The CLI dedups by span+kind, which
-            // is why the fleet output shows one. Filed separately; asserting
-            // `== 1` here would be asserting a bug is absent when it is not.
-            assert!(
-                nonconst(&d) >= 1,
-                "`{label}`: the call itself must still be diagnosed, got {:?}",
+            // `== 1`, tightened from `>= 1` by B126. A write THROUGH a call
+            // (`c.Get().x = 1`) used to walk the callee TWICE — once to type
+            // the assignment target, once for the value — emitting the call
+            // diagnostic twice at the same span. lane-enum relaxed this to
+            // `>= 1` during B120 with the reason written in, rather than
+            // asserting `== 1` and thereby asserting a bug is absent when it
+            // was not. The double walk is fixed, so the honest assertion is
+            // available again. It matters at unit level even though the CLI
+            // dedups by span+kind: the dedup is why the fleet never showed
+            // this, not a reason it was harmless.
+            assert_eq!(
+                nonconst(&d),
+                1,
+                "`{label}`: the call must be diagnosed exactly once, got {:?}",
                 d
             );
             assert_eq!(
@@ -14734,6 +14751,62 @@ mod b121_return_aliasing_tests {
                 split
             );
         }
+    }
+
+    /// B126: a write THROUGH a call diagnoses the callee exactly ONCE.
+    ///
+    /// `check_readonly_prop_assign` re-walks the assignment target's object to
+    /// type it, and `expr_type` PUSHES DIAGNOSTICS. Its comment claimed
+    /// member-access typing was "read-only and idempotent, so walking the
+    /// object again is safe" — true of the type it returns, false of its
+    /// effect on the diagnostic list. So `c.Get().x = 1` reported the const
+    /// receiver twice at the identical span.
+    ///
+    /// This is pinned at unit level BECAUSE the CLI dedups by span+kind. That
+    /// dedup is why the fleet never showed it — it is not a reason the double
+    /// emit was harmless, and any consumer reading diagnostics before the
+    /// dedup (an LSP client, a count, a test) saw two.
+    #[test]
+    fn a_write_through_a_call_does_not_double_report_the_callee() {
+        let class = "class C { C@ Get() { return this; } int x; }";
+        let write = check_ws(
+            &format!("{class} void f(const C@ c) {{ c.Get().x = 1; }}"),
+            &[],
+            None,
+        );
+        assert_eq!(
+            nonconst(&write),
+            1,
+            "the callee must be diagnosed once, not once per walk: {:?}",
+            write
+        );
+
+        // THE PAIR. Reading through the same call is also exactly one, which
+        // is what distinguishes the fix from "assignment suppresses
+        // diagnostics" — a suppression would satisfy the assertion above.
+        let read = check_ws(
+            &format!("{class} void f(const C@ c) {{ auto v = c.Get().x; }}"),
+            &[],
+            None,
+        );
+        assert_eq!(
+            nonconst(&read),
+            1,
+            "a READ through the same call must also report once: {:?}",
+            read
+        );
+
+        // CONTROL, and the one that matters for the shape of the fix: the
+        // de-duplication discards a REDUNDANT walk, not diagnostics. The
+        // assignment's own violation is still reported, so the truncation is
+        // not swallowing the finding the re-walk exists to produce.
+        assert_eq!(
+            violations(&write),
+            1,
+            "the assignment's own const violation must survive the \
+             de-duplication: {:?}",
+            write
+        );
     }
 
     /// NON-VACUITY. The pair test above is satisfied by two identical empty
