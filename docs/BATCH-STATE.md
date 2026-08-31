@@ -1,4 +1,19 @@
-# bl-fix-many batch state — 2026-08-31 20:35 AEST
+# bl-fix-many batch state — 2026-08-31, updated 21:05 AEST
+
+> **RESUMED 21:05.** Credits were restored, four fresh lanes are running
+> (enum: B091 then B100; unused: B093 then B099; tooling: B106 then B097 then
+> B096; resolver: B101). Master re-verified at **2601 on x-tuf** — an
+> independent host, because of the ENOSPC hazard below. The history below is
+> kept as the record of the outage.
+>
+> **GATES NOW RUN ON x-tuf, NOT x-alpha.** x-alpha reached 100% disk today and
+> `just rtest` exited 0 while the underlying build had FAILED with ENOSPC — a
+> false green (B106, lane-tooling's first ticket). x-alpha is back to 18G free
+> after reclaiming ~10G of finished lane trees, but do not trust its exit codes
+> until B106 lands. Trust the printed SUITE-VERIFIED line WITH its binary
+> count, and reconcile the total arithmetically against the base.
+
+## Original entry — 20:35 AEST
 
 Written to disk because all four lanes died on a spend limit and the batch
 resumes from here, not from anyone's memory.
