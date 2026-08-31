@@ -236,6 +236,18 @@ indistinguishable from "I am structurally incapable of seeing it".
   the instrument, because a duplicate reported twice under one method and once
   under another is the same member of the set either way.
 
+  **But a set diff keyed on line numbers manufactures its own phantom
+  regression, and following the advice above literally produces one.** The lane
+  that resolved this ran the set diff as instructed and got 5 branch-only and 5
+  master-only rows. They were **the same five** pre-existing warnings, shifted
+  down a few lines because the branch had inserted code above them. Any
+  diagnostic below an insertion point moves, so every one of them reads as
+  "removed at the old line, added at the new". Key the comparison on
+  `(file, column, message)` with line numbers normalised out; then both diffs
+  came back empty against 57 unique warnings a side. **A diff is only as
+  meaningful as the identity you diff on, and line numbers are not identity —
+  they are position, and position is exactly what an unrelated edit changes.**
+
   Caught here only because one coordinator happened to read two lanes' reports
   in the same sitting. **That is not a control, it is a coincidence** — the
   general fix is that any number handed across a lane boundary carries the
@@ -337,6 +349,39 @@ indistinguishable from "I am structurally incapable of seeing it".
 
   A mutation that nothing detects is usually read as "that code is fine". It
   means the opposite: **no test is looking at it.**
+
+- **Twice in one day, a lane committed the exact defect it was fixing, while
+  fixing it.** Not a coincidence, and worth naming as a pattern rather than
+  filed as two anecdotes:
+
+  - Writing the guard against stranded probe fixtures, a lane **stranded three
+    probe fixtures in the live game directory** — two of them declaring a
+    namespace, which is the contaminating shape the ticket exists to prevent.
+  - Designing the fix for "callers reach for the wrong member of a set of
+    near-identical predicates", a lane proposed a `pub(crate)` demotion that
+    **closes nothing**, because these are sibling modules in a single crate.
+    It had, hours earlier, produced the finding that the same fix's boundary
+    was drawn around the *name* rather than the *capability* — and then drew
+    it around the name again, one level up.
+
+  A third, from the same batch: a coordinator who had just written "never
+  suppress stderr on a probe you intend to believe" added `2>/dev/null` to a
+  probe and believed its output.
+
+  **The mechanism is not carelessness — it is that the fix for a class of error
+  is written by someone holding that class of error in their head, which is
+  also the state in which they are most likely to commit it.** Attention spent
+  on the abstraction is attention not spent on the instance. This is why "the
+  author understands the hazard" is worth nothing as a control, and why the
+  countermeasures that actually worked in all three cases were mechanical and
+  external: an assertion about a path rather than existence, checking whether a
+  keyword binds before building on it, and a contradiction visible in the same
+  output.
+
+  Practical consequence: **the moment you are most confident about a hazard is
+  the moment to add a control against it, not to rely on knowing it.** Every
+  instance above was caught by something written down, never by the
+  understanding that had just been demonstrated in prose.
 
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
