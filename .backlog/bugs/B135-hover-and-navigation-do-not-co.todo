@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T15:05:17Z"
 depends_on: []
 estimate_hours: 1
 id: B135
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Hover and navigation do not consume member visibility either: is_private/is_protected have zero readers in hover.rs and navigation.rs after B117 wired completion'
@@ -12,3 +14,72 @@ updated_at: "2026-08-31T15:05:17Z"
 ---
 
 Hover and navigation do not consume member visibility either: is_private/is_protected have zero readers in hover.rs and navigation.rs after B117 wired completion
+
+
+## Found by lane-unused on completing B117, 2026-09-01. Deliberately not absorbed.
+
+After B117 wired member-completion filtering, a grep for `is_private|is_protected`
+returns **0 hits** in both `src/server/hover.rs` and `src/server/navigation.rs`.
+
+## Why it was scoped out rather than swept in — read this before "finishing the job"
+
+**Hiding may not be the right behaviour there, and that is a real design question
+rather than an oversight.** Hovering a private member you can already SEE in the
+source is arguably fine; offering one you cannot use in completion is not. The
+two features have different jobs and the same flag should not be assumed to mean
+the same thing in both.
+
+So the deliverable here starts with a DECISION, not a filter:
+
+- **Hover:** probably should still render, possibly annotated (`private`, or the
+  visibility shown in the signature line) rather than suppressed. Suppressing
+  hover on a symbol the user is pointing at is hostile — they can see it exists.
+- **Navigation / go-to-definition:** probably should still resolve. A user
+  navigating to a private member is reading code, not calling it.
+- **Document symbols / workspace symbols:** genuinely open. An outline that hides
+  private members is a different product decision from one that shows them.
+
+Decide each explicitly and write the reasoning where the code is, the way B117
+wrote the B131 engine bound at its filter site.
+
+## What B117 already established, so this does not get re-derived
+
+The engine's rule, measured over 39 variants with 15 controls
+(`docs/probes/b117-member-visibility.tsv`):
+
+| access site | private | protected | public |
+|---|---|---|---|
+| inside the declaring class | offer | offer | offer |
+| inside a derived class | **HIDE** | offer | offer |
+| an unrelated function | **HIDE** | **HIDE** | offer |
+
+Plus three findings that will save you the same traps:
+
+1. **The file boundary is irrelevant** — an AngelScript class is module-scoped,
+   so cross-file rows match unrelated rows exactly. This repo's recurring
+   same-file-only shape (B116, B120) does NOT apply. Do not build a second code
+   path for it.
+2. **Privacy is class-scoped, not object-scoped** — a method may touch a private
+   field of another INSTANCE of its own class. Key on the enclosing class, never
+   on the receiver expression.
+3. **There is an engine hole in one spelling.** At a derived site, `this.mem`
+   ACCEPTS while bare `mem` and `b.mem` both REJECT. It is a hole, not a rule —
+   B117 confirmed with three rows. Do not model the permissive spelling.
+
+**Engine members carry no visibility data at all** (B131: 0/1002 and 0/975, the
+strings absent from both dumps), so this is workspace-half-only, exactly as B117
+is.
+
+## Safe direction
+
+Whatever is decided, follow B117's precedent: every uncertain case **shows**.
+Unknown enclosing class, unresolvable or cyclic hierarchy, ambiguous qualified
+name — a spurious reveal is visible and harmless, a spurious hide is
+undiagnosable by the user.
+
+## Mutation-test it
+
+B117's three mutations are the model: filter nothing, filter everything
+non-public, and treat `protected` as `private`. Each was caught by the guard
+written for it, and the third is the one that matters — it is the only mutation
+that a test suite lacking a derived-class site would miss.
