@@ -115,6 +115,81 @@ fn override_key(param_types: &[String]) -> String {
 #[derive(Debug, Clone, Copy)]
 pub struct Accepted(());
 
+/// B081: a type name resolved SHADOW-AWARE — proof that the workspace does
+/// not declare a type of this name, so it really denotes the engine type the
+/// typedb holds under it.
+///
+/// The field is private, so only [`GlobalScope::external_type_name`] can mint
+/// one, and that is the shadow-aware resolver. A caller holding this has
+/// necessarily asked whether the workspace shadows the name.
+///
+/// # Which hole this closes, and which one the NAME closes
+///
+/// This closes SHADOW-BLINDNESS. `is_external_derived_from` used to take two
+/// `&str`s and resolve them against the type index whether or not the
+/// workspace shadowed them, which made it indistinguishable at the call site
+/// from the shadow-aware `is_external_type`. B063 picked the shadow-blind one
+/// while actively reasoning about B079's duplicate-predicate hazard, and a
+/// plugin declaring `class CSmPlayer {}` was offered the engine class's
+/// injected methods. Nothing was missing; the right predicate existed, one
+/// identifier away.
+///
+/// It does NOT close argument ORDER — the rename to
+/// [`GlobalScope::external_type_derives_from`] does that, by making a
+/// transposed call read wrong.
+///
+/// # Why only the DESCENDANT position is newtyped
+///
+/// Deliberate, not an oversight. The ancestor is an engine IDENTITY, not a
+/// name the plugin author wrote: six of the eight original call sites pass a
+/// hardcoded `"CMwNod"` or a string from `INJECTED_METHODS`. Making the
+/// ancestor shadow-aware would be actively wrong — a plugin declaring
+/// `class CMwNod {}` must not switch off `MwAddRef` for genuine engine types.
+///
+/// The asymmetry pays a second dividend the design ruling did not expect. It
+/// observed that one newtype applied to BOTH parameters leaves them mutually
+/// substitutable and so cannot close transposition. Applied to ONE position it
+/// does: the two arguments now have different types, so a transposed call is a
+/// compile error as well as a misreading.
+///
+/// The POSITIVE CONTROL for the two `compile_fail` blocks below, and it is
+/// not decoration: a `compile_fail` doctest that fails for the wrong reason —
+/// a mistyped import path, a renamed method — passes just as green as one that
+/// fails for the intended reason. This block differs from each of them by
+/// exactly the offending line, so if the path or the signature were wrong,
+/// this one goes red and says so.
+///
+/// ```
+/// use openplanet_lsp::typecheck::global_scope::ExternalTypeName;
+/// fn wants(n: ExternalTypeName<'_>) -> &str { n.as_str() }
+/// let _ = wants;
+/// ```
+///
+/// ```compile_fail
+/// // A bare `&str` cannot stand in for a resolved name.
+/// use openplanet_lsp::typecheck::global_scope::ExternalTypeName;
+/// fn wants(n: ExternalTypeName<'_>) -> &str { n.as_str() }
+/// wants("CSmPlayer");
+/// ```
+///
+/// ```compile_fail
+/// // Nor can one be forged: the field is private, so the shadow-aware
+/// // resolver is the only source.
+/// use openplanet_lsp::typecheck::global_scope::ExternalTypeName;
+/// fn wants(n: ExternalTypeName<'_>) -> &str { n.as_str() }
+/// wants(ExternalTypeName("CSmPlayer"));
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ExternalTypeName<'a>(&'a str);
+
+impl<'a> ExternalTypeName<'a> {
+    /// The underlying spelling. Read-only on purpose: handing the `&str` back
+    /// is fine, since what the witness proves is about how it was OBTAINED.
+    pub fn as_str(self) -> &'a str {
+        self.0
+    }
+}
+
 impl<'a> GlobalScope<'a> {
     pub fn new(workspace: &'a SymbolTable, external: Option<&'a TypeIndex>) -> Self {
         Self {
@@ -1019,25 +1094,36 @@ impl<'a> GlobalScope<'a> {
         None
     }
 
-    /// True when `type_name` is (or derives from) `base` in the external
-    /// typedb. Walks the parent chain with a cycle guard, same as
-    /// `ext_lookup_member`. Used to gate game-builtin allowances (GH #21:
-    /// `MwAddRef`/`MwRelease` on CMwNod).
-    pub fn is_external_derived_from(&self, type_name: &str, base: &str) -> bool {
+    /// The chain walk itself: does `descendant`'s external parent chain reach
+    /// `ancestor`? Walks with a cycle guard, same as `ext_lookup_member`.
+    ///
+    /// B081: SHADOW-BLIND BY CONSTRUCTION, and PRIVATE for that reason. It
+    /// resolves both names against the type index whether or not the workspace
+    /// declares a type of that name, which is right for an engine identity in
+    /// the ancestor position and wrong for a name the plugin author wrote.
+    /// Public callers go through [`Self::external_type_derives_from`] or
+    /// [`Self::external_type_is`], both of which demand an
+    /// [`ExternalTypeName`] for the descendant.
+    ///
+    /// This used to be `pub fn is_external_derived_from(type_name, base)`.
+    /// Two `&str`s said nothing about which was the ancestor, and nothing
+    /// about whether either had been shadow-resolved; see [`ExternalTypeName`]
+    /// for what each half of the fix closes.
+    fn external_chain_contains(&self, descendant: &str, ancestor: &str) -> bool {
         let Some(ext) = self.external else {
             return false;
         };
-        let Some(base_resolved) = Self::resolve_external_type_name(ext, base) else {
+        let Some(ancestor_resolved) = Self::resolve_external_type_name(ext, ancestor) else {
             return false;
         };
-        let mut current: Option<String> = Self::resolve_external_type_name(ext, type_name);
+        let mut current: Option<String> = Self::resolve_external_type_name(ext, descendant);
         let mut hops = 0usize;
         while let Some(name) = current.take() {
             hops += 1;
             if hops > 32 {
                 break;
             }
-            if name == base_resolved {
+            if name == ancestor_resolved {
                 return true;
             }
             let Some(info) = ext.lookup_type(&name) else {
@@ -1131,6 +1217,62 @@ impl<'a> GlobalScope<'a> {
         }
         let q = ext.find_by_short_name(name).first()?;
         ext.lookup_type(q)
+    }
+
+    /// B081: the shadow-aware resolver, and the ONLY way to mint an
+    /// [`ExternalTypeName`].
+    ///
+    /// Same question as [`Self::is_external_type`] — the `Some` just carries
+    /// the proof that it was asked. Where a caller previously wrote
+    /// `if !scope.is_external_type(&t) { return; }` and then passed the bare
+    /// `&t` onward, the guard and the use are now one expression and cannot
+    /// drift apart. That drift is the whole ticket: both `injected_method`
+    /// callers in `checker.rs` WERE correct, but only because an
+    /// `is_external_type` guard fifteen lines earlier, written for a different
+    /// purpose ("only emit when the type is a known external type"), happened
+    /// to dominate them. Correct by coincidence of control flow is not the
+    /// same as correct by construction, and it is not visible to a reader at
+    /// the call site.
+    pub fn external_type_name<'n>(&self, name: &'n str) -> Option<ExternalTypeName<'n>> {
+        self.is_external_type(name)
+            .then_some(ExternalTypeName(name))
+    }
+
+    /// True when `descendant` is, or derives from, the engine type spelled
+    /// `ancestor`.
+    ///
+    /// Named so a transposed call reads wrong, which is the half of B081 the
+    /// witness type cannot do: `is_external_derived_from(a, b)` gave a reader
+    /// nothing to check the order against.
+    ///
+    /// `ancestor` stays a `&str` deliberately — it is an engine identity
+    /// (`"CMwNod"`, a row from `INJECTED_METHODS`), not a name the plugin
+    /// author wrote, and shadow-resolving it would let a plugin's
+    /// `class CMwNod {}` switch off a rule about genuine engine types. See
+    /// [`ExternalTypeName`] for why that asymmetry also closes transposition.
+    pub fn external_type_derives_from(
+        &self,
+        descendant: ExternalTypeName<'_>,
+        ancestor: &str,
+    ) -> bool {
+        self.external_chain_contains(descendant.as_str(), ancestor)
+    }
+
+    /// True when `resolved` and the engine type spelled `engine_name` are the
+    /// SAME external type, tolerating short vs. namespace-qualified spellings
+    /// on either side.
+    ///
+    /// The typedb parent chain is a tree, so mutual derivation can only mean
+    /// the two names resolve to one type. It lives here rather than in
+    /// `checker.rs` because that is where the name resolver is: the checker's
+    /// own `same_external_type` helper existed only to work around this being
+    /// private, and `builtins.rs` open-coded the same pair of calls. One
+    /// concept, three spellings, which is the B079 shape that B081 is the
+    /// fifth instance of — so B081 removes two of them rather than adding a
+    /// fourth.
+    pub fn external_type_is(&self, resolved: ExternalTypeName<'_>, engine_name: &str) -> bool {
+        self.external_chain_contains(resolved.as_str(), engine_name)
+            && self.external_chain_contains(engine_name, resolved.as_str())
     }
 
     /// True if `qualified` is known to the external TypeIndex as a type.
@@ -2262,6 +2404,67 @@ mod tests {
             &fixtures.join("OpenplanetNext.json"),
         )
         .expect("typedb fixtures must load")
+    }
+
+    /// B081: the mint is the shadow-aware resolver, and both directions are
+    /// asserted because the reject half alone is satisfied by a mint that
+    /// never returns `Some`.
+    ///
+    /// `CSmPlayer` is the exact name B063's defect turned on: a plugin
+    /// declaring `class CSmPlayer {}` was offered the engine class's injected
+    /// methods, because the predicate that got picked resolved the name
+    /// against the index whether or not the workspace shadowed it.
+    #[test]
+    fn the_mint_refuses_a_shadowed_name_and_accepts_an_unshadowed_one() {
+        let index = typedb_fixture_index();
+
+        let ws = SymbolTable::new();
+        let unshadowed = GlobalScope::new(&ws, Some(&index));
+        assert!(
+            unshadowed
+                .external_type_name("CSmPlayer")
+                .is_some_and(|n| n.as_str() == "CSmPlayer"),
+            "the engine CSmPlayer must mint when nothing shadows it, or the \
+             reject half below proves nothing"
+        );
+
+        let mut shadowing = SymbolTable::new();
+        let fid = shadowing.allocate_file_id();
+        shadowing.set_file_symbols(
+            fid,
+            vec![make_symbol(
+                "CSmPlayer",
+                SymbolKind::Class {
+                    parents: Vec::new(),
+                    is_mixin: false,
+                },
+            )],
+        );
+        let shadowed = GlobalScope::new(&shadowing, Some(&index));
+        assert!(
+            shadowed.external_type_name("CSmPlayer").is_none(),
+            "a workspace `class CSmPlayer {{}}` shadows the engine type, so no \
+             witness may be minted for that name"
+        );
+        // The derivation question is therefore unreachable for a shadowed
+        // name: no witness, no way to ask. Paired with the positive control
+        // below so this is not the vacuous half — on the UNSHADOWED scope the
+        // very same chain walk answers `true`, so `is_none()` above is the
+        // shadow check biting rather than the predicate being broken.
+        assert!(
+            unshadowed
+                .external_type_name("CSmPlayer")
+                .is_some_and(|n| unshadowed.external_type_derives_from(n, "CMwNod")),
+            "control: the engine CSmPlayer really does derive from CMwNod, so \
+             the refusal above is about shadowing and nothing else"
+        );
+        assert!(
+            !shadowed
+                .external_type_name("CSmPlayer")
+                .is_some_and(|n| shadowed.external_type_derives_from(n, "CMwNod")),
+            "and with the workspace declaration in place the same question \
+             cannot even be put"
+        );
     }
 
     #[test]

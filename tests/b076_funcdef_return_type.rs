@@ -300,7 +300,7 @@ fn handle_versus_value_return_is_accepted_at_both_positions() {
 
 /// A derived class is still not the declared return type for delegate
 /// construction. Kept separate from the unrelated-classes case because a fix
-/// that leans on `is_external_derived_from` would pass that one and fail this.
+/// that leans on `external_type_derives_from` would pass that one and fail this.
 #[test]
 fn binding_rejects_derived_handle_return_against_base_funcdef() {
     assert_rejected(
@@ -523,7 +523,7 @@ fn engine_base_return_against_derived_funcdef_is_rejected() {
 }
 
 /// The covariant direction: returning a DERIVED where the funcdef promises a
-/// BASE is accepted, via `is_external_derived_from` inside
+/// BASE is accepted, via `external_type_derives_from` inside
 /// `funcdef_types_compatible`.
 ///
 /// MEASURED, not asserted from first principles — and it is the reason the

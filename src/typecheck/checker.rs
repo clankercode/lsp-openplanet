@@ -12,7 +12,9 @@
 use super::access_position::AccessPosition;
 use super::builtins;
 use super::call_site::{self, ArgBind};
-use super::global_scope::{qualified_virtual_name, FuncdefSig, GlobalScope, OverloadSig};
+use super::global_scope::{
+    qualified_virtual_name, ExternalTypeName, FuncdefSig, GlobalScope, OverloadSig,
+};
 use super::repr::{param_mode_from_text, ParamMode, PrimitiveType, TypeRepr};
 use super::resolver::TypeResolver;
 use crate::lexer::token::TokenKind;
@@ -2450,9 +2452,12 @@ impl<'a> Checker<'a> {
         // property list). Unknown names (e.g. tail-matched class field
         // identifiers fabricated into `Named(name)` by the Ident walker)
         // are also silenced — we can't trust the object type.
-        if !self.scope.is_external_type(&type_name) {
+        // B081: the mint, not merely a guard. Its `Some` is what
+        // `injected_method` below takes, so the shadow check and the use it
+        // protects can no longer be separated by an edit.
+        let Some(external_receiver) = self.scope.external_type_name(&type_name) else {
             return TypeRepr::Error(String::new());
-        }
+        };
         // Nadeo-sourced types can have incomplete member metadata. When the
         // typedb lists zero properties/methods for the type, a failed
         // lookup may just mean the DB is incomplete — stay silent. When
@@ -2468,7 +2473,7 @@ impl<'a> Checker<'a> {
         // argument list), which yields no value in AngelScript — silence is
         // all that's owed here. The call site is where the return type
         // matters; see `injected_method_return`.
-        if self.injected_method(&type_name, &member_name).is_some() {
+        if self.injected_method(external_receiver, &member_name).is_some() {
             return TypeRepr::Error(String::new());
         }
         self.diagnostics.push(TypeDiagnostic {
@@ -2490,31 +2495,31 @@ impl<'a> Checker<'a> {
     /// the game compiles. Consulted at both member-access and call sites,
     /// which is why the data lives in one table rather than in `matches!`
     /// arms at each.
+    /// B081: takes an [`ExternalTypeName`] rather than a `&str`, so the shadow
+    /// check cannot be separated from the use it guards.
+    ///
+    /// Both callers were already correct, but only because an
+    /// `is_external_type` guard fifteen-odd lines earlier — written for a
+    /// different purpose, "only emit when the type is a known external type" —
+    /// happened to dominate them. Measured, not assumed: a fixture declaring
+    /// `class CSmPlayer {}` and calling `p.MwAddRef()` reports
+    /// `type 'CSmPlayer' has no member 'MwAddRef'` on master. Correct by
+    /// coincidence of control flow, invisible to a reader here, and one
+    /// reordering away from the defect B063 shipped on the completion side.
+    /// The guard is now the mint, so the two are one expression.
     fn injected_method(
         &self,
-        type_name: &str,
+        receiver: ExternalTypeName<'_>,
         member_name: &str,
     ) -> Option<&'static builtins::InjectedMethod> {
         builtins::injected_methods_named(member_name).find(|m| match &m.receivers {
             builtins::InjectedReceiver::EveryEngineClass => {
-                self.scope.is_external_derived_from(type_name, "CMwNod")
+                self.scope.external_type_derives_from(receiver, "CMwNod")
             }
             builtins::InjectedReceiver::Exact(names) => {
-                names.iter().any(|n| self.same_external_type(type_name, n))
+                names.iter().any(|n| self.scope.external_type_is(receiver, n))
             }
         })
-    }
-
-    /// True when `a` and `b` name the SAME external type, tolerating short
-    /// vs. namespace-qualified spellings on either side.
-    ///
-    /// The typedb parent chain is a tree, so mutual derivation can only mean
-    /// the two names resolve to one type. Expressed through the public
-    /// `is_external_derived_from` because `GlobalScope`'s name resolver is
-    /// private. Only reached on the lookup-miss path, so the two short chain
-    /// walks cost nothing on hot paths.
-    fn same_external_type(&self, a: &str, b: &str) -> bool {
-        self.scope.is_external_derived_from(a, b) && self.scope.is_external_derived_from(b, a)
     }
 
     /// Value an injected method's CALL yields.
@@ -3635,7 +3640,16 @@ impl<'a> Checker<'a> {
             (
                 TypeRepr::Named(a) | TypeRepr::Funcdef(a),
                 TypeRepr::Named(b) | TypeRepr::Funcdef(b),
-            ) => self.named_types_equivalent(a, b) || self.scope.is_external_derived_from(a, b),
+            ) => {
+                // B081: the descendant is a name from SOURCE here, not an
+                // engine identity, so it is resolved shadow-aware. The
+                // ancestor stays as written — see `ExternalTypeName`.
+                self.named_types_equivalent(a, b)
+                    || self
+                        .scope
+                        .external_type_name(a)
+                        .is_some_and(|d| self.scope.external_type_derives_from(d, b))
+            }
             _ => got == expected,
         }
     }
@@ -3869,7 +3883,19 @@ impl<'a> Checker<'a> {
                                     && !matches!(param_ty.unwrap_const(), TypeRepr::Handle(_))
                                     && self.scope.external_ctor_converts(arg_n, param_n);
                             if !self.named_types_equivalent(arg_n, param_n)
-                                && !self.scope.is_external_derived_from(arg_n, param_n)
+                                // B081: shadow-aware on the descendant, as
+                                // above. Note `is_external_type(arg_n)` is
+                                // already consulted sixteen lines up for
+                                // `is_unknown_workspace_arg` — the correct
+                                // predicate was in view and the shadow-blind
+                                // one was used here anyway, which is the
+                                // selection failure this ticket is about.
+                                && !self
+                                    .scope
+                                    .external_type_name(arg_n)
+                                    .is_some_and(|d| {
+                                        self.scope.external_type_derives_from(d, param_n)
+                                    })
                                 && !ctor_converts
                                 // GH #23: an `auto` (or workspace-local class)
                                 // the typedb can't see has no ancestry to
@@ -4663,9 +4689,10 @@ impl<'a> Checker<'a> {
                         });
                     }
                 }
-                if !self.scope.is_external_type(&type_name) {
+                // B081: the mint, as in `member_access_type`.
+                let Some(external_receiver) = self.scope.external_type_name(&type_name) else {
                     return TypeRepr::Error(String::new());
-                }
+                };
                 // Same Nadeo completeness rule as `member_access_type` (B006):
                 // suppress only when the typedb member list is empty.
                 if self.scope.is_nadeo_type(&type_name)
@@ -4680,7 +4707,7 @@ impl<'a> Checker<'a> {
                 // here. Unlike the member-access mirror of this gate, the
                 // RETURN TYPE is load-bearing — `auto id = p.GetCurrentEntityID()`
                 // must infer `uint`, not the silence sentinel.
-                if let Some(inj) = self.injected_method(&type_name, &member_name) {
+                if let Some(inj) = self.injected_method(external_receiver, &member_name) {
                     self.check_arity_against_ranges(
                         &member_name,
                         &[inj.arity],
@@ -9482,6 +9509,62 @@ void Main() {
             undefined_members_named(&diags, "GetCurrentEntityID").is_empty(),
             "GetCurrentEntityID on its declaring type must be silent, got {:?}",
             diags
+        );
+    }
+
+    /// B081: a workspace class shadowing an engine one gets NONE of that engine
+    /// class's injected methods, at the call path and the member-access path
+    /// alike.
+    ///
+    /// HONEST STATUS: this passes before B081 as well as after, and it is a
+    /// characterization test rather than a red/green. It is here because of
+    /// WHY it passed before. Both `injected_method` call sites were correct
+    /// only because an `is_external_type` guard fifteen-odd lines earlier —
+    /// written for an unrelated purpose, "only emit when the type is a known
+    /// external type" — happened to dominate them. Nothing tied the guard to
+    /// the use, no test named the property, and a reader at the call site
+    /// could not see it. B063 shipped exactly that defect on the completion
+    /// side, where `completion.rs` has carried the mirror of this test ever
+    /// since; the checker side had the behaviour and no witness.
+    ///
+    /// B081 makes it structural — `injected_method` takes an
+    /// `ExternalTypeName`, which only the shadow-aware mint produces — so what
+    /// this test now pins is a guarantee rather than a coincidence of control
+    /// flow. The `compile_fail` doctests on `ExternalTypeName` are the
+    /// red/green for the guarantee itself.
+    #[test]
+    fn b081_a_workspace_class_shadowing_an_engine_one_gets_no_injected_methods() {
+        let diags = check_with_typedb(
+            r#"
+            class CSmPlayer { int ownField; }
+            void Use(CSmPlayer@ p) {
+                p.MwAddRef();
+                p.GetCurrentEntityID();
+                print("" + p.ownField);
+            }
+            "#,
+        );
+        let undefined: Vec<_> = diags
+            .iter()
+            .filter_map(|d| match &d.kind {
+                TypeDiagnosticKind::UndefinedMember { member, .. } => Some(member.as_str()),
+                _ => None,
+            })
+            .collect();
+        for name in ["MwAddRef", "GetCurrentEntityID"] {
+            assert!(
+                undefined.contains(&name),
+                "the workspace CSmPlayer has no `{name}`: the engine class's \
+                 injected methods must not leak onto a shadowing declaration, \
+                 got {diags:?}"
+            );
+        }
+        // The control that makes the two assertions above mean something: the
+        // shadowing class's OWN member still resolves, so this is a shadow
+        // rule and not the receiver failing to type at all.
+        assert!(
+            !undefined.contains(&"ownField"),
+            "the shadowing class's own field must still resolve: {diags:?}"
         );
     }
 
