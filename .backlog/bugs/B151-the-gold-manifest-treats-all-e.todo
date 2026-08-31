@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T16:02:56Z"
 depends_on: []
 estimate_hours: 1
 id: B151
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'The gold manifest treats all engine artifacts alike, but only game-surface ones need retained per-version history: language-semantics corpora want one current version plus a drift report'
@@ -12,3 +14,91 @@ updated_at: "2026-08-31T16:02:56Z"
 ---
 
 The gold manifest treats all engine artifacts alike, but only game-surface ones need retained per-version history: language-semantics corpora want one current version plus a drift report
+
+
+## Raised by Max, 2026-09-01
+
+> "do we want to keep multiple versions of those tied to the openplanet version?
+> unless it's to do with game classes cause they can change with game version
+> updates"
+
+**The instinct is right and it splits the manifest cleanly.** The 14 rows fall
+into two groups with genuinely different needs.
+
+## The distinction: does an OLD version's answer remain evidence?
+
+**GAME SURFACE — retain per-version, because you DIFF them.**
+
+| artifact | why |
+|---|---|
+| `tests/fixtures/typedb` | the type dump itself; changes every game update |
+| `b052-qualified-enum-spellings.tsv` | names specific game enums (`Scene::ESceneCharVisNotice`) |
+| `b053-bare-enum-values.tsv` | names specific game enum values (`Turbo`, `GlassSmash`) |
+| `b052-scope-provenance.tsv` | which scopes existed; a surface question |
+
+A member added or removed between versions is **the finding**, and you can only
+see it by holding both. This is the deprecation/ABI story — GH #18, B094, and
+B124's constness drift all live here. **typedb already implements exactly this**
+(`typedb-status` / `diff` / `refresh` / `refresh-apply` / `typedb-guard`), so the
+pattern exists and should be extended to the three enum-surface corpora rather
+than invented.
+
+**LANGUAGE SEMANTICS — one current version, plus the drift report.**
+
+`b067`, `b071`, `b086`, both `b096` corpora, `b117`, `b119`, and all three
+PRIMARY sites. These measure how the AngelScript compiler and Openplanet's module
+system BEHAVE, not what the game exposes. When the rule changes you **replace**
+the answer; the old one is not evidence about anything you would act on.
+
+Keeping those live side-by-side costs review noise and creates a real hazard:
+**someone cites the stale version.** This batch spent a night on exactly that
+class of defect.
+
+## The argument that decides it
+
+**Git already gives you history for free.** The question is not "keep or lose the
+old data" — every previous version of every corpus is in the log. The question is
+whether to hold multiple versions **live, side by side, and comparable**, and
+that is only worth its cost where something actually diffs them.
+
+For a language rule nothing diffs them: the drift report says CHANGED, a human
+reads why, and the new answer replaces the old. For game surface the diff IS the
+product.
+
+## Proposed mechanism
+
+Add a **`volatility`** column to `docs/probes/MANIFEST.tsv`:
+
+- `SURFACE` — retain per-version; regen adds a version rather than replacing;
+  a diff between versions is a reportable finding.
+- `SEMANTICS` — single current version; regen replaces in place; a change is
+  reported as DRIFT for a human to read, and git holds the history.
+
+The runner already refuses silent cross-version comparison (B129), so this only
+changes what a regen WRITES, not what it compares.
+
+## One middle case, worth naming rather than forcing
+
+**Message-text corpora.** `b067`'s discriminator is literally two message
+spellings, and `interface_impl.rs` records exact engine error strings. Those can
+change on an engine upgrade with **no semantic change at all**.
+
+They are `SEMANTICS` — you do not want a growing archive of wording — but they
+need the version stamp to explain a diff, and a drift there should be readable as
+"wording changed" rather than "behaviour changed". Say so in the `question`
+column so the next reader is not alarmed by a cosmetic diff.
+
+## Do the stamps first — this is blocked on real work, not on the design
+
+The classification is cheap; the data is not currently in a state to act on it:
+
+- **5 of 14 rows are `engine_version=UNKNOWN`** — `b052-scope-provenance`,
+  `b117`, `b119`, `config.rs`, `server/mod.rs`.
+- **`tests/fixtures/typedb` is stamped 1.29.5 while the live engine is 1.29.14.**
+  The SURFACE artifact most in need of per-version history is itself a version
+  behind.
+- **B148**: `b067` and `b071` carry a stamp that looks copied from a sibling
+  corpus, and they are the two orphans with no generator.
+
+**Restamp and re-measure before adding a retention policy**, or the policy will
+be applied to labels nobody has verified.
