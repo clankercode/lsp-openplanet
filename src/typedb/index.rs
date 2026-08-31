@@ -1231,7 +1231,9 @@ impl TypeIndex {
                                 is_const: a.typeflags & 0b100 != 0,
                             })
                             .collect(),
-                        is_const: m.is_const,
+                        // B125: derived from `decl`, not from a `const`
+                        // key — the dumps do not carry one.
+                        is_const: m.declared_const(),
                         decl: m.decl.clone(),
                         doc: m.desc.clone(),
                     })
@@ -5406,5 +5408,265 @@ mod single_read_tests {
                 "generation {gen:?} is not identifiable from a loaded index"
             );
         }
+    }
+}
+
+// ── B124 / B125: engine method constness lives in `decl`, and now arrives ────
+//
+// `CoreMethod` used to carry a `#[serde(rename = "const")] is_const` field that
+// no dump has ever populated, so `serde(default)` answered `false` for every
+// engine method and its one consumer — the `typedb diff` drift report —
+// rendered every engine signature as non-const. Nothing distinguished "no
+// engine method is const" from "we never read this", which is exactly the trap
+// B116 warned about: a field that greps cleanly and type-checks and is wrong.
+//
+// These tests are also the DURABLE RECORD of the measurement, so the next
+// person does not re-derive the 301 by hand. They read the shipped fixtures on
+// purpose: if a future dump changes shape, they fail and say what to do.
+#[cfg(test)]
+mod b125_engine_method_constness_tests {
+    use super::*;
+    use crate::typedb::core_format::CoreMethod;
+
+    fn core_json() -> serde_json::Value {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        serde_json::from_str(&std::fs::read_to_string(p).expect("fixture must exist"))
+            .expect("fixture must parse")
+    }
+
+    fn core_methods(v: &serde_json::Value) -> Vec<&serde_json::Value> {
+        v["classes"]
+            .as_array()
+            .expect("classes[]")
+            .iter()
+            .flat_map(|c| {
+                c["methods"]
+                    .as_array()
+                    .map(|m| m.iter())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// A parsed `CoreMethod` from a decl, for the rule's own unit tests.
+    fn method_with_decl(decl: Option<&str>) -> CoreMethod {
+        let json = match decl {
+            Some(d) => format!(r#"{{"name":"M","decl":{}}}"#, serde_json::json!(d)),
+            None => r#"{"name":"M"}"#.to_string(),
+        };
+        serde_json::from_str(&json).expect("CoreMethod must parse")
+    }
+
+    /// The rule, stated against every shape the real dump contains. The
+    /// param-only row is the one that matters: a `contains("const")` test
+    /// marks 352 methods const on the shipped dump, and every one is wrong.
+    #[test]
+    fn declared_const_reads_the_suffix_and_only_the_suffix() {
+        for (want, decl) in [
+            (true, Some("string GetName() const")),
+            (true, Some("const T& opIndex(uint index) const")),
+            (true, Some("const Json::Value@ opIndex(int) const")),
+            (
+                true,
+                Some("string Replace(const string&in a, const string&in b) const"),
+            ),
+            // Trailing whitespace must not hide the qualifier.
+            (true, Some("string GetName() const  ")),
+            // Return-type const is NOT method const.
+            (false, Some("const string& Get()")),
+            (false, Some("const Json::Value@ opIndex(int)")),
+            // `const` inside a parameter is NOT method const.
+            (false, Some("bool opEquals(const MwId&in)")),
+            (false, Some("void SetName(const string&in)")),
+            // A method whose NAME merely ends in the letters.
+            (false, Some("void MakeConst()")),
+            (false, Some("void SetName(int)")),
+            (false, None),
+        ] {
+            assert_eq!(
+                method_with_decl(decl).declared_const(),
+                want,
+                "decl {decl:?}"
+            );
+        }
+    }
+
+    /// THE MEASUREMENT, pinned. These are the numbers B124 and B125 were
+    /// filed on; keeping them in a test means nobody has to trust a commit
+    /// message. A shape change in a future dump lands here first.
+    #[test]
+    fn the_shipped_core_dump_carries_constness_only_in_decl() {
+        let v = core_json();
+        let methods = core_methods(&v);
+        assert_eq!(methods.len(), 1002, "Core class-method count changed");
+
+        // The dead field: no dump has ever carried a `const` KEY. If this
+        // fires, a dump started supplying one — prefer it over the decl
+        // suffix and revisit `CoreMethod::declared_const`.
+        let with_key = methods.iter().filter(|m| m.get("const").is_some()).count();
+        assert_eq!(
+            with_key, 0,
+            "a dump now carries a `const` key on {with_key} methods — \
+             `declared_const` reads the decl suffix and should be revisited"
+        );
+
+        // The live source, and the trap it avoids.
+        let suffix = methods
+            .iter()
+            .filter(|m| {
+                m["decl"]
+                    .as_str()
+                    .is_some_and(|d| d.trim_end().ends_with(" const"))
+            })
+            .count();
+        assert_eq!(suffix, 301, "count of ` const`-suffixed decls changed");
+
+        let naive = methods
+            .iter()
+            .filter(|m| m["decl"].as_str().is_some_and(|d| d.contains("const")))
+            .count();
+        assert_eq!(
+            naive, 653,
+            "a substring test would claim {naive} const methods vs the real 301"
+        );
+
+        // Every method has a decl, so the suffix rule is never guessing.
+        assert!(
+            methods.iter().all(|m| m["decl"].as_str().is_some()),
+            "a method without a `decl` cannot have its constness read"
+        );
+
+        // A free function cannot carry the qualifier — the sanity check
+        // that the suffix means what we think it means.
+        let free_const = v["functions"]
+            .as_array()
+            .expect("functions[]")
+            .iter()
+            .filter(|f| {
+                f["decl"]
+                    .as_str()
+                    .is_some_and(|d| d.trim_end().ends_with(" const"))
+            })
+            .count();
+        assert_eq!(free_const, 0, "a free function cannot be const");
+    }
+
+    /// `returntypeflags` carries the by-value / by-reference distinction that
+    /// `returntypedecl` LOSES — `decl "const T& opIndex(...)"` arrives with
+    /// `returntypedecl "T"` but flags 7. Recorded here because it is the
+    /// half of the aliasing question the dumps CAN answer, and B121's
+    /// residual is the half they cannot.
+    ///
+    /// The bits match the parameter convention already used for
+    /// `ParamInfo`: 0b001 in, 0b010 out, 0b100 const.
+    #[test]
+    fn returntypeflags_histogram_is_the_recorded_shape_signal() {
+        let v = core_json();
+        let mut hist = std::collections::BTreeMap::new();
+        for m in core_methods(&v) {
+            *hist
+                .entry(m["returntypeflags"].as_u64().unwrap_or(0))
+                .or_insert(0) += 1;
+        }
+        assert_eq!(
+            hist,
+            [(0u64, 865), (3, 123), (7, 14)].into_iter().collect(),
+            "returntypeflags shape changed: 0 = by value or handle, \
+             3 = `T&`, 7 = `const T&`"
+        );
+    }
+
+    /// End to end: the real index now reports engine constness. Before B125
+    /// every one of these was `false`.
+    #[test]
+    fn the_loaded_index_reports_engine_method_constness() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        let idx = TypeIndex::load(
+            &dir.join("OpenplanetCore.json"),
+            &dir.join("OpenplanetNext.json"),
+        )
+        .expect("fixtures must load");
+        let stringy = idx.lookup_type("string").expect("`string` must be known");
+        for (name, want) in [
+            ("Replace", true),
+            ("ToLower", true),
+            ("Split", true),
+            ("Trim", true),
+        ] {
+            let m = stringy
+                .methods
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("string::{name} must exist"));
+            assert_eq!(m.is_const, want, "string::{name} decl={:?}", m.decl);
+        }
+        // Non-vacuity: the index must not simply say `true` everywhere.
+        let any_false = idx
+            .lookup_type("string")
+            .expect("string")
+            .methods
+            .iter()
+            .any(|m| !m.is_const);
+        assert!(
+            any_false,
+            "every `string` method reported const — the flag is not discriminating"
+        );
+    }
+}
+
+// ── B125: the drift report can now SEE a constness change ───────────────────
+#[cfg(test)]
+mod b125_drift_visibility_tests {
+    use super::*;
+
+    const EMPTY_NADEO: &str = r#"{"op":"1.0.0","ns":{}}"#;
+
+    fn core_with_method_decl(decl: &str) -> String {
+        format!(
+            r#"{{"op":"1.0.0","classes":[{{"id":1,"name":"C","methods":[{{"name":"M","returntypedecl":"string","returntypeflags":0,"args":[],"decl":"{decl}"}}],"props":[]}}]}}"#
+        )
+    }
+
+    fn index_from(tag: &str, core: &str) -> TypeIndex {
+        let dir = crate::testing::TempDir::new(&format!("openplanet-lsp-b125-{tag}"));
+        let core_path = dir.join("OpenplanetCore.json");
+        let nadeo_path = dir.join("OpenplanetNext.json");
+        std::fs::write(&core_path, core).unwrap();
+        std::fs::write(&nadeo_path, EMPTY_NADEO).unwrap();
+        TypeIndex::load(&core_path, &nadeo_path).unwrap()
+    }
+
+    /// THE POINT OF POPULATING THE FIELD. An engine method gaining or losing
+    /// its `const` qualifier between two Openplanet versions is a real ABI
+    /// change — B094's probe measured the engine treating `void M() const`
+    /// and `void M()` as different signatures. While `is_const` was hardwired
+    /// `false`, `class_facts` rendered both spellings identically and the
+    /// drift report said nothing at all.
+    ///
+    /// This is the red/green for B125: without the fix the diff is EMPTY.
+    #[test]
+    fn a_method_gaining_const_between_versions_is_reported_as_drift() {
+        let old = index_from("const-old", &core_with_method_decl("string M()"));
+        let new = index_from("const-new", &core_with_method_decl("string M() const"));
+        let diff = diff_indexes(&old, &new);
+        assert!(
+            !diff.is_empty(),
+            "a method gaining `const` must show as drift, got {diff:?}"
+        );
+    }
+
+    /// The other direction, so the test above cannot pass by reporting drift
+    /// for everything.
+    #[test]
+    fn an_unchanged_const_method_reports_no_drift() {
+        let core = core_with_method_decl("string M() const");
+        let old = index_from("same-old", &core);
+        let new = index_from("same-new", &core);
+        assert!(
+            diff_indexes(&old, &new).is_empty(),
+            "identical DBs must diff clean"
+        );
     }
 }
