@@ -386,6 +386,8 @@ Useful options (see `--help` for the full list):
 | `--errors last\|first\|off` | Group errors after / before / interleaved with other diagnostics (default last; ignored for JSON) |
 | `--typedb-dir <DIR>` | Load Openplanet type database from DIR |
 | `--no-typedb` | Skip type DB (parse-only / limited checks) |
+| `--openplanet-version <V[,V...]>` | Check against these Openplanet versions (default: the installed one). Several versions check all of them at once; diagnostics that fire on only some targets get an `[op V]` label, and missing symbols other recorded versions know carry "added in" / "removed in" notes |
+| `--typedb-versions-dir <DIR>` | Root of recorded typedb snapshots, one `<version>/` subdirectory each (see `tests/fixtures/typedb-versions/`) |
 | `--plugins-dir <DIR>` | Extra Openplanet plugins dir for dependency exports |
 
 Unless `--no-typedb` is passed, every run states which type database it used

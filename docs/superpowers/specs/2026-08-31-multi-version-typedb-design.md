@@ -132,6 +132,26 @@ convention. Layers:
   pair. **B00x suite untouched and green** on the 1.29.5 primary
   fixture (`tests/fixtures/typedb/`).
 
+## Live incident (motivation, 2026-08-31)
+
+The failure this design prevents was observed in the wild the day it was
+approved: an Openplanet update landed on disk at ~15:10 while a game
+process started earlier kept the old runtime in memory. A plugin's 08:39
+green LSP gate answered from a 1.29.5-era typedb; the ~15:30 game restart
+came up on 1.29.14 and rejected `Net::SecureSocket`
+(`Identifier 'SecureSocket' is not a data type in namespace 'Net'`) plus
+`string::Join`/`string::Repeat` in two other plugins. The tool said yes
+because its database predated the removal (tm-tournament-station +
+lsp-openplanet-08 sessions).
+
+Related finding from the same investigation: deprecation intent for
+`SecureSocket` exists on disk in the install's `Scripts/Compatibility.as`
+(a shim whose constructor errors with the official migration to
+`Net::Socket` + `secure=true`) — but not in the typedb, and the shim is
+apparently not applied to user-plugin compiles. A future overlay could be
+*seeded* from `Compatibility.as` prose (named replacements), with the
+snapshot diff as the completeness check on the shim, never the reverse.
+
 ## Out of scope (future work)
 
 - Fetch-on-demand snapshot distribution; compressed/binary snapshot

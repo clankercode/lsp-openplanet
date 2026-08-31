@@ -93,6 +93,17 @@ check-showcase:
       --typedb-dir {{typedb}} \
       {{showcase}}
 
+# GH #18: multi-version check of the version-straddle fixture against the
+# recorded snapshots (1.29.5 + 1.29.14) — the Text::Join miss should come
+# back labeled `[op 1.29.5]` with an added-in note.
+check-versions:
+    cargo build
+    ./target/debug/{{bin}} check \
+      --typedb-dir tests/fixtures/typedb-versions/1.29.5 \
+      --typedb-versions-dir tests/fixtures/typedb-versions \
+      --openplanet-version 1.29.5,1.29.14 \
+      tests/fixtures/issue-repros/gh18-version-straddle || true
+
 # Show resolved type-DB paths + versions (auto-detect, or pass --from DIR)
 typedb-status:
     cargo build
