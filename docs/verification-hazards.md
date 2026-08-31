@@ -2862,3 +2862,39 @@ and now evidence-gathering.
 status you are about to draw a conclusion from must not be piped, truncated, or
 have its status read through another process.** Gate, probe, sanity check, or
 one-off — the mechanism does not care which you called it.
+
+## A remote gate rsyncs FILES, not the git index — so a peer's in-flight merge reads as a compile error
+
+Two sessions share the main checkout of this repo. A peer began merging its lane
+while this session ran `just rclippy-delta` on what it believed was its own
+post-merge master. The gate rsynced the peer's **conflicted working tree** to
+x-tuf and returned:
+
+    ADDED [(uncoded)] src/typecheck/checker.rs (new): encountered diff marker
+    ADDED [(uncoded)] src/typecheck/checker.rs (new): expected at least one digit in exponent
+    clippy checked zero workspace units, so it found nothing because it looked at
+    nothing. An empty result is not a clean result.
+
+**The gate refused correctly, and for the right reason** — the zero-units guard
+did its job. But nothing in that message says "another session is mid-merge in
+your checkout". It reads as *your code does not compile*, which is the third time
+this batch that an infrastructure condition has been reported as a code defect
+(see also the ENOSPC entry).
+
+**The mechanism, stated once so it is not re-derived:** the remote gate does not
+and cannot see the git index. It copies the FILES. So an unresolved merge, a
+half-written edit, or any dirty tree is measured as source, and conflict markers
+arrive at the compiler as syntax.
+
+**The fix is a pre-gate cleanliness probe.** A `MERGE_HEAD` check plus
+`git status --porcelain` in the rsync wrapper turns a confusing compile failure
+into a named refusal: *"the working tree has an unresolved merge; gating it would
+measure conflict markers."* Cheap, and it converts the worst diagnostic in the
+system into the clearest.
+
+**The coordination lesson is separate and just as important.** The collision was
+resolved without loss because neither side touched the other's index: this
+session did not run `merge --abort`, `checkout` or `reset` on a merge it did not
+start, and the peer announced a bounded, pre-announced hold-gates window for its
+retry. **In a shared checkout, the index belongs to whoever started the
+operation.** Abort is not a cleanup command when the mess is someone else's.
