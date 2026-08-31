@@ -175,6 +175,31 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **117 false "never used" warnings removed across four plugin corpora**
+  (B084, B087) — three separate defects all reported live code as dead.
+
+  An **overloaded** global function was never credited when called: the
+  lookup that credits a call gives up the moment two functions share a
+  name, and the call then hit a silencer that suppressed the
+  undefined-identifier error and recorded nothing. `LabeledValue` in
+  tm-editor-plus-plus — ten overloads, called from dozens of sites — was
+  reported unused ten times. A funcdef handle invoked as a call, and an
+  enum used as a cast-call, took the same path.
+
+  A **`shared`** declaration is now a root. The parser consumed the
+  modifier and discarded it for everything except a class, so a shared
+  interface, enum, funcdef or function looked unreferenced.
+
+  A function **exported from inside a `namespace`** is now rooted by its
+  export stub. Export rooting excluded names containing `::` to skip class
+  methods, which also discarded namespaced functions — the shape
+  tm-editor-plus-plus uses throughout. Rooting now tests span containment,
+  which is strictly more accurate even for the original case, since
+  `namespace Holder { void F() {} }` and `class Holder { void F() {} }`
+  are indistinguishable by name alone.
+
+  Five warnings are NEW and all are genuine — an unread parameter and four
+  unreferenced enum values that the false positives had been hiding.
 - **A plugin type that shares a name with an engine funcdef now shadows it**
   (B073, GH #38) — a plugin declaring `class CoroutineFunc` resolved to the
   *engine* funcdef of that name, so constructing its own class reported
