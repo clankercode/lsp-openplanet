@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T14:11:35Z"
+depends_on: []
+estimate_hours: 1
+id: B124
+priority: high
+status: pending
+tags: []
+title: 'lookup_method_return''s ''External types: no const-qualifier metadata yet'' is stale: 301 of 1002 Core method decls carry a trailing const in the decl string, unparsed'
+updated_at: "2026-08-31T14:11:35Z"
+---
+
+lookup_method_return's 'External types: no const-qualifier metadata yet' is stale: 301 of 1002 Core method decls carry a trailing const in the decl string, unparsed
