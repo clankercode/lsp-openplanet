@@ -23,6 +23,7 @@ use super::fix::{DiagnosticFixFamily, FixFamily};
 
 pub mod conversion;
 pub mod did_you_mean;
+pub mod implement_interface;
 pub mod removed_api;
 pub mod rename_and_const;
 pub mod string_by_value;
@@ -45,6 +46,7 @@ pub const FAMILIES: &[FixFamily] = &[
     rename_and_const::const_receiver::FAMILY,
     removed_api::FAMILY,
     with_run_context::FAMILY,
+    implement_interface::FAMILY,
 ];
 
 /// The diagnostic-keyed registry, for findings the type checker does not
