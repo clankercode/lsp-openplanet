@@ -93,9 +93,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -117,6 +119,25 @@ SUMMARY = re.compile(
 )
 
 
+# `test some::name ... ok` / `... FAILED` / `... ignored`. Counting these is
+# how a binary that died MIDWAY is told from one that never started a test.
+TEST_LINE = re.compile(r"^test\s+\S+\s+\.\.\.\s")
+# cargo's own post-mortem, e.g.
+#   process didn't exit successfully: `/path/foo-abc` (signal: 9, SIGKILL: kill)
+#   process didn't exit successfully: `/path/foo-abc` (exit status: 101)
+PROCESS_STATUS = re.compile(
+    r"process didn't exit successfully: `(?P<cmd>[^`]+)`\s*\((?P<status>[^)]*)\)"
+)
+SIGNAL_IN_STATUS = re.compile(r"signal:\s*(?P<num>\d+)(?:,\s*(?P<name>SIG\w+))?")
+
+# Signals that mean the code did something wrong, versus ones that mean
+# something outside the process killed it. The distinction is the whole point
+# of the post-mortem: a SIGSEGV on an idle box and a SIGKILL under load average
+# 40 are different findings and must not render as the same line.
+DEFECT_SIGNALS = {4: "SIGILL", 6: "SIGABRT", 8: "SIGFPE", 11: "SIGSEGV", 31: "SIGSYS"}
+EXTERNAL_SIGNALS = {1: "SIGHUP", 2: "SIGINT", 9: "SIGKILL", 15: "SIGTERM"}
+
+
 class Section:
     """One `Running <binary>` or `Doc-tests <crate>` block of cargo's output."""
 
@@ -124,6 +145,14 @@ class Section:
         self.label = label
         self.path = path
         self.summaries: list[re.Match[str]] = []
+        # Everything below exists so a section that produced NO summary can
+        # still say why. Without it every such binary renders as one
+        # indistinguishable line and a human has to guess between "real crash",
+        # "starved under load" and "something else" — and the failure mode of
+        # guessing is dismissing a real crash as "just load", which is how B078
+        # nearly went.
+        self.test_lines = 0  # individual `test ... ok` lines seen
+        self.status: str | None = None  # cargo's post-mortem for this binary
 
 
 # Cargo flags that narrow WHICH test binaries run. A libtest name filter
@@ -151,6 +180,32 @@ def split_cargo_args(argv: list[str]) -> tuple[list[str], list[str]]:
     return argv, []
 
 
+# Shared-machine throttle. `-j2` caps cargo's BUILD jobs; it does NOT touch
+# libtest, which defaults to one thread per CPU — 16 here. Four lanes plus a
+# merge gate reached load average 37-41 that way. The repo's standing rule is
+# two threads for builds AND tests, so the gate applies both itself rather
+# than relying on every caller remembering, and says so when it does.
+DEFAULT_BUILD_JOBS = "-j2"
+DEFAULT_TEST_THREADS = "--test-threads=2"
+
+
+def apply_throttle(extra: list[str]) -> tuple[list[str], list[str]]:
+    """Return ``(args, notes)`` with build-job and test-thread caps applied.
+
+    An explicit `-j`/`--jobs` or `--test-threads` from the caller always wins:
+    the point is a safe default, not a ceiling nobody can raise deliberately.
+    """
+    cargo_args, libtest_args = split_cargo_args(extra)
+    notes: list[str] = []
+    if not any(a.startswith(("-j", "--jobs")) for a in cargo_args):
+        cargo_args = [DEFAULT_BUILD_JOBS, *cargo_args]
+        notes.append(DEFAULT_BUILD_JOBS)
+    if not any(a.startswith("--test-threads") for a in libtest_args):
+        libtest_args = [*(libtest_args or ["--"]), DEFAULT_TEST_THREADS]
+        notes.append(DEFAULT_TEST_THREADS)
+    return cargo_args + libtest_args, notes
+
+
 def names_a_target(cargo_args: list[str]) -> bool:
     """True when the caller deliberately narrowed the set of binaries."""
     return any(
@@ -173,7 +228,11 @@ def enumerate_expected_binaries(cargo_args: list[str] | None = None) -> dict[str
     truncation at a caller who asked for one target.
     """
     proc = subprocess.run(
-        ["cargo", "test", "--locked", "--no-run", "--message-format=json", *(cargo_args or [])],
+        [
+            "cargo", "test", "--locked", "--no-run", "--message-format=json",
+            *([] if any(a.startswith(("-j", "--jobs")) for a in (cargo_args or [])) else [DEFAULT_BUILD_JOBS]),
+            *(cargo_args or []),
+        ],
         cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
         text=True,
@@ -207,8 +266,15 @@ def enumerate_expected_binaries(cargo_args: list[str] | None = None) -> dict[str
     return found
 
 
-def run_and_capture(args: list[str], echo: bool = True) -> tuple[int, list[str]]:
-    """Run cargo, streaming its output through, and keep every line."""
+def run_and_capture(
+    args: list[str], echo: bool = True, watch: "LoadWatch | None" = None
+) -> tuple[int, list[str]]:
+    """Run cargo, streaming its output through, and keep every line.
+
+    Samples machine load as it goes when given a ``LoadWatch``: a spike that
+    starved a test binary has usually decayed by the time the run ends, so a
+    single reading at the end cannot see the thing it is there to explain.
+    """
     proc = subprocess.Popen(
         args,
         cwd=REPO_ROOT,
@@ -222,18 +288,33 @@ def run_and_capture(args: list[str], echo: bool = True) -> tuple[int, list[str]]
     for line in proc.stdout:
         line = line.rstrip("\n")
         lines.append(line)
+        if watch is not None:
+            watch.sample()
         if echo:
             print(line, flush=True)
-    return proc.wait(), lines
+    exit_code = proc.wait()
+    if watch is not None:
+        watch.sample(force=True)
+    return exit_code, lines
 
 
 def split_sections(lines: list[str]) -> list[Section]:
-    """Group cargo's output into `Running` / `Doc-tests` blocks."""
+    """Group cargo's output into `Running` / `Doc-tests` blocks.
+
+    Also gathers, per section, the two things a post-mortem needs: how many
+    individual test lines it managed to print before it stopped, and cargo's
+    own report of how the process ended. Cargo prints the latter AFTER the
+    section, so it is attributed to the binary it names rather than to
+    whichever section happened to be current.
+    """
     sections: list[Section] = []
+    by_path: dict[str, Section] = {}
     for line in lines:
         running = RUNNING.match(line)
         if running:
-            sections.append(Section(running["label"], running["path"]))
+            section = Section(running["label"], running["path"])
+            sections.append(section)
+            by_path[running["path"]] = section
             continue
         doctests = DOCTESTS.match(line)
         if doctests:
@@ -242,7 +323,105 @@ def split_sections(lines: list[str]) -> list[Section]:
         summary = SUMMARY.match(line)
         if summary and sections:
             sections[-1].summaries.append(summary)
+            continue
+        if TEST_LINE.match(line) and sections:
+            sections[-1].test_lines += 1
+            continue
+        status = PROCESS_STATUS.search(line)
+        if status:
+            # Attribute by the path cargo names. Falling back to "the current
+            # section" would pin a post-mortem on the wrong binary whenever
+            # cargo prints it after moving on.
+            target = by_path.get(status["cmd"])
+            if target is None:
+                target = next(
+                    (sec for sec in sections if sec.path and sec.path in status["cmd"]),
+                    sections[-1] if sections else None,
+                )
+            if target is not None:
+                target.status = status["status"]
     return sections
+
+
+def explain_status(status: str | None) -> tuple[str, str | None]:
+    """`(one-line reading, competing-explanation hint)` for cargo's post-mortem.
+
+    Deliberately does NOT pick a winner between "real defect" and
+    "environmental". It names which one the evidence points at and what would
+    settle it, because a gate that guesses teaches people to believe the guess.
+    """
+    if status is None:
+        return ("cargo reported no exit status for it", None)
+    signal = SIGNAL_IN_STATUS.search(status)
+    if not signal:
+        return (f"exited with {status}", None)
+    num = int(signal["num"])
+    name = signal["name"] or DEFECT_SIGNALS.get(num) or EXTERNAL_SIGNALS.get(num) or f"signal {num}"
+    if num in DEFECT_SIGNALS:
+        return (
+            f"killed by {name} (signal {num}) — a fault inside the process",
+            "this is the shape of a real defect, not of machine load; do not "
+            "dismiss it as contention without evidence",
+        )
+    if num in EXTERNAL_SIGNALS:
+        return (
+            f"killed by {name} (signal {num}) — something outside the process "
+            f"ended it",
+            "an OOM kill, a session teardown or the scheduler; check the load "
+            "line below and `dmesg`/`journalctl -k` for an OOM record. It is "
+            "NOT evidence that the code is fine",
+        )
+    return (f"killed by signal {num}", None)
+
+
+def read_loadavg() -> tuple[float, float, float] | None:
+    try:
+        parts = Path("/proc/loadavg").read_text().split()
+        return (float(parts[0]), float(parts[1]), float(parts[2]))
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+class LoadWatch:
+    """Samples /proc/loadavg while the suite runs, at most every few seconds.
+
+    A verdict that says "a binary died" without saying what the machine was
+    doing forces the reader to guess. Sampling only at the end would miss a
+    spike that has since decayed, which is exactly the case worth catching on a
+    box several lanes are building in.
+    """
+
+    INTERVAL = 5.0
+
+    def __init__(self) -> None:
+        self.cpus = os.cpu_count() or 1
+        self.samples: list[float] = []
+        self._last = 0.0
+        self.sample()
+
+    def sample(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last < self.INTERVAL:
+            return
+        self._last = now
+        current = read_loadavg()
+        if current:
+            self.samples.append(current[0])
+
+    def describe(self) -> str:
+        if not self.samples:
+            return "load: unavailable"
+        peak, first, last = max(self.samples), self.samples[0], self.samples[-1]
+        note = ""
+        if peak > 2 * self.cpus:
+            note = (
+                f"  <-- {peak / self.cpus:.1f}x the core count; a binary killed "
+                f"by an external signal here may well have been starved"
+            )
+        return (
+            f"load: {first:.1f} at start, peak {peak:.1f}, {last:.1f} at end, "
+            f"on {self.cpus} cores{note}"
+        )
 
 
 def reconcile(
@@ -250,8 +429,16 @@ def reconcile(
     lines: list[str],
     expected: dict[str, str],
     filtered: bool = False,
+    declared: dict[str, int] | None = None,
+    load: str | None = None,
 ) -> tuple[int, str]:
     """The gate's verdict. Pure, so the selftest exercises this exact code.
+
+    ``declared`` maps a binary's path to how many tests its SOURCE declares
+    (from the B085 inventory). It turns "this binary produced no summary" into
+    "it printed 37 of its 118 tests and then stopped", which is the difference
+    between a fact and a diagnosis. ``load`` is the machine's load description
+    at the time, passed in rather than read here so this stays pure.
 
     Returns ``(status, report)`` where status is 0 for a trustworthy green.
     """
@@ -267,9 +454,20 @@ def reconcile(
     ignored = sum(int(m["ignored"]) for s in sections for m in s.summaries)
 
     for section in started_without_summary:
+        name = Path(section.path or "?").name
+        reading, hint = explain_status(section.status)
+        progress = f"printed {section.test_lines} test line(s)"
+        want = (declared or {}).get(section.path or "")
+        if want:
+            progress += f" of the {want} its source declares"
+        if section.test_lines == 0:
+            progress += " — it died before running a single test"
         problems.append(
-            f"`{Path(section.path or '?').name}` started and produced no libtest "
-            f"summary — killed mid-run, so its tests are missing from the total"
+            f"`{name}` started and produced no libtest summary — killed "
+            f"mid-run, so its tests are missing from the total.\n"
+            f"      how it ended: {reading}\n"
+            f"      progress:     {progress}"
+            + (f"\n      note:         {hint}" if hint else "")
         )
     for path, name in sorted(missing.items(), key=lambda kv: kv[1]):
         if any(s.path == path for s in sections):
@@ -350,11 +548,19 @@ def reconcile(
     for problem in problems:
         report.append(f"  - {problem}")
     report.append("")
+    if load:
+        report.append(f"  {load}")
+        report.append("")
     report.append(
         "A binary that dies contributes no `test result:` line, and cargo stops\n"
         "at the first failure, so everything after it never runs either. Both\n"
         "shrink the total without producing a single failed test. Do not report\n"
-        "the number above. See B078."
+        "the number above. See B078.\n"
+        "\n"
+        "This gate does NOT retry. An intermittent that a retry turns green is\n"
+        "an intermittent nobody investigates, which is worse than a red run: it\n"
+        "converts a defect into silence. Re-run it yourself, deliberately, and\n"
+        "compare the post-mortem above across runs (B085)."
     )
     return 1, "\n".join(report)
 
@@ -366,7 +572,7 @@ def run_gate(extra: list[str]) -> int:
     # B085, first: the binaries about to run must contain the tests their
     # sources declare, and nothing they measure may be older than the tree.
     # A suite run against a stale binary still produces a total.
-    inventory_status, inventory_report = test_inventory.check(cargo_args)
+    inventory_status, inventory_report, declared = test_inventory.check(cargo_args)
     print(inventory_report, file=sys.stderr if inventory_status else sys.stdout)
     if inventory_status:
         print(
@@ -379,9 +585,22 @@ def run_gate(extra: list[str]) -> int:
 
     expected = enumerate_expected_binaries(cargo_args)
     scope = "selected" if filtered else "expected"
+    throttled, notes = apply_throttle(extra)
+    if notes:
+        print(f"==> throttled: {' '.join(notes)} (shared machine; override to opt out)")
     print(f"==> {len(expected)} test binaries {scope}\n", flush=True)
-    exit_code, lines = run_and_capture(["cargo", "test", "--locked", *extra])
-    status, report = reconcile(exit_code, lines, expected, filtered=filtered)
+    watch = LoadWatch()
+    exit_code, lines = run_and_capture(
+        ["cargo", "test", "--locked", *throttled], watch=watch
+    )
+    status, report = reconcile(
+        exit_code,
+        lines,
+        expected,
+        filtered=filtered,
+        declared=declared,
+        load=watch.describe(),
+    )
     print(report, file=sys.stderr if status else sys.stdout)
     return status
 
@@ -491,6 +710,110 @@ def run_selftest() -> int:
             "stop-early half of the check is not working"
         )
 
+    # B085 post-mortem: an INCOMPLETE RUN verdict is worthless if it renders a
+    # real crash and a starved process as the same line — the reader has to
+    # guess, and the failure mode of guessing is dismissing a crash as "just
+    # load". These drive the real `reconcile` with synthetic cargo output.
+    seg = "/deps/segv-0000000000000000"
+    segv_lines = [
+        f"     Running tests/segv.rs ({seg})",
+        "test alpha ... ok",
+        "test beta ... ok",
+        f"error: test failed, to rerun pass `--test segv`",
+        f"Caused by:",
+        f"  process didn't exit successfully: `{seg}` (signal: 11, SIGSEGV: invalid memory reference)",
+    ]
+    _st, segv_report = reconcile(
+        101, segv_lines, {seg: "segv"}, declared={seg: 118}, load="load: 0.4 at start, peak 0.6, 0.5 at end, on 16 cores"
+    )
+    kill_lines = [
+        f"     Running tests/segv.rs ({seg})",
+        f"  process didn't exit successfully: `{seg}` (signal: 9, SIGKILL: kill)",
+    ]
+    _st, kill_report = reconcile(
+        101, kill_lines, {seg: "segv"}, declared={seg: 118},
+        load="load: 38.0 at start, peak 41.2, 39.0 at end, on 16 cores",
+    )
+    if "SIGSEGV" not in segv_report or "signal 11" not in segv_report:
+        problems.append("a SIGSEGV death did not name the signal in the verdict")
+    if "SIGKILL" not in kill_report:
+        problems.append("a SIGKILL death did not name the signal in the verdict")
+    if segv_report == kill_report:
+        problems.append(
+            "a SIGSEGV on an idle box and a SIGKILL under load render "
+            "IDENTICALLY — the verdict cannot distinguish a real crash from "
+            "contention, which is the ambiguity this post-mortem exists to remove"
+        )
+    if "2 test line(s) of the 118" not in segv_report:
+        problems.append(
+            "partial progress was not reported — 'produced no summary' without "
+            "'got 2 of 118' is a fact with no diagnosis attached"
+        )
+    if "died before running a single test" not in kill_report:
+        problems.append("a binary that ran no tests at all was not distinguished")
+    if "41.2" not in kill_report or "16 cores" not in kill_report:
+        problems.append("the machine load was not reported alongside the death")
+    # The load READING has to come from the real describe(), not from a string
+    # this selftest wrote. Asserting on a fabricated `load=` argument would be
+    # checking the fixture, which is how a control ends up proving nothing.
+    busy, idle = LoadWatch(), LoadWatch()
+    busy.cpus = idle.cpus = 16
+    busy.samples = [38.0, 41.2, 39.0]
+    idle.samples = [0.4, 0.6, 0.5]
+    if "x the core count" not in busy.describe():
+        problems.append(
+            "a load of 41 on 16 cores was not flagged as a plausible starvation "
+            "cause, so the reader gets the number without the reading"
+        )
+    if "x the core count" in idle.describe():
+        problems.append(
+            "an idle box was described as loaded — the starvation hint fires "
+            "regardless of load and therefore says nothing"
+        )
+    if "peak 41.2" not in busy.describe() or "16 cores" not in busy.describe():
+        problems.append("the load description lost its peak or its core count")
+    empty = LoadWatch()
+    empty.samples = []
+    if "unavailable" not in empty.describe():
+        problems.append(
+            "a run with no load samples claimed a load anyway — an unmeasured "
+            "value must read as unmeasured"
+        )
+    if "does NOT retry" not in segv_report:
+        problems.append(
+            "the verdict no longer states that it does not retry; a gate that "
+            "retries until green converts an intermittent into silence"
+        )
+    # Attribution: cargo prints its post-mortem AFTER the section, and pinning
+    # it on 'the current section' would blame the wrong binary.
+    one, two = "/deps/one-0000000000000000", "/deps/two-0000000000000000"
+    misattrib = [
+        f"     Running tests/one.rs ({one})",
+        f"     Running tests/two.rs ({two})",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        f"  process didn't exit successfully: `{one}` (signal: 11, SIGSEGV: x)",
+    ]
+    _st, attrib_report = reconcile(101, misattrib, {one: "one", two: "two"})
+    if "SIGSEGV" not in attrib_report or "one-" not in attrib_report:
+        problems.append(
+            "a post-mortem naming binary `one` was not attributed to it — "
+            "cargo prints it after the section, so 'the current section' is "
+            "the wrong binary"
+        )
+    if not apply_throttle([])[1] or "-j2" not in apply_throttle([])[0]:
+        problems.append("the shared-machine throttle is not applied by default")
+    if "--test-threads=2" not in apply_throttle([])[0]:
+        problems.append("libtest is not throttled by default — `-j2` does not cap it")
+    if "--test-threads=8" not in apply_throttle(["--", "--test-threads=8"])[0]:
+        problems.append("an explicit --test-threads was overridden by the default")
+    explicit_jobs = apply_throttle(["-j4"])[0]
+    if DEFAULT_BUILD_JOBS in explicit_jobs or "-j4" not in explicit_jobs:
+        problems.append(
+            f"an explicit -j4 was not respected: got {explicit_jobs}"
+        )
+    if apply_throttle(["-j4"])[1] != [DEFAULT_TEST_THREADS]:
+        problems.append("the throttle notes do not name only what was injected")
+
     # B085 phase: a failed inventory must stop the gate BEFORE any test runs,
     # and must never print the marker. The inventory is stubbed rather than a
     # real binary being staled, because staling one means a rebuild; the
@@ -499,7 +822,7 @@ def run_selftest() -> int:
     marker = "SYNTHETIC-INVENTORY-FAILURE"
     real_check = test_inventory.check
     captured_out, captured_err = io.StringIO(), io.StringIO()
-    test_inventory.check = lambda *_a, **_k: (1, f"FAIL: {marker}")
+    test_inventory.check = lambda *_a, **_k: (1, f"FAIL: {marker}", {})
     try:
         with contextlib.redirect_stdout(captured_out), contextlib.redirect_stderr(
             captured_err

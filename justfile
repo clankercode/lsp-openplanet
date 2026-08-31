@@ -37,9 +37,16 @@ install: build
 #
 # B085: runs `just test-inventory` first, so a test that vanished inside a
 # healthy binary, or a stale binary a test spawns as a child, stops the run
-# instead of quietly shrinking the total.
+# instead of quietly shrinking the total. And when a binary DOES die, the
+# verdict says how — signal or exit status, how many of its tests it managed
+# to print, and the machine's load at the time — because "INCOMPLETE RUN"
+# alone cannot tell a real crash from a process starved under load.
 #
-# Extra args are forwarded: `just test -- --test-threads=2`.
+# Throttled to `-j2 -- --test-threads=2` by default: `-j2` caps cargo's build
+# jobs but NOT libtest, which otherwise takes one thread per CPU. Pass your own
+# `-j` or `--test-threads` to override.
+#
+# Extra args are forwarded: `just test -- --test-threads=4`.
 test *ARGS:
     python3 scripts/test-suite.py {{ARGS}}
 

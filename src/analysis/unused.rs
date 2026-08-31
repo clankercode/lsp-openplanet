@@ -324,9 +324,11 @@ pub fn unused_declarations_for_file(
 /// bind to live in ordinary source files and are called from nowhere in the
 /// plugin, so they were reported unused.
 ///
-/// That fixture is safe to read as evidence again as of B086. Until then its
-/// stub did not match its own body and its comment called the mismatch
-/// correct; the paragraph below is what the game actually does.
+/// That fixture is safe to read as evidence again as of B086: it is now
+/// game-probed, and the verbatim verdicts for 18 stub/body shapes live at
+/// `docs/probes/b086-export-stub-binding.tsv`. Until then its stub did not
+/// match its own body and its comment called the mismatch correct; the
+/// paragraph below is what the game actually does.
 ///
 /// Exempting the export FILE, which this module already does, cannot reach
 /// them: the file holds stubs and the bodies are elsewhere. So the stubs are

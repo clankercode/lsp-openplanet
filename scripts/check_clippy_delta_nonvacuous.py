@@ -243,6 +243,87 @@ fn b083_extra_needless_borrow_probe() {
 """
 
 
+def method_mismatch_case(baseline: dict) -> tuple[int, int]:
+    """Record a REAL baseline the wrong way and require the gate to refuse it.
+
+    The fixture is `--all-targets`. Two of master's three `unused_imports`
+    live under `cfg(test)` (`src/server/symbols.rs`, `src/typedb/index.rs`),
+    so dropping the flag drops them — along with nine other findings — and the
+    difference is completely invisible in a count.
+
+    The materiality check comes FIRST and is not optional: if the two captures
+    happened to agree, a refusal would be untested against any real difference
+    and this case would be scoring itself. That is the same "the mutation
+    stopped applying" hazard B077 scores as a MISS, one level up.
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        wrong = Path(handle.name)
+    try:
+        rc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--record",
+                "--baseline",
+                str(wrong),
+                # Capture WITHOUT --all-targets by overriding the command.
+                "--command-override",
+                "cargo,clippy,--locked,--message-format=json,-j2",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+        if rc.returncode != 0 or not wrong.exists():
+            print(
+                f"  ANCHOR MISSING: could not record a no---all-targets baseline: "
+                f"{rc.stdout[-300:]}{rc.stderr[-300:]}",
+                file=sys.stderr,
+            )
+            return 0, 1
+        other = json.loads(wrong.read_text())
+        here = {(f["file"], f["code"], f["message"]) for f in baseline["findings"]}
+        there = {(f["file"], f["code"], f["message"]) for f in other["findings"]}
+        if here == there:
+            print(
+                "  ANCHOR MISSING: capturing with and without --all-targets gave "
+                "the SAME fingerprint set, so refusing to compare them proves "
+                "nothing on this tree",
+                file=sys.stderr,
+            )
+            return 0, 1
+        only_all_targets = len(here - there)
+        rc2, out = run_gate(extra=["--baseline", str(wrong)])
+        if rc2 == 0:
+            print(
+                "  MISSED: a baseline captured without --all-targets was accepted",
+                file=sys.stderr,
+            )
+            return 0, 1
+        if "METHOD MISMATCH" not in out or "REFUSED" not in out:
+            print(
+                f"  MISSED: went red but did not refuse — it differenced two "
+                f"incomparable captures",
+                file=sys.stderr,
+            )
+            return 0, 1
+        if "ADDED [" in out:
+            print(
+                f"  MISSED: the refusal still printed a delta; {only_all_targets} "
+                f"phantom additions would read as a code change",
+                file=sys.stderr,
+            )
+            return 0, 1
+        print(
+            f"  caught: a baseline captured without --all-targets "
+            f"({only_all_targets} fingerprints differ) — refused, no delta shown"
+        )
+        return 1, 0
+    finally:
+        wrong.unlink(missing_ok=True)
+
+
 def family_b(baseline: dict) -> tuple[int, int]:
     rc, out = run_gate()
     if rc != 0:
@@ -318,6 +399,14 @@ def family_b(baseline: dict) -> tuple[int, int]:
         else:
             print(f"  caught: one more needless_borrow in {rel} (count increase)")
             caught += 1
+
+    # 3. A baseline captured by a DIFFERENT METHOD must be refused, not
+    #    differenced. The live fixture is `--all-targets`: two of the three
+    #    `unused_imports` on master exist only under `cfg(test)`, so its
+    #    presence or absence changes the diagnostic set — invisibly, in a count.
+    caught_m, missed_m = method_mismatch_case(baseline)
+    caught += caught_m
+    missed += missed_m
 
     rc, _out = run_gate()
     if rc != 0:

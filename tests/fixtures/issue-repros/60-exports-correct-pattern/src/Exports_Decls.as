@@ -9,15 +9,29 @@
 // signature, so every stub here matches its body character for character —
 // `const`, `&in`/`&out`, `@`, the default argument, all of it.
 //
-// Game-probed against Openplanet 1.29.5 (B086, 2026-08-31, exporter +
-// consumer plugins with a positive AND a negative control): a stub
-// `import string SendEvent(string a, string b)` over a body
-// `string SendEvent(const string &in a, const string &in b)` does NOT bind —
-// the consumer dies at runtime with `Unbound function called` — while an
-// exactly matching stub binds and runs. `scripts/probe_export_binding.py`
-// reproduces it and probes the other parameter shapes below.
-// Corroborated by a shipped library on the probing machine: `ai-api`'s
-// export stubs are byte-identical to their bodies in `AiApi_Net.as`.
+// MEASURED, not assumed. Game-probed against Openplanet 1.29.14 on
+// 2026-08-31 by `scripts/probe_export_binding.py` — an exporter plugin
+// holding every body, one consumer plugin per shape CALLING the import, with
+// a positive AND a negative control. 18 variants, 0 ambiguous. The verbatim
+// verdicts are committed at `docs/probes/b086-export-stub-binding.tsv`.
+//
+// The rule the engine actually follows:
+//   * an EXACT signature match binds, in every shape tried — by value,
+//     `const &in`, `&out`, `int &out`, `T@`, `T@ &in`, and a defaulted
+//     parameter;
+//   * ANY difference in a parameter type does not bind, and the consumer
+//     dies at runtime with `Unbound function called`. `const` alone is
+//     enough: a `string &in` stub over a `const string &in` body fails.
+//   * the RETURN type counts too — identical parameters with `string` vs
+//     `void` does not bind;
+//   * a DEFAULT ARGUMENT does not: present on only one side, it still binds,
+//     in both directions;
+//   * the resolved type is what matters, not its spelling — a `uint` stub
+//     over a `uint32` body binds.
+//
+// Corroborated independently by a shipped library on the probing machine:
+// `ai-api`'s export stubs are byte-identical to their bodies in
+// `AiApi_Net.as`, and `tm-agent` calls them at runtime.
 //
 // WHAT IT IS NOT EVIDENCE OF
 // --------------------------

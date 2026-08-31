@@ -1,0 +1,20 @@
+# B086 export stub/body binding, probed against the live game
+variant	stub	body	verdict	detail
+exact-const-ref-in	string Echo_exact(const string &in a, const string &in b)	string Echo_exact(const string &in a, const string &in b)	BOUND	xy
+control-no-body	string Echo_missing(const string &in a, const string &in b)	(none)	UNBOUND	Unbound function called
+lax-by-value-over-const-ref-in	string Echo_lax(string a, string b)	string Echo_lax(const string &in a, const string &in b)	UNBOUND	Unbound function called
+exact-by-value	string Echo_byval(string a, string b)	string Echo_byval(string a, string b)	BOUND	xy
+const-ref-in-stub-over-by-value-body	string Echo_rev(const string &in a, const string &in b)	string Echo_rev(string a, string b)	UNBOUND	Unbound function called
+const-only-difference	string Echo_nonconst(string &in a)	string Echo_nonconst(const string &in a)	UNBOUND	Unbound function called
+exact-out-ref	void Fill_out(string &out a)	void Fill_out(string &out a)	BOUND	filled
+out-stub-over-const-ref-in-body	void Fill_mismatch(string &out a)	void Fill_mismatch(const string &in a)	UNBOUND	Unbound function called
+exact-int-out-ref	void Fill_int(int &out a)	void Fill_int(int &out a)	BOUND	42
+exact-handle	Json::Value@ Ident_handle(Json::Value@ v)	Json::Value@ Ident_handle(Json::Value@ v)	BOUND	{"k":1}
+handle-stub-over-handle-ref-in-body	Json::Value@ Ident_handle_ref(Json::Value@ v)	Json::Value@ Ident_handle_ref(Json::Value@ &in v)	UNBOUND	Unbound function called
+exact-handle-ref-in	Json::Value@ Ident_href(Json::Value@ &in v)	Json::Value@ Ident_href(Json::Value@ &in v)	BOUND	{"k":2}
+exact-default-arg	string Greet_default(const string &in a, const string &in b = "!")	string Greet_default(const string &in a, const string &in b = "!")	BOUND	hi!
+default-in-stub-only	string Greet_stubdef(const string &in a, const string &in b = "!")	string Greet_stubdef(const string &in a, const string &in b)	BOUND	hi!
+default-in-body-only	string Greet_bodydef(const string &in a, const string &in b)	string Greet_bodydef(const string &in a, const string &in b = "!")	BOUND	hi!
+arity-mismatch	string Echo_arity(const string &in a, const string &in b)	string Echo_arity(const string &in a)	UNBOUND	Unbound function called
+primitive-alias	uint Add_alias(uint a)	uint32 Add_alias(uint32 a)	BOUND	42
+return-type-mismatch	string Echo_ret(const string &in a)	void Echo_ret(const string &in a)	UNBOUND	Unbound function called

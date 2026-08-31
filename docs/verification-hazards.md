@@ -1415,6 +1415,26 @@ The test passes, and would have passed either way.
   level inside its members and one level outside its membership rule.** Both
   are invisible to it by construction, and both fail toward looking clean.
 
+- **A gate that correctly refuses to answer still has to say why.** `just test`
+  went INCOMPLETE on one merge and clean on an immediate re-run of the same
+  tree. Refusing to report a total was right; rendering all three possible
+  causes as the same line was not. A binary that produced no summary might have
+  crashed on a real defect, been killed under machine load, or hit something
+  else entirely, and **the failure mode of making a human guess is dismissing a
+  real crash as "just load"** — which is how B078 nearly went.
+
+  So the verdict now carries the post-mortem: the signal or exit status cargo
+  reported, classified into "a fault inside the process" (SIGSEGV, SIGABRT,
+  SIGILL) versus "something outside ended it" (SIGKILL, SIGTERM); how many of
+  its declared tests it managed to print before stopping; and the machine's
+  load, sampled DURING the run because a spike that starved a process has
+  usually decayed by the time it ends. A SIGSEGV on an idle box and a SIGKILL
+  at 41 on 16 cores must not render identically, and the selftest asserts they
+  do not.
+
+  **And it does not retry.** A gate that retries until green converts an
+  intermittent into silence, which is strictly worse than a red run.
+
 - **`-D warnings` makes clippy report FEWER lints, not more.** It turns the
   first warning into an error, so compilation stops early and the diagnostic
   set is truncated. Measured on this tree, rustc 1.97.0:
@@ -1437,6 +1457,17 @@ The test passes, and would have passed either way.
   its numbers, or the next reader compares 129 against 115 and concludes
   something moved.
 
+  **A recorded method that is not enforced is a comment.** Measured on this
+  tree: `cargo clippy --all-targets` yields 39 fingerprints, and dropping
+  `--all-targets` yields 28. All 11 of the difference exist only WITH the flag,
+  and two of them are `unused_imports` that exist only under `cfg(test)`
+  (`src/server/symbols.rs`, `src/typedb/index.rs`). Difference an all-targets
+  run against a baseline captured without it and you are handed **11 added
+  lints attributed to a code change nobody made** — and nothing in either
+  number says which capture was which. So the gate REFUSES to compare across
+  methods and shows no delta at all, rather than printing a warning above a
+  plausible-looking list. The reader acts on the list.
+
 - **A fixture comment asserting engine behaviour is a claim, not a
   measurement — and everyone downstream reads it as a measurement.**
   `tests/fixtures/.../60-exports-correct-pattern` paired a by-value `import`
@@ -1455,6 +1486,31 @@ The test passes, and would have passed either way.
   measurement, because `exact` binds and the only difference from the failing
   case is the parameter type. **A negative control alone proves nothing: it
   cannot distinguish "the thing is false" from "the probe cannot see".**
+
+  The same trap sprang again the same afternoon, one layer down, and this time
+  it caught a control rather than a test. Nine RemoteBuild routes were probed
+  with a long plugin id — eight real ones and `zzz_no_such_route` as the
+  control — and all nine answered `Not implemented`. The conclusion on offer
+  was "these routes are unimplemented". They are not: every request over 64
+  bytes is truncated before it parses, so **the control failed through the
+  same mechanism as the positives**. A control that shares a failure mode with
+  the test is not a control, it is a second test. The discriminator was a size
+  sweep, which no amount of re-reading the route names would have suggested.
+
+- **Measure the thing, not a consequence of it.** The read cap above was first
+  put at 66 bytes by padding a request until it stopped parsing. That measures
+  whether a *particular payload* survives being cut, not where the cut falls:
+  padded to 65 and 66 the first 64 bytes still ended in `"}` and `"`, parsed
+  leniently with `route` intact, and answered normally. The cap was 64
+  throughout. The game traces every socket read verbatim, so the length of the
+  first read was available directly the whole time — the wrong number came
+  from choosing an indirect instrument when a direct one existed.
+
+  Both readings were self-consistent, both were reproducible over repeated
+  trials, and the wrong one was off by exactly the amount that made a
+  structural boundary look like a fencepost. **Reproducibility is not
+  accuracy.** When a measured constant lands near a suspicious number, check
+  whether the instrument is reporting the quantity or a proxy for it.
 
 ---
 

@@ -66,6 +66,7 @@ from __future__ import annotations
 import argparse
 import json
 import socket
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -225,8 +226,9 @@ VARIANTS: list[Variant] = [
         'string Greet_stubdef(const string &in a, const string &in b = "!")',
         'string Greet_stubdef(const string &in a, const string &in b) { return a + b; }',
         'string res = %(NS)s::Greet_stubdef("hi");',
-        "The default exists only in the stub — is a default part of the signature?",
-        "UNKNOWN",
+        "The default exists only in the stub. MEASURED 2026-08-31: BINDS — a "
+        "default argument is not part of the binding signature.",
+        "BOUND",
     ),
     V(
         "default-in-body-only",
@@ -234,8 +236,9 @@ VARIANTS: list[Variant] = [
         'string Greet_bodydef(const string &in a, const string &in b)',
         'string Greet_bodydef(const string &in a, const string &in b = "!") { return a + b; }',
         'string res = %(NS)s::Greet_bodydef("hi", "!");',
-        "The default exists only in the body.",
-        "UNKNOWN",
+        "The default exists only in the body. MEASURED 2026-08-31: BINDS, the "
+        "same way round.",
+        "BOUND",
     ),
     V(
         "arity-mismatch",
@@ -261,8 +264,9 @@ VARIANTS: list[Variant] = [
         'string Echo_ret(const string &in a)',
         'void Echo_ret(const string &in a) { print("' + TOKEN + ' body:" + a); }',
         'string res = %(NS)s::Echo_ret("x");',
-        "Parameters match; only the RETURN type differs.",
-        "UNKNOWN",
+        "Parameters match; only the RETURN type differs. MEASURED 2026-08-31: "
+        "does NOT bind — the return type is part of the signature.",
+        "UNBOUND",
     ),
 ]
 
@@ -457,57 +461,145 @@ def rb_route(route: str, data: dict, timeout: float = 20.0) -> dict:
         sock.close()
 
 
+# `Net::Socket::ReadRaw` returns at most this many bytes per call, measured
+# directly off the game's own `Read payload:` trace rather than inferred from
+# whether a request parsed. See `measure_read_cap()`.
+READ_CAP = 64
+
+CONTROL_MCP = Path.home() / "src/openplanet/my-plugins/tm-control-mcp"
+
+
 def load_plugin_payload(fid: str) -> dict:
     return {"id": fid, "source": "user", "type": "folder"}
 
 
+def measure_read_cap(trials: int = 1) -> int | None:
+    """Measure ReadRaw's per-call cap from the game log. Returns None if unclear.
+
+    This is deliberately NOT "pad a request until it stops parsing", which is
+    how an earlier version of this file got the wrong number. That method
+    measures whether a particular payload survives being cut, not where the cut
+    falls: padding `{"route":"get_status","data":{"p":"AAA..."}}` to 65 and 66
+    bytes leaves the first 64 ending in `"}` and `"` respectively, still
+    lenient-parseable with `route` intact, so both answered `Alive` and the
+    boundary read as 66/67. The cut was at 64 the whole time.
+
+    The game traces `Read payload:` verbatim per read, so the length of the
+    FIRST read is the cap, directly. An instrument that reports the thing
+    asked about beats one that reports a consequence of it.
+    """
+    log = Path(fleet.OP_LOG)
+    try:
+        mark = log.stat().st_size
+    except OSError:
+        return None
+    payload = '{"route":"get_status","data":{"p":"' + "A" * 100 + '"}}'
+    try:
+        sock = socket.create_connection((fleet.RB_HOST, fleet.RB_PORT), timeout=8)
+    except OSError:
+        return None
+    try:
+        sock.sendall(payload.encode())
+        time.sleep(3.0)
+    finally:
+        sock.close()
+    try:
+        with open(log, "rb") as handle:
+            handle.seek(mark)
+            window = handle.read().decode(errors="replace")
+    except OSError:
+        return None
+    reads = [
+        line.split("Read payload: ", 1)[1]
+        for line in window.splitlines()
+        if "Read payload: " in line
+    ]
+    return len(reads[0]) if reads else None
+
+
+def control_mcp(action: str, **fields) -> dict:
+    """Drive the plugin through `tm-control-mcp`, which reassembles its socket.
+
+    RemoteBuild cannot be driven at all (see `preflight_request_size`), and
+    `tm-control-mcp` has RemoteBuild parity plus one property that matters more
+    here than convenience: it returns the compile log INLINE, attributed to the
+    build this call triggered. Collecting diagnostics by severity out of the
+    shared `Openplanet.log` picks up whatever another session happened to load
+    in the same second.
+    """
+    payload = json.dumps({"action": action, **fields}, separators=(",", ":"))
+    proc = subprocess.run(
+        [sys.executable, "tools/call.py", "ControlPlugin", payload],
+        cwd=CONTROL_MCP,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                envelope = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            result = envelope.get("data", {}).get("result", {})
+            if result.get("success") is False:
+                return {"error": result.get("error") or result.get("code") or "failed",
+                        "result": result}
+            return {"error": "", "result": result}
+    return {"error": f"no JSON reply from tm-control-mcp: {proc.stdout[-300:]}{proc.stderr[-300:]}"}
+
+
 def load_plugin(fid: str) -> dict:
-    return rb_route("load_plugin", load_plugin_payload(fid))
+    return control_mcp("load", id=fid)
 
 
 def preflight_request_size(fid: str) -> str | None:
-    """Is a `load_plugin` request even deliverable? Measured, not assumed.
+    """Confirm RemoteBuild still cannot be driven, and say so precisely.
 
-    RemoteBuild's `HandleClient` calls `Json::Parse` on **each raw socket
-    read**, and Openplanet's `Net::Socket::ReadRaw` returns at most ~66 bytes
-    per call, so any request longer than that is split into fragments and
-    every fragment fails to parse. The reply is
+    Kept even though the probe now goes through `tm-control-mcp`: the next
+    person to read this file will wonder why, and a measured answer is better
+    than a comment. It also fails LOUD if RemoteBuild is ever fixed, which is
+    the signal to move back.
+
+    RemoteBuild's `HandleClient` calls `Json::Parse` on each raw socket read,
+    and `ReadRaw` returns at most READ_CAP (64) bytes, so a longer request is
+    split into fragments that individually fail to parse. The reply is
     ``{"error":"Not implemented: "}`` — the router's message for an *unknown
-    route*, which points a reader at the route name rather than at the size.
+    route* — which sends the reader off to check route spellings. Note what
+    that means for anyone probing routes: a >64-byte probe of ANY route name,
+    including a deliberately bogus one, answers "Not implemented", so a
+    negative control fails through the same mechanism as the positives and
+    proves nothing. No route may be called unimplemented on that evidence.
 
-    A minimal `load_plugin` request is 72 bytes with an EMPTY id, so it cannot
-    fit at any id length. Without this preflight the probe reports every
-    variant as `AMBIGUOUS: exporter did not load: Not implemented:`, which
-    reads like a protocol mismatch and sends the next person to check route
-    spellings. Measured 2026-08-31 against Openplanet 1.29.14: 66 bytes pass,
-    67 fail, deterministically over three trials each.
-
-    Returns None when a request of the needed size is deliverable, else a
-    message saying so.
+    A minimal `load_plugin` request is 72 bytes with an EMPTY id, so no shorter
+    plugin id fixes it and the call has never been reachable.
     """
     needed = len(json.dumps({"route": "load_plugin", "data": load_plugin_payload(fid)}))
-    pad = needed - len('{"route":"get_status","data":{"p":""}}')
-    if pad < 0:
+    if needed <= READ_CAP:
         return None
-    reply = rb_route("get_status", {"p": "A" * pad}, timeout=8)
-    if reply.get("data") == "Alive":
-        return None
+    measured = measure_read_cap()
+    detail = (
+        f"measured {measured} bytes on the first read just now"
+        if measured is not None
+        else f"could not re-measure; using the recorded cap of {READ_CAP}"
+    )
     return (
         f"RemoteBuild cannot receive a request this size. A `load_plugin` call "
-        f"for `{fid}` is {needed} bytes; a padded `get_status` of the same size "
-        f"came back {reply!r}.\n"
-        f"  RemoteBuild parses each raw socket read as a whole JSON message, and "
-        f"`Net::Socket::ReadRaw` returns at most ~66 bytes per call, so every "
-        f"longer request is split into unparseable fragments.\n"
+        f"for `{fid}` is {needed} bytes and `ReadRaw` returns at most "
+        f"{READ_CAP} per call ({detail}).\n"
         f"  A minimal `load_plugin` request is 72 bytes with an EMPTY id, so no "
-        f"shorter plugin id fixes it. `scripts/issue_repro_game.py` and "
-        f"`scripts/probe_enum_corpus.py` are blocked by the same limit."
+        f"shorter plugin id fixes it — the call has never been reachable.\n"
+        f"  Corollary: any >64-byte route probe answers `Not implemented` "
+        f"whatever the route name, so a bogus-route control fails for the same "
+        f"reason as a real one and cannot establish that a route is missing.\n"
+        f"  This probe therefore drives the game through tm-control-mcp instead."
     )
 
 
 def unload_plugin(fid: str) -> dict:
     try:
-        return rb_route("unload_plugin", {"id": fid})
+        return control_mcp("unload", id=fid)
     except Exception as exc:  # pragma: no cover - network teardown
         return {"error": f"unload_plugin raised: {exc}"}
 
@@ -528,9 +620,16 @@ def run(variants: list[Variant], workdir: Path) -> list[Result]:
 
     # RemoteBuild answering `get_status` is NOT evidence that it can be driven:
     # the route that matters is bigger than the biggest request it can read.
+    # Recorded rather than fatal, because the probe now goes through
+    # tm-control-mcp — but printed every run, so the day it stops being true
+    # is visible rather than inferred.
     blocked = preflight_request_size(EXPORTER_ID)
-    if blocked:
-        sys.exit(f"cannot probe: {blocked}")
+    print(
+        f"  RemoteBuild: {'UNUSABLE, routing via tm-control-mcp' if blocked else 'usable'}"
+    )
+    probe = control_mcp("getLogs", id="tm-control-mcp", maxLines=1)
+    if probe.get("error"):
+        sys.exit(f"tm-control-mcp is not answering either: {probe['error']}")
 
     exporter = write_exporter(workdir, variants)
     results: list[Result] = []

@@ -13,6 +13,30 @@ dated 2026-02-03), via `scripts/probe_enum_corpus.py`.
 |---|---|---|
 | `b052-qualified-enum-spellings.tsv` | 1901 | for a qualified *type* spelling (`Scene::ESceneCharVisNotice`, `UI::VirtualKey`, `CGameMenu::EMenuOrder`), does the game accept it, and if not, what does it say? |
 | `b053-bare-enum-values.tsv` | 2989 | for a bare *value* name of a named enum (`Turbo`, `GlassSmash`), does the game accept it, reject it as unknown, or reject it as ambiguous? |
+| `b086-export-stub-binding.tsv` | 18 | given a `[script] exports` stub and a body, does the engine BIND them? Produced 2026-08-31 against **Openplanet 1.29.14** by `scripts/probe_export_binding.py`, driving the game through `tm-control-mcp`. 18 variants, 0 ambiguous. |
+
+The B086 corpus answers a question the other two do not, and needs a different
+instrument for it: binding is a RUNTIME property, so the probe has to CALL the
+import. An unmatched stub compiles fine on both sides and only dies, with
+`Unbound function called`, when reached. What it found:
+
+- an EXACT signature match binds in every shape tried — by value, `const &in`,
+  `&out`, `int &out`, `T@`, `T@ &in`, and a defaulted parameter;
+- ANY parameter-type difference does not bind; **`const` alone is enough**
+  (a `string &in` stub over a `const string &in` body fails);
+- the RETURN type is part of the signature — identical parameters with `string`
+  vs `void` does not bind;
+- a DEFAULT ARGUMENT is **not** — present on only one side it still binds, in
+  both directions;
+- the resolved type matters, not its spelling: a `uint` stub over a `uint32`
+  body binds.
+
+Its offline `--selftest` needs no game and is worth reading as the shape a
+probe's oracle should have: every way a run can fail to measure is a distinct
+`AMBIGUOUS`, never a verdict, and the variant table is itself checked for the
+ability to discriminate — the two controls must expect OPPOSITE verdicts, and
+the `exact`/`lax` pair must differ in the stub's parameter type alone. B086
+exists because an earlier probe's two variants failed identically.
 | `b052-scope-provenance.tsv` | 233 | for each SCOPE an ACCEPTED b052 row depends on: did it exist on the probing machine, and did the ENGINE supply it or that machine's plugins? |
 
 `scripts/probe_export_binding.py` (B086) answers a different question — given a
@@ -219,7 +243,7 @@ exits non-zero. Defaulting an unseen prefix to `ENGINE` would be exactly the
 failure the file exists to prevent.
 
 
-## BLOCKED as of 2026-08-31: RemoteBuild cannot receive a `load_plugin` request
+## RemoteBuild cannot receive a `load_plugin` request. Drive `tm-control-mcp` instead.
 
 Everything on this page needs `load_plugin`, and **`load_plugin` currently
 cannot be delivered at all**. Measured against Openplanet 1.29.14 with
@@ -231,9 +255,18 @@ anything ever seen loaded was loaded at game start, not by the call:
   and `Net::Socket::ReadRaw` returns at most **64** bytes per call. Every longer
   request is split into fragments and each fragment fails to parse.
 - The threshold is exact and deterministic: **<=64 passes, >=65 splits**.
-  `Available()` reports the true size; `ReadRaw(n)` returns at most 64. (An
-  earlier 66/67 figure here was measured with a padded `get_status` and was off
-  by the framing bytes.)
+  `Available()` reports the true size; `ReadRaw(n)` returns at most 64.
+
+  An earlier 66/67 figure here was wrong, and **not** because of framing bytes —
+  requests are unframed. It came from padding a `get_status` until it stopped
+  parsing, which measures whether *that payload* survives being cut rather than
+  where the cut falls. Padded to 65 and 66, the first 64 bytes happened to end
+  in `"}` and `"`, still leniently parseable with `route` intact, so both
+  answered `Alive`; at 67 the cut landed mid-string. The cut was at 64
+  throughout. **Read the cap off the game's own `Read payload:` trace**, which
+  reports the read length directly —
+  `scripts/probe_export_binding.py:measure_read_cap()` does. Both readings were
+  reproducible over repeated trials and only one was accurate.
 - A minimal `load_plugin` request is **72 bytes with an empty id**, so no
   shorter plugin id fixes it.
 - The reply is `{"error":"Not implemented: ","data":""}` — the router's message
@@ -241,6 +274,14 @@ anything ever seen loaded was loaded at game start, not by the call:
   route spellings rather than at size.
 - `get_status` is 35 bytes and works, so `rb_alive()` returns True. Every probe
   passes its liveness gate and then fails on the route that matters.
+
+**Corollary, and it invalidates a tempting finding: do not conclude that a route
+is unimplemented from a >64-byte probe.** Every route name answers
+`Not implemented` at that size, a deliberately bogus one included — so a
+bogus-route control fails through the *same mechanism* as the positives and
+discriminates nothing. Nine routes were probed this way in one afternoon and all
+nine "failed"; none of that was evidence. A control that shares a failure mode
+with the test is not a control, it is a second test.
 
 Two consequences worth knowing before you spend an afternoon on it:
 
