@@ -2180,3 +2180,57 @@ was right to raise it rather than let it pass.
 The general lesson is the same one the gate teaches: a mutating command that can
 succeed by doing nothing needs a check on the *outcome*, not on its exit status
 or its output.
+
+## A missing `cd` does not fail — it builds a different repository
+
+Found by lane-unused during B108, and retracted-into rather than reported: it
+first told me my merge had destroyed its uncommitted test, then traced the
+mechanism and withdrew the accusation. The withdrawal is what makes this entry
+possible.
+
+An agent's cwd **resets between tool calls**. Three of its commands omitted the
+leading `cd` into the lane worktree, so they ran from the main checkout instead:
+
+- `grep -c check_b108 tests/cli_check_tests.rs` read the *main checkout's* copy,
+  which of course lacks the lane's uncommitted test. Count 0. It read that as
+  "my work was destroyed" — and it was not; the file was intact the whole time.
+- Worse: `just rrun cargo test --test cli_check_tests b108` also ran from the
+  main checkout. It synced a **different tree** to the build box, where the test
+  does not exist, and reported `test result: ok. 0 passed; 0 failed; 127
+  filtered out` with **exit 0**.
+
+**That is a fourth false-green route in one day**, and the same signature as the
+others: a green exit over a run that tested nothing. It was caught only because
+"0 passed" is nonsense for a filter that had matched 1 test five minutes
+earlier. The exit code was 0 and would have satisfied any gate trusting it.
+
+**The mechanism, stated generally.** A missing `cd` produces no error. It
+silently retargets the work at whatever tree the shell is in, and every
+downstream signal stays plausible — the sync succeeds, the build succeeds, the
+tests compile, the count is merely smaller. This is the "partial instrument"
+mechanism again, except the instrument is pointed at the **wrong repository**
+rather than being incomplete.
+
+Two false conclusions follow from it, and the lane drew both: that its file was
+gone, and that a green run had verified something. The first is loud and wrong;
+the second is quiet and wrong, which is worse.
+
+**Countermeasures, cheapest first.**
+
+1. **Read the run banner.** `remote-build.py` prints the tree on every run, and
+   it now names the **branch** as well as the slug precisely because of this
+   incident: `remote-build: x-tuf [enum-189cb63a] branch=lane/enum j=8 :: ...`.
+   A hash mismatch is easy to skim past; `branch=master` when you meant
+   `lane/enum` is not. Checking it costs nothing and makes the class impossible.
+2. **Use absolute paths.** The lane's own environment notes say to, for exactly
+   this reason, and it used relative ones anyway. So did I, in the entry above
+   this one. Knowing the rule is not the same as following it, which is why
+   countermeasure 1 exists — it works without anyone remembering anything.
+
+**And the retraction is the durable part.** Two separate faults happened to look
+like one, and the lane attributed its own to me before checking. It then went
+and found the evidence — the slug line in its own logs, `[unused-3616122f]` on
+the two correct runs and `[lsp-openplanet-bf0363fb]` on the bad one — and
+withdrew the specific claim while keeping the unrelated real finding about my
+merge. Both halves matter: a retraction that also abandoned the true half would
+have been as unhelpful as never retracting.

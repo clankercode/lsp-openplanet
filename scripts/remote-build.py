@@ -90,6 +90,25 @@ def local_root() -> Path:
     return Path(out)
 
 
+def git_branch(root: Path) -> str:
+    """The checked-out branch, for the run banner. Never raises.
+
+    Reported so a caller can see at a glance WHICH TREE is being built. `.git`
+    is not synced to the remote, so this is read locally and is purely a label.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        name = out.stdout.strip()
+        return name if out.returncode == 0 and name else "?"
+    except Exception:
+        # A missing git, a detached worktree, anything at all: the banner must
+        # never be the reason a build does not run.
+        return "?"
+
+
 def slug_for(root: Path) -> str:
     """A stable per-worktree name.
 
@@ -361,7 +380,21 @@ def main() -> int:
             f"export CARGO_BUILD_JOBS={jobs} && "
             f"{cmd}"
         )
-        print(f"remote-build: {a.host} [{slug}] j={jobs} :: {cmd}", file=sys.stderr)
+        # Name the TREE in terms the caller actually knows, not just a hash.
+        #
+        # A missing `cd` does not fail -- it silently retargets the run at
+        # whatever tree the shell happens to be in, and every downstream signal
+        # stays plausible: the build succeeds, the tests compile, the count is
+        # merely smaller. A lane that meant to test `lane/unused` and actually
+        # tested master gets `0 passed; 127 filtered out` and EXIT 0. That is a
+        # false green by a fourth route (see docs/verification-hazards.md), and
+        # the slug alone did not prevent it, because `unused-3616122f` and
+        # `lsp-openplanet-bf0363fb` are equally opaque at a glance.
+        #
+        # The branch is not opaque. A lane knows it is on `lane/enum`, so
+        # seeing `master` here is unmissable in a way a differing hash is not.
+        print(f"remote-build: {a.host} [{slug}] branch={git_branch(root)} "
+              f"j={jobs} :: {cmd}", file=sys.stderr)
         t0 = time.monotonic()
         rc = run_ssh(a.host, script)
         print(f"remote-build: exit {rc} in {time.monotonic() - t0:.1f}s",
