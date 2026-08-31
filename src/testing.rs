@@ -588,3 +588,398 @@ mod tests {
         );
     }
 }
+
+/// B074: the env-lock enforcement, over the WHOLE crate.
+///
+/// B032 built this check for `src/update.rs` and scanned exactly that file —
+/// `test_fns()` was `include_str!("update.rs")`. A test mutating the process
+/// environment in any other module was not failed and not warned; it was
+/// never considered. That is not a weak gate, it is a gate whose corpus
+/// cannot contain the thing it claims to check, and it is how `src/config.rs`
+/// came to race `src/update.rs` over `HOME` through two tickets: B032 fixed
+/// one side of the race and could not see that the other side existed.
+///
+/// The corpus here is the source tree, walked at test time, so there is no
+/// module list to fall out of date. A module that never touches the
+/// environment needs to do nothing; the day one starts, this fails.
+///
+/// # What it decides, and what it cannot
+///
+/// It decides one mechanically checkable property: **every `set_var` /
+/// `remove_var` in `src/` sits inside a function that also takes the lock.**
+/// That is the property a scan can settle completely, which is exactly why it
+/// belongs in a scan rather than in a review — a reviewer who finds four
+/// unguarded sites has told you about four sites, never that there is no
+/// fifth.
+///
+/// It does NOT decide the reader side. A test that merely *reads* `HOME`
+/// races a writer too, but "reads the environment" is transitive through
+/// arbitrary call chains (`LspConfig::load` reaches `std::env::var` four
+/// frames down) and is not decidable by scanning. B032 approximated it with a
+/// hand-maintained list of entry points, and that list is a corpus with the
+/// same weakness this ticket is about. Readers are handled by convention and
+/// by `just test-hermetic`, not by this test. Do not read a green here as
+/// "no env races remain".
+///
+/// Integration tests under `tests/` are out of scope: each is its own
+/// process, so they cannot race the lib tests or each other. Verified: none
+/// of them mutates the environment today.
+#[cfg(test)]
+mod env_enforcement {
+    use std::path::{Path, PathBuf};
+
+    /// Calls that mutate the process environment.
+    const MUTATORS: &[&str] = &["set_var(", "remove_var("];
+
+    /// Ways a function can hold the process-wide lock. `EnvVars` takes it in
+    /// `capture` and holds it until drop, so a function that captures is
+    /// guarded for its whole body.
+    const GUARDS: &[&str] = &["env_guard()", "env_lock()", "EnvVars::capture("];
+
+    /// The primitive that implements the lock, and so cannot take it.
+    ///
+    /// This is an exemption for the three functions that BUILD the guard, not
+    /// a corpus restriction — the scan still reads every file. Adding to it is
+    /// a visible edit to this list, which is the point: it is checked for
+    /// exactness below, so a silent widening fails.
+    const LOCK_PRIMITIVE: &[(&str, &str)] = &[
+        ("src/testing.rs", "set"),
+        ("src/testing.rs", "remove"),
+        ("src/testing.rs", "drop"),
+    ];
+
+    fn crate_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("src/ must be readable") {
+            let path = entry.expect("readable dir entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Blank out string literals and comments so brace counting and call
+    /// matching cannot be fooled by prose. Without this, a doc comment
+    /// mentioning `set_var("HOME", ..)` reads as a mutation — `src/config.rs`
+    /// has exactly such a comment, and an earlier draft of this test flagged
+    /// it.
+    fn strip_literals(src: &str) -> String {
+        let b = src.as_bytes();
+        let mut out = vec![b' '; b.len()];
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\n' {
+                out[i] = b'\n';
+                i += 1;
+            } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    if b[i] == b'\n' {
+                        out[i] = b'\n';
+                    }
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
+            } else if b[i] == b'r'
+                && !matches!(
+                    b.get(i.wrapping_sub(1)),
+                    Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')
+                )
+                && {
+                    let mut k = i + 1;
+                    while k < b.len() && b[k] == b'#' {
+                        k += 1;
+                    }
+                    k < b.len() && b[k] == b'"'
+                }
+            {
+                // Raw string: `r"..."`, `r#"..."#`, `r##"..."##`. Found by
+                // this very test flagging its own fixture, which quotes
+                // `set_var` inside an `r#"..."#` block. An unhandled literal
+                // form is the same defect class the scan exists to catch.
+                let hashes = b[i + 1..].iter().take_while(|c| **c == b'#').count();
+                i += 1 + hashes + 1;
+                loop {
+                    if i >= b.len() {
+                        break;
+                    }
+                    if b[i] == b'"'
+                        && b[i + 1..]
+                            .iter()
+                            .take(hashes)
+                            .filter(|c| **c == b'#')
+                            .count()
+                            == hashes
+                    {
+                        i += 1 + hashes;
+                        break;
+                    }
+                    if b[i] == b'\n' {
+                        out[i] = b'\n';
+                    }
+                    i += 1;
+                }
+            } else if b[i] == b'"' {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    } else if b[i] == b'\n' {
+                        out[i] = b'\n';
+                    }
+                    i += 1;
+                }
+                i += 1;
+            } else {
+                out[i] = b[i];
+                i += 1;
+            }
+        }
+        String::from_utf8(out).expect("ASCII-preserving transform")
+    }
+
+    /// `(name, body)` for every `fn` in `src`, bodies matched by brace depth.
+    fn functions(src: &str) -> Vec<(String, String)> {
+        let clean = strip_literals(src);
+        let bytes = clean.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while let Some(rel) = clean[i..].find("fn ") {
+            let at = i + rel;
+            // `fn` must start a token, or `..fn ` inside an identifier matches.
+            let prev_ok =
+                at == 0 || !matches!(bytes[at - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+            if !prev_ok {
+                i = at + 3;
+                continue;
+            }
+            let name: String = clean[at + 3..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let Some(open_rel) = clean[at..].find('{') else {
+                break;
+            };
+            let open = at + open_rel;
+            let mut depth = 0usize;
+            let mut end = open;
+            for (k, c) in clean[open..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + k;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.push((name, clean[open..=end].to_string()));
+            i = open + 1;
+        }
+        out
+    }
+
+    /// The scan itself, so the tests below can run it over synthetic input as
+    /// well as over the tree. Returns one message per violation.
+    fn unguarded_mutations(rel_path: &str, src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for (name, body) in functions(src) {
+            if !MUTATORS.iter().any(|m| body.contains(m)) {
+                continue;
+            }
+            if GUARDS.iter().any(|g| body.contains(g)) {
+                continue;
+            }
+            if LOCK_PRIMITIVE.contains(&(rel_path, name.as_str())) {
+                continue;
+            }
+            out.push(format!("{rel_path}: fn {name}"));
+        }
+        out
+    }
+
+    #[test]
+    fn every_env_mutation_in_the_crate_takes_the_lock() {
+        let root = crate_root();
+        let mut files = Vec::new();
+        // `tests/` as well as `src/`. Each integration binary runs its own
+        // tests as threads in ONE process, so an unguarded mutation there
+        // races its siblings exactly as one in `src/` does. No `tests/` file
+        // mutates the environment today; the point is that the first one to
+        // do so is caught on the way in, not after it starts flaking.
+        for dir in ["src", "tests"] {
+            rust_sources(&root.join(dir), &mut files);
+        }
+        assert!(
+            files.len() > 20,
+            "the walk found only {} files; a scan that reads nothing passes \
+             vacuously, which is the defect this test exists to fix",
+            files.len()
+        );
+
+        let mut violations = Vec::new();
+        let mut scanned_with_mutations = 0usize;
+        for path in &files {
+            let rel = path
+                .strip_prefix(&root)
+                .expect("under the crate root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let src = std::fs::read_to_string(path).expect("readable source");
+            if MUTATORS.iter().any(|m| strip_literals(&src).contains(m)) {
+                scanned_with_mutations += 1;
+            }
+            violations.extend(unguarded_mutations(&rel, &src));
+        }
+
+        assert!(
+            scanned_with_mutations >= 2,
+            "expected at least the lock primitive and update.rs to mutate the \
+             environment; found {scanned_with_mutations} such files, so the \
+             matcher has probably stopped matching"
+        );
+        assert!(
+            violations.is_empty(),
+            "these functions mutate the process environment without holding \
+             the lock, so they race every other test in the same binary. Take \
+             `crate::testing::EnvVars::capture(..)`, which also restores on \
+             the unwind path:\n  {}",
+            violations.join("\n  ")
+        );
+    }
+
+    /// Positive control. A gate that has never been observed saying NO is not
+    /// known to be a gate — and this one replaces a check that said YES for
+    /// two tickets while a real race ran underneath it.
+    #[test]
+    fn the_scan_flags_an_unguarded_mutation() {
+        let src = r#"
+            #[test]
+            fn touches_home_without_the_lock() {
+                std::env::set_var("HOME", "/tmp/nope");
+                assert!(true);
+            }
+        "#;
+        let found = unguarded_mutations("src/somewhere.rs", src);
+        assert_eq!(
+            found,
+            vec!["src/somewhere.rs: fn touches_home_without_the_lock".to_string()],
+            "the scan must catch an unguarded mutation in a module it has \
+             never heard of"
+        );
+    }
+
+    /// Negative control. A scan that flags everything is as useless as one
+    /// that flags nothing, and would make the positive control above pass for
+    /// the wrong reason.
+    #[test]
+    fn the_scan_accepts_a_guarded_mutation() {
+        let src = r#"
+            #[test]
+            fn touches_home_under_the_lock() {
+                let env = crate::testing::EnvVars::capture(&["HOME"]);
+                env.set("HOME", "/tmp/fine");
+                assert!(true);
+            }
+        "#;
+        assert!(unguarded_mutations("src/somewhere.rs", src).is_empty());
+    }
+
+    /// Prose must not be mistaken for code. `src/config.rs` carries a comment
+    /// quoting `set_var("HOME", ..)` to explain why the call was removed, and
+    /// an unstripped scan flags it.
+    #[test]
+    fn the_scan_ignores_mutations_named_only_in_comments_and_strings() {
+        let src = r#"
+            /// This used to `set_var("HOME", &tmp)` with no guard.
+            #[test]
+            fn only_talks_about_it() {
+                let explanation = "call set_var(\"HOME\") here and you race";
+                assert!(!explanation.is_empty());
+            }
+        "#;
+        assert!(unguarded_mutations("src/somewhere.rs", src).is_empty());
+    }
+
+    /// The exemption is for the three functions that BUILD the lock. If it
+    /// ever grows, that is a deliberate edit and should read like one.
+    #[test]
+    fn the_lock_primitive_exemption_stays_minimal() {
+        assert_eq!(
+            LOCK_PRIMITIVE,
+            &[
+                ("src/testing.rs", "set"),
+                ("src/testing.rs", "remove"),
+                ("src/testing.rs", "drop"),
+            ],
+            "only `EnvVars`'s own accessors may mutate the environment without \
+             taking the lock, because they ARE the lock. Anything else added \
+             here is a hole in the gate."
+        );
+    }
+
+    /// Historical witness: the real defect, pinned.
+    ///
+    /// B074's stated red condition — "the enforcement must FAIL on master
+    /// today, because `config.rs` is unguarded" — is no longer literally
+    /// available: B066 guarded that call site before this ticket started. A
+    /// gate whose only demonstration of saying NO is a synthetic fixture is
+    /// weaker than one that says NO to the actual bug, so the actual bug is
+    /// kept here.
+    ///
+    /// The body below is `fn test_game_json_derivation_uses_variant_folder`
+    /// copied verbatim from `37723b1:src/config.rs:2888` — the last commit
+    /// before the B066 branch — down to its `remove_var`. Note the comment it
+    /// carried: it asserted the mutation was safe *because* the value was
+    /// unique, which is true of the value and false of the variable. That is
+    /// the reasoning the scan exists to overrule, so it is preserved too.
+    #[test]
+    fn the_scan_flags_the_pre_b066_config_test_that_started_this() {
+        let historical = r##"
+        #[test]
+        fn test_game_json_derivation_uses_variant_folder() {
+            // Build a fake variant install: home/OpenplanetTurbo with the two
+            // JSON files, plus an OpenplanetNext alongside to prove selection.
+            let tmp = crate::testing::TempDir::new("oplsp-gh45");
+            let turbo = tmp.join("OpenplanetTurbo");
+            let next = tmp.join("OpenplanetNext");
+            std::fs::create_dir_all(&turbo).unwrap();
+            std::fs::create_dir_all(&next).unwrap();
+            std::fs::write(turbo.join("OpenplanetCore.json"), "{}").unwrap();
+            std::fs::write(turbo.join("OpenplanetTurbo.json"), "{}").unwrap();
+            std::fs::write(next.join("OpenplanetCore.json"), "{}").unwrap();
+            std::fs::write(next.join("OpenplanetNext.json"), "{}").unwrap();
+            std::fs::create_dir_all(turbo.join("Plugins")).unwrap();
+            std::fs::create_dir_all(next.join("Plugins")).unwrap();
+
+            // SAFETY for tests: scoped env mutation is fine here — cargo runs
+            // lib tests in one process, but this test owns a unique HOME value
+            // and config load is deterministic given HOME.
+            std::env::set_var("HOME", &tmp);
+            let opts = serde_json::json!({ "game_target": "TURBO" });
+            let config = LspConfig::load(None, Some(&opts));
+            std::env::remove_var("HOME");
+
+            assert_eq!(config.openplanet_dir, Some(turbo.clone()));
+        }
+        "##;
+        assert_eq!(
+            unguarded_mutations("src/config.rs", historical),
+            vec!["src/config.rs: fn test_game_json_derivation_uses_variant_folder".to_string()],
+            "the gate must say NO to the defect it was written for; if this \
+             passes, it is scanning something other than what it claims"
+        );
+    }
+}
