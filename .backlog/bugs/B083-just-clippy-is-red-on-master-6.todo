@@ -1,0 +1,83 @@
+---
+complexity: medium
+created_at: "2026-08-31T04:00:15Z"
+depends_on: []
+estimate_hours: 2
+id: B083
+priority: medium
+status: pending
+tags:
+    - tech-debt
+    - tooling
+    - ci
+title: 'just clippy is red on master: 65 errors under -D warnings, so no lane can use it as a gate'
+updated_at: "2026-08-31T04:00:15Z"
+---
+## Summary
+
+`just clippy` (`cargo clippy --all-targets -- -D warnings`) exits **101 with 65
+errors on master `cb28c49`**. It is not a regression from any one lane — it is
+red for everyone, so every lane that runs it either skips it or learns to read
+past a failing gate, which is the worse outcome.
+
+Measured 2026-08-31 from a clean detached worktree at `cb28c49`
+(`CARGO_TARGET_DIR=/home/xertrov/.cache/lsp-openplanet-builds/b074-baseline`):
+
+```
+master_just_clippy_exit=101
+n_errors=65
+```
+
+Without `-D warnings` the same invocation exits 0 and prints 83 `warning:`
+lines (40 unique after normalising `file:LINE:COL`). So the recipe's `-D
+warnings` is the only thing separating green from red — the lints themselves
+have been accumulating quietly.
+
+## Breakdown (master `cb28c49`)
+
+| n | lint |
+|---|---|
+| 20 | expression creates a reference immediately dereferenced (`needless_borrow`) |
+| 10 | very complex type; consider a `type` alias (`type_complexity`) |
+| 6 | unneeded `return` |
+| 6 | `if` collapsible into the outer `match` |
+| 4 | redundant closure |
+| 3 | **unused import** — `super::repr::ParamMode`, `crate::testing::TempDir`, `crate::parser::ast::SourceFile` |
+| 2 | explicit lifetimes could be elided |
+| 2 | field assignment outside initializer for `Default::default()` |
+| 12 | one each: `values()` iteration, `&mut Vec` vs slice, useless `format!`, `x - 1 >=`, derivable `impl`, `?` operator, constant-value assertion, loop index, module named as its parent, empty line after doc comment |
+
+The three **unused imports** are the ones worth reading first: they are rustc
+warnings, not style lints, and they mark code that a recent change left behind.
+`crate::testing::TempDir` in `src/typedb/index.rs` and
+`crate::parser::ast::SourceFile` both appear in the ordinary `cargo test` build
+output too, so they are visible on every build in this repo right now.
+
+## Why this matters beyond tidiness
+
+A gate that is red for reasons unrelated to your change cannot tell you whether
+your change is clean. The workaround every lane is forced into — a
+line-normalised set diff of branch-vs-master clippy output — is a good
+technique but it is a *substitute* for the gate, and it needs a master baseline
+run each time (about 2 minutes of build). Making `just clippy` green once
+restores a cheap boolean.
+
+## Suggested work
+
+1. Fix the 3 unused imports first — smallest, and they are real dead code.
+2. Sweep the mechanical lints (`needless_borrow`, `needless_return`,
+   `redundant_closure`, `collapsible_if`) with `cargo clippy --fix`, reviewing
+   the diff rather than trusting it.
+3. Decide deliberately on `type_complexity` (10 sites): either introduce the
+   aliases or `#![allow]` it crate-wide with a one-line reason. Do not leave it
+   as the reason the gate stays red.
+4. Re-run `just clippy` and confirm exit 0, then keep it in whatever CI or
+   pre-merge check exists so it cannot silently rot again.
+
+## Provenance
+
+Found by lane-b065-b066 while gating B074. B074 itself adds **zero** clippy
+findings: the line-normalised set diff between branch `b074-env-enforcement`
+and master `cb28c49` is empty in both directions, and both trees report the
+same 65 errors under `-D warnings`. Filed rather than fixed, per the standing
+instruction not to widen a ticket.

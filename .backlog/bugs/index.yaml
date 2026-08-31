@@ -81,3 +81,4 @@ bugs:
     - file: B080-probe-corpora-do-not-record-wh.todo
     - file: B081-is-external-derived-from-is-sh.todo
     - file: B082-a-crashed-test-binary-silently.todo
+    - file: B083-just-clippy-is-red-on-master-6.todo
