@@ -1,14 +1,18 @@
 ---
+claimed_at: "2026-08-31T15:29:06Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T15:27:38Z"
 depends_on: []
 estimate_hours: 1
 id: B143
 priority: high
-status: pending
+started_at: "2026-08-31T15:29:06Z"
+status: in_progress
 tags: []
 title: Max's plugin dev norms mean code is often moved from /src/ to / within the plugin directory. so the info.toml entries need to be without 'src/'. We should support extra search dirs for export files (keeping their path if the have one). so we check <export_path> and if that's not found, we check <search_dir>/<export_path> too. This goes for normal and shared exports. This should make it work with most of Max's plugins.
-updated_at: "2026-08-31T15:27:38Z"
+updated_at: "2026-08-31T15:29:06Z"
 ---
 
 Max's plugin dev norms mean code is often moved from /src/ to / within the plugin directory. so the info.toml entries need to be without 'src/'. We should support extra search dirs for export files (keeping their path if the have one). so we check <export_path> and if that's not found, we check <search_dir>/<export_path> too. This goes for normal and shared exports. This should make it work with most of Max's plugins.
