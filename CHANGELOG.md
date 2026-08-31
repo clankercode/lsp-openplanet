@@ -28,6 +28,19 @@ GitHub Release body to match this section (gh release edit).
   anything is folded.
 
 ### Added
+- **The language server notices when its own binary is replaced** (B105)
+  — after a self-update or a package-manager upgrade, a running server
+  used to keep answering from the old binary until the editor happened to
+  restart it. It now stats its executable path every 30s and, once
+  nothing is in flight, acts exactly once: by default it exits cleanly so
+  the editor respawns it on the new binary. Clients that would rather
+  drive the restart themselves send `on_binary_replaced: "notify"` in
+  `initializationOptions` and receive an `openplanet/serverBinaryReplaced`
+  notification (`path`, `runningVersion`, `previous`/`current` file
+  stamps); `"off"` disables the watch. A missing file is never treated as
+  a replacement, so the server cannot restart toward a binary that is not
+  there. Not detected: installs that upgrade by repointing a symlink at a
+  new immutable file (Nix and similar).
 - **Multi-version Openplanet checking** (GH #18) — `check` can now target
   any recorded Openplanet version, or several at once:
   `--openplanet-version 1.29.5,1.29.14` runs the typecheck once per
