@@ -4945,11 +4945,16 @@ fn check_command_issue_repro_b061_property_read_credits_accessor() {
 /// while the bodies live elsewhere. So the stubs are read as a root set and
 /// matched against ordinary declarations.
 ///
-/// Matched by SIMPLE name and overlapping arity, not by parameter type: the
-/// fixture above pairs an `import ... (string a, string b)` stub with a
-/// `(const string &in a, const string &in b)` body and calls that correct, so
-/// comparing types would invent a precision the engine does not have and
-/// resurrect the warning this removes.
+/// Matched by SIMPLE name and overlapping arity, NOT by parameter type —
+/// a deliberate under-approximation of the engine. Game-probed 2026-08-31
+/// (OP 1.29.5, exporter + consumer plugins, positive and negative controls):
+/// the engine binds an import by EXACT parameter type, so a by-value stub
+/// over a `const &in` body does NOT bind (`Unbound function called`) while an
+/// exact stub binds and runs. Mirroring that here would mean comparing
+/// AngelScript type text, where a normalisation slip becomes a false
+/// "never used" on a live export — the very defect this removes. Over-rooting
+/// costs a missed warning instead, and `TrulyDead` is the control that keeps
+/// "safe" from becoming "root everything".
 ///
 /// Three survivors are the gates, all in the SAME FILE as the rooted bodies so
 /// that "exempt the file" cannot pass: an unexported global, an unused class,
