@@ -6,7 +6,7 @@ use crate::analysis::unused::UnusedDeclaration;
 use crate::analysis::DocumentAnalysis;
 use crate::config::{InactiveLevel, LspConfig, UnusedLevel};
 use crate::symbols::SymbolTable;
-use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticSeverity};
+use crate::typecheck::{Checker, GlobalScope, TypeDiagnosticKind, TypeDiagnosticSeverity};
 use crate::typedb::TypeIndex;
 use crate::workspace::manifest::{
     DiagSeverity, Manifest, ManifestAnchor, ManifestDiagnostic, ManifestWorkspace,
@@ -80,9 +80,27 @@ pub fn compute_manifest_diagnostics_in_workspace(
 pub fn compute_diagnostics_from_analysis(
     uri: &Url,
     analysis: &DocumentAnalysis,
+    config: &LspConfig,
+    type_index: Option<&TypeIndex>,
+    workspace_symbols: &SymbolTable,
+) -> Vec<Diagnostic> {
+    compute_diagnostics_with_versions(uri, analysis, config, type_index, workspace_symbols, None)
+}
+
+/// [`compute_diagnostics_from_analysis`] plus GH #18 version context:
+/// `(notes, target_label)` from the version catalog. A missing symbol the
+/// recorded snapshots know (added later / removed earlier than the target)
+/// gets that fact appended to its message. Keyed on the STRUCTURED
+/// `NoMatchingSymbol.qualified` field — never on message text — and all
+/// version comparison happened in the catalog; this only renders the
+/// supplied strings.
+pub fn compute_diagnostics_with_versions(
+    uri: &Url,
+    analysis: &DocumentAnalysis,
     _config: &LspConfig,
     type_index: Option<&TypeIndex>,
     workspace_symbols: &SymbolTable,
+    version: Option<(&crate::typedb::catalog::VersionNotes, &str)>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let source = analysis.source.as_str();
@@ -122,10 +140,19 @@ pub fn compute_diagnostics_from_analysis(
             TypeDiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
             TypeDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
         };
+        let mut message = diag.message();
+        if let (Some((notes, target_label)), TypeDiagnosticKind::NoMatchingSymbol { qualified, .. }) =
+            (version, &diag.kind)
+        {
+            if let Some(note) = notes.get(qualified) {
+                message =
+                    format!("{message} ({note}; target is Openplanet {target_label})");
+            }
+        }
         diagnostics.push(Diagnostic {
             range,
             severity: Some(severity),
-            message: diag.message(),
+            message,
             source: Some("openplanet-lsp".to_string()),
             ..Default::default()
         });

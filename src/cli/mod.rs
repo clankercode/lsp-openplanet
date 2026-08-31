@@ -797,6 +797,10 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         /// report, but only multi-target runs label diagnostics).
         label: Option<String>,
         index: Option<TypeIndex>,
+        /// GH #18: what other recorded versions know about symbols this
+        /// target lacks. `None` when the catalog has nothing to diff
+        /// against (legacy path, or a single-entry catalog).
+        notes: Option<crate::typedb::catalog::VersionNotes>,
     }
     let targets: Vec<Target> = if options.openplanet_version.is_none()
         && options.typedb_versions_dir.is_none()
@@ -804,6 +808,7 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         vec![Target {
             label: None,
             index: load_type_index(&config, options.no_typedb)?,
+            notes: None,
         }]
     } else {
         let installed = config.core_json.as_deref().zip(config.game_json.as_deref());
@@ -820,17 +825,27 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
             vec![Target {
                 label: None,
                 index: None,
+                notes: None,
             }]
         } else {
+            // With a second version to diff against, missing-symbol
+            // diagnostics can say WHEN the symbol appeared or vanished.
+            let diffable = catalog.entries().len() > 1;
             resolved
                 .into_iter()
                 .map(|entry| {
                     let index = TypeIndex::load(&entry.core_json, &entry.game_json).map_err(
                         |e| CliError::Check(format!("failed to load type database: {e}")),
                     )?;
+                    let notes = diffable
+                        .then(|| catalog.notes_for_target(entry))
+                        .transpose()
+                        .map_err(CliError::Check)?
+                        .filter(|n| !n.is_empty());
                     Ok(Target {
                         label: Some(entry.label.clone()),
                         index: Some(index),
+                        notes,
                     })
                 })
                 .collect::<Result<Vec<_>, CliError>>()?
@@ -883,11 +898,16 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         let snapshot = AnalysisSnapshot::from_load(&load, &combo_config);
         for target in &targets {
             let pass_start = cli_diagnostics.len();
+            let version = target
+                .notes
+                .as_ref()
+                .zip(target.label.as_deref());
             collect_pass_diagnostics(
                 &load,
                 &snapshot,
                 &combo_config,
                 target.index.as_ref(),
+                version,
                 &manifest_path,
                 &search.plugin_files_search_paths,
                 &mut cli_diagnostics,
@@ -941,6 +961,7 @@ fn collect_pass_diagnostics(
     snapshot: &AnalysisSnapshot,
     config: &LspConfig,
     type_index: Option<&TypeIndex>,
+    version: Option<(&crate::typedb::catalog::VersionNotes, &str)>,
     manifest_path: &Path,
     plugin_files_search_paths: &[PathBuf],
     cli_diagnostics: &mut Vec<CliDiagnostic>,
@@ -1006,12 +1027,13 @@ fn collect_pass_diagnostics(
         // own import decls must resolve within it).
         let table_for_check =
             snapshot.table_for_own_file(crate::analysis_snapshot::FileRef::Path(&item.path));
-        for mut diagnostic in diagnostics::compute_diagnostics_from_analysis(
+        for mut diagnostic in diagnostics::compute_diagnostics_with_versions(
             &uri,
             analysis,
             config,
             type_index,
             &table_for_check,
+            version,
         ) {
             diagnostic.range =
                 diagnostics::range_to_utf8_columns(&analysis.source, diagnostic.range);

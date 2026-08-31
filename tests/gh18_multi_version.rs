@@ -93,30 +93,52 @@ fn diags_for<'r>(
         .collect()
 }
 
-#[test]
-fn multi_target_labels_version_specific_misses() {
-    let s = setup("multi");
-    let opts = parse_check_args(&[
+/// Args for a hermetic multi-target run: `--typedb-dir` pins the
+/// "installed" pair to the v1 snapshot so the machine's real Openplanet
+/// install (if any) never joins the catalog and skews version notes.
+fn multi_args(s: &Setup, versions: &str) -> Vec<String> {
+    vec![
+        "--typedb-dir".into(),
+        s.v1_dir.display().to_string(),
         "--typedb-versions-dir".into(),
         s.versions_root.display().to_string(),
         "--openplanet-version".into(),
-        "1.0.0,2.0.0".into(),
+        versions.into(),
         s.plugin.display().to_string(),
-    ])
-    .unwrap();
+    ]
+}
+
+#[test]
+fn multi_target_labels_version_specific_misses() {
+    let s = setup("multi");
+    let opts = parse_check_args(&multi_args(&s, "1.0.0,2.0.0")).unwrap();
     let report = run_check(&opts).unwrap();
 
     assert_eq!(report.targets, ["1.0.0", "2.0.0"], "report names its targets");
 
-    // Ns::Old exists on 1.0.0, missing on 2.0.0 → labeled with 2.0.0 only.
+    // Ns::Old exists on 1.0.0, missing on 2.0.0 → labeled with 2.0.0 only,
+    // and version-enriched: the snapshots prove it was removed in 2.0.0.
     let old = diags_for(&report, "Ns::Old");
     assert_eq!(old.len(), 1, "one merged diagnostic for Ns::Old: {old:?}");
     assert_eq!(old[0].1, ["2.0.0"]);
+    assert!(
+        old[0].0.contains("removed in Openplanet 2.0.0")
+            && old[0].0.contains("target is Openplanet 2.0.0"),
+        "removed_in note: {}",
+        old[0].0
+    );
 
-    // Ns::Gone exists on 2.0.0, missing on 1.0.0 → labeled with 1.0.0 only.
+    // Ns::Gone exists on 2.0.0, missing on 1.0.0 → labeled with 1.0.0 only,
+    // enriched as added in 2.0.0.
     let gone = diags_for(&report, "Ns::Gone");
     assert_eq!(gone.len(), 1, "one merged diagnostic for Ns::Gone: {gone:?}");
     assert_eq!(gone[0].1, ["1.0.0"]);
+    assert!(
+        gone[0].0.contains("added in Openplanet 2.0.0")
+            && gone[0].0.contains("target is Openplanet 1.0.0"),
+        "added_in note: {}",
+        gone[0].0
+    );
 
     // Ns::Never is missing on every target → merged, and NOT labeled:
     // firing everywhere is not version news.
@@ -125,6 +147,11 @@ fn multi_target_labels_version_specific_misses() {
     assert!(
         never[0].1.is_empty(),
         "all-targets diagnostic carries no version label: {never:?}"
+    );
+    assert!(
+        !never[0].0.contains("added in") && !never[0].0.contains("removed in"),
+        "no recorded version has Ns::Never, so no version note: {}",
+        never[0].0
     );
 }
 
@@ -153,14 +180,7 @@ fn single_target_run_has_no_version_labels() {
 fn formatters_render_version_labels_only_where_version_specific() {
     use openplanet_lsp::cli::{format_check_report_for, CheckFormat};
     let s = setup("format");
-    let opts = parse_check_args(&[
-        "--typedb-versions-dir".into(),
-        s.versions_root.display().to_string(),
-        "--openplanet-version".into(),
-        "1.0.0,2.0.0".into(),
-        s.plugin.display().to_string(),
-    ])
-    .unwrap();
+    let opts = parse_check_args(&multi_args(&s, "1.0.0,2.0.0")).unwrap();
     let report = run_check(&opts).unwrap();
 
     let plain = format_check_report_for(&report, CheckFormat::Plain);
@@ -231,14 +251,7 @@ fn single_target_output_is_label_free() {
 #[test]
 fn unknown_requested_version_is_a_hard_error_naming_known() {
     let s = setup("unknown");
-    let opts = parse_check_args(&[
-        "--typedb-versions-dir".into(),
-        s.versions_root.display().to_string(),
-        "--openplanet-version".into(),
-        "9.9.9".into(),
-        s.plugin.display().to_string(),
-    ])
-    .unwrap();
+    let opts = parse_check_args(&multi_args(&s, "9.9.9")).unwrap();
     let err = run_check(&opts).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("9.9.9"), "names the request: {msg}");
