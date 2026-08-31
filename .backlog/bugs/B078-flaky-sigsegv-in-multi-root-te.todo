@@ -9,11 +9,11 @@ priority: medium
 started_at: null
 status: pending
 tags: []
-title: 'Flaky SIGSEGV in multi_root_tests: deterministic execute fault at a fixed module offset, and a crashed binary silently lowers the suite total'
+title: 'A crashed test binary silently lowers the suite total: cargo exits 101 with zero test-result lines (the SIGSEGV is an external instruction-fetch fault, not a project defect)'
 updated_at: "2026-08-30T22:24:33Z"
 ---
 
-# Flaky SIGSEGV in multi_root_tests: deterministic execute fault at a fixed module offset, and a crashed binary silently lowers the suite total
+# A crashed test binary silently lowers the suite total: cargo exits 101 with zero test-result lines (the SIGSEGV is an external instruction-fetch fault, not a project defect)
 
 ## Steps to Reproduce
 
