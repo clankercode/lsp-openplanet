@@ -2774,13 +2774,37 @@ impl<'a> Checker<'a> {
     /// External parameter text is already fully qualified, which is why the
     /// typedb path does not need this.
     fn slot_funcdef_in_scope(&self, param_text: &str, owner_qualified: &str) -> Option<FuncdefSig> {
-        if let Some(fd) = self.slot_funcdef(param_text) {
-            return Some(fd);
-        }
         let name = match Self::peel_const_handle(&TypeRepr::parse_type_string(param_text.trim())) {
             TypeRepr::Named(n) | TypeRepr::Funcdef(n) => n.clone(),
             _ => return None,
         };
+        // GH #38 / B073: the plugin's own declaration wins, so a parameter
+        // written with a name the workspace declares is NOT a funcdef slot,
+        // whatever the typedb has under that name. `lookup_funcdef` walks
+        // workspace symbols but only RETURNS on a real funcdef and then falls
+        // through to the engine, so without this a plugin class named
+        // `CoroutineFunc` turns `void g(CoroutineFunc@ p)` into an engine
+        // funcdef slot and rejects a perfectly good argument.
+        //
+        // `check_funcdef_binding` guards B076's four declaration positions
+        // with exactly this test. B073 left `slot_funcdef` itself unguarded
+        // on a REACHABILITY argument — no site could then reach it while
+        // shadowing — and wrote
+        // `a_plugin_type_named_after_an_engine_funcdef_behaves_the_same_at_a_call_slot`
+        // to go red when that expired. B089 expired it: running the slot
+        // check over workspace calls is exactly the site that argument said
+        // did not exist. The test did its job and this is the guard it asked
+        // for. It lives here rather than in `slot_funcdef` so the external
+        // path's own reachability argument is left as B073 measured it.
+        if self
+            .scope
+            .workspace_shadows_funcdef(&self.resolve_value_type_name(&name))
+        {
+            return None;
+        }
+        if let Some(fd) = self.slot_funcdef(param_text) {
+            return Some(fd);
+        }
         // A written qualifier is the author's own answer about scope; walking
         // past it would resolve a name they did not write.
         if name.contains("::") {
@@ -3955,6 +3979,16 @@ impl<'a> Checker<'a> {
                 //    chained `.member` access off a constructor can
                 //    still resolve. Otherwise just silence.
                 if self.scope.has_type(&name) {
+                    // No `record_use` here, and that is MEASURED rather than
+                    // assumed. This arm looks like it is missing the
+                    // `record_use(&qualified)` its namespaced twin at step 3
+                    // has, and a line was added here on that reasoning — but
+                    // removing it again left
+                    // `a_class_used_only_as_a_constructor_call_is_credited`
+                    // green, so a workspace class reached by its constructor
+                    // call is already credited by another route. The line was
+                    // inert; an inert line that carries a comment claiming a
+                    // bug is worse than no line.
                     let mut arg_tys = Vec::with_capacity(args.len());
                     for a in args {
                         arg_tys.push(self.expr_type(&a.value));
@@ -4013,6 +4047,16 @@ impl<'a> Checker<'a> {
                 // is the B084 shape, where B062's export rooting hid a
                 // crediting defect behind a green gate.
                 if let Some(declared) = self.scope.workspace_shadowing_type_name(&name) {
+                    // B084 parity, and this guard would otherwise UNDO it.
+                    // The `has_global_ident` arm below credits every name
+                    // that reaches it; returning above that arm without
+                    // recording reintroduces the false "never used" for an
+                    // enum whose only reference is this cast-call form —
+                    // `tostring(WheelOrder(w))` is B084's own example.
+                    // Pinned by `b071_shadowing_guard_credits_the_enum` in
+                    // `analysis::unused`, which is the only harness that can
+                    // see it: `compute_diagnostics` runs no unused analysis.
+                    self.record_use(&declared);
                     self.walk_args(args);
                     return TypeRepr::Named(declared);
                 }
@@ -5617,9 +5661,8 @@ mod tests {
                 }
                 _ => None,
             });
-            let (qualified, hint) = hit.unwrap_or_else(|| {
-                panic!("expected NoMatchingSymbol for {call:?}, got {diags:?}")
-            });
+            let (qualified, hint) = hit
+                .unwrap_or_else(|| panic!("expected NoMatchingSymbol for {call:?}, got {diags:?}"));
             assert!(qualified.starts_with("string::"), "{qualified}");
             assert_eq!(hint.as_deref(), Some(expect_hint), "for {call:?}");
         }
@@ -12486,12 +12529,22 @@ void f() {
     /// IF YOU LANDED HERE FROM A FAILURE, this is what it means. Two more
     /// sites ask `lookup_funcdef` without the GH #38 shadowing guard that
     /// [`Self::try_funcdef_ctor`] carries — [`Self::funcdef_name_of`] and
-    /// [`Self::slot_funcdef`] — and they are UNGUARDED DELIBERATELY. Measured
+    /// [`Self::slot_funcdef`] — and they were UNGUARDED DELIBERATELY. Measured
     /// when B073 landed: with a plugin type named after a Core funcdef, both
-    /// produce output identical to the non-colliding control, so a guard there
+    /// produced output identical to the non-colliding control, so a guard there
     /// could not fire. A guard that cannot fire is worse than none, because at
     /// review time it is indistinguishable from one that can, and it tells the
     /// next reader an axis is covered when nothing is checking it.
+    ///
+    /// THAT ARGUMENT HAS SINCE EXPIRED FOR ONE OF THEM, exactly as this test
+    /// was built to detect. B089 ran the funcdef-slot check over workspace
+    /// call sites — the site the reachability argument said did not exist —
+    /// and this test went red on the `void g({T}@ p)` row, reporting
+    /// `NoMatchingSignatures` where the control was silent. The guard now
+    /// lives in [`Self::slot_funcdef_in_scope`], which is the only caller
+    /// that can reach it while shadowing; `slot_funcdef` and
+    /// `funcdef_name_of` stay unguarded on the original argument, which
+    /// still holds for their callers.
     ///
     /// This test is the substitute for those guards. It goes red the moment
     /// either site becomes reachable-and-shadowing, which forces that call to
