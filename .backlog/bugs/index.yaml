@@ -154,3 +154,4 @@ bugs:
     - file: B153-nadeo-format-rs-drops-two-unde.todo
     - file: B154-probe-export-binding-has-a-sel.todo
     - file: B155-the-engine-now-names-an-assign.todo
+    - file: B156-repr-rs-is-array-generic-base.todo
