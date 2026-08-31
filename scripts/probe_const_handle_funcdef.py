@@ -3,6 +3,7 @@
 at a funcdef slot, as far as the ENGINE is concerned?
 
     scripts/probe_const_handle_funcdef.py [--tsv out.tsv] [--json out.json]
+                                          [--b165-primitive]
                                           [--only <id-prefix>]
 
 Requires Trackmania + Openplanet with RemoteBuild on 127.0.0.1:30000.
@@ -31,6 +32,10 @@ Q3  is the LEADING const (`const T@` vs `T@`) still EXACT, as B110
 Q4  the same for `&out`, `&inout` and by-value.
 Q5  the same for a RETURN type.
 Q6  the reported call path itself: `array<T>::Sort` with such a comparator.
+Q9  does primitive width or signedness participate exactly in a funcdef
+    signature? B165 asks both directions for int/int64 and uint/uint64,
+    signed/unsigned crossings at both widths, and the real `startnew` int64
+    userdata slot that motivated the question.
 
 Declarability is asked separately (`decl-*`), because "the engine rejected it"
 must be attributable to the BINDING and not to the spelling being illegal in a
@@ -75,6 +80,7 @@ import issue_repro_game as repro  # noqa: E402
 from probe_const_receiver import V, classify  # noqa: E402
 
 TOKEN = "B144CHF"
+B165_TOKEN = "B165PF"
 
 # Written at the top of the TSV. The engine version is the fact a bare table
 # loses first, and this repo cites three generations concurrently (1.29.5,
@@ -118,11 +124,38 @@ PREAMBLE = """\
 # a control whose verdict does not match its expectation invalidates the run.
 """
 
+B165_PREAMBLE = """\
+# B165 primitive funcdef exactness, probed against the live game.
+#
+# Openplanet 1.29.14 (next, Public, 6fd4200f), 2026-09-01.
+# Generator: python3 scripts/probe_const_handle_funcdef.py --b165-primitive --tsv <this file>
+#
+# THE QUESTION. Does a primitive handler bind a funcdef slot through ordinary
+# numeric conversion, or is a funcdef signature exact about primitive width
+# and signedness? The real motivating seam is `void H(int)` offered to
+# `startnew`, whose integer-userdata callback is `void(int64)`.
+#
+# THE ANSWER. Exact. The real startnew row rejects, as do int/int64 and
+# uint/uint64 in both directions and signed/unsigned crossings at both 32 and
+# 64 bits. The exact int64/int64 control accepts and the bogus-symbol control
+# rejects, proving both oracle polarities were live.
+#
+# FLEET EXPOSURE. Before preserving B110's exact checker rule, a temporary
+# marker re-ran its old-vs-exact disagreement over 151 shipped plugin dirs plus
+# five in-repo fixture plugins: 408 comparisons were exposed, all four known
+# overload-sibling pairs (int64<->uint64 and either ->double). No int<->int64
+# hit and no reference-data defect appeared. The exact sibling still binds at
+# each call, which B110's typedb-backed startnew tripwire holds shut.
+#
+# `expect` is ACCEPT/REJECT for CONTROL rows and UNKNOWN for question rows;
+# a control whose verdict does not match its expectation invalidates the run.
+"""
 
-def write_fixture(root: Path, v: V) -> Path:
+
+def write_fixture(root: Path, v: V, token: str = TOKEN) -> Path:
     """One plugin folder per variant (B068: one construct per compilation unit)."""
-    suffix = TOKEN + v.id.replace("-", "")
-    pretty = f"B144chf {v.id}"
+    suffix = token + v.id.replace("-", "")
+    pretty = f"{token} {v.id}"
     v.fid = repro.PROBE_PREFIX + fleet.folder_id(pretty)
     plugin = root / v.id
     plugin.mkdir(parents=True)
@@ -135,12 +168,12 @@ def write_fixture(root: Path, v: V) -> Path:
         "\n[script]\n"
     )
     (plugin / "Main.as").write_text(
-        f"// B144 const-handle funcdef probe :: {v.id}\n"
+        f"// {token} funcdef probe :: {v.id}\n"
         f"// question: {v.question}\n"
         f"// stands in for: {v.stands_for}\n"
         + (v.code % {"S": suffix})
         + "\nvoid Main() {\n"
-        f'    print("{TOKEN} {v.id} ready");\n'
+        f'    print("{token} {v.id} ready");\n'
         "}\n"
     )
     return plugin
@@ -506,6 +539,56 @@ def variants() -> list[V]:
         question="Q8", expect="UNKNOWN",
         stands_for="a CONST callback at the NON-const slot (the reverse)",
     ))
+
+    # ---- Q9 / B165: primitive width and signedness ----------------------
+    #
+    # One prefix intentionally contains both controls and every question row,
+    # so `--only b165-primitive` remains an evidential run rather than a
+    # question-only sample whose oracle was never shown accepting or rejecting.
+    v.append(V(
+        id="b165-primitive-ctl-valid",
+        code=bind("int64 v", "int64 v"),
+        question="control", expect="ACCEPT",
+        stands_for="an exactly matching primitive funcdef signature",
+    ))
+    v.append(V(
+        id="b165-primitive-ctl-bogus",
+        code="void Use%(S)s() { NoSuchFunction%(S)s(); }\n",
+        question="control", expect="REJECT",
+        stands_for="a definitely-invalid call; proves the oracle sees errors",
+    ))
+
+    # The real built-in seam behind B110's isolated row. `startnew`'s integer
+    # userdata overload takes an int64 callback, while the literal selects the
+    # corresponding userdata family. Keep this beside the local funcdef rows:
+    # the local declarations discriminate both directions, which the built-in
+    # overload family cannot express.
+    v.append(V(
+        id="b165-primitive-startnew-int-int64",
+        code=("void F%(S)s(int v) { }\n"
+              "void Use%(S)s() { startnew(F%(S)s, 1); }\n"),
+        question="Q9-primitive", expect="UNKNOWN",
+        stands_for="the reported bare int handler at startnew's int64 userdata slot",
+    ))
+
+    primitive_pairs = [
+        ("int-at-int64", "int64", "int"),
+        ("int64-at-int", "int", "int64"),
+        ("uint-at-uint64", "uint64", "uint"),
+        ("uint64-at-uint", "uint", "uint64"),
+        ("int-at-uint", "uint", "int"),
+        ("uint-at-int", "int", "uint"),
+        ("int64-at-uint64", "uint64", "int64"),
+        ("uint64-at-int64", "int64", "uint64"),
+    ]
+    for pair_id, slot_ty, handler_ty in primitive_pairs:
+        v.append(V(
+            id=f"b165-primitive-{pair_id}",
+            code=bind(f"{slot_ty} v", f"{handler_ty} v"),
+            question="Q9-primitive", expect="UNKNOWN",
+            stands_for=(f"primitive signature direction: `{handler_ty}` handler "
+                        f"at a `{slot_ty}` funcdef slot"),
+        ))
     return v
 
 
@@ -513,10 +596,19 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tsv")
     ap.add_argument("--json")
+    ap.add_argument(
+        "--b165-primitive",
+        action="store_true",
+        help="run B165's primitive-signature suite instead of B144's const suite",
+    )
     ap.add_argument("--only", help="run only variants whose id starts with this")
     args = ap.parse_args()
 
     vs = variants()
+    if args.b165_primitive:
+        vs = [v for v in vs if v.id.startswith("b165-primitive-")]
+    else:
+        vs = [v for v in vs if not v.id.startswith("b165-primitive-")]
     if args.only:
         vs = [v for v in vs if v.id.startswith(args.only)]
         if not vs:
@@ -534,11 +626,12 @@ def main() -> int:
               file=sys.stderr)
         return 4
 
-    tmp = Path(tempfile.mkdtemp(prefix="b144chf-"))
+    token = B165_TOKEN if args.b165_primitive else TOKEN
+    tmp = Path(tempfile.mkdtemp(prefix=f"{token.lower()}-"))
     rows = []
     try:
         for v in vs:
-            fixture = write_fixture(tmp, v)
+            fixture = write_fixture(tmp, v, token)
             rec = repro.probe(fixture)
             verdict, reason = classify(rec)
             # The MESSAGE is the part hand-transcription loses and the part
@@ -574,7 +667,7 @@ def main() -> int:
         Path(args.json).write_text(json.dumps(rows, indent=1))
     if args.tsv:
         Path(args.tsv).write_text(
-            PREAMBLE
+            (B165_PREAMBLE if args.b165_primitive else PREAMBLE)
             + "id\tquestion\texpect\tverdict\tbuild_status\tengine_messages\tstands_for\n"
             + "".join(
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(

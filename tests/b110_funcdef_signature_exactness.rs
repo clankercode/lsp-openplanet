@@ -44,32 +44,23 @@
 //! The leniency is therefore not load-bearing on any shipped plugin: it is
 //! exercised constantly and relied upon nowhere.
 //!
-//! ## The one row that is REASONED, not measured, stated where it lands
+//! ## B165 measured the formerly reasoned row
 //!
 //! A handler declared with a BARE `int` at a coroutine userdata slot
 //! (`void H(int)` against `CoroutineFuncUserdataInt64`, i.e. `void(int64)`)
-//! is accepted today and rejected after this change, and NO plugin in the
-//! corpus writes it — the instrumented sweep never once printed an
-//! `int -> int64` pair, and a source-level cross-check found the single
-//! apparent hit to be a different plugin's `void DownloadTmxMapToLocal(ref@)`.
-//! So there is no fleet evidence in either direction for that pair, only for
-//! the four it does exercise.
+//! is rejected by the live engine itself. B165 ran the real `startnew` seam,
+//! both directions of int/int64 and uint/uint64, and both directions of the
+//! equal-width signed/unsigned crossings. All nine question rows reject; the
+//! exact-match and bogus-symbol controls accept and reject respectively. The
+//! durable evidence is `docs/probes/b165-primitive-funcdef.tsv`.
 //!
-//! What stands behind it is reasoning plus corroboration, and B097 still
-//! blocks the probe that would settle it:
-//!
-//!   * a delegate has no conversion seam — the engine compares signatures,
-//!     it does not convert them;
-//!   * B027 measured the sibling axis directly: any plain/`&in`/`&out`/
-//!     `&inout` MODE mismatch is `Can't create delegate` (OP 1.29.5,
-//!     2026-08-29). Exactness is already the rule for how a parameter is
-//!     passed; this says it is also the rule for what type it is;
-//!   * the corpus corroborates by construction: plugins that pass userdata
-//!     to `startnew` write `int64`/`uint64`/`double` handlers, never `int`.
-//!     If `int` bound the slot, one of 151 plugins would have written it.
-//!
-//! That is strong, but it is not a probe. Re-measure when B097 is fixed; the
-//! `bare_int_handler_*` test below is the row to revisit.
+//! The fleet audit was repeated after measurement. The old-vs-exact marker
+//! still reached 408 comparisons across the 151 shipped plugin dirs plus five
+//! in-repo fixtures, all in the four known overload-sibling shapes
+//! (`int64 <-> uint64`, either to `double`). No `int <-> int64` exposure or
+//! primitive reference-data defect appeared. Thus the bare-int row is engine
+//! evidence, while the fleet remains evidence that existing plugins do not
+//! rely on it.
 //!
 //! # What is deliberately NOT touched
 //!
