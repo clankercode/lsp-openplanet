@@ -181,3 +181,92 @@ precisely why no gate in this batch could see the related regressions.** That
 last point is the reason this is worth fixing rather than shrugging at: the
 absence of a fixture is not evidence of absence in the wild, it is the reason
 the wild goes unmeasured.
+
+## FIXED (lane-resolver, 2026-08-31) — commit e3e1241 on lane/resolver
+
+`SUITE-VERIFIED: 2397 passed; 0 failed; 14 ignored; 26/26 binaries reported`
+(2388 + 9). Merged by coordinator; see the merge commit for final state.
+
+### Change — 2 production hunks and one predicate composition
+
+- **`src/typecheck/resolver.rs:136`** — `resolve_named` establishes
+  `workspace_shadowing_type_name(&qualified)` BEFORE the `lookup_funcdef` and
+  `is_angelscript_builtin_type` shortcuts (both of which answer from the
+  ENGINE), and lets it win at `:179` — after the primitive/void checks, so a
+  keyword-spelled type still cannot be shadowed.
+- **`src/typecheck/checker.rs:2530`** — `try_funcdef_ctor` declines when the
+  workspace shadows, handing the call to the type-constructor path below.
+- **`src/typecheck/global_scope.rs:1602`** — new
+  `workspace_shadowing_type_name -> Option<String>`;
+  `workspace_shadows_funcdef` becomes `.is_some()` of it. **Composition, not
+  addition** (the B079 convention): zero behavioural change to its five
+  existing callers. `any_workspace_symbol` likewise becomes `.is_some()` of a
+  new private `first_workspace_symbol`.
+
+The fix returns the **declaration's qualified name, not the spelling**. That is
+what makes the namespaced case produce
+`UndefinedMember { object_type: "Nz::CoroutineFunc" }` matching its control
+exactly, and it is the detail most likely to be "simplified" back later — the
+namespace test is the only thing that would catch that.
+
+### THE HOLE WAS IN TWO PATHS, NOT ONE
+
+`awaitable` is **not** a typedb funcdef — it is hardcoded in
+`is_angelscript_builtin_type`, and that check had the identical hole. Guarding
+`lookup_funcdef` alone leaves those four cells red.
+
+Same lesson B071 and B076 carry from the other direction: a check has a natural
+home, and the natural home is one of N sites. Here the ticket implied N=1 and
+the answer was N=2. It was found by testing the BEHAVIOUR rather than the
+function. Kept as a separate test for that reason.
+
+### Deliberately NOT guarded — do not "complete" this later without reading
+
+The ticket's "Located" note points at all four `lookup_funcdef` sites in
+resolver.rs. **Only one was guarded.** The other three are reached only after a
+name has FAILED to resolve, which cannot happen while the workspace declares a
+type of that name — an exact declaration answers at the first site, and a
+namespaced one answers there too through the tail table.
+
+Two further sites in checker.rs were probed and left alone for the same reason:
+`funcdef_name_of` (2540) and `slot_funcdef` (2602). Both produce output
+identical to the non-colliding control today.
+
+**Three dead guards would have read as protection.** A guard that cannot fire
+is indistinguishable at review from one that can, so it makes the next reader
+believe an axis is covered when nothing is checking it — the mirror image of
+B076, where a real check reached one of four positions and LOOKED like it
+reached all four.
+
+The substitute is a tripwire, not an argument:
+`a_plugin_type_named_after_an_engine_funcdef_behaves_the_same_at_a_call_slot`
+goes red if either checker site ever becomes reachable-and-shadowing, forcing a
+deliberate decision instead of a discovery.
+
+### Red-then-green (production hunks reverse-applied with tests in place)
+
+6 red / 3 green before, 9/9 after.
+
+- **24 resolver cells red**: {CoroutineFunc, CoroutineFuncUserdataString} x
+  {class, interface, enum, typedef} x {top-level bare, namespaced bare from
+  inside, namespaced bare from outside} — all gave `Funcdef("CoroutineFunc")`,
+  want `Named(...)`. The 4th cell of each row (namespaced, spelled fully
+  qualified) already worked and is an **in-sweep control**.
+- **4 builtin-table cells red** — the `awaitable` path above.
+- **5 checker position rows red**: local, parameter, member field,
+  `array<T>` element, `T@[]` element all LOST their `UndefinedMember`
+  (return-type position already worked). Each paired against a non-colliding
+  `ZZZWidget` control of the same shape in the same position and required to
+  agree, with an anti-vacuity floor on how many control rows diagnosed anything.
+- **ctor red**: `CoroutineFunc()` on the plugin's own class gave
+  `ArgCountMismatch expects 1, got 0` — the false positive, and the damaging
+  direction.
+- **namespace qualifier red**, **call-slot parity red**.
+
+**Three pure controls, green in BOTH directions** (the B060 over-blocking
+edge): a workspace VARIABLE or FUNCTION of the name shadows nothing and the
+engine funcdef still wins; a non-colliding type of each shape still resolves to
+itself; an unshadowed engine funcdef still constructs, still binds a matching
+function, and still rejects a mismatched one.
+
+No test expectation was changed.
