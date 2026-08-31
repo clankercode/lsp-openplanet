@@ -3251,3 +3251,40 @@ This is the pipe-eats-the-status family one layer further out. That family says 
 command's STATUS can be lost; this says a command's EFFECT can be lost, with the
 downstream step reporting success on stale state. Both produce a green that
 describes something other than what you asked about.
+
+## A correct verdict with a wrong reason attached is still a false green
+
+B129's mutation harness produced three defects in itself, each of which would
+have shipped as a green guard:
+
+**1. A vacuous guard hidden by a NEIGHBOURING guard.** The manifest column check
+survived its mutation — but only because its fixture had no data rows, so the
+mutation tripped the *empty-manifest* guard instead. The column guard never ran.
+A mutation killed, the score was perfect, and the thing under test was never
+exercised. **Fixed with a fixture valid in every respect except the one being
+tested** — which is the general shape of a fixture that isolates a guard.
+
+**2. A mutation red for the wrong reason.** Removing the empty check raised an
+uncaught `IndexError`, so the selftest CRASHED rather than failing its named
+check. Caught only because the harness verifies WHICH check failed, not merely
+that something did. A harness that scores "did it go red?" cannot tell a guard
+from a stack trace.
+
+**3. An anchor that matched three sites.** The mutation anchor `    return found`
+also prefixes `return found[-1][0]`, so applying it silently rewrote the version
+reader as well. **And the harness's summary folded that SETUP-FAIL into "killed
+for the wrong reason"** — a correct verdict with a wrong reason attached, which is
+precisely the defect the ticket exists to prevent, occurring inside the tool
+built to prevent it. It is now its own category, reported as "these proved
+NOTHING".
+
+**The rule: a mutation score is only meaningful if the harness knows WHY each
+mutation died.** "Killed" without a reason is the same class of evidence as a
+green gate that measured nothing — and this batch has now found that shape in
+five separate tools, including three that were built specifically to detect it.
+
+The lane also found two vacuity holes in its own selftest BEFORE writing any
+mutants: `check_row_count` returning always-`None` and `classify_without_running`
+returning always-`ERROR` would each have passed it. Positive and over-condemn
+controls were added for both. **Auditing your own harness before you trust its
+score is now the third time tonight that step has paid.**
