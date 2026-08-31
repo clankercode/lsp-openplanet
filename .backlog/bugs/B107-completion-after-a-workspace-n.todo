@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T11:34:46Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T11:55:48Z"
 complexity: medium
 created_at: "2026-08-31T11:34:20Z"
 depends_on: []
+duration_minutes: 21.042194291266668
 estimate_hours: 1
 id: B107
 priority: high
 started_at: "2026-08-31T11:34:46Z"
-status: in_progress
+status: done
 tags: []
 title: 'Completion after a WORKSPACE namespace offers nothing at all: Helper:: has no producer, only the typedb route exists'
-updated_at: "2026-08-31T11:34:46Z"
+updated_at: "2026-08-31T11:55:48Z"
 ---
 
 # Completion after a WORKSPACE namespace offers nothing at all: Helper:: has no producer, only the typedb route exists
