@@ -178,10 +178,19 @@ impl<'a> TypeResolver<'a> {
 
         // The workspace declaration from above, now that the primitives have
         // had their say — a keyword-spelled type is not something a plugin
-        // can shadow. Answered with the DECLARATION's qualified name, not the
-        // spelling, so `CoroutineFunc` written inside `namespace Nz` is the
-        // same `Nz::CoroutineFunc` a non-colliding name would have resolved
-        // to through `resolve_unqualified` below.
+        // can shadow.
+        //
+        // Answered with the DECLARATION's qualified name, not the spelling.
+        // That is a decision, not an incidental: `CoroutineFunc` written
+        // inside `namespace Nz` becomes the same `Nz::CoroutineFunc` a
+        // non-colliding name would have reached through `resolve_unqualified`
+        // below, so member lookup and every diagnostic downstream name the
+        // real type. Returning `qualified` here would look simpler, still fix
+        // the false positive, and silently produce `Named("CoroutineFunc")`
+        // for a type that is not called that. The only thing that catches it
+        // is the namespace arm of
+        // `a_namespaced_plugin_type_named_after_an_engine_funcdef_keeps_its_qualifier`,
+        // which asserts the diagnostic says `Nz::CoroutineFunc`.
         if let Some(declared) = workspace_shadowing {
             return TypeRepr::Named(declared);
         }
@@ -1055,6 +1064,17 @@ mod tests {
     ///
     /// Guarding only `lookup_funcdef` leaves this cell red, which is why it
     /// is here rather than folded into the sweep above.
+    ///
+    /// **The transferable part: the check had TWO natural homes, and the
+    /// ticket named one.** B073 described a single fall-through in
+    /// `lookup_funcdef`; there is a second, independently hardcoded path with
+    /// the identical hole, and a fix that guards only the named one passes
+    /// every test that enumerates funcdef names while leaving these four
+    /// cells wrong. It was found by testing the BEHAVIOUR — does a plugin type
+    /// of this name resolve to the plugin's own declaration? — rather than the
+    /// function the ticket pointed at. Keeping it as its own test rather than
+    /// a row of the sweep is deliberate: the sweep would go green again if
+    /// somebody deleted the builtin table, and this would not.
     #[test]
     fn workspace_type_shadows_a_hardcoded_builtin_type_name() {
         let index = typedb_fixture_index();
