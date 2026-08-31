@@ -54,3 +54,81 @@ COORDINATOR APPEND (2026-09-01, post-acceptance): peer fleet (claude-mortar-vica
 3. ENGINE METHOD CONSTNESS IS IN SCOPE FROM DAY ONE: as of B124/B125, 301 of 1002 Core method decls parse a trailing ' const' from the typedb dumps (previously hardwired false — 'void M()' and 'void M() const' rendered identically). The drift report can now see an engine method gaining/losing its const qualifier between Openplanet versions, which is exactly the ABI-change class this ticket exists to catch. Manifest it.
 
 On the open design question (in-source hand-measured tables): peer's instinct is v1 enumerates them manually rather than auto-regenerating — a hand-measured table encodes human scope judgement that silent regeneration would destroy — but will MEASURE the inventory before committing, and append findings here. Enumeration at minimum makes them answer to the drift report as UNCHECKED rather than invisible.
+
+
+## Design input from the 2026-08-31/09-01 batch (coordinator, agreed with the peer session)
+
+### The manifest needs a THIRD column: THE QUESTION EACH ARTIFACT ANSWERS
+
+Not just artifact -> generator -> version. This batch produced two cases where a
+probe's stated reason was **wrong** while its output was **right**:
+
+- **B118** — three parsing bugs were filed; the real defect was that *'the engine
+  refused this construct'* and *'this build did not happen'* were the same value.
+- **B123** — the migration shipped for a completely different reason than the
+  ticket assumed. Attribution had never been at risk; the build-health check was
+  what actually needed the raw reader.
+
+In both cases a manifest recording artifact/generator/version would have
+regenerated **correctly and preserved a false explanation**. The question an
+artifact answers is the field that goes stale silently, and it is the one a regen
+cannot re-derive.
+
+### Nonvacuity gating must demand PER-GUARD KILL EVIDENCE, not suite-level green
+
+B118's lane built four positive-control pairs, all four passed on the first run,
+and mutation testing then found **4 of its 9 guards were vacuous** — an earlier
+check in the verdict chain had already decided each case, so the guard under test
+never executed. None were visible by inspection.
+
+Worse, the same lane later **reintroduced two of those exact shapes** while
+authoring fresh fixtures for B127, having personally written them up. Its
+conclusion: *knowing a hazard does not stop you writing it; only the mutation run
+does.*
+
+So the regen gate must require each guard to be shown firing on its own, and
+must include an **over-condemn mutation** — a probe that fails everything passes
+a suite that only checks things get caught. Working models: `just
+enum-probe-mutants` (11/11), `just probe-cleanup-mutants` (23/23), `just
+fleet-verdict-mutants` (11/11).
+
+Concrete fixture rule from the same lane: **the correct fixture for 'our build is
+absent' is ANOTHER LANE'S BUILD, never nothing.** An empty window makes a broken
+slicer look correct for free; the real log is shared and always carries traffic.
+
+### A DRIFT REPORT THAT DIFFS RENDERED STRINGS IS BLIND TO STRUCTURAL CHANGE
+
+B136: `const C@[]@` and `const array<C@>@` produced **different TypeRepr trees
+with identical display() output**. Every string-level check agreed while the
+structures diverged, which is exactly how it survived.
+
+**If the regen diffs rendered artifacts, it cannot see this class of drift.**
+Diff the structure where structure exists, or state explicitly which artifacts
+are rendered-only and therefore blind to it.
+
+### Inventory data the manifest should carry from day one
+
+- **Engine method constness is now real in the typedb pipeline.** 301 of 1002
+  Core method decls end in ` const`, parsed as of B124/B125. The drift report can
+  now see an engine method gaining or losing its qualifier — it previously could
+  not, since `is_const` was hardwired false and `void M()` / `void M() const`
+  rendered identically. That is precisely the ABI change class B129 exists to
+  catch. **Caveat, measured:** 0 of 634 methods present in both 1.29.5 and
+  1.29.14 changed constness, so the capability is real but has never fired.
+- **Engine members carry no visibility data at all.** 0 of 1002 (1.29.5) and 0 of
+  975 (1.29.14); the strings `private` and `protected` appear nowhere in either
+  dump.
+- **Probe corpora to enumerate:** `docs/probes/b096-namespaced-export-binding.tsv`,
+  `b096-shared-modifiers.tsv`, `b119-const-receiver.tsv`,
+  `b117-member-visibility.tsv`, plus the b052/b053 enum corpora.
+- **B118's four-valued `build_status`** (CLEAN / REJECTED / BUILD-ERR / NOT-RUN)
+  and **B077's no-stranded-fixture rule** are preconditions for any regen run.
+
+### Open question, my current lean (to be measured, not decided yet)
+
+On whether in-source hand-measured tables migrate into generated fixtures: **v1
+should enumerate them manually**, for a reason rather than expedience — a
+hand-measured table that gets auto-regenerated silently loses the human judgement
+that produced it, and several of ours encode a deliberate SCOPE decision rather
+than a raw observation. Enumerating them at least makes them answer to the drift
+report. **I will measure the inventory before committing to that.**
