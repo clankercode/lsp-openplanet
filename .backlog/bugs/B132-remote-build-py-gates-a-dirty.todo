@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:43:15Z"
 depends_on: []
 estimate_hours: 1
 id: B132
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'remote-build.py gates a dirty working tree without noticing: an unresolved merge or half-written edit is rsynced as source, so conflict markers arrive at the compiler as syntax errors'
@@ -12,3 +14,67 @@ updated_at: "2026-08-31T14:43:15Z"
 ---
 
 remote-build.py gates a dirty working tree without noticing: an unresolved merge or half-written edit is rsynced as source, so conflict markers arrive at the compiler as syntax errors
+
+
+## Found the hard way, 2026-09-01
+
+Two sessions share this repo's main checkout. A peer began merging its lane while
+this session ran `just rclippy-delta` on what it believed was its own post-merge
+master. The gate rsynced the peer's **conflicted working tree** and returned:
+
+    ADDED [(uncoded)] src/typecheck/checker.rs (new): encountered diff marker
+    ADDED [(uncoded)] src/typecheck/checker.rs (new): expected at least one digit in exponent
+    clippy checked zero workspace units, so it found nothing because it looked at
+    nothing. An empty result is not a clean result.
+
+**The gate refused correctly** — B083's zero-units guard did its job and stopped a
+false green. The defect is the DIAGNOSIS, not the verdict.
+
+## Why this is worth fixing rather than remembering
+
+Nothing in that message says "another session is mid-merge in your checkout". It
+reads as *your code does not compile*. **This is the third time in this batch
+that an infrastructure condition has been reported as a code defect** — the other
+two were a full disk on x-alpha (B106) and a name-filtered run printing a green
+summary. Same shape every time: the tool reports what it saw rather than why it
+could not see.
+
+The mechanism, so it is not re-derived: **the remote gate does not and cannot see
+the git index. It copies the FILES.** An unresolved merge, a half-written edit,
+or any dirty tree is measured as source, and conflict markers arrive at the
+compiler as syntax.
+
+## Deliverable
+
+A pre-sync cleanliness probe in `scripts/remote-build.py`:
+
+1. If `.git/MERGE_HEAD` (or `REBASE_HEAD`, `CHERRY_PICK_HEAD`) exists, **refuse
+   with a named error** — "the working tree has an unresolved merge; gating it
+   would measure conflict markers, not your code."
+2. Report unmerged paths from `git diff --name-only --diff-filter=U` in that
+   message, so the user sees WHICH files.
+3. Consider a softer warning for a merely dirty tree (`git status --porcelain`),
+   since gating uncommitted work is legitimate and routine here. **Do not refuse
+   on dirty** — only on an unresolved operation. Refusing on dirty would break
+   every lane's normal workflow.
+
+This converts the worst diagnostic in the system into the clearest.
+
+## Test axes
+
+- `MERGE_HEAD` present -> refuses, names the unmerged files.
+- A rebase and a cherry-pick in progress -> also refuse (different sentinel
+  files; do not test only the merge case).
+- Dirty but no operation in progress -> **proceeds**, since that is the normal
+  lane workflow and a refusal here would be a regression.
+- Clean tree -> proceeds silently, no new output.
+- **Mutation:** delete the check and confirm a tree with conflict markers reaches
+  the remote. A guard that cannot be shown to fire is not a guard — see the
+  hazards catalogue, where four of nine such guards were vacuous in one ticket.
+
+## The coordination rule that saved this incident
+
+Recorded in `docs/verification-hazards.md`: **in a shared checkout the index
+belongs to whoever started the operation.** This session did not run
+`merge --abort`, `checkout` or `reset` on a merge it did not start. Abort is not
+a cleanup command when the mess is someone else's.
