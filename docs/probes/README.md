@@ -25,6 +25,35 @@ look complete. `tests/b129_gold_manifest.rs` now parses this DIRECTORY and
 fails if a `.tsv` here is missing from the manifest, so the same drift cannot
 recur silently.
 
+## Retention: which corpora are kept per version (B151)
+
+Every manifest row carries a `volatility` saying **how to read its drift**, and
+that decides whether old versions are kept live:
+
+| volatility | retention | the reading |
+|---|---|---|
+| `SURFACE` | kept per version under `versions/` | the artifact says what the game EXPOSES. A member appearing or disappearing between versions IS the finding, and you can only see it holding both. |
+| `SEMANTICS` | one current copy | the artifact says how the COMPILER BEHAVES. Nothing diffs an old language rule, git holds the history, and a live stale copy invites someone citing it. |
+| `HYBRID` | one current copy | a language rule measured over a game-surface enumeration. Its row set moves for SURFACE reasons and its verdicts for SEMANTICS ones, so the two axes are read differently. |
+
+`b067-class-position-scopes.tsv` is the only `HYBRID` today, and it is why one
+label per file would have lied: it asks a language question — can a class name
+qualify a type? — about **41 specific game class names**. A game update that
+removes `CGxLightBall` changes a row for a reason that has nothing to do with
+the language.
+
+**Volatility is per-artifact, not per-column, because the columns are already
+separated where it matters.** `scripts/diff_probe_corpus.py` splits a diff into
+`BEHAVIOUR-CHANGED` (verdict), `WORDING-CHANGED` (message), `ROW-ADDED`/
+`ROW-REMOVED` (key set) and `INSTRUMENT-BROKEN` (unclassifiable) at comparison
+time. The label does not classify anything; it says which of those categories
+is EXPECTED for this artifact and which is a finding. Pass it with
+`--volatility` and the report says so in words.
+
+`just regen-golds` CHECKS the policy rather than trusting it: a `SURFACE`
+artifact that nothing archives is reported every run. It found three on its
+first run, which is why `versions/` exists.
+
 Two findings the manifest records rather than hides:
 
 * **`b067` and `b071` have no generator anywhere in this repo.** Both are
