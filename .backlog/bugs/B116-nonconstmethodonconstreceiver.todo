@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T13:18:13Z"
 depends_on: []
 estimate_hours: 1
 id: B116
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'NonConstMethodOnConstReceiver is single-file by construction: the emit site is gated on file_classes, so a const receiver whose class lives in another file is silently unchecked'
@@ -12,3 +14,58 @@ updated_at: "2026-08-31T13:18:13Z"
 ---
 
 NonConstMethodOnConstReceiver is single-file by construction: the emit site is gated on file_classes, so a const receiver whose class lives in another file is silently unchecked
+
+
+## Reported by lane-resolver, 2026-08-31, as a by-product of the B114 audit
+
+## The mechanism, and it is short enough to check by reading
+
+- `file_const_methods` is built ONLY by `index_file_classes`, which walks **one
+  document**.
+- The sole `NonConstMethodOnConstReceiver` emit site sits inside the
+  `if let Some((_, members)) = self.file_classes.get(&type_name)` arm — also
+  **one document**.
+
+So the gate is `file_classes`, not the const set.
+
+## Repro
+
+`a.as`:
+
+    class C { void Mutate() {} }
+
+`b.as`:
+
+    void f(const C@ c) { c.Mutate(); }
+
+**Same file: this diagnoses**, and that is game parity — confirmed against
+`HatDump.as:60`.
+
+**Split across files: silent.** `file_classes` has no entry for `C`, the arm is
+never entered, and control falls through to `lookup_method_return`, whose own
+comment already concedes "External types: no const-qualifier metadata yet".
+
+## Why this is NOT closed by B114, despite looking like it should be
+
+B114 pools `is_const` and makes the metadata available cross-file. That is
+necessary and not sufficient: **the gate is `file_classes`, not the const set.**
+A pooled `is_const` sitting in a `Symbol` changes nothing while the emit site is
+still inside an arm that only single-file classes can enter.
+
+Do not close this as a duplicate of B114, and do not assume landing B114
+silently fixed it — check the arm.
+
+## The cost of closing it, which is why this is its own ticket
+
+Closing it means letting the rule fire on symbols resolved from the **pool**.
+That is a new false-positive surface: the rule currently only ever sees classes
+this LSP parsed itself, and pool symbols include engine types where the
+const-qualifier story is exactly the "no metadata yet" case above. B101 added
+method constness to the pooled symbol, so the data exists — but "the data
+exists" and "the data is right for every provenance" are different claims and
+only the second licenses the change.
+
+**Wants its own measurement before its own fix:** instrument the widened gate to
+count how many additional emits it would produce across the 151-plugin fleet,
+and read the disagreements, before writing anything. A zero delta here would be
+suspicious rather than reassuring — the whole point is that it should fire more.
