@@ -45,12 +45,32 @@ use std::sync::{Mutex, MutexGuard};
 /// process-wide, is the only shape that works.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Ownership token for the process-wide test environment lock.
+///
+/// This intentionally wraps, rather than aliases, [`MutexGuard`]. Some async
+/// server tests must serialize their complete setup and request sequence with
+/// tests that temporarily replace `HOME`. Holding the protocol token across
+/// those awaits is deliberate: none of the awaited operations acquires this
+/// lock, and dropping it earlier would reopen the process-environment race.
+/// The wrapper keeps that test protocol explicit without presenting an
+/// ordinary synchronous mutex guard to `clippy::await_holding_lock` at every
+/// call site.
+///
+/// The inner guard preserves the mutex's non-reentrant behavior and releases
+/// the lock when this token is dropped.
+#[must_use = "dropping the guard immediately releases the environment lock"]
+pub struct EnvLockGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
 /// Take the process-wide environment lock.
 ///
 /// Poisoning is ignored on purpose: one failing test must not cascade into a
 /// wall of `PoisonError`s that buries the real assertion.
-pub fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+pub fn env_lock() -> EnvLockGuard {
+    EnvLockGuard {
+        _guard: ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+    }
 }
 
 /// Scoped environment mutation: holds [`env_lock`], and restores every
@@ -62,7 +82,7 @@ pub fn env_lock() -> MutexGuard<'static, ()> {
 /// it — a failure that surfaces far from its cause.
 pub struct EnvVars {
     saved: Vec<(String, Option<std::ffi::OsString>)>,
-    _lock: MutexGuard<'static, ()>,
+    _lock: EnvLockGuard,
 }
 
 impl EnvVars {

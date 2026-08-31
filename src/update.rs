@@ -1694,7 +1694,7 @@ mod tests {
     /// B065/B066: the lock now lives in [`crate::testing`] so that a test in
     /// ANOTHER module writing the same variable — `src/config.rs` writes
     /// `HOME` — serialises against these. A second mutex here would not.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    fn env_guard() -> crate::testing::EnvLockGuard {
         crate::testing::env_lock()
     }
 

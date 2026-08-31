@@ -2257,7 +2257,7 @@ mod tests {
     use tower_lsp::lsp_types::WorkspaceFolder;
 
     fn test_service() -> (
-        std::sync::MutexGuard<'static, ()>,
+        crate::testing::EnvLockGuard,
         LspService<Backend>,
         tower_lsp::ClientSocket,
     ) {
