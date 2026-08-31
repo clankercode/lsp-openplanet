@@ -140,3 +140,4 @@ bugs:
     - file: B139-sweep-every-gate-for-a-missing.todo
     - file: B140-remote-build-py-sync-back-reso.todo
     - file: B141-three-probe-scripts-are-reacha.todo
+    - file: B142-paraminfo-is-const-is-hardcode.todo
