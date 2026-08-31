@@ -167,3 +167,4 @@ bugs:
     - file: B166-the-standing-tm-ghosts-plus-pl.todo
     - file: B167-x-alpha-is-at-90-percent-disk.todo
     - file: B168-b153-s-nadeo-field-audit-has-t.todo
+    - file: B169-rebase-head-is-not-an-unresolv.todo
