@@ -1153,8 +1153,8 @@ mod tests {
     // when the corpus was measured and is not now. They witness "a namespace
     // some OTHER installed plugin declares appears as a scope", which is an
     // environment fact this crate deliberately does not implement — see
-    // `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which forces exactly
-    // those spellings to not resolve in a bare context.
+    // `docs/probes/b052-scope-provenance.tsv`, which records `Foo` as HOST and
+    // so forces exactly those spellings to not resolve in a bare context.
     //
     // The `Bogus::` row (26) is REJECTED and is a genuine control: nothing
     // declares it. Note the re-probe result AGREES with it — by not declaring

@@ -537,9 +537,9 @@ impl<'a> GlobalScope<'a> {
     /// flip: `Audio::VirtualKey`, `Crypto::VirtualKey`, `Dev::VirtualKey`,
     /// `Display::VirtualKey`, `Fids::VirtualKey`. A namespace the workspace
     /// itself declares is a real scope in its own compilation unit and reaches
-    /// global by the same walk. Do not re-cite the `Foo::*` rows for it; they
-    /// are listed in `PLUGIN_NAMESPACE_ARTEFACTS` precisely because they must
-    /// NOT resolve when nothing declares them.
+    /// global by the same walk. Do not re-cite the `Foo::*` rows for it: the
+    /// b052 provenance sidecar records `Foo` as HOST — a foreign plugin's —
+    /// precisely so those rows must NOT resolve when nothing declares them.
     pub fn scope_exists(&self, path: &str) -> bool {
         if path.is_empty() {
             return false;
@@ -4390,6 +4390,65 @@ mod tests {
         assert_eq!(
             assert_true[0].param_names,
             vec![Some("condition".to_string()), Some("message".to_string())]
+        );
+    }
+    /// B080: b053's answer to "which rows are environment-dependent?" — and it
+    /// is already in the file, in a column nobody had named as provenance.
+    ///
+    /// `global_enum_owners` records, per row, WHICH globally visible enums of
+    /// the shipped type DB carry that value. It was written at probe time,
+    /// beside the game's verdict, by a different instrument. So the two
+    /// together say more than either alone:
+    ///
+    /// * ACCEPTED with owners — the model and the game agree, and the model's
+    ///   reason is recorded. Environment-INDEPENDENT as far as this corpus can
+    ///   tell.
+    /// * ACCEPTED with NO owners — the game took a bare name the shipped DB
+    ///   cannot explain. That is the value-position twin of b052's `Foo::`
+    ///   rows: a plugin declaring a GLOBAL enum with that value makes it
+    ///   compile, and the row measures that machine.
+    ///
+    /// **There are none of the second kind**, which is why b053 re-probed
+    /// 592/592 unchanged while b052 moved three rows. Asserting it here turns
+    /// that from a fact someone noticed once into a gate: a corpus regenerated
+    /// on a machine with such a plugin fails and NAMES the values, instead of
+    /// quietly adding rows this crate would then be required to accept.
+    ///
+    /// b052 needs a whole sidecar for the same question because its rows turn
+    /// on a SCOPE, and a scope's origin is not recorded anywhere in that file.
+    #[test]
+    fn every_accepted_bare_value_is_explained_by_the_shipped_type_db() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("docs/probes/b053-bare-enum-values.tsv");
+        let text = std::fs::read_to_string(&path).expect("the probe corpus must be committed");
+
+        let mut accepted = 0usize;
+        let mut unexplained: Vec<String> = Vec::new();
+        for line in text.lines() {
+            if line.starts_with('#') || line.is_empty() || line.starts_with("value\t") {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            let (value, verdict) = (cols[0], cols[1]);
+            if verdict != "ACCEPTED" {
+                continue;
+            }
+            accepted += 1;
+            if cols.get(3).map(|c| c.trim()).unwrap_or("").is_empty() {
+                unexplained.push(value.to_string());
+            }
+        }
+
+        assert_eq!(
+            accepted, 592,
+            "anti-vacuity: the ACCEPTED rows are still found"
+        );
+        assert!(
+            unexplained.is_empty(),
+            "{} bare value(s) the game accepted have no globally visible enum in \
+             the shipped DB, so the probing machine's plugins supplied them: {:?}",
+            unexplained.len(),
+            &unexplained[..unexplained.len().min(20)]
         );
     }
 }

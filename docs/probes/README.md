@@ -13,9 +13,14 @@ dated 2026-02-03), via `scripts/probe_enum_corpus.py`.
 |---|---|---|
 | `b052-qualified-enum-spellings.tsv` | 1901 | for a qualified *type* spelling (`Scene::ESceneCharVisNotice`, `UI::VirtualKey`, `CGameMenu::EMenuOrder`), does the game accept it, and if not, what does it say? |
 | `b053-bare-enum-values.tsv` | 2989 | for a bare *value* name of a named enum (`Turbo`, `GlassSmash`), does the game accept it, reject it as unknown, or reject it as ambiguous? |
+| `b052-scope-provenance.tsv` | 233 | for each SCOPE an ACCEPTED b052 row depends on: did it exist on the probing machine, and did the ENGINE supply it or that machine's plugins? |
 
-Both are TSV with a `#`-comment header. The `game_message` column is the
-compiler's own text, unedited.
+Both corpora are TSV with a `#`-comment header. The `game_message` column is
+the compiler's own text, unedited.
+
+The third file is a **sidecar, not a measurement**: it is how a reader tells an
+environment-dependent row from a stable one without re-probing. Documented in
+full under "Which rows are the probing machine's?" below.
 
 ## Who depends on these
 
@@ -33,11 +38,18 @@ compiler's own text, unedited.
   edit, and say so in the commit.
 
   Two groups of rows are deliberately NOT expected to resolve here, and both
-  are named in that test rather than silently skipped: the 13 spellings that
-  compiled only because of the probing machine's installed plugins (see the
-  asymmetry below — `GameData::EGameInventoryItemClass` is the subtle one,
-  since `GameData` is *also* a Nadeo module name), and the 4 `string::` rows,
-  which are a lexer gap rather than a resolution one.
+  are named in that test rather than silently skipped: the 13 spellings whose
+  leading scope this crate does not have, and the 4 `string::` rows, which are
+  a lexer gap rather than a resolution one.
+
+  Those 13 are no longer hand-listed. They are DERIVED from
+  `b052-scope-provenance.tsv` (B080), which splits them by reason: **9** whose
+  scope was a foreign plugin's (`Foo`, `Foo::Bar`, `MathX`, `MLFeed`, `MLHook`,
+  `VehicleState`) and **4** whose scope the engine really has while neither
+  shipped database records it (all four `GameData::*`). The hand-maintained
+  lists had that split wrong — they called three of the four `GameData` rows
+  plugin artefacts while the same file's prose called `GameData` an engine
+  scope — which is the drift that motivated the sidecar.
 - **B057** (landed) — the 2373 bare value names the LSP used to accept and the
   game answers `No matching symbol` for. Filter `b053-bare-enum-values.tsv`
   for `verdict == NO_SYMBOL`.
@@ -48,6 +60,109 @@ compiler's own text, unedited.
   file is load-bearing for `cargo test`: editing a verdict, a value name or the
   row count changes what the suite demands. Re-probe before you edit it, and
   say so in the commit.
+
+## Which rows are the probing machine's? (B080)
+
+A corpus records what the game said. It does not, by itself, record which of
+those verdicts were only true on the machine that ran it — and the damage from
+that is not the flip, it is a later reader citing such a row as evidence of
+something it never showed. Three `Foo::*` rows of b052 were cited as
+workspace-declared witnesses; they were a foreign plugin's namespace.
+
+### Half the answer is already in the corpus, in the MESSAGE FORM
+
+The `<prefix>::ZZZNoSuch` context pins carry it, and they carry it in their
+wording rather than their verdict — **both forms are `REJECTED`**, so a reader
+keying off the verdict column learns nothing:
+
+    Identifier 'ZZZNoSuch' is not a data type in namespace 'P' or parent
+        -> the compiler resolved the scope `P` and failed INSIDE it, which it
+           can only do when `P` exists.
+    Namespace 'P' doesn't exist.
+        -> it does not.
+
+Read the prefix from the SPELLING, never from the message. The message is not
+consistent about it: `Meta::Plugin::ZZZNoSuch` answers "in namespace `'Plugin'`"
+while `UI::Font::ZZZNoSuch` answers "in namespace `'UI::Font'`".
+
+### The other half cannot be derived, so it is recorded
+
+Whether an existing scope came from the ENGINE or from an installed plugin is
+not in the corpus and no amount of re-reading will put it there. `Foo::VirtualKey`
+and `UI::VirtualKey` are the same shape to the probe: namespace-qualified names
+that resolved. That half lives in `b052-scope-provenance.tsv`, one row per
+scope prefix:
+
+| column | |
+|---|---|
+| `prefix` | a leading scope some ACCEPTED row depends on |
+| `pin` | `SCOPE` / `ABSENT` / `UNPINNED` — **recomputed** from the corpus's own pin rows by `scripts/probe_enum_corpus.py --scope-provenance`; do not hand-edit |
+| `origin` | `ENGINE` / `HOST` / `ENGINE_UNMODELLED` / `UNKNOWN` — recorded, and carried forward across regenerations |
+| `evidence` | what supports `origin`, opening `MEASURED:` (an instrument answered) or `INFERRED:` (someone reasoned) |
+
+A consumer reads it as:
+
+- `HOST` → **environment-dependent.** A valid measurement of that machine,
+  saying nothing about the engine.
+- `ENGINE_UNMODELLED` → environment-INdependent; the engine has the scope but
+  neither shipped database records it, so this crate cannot resolve the row
+  either. Kept separate from `HOST` because conflating them is how a list of
+  twelve spellings came to carry three that the same file calls engine facts.
+- `ENGINE` → environment-independent.
+- `UNKNOWN` → nobody has classified it. The generator exits non-zero.
+
+### `UNPINNED` is a measured gap, not a tidying job
+
+**Only 38 of the 233 scopes b052's ACCEPTED rows depend on carry a pin**, and
+two of the scopes the sidecar calls `HOST` — `MLHook` and `VehicleState` — have
+no pin row at all. So provenance derived from the pins ALONE would read both as
+engine facts. That is why `UNPINNED` is a value rather than an absence: a format
+that spells the unmeasured case the same as the measured-safe one is how the
+hazard gets in.
+
+Closing the gap means probing `<prefix>::ZZZNoSuch` for the unpinned scopes.
+`every_scope_an_accepted_row_depends_on_is_classified_with_evidence` asserts the
+current gap size, so closing it shows up as a test change rather than as nothing.
+
+### What guards the labels
+
+Not review. Four tests, each mutation-checked:
+
+| a wrong label | what goes red |
+|---|---|
+| a `HOST` scope labelled `ENGINE` | `every_probed_type_spelling_matches_the_games_verdict` — the row stays asserted, and the crate rejects it |
+| an `ENGINE` scope labelled `HOST` | the same sweep (the row is excluded but the crate resolves it) **and** `no_scope_the_engine_declares_is_labelled_host` |
+| a hand-edited `pin` cell | `the_recorded_pins_match_the_corpuss_own_pin_rows`, which recomputes them from the corpus |
+| a new or unevidenced scope | `every_scope_an_accepted_row_depends_on_is_classified_with_evidence` |
+
+`the_derived_exclusion_set_reproduces_the_hand_maintained_one` pins the whole
+switch: the set derived from the sidecar is byte-identical to the two
+hand-maintained Rust constants it replaced, which are now frozen and read by
+nothing else.
+
+### b053 already had this, in a column nobody had named
+
+`b053-bare-enum-values.tsv` records `global_enum_owners` beside the game's
+verdict — the shipped DB's own reason, written at probe time by a different
+instrument. An ACCEPTED row with an EMPTY owners cell would be a bare value the
+game took and the model cannot explain: the value-position twin of the `Foo::`
+rows, since a plugin declaring a *global* enum with that value makes it compile.
+**There are none**, which is why b053 re-probed 592/592 unchanged. Asserted by
+`every_accepted_bare_value_is_explained_by_the_shipped_type_db`, so a corpus
+regenerated on a machine with such a plugin fails and names the values.
+
+b052 needs a sidecar for the same question only because its rows turn on a
+SCOPE, and a scope's origin appears nowhere in that file.
+
+### Regenerating the sidecar
+
+    scripts/probe_enum_corpus.py --scope-provenance b052
+
+Offline — no game. It recomputes `pin` only. `origin` and `evidence` are carried
+forward by prefix, so a re-probe on another machine cannot silently relabel a
+scope, and a prefix the sidecar has never seen is written `UNKNOWN` and the run
+exits non-zero. Defaulting an unseen prefix to `ENGINE` would be exactly the
+failure the file exists to prevent.
 
 ## Regenerating
 
@@ -332,6 +447,14 @@ spellings flipped, while all nine `GameData::*`, `MLFeed::*`, `MLHook::*`,
 `::ZZZNoSuch` probes confirm those namespaces still exist. The re-probe
 therefore CONFIRMS an exclusion list a previous lane had reasoned out rather
 than measured.
+
+**Two corrections to that paragraph, from B080.** It says the `::ZZZNoSuch`
+probes confirm those namespaces: they confirm four of the six — `MLHook` and
+`VehicleState` have no pin row in this corpus at all, so nothing in it witnesses
+their scope-hood in either direction. And "artefact" is wrong for `GameData`,
+which no installed plugin declares; all four of its rows are an engine scope
+neither database records. Both are now recorded per scope in
+`b052-scope-provenance.tsv` instead of in prose, and both are asserted.
 
 **Carry this forward when re-measuring anything here.** Restricting a re-probe
 to the rows a known defect could affect also blinds it to every defect you were
