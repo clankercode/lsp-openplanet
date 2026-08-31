@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T15:06:30Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T15:21:00Z"
 complexity: medium
 created_at: "2026-08-31T15:05:17Z"
 depends_on: []
+duration_minutes: 14.500467406366667
 estimate_hours: 1
 id: B135
 priority: high
 started_at: "2026-08-31T15:06:30Z"
-status: in_progress
+status: done
 tags: []
 title: 'Hover and navigation do not consume member visibility either: is_private/is_protected have zero readers in hover.rs and navigation.rs after B117 wired completion'
-updated_at: "2026-08-31T15:06:30Z"
+updated_at: "2026-08-31T15:21:00Z"
 ---
 
 Hover and navigation do not consume member visibility either: is_private/is_protected have zero readers in hover.rs and navigation.rs after B117 wired completion
