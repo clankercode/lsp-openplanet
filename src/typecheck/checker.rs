@@ -1046,6 +1046,80 @@ impl<'a> Checker<'a> {
             .is_some_and(|names| names.contains(method_name))
     }
 
+    /// B119: the parents of `class`, from whichever surface knows it.
+    /// Same-file classes come from `file_classes`; anything else from the
+    /// pooled workspace symbol.
+    fn class_parents_for_const(&self, class: &str) -> Vec<String> {
+        if let Some((parents, _)) = self.file_classes.get(class) {
+            return parents.clone();
+        }
+        self.scope.workspace_class_parents(class)
+    }
+
+    /// B119: is `method` const, as found on `class`'s ANCESTORS?
+    ///
+    /// Starts at the PARENTS, never at `class` itself, so a method the class
+    /// declares is left entirely to the own-class arms and can never be
+    /// diagnosed twice. Breadth-first, so a nearer ancestor's override wins
+    /// over a more distant declaration — which is the same precedence
+    /// `cross_file_derived_override_decides_constness` pins one level down.
+    ///
+    /// `None` means no ancestor declares the name in the WORKSPACE. That is
+    /// also the answer for an engine/typedb ancestor, because both lookups
+    /// here read the workspace half only — `file_has_method` is per-document
+    /// and `workspace_own_method_is_const` reads the pooled workspace
+    /// symbols. Same provenance rule B116 established for the own-class
+    /// cross-file arm, applied one inheritance level out.
+    ///
+    /// NOT because the dumps lack the data. B124 corrected that: 301 of 1002
+    /// Core method decls end in ` const`, and the old
+    /// "no const-qualifier metadata yet" comment was stale — it had been
+    /// steering decisions, including part of B116's provenance argument. The
+    /// engine population is excluded here by CHOICE of lookup, not by absence
+    /// of metadata, and consuming it is B130's job precisely because it opens
+    /// a false-positive surface that needs its own variant sweep.
+    ///
+    /// Measured against the game (`scripts/probe_const_receiver.py`): the
+    /// engine rejects an inherited NON-const method on a const receiver at
+    /// depths 1, 2 and 4 and for every receiver spelling, and accepts an
+    /// inherited CONST one. So the walk is the engine's own rule, not a
+    /// tightening chosen here.
+    fn inherited_method_is_const(&self, class: &str, method: &str) -> Option<bool> {
+        let mut visited: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        visited.insert(class.to_string());
+        let mut queue: std::collections::VecDeque<String> =
+            self.class_parents_for_const(class).into_iter().collect();
+        let mut depth_guard = 0usize;
+        while let Some(ancestor) = queue.pop_front() {
+            depth_guard += 1;
+            if depth_guard > 64 {
+                // A cyclic `class A : B` / `class B : A` is invalid, but the
+                // checker must not hang on invalid input.
+                break;
+            }
+            if !visited.insert(ancestor.clone()) {
+                continue;
+            }
+            if self.file_has_method(&ancestor, method) {
+                return Some(
+                    self.file_const_methods
+                        .contains(&(ancestor.clone(), method.to_string())),
+                );
+            }
+            if let Some(is_const) = self
+                .scope
+                .workspace_own_method_is_const(&ancestor, method)
+            {
+                return Some(is_const);
+            }
+            for p in self.class_parents_for_const(&ancestor) {
+                queue.push_back(p);
+            }
+        }
+        None
+    }
+
     fn index_file_classes(&mut self, items: &[Item], ns: Option<&str>) {
         for item in items {
             match item {
@@ -4763,6 +4837,64 @@ impl<'a> Checker<'a> {
                         }
                         return t;
                     }
+                }
+
+                // B119: the same rule, one INHERITANCE level further in.
+                // Both arms above are own-class-only -- `file_classes` holds
+                // a class's own members and `workspace_own_method_is_const`
+                // reads its own pooled methods -- so an inherited non-const
+                // method reached through a derived const receiver was silent
+                // on BOTH sides of the file boundary, identically. B116 pinned
+                // that parity deliberately rather than closing it, because
+                // whether the engine rejects it was unmeasured.
+                //
+                // It does, at depths 1, 2 and 4 and for every receiver
+                // spelling, and it accepts the inherited CONST case:
+                // `No matching signatures to 'D::Mutate() const'`. Measured by
+                // `scripts/probe_const_receiver.py` against Openplanet, with
+                // `ctl-own-nonconst` proving the oracle can see a const
+                // violation at all.
+                //
+                // Guarded on the own class NOT declaring the name, so an
+                // override decides its own constness rather than this walk
+                // reaching past it to a base declaration.
+                //
+                // The guard is NOT what prevents a double diagnostic in the
+                // common case: since B120 the cross-file arm above returns
+                // when `workspace_class_member` resolves, and the same-file
+                // arm has always returned on a match, so neither reaches
+                // here. B121 restructured that return into two branches --
+                // const-wrapped when the return may alias, bare when it
+                // cannot -- and BOTH still return, so the reachability is
+                // unchanged. Verified by mutation: removing `!own_declares`
+                // changes no test. It is kept for the residual path where the
+                // cross-file arm fires and `workspace_class_member` answers
+                // `None`, which falls through.
+                //
+                // This arm deliberately does NOT propagate constness into the
+                // return type at all, neither B120's unconditional form nor
+                // B121's shape-gated one. Propagation through an inherited
+                // method has never been measured on the fleet, and B121's own
+                // result -- that the shape proxy removes 7 of 10 false
+                // positives and leaves 3 it cannot see -- is the reason to
+                // stop rather than to extend it by analogy.
+                let own_declares = self.file_has_method(&type_name, &member_name)
+                    || self
+                        .scope
+                        .workspace_own_method_is_const(&type_name, &member_name)
+                        .is_some();
+                if receiver_const
+                    && !own_declares
+                    && self.inherited_method_is_const(&type_name, &member_name)
+                        == Some(false)
+                {
+                    self.diagnostics.push(TypeDiagnostic {
+                        span: callee.span,
+                        kind: TypeDiagnosticKind::NonConstMethodOnConstReceiver {
+                            method: member_name.clone(),
+                            object_type: type_name.clone(),
+                        },
+                    });
                 }
                 if let Some(t) = self.scope.lookup_method_return(&type_name, &member_name) {
                     // EXTERNAL types are not const-checked here. The reason
@@ -13816,20 +13948,34 @@ mod b116_cross_file_const_receiver_tests {
         assert_eq!(fired(&diags), 0, "field read must be silent, got {:?}", diags);
     }
 
-    /// An INHERITED method reached through a derived const receiver is
-    /// silent — and that is deliberate, because the same-file rule is
-    /// silent too. `index_file_classes` records only a class's OWN
-    /// members, so `d.Mutate()` on `class D : B` never matched inside the
-    /// `file_classes` arm either. B116 restores PARITY across the file
-    /// boundary; it does not invent a rule the same-file side never had.
+    /// An INHERITED method reached through a derived const receiver.
     ///
-    /// The residual false negative is real and shared by both halves —
-    /// which is why the assertion is on the pair being EQUAL rather than
-    /// on a hardcoded 0. Closing it is its own ticket: measured on the
-    /// 151-plugin fleet, a parent-walking gate would have changed exactly
-    /// one verdict (`Editor::SetSkinSpec::WriteToNetworkBuffer`, inherited
-    /// non-const from `NetworkSerializable`, called on a
-    /// `const Editor::SetSkinSpec@[]@` element in tm-map-together).
+    /// The EQUALITY is what this test has always been for, and it is
+    /// unchanged: the verdict must not depend on the file boundary, because
+    /// B116 established the two arms are separate code paths. What changed is
+    /// the VALUE it pins, and B119 is why.
+    ///
+    /// B116 left this silent deliberately — `index_file_classes` records only
+    /// a class's OWN members, so `d.Mutate()` on `class D : B` never matched
+    /// the same-file arm either, and B116 restored parity rather than
+    /// inventing a rule the same-file side never had. Whether the engine
+    /// actually rejects it was UNMEASURED, and the ticket said so.
+    ///
+    /// B119 measured it (`scripts/probe_const_receiver.py`, corpus in
+    /// `docs/probes/b119-const-receiver.tsv`). The engine REJECTS it —
+    /// `No matching signatures to 'D::Mutate() const'` — at depths 1, 2 and 4
+    /// and for every receiver spelling, while accepting the inherited CONST
+    /// case. So possibility 1 of that ticket, "a real missed error", is the
+    /// answer here and the rule now walks parents.
+    ///
+    /// The fleet site that motivated the ticket is NOT this case. It was
+    /// `const Editor::SetSkinSpec@[]@`, and the probe found a SECOND defect
+    /// there: the parser bound a leading `const` to the first `@`, making the
+    /// array element a const receiver when the engine treats it as a mutable
+    /// pointee behind a const slot. Both readings the ticket offered were
+    /// true, of different things — see
+    /// `b119_inherited_const_receiver_tests` and
+    /// `Parser::const_binding_at`.
     #[test]
     fn inherited_nonconst_method_agrees_across_the_file_boundary() {
         let base = "class B { void Mutate() {} }";
@@ -13850,9 +13996,10 @@ mod b116_cross_file_const_receiver_tests {
         );
         assert_eq!(
             fired(&same),
-            0,
-            "own-class-only is the same-file rule; a change here is a scope \
-             change, not a refactor: {:?}",
+            1,
+            "B119: the engine rejects an inherited non-const method on a const \
+             receiver, so the rule walks parents. Measured, not chosen — if \
+             this is 0 again the parent walk regressed: {:?}",
             same
         );
     }
@@ -14535,5 +14682,566 @@ mod b121_return_aliasing_tests {
                 d
             );
         }
+    }
+}
+
+
+// ── B119: const receivers, inheritance, and where `const` binds ─────────────
+//
+// Two defects, measured against the live game compiler and fixed together
+// because either one alone is a regression.
+//
+// The ticket asked which of two readings explained the ONE fleet site B116
+// found (`tm-map-together/src/Socket.as:467`, `skins[i].WriteToNetworkBuffer`
+// on a `const Editor::SetSkinSpec@[]@`): a missed error that wants a parent
+// walk, or `const T@[]@` element constness not propagating as modelled. The
+// probe settled BOTH, and they are independent — which is why the either/or
+// framing would have produced half a fix.
+//
+//   scripts/probe_const_receiver.py, Trackmania + Openplanet, 21 variants,
+//   4 controls, all controls passing:
+//
+//   | probe row                 | engine | checker before | after |
+//   |---|---|---|---|
+//   | ctl-own-nonconst          | REJECT | fires          | fires |
+//   | inh-d1/d2/d4-nonconst     | REJECT | SILENT (FN)    | fires |
+//   | inh-d2-const              | ACCEPT | silent         | silent|
+//   | recv-const{ref,handleref,value} | REJECT | SILENT (FN) | fires |
+//   | arr-own-nonconst          | ACCEPT | FIRES (FP)     | silent|
+//   | arr-inherited-nonconst    | ACCEPT | silent         | silent|
+//   | arr-value-array           | REJECT | fires          | fires |
+//   | arr-generic-spelling      | ACCEPT | silent         | silent|
+//
+// The false POSITIVE was not in this rule at all: the parser bound a leading
+// `const` to the first `@` in a suffix chain, so `const C@[]@` became an array
+// of handles to CONST C instead of a handle to a CONST ARRAY of mutable
+// handles — while rendering to the same display string as the correct
+// `const array<C@>@`. See `Parser::const_binding_at`.
+//
+// The fleet site is silent before AND after, for different reasons each time:
+// before, because two bugs cancelled; after, because the element genuinely is
+// not a const receiver. That is why closing the parent walk alone would have
+// turned the one site B116 measured into a false error.
+#[cfg(test)]
+mod b119_inherited_const_receiver_tests {
+    use super::*;
+    use crate::lexer::tokenize_filtered;
+    use crate::parser::Parser;
+    use crate::symbols::SymbolTable;
+
+    fn check_ws(main: &str, siblings: &[&str]) -> Vec<TypeDiagnostic> {
+        let mut ws = SymbolTable::new();
+        for sibling in siblings {
+            let tokens = tokenize_filtered(sibling);
+            let mut parser = Parser::new(&tokens, sibling);
+            let file = parser.parse_file();
+            let fid = ws.allocate_file_id();
+            let syms = SymbolTable::extract_symbols(fid, sibling, &file);
+            ws.set_file_symbols(fid, syms);
+        }
+        let tokens = tokenize_filtered(main);
+        let mut parser = Parser::new(&tokens, main);
+        let file = parser.parse_file();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, main, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, None);
+        let mut checker = Checker::new(main, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    /// How many `NonConstMethodOnConstReceiver` the rule produced.
+    fn fired(d: &[TypeDiagnostic]) -> usize {
+        d.iter()
+            .filter(|x| {
+                matches!(
+                    &x.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .count()
+    }
+
+    fn const_violations(d: &[TypeDiagnostic]) -> usize {
+        d.iter()
+            .filter(|x| matches!(&x.kind, TypeDiagnosticKind::ConstViolation { .. }))
+            .count()
+    }
+
+    /// Every case is stated TWICE — same-file and split across files —
+    /// because B116 established the two arms are separate code paths and a
+    /// fix to one is not a fix to the other.
+    fn both_ways(decls: &[&str], body: &str) -> (usize, usize) {
+        let same = format!("{} {}", decls.join(" "), body);
+        (
+            fired(&check_ws(&same, &[])),
+            fired(&check_ws(body, decls)),
+        )
+    }
+
+    // ── part 2: where a leading `const` binds ────────────────────────────
+
+    fn resolve(spelling: &str) -> TypeRepr {
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, None);
+        let src = format!("void f({spelling} a) {{}}");
+        let tokens = tokenize_filtered(&src);
+        let mut parser = Parser::new(&tokens, &src);
+        let file = parser.parse_file();
+        let Item::Function(func) = &file.items[0] else {
+            panic!("expected a function for `{spelling}`");
+        };
+        let mut r = TypeResolver::new(&scope, &src);
+        r.resolve(&func.params[0].type_expr)
+    }
+
+    /// The two spellings of ONE type must produce ONE structure. Before
+    /// B119 they did not, and both rendered as `const C@[]@`, which is
+    /// exactly why the disagreement survived: every string-level check
+    /// agreed while the trees differed.
+    #[test]
+    fn the_two_spellings_of_a_const_handle_array_agree() {
+        assert_eq!(
+            resolve("const C@[]@"),
+            resolve("const array<C@>@"),
+            "`const C@[]@` and `const array<C@>@` are the same type"
+        );
+    }
+
+    /// Stated positively, so a future change that breaks BOTH spellings the
+    /// same way cannot pass the equality test above.
+    #[test]
+    fn const_binds_to_the_array_not_to_the_element_pointee() {
+        // Handle( Const( Array( Handle(C) ) ) ) — a handle to a CONST ARRAY
+        // of MUTABLE handles. Measured: `arr.InsertLast(..)` is rejected
+        // (the array is const) while `arr[0].Mutate()` and `arr[0].x = 1`
+        // are accepted (the pointee is not).
+        let repr = resolve("const C@[]@");
+        let TypeRepr::Handle(outer) = &repr else {
+            panic!("expected an outer Handle, got {repr:?}");
+        };
+        let TypeRepr::Const(arr) = outer.as_ref() else {
+            panic!("expected Const directly inside the outer handle, got {outer:?}");
+        };
+        assert!(
+            matches!(arr.as_ref(), TypeRepr::Array(_)),
+            "the `const` must qualify the ARRAY, got {arr:?}"
+        );
+    }
+
+    /// B119 x B121: the const REBIND must not change any ALIASING verdict.
+    ///
+    /// B121 gates constness propagation on whether a method's return type can
+    /// alias the receiver, and its proxy is the OUTERMOST constructor being a
+    /// handle. B119 moves where `const` sits INSIDE a suffix chain. Those two
+    /// could have disagreed — a rebind that changed the outermost constructor
+    /// would silently change B121's answer for every method returning that
+    /// type, which is a const-model change neither ticket measured.
+    ///
+    /// They do not, and this pins it rather than arguing it: for every
+    /// spelling B119 rebinds, the pre-B119 tree and the post-B119 tree give
+    /// the SAME aliasing verdict. `const C@[]@` stays `Handle` at the top
+    /// (true both ways) and `const C@[]` stays non-`Handle` (false both
+    /// ways); the rebind only ever moves `Const` past an `Array`, never
+    /// across the outermost `Handle`.
+    #[test]
+    fn the_const_rebind_never_changes_an_aliasing_verdict() {
+        let named = || TypeRepr::Error("C".to_string());
+        let handle = |t: TypeRepr| TypeRepr::Handle(Box::new(t));
+        let konst = |t: TypeRepr| TypeRepr::Const(Box::new(t));
+        let array = |t: TypeRepr| TypeRepr::Array(Box::new(t));
+
+        // (spelling, the tree the parser built BEFORE B119)
+        let rebound = [
+            (
+                "const C@[]@",
+                handle(array(handle(konst(named())))),
+            ),
+            ("const C@[]", array(handle(konst(named())))),
+        ];
+        for (spelling, before) in rebound {
+            let after = resolve(spelling);
+            assert_ne!(
+                after, before,
+                "`{spelling}` is supposed to have been rebound by B119"
+            );
+            assert_eq!(
+                Checker::method_return_may_alias_receiver(&after),
+                Checker::method_return_may_alias_receiver(&before),
+                "B119's rebind changed B121's aliasing verdict for `{spelling}`: \
+                 before {before:?}, after {after:?}"
+            );
+        }
+
+        // And the spellings B119 does NOT touch are untouched, so the
+        // invariant above is about the rebind and not about everything
+        // trivially agreeing.
+        for spelling in ["const C", "const C@", "const C[]"] {
+            let _ = resolve(spelling);
+        }
+        assert!(
+            Checker::method_return_may_alias_receiver(&resolve("const C@")),
+            "a handle return still aliases"
+        );
+        assert!(
+            !Checker::method_return_may_alias_receiver(&resolve("const C[]")),
+            "a by-value array return still does not"
+        );
+    }
+
+    /// The simple spellings are unchanged. `const C@` in particular still
+    /// binds to the pointee — the engine rejects `c.Mutate()` on it, and a
+    /// fix that moved every `const` outward would have broken the rule this
+    /// ticket is about.
+    #[test]
+    fn const_binding_is_unchanged_for_the_simple_spellings() {
+        assert!(
+            matches!(resolve("const C"), TypeRepr::Const(_)),
+            "`const C` stays Const(C)"
+        );
+        let repr = resolve("const C@");
+        let TypeRepr::Handle(inner) = &repr else {
+            panic!("expected Handle, got {repr:?}");
+        };
+        assert!(
+            matches!(inner.as_ref(), TypeRepr::Const(_)),
+            "`const C@` is a handle to CONST, got {inner:?}"
+        );
+        let repr = resolve("const C[]");
+        let TypeRepr::Const(inner) = &repr else {
+            panic!("`const C[]` is a const array, got {repr:?}");
+        };
+        assert!(matches!(inner.as_ref(), TypeRepr::Array(_)));
+    }
+
+    /// A trailing reference is transparent to the binding: `const C@ &in`
+    /// still makes the POINTEE const, which is what makes
+    /// `recv-consthandleref` a REJECT in the game.
+    #[test]
+    fn a_trailing_reference_does_not_move_the_const() {
+        // `TypeRepr` has no reference variant -- the resolver drops the
+        // parameter mode -- so what must be preserved is the shape UNDER it.
+        let repr = resolve("const C@ &in");
+        let TypeRepr::Handle(pointee) = &repr else {
+            panic!("expected a Handle for `const C@ &in`, got {repr:?}");
+        };
+        assert!(
+            matches!(pointee.as_ref(), TypeRepr::Const(_)),
+            "`const C@ &in` keeps the const on the pointee, got {pointee:?}"
+        );
+        assert_eq!(
+            resolve("const C@ &in"),
+            resolve("const C@"),
+            "the parameter mode must not move the const"
+        );
+    }
+
+    /// `const C@[]` — no outer handle — puts the const on the array too.
+    ///
+    /// MEASURED, not reasoned. The first pass inferred this spelling from the
+    /// `const C@[]@` result and said so; it is now its own probe row, because
+    /// B119's rebind changes this spelling and an inference is not a
+    /// measurement. `arr.InsertLast(null)` is REJECTED (the array is const)
+    /// and `arr[0].Mutate()` is ACCEPTED (the element pointee is mutable) —
+    /// the same shape as with the outer handle.
+    #[test]
+    fn a_const_handle_array_without_an_outer_handle_is_a_const_array() {
+        let repr = resolve("const C@[]");
+        let TypeRepr::Const(inner) = &repr else {
+            panic!("expected an outer Const, got {repr:?}");
+        };
+        assert!(matches!(inner.as_ref(), TypeRepr::Array(_)));
+    }
+
+    /// The observable half of the row above: a non-const method on an element
+    /// of a `const T@[]` is silent, because the element is a handle and the
+    /// pointee is not const. The engine accepts it (`arrq-noouter-elem-method`).
+    #[test]
+    fn a_non_const_method_on_a_const_handle_array_element_without_an_outer_handle_is_silent() {
+        let (same, cross) = both_ways(
+            &["class C { void Mutate() {} }"],
+            "void f(const C@[] arr) { arr[0].Mutate(); }",
+        );
+        assert_eq!((same, cross), (0, 0), "engine accepts this");
+    }
+
+    // ── part 2, observable: the false positive is gone ───────────────────
+
+    /// THE FALSE POSITIVE. The engine ACCEPTS this (`arr-own-nonconst`), and
+    /// the checker used to diagnose it. Not an inheritance case at all —
+    /// the method is declared on the element's OWN class — which is what
+    /// isolates it from the parent walk below.
+    #[test]
+    fn a_non_const_method_on_a_const_handle_array_element_is_silent() {
+        let (same, cross) = both_ways(
+            &["class C { void Mutate() {} }"],
+            "void f(const C@[]@ arr) { arr[0].Mutate(); }",
+        );
+        assert_eq!((same, cross), (0, 0), "engine accepts this; we must too");
+    }
+
+    /// The generic spelling was already silent and must stay so — it is the
+    /// control that shows the fix moved the shorthand INTO agreement rather
+    /// than moving both out of it.
+    #[test]
+    fn the_generic_spelling_of_a_const_handle_array_stays_silent() {
+        let (same, cross) = both_ways(
+            &["class C { void Mutate() {} }"],
+            "void f(const array<C@>@ arr) { arr[0].Mutate(); }",
+        );
+        assert_eq!((same, cross), (0, 0));
+    }
+
+    /// A const VALUE array is a different type and the engine REJECTS it
+    /// (`arr-value-array`). Without this row, "stop firing on const arrays"
+    /// would pass, and that would be a false negative.
+    #[test]
+    fn a_non_const_method_on_a_const_value_array_element_still_fires() {
+        let (same, cross) = both_ways(
+            &["class C { void Mutate() {} }"],
+            "void f(const C[] arr) { arr[0].Mutate(); }",
+        );
+        assert_eq!((same, cross), (1, 1), "engine rejects this");
+    }
+
+    /// The const on the array is still LIVE after the rebind: assigning into
+    /// an element slot is a `ConstViolation`, matching the engine's
+    /// `Reference is read-only` on `@arr[0] = c`. This is the row that stops
+    /// the false-positive fix from becoming a false negative.
+    #[test]
+    fn assigning_into_a_const_handle_array_element_still_violates() {
+        let d = check_ws(
+            "class C {} void f(const C@[]@ arr, C@ c) { @arr[0] = c; }",
+            &[],
+        );
+        assert!(
+            const_violations(&d) >= 1,
+            "the element slot is read-only; got {d:?}"
+        );
+    }
+
+    // ── part 1: the parent walk ──────────────────────────────────────────
+
+    /// Depth 1, the exact shape of the B116 pin. The engine says
+    /// `No matching signatures to 'D::Mutate() const'`.
+    #[test]
+    fn an_inherited_non_const_method_on_a_const_receiver_fires_at_depth_1() {
+        let (same, cross) = both_ways(
+            &["class B { void Mutate() {} }", "class D : B {}"],
+            "void f(const D@ d) { d.Mutate(); }",
+        );
+        assert_eq!((same, cross), (1, 1));
+    }
+
+    /// Depth 2 — the fleet site's own depth
+    /// (`Editor::SetSkinSpec` -> `NetworkSerializable`).
+    #[test]
+    fn an_inherited_non_const_method_fires_at_depth_2() {
+        let (same, cross) = both_ways(
+            &[
+                "class A { void Mutate() {} }",
+                "class B : A {}",
+                "class D : B {}",
+            ],
+            "void f(const D@ d) { d.Mutate(); }",
+        );
+        assert_eq!((same, cross), (1, 1));
+    }
+
+    /// Depth 4 — MLFeed ships hierarchies this deep and B116 measured two
+    /// inherited-const sites in them.
+    #[test]
+    fn an_inherited_non_const_method_fires_at_depth_4() {
+        let (same, cross) = both_ways(
+            &[
+                "class A1 { void Mutate() {} }",
+                "class A2 : A1 {}",
+                "class A3 : A2 {}",
+                "class A4 : A3 {}",
+            ],
+            "void f(const A4@ d) { d.Mutate(); }",
+        );
+        assert_eq!((same, cross), (1, 1));
+    }
+
+    /// THE GUARD. An inherited CONST method must stay silent — the engine
+    /// accepts it (`inh-d2-const`). Without this row, a fix that fires on
+    /// every inherited method passes everything above.
+    #[test]
+    fn an_inherited_const_method_stays_silent_at_every_depth() {
+        for decls in [
+            vec!["class A { bool Peek() const { return true; } }", "class D : A {}"],
+            vec![
+                "class A { bool Peek() const { return true; } }",
+                "class B : A {}",
+                "class D : B {}",
+            ],
+        ] {
+            let (same, cross) = both_ways(&decls, "void f(const D@ d) { d.Peek(); }");
+            assert_eq!((same, cross), (0, 0), "inherited const, decls {decls:?}");
+        }
+    }
+
+    /// Every receiver spelling B116 pairs, on the inherited path. The engine
+    /// rejects all four.
+    #[test]
+    fn every_const_receiver_spelling_fires_on_an_inherited_method() {
+        for recv in ["const D &in d", "const D@ &in d", "const D@ d", "const D d"] {
+            let (same, cross) = both_ways(
+                &["class B { void Mutate() {} }", "class D : B {}"],
+                &format!("void f({recv}) {{ d.Mutate(); }}"),
+            );
+            assert_eq!((same, cross), (1, 1), "receiver `{recv}`");
+        }
+    }
+
+    /// A NON-const receiver is untouched by any of this.
+    #[test]
+    fn a_mutable_receiver_never_fires_on_an_inherited_method() {
+        let (same, cross) = both_ways(
+            &["class B { void Mutate() {} }", "class D : B {}"],
+            "void f(D@ d) { d.Mutate(); }",
+        );
+        assert_eq!((same, cross), (0, 0));
+    }
+
+    /// A derived override decides its own constness — a const override of a
+    /// non-const base method makes the call legal, and the walk must not
+    /// reach past it. This is the inherited counterpart of
+    /// `cross_file_derived_override_decides_constness`.
+    #[test]
+    fn a_const_override_in_the_derived_class_wins_over_a_non_const_base() {
+        let (same, cross) = both_ways(
+            &[
+                "class B { void Mutate() {} }",
+                "class D : B { void Mutate() const {} }",
+            ],
+            "void f(const D@ d) { d.Mutate(); }",
+        );
+        assert_eq!((same, cross), (0, 0), "the override is const, so this is legal");
+    }
+
+    /// And the other direction: a non-const override of a const base method
+    /// fires, and fires exactly ONCE — the own-class arm owns it and the
+    /// inherited walk must not double-report.
+    #[test]
+    fn a_non_const_override_fires_exactly_once() {
+        let (same, cross) = both_ways(
+            &[
+                "class B { bool Peek() const { return true; } }",
+                "class D : B { bool Peek() { return false; } }",
+            ],
+            "void f(const D@ d) { d.Peek(); }",
+        );
+        assert_eq!((same, cross), (1, 1), "exactly one, not two");
+    }
+
+    /// A method declared on the class AND on an ancestor yields exactly ONE
+    /// diagnostic.
+    ///
+    /// # What this pins, and what it does NOT
+    ///
+    /// It pins the OBSERVABLE. It does not prove the `!own_declares` guard on
+    /// the B119 arm is what produces it — mutation testing showed that
+    /// removing that guard leaves this test green, so stating it as the
+    /// double-report guard would have been a vacuous claim of exactly the
+    /// kind B118 found four of.
+    ///
+    /// The reason is B120, which landed between this ticket's measurement and
+    /// its fix: the B116 cross-file arm now ends in
+    /// `return Self::apply_receiver_const(t, true)` when
+    /// `workspace_class_member` resolves the member, so the B119 arm below it
+    /// is never reached on that path. Same-file is covered by its own arm
+    /// returning early. Between them the two own-class arms already exit
+    /// before the inherited walk can add a second diagnostic.
+    ///
+    /// `!own_declares` is kept anyway, for the residual path where the
+    /// cross-file arm fires and `workspace_class_member` returns `None` — it
+    /// then falls through rather than returning. That path is real but not
+    /// reachable from any fixture here, so the guard is defence in depth and
+    /// is documented as such rather than credited to this test.
+    #[test]
+    fn a_method_declared_on_both_the_class_and_an_ancestor_fires_once() {
+        let (same, cross) = both_ways(
+            &[
+                "class B { void Mutate() {} }",
+                "class D : B { void Mutate() {} }",
+            ],
+            "void f(const D@ d) { d.Mutate(); }",
+        );
+        assert_eq!((same, cross), (1, 1), "one diagnostic, not one per declaration");
+    }
+
+    /// An inherited FIELD read is not a method call.
+    #[test]
+    fn reading_an_inherited_field_through_a_const_receiver_is_silent() {
+        let (same, cross) = both_ways(
+            &["class B { int x; }", "class D : B {}"],
+            "void f(const D@ d) { int y = d.x; }",
+        );
+        assert_eq!((same, cross), (0, 0));
+    }
+
+    /// Provenance: an unknown receiver type has no const metadata anywhere,
+    /// so the walk answers `None` and stays silent rather than treating
+    /// "not known const" as "non-const". B116 established this rule for the
+    /// own-class arm; it has to hold one level out or the widening fires on
+    /// every engine type in the fleet.
+    #[test]
+    fn an_unknown_receiver_type_is_never_diagnosed() {
+        let d = check_ws("void f(const CSomeEngineThing@ c) { c.Whatever(); }", &[]);
+        assert_eq!(fired(&d), 0, "no const metadata means no verdict, got {d:?}");
+    }
+
+    /// A cycle in the class graph is invalid AngelScript, but the walk must
+    /// terminate on it rather than hang.
+    #[test]
+    fn a_cyclic_hierarchy_terminates() {
+        let (same, cross) = both_ways(
+            &["class A : B {}", "class B : A {}"],
+            "void f(const A@ a) { a.Mutate(); }",
+        );
+        assert_eq!((same, cross), (0, 0), "no method exists anywhere");
+    }
+
+    // ── the two fixes together, at the fleet site ────────────────────────
+
+    /// THE ONE FLEET SITE, in both its halves. `tm-map-together`'s
+    /// `skins[i].WriteToNetworkBuffer(buf)` on a
+    /// `const Editor::SetSkinSpec@[]@`, with the method inherited non-const
+    /// from two levels up.
+    ///
+    /// It is silent before this ticket and silent after, and the reason
+    /// changes completely: before, the parent walk was missing AND the
+    /// element was wrongly const, two bugs cancelling; after, the walk
+    /// exists and the element is correctly NOT a const receiver. Landing the
+    /// walk alone would have turned the single site B116 measured across 151
+    /// plugins into a false error.
+    #[test]
+    fn the_one_fleet_site_stays_silent_for_the_right_reason() {
+        let decls = [
+            "class NetworkSerializable { void WriteToNetworkBuffer(int b) {} }",
+            "class Serializable : NetworkSerializable {}",
+            "class SetSkinSpec : Serializable {}",
+        ];
+        let (same, cross) = both_ways(
+            &decls,
+            "void f(const SetSkinSpec@[]@ skins, int buf) { skins[0].WriteToNetworkBuffer(buf); }",
+        );
+        assert_eq!((same, cross), (0, 0), "the engine compiles this");
+
+        // The same call on a NON-array const receiver DOES fire — which is
+        // what proves the silence above comes from the element type and not
+        // from the walk having quietly failed to find the method.
+        let (same2, cross2) = both_ways(
+            &decls,
+            "void f(const SetSkinSpec@ s, int buf) { s.WriteToNetworkBuffer(buf); }",
+        );
+        assert_eq!(
+            (same2, cross2),
+            (1, 1),
+            "the walk finds it two levels up when the receiver really is const"
+        );
     }
 }
