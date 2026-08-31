@@ -74,37 +74,21 @@ impl Fixture {
 /// developer machine with the game installed these tests would silently load
 /// that person's real type database: slow, and a different answer per machine.
 ///
-/// `game_target` is pinned too, and the reason is HERMETICITY, not B066.
+/// `game_target` USED to be pinned here as well, and not for tidiness: B066
+/// meant the GH #45 variant re-probe replaced an explicit `openplanet_dir`
+/// with `$HOME/<variant>` whenever the resolved target named a different
+/// folder — and the user-global `~/.config/openplanet-lsp/config.toml` gets a
+/// say in that target. Observed, not theorised: with a synthetic HOME whose
+/// global config set `game_target = "MP4"`, the EMPTY-fixture test loaded a
+/// full 4276-symbol database straight through the pin. Pinning the target kept
+/// the folder name matching so the re-probe returned early.
 ///
-/// `game_target` selects the game database FILENAME
-/// (`LspConfig::game_json_filename_for_target`), and this fixture ships
-/// `OpenplanetNext.json`. The resolved target is decided by the ladder, and
-/// the user-global `~/.config/openplanet-lsp/config.toml` gets a say in it. So
-/// without the pin, whether path derivation finds this fixture's database at
-/// all depends on the config of whoever runs the suite.
-///
-/// Measured, with the pin removed and a synthetic HOME whose global config
-/// sets `game_target = "MP4"`: `regenerate_type_db` returns
-/// `{"ok":false,"message":"type database paths not configured"}` — the ladder
-/// correctly keeps the pinned directory, then looks in it for
-/// `OpenplanetMP4.json`, which is not there. Under a default HOME it passes
-/// without the pin, because the default target IS TMNEXT. That is the shape of
-/// a test that passes for its author and fails for a colleague, with an error
-/// reading like a broken fixture rather than an environment difference.
-///
-/// The pin therefore buys the same property as the isolated `TMPDIR`, the env
-/// lock and `just test-hermetic`: independence from the machine running the
-/// tests (B045).
-///
-/// # What B066 changed here, and what it did not
-///
-/// This comment previously said the pin existed because B066's defect let the
-/// GH #45 variant re-probe replace an explicit `openplanet_dir` with
-/// `$HOME/<variant>`. That job IS done — provenance is recorded now, so an
-/// explicit dir survives any target. Measured three ways under the same
-/// hostile HOME, because this suite cannot discriminate that fix while the pin
-/// is present (with it, the target resolves to TMNEXT and the re-probe returns
-/// early either way):
+/// B066 records the dir's provenance instead of inferring it from the value,
+/// so an explicit `openplanet_dir` now survives any target and that job is
+/// done. Measured three ways under exactly the hostile HOME above, because
+/// this suite cannot discriminate the fix while the pin is present — with the
+/// pin, the resolved target is TMNEXT, the re-probe sees a matching folder
+/// name and returns early whether or not B066 is fixed:
 ///
 /// | pin     | B066    | result                                          |
 /// |---------|---------|-------------------------------------------------|
@@ -112,10 +96,9 @@ impl Fixture {
 /// | removed | REVERTED| **passes** — silently regenerates off `$HOME/OpenplanetMP4` |
 /// | present | fixed   | passes correctly                                |
 ///
-/// The middle row is the old defect: a fixture pinning an EMPTY
-/// `openplanet_dir` still regenerated a full database. Kept because a test
-/// that passes only when the bug is present is the sharpest evidence there
-/// was — but note it is history, not the reason the pin is here now.
+/// The middle row is the defect: a fixture pinning an EMPTY `openplanet_dir`
+/// still regenerated a full database. A test that passes only because the
+/// bug is present is the sharpest evidence available here.
 ///
 /// The pin stays, for a DIFFERENT and narrower reason that B066 was masking.
 /// `game_target` also picks the game database FILENAME
