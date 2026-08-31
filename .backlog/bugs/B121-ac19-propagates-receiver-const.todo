@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T13:55:40Z"
+depends_on: []
+estimate_hours: 1
+id: B121
+priority: high
+status: pending
+tags: []
+title: 'AC19 propagates receiver constness through any non-const method''s return value, including one returning a fresh value rather than a view into this: measured at 10 false positives across 7 plugins in the engine population'
+updated_at: "2026-08-31T13:55:40Z"
+---
+
+AC19 propagates receiver constness through any non-const method's return value, including one returning a fresh value rather than a view into this: measured at 10 false positives across 7 plugins in the engine population

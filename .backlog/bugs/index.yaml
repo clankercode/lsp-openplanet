@@ -119,3 +119,4 @@ bugs:
     - file: B118-issue-repro-game-probe-has-two.todo
     - file: B119-const-receiver-rule-is-own-cla.todo
     - file: B120-cross-file-const-receivers-do.todo
+    - file: B121-ac19-propagates-receiver-const.todo
