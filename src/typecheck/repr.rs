@@ -127,7 +127,18 @@ impl TypeRepr {
             TypeRepr::Void => "void".to_string(),
             TypeRepr::Null => "null".to_string(),
             TypeRepr::Handle(inner) => format!("{}@", inner.display()),
-            TypeRepr::Const(inner) => format!("const {}", inner.display()),
+            // B144: AngelScript spells a const HANDLE with the `const`
+            // AFTER the `@`. Rendering `Const(Handle(T))` as `const T@`
+            // printed the OTHER type — `Handle(Const(T))`, a handle to a
+            // const object — so the two collapsed onto one string and no
+            // display-based assertion could tell them apart. See B136: a
+            // test that compares types by rendered string cannot detect a
+            // structural type bug, and this was the rendering that made
+            // that possible.
+            TypeRepr::Const(inner) => match inner.as_ref() {
+                TypeRepr::Handle(_) => format!("{} const", inner.display()),
+                _ => format!("const {}", inner.display()),
+            },
             TypeRepr::Named(name) => name.clone(),
             TypeRepr::Generic { base, args } => {
                 let joined = args
@@ -319,6 +330,20 @@ fn parse_type_string_inner(s: &str) -> TypeRepr {
         let inner = parse_type_string_inner(rest.trim());
         return match inner {
             TypeRepr::Handle(pointee) => TypeRepr::Handle(Box::new(TypeRepr::Const(pointee))),
+            // B144: `const Foo@ const`. The recursion has already produced
+            // the CONST HANDLE `Const(Handle(Foo))`; this leading `const`
+            // is the OTHER qualifier and binds to the POINTEE, so it goes
+            // inside the handle while the const-handle wrapper stays
+            // outside. Without this arm the two would stack as
+            // `Const(Const(Handle(Foo)))` and the pointee — the half that
+            // actually restricts what may be done through the handle —
+            // would be silently unqualified.
+            TypeRepr::Const(held) => match *held {
+                TypeRepr::Handle(pointee) => TypeRepr::Const(Box::new(TypeRepr::Handle(Box::new(
+                    TypeRepr::Const(pointee),
+                )))),
+                already_const => TypeRepr::Const(Box::new(already_const)),
+            },
             other => TypeRepr::Const(Box::new(other)),
         };
     }
@@ -329,6 +354,29 @@ fn parse_type_string_inner(s: &str) -> TypeRepr {
         let tail = s[idx + 1..].trim();
         if tail.is_empty() || tail == "in" || tail == "out" || tail == "inout" {
             return parse_type_string_inner(s[..idx].trim());
+        }
+    }
+    // B144: a TRAILING `const` is a CONST HANDLE — a handle that may not be
+    // rebound, pointing at an object that may still be mutated. It is a
+    // different qualifier from the LEADING `const`, which makes the POINTEE
+    // read-only, and AngelScript can spell both at once
+    // (`const Foo@ const`). `Const(Handle(T))` is the shape the source
+    // parser has produced for it since AC20, and which `receiver_is_const`,
+    // `base_type_name` and `array_element_type` were all written against;
+    // this string path simply never built it, so `Foo@ const` fell through
+    // to the `Named` arm below as `Named("Foo@ const")` — a type carrying
+    // its own qualifiers in its NAME, and therefore equal to nothing. That
+    // is B144: every funcdef signature comparison against a const-handle
+    // parameter failed, on code the engine compiles.
+    //
+    // Only legal after a `@`: the engine rejects `int const &in` and
+    // `vec3 const &in` at the parser ("Instead found reserved keyword
+    // 'const'", 2026-09-01, OP 1.29.14), so requiring the handle also stops
+    // this rule from eating a type whose name merely ends in those letters.
+    if let Some(head) = s.strip_suffix("const") {
+        let head = head.trim_end();
+        if head.ends_with('@') {
+            return TypeRepr::Const(Box::new(parse_type_string_inner(head)));
         }
     }
     // Trailing `@` → Handle
@@ -422,12 +470,36 @@ mod tests {
         assert_eq!(t.display(), "Foo@[]");
     }
 
+    /// B144. `Const(Handle(T))` is a CONST HANDLE, which AngelScript spells
+    /// with the `const` AFTER the `@`. Rendering it as `const Foo@` printed
+    /// the OTHER type — handle to a const object — so the two positions
+    /// collapsed onto one string and no display-based assertion anywhere
+    /// could tell them apart. Round-tripping is the property that matters:
+    /// `parse_type_string(t.display()) == t` for every const position.
     #[test]
     fn display_const_handle() {
         let t = TypeRepr::Const(Box::new(TypeRepr::Handle(Box::new(TypeRepr::Named(
             "Foo".into(),
         )))));
-        assert_eq!(t.display(), "const Foo@");
+        assert_eq!(t.display(), "Foo@ const");
+
+        let handle_to_const = TypeRepr::Handle(Box::new(TypeRepr::Const(Box::new(
+            TypeRepr::Named("Foo".into()),
+        ))));
+        assert_eq!(handle_to_const.display(), "const Foo@");
+
+        let both = TypeRepr::Const(Box::new(TypeRepr::Handle(Box::new(TypeRepr::Const(
+            Box::new(TypeRepr::Named("Foo".into())),
+        )))));
+        assert_eq!(both.display(), "const Foo@ const");
+
+        for t in [t, handle_to_const, both] {
+            assert_eq!(
+                TypeRepr::parse_type_string(&t.display()),
+                t,
+                "display must round-trip through parse_type_string"
+            );
+        }
     }
 
     #[test]
@@ -537,16 +609,118 @@ mod tests {
         );
     }
 
+    /// B144. This test used to be named for the trailing-`const` case and
+    /// then assert `Foo@` instead — "we just verify the default handle path
+    /// stays lossless". It was the test that should have caught the defect,
+    /// and it sidestepped it because `display()` renders `Const(Handle(T))`
+    /// and `Handle(Const(T))` to strings that were assumed equal. That is
+    /// B136's caution exactly: a test that compares types by rendered string
+    /// cannot see a structural type bug, and one that declines to assert the
+    /// structure at all cannot see anything.
+    ///
+    /// So this asserts the TREE. `Foo@ const` is a const HANDLE to a mutable
+    /// object -> `Const(Handle(Foo))`, the shape `receiver_is_const` and
+    /// `base_type_name` were both already written against.
     #[test]
     fn parse_type_string_handle_trailing_const() {
-        // `Foo@ const` → const handle to a mutable object. The parser
-        // produces `Const(Handle(Foo))`; the canonical type-string form
-        // printed back by `display()` is `const Foo@`, so we assert the
-        // distinction at the parser level instead (see parser tests).
-        // Here we just verify the default handle path stays lossless.
         assert_eq!(
             TypeRepr::parse_type_string("Foo@"),
             TypeRepr::Handle(Box::new(TypeRepr::Named("Foo".into())))
+        );
+        assert_eq!(
+            TypeRepr::parse_type_string("Foo@ const"),
+            TypeRepr::Const(Box::new(TypeRepr::Handle(Box::new(TypeRepr::Named(
+                "Foo".into()
+            )))))
+        );
+    }
+
+    /// B144. The two `const`s mean different things and the type string
+    /// parser must land them in different places:
+    ///
+    /// * leading `const Foo@` is a handle to a const OBJECT, so the const
+    ///   goes INSIDE the handle: `Handle(Const(T))`.
+    /// * trailing `Foo@ const` is a const HANDLE to a mutable object, so it
+    ///   goes OUTSIDE: `Const(Handle(T))`.
+    /// * both, `const Foo@ const`, is a const handle to a const object:
+    ///   `Const(Handle(Const(T)))`.
+    ///
+    /// Before the fix the trailing one was not recognised at all: the whole
+    /// string fell through to the `Named` arm as `Named("Foo@ const")`, a
+    /// type whose NAME contains its own qualifiers and which is therefore
+    /// equal to nothing. Every funcdef signature comparison against it
+    /// failed, which is the false positive Max reported against a shipped
+    /// plugin (`array::Sort(SortGhosts)`).
+    #[test]
+    fn parse_type_string_distinguishes_the_two_const_positions() {
+        let foo = || TypeRepr::Named("Foo".into());
+        let leading = TypeRepr::Handle(Box::new(TypeRepr::Const(Box::new(foo()))));
+        let trailing = TypeRepr::Const(Box::new(TypeRepr::Handle(Box::new(foo()))));
+        let both = TypeRepr::Const(Box::new(TypeRepr::Handle(Box::new(TypeRepr::Const(
+            Box::new(foo()),
+        )))));
+
+        assert_eq!(TypeRepr::parse_type_string("const Foo@"), leading);
+        assert_eq!(TypeRepr::parse_type_string("Foo@ const"), trailing);
+        assert_eq!(TypeRepr::parse_type_string("const Foo@ const"), both);
+
+        // Non-vacuity: the three really are three distinct trees, so the
+        // three assertions above cannot all be satisfied by one shape.
+        assert_ne!(leading, trailing);
+        assert_ne!(leading, both);
+        assert_ne!(trailing, both);
+    }
+
+    /// B144. The reference modifier is stripped from all four spellings, and
+    /// the engine's OWN rendering — which writes no spaces around the
+    /// trailing `const` (`const Json::Value@const&in`, measured 2026-09-01,
+    /// OP 1.29.14) — parses to the same tree as the spaced source form.
+    #[test]
+    fn parse_type_string_const_positions_survive_reference_modifiers() {
+        let want = TypeRepr::Const(Box::new(TypeRepr::Handle(Box::new(TypeRepr::Const(
+            Box::new(TypeRepr::Named("Json::Value".into())),
+        )))));
+        for spelling in [
+            "const Json::Value@ const &in",
+            "const Json::Value@ const &out",
+            "const Json::Value@ const&in",
+            "const Json::Value@const&in",
+            "const Json::Value@const",
+        ] {
+            assert_eq!(
+                TypeRepr::parse_type_string(spelling),
+                want,
+                "spelling {spelling:?}"
+            );
+        }
+    }
+
+    /// B144 negative control. A trailing `const` is legal ONLY after a `@`
+    /// — the engine rejects `int const &in` and `vec3 const &in` outright
+    /// ("Expected ')' or ','; Instead found reserved keyword 'const'",
+    /// measured 2026-09-01, OP 1.29.14). So the new suffix rule must not
+    /// fire on a bare value type, and must not eat a type whose NAME merely
+    /// ends in those letters.
+    #[test]
+    fn parse_type_string_trailing_const_needs_a_handle() {
+        assert_eq!(
+            TypeRepr::parse_type_string("Myconst"),
+            TypeRepr::Named("Myconst".into())
+        );
+        assert_eq!(
+            TypeRepr::parse_type_string("Ns::const"),
+            TypeRepr::Named("Ns::const".into())
+        );
+    }
+
+    /// B144. An array OF const handles keeps the element structure.
+    #[test]
+    fn parse_type_string_array_of_const_handles() {
+        assert_eq!(
+            TypeRepr::parse_type_string("Foo@ const[]"),
+            TypeRepr::Array(Box::new(TypeRepr::Const(Box::new(TypeRepr::Handle(
+                Box::new(TypeRepr::Named("Foo".into()))
+            )))))
         );
     }
 

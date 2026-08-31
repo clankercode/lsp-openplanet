@@ -3,9 +3,20 @@
 //
 // The rows here are exactly the ones decidable WITHOUT a game probe — they
 // are wrong under every reading of the undeclared `T[]::less` signature.
-// The const-ness axis, which the typedb does not pin and B097 blocks
-// probing, is deliberately NOT exercised here; it lives in the correct-
-// callbacks fixture as a required silence.
+// The const-ness axis, which the typedb does not pin, is deliberately NOT
+// exercised here; it lives in the correct-callbacks fixture as a required
+// silence. (B097 used to block probing it. B144 probed it — see
+// `docs/probes/b144-const-handle-funcdef.tsv` — and the checker's neutrality
+// is now a KNOWN, recorded false negative rather than an open question. The
+// rows below stay independent of it on purpose: each is wrong on an axis the
+// checker enforces, so none of them depends on how const-ness is resolved.)
+//
+// B144 added the `*ConstHandle` rows. A CONST HANDLE (`T@ const`) must not
+// become a wildcard: before B144 it was parsed out of a stored signature as
+// a type literally NAMED "T@ const", so these lines failed for the WRONG
+// reason — the name matched nothing, rather than the arity/return/element
+// type/mode being wrong. After the fix they must still fail, now for the
+// right reason.
 
 class Item { int v; }
 
@@ -20,6 +31,12 @@ int  WrongReturnInt(const int &in a, const int &in b) { return a < b ? 1 : 0; }
 bool WrongModeOut(int &out a, int &out b) { a = 0; b = 0; return true; }
 bool WrongModeInout(int &inout a, int &inout b) { return a < b; }
 bool WrongModeValue(int a, int b) { return a < b; }
+
+// B144: the same four wrongness axes, each carried on a CONST HANDLE.
+bool WrongArityConstHandle(const Item@ const &in a) { return a.v < 0; }
+void WrongReturnConstHandle(const Item@ const &in a, const Item@ const &in b) { }
+bool WrongElemConstHandle(const Item@ const &in a, const Item@ const &in b) { return a.v < b.v; }
+bool WrongModeConstHandle(Item@ const &out a, Item@ const &out b) { return true; }
 
 // A funcdef HANDLE of the wrong shape. This row exists because the sibling
 // fixture's correct-handle row would otherwise be unfalsifiable: if a
@@ -41,6 +58,10 @@ void Main() {
 
     array<Item@> items;
     items.Sort(LessInt);         // element type, the other direction
+    items.Sort(WrongArityConstHandle);   // B144: arity, on a const handle
+    items.Sort(WrongReturnConstHandle);  // B144: return type, on a const handle
+    items.Sort(WrongModeConstHandle);    // B144: parameter mode, on a const handle
+    xs.Sort(WrongElemConstHandle);       // B144: element type, on a const handle
 
     xs.SortNonConst(LessString); // the non-const slot checks the same way
 

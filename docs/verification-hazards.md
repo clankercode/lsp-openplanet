@@ -3288,3 +3288,67 @@ mutants: `check_row_count` returning always-`None` and `classify_without_running
 returning always-`ERROR` would each have passed it. Positive and over-condemn
 controls were added for both. **Auditing your own harness before you trust its
 score is now the third time tonight that step has paid.**
+
+## A lossy renderer does not just hide a bug — it gets written into the test as a reason not to look
+
+B144: `Foo@ const` (a const HANDLE) was parsed out of a stored signature string
+as `Named("Foo@ const")` — a type whose NAME contains its own qualifiers, and
+which is therefore equal to nothing. Every funcdef signature comparison against
+a const-handle parameter failed, and Max found it as red squiggles on a shipped
+plugin the game compiles.
+
+There WAS a test. It was named `parse_type_string_handle_trailing_const`, it
+was the only test in the file named for that exact case, and here is what it
+asserted:
+
+```rust
+// `Foo@ const` → const handle to a mutable object. The parser produces
+// `Const(Handle(Foo))`; the canonical type-string form printed back by
+// `display()` is `const Foo@`, so we assert the distinction at the parser
+// level instead (see parser tests). Here we just verify the default handle
+// path stays lossless.
+assert_eq!(parse_type_string("Foo@"), Handle(Named("Foo")));
+```
+
+It states the correct answer in prose, then asserts a DIFFERENT input. So it
+passed for the whole life of the defect, and it did so while carrying the
+subject's own name.
+
+**The mechanism is the interesting part, and it is not carelessness.** The
+reason the author gave for not asserting is true and load-bearing:
+`display()` rendered `Const(Handle(T))` and `Handle(Const(T))` — the const
+handle and the handle-to-const, two genuinely different types — to the same
+string. Faced with a renderer that cannot distinguish the two shapes, the
+author concluded the distinction could not be asserted HERE and deferred it
+elsewhere. The deferral was never picked up.
+
+So a lossy rendering does more damage than hiding one comparison. It becomes
+a **documented, plausible reason to write a weaker assertion**, and the
+weaker assertion inherits the strong name. B136 already says a test comparing
+types by rendered string cannot detect a structural type bug. This is the
+sharper version:
+
+> **When the renderer cannot express the distinction, do not weaken the test —
+> fix the renderer, or assert on the constructed tree.** "It does not round-trip,
+> so I asserted something else" is how a defect acquires a green test named
+> after it.
+
+The fix asserts trees (`Const(Handle(Named))` vs `Handle(Const(Named))` vs
+`Const(Handle(Const(Named)))`), asserts the three are pairwise DISTINCT so one
+shape cannot satisfy all three, repairs `display()` so the const handle prints
+as `Foo@ const`, and pins `parse(t.display()) == t` for all three. The
+round-trip property is what makes the renderer safe to assert through again.
+
+**A second-order finding from the same ticket, worth its own line.** The
+engine was probed before fixing, per the batch rule, and the probe did not
+confirm the ticket's model — it inverted it. The ticket assumed the engine was
+LENIENT about const handles and the checker too strict. The engine is exact on
+every const position in both directions; what it actually does is synthesise
+`array<T>::Sort`'s comparator as `const T@ const &in` whenever the element type
+is a HANDLE, so the spelling the checker DEMANDED (`const T@ &in`) is the one
+the engine rejects, and the spelling it rejected is the one the engine wants.
+Both facts were extracted by a trick worth reusing: **make the compiler print
+its own expected signature by deliberately mismatching the call**, rather than
+inferring the rule from a table of accept/reject. Eleven element types, eleven
+verbatim signatures, one run — and it retired a "this is UNMEASURED" note that
+two source files had been restating since B102.
