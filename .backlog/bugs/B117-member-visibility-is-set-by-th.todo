@@ -8,11 +8,12 @@ depends_on: []
 estimate_hours: 1
 id: B117
 priority: high
+reason: 'Blocked on B114 (peer session). Measured by lane-unused: the ONLY dot-member completion path for a workspace class is add_type_members (src/server/completion.rs:340), whose workspace branch reads exclusively from the pool via ws.all_symbols() with no AST fallback. So unpooled member visibility blocks B117 on ALL axes, not just cross-file. B114 as currently written on .worktrees/pool hardcodes DeclModifiers::default() at the field arm, so its landing is necessary but NOT sufficient — the field arm must also pass field_modifiers(var). Peer notified 2026-08-31 23:45. The one AST-sourced site, complete_identifier''s enclosing-class walk, needs no filter: inside your own class every own member is legitimately visible and it only offers cls.members, never inherited ones.'
 started_at: "2026-08-31T13:32:20Z"
-status: in_progress
+status: blocked
 tags: []
 title: 'Member visibility is set by the parser and read by nothing: no layer above consumes is_private/is_protected, so completion offers private and protected members everywhere'
-updated_at: "2026-08-31T13:32:20Z"
+updated_at: "2026-08-31T13:39:57Z"
 ---
 
 Member visibility is set by the parser and read by nothing: no layer above consumes is_private/is_protected, so completion offers private and protected members everywhere

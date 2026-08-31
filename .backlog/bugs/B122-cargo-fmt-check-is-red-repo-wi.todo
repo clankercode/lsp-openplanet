@@ -6,11 +6,12 @@ depends_on: []
 estimate_hours: 1
 id: B122
 priority: high
+reason: 'HOLD until all WIP is merged, this session''s lanes AND the peer session''s. Set by Max 2026-09-01. Blocking: B119 (lane-unused), B121 (lane-enum), B123 (lane-resolver), and B113+B114 in peer session claude-xenon-side-u7o7. B114 is the critical one — a pooling change whose consumer ripple reaches checker.rs, which carries ~40 of the 77 fmt diffs. Re-check BOTH sessions immediately before running cargo fmt; two sessions draining at different moments is not a window.'
 started_at: null
-status: pending
+status: blocked
 tags: []
 title: 'cargo fmt --check is red repo-wide on master: 77 diffs across five files, so any lane that runs cargo fmt makes its own diff unreviewable'
-updated_at: "2026-08-31T13:55:40Z"
+updated_at: "2026-08-31T14:06:52Z"
 ---
 
 cargo fmt --check is red repo-wide on master: 77 diffs across five files, so any lane that runs cargo fmt makes its own diff unreviewable
