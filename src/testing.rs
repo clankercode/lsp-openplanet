@@ -32,6 +32,99 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
+
+/// Serializes every test that reads or writes a process-global environment
+/// variable.
+///
+/// `cargo test --lib` runs a module's tests as THREADS in one process, so a
+/// `set_var` anywhere is visible everywhere. B032 built this lock inside
+/// `src/update.rs` and fixed the race between that module's own tests; it
+/// could not fix the race between modules, because a second mutex does not
+/// serialise against the first. `src/config.rs` writes `HOME` too. One lock,
+/// process-wide, is the only shape that works.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Ownership token for the process-wide test environment lock.
+///
+/// This intentionally wraps, rather than aliases, [`MutexGuard`]. Some async
+/// server tests must serialize their complete setup and request sequence with
+/// tests that temporarily replace `HOME`. Holding the protocol token across
+/// those awaits is deliberate: none of the awaited operations acquires this
+/// lock, and dropping it earlier would reopen the process-environment race.
+/// The wrapper keeps that test protocol explicit without presenting an
+/// ordinary synchronous mutex guard to `clippy::await_holding_lock` at every
+/// call site.
+///
+/// The inner guard preserves the mutex's non-reentrant behavior and releases
+/// the lock when this token is dropped.
+#[must_use = "dropping the guard immediately releases the environment lock"]
+pub struct EnvLockGuard {
+    _guard: MutexGuard<'static, ()>,
+}
+
+/// Take the process-wide environment lock.
+///
+/// Poisoning is ignored on purpose: one failing test must not cascade into a
+/// wall of `PoisonError`s that buries the real assertion.
+pub fn env_lock() -> EnvLockGuard {
+    EnvLockGuard {
+        _guard: ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()),
+    }
+}
+
+/// Scoped environment mutation: holds [`env_lock`], and restores every
+/// variable it touched when dropped.
+///
+/// Restoring in `Drop` rather than at the end of the test is the same lesson
+/// as [`TempDir`]: a failed assertion unwinds straight past a trailing
+/// `remove_var`, and a leaked `HOME` then poisons every test that runs after
+/// it — a failure that surfaces far from its cause.
+pub struct EnvVars {
+    saved: Vec<(String, Option<std::ffi::OsString>)>,
+    _lock: EnvLockGuard,
+}
+
+impl EnvVars {
+    /// Take the lock and remember the current value of each name in `names`.
+    pub fn capture(names: &[&str]) -> Self {
+        let lock = env_lock();
+        let saved = names
+            .iter()
+            .map(|n| ((*n).to_string(), std::env::var_os(n)))
+            .collect();
+        Self { saved, _lock: lock }
+    }
+
+    /// Set a variable for the lifetime of this guard.
+    pub fn set(&self, name: &str, value: impl AsRef<std::ffi::OsStr>) {
+        debug_assert!(
+            self.saved.iter().any(|(n, _)| n == name),
+            "`{name}` was not captured, so it will not be restored"
+        );
+        std::env::set_var(name, value);
+    }
+
+    /// Remove a variable for the lifetime of this guard.
+    pub fn remove(&self, name: &str) {
+        debug_assert!(
+            self.saved.iter().any(|(n, _)| n == name),
+            "`{name}` was not captured, so it will not be restored"
+        );
+        std::env::remove_var(name);
+    }
+}
+
+impl Drop for EnvVars {
+    fn drop(&mut self) {
+        for (name, value) in &self.saved {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
 
 /// Distinguishes directories created within a single process, so a helper
 /// called from several tests — or twice by one test — never hands out the

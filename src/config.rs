@@ -81,9 +81,33 @@ pub struct ResolvedDefine {
     pub derived_active: bool,
 }
 
+/// Where [`LspConfig::openplanet_dir`] came from (B066).
+///
+/// The GH #45 variant re-probe must replace a directory the tool found for
+/// itself and must NOT replace one the user configured. Those two cases can
+/// hold the SAME path — a user may explicitly configure the very directory
+/// Layer 1 would have detected — so the difference is not recoverable from
+/// the value and has to be recorded when the value is set. B050 records
+/// define origins for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenplanetDirOrigin {
+    /// Layer 1's `$HOME` probe, or the variant re-probe that follows it.
+    /// Also the state when nothing was detected at all, so an empty
+    /// `openplanet_dir` is still eligible for the re-probe.
+    AutoDetected,
+    /// A config file's `openplanet_dir`, or init options. Wins over the probe.
+    Explicit,
+}
+
 #[derive(Debug, Clone)]
 pub struct LspConfig {
     pub openplanet_dir: Option<PathBuf>,
+    /// B066: whether `openplanet_dir` was set explicitly or auto-detected.
+    /// Read it through the ladder, not directly; it exists so
+    /// [`LspConfig::recheck_variant_folder`] can tell the two apart when the
+    /// paths are equal.
+    #[doc(hidden)]
+    pub openplanet_dir_origin: OpenplanetDirOrigin,
     pub plugins_dir: Option<PathBuf>,
     pub core_json: Option<PathBuf>,
     pub game_json: Option<PathBuf>,
@@ -216,6 +240,7 @@ impl Default for LspConfig {
     fn default() -> Self {
         let mut config = Self {
             openplanet_dir: None,
+            openplanet_dir_origin: OpenplanetDirOrigin::AutoDetected,
             plugins_dir: None,
             core_json: None,
             game_json: None,
@@ -1536,8 +1561,7 @@ impl LspConfig {
 
         // GH #45: the finalized target may expect a different install folder
         // than the Layer-1 TMNEXT default — re-probe before deriving paths.
-        let auto_detected = config.openplanet_dir.clone();
-        config.recheck_variant_folder(auto_detected.as_deref());
+        config.recheck_variant_folder();
         if Self::openplanet_folder_for_target(&config.game_target).is_none() {
             // No-build target (MP3 / NATIONS_FOREVER): warn here too —
             // auto_detect couldn't know the final target yet.
@@ -1858,7 +1882,7 @@ impl LspConfig {
         if let Ok(home) = std::env::var("USERPROFILE") {
             let p = PathBuf::from(&home).join(folder);
             if p.exists() {
-                self.openplanet_dir = Some(p);
+                self.set_openplanet_dir(p, OpenplanetDirOrigin::AutoDetected);
                 return;
             }
         }
@@ -1866,7 +1890,7 @@ impl LspConfig {
         if let Ok(home) = std::env::var("HOME") {
             let p = PathBuf::from(&home).join(folder);
             if p.exists() {
-                self.openplanet_dir = Some(p);
+                self.set_openplanet_dir(p, OpenplanetDirOrigin::AutoDetected);
             }
         }
     }
@@ -1876,7 +1900,19 @@ impl LspConfig {
     /// an explicit `openplanet_dir` (config / init options) wins over the
     /// variant probe; a default TMNEXT detection is replaced by the
     /// variant folder when it exists.
-    fn recheck_variant_folder(&mut self, auto_detected: Option<&Path>) {
+    ///
+    /// B066: that second sentence used to be false. The guard compared
+    /// `openplanet_dir` against a clone of itself taken immediately before
+    /// the call, with nothing mutating it in between, so it was always true
+    /// and every dir was replaced. It reads
+    /// [`LspConfig::openplanet_dir_origin`] now, which is recorded where each
+    /// layer sets the value — the only place the answer is knowable.
+    fn set_openplanet_dir(&mut self, dir: PathBuf, origin: OpenplanetDirOrigin) {
+        self.openplanet_dir = Some(dir);
+        self.openplanet_dir_origin = origin;
+    }
+
+    fn recheck_variant_folder(&mut self) {
         let folder = match Self::openplanet_folder_for_target(&self.game_target) {
             Some(f) => f,
             None => return, // no-build targets already warned in auto_detect
@@ -1888,15 +1924,16 @@ impl LspConfig {
         if current_matches {
             return;
         }
+        if self.openplanet_dir_origin == OpenplanetDirOrigin::Explicit {
+            // The user named this directory. Their setting is the answer even
+            // when the target's variant folder exists and differs.
+            return;
+        }
         for var in ["USERPROFILE", "HOME"] {
             if let Ok(home) = std::env::var(var) {
                 let p = PathBuf::from(&home).join(folder);
                 if p.exists() {
-                    // Replace the auto-detected dir only when it was the
-                    // Layer-1 default (not an explicit user override).
-                    if self.openplanet_dir.as_deref() == auto_detected {
-                        self.openplanet_dir = Some(p);
-                    }
+                    self.set_openplanet_dir(p, OpenplanetDirOrigin::AutoDetected);
                     return;
                 }
             }
@@ -1953,7 +1990,7 @@ impl LspConfig {
 
     fn apply_config_file(&mut self, cfg: ConfigFile) {
         if let Some(dir) = cfg.openplanet_dir {
-            self.openplanet_dir = Some(PathBuf::from(dir));
+            self.set_openplanet_dir(PathBuf::from(dir), OpenplanetDirOrigin::Explicit);
         }
         if let Some(dir) = cfg.plugins_dir {
             self.plugins_dir = Some(PathBuf::from(dir));
@@ -2033,7 +2070,7 @@ impl LspConfig {
 
     fn apply_init_options(&mut self, opts: &serde_json::Value) {
         if let Some(dir) = opts.get("openplanet_dir").and_then(|v| v.as_str()) {
-            self.openplanet_dir = Some(PathBuf::from(dir));
+            self.set_openplanet_dir(PathBuf::from(dir), OpenplanetDirOrigin::Explicit);
         }
         if let Some(dir) = opts.get("plugins_dir").and_then(|v| v.as_str()) {
             self.plugins_dir = Some(PathBuf::from(dir));
@@ -2223,6 +2260,31 @@ fn dependency_define_suffix(dep: &str) -> String {
 mod tests {
     use super::*;
 
+    /// `LspConfig::load` reads `$HOME` — for the user-global config path and
+    /// again in auto-detect — so every test that calls it is a READER in
+    /// B032's sense and has to hold the process-wide env lock. B032's own
+    /// words: "the mutex only helps if the READERS take it." Without this, a
+    /// test asserting on the DEFAULT target raced the B066 tests that pin a
+    /// synthetic `$HOME` carrying a user-global `game_target`, and failed
+    /// under `just test-hermetic` with `TMNEXT` missing from its defines.
+    ///
+    /// Not used by helpers that already hold the lock themselves — a
+    /// `std::sync::Mutex` is not reentrant, so taking it twice on one thread
+    /// deadlocks.
+    fn load_cfg(root: Option<&Path>, init: Option<&serde_json::Value>) -> LspConfig {
+        let _env = crate::testing::env_lock();
+        LspConfig::load(root, init)
+    }
+
+    fn load_cfg_with_parent(
+        root: Option<&Path>,
+        parent: Option<&Path>,
+        init: Option<&serde_json::Value>,
+    ) -> LspConfig {
+        let _env = crate::testing::env_lock();
+        LspConfig::load_with_parent(root, parent, init)
+    }
+
     /// Private protocol between [`unused_callbacks_load_wiring_end_to_end`]
     /// and its child test. Set only on the spawned `Command`, never with
     /// `set_var`, so no sibling test can observe them (B032).
@@ -2320,7 +2382,7 @@ mod tests {
         let tmp = crate::testing::TempDir::new("oplsp-unused-init");
         std::fs::write(tmp.join(".openplanet-lsp.toml"), "unused = \"ignore\"\n").unwrap();
         let opts = serde_json::json!({ "unused": "error" });
-        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        let cfg = load_cfg(Some(&tmp), Some(&opts));
         assert_eq!(cfg.unused, UnusedLevel::Error);
     }
 
@@ -2419,7 +2481,7 @@ mod tests {
         .unwrap();
         for (json_value, want) in [("hint", InactiveLevel::Hint), ("info", InactiveLevel::Info)] {
             let opts = serde_json::json!({ "inactive_regions": json_value });
-            let cfg = LspConfig::load(Some(&init_root), Some(&opts));
+            let cfg = load_cfg(Some(&init_root), Some(&opts));
             assert_eq!(
                 cfg.inactive_regions, want,
                 "initializationOptions must beat the workspace file"
@@ -2491,7 +2553,7 @@ mod tests {
         .unwrap();
         for (json_value, want) in [("hint", UnusedLevel::Hint), ("info", UnusedLevel::Info)] {
             let opts = serde_json::json!({ "unused": json_value });
-            let cfg = LspConfig::load(Some(&init_root), Some(&opts));
+            let cfg = load_cfg(Some(&init_root), Some(&opts));
             assert_eq!(
                 cfg.unused, want,
                 "initializationOptions unused = {json_value} must beat the workspace file"
@@ -2654,7 +2716,7 @@ mod tests {
         let tmp = crate::testing::TempDir::new("oplsp-errors-init");
         std::fs::write(tmp.join(".openplanet-lsp.toml"), "errors = \"off\"\n").unwrap();
         let opts = serde_json::json!({ "errors": "first" });
-        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        let cfg = load_cfg(Some(&tmp), Some(&opts));
         assert_eq!(cfg.errors, ErrorGroup::First);
     }
 
@@ -2711,7 +2773,7 @@ mod tests {
     fn test_game_target_rederives_defines_when_not_overridden() {
         // Setting game_target (no explicit defines) re-derives defines.
         let opts = serde_json::json!({ "game_target": "TURBO" });
-        let config = LspConfig::load(None, Some(&opts));
+        let config = load_cfg(None, Some(&opts));
         assert_eq!(config.game_target, "TURBO");
         assert!(config.defines.contains("TURBO"));
         assert!(!config.defines.contains("TMNEXT"));
@@ -2726,7 +2788,7 @@ mod tests {
             "game_target": "MP4",
             "defines": ["MP4", "WINDOWS"]
         });
-        let config = LspConfig::load(None, Some(&opts));
+        let config = load_cfg(None, Some(&opts));
         assert_eq!(config.game_target, "MP4");
         assert!(config.defines.contains("MP4"));
         assert!(config.defines.contains("MP40"));
@@ -2738,7 +2800,7 @@ mod tests {
     fn test_plugin_roots_absent_init_option_means_no_override() {
         // No `plugin_roots` key in initializationOptions → empty (walk wins).
         let opts = serde_json::json!({ "game_target": "MP4" });
-        let config = LspConfig::load(None, Some(&opts));
+        let config = load_cfg(None, Some(&opts));
         assert!(config.plugin_roots.is_empty());
     }
 
@@ -2746,7 +2808,7 @@ mod tests {
     fn test_plugin_roots_empty_init_option_means_no_override() {
         // Explicit empty array → still no override (non-empty required).
         let opts = serde_json::json!({ "plugin_roots": [] });
-        let config = LspConfig::load(None, Some(&opts));
+        let config = load_cfg(None, Some(&opts));
         assert!(config.plugin_roots.is_empty());
     }
 
@@ -2755,7 +2817,7 @@ mod tests {
         let opts = serde_json::json!({
             "plugin_roots": ["/tmp/plugin-a", "/tmp/plugin-b"]
         });
-        let config = LspConfig::load(None, Some(&opts));
+        let config = load_cfg(None, Some(&opts));
         assert_eq!(
             config.plugin_roots,
             vec![
@@ -2769,7 +2831,7 @@ mod tests {
     fn test_plugin_roots_ignores_non_string_entries() {
         // Non-string entries are skipped, not fatal.
         let opts = serde_json::json!({ "plugin_roots": ["/tmp/ok", 42, null] });
-        let config = LspConfig::load(None, Some(&opts));
+        let config = load_cfg(None, Some(&opts));
         assert_eq!(config.plugin_roots, vec![PathBuf::from("/tmp/ok")]);
     }
 
@@ -2795,7 +2857,7 @@ define_matrix_max_combinations = 32
 "#,
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert_eq!(cfg.define_matrix, vec!["DEV", "DEPENDENCY_MLHOOK"]);
         assert_eq!(cfg.define_groups, vec![vec!["A", "B"]]);
         assert_eq!(cfg.define_combinations, None);
@@ -2811,7 +2873,7 @@ define_matrix_max_combinations = 32
 "#,
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert_eq!(
             cfg.define_combinations,
             Some(vec![
@@ -2901,13 +2963,22 @@ define_matrix_max_combinations = 32
         std::fs::create_dir_all(turbo.join("Plugins")).unwrap();
         std::fs::create_dir_all(next.join("Plugins")).unwrap();
 
-        // SAFETY for tests: scoped env mutation is fine here — cargo runs
-        // lib tests in one process, but this test owns a unique HOME value
-        // and config load is deterministic given HOME.
-        std::env::set_var("HOME", &tmp);
+        // B066: this used to `set_var("HOME", ..)` unguarded, on the
+        // reasoning that the value was unique to this test. The value being
+        // unique is not the issue — the VARIABLE is shared. `cargo test
+        // --lib` runs every module's tests as threads in one process, so a
+        // concurrent test reading or writing `HOME` raced this one, and the
+        // trailing `remove_var` was skipped entirely when an assertion below
+        // failed. `EnvVars` takes the process-wide lock and restores on drop.
+        //
+        // `USERPROFILE` is cleared because `auto_detect_for_target` consults
+        // it BEFORE `HOME`, so an inherited value routes around the fixture.
+        let env = crate::testing::EnvVars::capture(&["HOME", "USERPROFILE"]);
+        env.set("HOME", &tmp);
+        env.remove("USERPROFILE");
         let opts = serde_json::json!({ "game_target": "TURBO" });
         let config = LspConfig::load(None, Some(&opts));
-        std::env::remove_var("HOME");
+        drop(env);
 
         assert_eq!(
             config.openplanet_dir,
@@ -2924,6 +2995,189 @@ define_matrix_max_combinations = 32
             Some(turbo.join("Plugins")),
             "plugins_dir must derive from the variant folder"
         );
+    }
+
+    // =====================================================================
+    // B066: the GH #45 variant re-probe must not overwrite an EXPLICIT
+    // `openplanet_dir`.
+    //
+    // The guard it used to have compared `self.openplanet_dir` against a
+    // clone of itself taken two lines earlier, so it was always true and the
+    // re-probe replaced every dir, explicit or not. The distinction cannot be
+    // recovered from the value — a user may explicitly configure the very
+    // directory Layer 1 would have detected — so provenance is recorded when
+    // the value is set. B050 records define origins for the same reason.
+    // =====================================================================
+
+    /// A synthetic `$HOME` holding one Openplanet install folder per entry in
+    /// `folders`. Contents do not matter: every assertion below is on
+    /// `openplanet_dir` itself, which is the only thing that can discriminate
+    /// two installs here — `tests/fixtures/typedb` is byte-identical to a real
+    /// one, so no assertion on what LOADED could tell them apart.
+    fn b066_home(name: &str, folders: &[&str]) -> crate::testing::TempDir {
+        let home = crate::testing::TempDir::new(&format!("oplsp-b066-{name}"));
+        for folder in folders {
+            std::fs::create_dir_all(home.join(folder)).unwrap();
+        }
+        home
+    }
+
+    /// Run the whole ladder with `$HOME` pinned to `home`.
+    ///
+    /// `USERPROFILE` is cleared because `auto_detect_for_target` consults it
+    /// BEFORE `HOME`, so an inherited value would route around the fixture on
+    /// any machine that sets it. `EnvVars` restores both on drop, including
+    /// while a failed assertion unwinds.
+    fn b066_load(
+        home: &Path,
+        workspace_toml: Option<&str>,
+        init: Option<serde_json::Value>,
+    ) -> LspConfig {
+        let env = crate::testing::EnvVars::capture(&["HOME", "USERPROFILE"]);
+        env.set("HOME", home);
+        env.remove("USERPROFILE");
+        let root = crate::testing::TempDir::new("oplsp-b066-root");
+        if let Some(body) = workspace_toml {
+            std::fs::write(root.join(".openplanet-lsp.toml"), body).unwrap();
+        }
+        LspConfig::load(Some(&root), init.as_ref())
+    }
+
+    fn b066_ws(dir: &Path, target: &str) -> String {
+        format!(
+            "openplanet_dir = {:?}\ngame_target = {target:?}\n",
+            dir.to_str().unwrap()
+        )
+    }
+
+    /// **The provenance case.** An explicit `openplanet_dir` that happens to
+    /// name the very folder Layer 1 auto-detects must still win over the
+    /// variant re-probe.
+    ///
+    /// This is the only variant that separates recorded provenance from
+    /// provenance inferred by comparing values: at the point the re-probe
+    /// runs, "explicitly set to the Layer-1 default" and "auto-detected" hold
+    /// the SAME path. Every value-comparison fix passes the other seven and
+    /// fails this one.
+    #[test]
+    fn explicit_dir_equal_to_the_layer1_default_survives_the_variant_probe() {
+        let home = b066_home("equal-default", &["OpenplanetNext", "OpenplanetMP4"]);
+        let next = home.join("OpenplanetNext");
+        let cfg = b066_load(&home, Some(&b066_ws(&next, "MP4")), None);
+        assert_eq!(
+            cfg.openplanet_dir.as_deref(),
+            Some(next.as_path()),
+            "an explicitly configured dir must survive the re-probe even when \
+             it equals the dir Layer 1 would have detected"
+        );
+    }
+
+    /// Explicit dir, non-matching target, and the variant folder EXISTS —
+    /// the case that silently replaced a user's configured install.
+    #[test]
+    fn explicit_dir_survives_a_non_matching_target_when_the_variant_exists() {
+        let home = b066_home(
+            "exists",
+            &["OpenplanetNext", "OpenplanetMP4", "custom-install"],
+        );
+        let custom = home.join("custom-install");
+        let cfg = b066_load(&home, Some(&b066_ws(&custom, "MP4")), None);
+        assert_eq!(cfg.openplanet_dir.as_deref(), Some(custom.as_path()));
+    }
+
+    /// Same, with the variant folder ABSENT. Passed before the fix too — the
+    /// probe simply found nothing — so it pins the behaviour rather than
+    /// proving it.
+    #[test]
+    fn explicit_dir_survives_a_non_matching_target_when_the_variant_is_absent() {
+        let home = b066_home("absent", &["OpenplanetNext", "custom-install"]);
+        let custom = home.join("custom-install");
+        let cfg = b066_load(&home, Some(&b066_ws(&custom, "MP4")), None);
+        assert_eq!(cfg.openplanet_dir.as_deref(), Some(custom.as_path()));
+    }
+
+    /// Explicit dir whose target MATCHES it: nothing to re-probe.
+    #[test]
+    fn explicit_dir_with_a_matching_target_is_unchanged() {
+        let home = b066_home("matching", &["OpenplanetNext", "OpenplanetMP4"]);
+        let mp4 = home.join("OpenplanetMP4");
+        let cfg = b066_load(&home, Some(&b066_ws(&mp4, "MP4")), None);
+        assert_eq!(cfg.openplanet_dir.as_deref(), Some(mp4.as_path()));
+    }
+
+    /// GH #45's own behaviour, which must NOT regress: with no explicit dir,
+    /// a non-default target re-probes to its variant folder.
+    #[test]
+    fn auto_detected_dir_is_still_reprobed_for_the_variant_folder() {
+        let home = b066_home("reprobe", &["OpenplanetNext", "OpenplanetMP4"]);
+        let cfg = b066_load(&home, Some("game_target = \"MP4\"\n"), None);
+        assert_eq!(
+            cfg.openplanet_dir.as_deref(),
+            Some(home.join("OpenplanetMP4").as_path()),
+            "with nothing explicit, the re-probe must still follow the target"
+        );
+    }
+
+    /// Explicit via INIT OPTIONS rather than a config file — the other way a
+    /// user sets this, and it must be protected identically.
+    #[test]
+    fn explicit_dir_from_init_options_survives_the_variant_probe() {
+        let home = b066_home(
+            "init-opts",
+            &["OpenplanetNext", "OpenplanetMP4", "custom-install"],
+        );
+        let custom = home.join("custom-install");
+        let cfg = b066_load(
+            &home,
+            None,
+            Some(serde_json::json!({
+                "openplanet_dir": custom.to_str().unwrap(),
+                "game_target": "MP4",
+            })),
+        );
+        assert_eq!(cfg.openplanet_dir.as_deref(), Some(custom.as_path()));
+    }
+
+    /// Explicit via the USER-GLOBAL config. This is the exact shape that
+    /// defeated B039's fixture: a machine-wide `game_target` plus a populated
+    /// variant folder under `$HOME`.
+    #[test]
+    fn explicit_dir_from_the_user_global_config_survives_the_variant_probe() {
+        let home = b066_home(
+            "user-global",
+            &["OpenplanetNext", "OpenplanetMP4", "custom-install"],
+        );
+        let custom = home.join("custom-install");
+        let user_cfg = home.join(".config/openplanet-lsp");
+        std::fs::create_dir_all(&user_cfg).unwrap();
+        std::fs::write(user_cfg.join("config.toml"), b066_ws(&custom, "MP4")).unwrap();
+        let cfg = b066_load(&home, None, None);
+        assert_eq!(cfg.openplanet_dir.as_deref(), Some(custom.as_path()));
+    }
+
+    /// A no-build target (MP3 / NATIONS_FOREVER) returns before the probe, so
+    /// an explicit dir survives and an auto-detected one keeps the TMNEXT
+    /// fallback. Unchanged by this fix; pinned so it stays that way.
+    #[test]
+    fn a_no_build_target_leaves_the_dir_alone() {
+        for target in ["MP3", "NATIONS_FOREVER"] {
+            let home = b066_home("no-build", &["OpenplanetNext", "custom-install"]);
+            let custom = home.join("custom-install");
+
+            let explicit = b066_load(&home, Some(&b066_ws(&custom, target)), None);
+            assert_eq!(
+                explicit.openplanet_dir.as_deref(),
+                Some(custom.as_path()),
+                "{target}: explicit dir must survive"
+            );
+
+            let auto = b066_load(&home, Some(&format!("game_target = {target:?}\n")), None);
+            assert_eq!(
+                auto.openplanet_dir.as_deref(),
+                Some(home.join("OpenplanetNext").as_path()),
+                "{target}: auto-detected dir keeps the TMNEXT fallback"
+            );
+        }
     }
 
     // === Namespace-shortcut config (completion QoL) ===
@@ -2990,7 +3244,7 @@ shortcut_match_enums = true
 "#,
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert_eq!(cfg.shortcut_namespace_list(), vec!["Net", "Audio"]);
         assert!(cfg.shortcut_match_enums);
     }
@@ -3002,7 +3256,7 @@ shortcut_match_enums = true
             "shortcut_disable_default_namespaces": true,
             "shortcut_match_enums": true
         });
-        let cfg = LspConfig::load(None, Some(&opts));
+        let cfg = load_cfg(None, Some(&opts));
         assert_eq!(cfg.shortcut_namespace_list(), vec!["Data"]);
         assert!(cfg.shortcut_match_enums);
     }
@@ -3340,14 +3594,14 @@ shortcut_match_enums = true
         match scenario.as_str() {
             "user-only" => {
                 assert_eq!(
-                    LspConfig::load(None, None).unused_callbacks,
+                    load_cfg(None, None).unused_callbacks,
                     vec!["FromUser"],
                     "the user-global file must reach the public `load` seam"
                 );
             }
             "workspace" => {
                 assert_eq!(
-                    LspConfig::load(Some(&case.join("workspace")), None).unused_callbacks,
+                    load_cfg(Some(&case.join("workspace")), None).unused_callbacks,
                     vec!["FromWorkspace"],
                     "workspace must override user global (B017)"
                 );
@@ -3355,7 +3609,7 @@ shortcut_match_enums = true
             "parent-root" => {
                 let parent = case.join("parent");
                 assert_eq!(
-                    LspConfig::load_with_parent(
+                    load_cfg_with_parent(
                         Some(&case.join("root-without-key")),
                         Some(&parent),
                         None,
@@ -3365,14 +3619,14 @@ shortcut_match_enums = true
                     "parent must override user when the root omits the key"
                 );
                 assert_eq!(
-                    LspConfig::load_with_parent(Some(&case.join("root")), Some(&parent), None)
+                    load_cfg_with_parent(Some(&case.join("root")), Some(&parent), None)
                         .unused_callbacks,
                     vec!["FromRoot"],
                     "root must override parent"
                 );
             }
             "malformed" => {
-                let config = LspConfig::load(Some(&case.join("workspace")), None);
+                let config = load_cfg(Some(&case.join("workspace")), None);
                 assert_eq!(
                     config.unused_callbacks,
                     vec!["FromUser"],
@@ -3443,7 +3697,7 @@ shortcut_match_enums = true
     fn config_file_defines_add_to_target_defines() {
         let tmp = crate::testing::TempDir::new("oplsp-defines-add");
         std::fs::write(tmp.join(".openplanet-lsp.toml"), "defines = [\"DEV\"]\n").unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert!(cfg.defines.contains("DEV"), "custom define missing");
         assert!(
             cfg.defines.contains("TMNEXT"),
@@ -3461,7 +3715,7 @@ shortcut_match_enums = true
     #[test]
     fn init_option_defines_add_to_target_defines() {
         let opts = serde_json::json!({ "defines": ["DEV", "DEBUG_BROWSER"] });
-        let cfg = LspConfig::load(None, Some(&opts));
+        let cfg = load_cfg(None, Some(&opts));
         assert!(cfg.defines.contains("DEV"));
         assert!(cfg.defines.contains("DEBUG_BROWSER"));
         assert!(cfg.defines.contains("TMNEXT"), "{:?}", cfg.defines);
@@ -3473,7 +3727,7 @@ shortcut_match_enums = true
     #[test]
     fn custom_defines_keep_the_selected_game_target_platform() {
         let opts = serde_json::json!({ "game_target": "TURBO", "defines": ["CUSTOM"] });
-        let cfg = LspConfig::load(None, Some(&opts));
+        let cfg = load_cfg(None, Some(&opts));
         assert!(cfg.defines.contains("CUSTOM"));
         assert!(cfg.defines.contains("TURBO"), "{:?}", cfg.defines);
         assert!(
@@ -3493,7 +3747,7 @@ shortcut_match_enums = true
             "defines = [\"DEV\", \"-SIG_DEVELOPER\", \"!LOGS\", \"DEAD\", \"-DEAD\"]\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert!(cfg.defines.contains("DEV"));
         assert!(cfg.defines.contains("TMNEXT"));
         assert!(!cfg.defines.contains("SIG_DEVELOPER"), "-NAME must remove");
@@ -3513,7 +3767,7 @@ shortcut_match_enums = true
     fn explicit_platform_selector_replaces_target_platform() {
         for (listed, dead) in [("MP4", "TMNEXT"), ("TURBO", "TMNEXT"), ("UNITED", "TMNEXT")] {
             let opts = serde_json::json!({ "defines": [listed, "DEV"] });
-            let cfg = LspConfig::load(None, Some(&opts));
+            let cfg = load_cfg(None, Some(&opts));
             assert!(cfg.defines.contains(listed), "listed selector missing");
             assert!(
                 !cfg.defines.contains(dead),
@@ -3530,7 +3784,7 @@ shortcut_match_enums = true
     #[test]
     fn same_family_platform_selector_keeps_the_family() {
         let opts = serde_json::json!({ "game_target": "MP4", "defines": ["MP4", "DEV"] });
-        let cfg = LspConfig::load(None, Some(&opts));
+        let cfg = load_cfg(None, Some(&opts));
         assert!(cfg.defines.contains("MP4"));
         assert!(cfg.defines.contains("MP40"), "{:?}", cfg.defines);
         assert!(cfg.defines.contains("MP41"));
@@ -3556,7 +3810,7 @@ shortcut_match_enums = true
             "defines = [\"ROOT_Y\", \"-PARENT_DROPPED\"]\n",
         )
         .unwrap();
-        let cfg = LspConfig::load_with_parent(Some(&root), Some(&tmp), None);
+        let cfg = load_cfg_with_parent(Some(&root), Some(&tmp), None);
         assert!(cfg.defines.contains("PARENT_X"), "{:?}", cfg.defines);
         assert!(cfg.defines.contains("ROOT_Y"));
         assert!(!cfg.defines.contains("PARENT_DROPPED"));
@@ -3578,7 +3832,7 @@ shortcut_match_enums = true
             "defines = [\"DEV\", \"-MANIFEST_OFF\"]\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert!(cfg.defines.contains("MANIFEST_ON"), "{:?}", cfg.defines);
         assert!(
             !cfg.defines.contains("MANIFEST_OFF"),
@@ -3660,7 +3914,7 @@ shortcut_match_enums = true
             "signature_mode = \"regular\"\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert_eq!(cfg.signature_mode, SignatureMode::Regular);
         assert!(cfg.defines.contains("SIG_OFFICIAL"));
         assert!(cfg.defines.contains("SIG_REGULAR"));
@@ -3679,7 +3933,7 @@ shortcut_match_enums = true
         )
         .unwrap();
         let opts = serde_json::json!({ "signature_mode": "school" });
-        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        let cfg = load_cfg(Some(&tmp), Some(&opts));
         assert_eq!(cfg.signature_mode, SignatureMode::School);
         assert!(cfg.defines.contains("SIG_SCHOOL"));
         assert!(!cfg.defines.contains("SIG_DEVELOPER"));
@@ -3696,7 +3950,7 @@ shortcut_match_enums = true
             "signature_mode = \"banana\"\ngame_target = \"TURBO\"\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert_eq!(cfg.signature_mode, SignatureMode::Developer);
         assert!(cfg.defines.contains("SIG_DEVELOPER"));
         assert_eq!(cfg.game_target, "TURBO", "sibling key must still apply");
@@ -3715,7 +3969,7 @@ shortcut_match_enums = true
             "signature_mode = \"official\"\ndefines = [\"SIG_DEVELOPER\"]\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&add), None);
+        let cfg = load_cfg(Some(&add), None);
         assert!(
             cfg.defines.contains("SIG_DEVELOPER"),
             "explicit add ignored"
@@ -3729,7 +3983,7 @@ shortcut_match_enums = true
             "signature_mode = \"developer\"\ndefines = [\"-SIG_DEVELOPER\"]\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&drop), None);
+        let cfg = load_cfg(Some(&drop), None);
         assert!(!cfg.defines.contains("SIG_DEVELOPER"), "removal ignored");
         assert!(cfg.defines.contains("SIG_SCHOOL"));
     }
@@ -3896,7 +4150,7 @@ shortcut_match_enums = true
             "os_target = \"wine\"\narch_target = \"32\"\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert_eq!(cfg.os_target, OsTarget::Wine);
         assert_eq!(cfg.arch_target, ArchTarget::Arch32);
         assert!(cfg.defines.contains("WINDOWS"), "{:?}", cfg.defines);
@@ -3918,7 +4172,7 @@ shortcut_match_enums = true
             "os_target = \"banana\"\narch_target = \"banana\"\ngame_target = \"TURBO\"\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert_eq!(cfg.os_target, OsTarget::Windows);
         assert_eq!(cfg.arch_target, ArchTarget::Arch64);
         assert_eq!(cfg.game_target, "TURBO", "sibling key must still apply");
@@ -3935,7 +4189,7 @@ shortcut_match_enums = true
         )
         .unwrap();
         let opts = serde_json::json!({ "os_target": "linux", "arch_target": "64" });
-        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        let cfg = load_cfg(Some(&tmp), Some(&opts));
         assert_eq!(cfg.os_target, OsTarget::Linux);
         assert_eq!(cfg.arch_target, ArchTarget::Arch64);
         assert!(cfg.defines.contains("LINUX"));
@@ -3955,7 +4209,7 @@ shortcut_match_enums = true
         )
         .unwrap();
         let opts = serde_json::json!({ "server": true, "logs": false });
-        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        let cfg = load_cfg(Some(&tmp), Some(&opts));
         assert!(cfg.build_flags.server, "init option beats config false");
         assert!(cfg.defines.contains("SERVER"));
         assert!(!cfg.build_flags.logs, "init option beats config true");
@@ -3973,7 +4227,7 @@ shortcut_match_enums = true
             "server = false\nlogs = false\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         assert!(!cfg.build_flags.server);
         assert!(!cfg.build_flags.logs);
         assert!(!cfg.defines.contains("SERVER"), "{:?}", cfg.defines);
@@ -3997,14 +4251,14 @@ shortcut_match_enums = true
             "os_target = \"wine\"\ndefines = [\"-WINDOWS_WINE\"]\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&drop), None);
+        let cfg = load_cfg(Some(&drop), None);
         assert!(!cfg.defines.contains("WINDOWS_WINE"), "removal ignored");
         assert!(cfg.defines.contains("WINDOWS"), "plain WINDOWS survives");
 
         let add = tmp.join("add-linux");
         std::fs::create_dir_all(&add).unwrap();
         std::fs::write(add.join(".openplanet-lsp.toml"), "defines = [\"LINUX\"]\n").unwrap();
-        let cfg = LspConfig::load(Some(&add), None);
+        let cfg = load_cfg(Some(&add), None);
         assert!(cfg.defines.contains("LINUX"), "explicit add ignored");
         assert!(cfg.defines.contains("WINDOWS"), "default os stays live");
     }
@@ -4342,7 +4596,7 @@ shortcut_match_enums = true
             "errors": "first",
             "inactive_regions": "info",
         });
-        let cfg = LspConfig::load(Some(&tmp), Some(&opts));
+        let cfg = load_cfg(Some(&tmp), Some(&opts));
         assert_eq!(cfg.game_target, "MP4");
         assert!(cfg.shortcut_match_enums);
         assert_eq!(cfg.unused, UnusedLevel::Error);
@@ -5105,7 +5359,7 @@ shortcut_match_enums = true
             "opt-missing",
             "optional_dependencies = [\"ZzzNoSuchOptDep99\"]\n",
         );
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         assert!(
             !cfg.defines.contains("DEPENDENCY_ZZZNOSUCHOPTDEP99"),
             "an uninstalled optional dep must not be defined: {:?}",
@@ -5127,7 +5381,7 @@ shortcut_match_enums = true
         );
         b019_install(&plugins, "ZzzReqDep");
         b019_install(&plugins, "ZzzOptDep");
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         assert!(
             cfg.defines.contains("DEPENDENCY_ZZZREQDEP"),
             "{:?}",
@@ -5155,7 +5409,7 @@ shortcut_match_enums = true
         )
         .unwrap();
         zip.finish().unwrap();
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         assert!(
             cfg.defines.contains("DEPENDENCY_ZZZARCHIVED"),
             "an .op archive dependency must resolve: {:?}",
@@ -5171,7 +5425,7 @@ shortcut_match_enums = true
     fn unresolved_required_dependency_is_not_defined_but_is_still_reported() {
         let (_tmp, root, _plugins) =
             b019_plugin("req-missing", "dependencies = [\"ZzzNoSuchReqDep99\"]\n");
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         assert!(
             !cfg.defines.contains("DEPENDENCY_ZZZNOSUCHREQDEP99"),
             "{:?}",
@@ -5199,7 +5453,7 @@ shortcut_match_enums = true
             "export-missing",
             "export_dependencies = [\"ZzzNoSuchExportDep99\"]\n",
         );
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         assert!(
             !cfg.defines.contains("DEPENDENCY_ZZZNOSUCHEXPORTDEP99"),
             "{:?}",
@@ -5222,7 +5476,7 @@ shortcut_match_enums = true
             "export_dependencies = [\"ZzzExportDep\"]\n",
         );
         b019_install(&plugins, "ZzzExportDep");
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         assert!(
             cfg.defines.contains("DEPENDENCY_ZZZEXPORTDEP"),
             "{:?}",
@@ -5252,7 +5506,7 @@ shortcut_match_enums = true
             "define_matrix = [\"DEPENDENCY_ZZZMATRIXDEP99\"]\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         assert!(
             !cfg.defines.contains("DEPENDENCY_ZZZMATRIXDEP99"),
             "the BASE set must not define an unresolved dep: {:?}",
@@ -5292,7 +5546,7 @@ shortcut_match_enums = true
             "defines = [\"DEPENDENCY_ZZZFORCEDDEP99\"]\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         assert!(
             cfg.defines.contains("DEPENDENCY_ZZZFORCEDDEP99"),
             "an explicit `defines` entry must still win: {:?}",
@@ -5323,7 +5577,7 @@ shortcut_match_enums = true
              os_target = \"windows\"\narch_target = \"64\"\ndefines = []\n",
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&tmp), None);
+        let cfg = load_cfg(Some(&tmp), None);
         (cfg, tmp)
     }
 
@@ -5389,7 +5643,7 @@ shortcut_match_enums = true
                 format!("{os_arch}defines = [\"{prefix}{name}\"]\n"),
             )
             .unwrap();
-            let cfg = LspConfig::load(Some(&tmp), None);
+            let cfg = load_cfg(Some(&tmp), None);
             assert!(
                 !cfg.defines.contains(name),
                 "`{prefix}{name}` must still turn the define off"
@@ -5408,7 +5662,7 @@ shortcut_match_enums = true
             "defines = [\"MY_FLAG\", \"-NEVER_SET\"]\n",
         )
         .unwrap();
-        let set = LspConfig::load(Some(&tmp), None).resolved_defines();
+        let set = load_cfg(Some(&tmp), None).resolved_defines();
         assert_resolved(&set, "MY_FLAG", DefineOrigin::User, true, false);
         assert!(
             resolved(&set, "NEVER_SET").is_none(),
@@ -5433,7 +5687,7 @@ shortcut_match_enums = true
         b019_install(&plugins, "ZzzB050Req");
         b019_install(&plugins, "ZzzB050Present");
         b019_install(&plugins, "ZzzB050Export");
-        let set = LspConfig::load(Some(&root), None).resolved_defines();
+        let set = load_cfg(Some(&root), None).resolved_defines();
 
         assert_resolved(&set, "FROM_MANIFEST", DefineOrigin::Manifest, true, true);
         assert_resolved(
@@ -5481,7 +5735,7 @@ shortcut_match_enums = true
             "defines = [\"DEPENDENCY_ZZZB050FORCED99\"]\n",
         )
         .unwrap();
-        let set = LspConfig::load(Some(&root), None).resolved_defines();
+        let set = load_cfg(Some(&root), None).resolved_defines();
         assert_resolved(
             &set,
             "DEPENDENCY_ZZZB050FORCED99",
@@ -5511,7 +5765,7 @@ shortcut_match_enums = true
         )
         .unwrap();
 
-        let set = LspConfig::load_with_parent(Some(&root), Some(&tmp), None).resolved_defines();
+        let set = load_cfg_with_parent(Some(&root), Some(&tmp), None).resolved_defines();
         assert_resolved(&set, "MP41", DefineOrigin::Target, true, true);
         assert_resolved(&set, "MP4", DefineOrigin::Target, true, true);
         assert!(
@@ -5525,8 +5779,7 @@ shortcut_match_enums = true
 
         // Init options are the top of the ladder and must win over both.
         let init = serde_json::json!({ "game_target": "TMNEXT" });
-        let set =
-            LspConfig::load_with_parent(Some(&root), Some(&tmp), Some(&init)).resolved_defines();
+        let set = load_cfg_with_parent(Some(&root), Some(&tmp), Some(&init)).resolved_defines();
         assert_resolved(&set, "TMNEXT", DefineOrigin::Target, true, true);
         assert!(resolved(&set, "MP41").is_none(), "{set:#?}");
     }
@@ -5564,7 +5817,7 @@ shortcut_match_enums = true
             ),
         )
         .unwrap();
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         let set = cfg.resolved_defines();
         for name in &cfg.defines {
             let row = resolved(&set, name)
@@ -5603,7 +5856,7 @@ shortcut_match_enums = true
                 &format!("optional_dependencies = [\"{first}\", \"{second}\"]\n"),
             );
             b019_install(&plugins, installed);
-            let cfg = LspConfig::load(Some(&root), None);
+            let cfg = load_cfg(Some(&root), None);
             assert!(
                 cfg.defines.contains("DEPENDENCY_ZZZB050_COLLIDE"),
                 "one colliding id resolved, so the macro is defined: {:?}",
@@ -5628,7 +5881,7 @@ shortcut_match_enums = true
             "b050-collide-none",
             "optional_dependencies = [\"ZzzB050-gone99\", \"ZzzB050.gone99\"]\n",
         );
-        let cfg = LspConfig::load(Some(&root), None);
+        let cfg = load_cfg(Some(&root), None);
         assert!(!cfg.defines.contains("DEPENDENCY_ZZZB050_GONE99"));
         assert_resolved(
             &cfg.resolved_defines(),

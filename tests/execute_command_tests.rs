@@ -69,25 +69,52 @@ impl Fixture {
 
 /// A plugin root, plus the `OpenplanetNext` dir its config points at.
 ///
-/// Every fixture pins BOTH `openplanet_dir` — an EMPTY one when `with_typedb`
-/// is false — and `game_target`. Left unset, `LspConfig` auto-detects
-/// `$HOME/OpenplanetNext`, so on a developer machine with the game installed
-/// these tests would silently load that person's real type database: slow, and
-/// a different answer per machine.
+/// Every fixture pins `openplanet_dir` — an EMPTY one when `with_typedb` is
+/// false. Left unset, `LspConfig` auto-detects `$HOME/OpenplanetNext`, so on a
+/// developer machine with the game installed these tests would silently load
+/// that person's real type database: slow, and a different answer per machine.
 ///
-/// `game_target` has to be pinned too, and the reason is B066 rather than
-/// tidiness. The directory is named `OpenplanetNext` so the variant re-probe
-/// (GH #45) sees a matching folder and returns before touching `$HOME` — but
-/// that match is against the RESOLVED target, and the user-global
-/// `~/.config/openplanet-lsp/config.toml` gets a say in that. A developer
-/// whose global config sets `game_target = "MP4"` makes the re-probe look for
-/// `OpenplanetMP4`, miss, and reach for `$HOME/OpenplanetMP4` — and B066 is
-/// that the guard meant to protect an explicit `openplanet_dir` there is
-/// always true, so the pin above is silently replaced. Observed, not
-/// theorised: with a synthetic HOME carrying that config, the EMPTY-fixture
-/// test loaded a full 4276-symbol database. Pinning the target keeps the
-/// folder name matching so the re-probe returns early. When B066 is fixed
-/// this pin should stop being load-bearing; do not remove it before then.
+/// `game_target` USED to be pinned here as well, and not for tidiness: B066
+/// meant the GH #45 variant re-probe replaced an explicit `openplanet_dir`
+/// with `$HOME/<variant>` whenever the resolved target named a different
+/// folder — and the user-global `~/.config/openplanet-lsp/config.toml` gets a
+/// say in that target. Observed, not theorised: with a synthetic HOME whose
+/// global config set `game_target = "MP4"`, the EMPTY-fixture test loaded a
+/// full 4276-symbol database straight through the pin. Pinning the target kept
+/// the folder name matching so the re-probe returned early.
+///
+/// B066 records the dir's provenance instead of inferring it from the value,
+/// so an explicit `openplanet_dir` now survives any target and that job is
+/// done. Measured three ways under exactly the hostile HOME above, because
+/// this suite cannot discriminate the fix while the pin is present — with the
+/// pin, the resolved target is TMNEXT, the re-probe sees a matching folder
+/// name and returns early whether or not B066 is fixed:
+///
+/// | pin     | B066    | result                                          |
+/// |---------|---------|-------------------------------------------------|
+/// | removed | fixed   | fails loudly: "type database paths not configured" |
+/// | removed | REVERTED| **passes** — silently regenerates off `$HOME/OpenplanetMP4` |
+/// | present | fixed   | passes correctly                                |
+///
+/// The middle row is the defect: a fixture pinning an EMPTY `openplanet_dir`
+/// still regenerated a full database. A test that passes only because the
+/// bug is present is the sharpest evidence available here.
+///
+/// The pin stays, for a DIFFERENT and narrower reason that B066 was masking.
+/// `game_target` also picks the game database FILENAME
+/// (`game_json_filename_for_target`), and this fixture ships
+/// `OpenplanetNext.json`. Under a global `game_target = "MP4"` the ladder now
+/// correctly keeps the pinned directory and then looks in it for
+/// `OpenplanetMP4.json`, which is not there — so regeneration reports "type
+/// database paths not configured". That is the right answer to a wrong
+/// question, and it is loud rather than silent: before B066 the same setup
+/// swapped in `$HOME/OpenplanetMP4` and reported `{"ok":true}` off the
+/// developer's real install.
+///
+/// So the pin is no longer a B066 workaround; it is the fixture declaring
+/// which database it ships, which is what keeps this test independent of the
+/// developer's global config (B045). Removing it would reintroduce that
+/// dependency.
 ///
 /// Worth knowing before trusting any assertion here to prove WHICH database
 /// loaded: it cannot. The fixtures are refreshed from a real install

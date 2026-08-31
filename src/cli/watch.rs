@@ -527,6 +527,7 @@ mod tests {
 
     #[test]
     fn startup_runs_exactly_one_check() {
+        let _env = crate::testing::env_lock();
         let calls = Arc::new(AtomicUsize::new(0));
         let calls2 = Arc::clone(&calls);
         let checker: Arc<dyn Fn(&CheckOptions) -> Result<CheckReport, CliError> + Send + Sync> =
@@ -571,6 +572,7 @@ mod tests {
 
     #[test]
     fn edits_during_check_coalesce_to_one_followup() {
+        let _env = crate::testing::env_lock();
         let phase = Arc::new(Mutex::new(0u32));
         let phase2 = Arc::clone(&phase);
         let checker: Arc<dyn Fn(&CheckOptions) -> Result<CheckReport, CliError> + Send + Sync> =
@@ -665,6 +667,7 @@ mod tests {
 
     #[test]
     fn workspace_config_write_retriggers_check() {
+        let _env = crate::testing::env_lock();
         let root = temp_plugin("ws");
         let calls = Arc::new(AtomicUsize::new(0));
         let calls2 = Arc::clone(&calls);
@@ -694,6 +697,7 @@ mod tests {
 
     #[test]
     fn user_config_write_retriggers_check() {
+        let _env = crate::testing::env_lock();
         let root = temp_plugin("user");
         let home = root.parent().unwrap().join(format!(
             "openplanet-lsp-watch-home-{}-{}",
@@ -737,6 +741,7 @@ mod tests {
 
     #[test]
     fn invalid_config_toml_does_not_retrigger() {
+        let _env = crate::testing::env_lock();
         let root = temp_plugin("invalid");
         let checker: Arc<dyn Fn(&CheckOptions) -> Result<CheckReport, CliError> + Send + Sync> =
             Arc::new(run_check);
