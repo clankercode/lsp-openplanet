@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T15:23:35Z"
+depends_on: []
+estimate_hours: 1
+id: B141
+priority: high
+status: pending
+tags: []
+title: 'Three probe scripts are reachable only by direct python3 invocation: probe_const_receiver, probe_member_visibility and probe_engine_const_receiver have no justfile target and no --selftest'
+updated_at: "2026-08-31T15:23:35Z"
+---
+
+Three probe scripts are reachable only by direct python3 invocation: probe_const_receiver, probe_member_visibility and probe_engine_const_receiver have no justfile target and no --selftest
