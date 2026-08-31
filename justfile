@@ -142,6 +142,14 @@ probe-export-binding *ARGS:
 probe-export-binding-selftest:
     python3 scripts/probe_export_binding.py --selftest
 
+# Prove remote-build's own guards are non-vacuous: remove the unresolved-merge
+# refusal and confirm a conflicted tree reaches the remote, plus five
+# OVER-CONDEMN mutations — gating uncommitted work is the normal lane workflow,
+# so a guard that refuses a dirty tree, or attributes the main checkout's merge
+# to every worktree, would stop all five lanes at once (B132).
+remote-build-mutants:
+    python3 scripts/check_remote_build_nonvacuous.py
+
 # Offline checks for the two functions that decide whether a build succeeded
 # (`build_verdict`) and whether a plugin shows parity (`verdict`). Neither had
 # a test of its own, which is how `verdict` kept reporting PARITY-CLEAN for

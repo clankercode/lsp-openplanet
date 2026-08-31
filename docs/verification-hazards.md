@@ -2129,6 +2129,71 @@ which is more than can be said for "think harder about your silence tests".
 **Corollary for reviewers.** A red/green report saying "11 failed, 4 passed" is
 not fully good news. The 4 are the ones to ask about.
 
+## The remote gate cannot see the git index — it copies FILES (B132)
+
+Found by incident, not review. A peer session began merging its lane into the
+shared main checkout while the coordinator ran `just rclippy-delta` on what it
+believed was its own post-merge master. The gate rsynced the peer's
+**conflicted working tree** and returned:
+
+    ADDED src/typecheck/checker.rs (new): encountered diff marker
+    clippy checked zero workspace units, so it found nothing because it looked
+    at nothing.
+
+**The verdict was right** — B083's zero-units guard refused correctly. **The
+diagnosis was the defect.** Nothing in that message says another session is
+mid-merge in your checkout, so it reads as *your code does not compile*.
+
+**This is the third infrastructure condition in one batch reported as a code
+defect**, after B106's full disk on x-alpha and a name-filtered run printing a
+green summary. The shape is identical every time: *the tool reports what it
+saw rather than why it could not see.* Worth naming as a class, because the fix
+is never in the checker that fired — it is a missing pre-flight that would have
+named the real condition first.
+
+The mechanism, so it is not re-derived: **the remote gate does not and cannot
+see the git index. It copies the FILES.** An unresolved merge, a half-written
+edit, any dirty tree is measured as source, and `<<<<<<<` arrives at the
+compiler as syntax.
+
+### Refuse on the OPERATION, never on the tree
+
+The guard refuses on `MERGE_HEAD` / `REBASE_HEAD` / `rebase-merge/` /
+`rebase-apply/` / `CHERRY_PICK_HEAD` / `REVERT_HEAD`, and **never on a dirty
+tree**. Gating uncommitted work is the normal lane workflow — every lane does
+it on every run — so a guard that fired on dirty would be a far worse
+regression than the defect it fixed. `BISECT_LOG` is deliberately excluded: a
+bisect checks out real commits and cannot produce a conflict marker, so
+refusing there costs a legitimate workflow to prevent an impossible failure.
+
+**Operation state is PER-WORKTREE and resolving it by hand would have been an
+outage.** A merge in the main checkout lives in `.git/`; a linked worktree's
+lives in `.git/worktrees/<name>/`. Joining `root/.git` by hand attributes the
+coordinator's merge to every lane and stops all of them at once. Asking
+`git rev-parse --absolute-git-dir` is what gets this right, and a mutation
+swapping it for `--git-common-dir` is in the suite precisely because that
+change looks harmless.
+
+### Two vacuity shapes this ticket produced, both found only by mutation
+
+**1. A test block placed after the check that reads its results.** The B132
+cases appended to `problems`, but the block landed BELOW `if problems: return
+1`, so nothing ever examined them. **Every one of ~120 lines of new test passed
+unconditionally.** The mutation run scored 0/10 with a green baseline — and
+*that* pattern, everything missed while the baseline passes, is the signature
+of a suite whose assertions are not reached at all, as against the usual one or
+two vacuous guards.
+
+**2. A test that derives its expectations from the table under test.** The
+sentinel loop iterated `GIT_OPERATION_SENTINELS` itself, so deleting
+`CHERRY_PICK_HEAD` from the table did not fail the suite — it simply stopped
+testing it. **A test that reads its expectations from the thing under test
+cannot see an omission**, only a malfunction. The required operations are now
+asserted by the filename git actually writes, independent of the table.
+
+Both were invisible by inspection; both were found by mutation, in a ticket
+whose author had written the mutation-testing rule two tickets earlier.
+
 ## The parity tool reported PARITY-CLEAN for builds that never happened (B127)
 
 The B123 finding, followed to every consumer that had been deriving build
