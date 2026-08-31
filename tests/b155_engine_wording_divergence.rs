@@ -1,6 +1,6 @@
-//! B155: the engine names an assignment target as a REFERENCE and ends the
-//! message with a full stop; our diagnostic does neither. That divergence is
-//! deliberate and documented in `checker.rs` — this file makes it CHECKED.
+//! B155/B160: the engine names an assignment target as a REFERENCE and ends
+//! the message with a full stop. B155 measured and pinned the old divergence;
+//! B160 adopted the engine spelling exactly.
 //!
 //! # What was measured (B148 regeneration, OP 1.29.14)
 //!
@@ -14,34 +14,19 @@
 //! Can't implicitly convert from '<function>@const' to 'FDB144CHFq4val@&'.
 //! ```
 //!
-//! Ours renders `Can't implicitly convert from 'int' to 'VirtualKey'` — no
-//! `&`, no full stop. B148 recorded three rows as WORDING-CHANGED and ZERO as
-//! behaviour-changed, so nothing about the RULES follows from this.
+//! Before B160 ours rendered `Can't implicitly convert from 'int' to
+//! 'VirtualKey'` — no `&`, no full stop. B148 recorded three rows as
+//! WORDING-CHANGED and ZERO as behaviour-changed, so nothing about the RULES
+//! follows from this.
 //!
-//! # Why this file exists rather than a fix
+//! # Why the relationship test remains after the fix
 //!
-//! The divergence is a product decision, and the repo currently states BOTH
-//! sides of it in different places:
-//!
-//!   * `checker.rs` (B148): "Our own diagnostic deliberately keeps the
-//!     unsuffixed spelling. The `&` is an artifact of how the engine models
-//!     assignment, not part of the type the user wrote."
-//!   * `b071_enum_type_mismatch.rs`: "Asserted by message text because the
-//!     engine's wording is part of the requirement, not an implementation
-//!     detail", and "the messages below match it so a user searching an error
-//!     string finds both tools" — quoting a string that today matches neither
-//!     the engine (no `&`) nor our output (it has the full stop).
-//!
-//! Changing the wording is a user-visible behaviour change touching 15
-//! exact-string assertions, so it is Max's call, not an automatic fix. What
-//! IS automatic is refusing to let the divergence drift: these tests derive
-//! the engine's spelling FROM the corpora and assert that the difference is
-//! EXACTLY "drop the target's `&`, drop the trailing `.`" and nothing else.
-//! If the engine's wording moves again, or ours does, this fails and names
-//! the new difference instead of leaving a stale comment behind.
-//!
-//! Flipping the decision is then a one-line change to the renderer plus this
-//! file's `DIVERGENCE` transform.
+//! The measured strings still come FROM the corpora. B160 inverted B155's
+//! documented transform: instead of dropping the engine's two marks to model
+//! the old local spelling, `legacy_local_text_to_engine` adds those marks and
+//! must reproduce each measured engine row character-for-character. The same
+//! test then requires the live renderer to equal that row. If either the
+//! engine corpus or our renderer moves, the failure names the new difference.
 
 use std::path::PathBuf;
 
@@ -50,14 +35,22 @@ use openplanet_lsp::server::diagnostics::compute_diagnostics;
 use openplanet_lsp::typedb::TypeIndex;
 use tower_lsp::lsp_types::{DiagnosticSeverity, Url};
 
-/// The documented divergence, as a transform from the ENGINE's text to ours:
-/// drop the trailing full stop, then drop a `&` immediately before the
-/// closing quote of the target. Nothing else.
-fn engine_text_to_ours(engine: &str) -> String {
-    engine
+/// B160's inverse of B155's transform: take the former local spelling and add
+/// a reference marker to the target plus the final full stop. Already-adopted
+/// text passes through unchanged, which keeps this helper safe for controls.
+fn legacy_local_text_to_engine(local: &str) -> String {
+    let mut out = local.to_string();
+    if !out.ends_with('.') {
+        out.push('.');
+    }
+    let target_quote = out
         .strip_suffix('.')
-        .unwrap_or(engine)
-        .replace("&'", "'")
+        .and_then(|s| s.rfind('\''))
+        .expect("conversion diagnostic must end with a quoted target");
+    if !out[..target_quote].ends_with('&') {
+        out.insert(target_quote, '&');
+    }
+    out
 }
 
 fn probe_dir() -> PathBuf {
@@ -221,12 +214,12 @@ fn the_extractor_reads_measurements_and_not_prose() {
 }
 
 // ---------------------------------------------------------------------------
-// Our side, and the exact shape of the difference
+// Our side, and its exact relationship to the measured engine spelling
 // ---------------------------------------------------------------------------
 
-/// Our renderer omits both marks, at every site that produces this message.
+/// Our renderer adopts both engine marks at every site producing this message.
 #[test]
-fn our_diagnostic_omits_the_reference_marker_and_the_full_stop() {
+fn our_diagnostic_uses_the_reference_marker_and_the_full_stop() {
     let sources = [
         // enum -> different enum (workspace)
         "enum LocalOne { X }\nenum LocalTwo { Y }\n\
@@ -241,11 +234,8 @@ fn our_diagnostic_omits_the_reference_marker_and_the_full_stop() {
                 continue;
             }
             seen += 1;
-            assert!(!m.contains("&'"), "ours must not suffix the target: {m:?}");
-            assert!(
-                !m.ends_with('.'),
-                "ours must not end with a full stop: {m:?}"
-            );
+            assert!(m.contains("&'"), "ours must suffix the target: {m:?}");
+            assert!(m.ends_with('.'), "ours must end with a full stop: {m:?}");
         }
     }
     assert!(
@@ -255,25 +245,26 @@ fn our_diagnostic_omits_the_reference_marker_and_the_full_stop() {
     );
 }
 
-/// The load-bearing one: the difference is EXACTLY the documented transform.
-/// Each engine row is converted by `engine_text_to_ours` and must equal our
-/// text character for character. If the engine's wording moves in any other
-/// way — or ours does — this fails and names the mismatch, instead of a code
-/// comment quietly going stale the way b071's header did.
+/// The load-bearing one: the inverse transform must reconstruct the measured
+/// engine row, and our live renderer must equal that row character for
+/// character. The transform stays checked rather than being deleted now that
+/// the two sides agree.
 #[test]
-fn the_divergence_is_exactly_the_documented_transform() {
+fn the_renderer_is_exactly_the_corpus_derived_engine_spelling() {
     let cases = [
         (
             "Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.",
+            "Can't implicitly convert from 'LocalOne' to 'LocalTwo'",
             "enum LocalOne { X }\nenum LocalTwo { Y }\n\
              void f() { LocalOne c = LocalOne::X; LocalTwo d = c; print('' + int(d)); }",
         ),
         (
             "Can't implicitly convert from 'int' to 'VirtualKey&'.",
+            "Can't implicitly convert from 'int' to 'VirtualKey'",
             "void f() { int a = 0; VirtualKey b = a; print('' + int(b)); }",
         ),
     ];
-    for (engine, src) in cases {
+    for (engine, legacy_local, src) in cases {
         // The engine string is not hardcoded folklore: it must be one the
         // corpora actually measured.
         assert!(
@@ -281,7 +272,11 @@ fn the_divergence_is_exactly_the_documented_transform() {
             "{engine:?} is not in any probe corpus — update the case, do not \
              invent engine text"
         );
-        let expected = engine_text_to_ours(engine);
+        let expected = legacy_local_text_to_engine(legacy_local);
+        assert_eq!(
+            expected, engine,
+            "the inverted transform must reproduce the measured engine row"
+        );
         let ours = our_errors(src);
         assert!(
             ours.iter().any(|m| m == &expected),
@@ -290,18 +285,18 @@ fn the_divergence_is_exactly_the_documented_transform() {
     }
 }
 
-/// Control: the transform is capable of changing a string, and leaves an
-/// already-unsuffixed message alone. Without this, `engine_text_to_ours`
-/// could be the identity function and every assertion above would still pass.
+/// Control: the inverted transform changes legacy text and leaves text already
+/// using the engine spelling alone. Without this, it could silently become an
+/// identity function and the relationship assertion would lose its subject.
 #[test]
-fn the_documented_transform_actually_transforms() {
+fn the_inverted_transform_actually_transforms() {
     assert_eq!(
-        engine_text_to_ours("Can't implicitly convert from 'int' to 'VirtualKey&'."),
-        "Can't implicitly convert from 'int' to 'VirtualKey'"
+        legacy_local_text_to_engine("Can't implicitly convert from 'int' to 'VirtualKey'"),
+        "Can't implicitly convert from 'int' to 'VirtualKey&'."
     );
     assert_eq!(
-        engine_text_to_ours("Can't implicitly convert from 'A' to 'B'"),
-        "Can't implicitly convert from 'A' to 'B'",
-        "an already-unsuffixed message must pass through unchanged"
+        legacy_local_text_to_engine("Can't implicitly convert from 'A' to 'B&'."),
+        "Can't implicitly convert from 'A' to 'B&'.",
+        "an already-adopted message must pass through unchanged"
     );
 }

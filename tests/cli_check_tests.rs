@@ -5609,12 +5609,12 @@ fn b091_the_declaration_position_names_the_offered_signature() {
     for (line, expected) in [
         (
             76,
-            "Can't implicitly convert from 'void()' to 'CoroutineFunc@'",
+            "Can't implicitly convert from 'void()' to 'CoroutineFunc@&'.",
         ),
-        (77, "Can't implicitly convert from 'void()' to 'Job@'"),
+        (77, "Can't implicitly convert from 'void()' to 'Job@&'."),
         (
             78,
-            "Can't implicitly convert from 'void()' to 'CoroutineFunc@'",
+            "Can't implicitly convert from 'void()' to 'CoroutineFunc@&'.",
         ),
     ] {
         assert!(

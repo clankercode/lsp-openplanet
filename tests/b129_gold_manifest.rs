@@ -25,12 +25,12 @@ use std::path::PathBuf;
 /// Data rows currently expected. Not a target to edit freely: raising it is
 /// how a new corpus gets registered, and LOWERING it is how one gets deleted,
 /// so both directions are a reviewed change.
-const EXPECTED_MANIFEST_ROWS: usize = 17;
+const EXPECTED_MANIFEST_ROWS: usize = 18;
 
 /// `.tsv` corpora expected in `docs/probes/`. Separate from the manifest row
 /// count because the manifest also carries TYPEDB and PRIMARY rows that are
 /// not files in that directory.
-const EXPECTED_TSV_CORPORA: usize = 11;
+const EXPECTED_TSV_CORPORA: usize = 12;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

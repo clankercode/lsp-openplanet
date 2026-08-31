@@ -256,7 +256,7 @@ pub enum TypeDiagnosticKind {
     UnreachableCode,
     /// GH #49: no implicit conversion exists between distinct math value
     /// types (`int3 size = map.Size;` — nat3 → int3). Game wording:
-    /// `Can't implicitly convert from 'const nat3' to 'int3'`.
+    /// `Can't implicitly convert from 'const nat3' to 'int3&'.`
     NoImplicitConversion {
         from: String,
         to: String,
@@ -477,7 +477,7 @@ impl TypeDiagnostic {
             }
             TypeDiagnosticKind::UnreachableCode => "Unreachable code".to_string(),
             TypeDiagnosticKind::NoImplicitConversion { from, to } => {
-                format!("Can't implicitly convert from '{from}' to '{to}'")
+                format!("Can't implicitly convert from '{from}' to '{to}&'.")
             }
             TypeDiagnosticKind::NoMatchingSignatures { text } => {
                 format!("No matching signatures to '{text}'")
@@ -2037,7 +2037,7 @@ impl<'a> Checker<'a> {
         }
         // GH #49: distinct math value types (nat3/int3/vec*/iso*/quat) have
         // no implicit conversion — the game rejects the initializer with
-        // `Can't implicitly convert from 'const nat3' to 'int3'`.
+        // `Can't implicitly convert from 'const nat3' to 'int3&'.`
         if let (TypeRepr::Named(target_n), TypeRepr::Named(source_n)) = (target, source) {
             if is_math_value_type(target_n) && is_math_value_type(source_n) && target_n != source_n
             {
@@ -2175,20 +2175,18 @@ impl<'a> Checker<'a> {
     /// rules are unaltered and nothing about this function's logic follows
     /// from the difference.
     ///
-    /// **Our own diagnostic deliberately keeps the unsuffixed spelling** (and
-    /// drops the engine's trailing full stop). The `&` is an artifact of how
-    /// the engine models assignment, not part of the type the user wrote, and
-    /// `to 'LocalTwo'` is what a reader is looking for. That is a deliberate
-    /// divergence from b071's "match the engine's own text" guidance.
+    /// B160 resolved the product decision in favour of exact engine spelling:
+    /// our renderer now includes both the target-reference `&` and the final
+    /// full stop. The 15 exact-string assertions in
+    /// `b071_enum_type_mismatch` and `cli_check_tests` pin that choice.
     ///
-    /// B155 made it CHECKED rather than merely recorded:
+    /// B155/B160 keep the relationship CHECKED rather than merely recorded:
     /// `tests/b155_engine_wording_divergence.rs` derives the engine's spelling
     /// from the probe corpora (22 of 22 measured messages carry BOTH marks,
-    /// across b071 and b144) and asserts the difference is exactly "drop the
-    /// target's `&`, drop the trailing `.`" and nothing else. Flipping the
-    /// decision is a one-line change to the renderer above plus that file's
-    /// transform — the 15 exact-string assertions in `b071_enum_type_mismatch`
-    /// and `cli_check_tests` are the rest of the blast radius.
+    /// across b071 and b144 when B160 landed). B160 inverted the old drop
+    /// transform: it adds both marks to the former local spelling, must
+    /// reproduce a measured engine row character-for-character, and then
+    /// requires the live renderer to equal that row.
     ///
     /// The converse of the second is LEGAL — `int i = LocalOne::X;` compiles,
     /// because an enum value decays to `int`. That asymmetry is the trap: a
@@ -3310,8 +3308,8 @@ impl<'a> Checker<'a> {
     /// function.
     ///
     /// Without this the message reads `Can't implicitly convert from 'G' to
-    /// 'F@'`, naming an identifier where a type belongs and hiding the very
-    /// thing that differs. `from 'int()' to 'F@'` shows the mismatch and
+    /// 'F@&'.`, naming an identifier where a type belongs and hiding the very
+    /// thing that differs. `from 'int()' to 'F@&'.` shows the mismatch and
     /// matches how the engine words it. Falls back to the type display when
     /// the reference is overloaded or does not resolve, since then there is
     /// no single signature to name.
@@ -3655,7 +3653,7 @@ impl<'a> Checker<'a> {
     /// type.
     ///
     /// Reuses [`Self::funcdef_binding_source_display`], which is what already
-    /// produces `Can't implicitly convert from 'void()' to 'CoroutineFunc@'`
+    /// produces `Can't implicitly convert from 'void()' to 'CoroutineFunc@&'.`
     /// at the DECLARATION position — the same argument shape, one message
     /// away. Deliberately not `render_func_or_type`, which B108 names:
     /// that one emits `"{} ({})"` with a space and takes `sigs.first()`,
@@ -3936,23 +3934,19 @@ impl<'a> Checker<'a> {
             // there is no seam for the engine to insert a numeric conversion
             // into and a `double()` cannot stand in for an `int()`.
             //
-            // REASONED, not probed — and NOTE THE DATE ON THAT EXCUSE. It
-            // read "B097 blocks probing repo-wide"; B097 is fixed, the game
-            // is reachable, and B144 has since measured the sibling `const`
-            // axis through exactly this predicate. So this arm is now
-            // CHEAPLY MEASURABLE AND STILL UNMEASURED, which is a different
-            // and more actionable state than the one this comment used to
-            // describe. See `b110_a_bare_int_handler_no_longer_binds_the_int64_userdata_slot`
-            // for the one pair that would settle it.
+            // MEASURED by B165, OP 1.29.14, 2026-09-01. The live engine
+            // rejects the real `void H(int)` / `startnew(H, 1)` seam, plus
+            // int/int64 and uint/uint64 in both directions and signed/unsigned
+            // crossings at 32 and 64 bits. Both oracle controls behaved.
+            // See `docs/probes/b165-primitive-funcdef.tsv`.
             //
-            // The reasoning is corroborated rather than assumed. B027 measured
-            // the sibling axis: any plain/`&in`/`&out`/`&inout` MODE mismatch
-            // is `Can't create delegate` (OP 1.29.5, 2026-08-29), so
-            // exactness is already the rule for how a parameter is passed;
-            // this says it is also the rule for what type it is. See
-            // `tests/b110_funcdef_signature_exactness.rs` for the fleet
-            // measurement that decided it and for the one pair
-            // (`int` at an `int64` slot) that no shipped plugin exercises.
+            // The risk audit was repeated after measuring: a temporary
+            // old-vs-exact marker reached 408 comparisons over 151 shipped
+            // plugin dirs plus five in-repo fixtures. Every hit was one of
+            // the four known overload-sibling pairs (int64 <-> uint64 and
+            // either -> double); no int <-> int64 hit or reference-data
+            // defect appeared. An exactly matching sibling still accepts at
+            // those calls, pinned by the typedb-backed startnew test below.
             //
             // Value conversions elsewhere are untouched and correct:
             // `int x = someDouble;` really is a conversion, and
@@ -12175,41 +12169,18 @@ void Main() {
         }
     }
 
-    /// THE ONE ROW THAT IS REASONED RATHER THAN MEASURED, isolated so it is
-    /// visible and revisitable instead of buried in the lattice.
+    /// B165's directly measured real built-in seam, isolated rather than
+    /// relying only on the exhaustive local-funcdef lattice.
     ///
     /// A handler declared with a BARE `int` at the `int64` userdata slot is
-    /// accepted before this change and rejected after. No plugin in the
-    /// 151-plugin corpus writes it: the instrumented sweep never printed an
-    /// `int -> int64` pair, and the single apparent source-level hit was a
-    /// different plugin's `void DownloadTmxMapToLocal(ref@)`. So the fleet
-    /// gives no evidence either way for this pair — only for the four it does
-    /// exercise.
-    ///
-    /// What stands behind it: a delegate has no conversion seam; B027
-    /// measured the sibling MODE axis as exact (`Can't create delegate`, OP
-    /// 1.29.5); and 151 plugins write `int64`/`uint64`/`double` handlers and
-    /// never `int`, which is what you would expect if only the exact type
-    /// binds.
-    ///
-    /// B152: **B097 IS FIXED AND THIS IS STILL UNMEASURED.** The note used to
-    /// read "B097 blocks the probe that would settle it. Re-measure when it is
-    /// fixed" — and it was left standing after B097 was fixed, which is how a
-    /// blocked-probe excuse outlives the block. B144 measured the neighbouring
-    /// `const` axis through this same predicate in one probe run, so the cost
-    /// of settling this is a handful of variants
-    /// (`scripts/probe_const_handle_funcdef.py` is the working model:
-    /// `void H(int v)` at `startnew(H, 1)`, against the
-    /// `CoroutineFuncUserdataInt64` slot, with a matching `int64` handler as
-    /// the ACCEPT control).
-    ///
-    /// Deliberately NOT taken here: it is a different axis from B152's, and a
-    /// contradiction would be a behaviour change arriving after this lane was
-    /// gated. Ticketed instead. What changed is only the honesty of the note —
-    /// "no oracle exists" became "an oracle exists and nobody has used it",
-    /// which is the state a future lane can act on.
+    /// rejected by the engine itself: B165's `startnew` row reports `No
+    /// matching signatures`, and all eight generalized width/sign directions
+    /// reject too (`docs/probes/b165-primitive-funcdef.tsv`). No plugin in the
+    /// 151-plugin corpus writes the bare-int shape; the exposure sweep still
+    /// reaches 408 neighbouring overload comparisons, so that zero is a real
+    /// population result rather than a dead instrument.
     #[test]
-    fn b110_a_bare_int_handler_no_longer_binds_the_int64_userdata_slot() {
+    fn b165_a_bare_int_handler_does_not_bind_the_int64_userdata_slot() {
         let diags = check_with_typedb("void H(int v) { }\nvoid Render() { startnew(H, 1); }");
         assert!(
             diags

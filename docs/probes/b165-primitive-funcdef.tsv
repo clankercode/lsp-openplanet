@@ -1,0 +1,36 @@
+# B165 primitive funcdef exactness, probed against the live game.
+#
+# Openplanet 1.29.14 (next, Public, 6fd4200f), 2026-09-01.
+# Generator: python3 scripts/probe_const_handle_funcdef.py --b165-primitive --tsv <this file>
+#
+# THE QUESTION. Does a primitive handler bind a funcdef slot through ordinary
+# numeric conversion, or is a funcdef signature exact about primitive width
+# and signedness? The real motivating seam is `void H(int)` offered to
+# `startnew`, whose integer-userdata callback is `void(int64)`.
+#
+# THE ANSWER. Exact. The real startnew row rejects, as do int/int64 and
+# uint/uint64 in both directions and signed/unsigned crossings at both 32 and
+# 64 bits. The exact int64/int64 control accepts and the bogus-symbol control
+# rejects, proving both oracle polarities were live.
+#
+# FLEET EXPOSURE. Before preserving B110's exact checker rule, a temporary
+# marker re-ran its old-vs-exact disagreement over 151 shipped plugin dirs plus
+# five in-repo fixture plugins: 408 comparisons were exposed, all four known
+# overload-sibling pairs (int64<->uint64 and either ->double). No int<->int64
+# hit and no reference-data defect appeared. The exact sibling still binds at
+# each call, which B110's typedb-backed startnew tripwire holds shut.
+#
+# `expect` is ACCEPT/REJECT for CONTROL rows and UNKNOWN for question rows;
+# a control whose verdict does not match its expectation invalidates the run.
+id	question	expect	verdict	build_status	engine_messages	stands_for
+b165-primitive-ctl-valid	control	ACCEPT	ACCEPT	CLEAN	-	an exactly matching primitive funcdef signature
+b165-primitive-ctl-bogus	control	REJECT	REJECT	REJECTED	(4,1) INFO: Compiling void UseB165PFb165primitivectlbogus() || (4,41) ERR: No matching symbol 'NoSuchFunctionB165PFb165primitivectlbogus'	a definitely-invalid call; proves the oracle sees errors
+b165-primitive-startnew-int-int64	Q9-primitive	UNKNOWN	REJECT	REJECTED	(5,1) INFO: Compiling void UseB165PFb165primitivestartnewintint64() || (5,49) ERR: No matching signatures to 'startnew(::FB165PFb165primitivestartnewintint64, const int)' || (5,49) INFO: Candidates are: || (5,49) INFO: awaitable@ startnew(CoroutineFunc@ func) || (5,49) INFO: awaitable@ startnew(CoroutineFuncUserdata@ func, ref userdata) || (5,49) INFO: Rejected due to type mismatch on parameter 'func' || (5,49) INFO: awaitable@ startnew(CoroutineFuncUserdataInt64@ func, const int userdata) || (5,49) INFO: Rejected due to type mismatch on parameter 'func' || (5,49) INFO: awaitable@ startnew(CoroutineFuncUserdataInt64@ func, const int64 userdata) || (5,49) INFO: Rejected due to type mismatch on parameter 'func' || (5,49) INFO: awaitable@ startnew(CoroutineFuncUserdataUint64@ func, const uint userdata) || (5,49) INFO: Rejected due to type mismatch on parameter 'func' || (5,49) INFO: awaitable@ startnew(CoroutineFuncUserdataUint64@ func, const uint64 userdata) || (5,49) INFO: Rejected due to type mismatch on parameter 'func' || (5,49) INFO: awaitable@ startnew(CoroutineFuncUserdataDouble@ func, const double userdata) || (5,49) INFO: Rejected due to type mismatch on parameter 'func' || (5,49) INFO: awaitable@ startnew(CoroutineFuncUserdataBool@ func, const bool userdata) || (5,49) INFO: Rejected due to type mismatch on parameter 'func' || (5,49) INFO: awaitable@ startnew(CoroutineFuncUserdataString@ func, const string&in userdata) || (5,49) INFO: Rejected due to type mismatch on parameter 'func'	the reported bare int handler at startnew's int64 userdata slot
+b165-primitive-int-at-int64	Q9-primitive	UNKNOWN	REJECT	REJECTED	(6,1) INFO: Compiling void UseB165PFb165primitiveintatint64() || (7,42) ERR: Can't implicitly convert from '<function>@const' to 'FDB165PFb165primitiveintatint64@&'.	primitive signature direction: `int` handler at a `int64` funcdef slot
+b165-primitive-int64-at-int	Q9-primitive	UNKNOWN	REJECT	REJECTED	(6,1) INFO: Compiling void UseB165PFb165primitiveint64atint() || (7,42) ERR: Can't implicitly convert from '<function>@const' to 'FDB165PFb165primitiveint64atint@&'.	primitive signature direction: `int64` handler at a `int` funcdef slot
+b165-primitive-uint-at-uint64	Q9-primitive	UNKNOWN	REJECT	REJECTED	(6,1) INFO: Compiling void UseB165PFb165primitiveuintatuint64() || (7,44) ERR: Can't implicitly convert from '<function>@const' to 'FDB165PFb165primitiveuintatuint64@&'.	primitive signature direction: `uint` handler at a `uint64` funcdef slot
+b165-primitive-uint64-at-uint	Q9-primitive	UNKNOWN	REJECT	REJECTED	(6,1) INFO: Compiling void UseB165PFb165primitiveuint64atuint() || (7,44) ERR: Can't implicitly convert from '<function>@const' to 'FDB165PFb165primitiveuint64atuint@&'.	primitive signature direction: `uint64` handler at a `uint` funcdef slot
+b165-primitive-int-at-uint	Q9-primitive	UNKNOWN	REJECT	REJECTED	(6,1) INFO: Compiling void UseB165PFb165primitiveintatuint() || (7,41) ERR: Can't implicitly convert from '<function>@const' to 'FDB165PFb165primitiveintatuint@&'.	primitive signature direction: `int` handler at a `uint` funcdef slot
+b165-primitive-uint-at-int	Q9-primitive	UNKNOWN	REJECT	REJECTED	(6,1) INFO: Compiling void UseB165PFb165primitiveuintatint() || (7,41) ERR: Can't implicitly convert from '<function>@const' to 'FDB165PFb165primitiveuintatint@&'.	primitive signature direction: `uint` handler at a `int` funcdef slot
+b165-primitive-int64-at-uint64	Q9-primitive	UNKNOWN	REJECT	REJECTED	(6,1) INFO: Compiling void UseB165PFb165primitiveint64atuint64() || (7,45) ERR: Can't implicitly convert from '<function>@const' to 'FDB165PFb165primitiveint64atuint64@&'.	primitive signature direction: `int64` handler at a `uint64` funcdef slot
+b165-primitive-uint64-at-int64	Q9-primitive	UNKNOWN	REJECT	REJECTED	(6,1) INFO: Compiling void UseB165PFb165primitiveuint64atint64() || (7,45) ERR: Can't implicitly convert from '<function>@const' to 'FDB165PFb165primitiveuint64atint64@&'.	primitive signature direction: `uint64` handler at a `int64` funcdef slot
