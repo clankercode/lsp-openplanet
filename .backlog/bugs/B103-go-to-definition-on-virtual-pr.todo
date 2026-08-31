@@ -54,3 +54,6 @@ navigation just never consults it.
 Read-vs-write position detection already exists for the checker's
 ReadOnlyProperty / compound-assign handling — reuse that classification,
 do not re-derive it in the server layer.
+
+## Lane decision (2026-08-31, bl-fix-many batch B103-105)
+Serialized with B104 in one worktree (.worktrees/nav): both tasks rewrite the goto-definition path in src/server/navigation.rs and its tests, so parallel lanes would conflict at merge. B103 lands FIRST (B104's generalize list includes an accessor-pair case that depends on B103's get_/set_ resolution existing).
