@@ -1195,6 +1195,7 @@ mod tests {
                 &crate::server::code_actions::CodeActionRequest {
                     uri: &uri,
                     analysis: &analysis,
+                    defines: crate::server::code_actions::no_defines(),
                     // The cursor sits on the squiggle, as in an editor.
                     range,
                     context: &context,
@@ -1249,6 +1250,7 @@ mod tests {
             &crate::server::code_actions::CodeActionRequest {
                 uri: &uri,
                 analysis: &analysis,
+                defines: crate::server::code_actions::no_defines(),
                 range,
                 context: &tower_lsp::lsp_types::CodeActionContext::default(),
                 workspace: &workspace,

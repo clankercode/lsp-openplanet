@@ -566,6 +566,7 @@ mod tests {
         let titles: Vec<_> = code_actions(&CodeActionRequest {
             uri: &uri,
             analysis: &analysis,
+            defines: crate::server::code_actions::no_defines(),
             range,
             context: &CodeActionContext::default(),
             workspace: &workspace,

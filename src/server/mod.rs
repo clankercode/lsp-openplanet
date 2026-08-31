@@ -2032,13 +2032,14 @@ impl LanguageServer for Backend {
         };
         let snapshot = self.snapshot_for(uri).await;
         let type_index_guard = self.type_index.read().await;
-        let owned = crate::analysis::DocumentAnalysis::analyze_plain(&source);
+        let owned = crate::analysis::DocumentAnalysis::analyze(&source, snapshot.defines());
         let analysis = analysis_for_current_source(snapshot.analysis_of(uri), &owned);
         let uri_map = snapshot.uri_map();
         let workspace_files: Vec<_> = uri_map.into_values().collect();
         let actions = code_actions::code_actions(&code_actions::CodeActionRequest {
             uri,
             analysis,
+            defines: snapshot.defines(),
             range: params.range,
             context: &params.context,
             workspace: snapshot.symbols(),

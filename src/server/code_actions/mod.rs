@@ -21,6 +21,9 @@
 //! such a producer reads travels inside the action's own `data` as a compact
 //! range/message/code record, never as the arbitrary full client diagnostic.
 
+use std::collections::HashSet;
+
+mod define_actions;
 pub mod fix;
 pub mod fix_all;
 pub mod fixes;
@@ -42,6 +45,12 @@ use fix::{
     materialize_descriptor, materialize_fix_from, single_file_edit, FixContext,
     FixDescriptorCandidate, Registries, WorkspaceFileResolver,
 };
+
+#[cfg(test)]
+pub(crate) fn no_defines() -> &'static HashSet<String> {
+    static DEFINES: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    DEFINES.get_or_init(HashSet::new)
+}
 
 /// Tag stamped into `CodeAction.data` so [`resolve_code_action`] never tries
 /// to interpret another provider's payload.
@@ -144,6 +153,8 @@ pub fn code_action_provider() -> CodeActionProviderCapability {
 pub struct CodeActionRequest<'a> {
     pub uri: &'a Url,
     pub analysis: &'a DocumentAnalysis,
+    /// The resolved define set which produced `analysis`.
+    pub defines: &'a HashSet<String>,
     /// The range the client asked about (cursor or selection).
     pub range: Range,
     pub context: &'a CodeActionContext,
@@ -229,8 +240,13 @@ pub(crate) fn code_actions_with(
         }
     }
 
-    // The response order, stated once: diagnostic-keyed quick fixes, the
-    // refactor, checker-keyed quick fixes, then the source action.
+    if wants_quickfix {
+        actions.extend(define_actions::define_actions(req));
+    }
+
+    // The response order, stated once: contextual define commands,
+    // diagnostic-keyed quick fixes, the refactor, checker-keyed quick fixes,
+    // then the source action.
     actions.extend(published_quickfixes);
     if kind_selected(&CodeActionKind::REFACTOR_REWRITE, only) {
         actions.extend(refactor_wrap_in_try_catch(
@@ -539,6 +555,7 @@ mod tests {
 
     struct Harness {
         analysis: DocumentAnalysis,
+        defines: HashSet<String>,
         workspace: SymbolTable,
         uri: Url,
         source: String,
@@ -549,6 +566,7 @@ mod tests {
             let (analysis, workspace, uri) = ctx_for(source);
             Self {
                 analysis,
+                defines: HashSet::new(),
                 workspace,
                 uri,
                 source: source.to_string(),
@@ -577,6 +595,7 @@ mod tests {
                 &CodeActionRequest {
                     uri: &self.uri,
                     analysis: &self.analysis,
+                    defines: &self.defines,
                     range,
                     context: &ctx,
                     workspace: &self.workspace,
@@ -972,6 +991,7 @@ mod tests {
         let request = |lazy_edits| CodeActionRequest {
             uri: &h.uri,
             analysis: &h.analysis,
+            defines: &h.defines,
             range: whole_doc(&h.source),
             context: &context,
             workspace: &h.workspace,
@@ -1039,6 +1059,7 @@ mod tests {
         let request = CodeActionRequest {
             uri: &h.uri,
             analysis: &h.analysis,
+            defines: &h.defines,
             range: whole_doc(&h.source),
             context: &CodeActionContext {
                 only: Some(vec![SOURCE_FIX_ALL_OPENPLANET]),
