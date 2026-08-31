@@ -108,3 +108,78 @@ B086 exists for.
 B056 (fixed the same class in `resolve_unqualified`), B071 (whose guard
 incidentally masks this), B076 / B073 (the same one-of-N-call-sites pattern),
 B097 (blocks the probe), B086 (why the recorded verdict is not enough).
+
+## CORRECTION — the "GAME PROBE REQUIRED, AND CURRENTLY IMPOSSIBLE" section above is WRONG on its premise (lane-resolver, 2026-08-31)
+
+I wrote that section. Two errors in it, and together they make this ticket read
+as indefinitely blocked when it is nearly unblocked.
+
+**1. The verdict IS a fresh probe, not a doc-comment rule.** I said
+`Identifier 'Axis' is not a data type in global namespace` "came from the
+documented rule in `resolve_unqualified` (B056's measurement), NOT from a fresh
+probe." It is a verbatim committed row of
+`docs/probes/b052-qualified-enum-spellings.tsv`, game output from 2026-08-30:
+
+    Axis        REJECTED   Identifier 'Axis' is not a data type in global namespace
+    AxisFlags   REJECTED   Identifier 'AxisFlags' is not a data type in global namespace
+    Align, Cond, EMenuOrder — same
+
+**2. "436 names" is not an independent count.** It is that corpus:
+`awk -F'\t' '$1 !~ /::/ && $2=="REJECTED"'` over it returns exactly 436. So all
+436 already carry a verbatim game verdict.
+
+**The chain was corpus -> `resolve_unqualified` doc comment -> ticket, and by
+the third hop the origin was lost and a measurement had been recorded as a
+rule.** That is the same provenance erosion B080 exists to stop, arriving from
+the opposite direction: there, a measurement's CONDITIONS were lost; here, its
+STATUS AS A MEASUREMENT was lost. Both end with a reader unable to tell
+evidence from reasoning.
+
+## What is genuinely unmeasured: ONE POSITION, not 436 names
+
+b052 is TYPE position (`Axis v;`). b053 is VALUE position and contains no
+`Axis` row at all. **Call position (`Axis(1)`) is a third**, and the probes
+README's own trap says not to generalise across positions — so the caution was
+right in substance and wrong in scale.
+
+The 436 share one mechanism, so closing the gap needs B067-style shape
+coverage — a Core enum nested in a namespace, a Core enum at global scope, a
+Nadeo enum under a class scope — plus a known-good control. **That is four or
+five names, not a campaign.** B097 blocks roughly a five-name probe here.
+
+## A construction argument that narrows it further — REASONING, NOT MEASUREMENT
+
+Presented as an argument deliberately, because recording it as a measurement is
+exactly what B086 is for. `Axis(1)` in call position is either a type
+conversion or a function call. A conversion requires `Axis` to name a data
+type, and the game says in the adjacent position that it does not. Nothing
+named `Axis` is a function. So the type-position measurement bounds call
+position tightly.
+
+That is how someone could justify acting before B097 clears. It must be written
+down AS reasoning, and the probe should still happen afterwards to close it.
+
+## Scope: ONE LANE, not a split
+
+The production change is one or two lines at a single call site
+(`checker.rs:3673`, the only caller of `external_enum_by_short_name`,
+`global_scope.rs:1785`). The work is entirely evidence, and it is B073-sized.
+
+If it must be split, the honest line is B097, not size:
+- **unblocked half**: drive all 436 bare REJECTED rows through the Ident-callee
+  arm and record how many the crate currently resolves. That is the real
+  blast-radius number, needs no game, and **nobody currently knows whether it is
+  436 or a handful.**
+- **blocked half**: the behaviour change, gated on the ~5-name call-position probe.
+
+Not recommended — the sweep is the fix's own test, and separating them means
+writing the harness twice.
+
+## DO NOT CITE A CLEAN FLEET RUN AS EVIDENCE HERE
+
+B071's workspace-wins guard MASKS this wherever a workspace type of the name
+exists, which is why the 151-plugin sweep now shows zero deltas. **The
+151-plugin sweep can no longer detect a regression in this rule.** Same shape as
+B084, where B062's export rooting masked a crediting defect — and the third time
+in one day a clean gate turned out to be measuring something other than the rule
+it was trusted for.
