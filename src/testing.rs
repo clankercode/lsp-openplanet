@@ -663,24 +663,43 @@ mod env_enforcement {
         }
     }
 
-    /// Blank out string literals and comments so brace counting and call
-    /// matching cannot be fooled by prose. Without this, a doc comment
-    /// mentioning `set_var("HOME", ..)` reads as a mutation — `src/config.rs`
-    /// has exactly such a comment, and an earlier draft of this test flagged
-    /// it.
+    /// Blank out comments and every literal form so brace counting and call
+    /// matching cannot be fooled by text that is not code.
+    ///
+    /// Every branch here was added because something slipped through, and the
+    /// list is worth reading as a history rather than a spec:
+    ///
+    /// - comments, because `src/config.rs` carries one quoting
+    ///   `set_var("HOME", ..)` to explain why the call was removed;
+    /// - raw strings, because this file's own fixture quotes `set_var` inside
+    ///   an `r#"..."#` block;
+    /// - char literals, because `b'"'` in `src/server/folding.rs` opened a
+    ///   string that ran to the next quote and blanked most of the file. Seven
+    ///   files under `src/` and `tests/` contain one. A scan that silently
+    ///   reads less than it claims is precisely the defect this module exists
+    ///   to catch, so it is caught here by a fixture of its own below.
+    ///
+    /// Blanking char literals also fixes brace counting: `'{'` used to open a
+    /// block that never closed.
     fn strip_literals(src: &str) -> String {
         let b = src.as_bytes();
         let mut out = vec![b' '; b.len()];
+        let ident =
+            |c: Option<&u8>| matches!(c, Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'));
         let mut i = 0;
         while i < b.len() {
             if b[i] == b'\n' {
                 out[i] = b'\n';
                 i += 1;
-            } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+                continue;
+            }
+            if b[i] == b'/' && b.get(i + 1) == Some(&b'/') {
                 while i < b.len() && b[i] != b'\n' {
                     i += 1;
                 }
-            } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                continue;
+            }
+            if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
                 i += 2;
                 while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
                     if b[i] == b'\n' {
@@ -689,46 +708,82 @@ mod env_enforcement {
                     i += 1;
                 }
                 i = (i + 2).min(b.len());
-            } else if b[i] == b'r'
-                && !matches!(
-                    b.get(i.wrapping_sub(1)),
-                    Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')
-                )
-                && {
-                    let mut k = i + 1;
-                    while k < b.len() && b[k] == b'#' {
+                continue;
+            }
+            // Raw string, with or without a byte-string prefix: `r"..."`,
+            // `r#"..."#`, `br##"..."##`.
+            let raw_r = if b[i] == b'r' && !ident(b.get(i.wrapping_sub(1))) {
+                Some(i)
+            } else if b[i] == b'b'
+                && b.get(i + 1) == Some(&b'r')
+                && !ident(b.get(i.wrapping_sub(1)))
+            {
+                Some(i + 1)
+            } else {
+                None
+            };
+            if let Some(r) = raw_r {
+                let mut k = r + 1;
+                while k < b.len() && b[k] == b'#' {
+                    k += 1;
+                }
+                if k < b.len() && b[k] == b'"' {
+                    let hashes = k - r - 1;
+                    i = k + 1;
+                    loop {
+                        if i >= b.len() {
+                            break;
+                        }
+                        if b[i] == b'"'
+                            && b[i + 1..]
+                                .iter()
+                                .take(hashes)
+                                .filter(|c| **c == b'#')
+                                .count()
+                                == hashes
+                        {
+                            i += 1 + hashes;
+                            break;
+                        }
+                        if b[i] == b'\n' {
+                            out[i] = b'\n';
+                        }
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+            // A leading quote is either a char literal or a lifetime, and only
+            // the closing quote tells them apart: `'a` is a lifetime, `'"'` is
+            // a char. Guessing wrong in the `'"'` direction is what blinded an
+            // earlier version of this scan.
+            if b[i] == b'\'' {
+                let closes = if b.get(i + 1) == Some(&b'\\') {
+                    let mut k = i + 2;
+                    while k < b.len() && b[k] != b'\'' && b[k] != b'\n' {
                         k += 1;
                     }
-                    k < b.len() && b[k] == b'"'
+                    (b.get(k) == Some(&b'\'')).then_some(k)
+                } else {
+                    let mut k = i + 1;
+                    if k < b.len() {
+                        k += 1;
+                        while k < b.len() && b[k] & 0xC0 == 0x80 {
+                            k += 1;
+                        }
+                    }
+                    (b.get(k) == Some(&b'\'')).then_some(k)
+                };
+                match closes {
+                    Some(end) => i = end + 1,
+                    None => {
+                        out[i] = b[i];
+                        i += 1;
+                    }
                 }
-            {
-                // Raw string: `r"..."`, `r#"..."#`, `r##"..."##`. Found by
-                // this very test flagging its own fixture, which quotes
-                // `set_var` inside an `r#"..."#` block. An unhandled literal
-                // form is the same defect class the scan exists to catch.
-                let hashes = b[i + 1..].iter().take_while(|c| **c == b'#').count();
-                i += 1 + hashes + 1;
-                loop {
-                    if i >= b.len() {
-                        break;
-                    }
-                    if b[i] == b'"'
-                        && b[i + 1..]
-                            .iter()
-                            .take(hashes)
-                            .filter(|c| **c == b'#')
-                            .count()
-                            == hashes
-                    {
-                        i += 1 + hashes;
-                        break;
-                    }
-                    if b[i] == b'\n' {
-                        out[i] = b'\n';
-                    }
-                    i += 1;
-                }
-            } else if b[i] == b'"' {
+                continue;
+            }
+            if b[i] == b'"' {
                 i += 1;
                 while i < b.len() && b[i] != b'"' {
                     if b[i] == b'\\' {
@@ -739,10 +794,10 @@ mod env_enforcement {
                     i += 1;
                 }
                 i += 1;
-            } else {
-                out[i] = b[i];
-                i += 1;
+                continue;
             }
+            out[i] = b[i];
+            i += 1;
         }
         String::from_utf8(out).expect("ASCII-preserving transform")
     }
@@ -831,6 +886,7 @@ mod env_enforcement {
 
         let mut violations = Vec::new();
         let mut scanned_with_mutations = 0usize;
+        let mut functions_found = 0usize;
         for path in &files {
             let rel = path
                 .strip_prefix(&root)
@@ -841,9 +897,23 @@ mod env_enforcement {
             if MUTATORS.iter().any(|m| strip_literals(&src).contains(m)) {
                 scanned_with_mutations += 1;
             }
+            functions_found += functions(&src).len();
             violations.extend(unguarded_mutations(&rel, &src));
         }
 
+        // A literal form the stripper mishandles blanks the REST OF THE FILE,
+        // so the symptom is a body count that silently drops rather than an
+        // error. `b'"'` cost about 20 functions before it was found; this
+        // floor sits far enough below the real figure to survive ordinary
+        // churn and far enough above zero to fail on a stripper regression.
+        assert!(
+            functions_found > 3000,
+            "the scan found only {functions_found} function bodies across \
+             {} files. A literal form the stripper does not understand blanks \
+             everything after it, so a body count that falls is how that \
+             failure shows up.",
+            files.len()
+        );
         assert!(
             scanned_with_mutations >= 2,
             "expected at least the lock primitive and update.rs to mutate the \
@@ -910,6 +980,102 @@ mod env_enforcement {
                 assert!(!explanation.is_empty());
             }
         "#;
+        assert!(unguarded_mutations("src/somewhere.rs", src).is_empty());
+    }
+
+    /// Regression: a `'"'` char literal must not open a string.
+    ///
+    /// Found by cross-checking this scan against a per-binary test count, not
+    /// by reading the code. `src/server/folding.rs` contains `b == b'"'`;
+    /// the old stripper read that quote as the start of a string literal and
+    /// blanked everything up to the next one, which silently removed most of
+    /// the file from the scan. Seven files under `src/` and `tests/` carry
+    /// such a literal.
+    #[test]
+    fn the_scan_sees_past_a_double_quote_char_literal() {
+        let src = r##"
+            fn lexer_helper(b: u8) -> bool {
+                b == b'"' || b == b'\''
+            }
+
+            #[test]
+            fn touches_home_after_a_char_literal() {
+                std::env::set_var("HOME", "/tmp/nope");
+            }
+        "##;
+        assert_eq!(
+            unguarded_mutations("src/somewhere.rs", src),
+            vec!["src/somewhere.rs: fn touches_home_after_a_char_literal".to_string()],
+            "a char literal containing a quote must not blank the rest of the \
+             file; that is how the scan went blind on seven real files"
+        );
+    }
+
+    /// The same defect seen through brace counting rather than through call
+    /// matching: `'{'` used to open a block that never closed, so every
+    /// function after it merged into one body.
+    #[test]
+    fn the_scan_counts_braces_past_a_brace_char_literal() {
+        let src = r##"
+            fn opens_a_brace_literal(c: char) -> bool {
+                c == '{' || c == '}'
+            }
+
+            #[test]
+            fn touches_home_after_a_brace_literal() {
+                std::env::set_var("HOME", "/tmp/nope");
+            }
+
+            #[test]
+            fn also_touches_home() {
+                std::env::remove_var("HOME");
+            }
+        "##;
+        assert_eq!(
+            unguarded_mutations("src/somewhere.rs", src),
+            vec![
+                "src/somewhere.rs: fn touches_home_after_a_brace_literal".to_string(),
+                "src/somewhere.rs: fn also_touches_home".to_string(),
+            ],
+            "two separate functions must stay separate; a brace char literal \
+             that is not blanked merges every body after it into one"
+        );
+    }
+
+    /// A lifetime is not a char literal, and treating it as one would blank
+    /// real code from the `'a` to the next quote. The distinction is the
+    /// closing quote, which is why both directions are pinned.
+    #[test]
+    fn the_scan_does_not_mistake_a_lifetime_for_a_char_literal() {
+        let src = r##"
+            struct Holder<'a> {
+                name: &'a str,
+            }
+
+            #[test]
+            fn touches_home_after_a_lifetime() {
+                std::env::set_var("HOME", "/tmp/nope");
+            }
+        "##;
+        assert_eq!(
+            unguarded_mutations("src/somewhere.rs", src),
+            vec!["src/somewhere.rs: fn touches_home_after_a_lifetime".to_string()],
+        );
+    }
+
+    /// Byte raw strings (`br#"..."#`) are a raw string with a prefix. The
+    /// prefix made the old `r`-keyed branch miss them, so the quote fell
+    /// through to the plain-string branch and closed in the wrong place.
+    #[test]
+    fn the_scan_ignores_mutations_inside_a_byte_raw_string() {
+        let src = "
+            const DOC: &[u8] = br#\"call set_var(\\\"HOME\\\") and you race\"#;
+
+            #[test]
+            fn only_holds_the_bytes() {
+                assert!(!DOC.is_empty());
+            }
+        ";
         assert!(unguarded_mutations("src/somewhere.rs", src).is_empty());
     }
 
