@@ -802,55 +802,54 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         /// against (legacy path, or a single-entry catalog).
         notes: Option<crate::typedb::catalog::VersionNotes>,
     }
-    let targets: Vec<Target> = if options.openplanet_version.is_none()
-        && options.typedb_versions_dir.is_none()
-    {
-        vec![Target {
-            label: None,
-            index: load_type_index(&config, options.no_typedb)?,
-            notes: None,
-        }]
-    } else {
-        let installed = config.core_json.as_deref().zip(config.game_json.as_deref());
-        let catalog =
-            VersionCatalog::build(installed, options.typedb_versions_dir.as_deref())
-                .map_err(CliError::Check)?;
-        let resolved = catalog
-            .resolve_targets(options.openplanet_version.as_deref())
-            .map_err(CliError::Check)?;
-        if resolved.is_empty() {
-            // A versions root but no request and no installed dump: the run
-            // proceeds without a typedb, exactly like discovery finding
-            // nothing today.
+    let targets: Vec<Target> =
+        if options.openplanet_version.is_none() && options.typedb_versions_dir.is_none() {
             vec![Target {
                 label: None,
-                index: None,
+                index: load_type_index(&config, options.no_typedb)?,
                 notes: None,
             }]
         } else {
-            // With a second version to diff against, missing-symbol
-            // diagnostics can say WHEN the symbol appeared or vanished.
-            let diffable = catalog.entries().len() > 1;
-            resolved
-                .into_iter()
-                .map(|entry| {
-                    let index = TypeIndex::load(&entry.core_json, &entry.game_json).map_err(
-                        |e| CliError::Check(format!("failed to load type database: {e}")),
-                    )?;
-                    let notes = diffable
-                        .then(|| catalog.notes_for_target(entry))
-                        .transpose()
-                        .map_err(CliError::Check)?
-                        .filter(|n| !n.is_empty());
-                    Ok(Target {
-                        label: Some(entry.label.clone()),
-                        index: Some(index),
-                        notes,
+            let installed = config.core_json.as_deref().zip(config.game_json.as_deref());
+            let catalog = VersionCatalog::build(installed, options.typedb_versions_dir.as_deref())
+                .map_err(CliError::Check)?;
+            let resolved = catalog
+                .resolve_targets(options.openplanet_version.as_deref())
+                .map_err(CliError::Check)?;
+            if resolved.is_empty() {
+                // A versions root but no request and no installed dump: the run
+                // proceeds without a typedb, exactly like discovery finding
+                // nothing today.
+                vec![Target {
+                    label: None,
+                    index: None,
+                    notes: None,
+                }]
+            } else {
+                // With a second version to diff against, missing-symbol
+                // diagnostics can say WHEN the symbol appeared or vanished.
+                let diffable = catalog.entries().len() > 1;
+                resolved
+                    .into_iter()
+                    .map(|entry| {
+                        let index =
+                            TypeIndex::load(&entry.core_json, &entry.game_json).map_err(|e| {
+                                CliError::Check(format!("failed to load type database: {e}"))
+                            })?;
+                        let notes = diffable
+                            .then(|| catalog.notes_for_target(entry))
+                            .transpose()
+                            .map_err(CliError::Check)?
+                            .filter(|n| !n.is_empty());
+                        Ok(Target {
+                            label: Some(entry.label.clone()),
+                            index: Some(index),
+                            notes,
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>, CliError>>()?
-        }
-    };
+                    .collect::<Result<Vec<_>, CliError>>()?
+            }
+        };
     let multi_target = targets.len() > 1;
     // GH #59: stamp the run with the DB build it judged the code against.
     // B064: out of the index, not out of a second read of the files — the
@@ -898,10 +897,7 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
         let snapshot = AnalysisSnapshot::from_load(&load, &combo_config);
         for target in &targets {
             let pass_start = cli_diagnostics.len();
-            let version = target
-                .notes
-                .as_ref()
-                .zip(target.label.as_deref());
+            let version = target.notes.as_ref().zip(target.label.as_deref());
             collect_pass_diagnostics(
                 &load,
                 &snapshot,
@@ -1189,10 +1185,10 @@ fn format_json(report: &CheckReport) -> String {
             });
             // GH #18: additive — absent unless version-specific.
             if !item.versions.is_empty() {
-                value.as_object_mut().expect("literal object").insert(
-                    "versions".to_string(),
-                    serde_json::json!(item.versions),
-                );
+                value
+                    .as_object_mut()
+                    .expect("literal object")
+                    .insert("versions".to_string(), serde_json::json!(item.versions));
             }
             value
         })
@@ -1925,8 +1921,7 @@ mod tests {
             Some(PathBuf::from("tests/fixtures/typedb-versions"))
         );
 
-        let opts =
-            parse_check_args(&["--typedb-versions-dir=--weird".into(), ".".into()]).unwrap();
+        let opts = parse_check_args(&["--typedb-versions-dir=--weird".into(), ".".into()]).unwrap();
         assert_eq!(opts.typedb_versions_dir, Some(PathBuf::from("--weird")));
     }
 

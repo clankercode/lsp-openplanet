@@ -19,7 +19,9 @@ fn plugin_root() -> PathBuf {
         .join("tests/fixtures/issue-repros/gh18-version-straddle")
 }
 
-fn check(version_flag: &str) -> Result<openplanet_lsp::cli::CheckReport, openplanet_lsp::cli::CliError> {
+fn check(
+    version_flag: &str,
+) -> Result<openplanet_lsp::cli::CheckReport, openplanet_lsp::cli::CliError> {
     let opts = parse_check_args(&[
         "--typedb-dir".into(),
         versions_root().join("1.29.5").display().to_string(),

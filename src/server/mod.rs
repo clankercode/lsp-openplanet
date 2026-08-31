@@ -1260,10 +1260,7 @@ impl LanguageServer for Backend {
         // config typo.
         let config = self.config.read().await;
         let (resolved_pair, version_warning) = crate::typedb::catalog::resolve_single_pair(
-            config
-                .core_json
-                .as_deref()
-                .zip(config.game_json.as_deref()),
+            config.core_json.as_deref().zip(config.game_json.as_deref()),
             config.typedb_versions_dir.as_deref(),
             config.openplanet_version.as_deref(),
         );

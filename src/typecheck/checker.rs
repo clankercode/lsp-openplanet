@@ -5242,9 +5242,8 @@ mod tests {
                 }
                 _ => None,
             });
-            let (qualified, hint) = hit.unwrap_or_else(|| {
-                panic!("expected NoMatchingSymbol for {call:?}, got {diags:?}")
-            });
+            let (qualified, hint) = hit
+                .unwrap_or_else(|| panic!("expected NoMatchingSymbol for {call:?}, got {diags:?}"));
             assert!(qualified.starts_with("string::"), "{qualified}");
             assert_eq!(hint.as_deref(), Some(expect_hint), "for {call:?}");
         }
