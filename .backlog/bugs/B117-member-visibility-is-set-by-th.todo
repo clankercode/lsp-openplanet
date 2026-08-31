@@ -1,18 +1,19 @@
 ---
-claimed_at: "2026-08-31T13:32:20Z"
+claimed_at: "2026-08-31T14:48:18Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T15:05:17Z"
 complexity: medium
 created_at: "2026-08-31T13:31:28Z"
 depends_on: []
+duration_minutes: 16.987582051866667
 estimate_hours: 1
 id: B117
 priority: high
-started_at: "2026-08-31T13:32:20Z"
-status: blocked
+started_at: "2026-08-31T14:48:18Z"
+status: done
 tags: []
 title: 'Member visibility is set by the parser and read by nothing: no layer above consumes is_private/is_protected, so completion offers private and protected members everywhere'
-updated_at: "2026-08-31T13:39:57Z"
+updated_at: "2026-08-31T15:05:17Z"
 ---
 
 Member visibility is set by the parser and read by nothing: no layer above consumes is_private/is_protected, so completion offers private and protected members everywhere
