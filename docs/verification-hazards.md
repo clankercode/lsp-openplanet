@@ -170,6 +170,47 @@ indistinguishable from "I am structurally incapable of seeing it".
   hidden by a later success, but a *success never attempted* wearing a failure's
   exit code.
 
+- **A backup that never happened, guarding a destructive edit.** About to
+  rewrite a ticket's title in place, I did the responsible thing first:
+  `F=.backlog/bugs/B078*.todo; cp $F "$SD/B078.todo.bak"`. **zsh does not
+  glob unquoted variable expansions** — bash does, which is why the habit
+  exists — so `cp` was handed the literal string `B078*.todo` and failed. The
+  very next line printed `backup: $(wc -c < ...) bytes`, which rendered as
+  `backup:  bytes`, and the step after that was a scripted `sed -i` on the file
+  the backup was meant to protect.
+
+  **The near-miss is the point.** Every individual habit here was correct: back
+  up before editing, keep the backup outside the repo, print what you did. The
+  hazard is that the *safety* step is exactly as susceptible to silent failure
+  as the dangerous one, and it fails first and quietly, leaving the dangerous
+  step fully armed. A guard that runs before the thing it guards will, when it
+  breaks, break invisibly.
+
+  What actually caught it was printing the backup's **byte count** rather than
+  a success message. `backup:  bytes` with the number missing is unmistakable;
+  `echo "backup done"` after a failed `cp` would have been a confident lie.
+  **A backup step whose success you do not measure is not a backup — it is a
+  sentence about a backup.** Same shape as the empty-md5 and empty-awk
+  vacuities elsewhere in this document: the absence rendered as blank rather
+  than as an error, and blank reads as fine.
+
+- **Four shell divergences, one cause.** `/dev/tcp` (bash builtin, absent in
+  zsh), `nomatch` aborting an `&&` chain, `$rev:s` eaten as a history modifier,
+  and now glob-in-variable. Each was diagnosed separately and each cost a real
+  investigation. The common factor is not any zsh feature: it is that **I write
+  bash by reflex into a zsh shell**, and zsh's divergences overwhelmingly
+  produce *plausible wrong answers* rather than errors — a closed port, an
+  empty diff, a blank byte count, a skipped test wearing someone else's exit
+  code. An error would be a gift; what you get instead is a clean-looking
+  result.
+
+  The countermeasure is not "learn zsh". It is that a shell one-liner is a
+  **measurement instrument**, and instruments get calibrated before they get
+  trusted: check the method against a case whose answer you already know
+  (`:22` for the port, a file you know exists for the glob), and prefer
+  python for anything whose failure would be silent. Four instances is enough
+  to stop treating each as a surprise.
+
 - **A flag that was accepted, documented, and ignored.** B068's fix added a
   `--batch` knob so a corpus could be re-measured one name per compilation
   unit. The flag parsed, was documented as a speed control — and **both corpus
