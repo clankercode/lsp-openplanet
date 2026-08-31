@@ -1,17 +1,18 @@
 ---
+claimed_at: "2026-08-31T05:07:56Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T04:00:15Z"
 depends_on: []
 estimate_hours: 2
 id: B083
 priority: medium
-status: pending
-tags:
-    - tech-debt
-    - tooling
-    - ci
+started_at: "2026-08-31T05:07:56Z"
+status: in_progress
+tags: []
 title: 'just clippy is red on master: 65 errors under -D warnings, so no lane can use it as a gate'
-updated_at: "2026-08-31T04:00:15Z"
+updated_at: "2026-08-31T05:07:56Z"
 ---
 ## Summary
 
