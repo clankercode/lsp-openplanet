@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T17:17:42Z"
 depends_on: []
 estimate_hours: 1
 id: B166
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'the standing tm-ghosts-plus-plus acceptance check is stale: the plugin is down to 1 warning, not 2, and the next lane to run it will get a red on a plugin nobody broke'
@@ -12,3 +14,38 @@ updated_at: "2026-08-31T17:17:42Z"
 ---
 
 the standing tm-ghosts-plus-plus acceptance check is stale: the plugin is down to 1 warning, not 2, and the next lane to run it will get a red on a plugin nobody broke
+
+MEASURED by lane-const on the merged tree, 2026-09-01. Master and lane report
+identically, so this is fully attributed to master and is NOT a lane regression:
+
+  lsp-base3:  src/HookHelper.as:49:31: warning: Signed/Unsigned mismatch -> 1 diagnostics
+  lsp-fixed2: src/HookHelper.as:49:31: warning: Signed/Unsigned mismatch -> 1 diagnostics
+
+`src/Scrubber.as:299:47` has disappeared. It went somewhere in B155 / B156 /
+B158; B155's `Math::Min(uint(20), buf.Length)` fix is the obvious candidate but
+that is a hypothesis, not a measurement. B152's fleet A/B independently proved
+base == fixed across all 152 plugins, which is what rules out the lane.
+
+WHY THIS NEEDS A TICKET RATHER THAN A SHRUG. "tm-ghosts-plus-plus reports 0
+errors and its 2 signed/unsigned warnings survive" has been the standing
+acceptance check since B144, and it is quoted in lane briefs. The next lane to
+run it gets a red on a plugin nobody broke -- and the likely response to an
+unexplained red on a standing check is to go looking in the lane's own diff,
+which is where the time goes.
+
+TWO PIECES OF WORK, and the second is the one that matters:
+
+1. Attribute the disappearance to a specific commit (bisect across B155/B156/B158
+   is cheap -- three candidates) and confirm the remaining warning is the one we
+   expect to keep. If Scrubber.as:299 was a false positive that B155 correctly
+   killed, that is a WIN and should be recorded as one, not quietly absorbed.
+
+2. Update the standing check wherever it is written down, and note the date and
+   the engine version alongside the number. A bare count with no provenance is
+   exactly the kind of remembered figure that goes stale silently -- see
+   docs/verification-hazards.md, "predict the count before the run", and the two
+   count errors made in this batch (12 ignored suite-wide read as per-harness;
+   ten backlog commits read as ten merges). A fleet acceptance number is the same
+   shape and rots the same way.
+
+Do not simply change 2 to 1. A number with no provenance rots again in a week.
