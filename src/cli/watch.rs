@@ -505,6 +505,8 @@ mod tests {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb"),
             ),
             no_typedb: false,
+            openplanet_version: None,
+            typedb_versions_dir: None,
             plugins_dirs: Vec::new(),
             plugin_files_search_paths: vec![PathBuf::from("src")],
             format: crate::cli::CheckFormat::Plain,

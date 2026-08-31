@@ -97,6 +97,15 @@ OPTIONS:
                         single-combo run.
     --typedb-dir DIR    Load OpenplanetCore.json and OpenplanetNext.json from DIR
                         (plus Openplanet.h, if present)
+    --openplanet-version V[,V...]
+                        Check against these Openplanet versions instead of the
+                        installed one. Each V must be the installed version or
+                        a snapshot under --typedb-versions-dir; with several,
+                        diagnostics are labeled with the versions they fire on.
+    --typedb-versions-dir DIR
+                        Root of recorded typedb snapshots (one subdirectory
+                        per version, each holding OpenplanetCore.json and
+                        OpenplanetNext.json)
     --no-typedb         Run without Openplanet/Nadeo type database files
     --no-gitignore      Check .as files that .gitignore excludes. Discovery
                         honors .gitignore at or below the plugin root by
@@ -182,6 +191,12 @@ pub struct CheckOptions {
     pub path: PathBuf,
     pub typedb_dir: Option<PathBuf>,
     pub no_typedb: bool,
+    /// GH #18: target Openplanet version(s), comma-separated. Raw string;
+    /// resolution against the version catalog happens in `run_check`.
+    pub openplanet_version: Option<String>,
+    /// GH #18: root of recorded typedb snapshots
+    /// (`tests/fixtures/typedb-versions`-shaped).
+    pub typedb_versions_dir: Option<PathBuf>,
     pub plugins_dirs: Vec<PathBuf>,
     pub plugin_files_search_paths: Vec<PathBuf>,
     pub format: CheckFormat,
@@ -566,6 +581,28 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                 options.typedb_dir = Some(PathBuf::from(value));
                 i += used;
             }
+            _ if arg == "--openplanet-version" || arg.starts_with("--openplanet-version=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--openplanet-version",
+                    "--openplanet-version requires a version argument",
+                    true,
+                )?;
+                options.openplanet_version = Some(value.to_string());
+                i += used;
+            }
+            _ if arg == "--typedb-versions-dir" || arg.starts_with("--typedb-versions-dir=") => {
+                let (value, used) = take_value_arg(
+                    args,
+                    i,
+                    "--typedb-versions-dir",
+                    "--typedb-versions-dir requires a directory argument",
+                    true,
+                )?;
+                options.typedb_versions_dir = Some(PathBuf::from(value));
+                i += used;
+            }
             _ if arg == "--plugins-dir" || arg.starts_with("--plugins-dir=") => {
                 let (value, used) = take_value_arg(
                     args,
@@ -608,6 +645,16 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
     if options.no_typedb && options.typedb_dir.is_some() {
         return Err(CliError::Usage(
             "--no-typedb cannot be combined with --typedb-dir".to_string(),
+        ));
+    }
+    if options.no_typedb && options.openplanet_version.is_some() {
+        return Err(CliError::Usage(
+            "--no-typedb cannot be combined with --openplanet-version".to_string(),
+        ));
+    }
+    if options.no_typedb && options.typedb_versions_dir.is_some() {
+        return Err(CliError::Usage(
+            "--no-typedb cannot be combined with --typedb-versions-dir".to_string(),
         ));
     }
 
@@ -1709,6 +1756,77 @@ mod tests {
         let msg = usage_msg(&["--typedb-dir", "--no-typedb", "tests/fixtures/tm-counter"]);
         assert!(
             msg.contains("--typedb-dir requires a directory argument"),
+            "{msg}"
+        );
+    }
+
+    /// GH #18: `--openplanet-version` captures separated and `=` values.
+    #[test]
+    fn parse_check_args_openplanet_version_captures_value() {
+        let opts = parse_check_args(&[
+            "--openplanet-version".into(),
+            "1.29.5,1.29.14".into(),
+            ".".into(),
+        ])
+        .unwrap();
+        assert_eq!(opts.openplanet_version.as_deref(), Some("1.29.5,1.29.14"));
+
+        let opts = parse_check_args(&["--openplanet-version=1.29.5".into(), ".".into()]).unwrap();
+        assert_eq!(opts.openplanet_version.as_deref(), Some("1.29.5"));
+    }
+
+    /// GH #18: `--typedb-versions-dir` captures separated and `=` values.
+    #[test]
+    fn parse_check_args_typedb_versions_dir_captures_value() {
+        let opts = parse_check_args(&[
+            "--typedb-versions-dir".into(),
+            "tests/fixtures/typedb-versions".into(),
+            ".".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            opts.typedb_versions_dir,
+            Some(PathBuf::from("tests/fixtures/typedb-versions"))
+        );
+
+        let opts =
+            parse_check_args(&["--typedb-versions-dir=--weird".into(), ".".into()]).unwrap();
+        assert_eq!(opts.typedb_versions_dir, Some(PathBuf::from("--weird")));
+    }
+
+    /// GH #18, same shape as GH #62: a following flag is never a value.
+    #[test]
+    fn parse_check_args_openplanet_version_rejects_following_flag() {
+        let msg = usage_msg(&["--openplanet-version", "--no-typedb", "."]);
+        assert!(
+            msg.contains("--openplanet-version requires a version argument"),
+            "{msg}"
+        );
+    }
+
+    /// GH #18, same shape as GH #62: a following flag is never a value.
+    #[test]
+    fn parse_check_args_typedb_versions_dir_rejects_following_flag() {
+        let msg = usage_msg(&["--typedb-versions-dir", "--no-typedb", "."]);
+        assert!(
+            msg.contains("--typedb-versions-dir requires a directory argument"),
+            "{msg}"
+        );
+    }
+
+    /// GH #18: `--no-typedb` contradicts both version flags, exactly as it
+    /// contradicts `--typedb-dir`.
+    #[test]
+    fn parse_check_args_no_typedb_conflicts_with_version_flags() {
+        let msg = usage_msg(&["--no-typedb", "--openplanet-version", "1.29.5", "."]);
+        assert!(
+            msg.contains("--no-typedb cannot be combined with --openplanet-version"),
+            "{msg}"
+        );
+
+        let msg = usage_msg(&["--no-typedb", "--typedb-versions-dir", "dir", "."]);
+        assert!(
+            msg.contains("--no-typedb cannot be combined with --typedb-versions-dir"),
             "{msg}"
         );
     }
