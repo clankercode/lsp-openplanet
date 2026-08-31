@@ -4861,6 +4861,44 @@ mod tests {
         );
     }
 
+    /// B157 (the consumer): a Nadeo method's return type reaches
+    /// `lookup_method_return` as a REAL type instead of the silence
+    /// sentinel, which is the whole point of loading it.
+    ///
+    /// `TypeRepr::Error` is what an empty `return_type` produced, and it
+    /// suppresses every downstream check — 1402 fleet call sites across 73
+    /// plugins resolved that way. Paired against a method the dump does NOT
+    /// document, which must STILL be the sentinel: loading the ones we know
+    /// must not invent an answer for the ones we do not.
+    #[test]
+    fn a_documented_nadeo_return_resolves_and_an_undocumented_one_stays_silent() {
+        let cp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetCore.json");
+        let np = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/typedb/OpenplanetNext.json");
+        let idx = TypeIndex::load(&cp, &np).unwrap();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+
+        let documented = scope
+            .lookup_method_return("CGameCtnArticleNode", "GetCollectorNod")
+            .expect("the method resolves");
+        assert_eq!(
+            documented,
+            TypeRepr::Handle(Box::new(TypeRepr::Named("CMwNod".into()))),
+            "the dump states `CMwNod@` and the checker must see it"
+        );
+
+        let undocumented = scope
+            .lookup_method_return("CGameManialinkEntry", "StartEdition")
+            .expect("the method resolves");
+        assert_eq!(
+            undocumented,
+            TypeRepr::Error(String::new()),
+            "the dump states nothing, so the sentinel must survive"
+        );
+    }
+
     #[test]
     fn workspace_typedef_is_type_but_not_funcdef() {
         let mut ws = SymbolTable::new();

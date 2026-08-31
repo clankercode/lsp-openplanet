@@ -1461,7 +1461,18 @@ impl TypeIndex {
                             let args = member.parse_args();
                             methods.push(MethodInfo {
                                 name: member.n.clone(),
-                                return_type: String::new(), // Nadeo format uses type IDs
+                                // B157: the dump states this. The comment
+                                // here used to say the format "uses type
+                                // IDs", which is measurably false — `r` is a
+                                // plain type-name string on all 1618 methods
+                                // that document a signature. The 1466 that do
+                                // not stay empty, which is what keeps a call
+                                // to them unchecked rather than wrongly
+                                // checked.
+                                return_type: member
+                                    .return_type_name()
+                                    .unwrap_or_default()
+                                    .to_string(),
                                 params: args
                                     .into_iter()
                                     .map(|(ty, name)| ParamInfo {
@@ -6108,14 +6119,6 @@ mod b138_loader_literal_audit {
              ones are built elsewhere with `true` (B046)",
         ),
         (
-            "return_type",
-            "String::new()",
-            1,
-            "the Nadeo dump identifies return types by numeric id, not text — \
-             empty is the honest rendering of `we have no string for this`, \
-             and `MethodInfo::return_type` is a String rather than an Option",
-        ),
-        (
             "ctor_conversions",
             "Vec::new()",
             1,
@@ -6255,11 +6258,19 @@ mod b138_loader_literal_audit {
             }
         }
         // Non-vacuity: an audit that scanned nothing passes trivially.
+        //
+        // The floor tracks `JUSTIFIED` rather than a hand-written number.
+        // B157 legitimately removed one asserted literal (`return_type:
+        // String::new()`), the floor of 5 fired reading it as scanner drift,
+        // and a bare constant would have to be edited down every time the
+        // codebase improves — which trains people to lower it, which is how
+        // a floor stops meaning anything.
         assert!(
-            found.len() >= 5,
-            "only {} distinct asserted literals found — the scanner has \
-             drifted from the source",
-            found.len()
+            found.len() >= JUSTIFIED.len(),
+            "only {} distinct asserted literals found for {} justified rows \
+             — the scanner has drifted from the source",
+            found.len(),
+            JUSTIFIED.len()
         );
         assert!(
             absences > 0,
@@ -6723,5 +6734,124 @@ mod b158_nadeo_member_notes {
         // kind. It is pinned, deliberately not interpreted (B153's rule for
         // `m` and `c`: a bit whose meaning nobody measured is not a fact).
         assert_eq!(fourth, [0, 1, 2].into_iter().collect(), "fourth field");
+    }
+}
+
+/// B157: Nadeo method return types, which the loader discarded.
+///
+/// `NadeoMember.r` is a plain type-name string on every method that documents
+/// a signature — `t == 1` iff both `a` and `r` are present, exactly, across
+/// 1618 methods and 120 distinct return strings. The loader wrote
+/// `String::new()` over all of them behind a comment claiming the format
+/// "uses type IDs", which is measurably false.
+///
+/// An empty `return_type` is not inert: `ext_lookup_method_return` turns it
+/// into `TypeRepr::Error`, the silence sentinel, so every call to those 1618
+/// methods was unchecked. 1965 fleet call sites across 73 of 163 plugins
+/// reach that branch, covering 286 distinct methods.
+#[cfg(test)]
+mod b157_nadeo_return_types {
+    use super::*;
+
+    fn fixtures() -> TypeIndex {
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("fixtures must load")
+    }
+
+    fn ret(idx: &TypeIndex, short: &str, method: &str) -> String {
+        let suffix = format!("::{short}");
+        let q = idx
+            .find_by_short_name(short)
+            .iter()
+            .find(|h| h.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("{short} must exist"))
+            .clone();
+        idx.lookup_type(&q)
+            .unwrap_or_else(|| panic!("{short} must resolve"))
+            .methods
+            .iter()
+            .find(|m| m.name == method)
+            .unwrap_or_else(|| panic!("{short}::{method} must exist"))
+            .return_type
+            .clone()
+    }
+
+    /// The four shapes the dump actually uses, generalised rather than
+    /// sampled: a primitive, a handle, a nested enum, and `void`.
+    #[test]
+    fn every_return_shape_the_dump_uses_is_loaded() {
+        let idx = fixtures();
+        assert_eq!(
+            ret(&idx, "CGameManialinkEntry", "SetText"),
+            "void",
+            "a void return"
+        );
+        assert_eq!(
+            ret(&idx, "CGameManialinkPage", "GetFirstChild"),
+            "CGameManialinkControl@",
+            "a handle return"
+        );
+        assert_eq!(
+            ret(&idx, "CGameManialinkEntry", "GetValueType"),
+            "CGameManialinkEntry::EValueType",
+            "a nested enum return"
+        );
+    }
+
+    /// A method that documents NO signature (`t == 0`, no `a`, no `r`) must
+    /// stay empty. 1466 of 3084 Nadeo methods are this shape — the silence
+    /// sentinel is correct for them and must survive.
+    #[test]
+    fn a_method_with_no_documented_signature_stays_empty() {
+        let idx = fixtures();
+        assert_eq!(
+            ret(&idx, "CGameManialinkEntry", "StartEdition"),
+            "",
+            "no `r` in the dump means no claim"
+        );
+    }
+
+    /// THE POPULATION, pinned with its denominator. A future dump that
+    /// documents more methods moves this number visibly rather than silently.
+    #[test]
+    fn the_loaded_population_is_1618_of_3084_methods() {
+        let idx = fixtures();
+        let (mut with, mut without) = (0usize, 0usize);
+        for info in idx.types.values() {
+            if info.source != TypeSource::Nadeo {
+                continue;
+            }
+            for m in &info.methods {
+                if m.return_type.is_empty() {
+                    without += 1;
+                } else {
+                    with += 1;
+                }
+            }
+        }
+        assert_eq!(
+            (with, without),
+            (1618, 1466),
+            "(documented, undocumented) Nadeo method returns"
+        );
+    }
+
+    /// NEGATIVE CONTROL: Core is untouched by this change.
+    #[test]
+    fn core_return_types_are_unchanged() {
+        let idx = fixtures();
+        let core_empty = idx
+            .types
+            .values()
+            .filter(|i| i.source == TypeSource::Core)
+            .flat_map(|i| &i.methods)
+            .filter(|m| m.return_type.is_empty())
+            .count();
+        assert_eq!(core_empty, 0, "Core has always stated every return type");
     }
 }

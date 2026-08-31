@@ -221,6 +221,25 @@ impl NadeoMember {
         self.t.as_str()
     }
 
+    /// The method's return type from `r`, as a plain type-name string.
+    ///
+    /// `r` is TWO different things depending on the member: on a method it is
+    /// the return type (`"void"`, `"bool"`, `"CWebServicesTaskResult@"` —
+    /// 120 distinct values across 1618 methods); on a PROPERTY it is a
+    /// 2-element numeric range such as `[0, 1]` (593 members). Only the
+    /// string form is a type, so the `as_str` is the discriminator and not a
+    /// convenience — reading `r` unconditionally would turn a slider range
+    /// into a return type.
+    ///
+    /// `None` for the 1466 methods that document no signature (`t == 0`,
+    /// neither `a` nor `r`). That is a real absence and must stay one: the
+    /// empty return type is what makes a call to them unchecked rather than
+    /// wrongly checked.
+    pub fn return_type_name(&self) -> Option<&str> {
+        let text = self.r.as_ref()?.as_str()?.trim();
+        (!text.is_empty()).then_some(text)
+    }
+
     /// Parse arguments string "Type1 name1, Type2 name2" into pairs
     pub fn parse_args(&self) -> Vec<(String, String)> {
         let Some(args_str) = &self.a else {
@@ -566,13 +585,6 @@ mod b153_nadeo_dump_field_audit {
         // --- OPEN FINDINGS, tracked: real data with a real consumer,
         // --- deliberately not consumed here because the field and its
         // --- consumer must land together (B125).
-        (
-            "NadeoMember",
-            "r",
-            "OPEN FINDING, tracked: 1618 method return types the loader \
-             replaces with String::new() behind a false \"uses type IDs\" \
-             comment; consuming it changes call-expression types",
-        ),
     ];
 
     /// The structs the audit knows about, in the order their objects nest.
