@@ -1,14 +1,18 @@
 ---
+claimed_at: "2026-08-31T08:12:50Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T07:38:30Z"
 depends_on: []
 estimate_hours: 2
 id: B087
 priority: high
-status: pending
+started_at: "2026-08-31T08:12:50Z"
+status: in_progress
 tags: []
 title: Exported functions and shared types/classes/interfaces flagged as unused
-updated_at: "2026-08-31T07:38:30Z"
+updated_at: "2026-08-31T08:12:50Z"
 ---
 ## Expected Behavior
 
