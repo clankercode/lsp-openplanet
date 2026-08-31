@@ -1270,7 +1270,7 @@ impl<'r> FoldedDiagnostics<'r> {
                 None => kinds.push((kind, 1)),
             }
         }
-        kinds.sort_by(|a, b| b.1.cmp(&a.1));
+        kinds.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
         Self {
             visible,
             hidden_info,

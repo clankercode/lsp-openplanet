@@ -2716,7 +2716,7 @@ impl<'a> Checker<'a> {
                 // behaviour. Use the legacy helpers so existing tests keep
                 // passing byte-for-byte.
                 self.check_arg_count(display_name, qualified, args.len(), callee_span);
-                let (arg_tys, arg_literals) = self.type_args_once(args);
+                let arg_tys = self.type_args_once(args);
                 if let Some(params) = self.scope.lookup_function_params(qualified) {
                     self.check_arg_types_against_params(display_name, args, &arg_tys, &params);
                 }
@@ -2730,7 +2730,6 @@ impl<'a> Checker<'a> {
                     qualified,
                     args,
                     &arg_tys,
-                    &arg_literals,
                     &overloads,
                 );
                 fallback_ret
@@ -2739,7 +2738,7 @@ impl<'a> Checker<'a> {
                 // 2+ overloads: walk args once, run real resolution.
                 // Named-arg overload resolution is not implemented yet —
                 // bind types in call order (positional) for matching.
-                let (arg_tys, arg_literals) = self.type_args_once(args);
+                let arg_tys = self.type_args_once(args);
                 // B089: run BEFORE `resolve_overload`, and independently of
                 // its verdict — the set-level rule is "every arity-compatible
                 // candidate is rejected by a funcdef slot", which is a
@@ -2749,7 +2748,6 @@ impl<'a> Checker<'a> {
                     qualified,
                     args,
                     &arg_tys,
-                    &arg_literals,
                     &overloads,
                 );
                 match resolve_overload(&overloads, &arg_tys) {
@@ -4030,21 +4028,28 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Type every argument expression exactly once, returning the types and
-    /// a parallel "was this a literal?" flag.
+    /// Type every argument expression exactly once.
     ///
     /// Split out because three workspace call paths need the SAME arg types
     /// for two different checks, and `expr_type` is not idempotent — it
     /// pushes the nested diagnostics of the argument subtree, so a second
     /// pass duplicates every one of them.
-    fn type_args_once(&mut self, args: &[CallArg]) -> (Vec<TypeRepr>, Vec<bool>) {
+    ///
+    /// It used to return a parallel "was this a literal?" flag as well. B108
+    /// removed the last reader when `render_no_matching_sig` stopped taking
+    /// parallel slices, but the producer survived: three callers were still
+    /// building that vector and passing it to a parameter nobody read. Found
+    /// by two lanes independently, from the `unused_variables` warning that
+    /// was failing master's own clippy-delta gate — which is the argument for
+    /// treating a lint failure on master as a defect rather than noise. The
+    /// literal flags are still computed where they ARE read, at their own
+    /// call sites; this function no longer computes them for nobody.
+    fn type_args_once(&mut self, args: &[CallArg]) -> Vec<TypeRepr> {
         let mut arg_tys = Vec::with_capacity(args.len());
-        let mut arg_literals = Vec::with_capacity(args.len());
         for a in args {
             arg_tys.push(self.expr_type(&a.value));
-            arg_literals.push(arg_is_const_literal(&a.value));
         }
-        (arg_tys, arg_literals)
+        arg_tys
     }
 
     /// B089: B023's funcdef-slot bind test, run over a call to a WORKSPACE
@@ -4082,7 +4087,6 @@ impl<'a> Checker<'a> {
         qualified_name: &str,
         args: &[CallArg],
         arg_tys: &[TypeRepr],
-        arg_literals: &[bool],
         overloads: &[OverloadSig],
     ) {
         let mut evidence: Option<Span> = None;
@@ -4548,12 +4552,11 @@ impl<'a> Checker<'a> {
                     let qualified_method = format!("{type_name}::{member_name}");
                     let method_overloads =
                         self.method_overloads_including_inherited(&qualified_method);
-                    let (arg_tys, arg_literals) = self.type_args_once(args);
+                    let arg_tys = self.type_args_once(args);
                     self.report_workspace_funcdef_slot_failure(
                         &qualified_method,
                         args,
                         &arg_tys,
-                        &arg_literals,
                         &method_overloads,
                     );
                 }
