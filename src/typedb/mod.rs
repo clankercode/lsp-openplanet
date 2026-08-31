@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod core_format;
 pub mod header_format;
 pub mod index;
