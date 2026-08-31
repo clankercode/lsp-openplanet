@@ -617,7 +617,10 @@ mod b153_nadeo_dump_field_audit {
         let db = nadeo();
         let covered: BTreeSet<&str> = dump_keys(&db).into_iter().map(|(n, _)| n).collect();
         let declared: BTreeSet<String> = all_struct_names().into_iter().collect();
-        let missing: Vec<&String> = declared.iter().filter(|s| !covered.contains(s.as_str())).collect();
+        let missing: Vec<&String> = declared
+            .iter()
+            .filter(|s| !covered.contains(s.as_str()))
+            .collect();
         assert!(
             missing.is_empty(),
             "structs in nadeo_format.rs that no audit row covers: {missing:?}"
