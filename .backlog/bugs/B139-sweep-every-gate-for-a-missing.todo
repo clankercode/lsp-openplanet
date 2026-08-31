@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T15:08:43Z"
+depends_on: []
+estimate_hours: 1
+id: B139
+priority: high
+status: pending
+tags: []
+title: 'Sweep every gate for a missing pre-flight: three infrastructure conditions in one batch were reported as code defects, and the fix is never in the checker that fired'
+updated_at: "2026-08-31T15:08:43Z"
+---
+
+Sweep every gate for a missing pre-flight: three infrastructure conditions in one batch were reported as code defects, and the fix is never in the checker that fired
