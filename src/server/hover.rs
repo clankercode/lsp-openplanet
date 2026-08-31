@@ -142,18 +142,21 @@ pub fn hover(
 
     // 4) External type database.
     if let Some(index) = scope.external() {
-        if let Some(md) = lookup_external(&qualified, index) {
+        // The direct map: a source spelling to its key, no scope test.
+        if let Some(md) = lookup_external(&qualified, index, index.source_name_key(&qualified)) {
             return Some(markdown_hover(md));
         }
         // B070: B052's ancestor walk resolves a globally visible enum through
         // ANY real scope, including a namespace the workspace itself declares
         // — `namespace Foo {}` makes `Foo::VirtualKey` legal, and the game
-        // agrees. `lookup_external` cannot see that: it reaches
-        // `TypeIndex::source_reference_key`, whose scope test is
-        // `TypeIndex::scope_exists`, the index-only half. The index is right
-        // not to know what a workspace declared; the resolver is the half that
-        // does, so ask it for the canonical key and look THAT up. Hover then
-        // answers for exactly the spellings the checker accepts.
+        // agrees. The direct map above cannot see that: it is a source
+        // spelling to key lookup with no scope test at all. The RESOLVER holds
+        // the scope test that knows what a workspace declared, so ask it.
+        //
+        // B079 deleted the wrapper that used to do this walk inside the index
+        // (`TypeIndex::source_reference_key`), because its scope test was the
+        // index-only `scope_exists` and reaching it through that wrapper is
+        // exactly how B070 happened.
         // The gate is load-bearing, not belt-and-braces. `canonical_enum_key`
         // is a CANONICALIZER: every other caller reaches it only after the
         // checker has accepted the spelling, so it may be wider than
@@ -185,10 +188,18 @@ pub fn hover(
         // where both answer, 0 disagreements, 0 cases of the primary answering
         // for a workspace-only head.
         if scope.has_enum(&qualified) {
-            if let Some(key) = scope.canonical_enum_key(&qualified) {
-                if let Some(md) = lookup_external(&key, index) {
-                    return Some(markdown_hover(md));
-                }
+            // `canonical_enum_key` answers `None` when the spelling ALREADY IS
+            // the key — true of a Nadeo module-level enum whose synthetic
+            // module happens to be a real Core scope, such as
+            // `Meta::EPlugSurfaceGameplayId`. Those must fall back to the
+            // spelling itself, not be dropped: the checker accepts them, and
+            // the deleted `source_reference_key` used to reach them through
+            // its own walk. Ten of them regressed when this said `if let
+            // Some(key)`, and the corpus sweep caught it.
+            let canonical = scope.canonical_enum_key(&qualified);
+            let key = canonical.as_deref().unwrap_or(qualified.as_str());
+            if let Some(md) = lookup_external(&qualified, index, Some(key)) {
+                return Some(markdown_hover(md));
             }
         }
     }
@@ -705,9 +716,21 @@ fn format_external_type(qualified: &str, ty: &TypeInfo) -> String {
     info
 }
 
-fn lookup_external(qualified: &str, index: &TypeIndex) -> Option<String> {
-    let source_key = index.source_reference_key(qualified);
-
+/// Render the type-DB entry a source spelling names, or `None`.
+///
+/// B079: this asks `source_name_key` — a direct source-spelling-to-key map
+/// with NO scope test — and nothing else. It used to ask
+/// `TypeIndex::source_reference_key`, which wrapped that map together with an
+/// ancestor walk gated on the INDEX-ONLY `scope_exists`, and that wrapper is
+/// how B070 happened: hover never called the index-only scope predicate by
+/// name, it reached the capability through a public function that embedded it.
+///
+/// The ancestor walk is not lost, it moved to where it belongs. The caller
+/// retries through `GlobalScope::canonical_enum_key` when this misses, which
+/// asks the RESOLVER's scope test — workspace OR index — instead of the
+/// index's. That is strictly wider, so no spelling stopped resolving; the
+/// corpus sweep in this module's tests pins that in both directions.
+fn lookup_external(qualified: &str, index: &TypeIndex, source_key: Option<&str>) -> Option<String> {
     if let Some(ty) = source_key.and_then(|key| index.lookup_type(key)) {
         return Some(format_external_type(qualified, ty));
     }
@@ -1104,12 +1127,13 @@ mod tests {
     //
     // B052's ancestor walk makes a WORKSPACE-declared namespace a real scope,
     // so a plugin writing `namespace Foo {}` can spell a global engine enum
-    // `Foo::VirtualKey`. Hover's `lookup_external` asks
-    // `TypeIndex::source_reference_key`, whose scope test is
+    // `Foo::VirtualKey`. Hover's `lookup_external` used to ask
+    // `TypeIndex::source_reference_key`, whose scope test was
     // `TypeIndex::scope_exists` — the INDEX-ONLY half, which cannot know a
     // workspace declared anything. `GlobalScope::scope_exists` is the half
-    // that does. That split is the defect: the checker accepted a spelling
-    // hover was silent on.
+    // that does. That split was the defect: the checker accepted a spelling
+    // hover was silent on. B079 deleted that wrapper; hover now asks the
+    // resolver, and these tests pin that the behaviour is unchanged.
     //
     // WHAT GROUNDS THESE TESTS, corrected after the b052 re-probe.
     //
