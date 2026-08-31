@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T20:11:16Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T20:31:29Z"
 complexity: medium
 created_at: "2026-08-31T19:13:26Z"
 depends_on: []
+duration_minutes: 20.229231437066666
 estimate_hours: 1
 id: B171
 priority: high
 started_at: "2026-08-31T20:11:16Z"
-status: in_progress
+status: done
 tags: []
 title: 'master is RED: B160''s universal ampersand rule is falsified by B145''s corpus, which the same batch merged - the engine writes to ''int3''. with no suffix, and our renderer now emits to ''int3&''.'
-updated_at: "2026-08-31T20:11:16Z"
+updated_at: "2026-08-31T20:31:29Z"
 ---
 
 master is RED: B160's universal ampersand rule is falsified by B145's corpus, which the same batch merged - the engine writes to 'int3'. with no suffix, and our renderer now emits to 'int3&'.
