@@ -2076,3 +2076,107 @@ mod shared_declarations_are_roots {
         );
     }
 }
+
+/// B071 x B084 interaction, in the harness that can actually see it.
+///
+/// B084 gave the Ident-callee ladder's `has_global_ident` arm a
+/// `record_value_use_variants` call, so a name reaching it is credited as
+/// used. B071's shadowing guard returns EARLIER in that same ladder, so an
+/// enum whose only reference is the cast-call form (`Axis(1)`) is
+/// intercepted before B084's arm sees it — and would reintroduce, for a
+/// narrower population, exactly the false "never used" warning B084 removed.
+/// `WheelOrder` in tm-dips-plus-plus is B084's own example of that shape:
+/// an enum used only as `tostring(WheelOrder(w))`.
+///
+/// Neither lane's evidence could have caught it. B071's 151-plugin sweep ran
+/// against a base predating B084, and in the plugin that motivated the guard
+/// the enum is ALSO used as a declared type, which credits it by another
+/// route. It needs an enum referenced SOLELY through the call form.
+///
+/// This lives here rather than in `tests/b071_enum_type_mismatch.rs` because
+/// it cannot be measured there: `compute_diagnostics` runs no
+/// unused-declaration analysis, so the same assertion passes there whether or
+/// not the rule works. It was written there first and did exactly that — the
+/// positive control below is what caught it.
+///
+/// Two further corrections this family earned, both worth more than the fix:
+///
+/// * The first version asserted `report(...) == []`, which also fails on
+///   unrelated unused locals in the fixture. It went red and read as a
+///   confirmed regression before the fix was even applied. Assert the NAME.
+/// * The class case looked like the same bug in the `has_type` arm one step
+///   up, and a `record_use` was added there on that reasoning. Removing it
+///   again left the class test green while the enum test went red — so that
+///   arm is already credited by another route and the line was inert. Only
+///   the enum arm needed anything. A fix is not a fix until the tree has been
+///   measured without it.
+#[cfg(test)]
+mod b071_shadowing_guard_credits_the_enum {
+    use super::test_support::{names, snap_of};
+    use super::*;
+    use std::collections::HashSet as StdHashSet;
+
+    fn report(files: &[(&str, &str)]) -> Vec<String> {
+        names(&unused_declarations(
+            &snap_of(files),
+            None,
+            &StdHashSet::new(),
+        ))
+    }
+
+    /// The oracle must be able to fail. An enum nothing references at all is
+    /// reported — without this, the silence asserted below means nothing.
+    #[test]
+    fn control_an_unreferenced_enum_is_reported() {
+        assert!(
+            report(&[(
+                "a.as",
+                "enum Axis { X }\nvoid Main() { int v = 1; v += 1; }\n"
+            )])
+            .contains(&"Axis".to_string()),
+            "control: a genuinely unreferenced enum must be reported"
+        );
+    }
+
+    /// The real case: the cast-call form is the ONLY reference, and the
+    /// shadowing guard intercepts it.
+    #[test]
+    fn an_enum_used_only_as_a_cast_call_is_credited() {
+        let got = report(&[(
+            "a.as",
+            "enum Axis { X }\nvoid Main() { int v = int(Axis(1)); v += 1; }\n",
+        )]);
+        // Name-specific, not `is_empty()`. `report` lists every unused
+        // declaration in the fixture, so an empty-vec assertion also fails on
+        // unrelated noise — it did, and read as a regression that was not
+        // there. Assert the one name this test is about.
+        assert!(
+            !got.contains(&"Axis".to_string()),
+            "an enum whose only use is `Axis(1)` must be credited — B084's \
+             arm does that and B071's guard returns above it. got: {got:?}"
+        );
+    }
+
+    /// CONTROL, not a case this lane fixed. A workspace class reached only
+    /// through its constructor call is already credited by some other route:
+    /// removing the enum fix above turns the enum test red and leaves this
+    /// one green, which is how the difference was established rather than
+    /// argued. It stays because it bounds the blast radius of the guard —
+    /// the predicate covers every declared type, and only the enum arm
+    /// needed the record.
+    #[test]
+    fn a_class_used_only_as_a_constructor_call_is_credited() {
+        // No declared-type reference anywhere: `auto` on the left, so the
+        // constructor CALL is the only mention of `Thing`. Writing
+        // `Thing@ t = Thing();` would credit it through `resolve_type_expr`
+        // instead and prove nothing about this arm.
+        let got = report(&[(
+            "a.as",
+            "class Thing { int V; }\nvoid Main() { auto t = Thing(); t.V = 1; }\n",
+        )]);
+        assert!(
+            !got.contains(&"Thing".to_string()),
+            "a class whose only use is its constructor call must be credited. got: {got:?}"
+        );
+    }
+}

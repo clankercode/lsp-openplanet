@@ -51,3 +51,39 @@ row	case	fixture	game_verdict	game_message	lsp_today
 # WORDING. Match the engine's own text in any new diagnostic
 # ("Can't implicitly convert from 'A' to 'B'.", "No matching symbol 'E::V'"),
 # so a user searching an error string finds both tools.
+#
+# AFTER THE FIX (lane/enum, B071, 2026-08-31). The `lsp_today` column above is
+# left exactly as measured on pre-fix master (a586825) — overwriting it would
+# erase the evidence the ticket was opened on. This block is the re-measurement
+# on the branch, same method: one fixture per row, `openplanet-lsp check
+# --typedb-dir tests/fixtures/typedb`, controls in the same run.
+#
+#   row 1  engine cross-enum   -> error: Can't implicitly convert from 'VirtualKey' to 'UI::MouseButton'
+#   row 2  workspace cross     -> error: Can't implicitly convert from 'LocalOne' to 'LocalTwo'
+#   row 4  enum -> int (ws)    -> silent   (UNCHANGED, and required to stay so)
+#   row 5  enum -> int (eng)   -> silent   (UNCHANGED, and required to stay so)
+#   row 6  int -> enum         -> error: Can't implicitly convert from 'int' to 'LocalOne'
+#   row 7  bad member, engine  -> error: No matching symbol 'VirtualKey::NoSuchValueZZZ'
+#   row 8  bad member, ws      -> error: No matching symbol 'LocalOne::NoSuchValueZZZ'
+#
+# Row 1 uses VirtualKey/UI::MouseButton rather than the ticket's
+# EDummyCollectionIdent/EGhostNameLogoType: the two Nadeo enums are absent from
+# the repo's FIXTURE typedb, so a test naming them would assert silence from a
+# path that never ran. Same axis, two engine enums, resolvable in the harness.
+#
+# Controls in the same run, both discriminating: a trivially valid fixture
+# returned rc=0 clean, and `ZZZNoSuchType q;` returned rc=1
+# `unknown type ZZZNoSuchType`.
+#
+# ALSO MEASURED, and required to stay silent — neither is in the table above
+# because neither is a conversion, and both are engine ACCEPTs a naive fix
+# breaks: cross-enum ARITHMETIC (`LocalOne::X + LocalTwo::Y`) and OR-ing an
+# engine flag enum into an int. Both live in the acceptance fixture in
+# tests/b071_enum_type_mismatch.rs alongside the six errors.
+#
+# FALSE-POSITIVE SWEEP. Base (f75dc89) and branch binaries were run over 151
+# real plugins in ~/src/openplanet/my-plugins. First pass: ONE new diagnostic,
+# and it was wrong — `tm-editor-plus-plus` declares `enum Axis` and writes
+# `Axis(c)`, which resolved to the Core enum `UI::Plot::Axis` by short-name
+# rescue. Fixed at the resolution site (the plugin's own declaration wins) and
+# pinned by a test. Second pass: zero delta across all 151.

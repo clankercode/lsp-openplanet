@@ -1524,6 +1524,7 @@ impl<'a> Checker<'a> {
                     if let Some(init) = &d.init {
                         let init_ty = self.expr_type(init);
                         self.check_funcdef_binding(&ty, init, &init_ty);
+                        self.check_enum_conversion(&ty, init, &init_ty);
                     }
                 }
             }
@@ -1818,6 +1819,7 @@ impl<'a> Checker<'a> {
             if let Some(init) = &d.init {
                 let init_ty = self.expr_type(init);
                 self.check_funcdef_binding(&ty, init, &init_ty);
+                self.check_enum_conversion(&ty, init, &init_ty);
             }
         }
     }
@@ -1844,6 +1846,7 @@ impl<'a> Checker<'a> {
                     let init_ty = self.expr_type(init);
                     self.check_init_conversion(&declared_ty, init, &init_ty);
                     self.check_funcdef_binding(&declared_ty, init, &init_ty);
+                    self.check_enum_conversion(&declared_ty, init, &init_ty);
                 }
                 declared_ty.clone()
             };
@@ -1912,6 +1915,126 @@ impl<'a> Checker<'a> {
                 kind: TypeDiagnosticKind::FloatTruncation { literal },
             });
         }
+    }
+
+    /// B071: type a qualified enum-value reference (`LocalOne::X`,
+    /// `VirtualKey::A`, `UI::Plot::Marker::Circle`) as its ENUM, and report a
+    /// member the enum never declared.
+    ///
+    /// Before this, `E::V` typed as `Error` whatever `V` was, and that single
+    /// fact is why the whole ticket was silent in both directions at once: an
+    /// undeclared member looked exactly like a declared one, and an
+    /// enum-typed initializer looked like an untypeable expression, so every
+    /// conversion check downstream bailed on the `Error` before it could
+    /// compare anything.
+    ///
+    /// Scoped to RESOLVING the reference. It deliberately does not decide
+    /// whether the enum may be assigned to whatever it is being assigned to —
+    /// that is [`Self::check_enum_conversion`] — and keeping the two apart is
+    /// what keeps cross-enum ARITHMETIC legal. `Binary` discards its operand
+    /// types, so two different enums in one expression never reach a
+    /// comparison; live probe says `LocalOne::X + LocalTwo::Y` compiles
+    /// (both decay to `int`), so a rule that fired on "two enum types in one
+    /// expression" would be reporting an error on code the game accepts.
+    fn enum_member_type(&mut self, qual: &str, span: Span) -> TypeRepr {
+        let Some((prefix, member)) = qual.rsplit_once("::") else {
+            return TypeRepr::Error(String::new());
+        };
+        // Innermost enclosing namespace first, matching the value-use walk
+        // just above: inside `namespace N`, a written `Inner::X` names
+        // `N::Inner::X`.
+        for depth in (0..=self.namespace_stack.len()).rev() {
+            let spelling = if depth == 0 {
+                prefix.to_string()
+            } else {
+                format!("{}::{}", self.namespace_stack[..depth].join("::"), prefix)
+            };
+            // `None` is "cannot enumerate the members", never "has none" —
+            // an anonymous engine enum (B016) lands there and must stay
+            // silent rather than have all of its members called misspelt.
+            let Some(members) = self.scope.enum_member_names(&spelling) else {
+                continue;
+            };
+            if members.iter().any(|m| m == member) {
+                return TypeRepr::Named(spelling);
+            }
+            // Near-name hint, exactly like the namespace-member path: purely
+            // additive, and it never gates the diagnostic.
+            let hint = members
+                .iter()
+                .filter(|m| edit_distance(m, member) <= 2)
+                .min_by_key(|m| edit_distance(m, member))
+                .map(|m| format!("{spelling}::{m}"));
+            self.diagnostics.push(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::NoMatchingSymbol {
+                    qualified: qual.to_string(),
+                    hint,
+                },
+            });
+            return TypeRepr::Error(String::new());
+        }
+        TypeRepr::Error(String::new())
+    }
+
+    /// B071: assignment / initialisation compatibility for ENUM targets, at
+    /// every position a value is bound to a declared type.
+    ///
+    /// A SIBLING of [`Self::check_init_conversion`], not an extension of it.
+    /// That method is reached from exactly one of the four initializer
+    /// positions — `check_var_decl_local`; globals, class fields and
+    /// assignments never see it — and that asymmetry is precisely what B076
+    /// turned out to be, one ticket earlier. This is called from all four
+    /// plus plain assignment, and the `position_*` tests in
+    /// `tests/b071_enum_type_mismatch.rs` are the fence that keeps it so.
+    ///
+    /// Two rules, each measured rather than reasoned (RemoteBuild probe, one
+    /// compilation unit per fixture — never batched, B068):
+    ///
+    /// * enum -> a DIFFERENT enum is rejected:
+    ///   `Can't implicitly convert from 'LocalOne' to 'LocalTwo'.`
+    /// * `int` -> enum is rejected:
+    ///   `Can't implicitly convert from 'int' to 'LocalOne'.`
+    ///
+    /// The converse of the second is LEGAL — `int i = LocalOne::X;` compiles,
+    /// because an enum value decays to `int`. That asymmetry is the trap: a
+    /// rule phrased as "enums and ints are interchangeable" gets one of the
+    /// two backwards whichever way it guesses. Nothing here looks at a
+    /// non-enum target, so the legal direction is silent by construction and
+    /// not by a carve-out that a later edit could drop.
+    fn check_enum_conversion(&mut self, declared: &TypeRepr, init: &Expr, init_ty: &TypeRepr) {
+        let target = declared.unwrap_const();
+        let source = init_ty.unwrap_const();
+        let TypeRepr::Named(target_n) = target else {
+            return;
+        };
+        if !self.scope.has_enum(target_n) {
+            return;
+        }
+        let from = match source {
+            // A different enum. `named_types_equivalent` canonicalizes, so
+            // the two accepted spellings of ONE enum — `VirtualKey` and the
+            // ancestor walk's `UI::VirtualKey` (B052) — compare equal and
+            // stay silent.
+            TypeRepr::Named(source_n)
+                if self.scope.has_enum(source_n)
+                    && !self.named_types_equivalent(source_n, target_n) =>
+            {
+                source_n.clone()
+            }
+            // An integer. Floats and bools are deliberately left alone: no
+            // probe covers them, and this ticket's measured population is
+            // the integer family.
+            TypeRepr::Primitive(p) if is_integer(*p) => source.display(),
+            _ => return,
+        };
+        self.diagnostics.push(TypeDiagnostic {
+            span: init.span,
+            kind: TypeDiagnosticKind::NoImplicitConversion {
+                from,
+                to: target_n.clone(),
+            },
+        });
     }
 
     /// GH #49 constructor form: the int/nat vector families have NO
@@ -2489,19 +2612,42 @@ impl<'a> Checker<'a> {
                 // behaviour. Use the legacy helpers so existing tests keep
                 // passing byte-for-byte.
                 self.check_arg_count(display_name, qualified, args.len(), callee_span);
+                let (arg_tys, arg_literals) = self.type_args_once(args);
                 if let Some(params) = self.scope.lookup_function_params(qualified) {
-                    self.walk_args_and_check_types(display_name, args, &params);
-                } else {
-                    self.walk_args(args);
+                    self.check_arg_types_against_params(display_name, args, &arg_tys, &params);
                 }
+                // B089: the funcdef-slot check the external call path has had
+                // since B023. `lookup_function_params` returns the declared
+                // param TEXT, which is what `slot_funcdef` needs, but the
+                // primitive check above discards everything that is not a
+                // primitive — a funcdef-typed parameter fell straight through
+                // it.
+                self.report_workspace_funcdef_slot_failure(
+                    qualified,
+                    args,
+                    &arg_tys,
+                    &arg_literals,
+                    &overloads,
+                );
                 fallback_ret
             }
             _ => {
                 // 2+ overloads: walk args once, run real resolution.
                 // Named-arg overload resolution is not implemented yet —
                 // bind types in call order (positional) for matching.
-                let arg_tys: Vec<TypeRepr> =
-                    args.iter().map(|a| self.expr_type(&a.value)).collect();
+                let (arg_tys, arg_literals) = self.type_args_once(args);
+                // B089: run BEFORE `resolve_overload`, and independently of
+                // its verdict — the set-level rule is "every arity-compatible
+                // candidate is rejected by a funcdef slot", which is a
+                // different question from whether any candidate wins on
+                // primitive conversions.
+                self.report_workspace_funcdef_slot_failure(
+                    qualified,
+                    args,
+                    &arg_tys,
+                    &arg_literals,
+                    &overloads,
+                );
                 match resolve_overload(&overloads, &arg_tys) {
                     OverloadMatch::Unique(sig) => {
                         // A unique winner means every primitive arg either
@@ -2643,6 +2789,67 @@ impl<'a> Checker<'a> {
             _ => return None,
         };
         self.scope.lookup_funcdef(&name)
+    }
+
+    /// B089: [`Self::slot_funcdef`], resolved in the DECLARING SCOPE of
+    /// `owner_qualified`.
+    ///
+    /// Workspace parameter text is the source spelling, so a funcdef declared
+    /// in `namespace NS` and used by a function in the same namespace is
+    /// stored as `Maker@`, not `NS::Maker@`. `lookup_funcdef` takes a
+    /// qualified name and does no ancestor walk, so that slot resolved to
+    /// nothing and the parameter was treated as a non-funcdef — silent in
+    /// exactly the way that reads as "checked, and fine". It is the
+    /// namespaced half of this ticket's generalisation and it passed the
+    /// qualified spelling of the same test.
+    ///
+    /// External parameter text is already fully qualified, which is why the
+    /// typedb path does not need this.
+    fn slot_funcdef_in_scope(&self, param_text: &str, owner_qualified: &str) -> Option<FuncdefSig> {
+        let name = match Self::peel_const_handle(&TypeRepr::parse_type_string(param_text.trim())) {
+            TypeRepr::Named(n) | TypeRepr::Funcdef(n) => n.clone(),
+            _ => return None,
+        };
+        // GH #38 / B073: the plugin's own declaration wins, so a parameter
+        // written with a name the workspace declares is NOT a funcdef slot,
+        // whatever the typedb has under that name. `lookup_funcdef` walks
+        // workspace symbols but only RETURNS on a real funcdef and then falls
+        // through to the engine, so without this a plugin class named
+        // `CoroutineFunc` turns `void g(CoroutineFunc@ p)` into an engine
+        // funcdef slot and rejects a perfectly good argument.
+        //
+        // `check_funcdef_binding` guards B076's four declaration positions
+        // with exactly this test. B073 left `slot_funcdef` itself unguarded
+        // on a REACHABILITY argument — no site could then reach it while
+        // shadowing — and wrote
+        // `a_plugin_type_named_after_an_engine_funcdef_behaves_the_same_at_a_call_slot`
+        // to go red when that expired. B089 expired it: running the slot
+        // check over workspace calls is exactly the site that argument said
+        // did not exist. The test did its job and this is the guard it asked
+        // for. It lives here rather than in `slot_funcdef` so the external
+        // path's own reachability argument is left as B073 measured it.
+        if self
+            .scope
+            .workspace_shadows_funcdef(&self.resolve_value_type_name(&name))
+        {
+            return None;
+        }
+        if let Some(fd) = self.slot_funcdef(param_text) {
+            return Some(fd);
+        }
+        // A written qualifier is the author's own answer about scope; walking
+        // past it would resolve a name they did not write.
+        if name.contains("::") {
+            return None;
+        }
+        let mut owner = owner_qualified;
+        while let Some((prefix, _)) = owner.rsplit_once("::") {
+            if let Some(fd) = self.scope.lookup_funcdef(&format!("{prefix}::{name}")) {
+                return Some(fd);
+            }
+            owner = prefix;
+        }
+        None
     }
 
     /// B076: the funcdef bind check, reached from a DECLARATION or an
@@ -3543,37 +3750,155 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Walk each argument expression and, for primitive-typed args whose
-    /// corresponding declared parameter type is also a primitive, emit an
-    /// `ArgTypeMismatch` when they differ. Non-primitive arg types, unknown
-    /// param types (non-primitive text), and error types are all silently
-    /// skipped — this is deliberately conservative, mirroring
-    /// `ReturnTypeMismatch`'s primitive-only strategy.
+    /// Type every argument expression exactly once, returning the types and
+    /// a parallel "was this a literal?" flag.
+    ///
+    /// Split out because three workspace call paths need the SAME arg types
+    /// for two different checks, and `expr_type` is not idempotent — it
+    /// pushes the nested diagnostics of the argument subtree, so a second
+    /// pass duplicates every one of them.
+    fn type_args_once(&mut self, args: &[CallArg]) -> (Vec<TypeRepr>, Vec<bool>) {
+        let mut arg_tys = Vec::with_capacity(args.len());
+        let mut arg_literals = Vec::with_capacity(args.len());
+        for a in args {
+            arg_tys.push(self.expr_type(&a.value));
+            arg_literals.push(matches!(
+                a.value.kind,
+                ExprKind::BoolLit(_)
+                    | ExprKind::IntLit(_)
+                    | ExprKind::HexLit(_)
+                    | ExprKind::FloatLit(_)
+                    | ExprKind::StringLit
+            ));
+        }
+        (arg_tys, arg_literals)
+    }
+
+    /// B089: B023's funcdef-slot bind test, run over a call to a WORKSPACE
+    /// callable.
+    ///
+    /// Nothing here re-implements the comparison. [`Self::slot_funcdef`]
+    /// resolves a parameter whose text names a funcdef and
+    /// [`Self::arg_fails_funcdef_slot`] carries B023's false-positive guards;
+    /// both already ran on the external call path and at B076's four
+    /// declaration positions. The gap this closes is purely POSITIONAL —
+    /// `Maker(MakeDistinct)` and `Maker@ b = MakeDistinct;` were rejected
+    /// while `Take(MakeDistinct)` was accepted, so the LSP gave two answers
+    /// for one binding depending on where it was written.
+    ///
+    /// **An overload set is not a declaration, and that is the whole reason
+    /// this is not simply the external check.** A candidate rejecting the
+    /// argument is not the call being wrong: only when EVERY arity-compatible
+    /// candidate is rejected does anything get reported. B060 is the standing
+    /// demonstration of getting that backwards — widening the
+    /// function-shaped rule there killed whole overload sets on one
+    /// candidate's verdict, and the test that pins this lives in the same
+    /// fixture as the errors.
+    ///
+    /// It is deliberately NARROWER than the external path in a second way: a
+    /// candidate is only ever rejected here by a FUNCDEF slot. A
+    /// function-shaped argument meeting a non-funcdef parameter leaves the
+    /// candidate neutral, so a set with no funcdef parameter at that position
+    /// can never fire. That is less than the engine does; widening it is
+    /// B023's scope decision to reopen, and B060 is what widening it cost.
+    ///
+    /// Never walks `args` — callers pass the types from
+    /// [`Self::type_args_once`].
+    fn report_workspace_funcdef_slot_failure(
+        &mut self,
+        qualified_name: &str,
+        args: &[CallArg],
+        arg_tys: &[TypeRepr],
+        arg_literals: &[bool],
+        overloads: &[OverloadSig],
+    ) {
+        let mut evidence: Option<Span> = None;
+        let mut any_candidate = false;
+        for sig in overloads
+            .iter()
+            .filter(|sig| args.len() >= sig.min_args && args.len() <= sig.param_types.len())
+        {
+            any_candidate = true;
+            let mut rejected: Option<Span> = None;
+            let mut next_positional = 0usize;
+            for (i, arg) in args.iter().enumerate() {
+                let named = arg.name.as_ref().map(|n| n.text(self.source));
+                let ArgBind::Index(slot) =
+                    call_site::bind_arg(named, &sig.param_names, &mut next_positional)
+                else {
+                    continue;
+                };
+                let Some(param_text) = sig.param_types.get(slot) else {
+                    continue;
+                };
+                let Some(arg_ty) = arg_tys.get(i) else {
+                    continue;
+                };
+                if arg_ty.is_error() {
+                    continue;
+                }
+                let Some(fd) = self.slot_funcdef_in_scope(param_text, qualified_name) else {
+                    continue;
+                };
+                if self.arg_fails_funcdef_slot(&fd, &arg.value, arg_ty) {
+                    rejected = Some(arg.value.span);
+                }
+            }
+            match rejected {
+                Some(span) => evidence = evidence.or(Some(span)),
+                // A candidate that no funcdef slot rejects keeps the whole
+                // call alive. Bail immediately rather than accumulate.
+                None => return,
+            }
+        }
+        if !any_candidate {
+            return;
+        }
+        if let Some(span) = evidence {
+            self.diagnostics.push(TypeDiagnostic {
+                span,
+                kind: TypeDiagnosticKind::NoMatchingSignatures {
+                    text: render_no_matching_sig(qualified_name, arg_tys, arg_literals),
+                },
+            });
+        }
+    }
+
+    /// For primitive-typed args whose corresponding declared parameter type
+    /// is also a primitive, emit an `ArgTypeMismatch` when they differ.
+    /// Non-primitive arg types, unknown param types (non-primitive text),
+    /// and error types are all silently skipped — this is deliberately
+    /// conservative, mirroring `ReturnTypeMismatch`'s primitive-only strategy.
     ///
     /// Binding rules (AngelScript):
     /// - Unnamed (positional) args bind left-to-right to successive parameters.
     /// - Named args (`name: value`) bind to the matching parameter by name and
     ///   may skip optional/defaulted parameters.
     ///
-    /// Walks each arg exactly once so callers must NOT pre-walk.
-    fn walk_args_and_check_types(
+    /// Takes already-computed arg types (B089): the caller walks once via
+    /// [`Self::type_args_once`] and shares the result with the funcdef-slot
+    /// check, because typing an argument twice duplicates the nested
+    /// diagnostics of its subtree.
+    fn check_arg_types_against_params(
         &mut self,
         display_name: &str,
         args: &[CallArg],
+        arg_tys: &[TypeRepr],
         params: &[(String, String)],
     ) {
         let mut next_positional = 0usize;
-        for arg in args {
+        for (i, arg) in args.iter().enumerate() {
             let named = arg.name.as_ref().map(|n| n.text(self.source));
             match call_site::bind_arg_workspace(named, params, &mut next_positional) {
                 ArgBind::UnknownName => {
-                    // Unknown parameter name — still type the value for
-                    // nested diagnostics, but don't emit ArgTypeMismatch.
-                    let _ = self.expr_type(&arg.value);
+                    // Unknown parameter name — no ArgTypeMismatch. The value
+                    // was already typed, so its nested diagnostics stand.
                     continue;
                 }
                 ArgBind::Index(param_index) => {
-                    let arg_ty = self.expr_type(&arg.value);
+                    let Some(arg_ty) = arg_tys.get(i).cloned() else {
+                        continue;
+                    };
                     let Some((_, param_text)) = params.get(param_index) else {
                         continue;
                     };
@@ -3686,6 +4011,16 @@ impl<'a> Checker<'a> {
                 //    chained `.member` access off a constructor can
                 //    still resolve. Otherwise just silence.
                 if self.scope.has_type(&name) {
+                    // No `record_use` here, and that is MEASURED rather than
+                    // assumed. This arm looks like it is missing the
+                    // `record_use(&qualified)` its namespaced twin at step 3
+                    // has, and a line was added here on that reasoning — but
+                    // removing it again left
+                    // `a_class_used_only_as_a_constructor_call_is_credited`
+                    // green, so a workspace class reached by its constructor
+                    // call is already credited by another route. The line was
+                    // inert; an inert line that carries a comment claiming a
+                    // bug is worse than no line.
                     let mut arg_tys = Vec::with_capacity(args.len());
                     for a in args {
                         arg_tys.push(self.expr_type(&a.value));
@@ -3701,6 +4036,61 @@ impl<'a> Checker<'a> {
                 if let Some(resolved) = self.scope.resolve_unqualified(&name) {
                     self.walk_args(args);
                     return TypeRepr::Named(resolved);
+                }
+                // B071: the workspace's own declaration outranks an engine
+                // enum that merely shares this SHORT name.
+                //
+                // Fleet-measured, not anticipated: `tm-editor-plus-plus`
+                // declares `enum Axis` and writes `Axis(c)`, and the
+                // short-name rescue below handed back the Core enum
+                // `UI::Plot::Axis`. Nothing compared the two until enum
+                // conversions were checked, at which point the plugin's enum
+                // was reported incompatible with itself — the only false
+                // positive the enum work produced across 151 real plugins,
+                // and the mismatch report was right about the types it was
+                // given. The wrong half was here.
+                //
+                // `workspace_shadowing_type_name` (B073) rather than the
+                // bare-boolean `workspace_declares_type`, because two
+                // predicates answering one question is how they drift
+                // (B079: compose, never merely add). B073 found the same
+                // rule at a different call site and needed the WINNER's
+                // qualified name, since a shadowing declaration may not be
+                // spelled the way the reference is. Taking the name here
+                // hands the enum-conversion check a canonical key instead of
+                // making it re-derive one.
+                //
+                // Honest limit on that, so the next reader does not test for
+                // a behaviour difference there is not: TODAY the two spell
+                // the same string at this position. The predicate's exact
+                // arm returns `name` itself, and its tail arm — the one that
+                // could return `Nz::Axis` for a bare `Axis` — is already
+                // consumed by `resolve_unqualified` one fallback above,
+                // which scans the same tail table. The qualified form is
+                // correctness insurance if that ordering ever changes, not
+                // an observable fix. Its exclusion of real funcdefs is right
+                // here too: step 5 above already owns that case.
+                //
+                // AND NOTE THIS GUARD MASKS B098, it does not fix it. The
+                // bare call form still resolves to a namespaced engine enum
+                // whenever the workspace declares nothing of that name — 436
+                // spellings the game rejects. The fleet sweep going from one
+                // delta to zero is the mask, not the rule being clean; that
+                // is the B084 shape, where B062's export rooting hid a
+                // crediting defect behind a green gate.
+                if let Some(declared) = self.scope.workspace_shadowing_type_name(&name) {
+                    // B084 parity, and this guard would otherwise UNDO it.
+                    // The `has_global_ident` arm below credits every name
+                    // that reaches it; returning above that arm without
+                    // recording reintroduces the false "never used" for an
+                    // enum whose only reference is this cast-call form —
+                    // `tostring(WheelOrder(w))` is B084's own example.
+                    // Pinned by `b071_shadowing_guard_credits_the_enum` in
+                    // `analysis::unused`, which is the only harness that can
+                    // see it: `compute_diagnostics` runs no unused analysis.
+                    self.record_use(&declared);
+                    self.walk_args(args);
+                    return TypeRepr::Named(declared);
                 }
                 if let Some(enum_name) = self.scope.external_enum_by_short_name(&name) {
                     self.walk_args(args);
@@ -3823,7 +4213,29 @@ impl<'a> Checker<'a> {
                     self.check_arity_against_ranges(&member_name, &ranges, args.len(), callee.span);
                     self.walk_args(args);
                 } else {
-                    self.walk_args(args);
+                    // B089: a WORKSPACE class method. `callables_method` is
+                    // typedb-only, so this arm has always been the "nothing
+                    // known about the parameters" fallback — but the workspace
+                    // symbol table does know them, and a funcdef-typed
+                    // parameter on a plugin's own method was the one binding
+                    // position with no check of any kind.
+                    //
+                    // Only the funcdef-slot rule is run here. Turning this arm
+                    // into a general workspace-method arg-type check is a much
+                    // larger change with its own false-positive surface, and
+                    // this ticket's scope is the slot check's missing
+                    // positions.
+                    let qualified_method = format!("{type_name}::{member_name}");
+                    let method_overloads =
+                        self.method_overloads_including_inherited(&qualified_method);
+                    let (arg_tys, arg_literals) = self.type_args_once(args);
+                    self.report_workspace_funcdef_slot_failure(
+                        &qualified_method,
+                        args,
+                        &arg_tys,
+                        &arg_literals,
+                        &method_overloads,
+                    );
                 }
                 // AC19: when the receiver is a const object, a non-const
                 // method's return value inherits `Const(_)` so that
@@ -4541,7 +4953,14 @@ impl<'a> Checker<'a> {
                     });
                 }
                 let lhs_ty = self.expr_type(lhs);
-                let _ = self.expr_type(rhs);
+                let rhs_ty = self.expr_type(rhs);
+                // B071, the fifth position. Plain `=` only: a compound
+                // assign is `a = a OP b`, whose right side has already
+                // decayed to `int` through `Binary`, and no probe covers
+                // what the engine then does with an enum slot.
+                if matches!(op, AssignOp::Assign) {
+                    self.check_enum_conversion(&lhs_ty, rhs, &rhs_ty);
+                }
                 if matches!(lhs_ty, TypeRepr::Const(_)) {
                     self.diagnostics.push(TypeDiagnostic {
                         span: lhs.span,
@@ -4702,7 +5121,7 @@ impl<'a> Checker<'a> {
                             break;
                         }
                     }
-                    TypeRepr::Error(String::new())
+                    self.enum_member_type(&qual, expr.span)
                 }
             }
             ExprKind::Lambda { params, body } => {
@@ -12142,12 +12561,22 @@ void f() {
     /// IF YOU LANDED HERE FROM A FAILURE, this is what it means. Two more
     /// sites ask `lookup_funcdef` without the GH #38 shadowing guard that
     /// [`Self::try_funcdef_ctor`] carries — [`Self::funcdef_name_of`] and
-    /// [`Self::slot_funcdef`] — and they are UNGUARDED DELIBERATELY. Measured
+    /// [`Self::slot_funcdef`] — and they were UNGUARDED DELIBERATELY. Measured
     /// when B073 landed: with a plugin type named after a Core funcdef, both
-    /// produce output identical to the non-colliding control, so a guard there
+    /// produced output identical to the non-colliding control, so a guard there
     /// could not fire. A guard that cannot fire is worse than none, because at
     /// review time it is indistinguishable from one that can, and it tells the
     /// next reader an axis is covered when nothing is checking it.
+    ///
+    /// THAT ARGUMENT HAS SINCE EXPIRED FOR ONE OF THEM, exactly as this test
+    /// was built to detect. B089 ran the funcdef-slot check over workspace
+    /// call sites — the site the reachability argument said did not exist —
+    /// and this test went red on the `void g({T}@ p)` row, reporting
+    /// `NoMatchingSignatures` where the control was silent. The guard now
+    /// lives in [`Self::slot_funcdef_in_scope`], which is the only caller
+    /// that can reach it while shadowing; `slot_funcdef` and
+    /// `funcdef_name_of` stay unguarded on the original argument, which
+    /// still holds for their callers.
     ///
     /// This test is the substitute for those guards. It goes red the moment
     /// either site becomes reachable-and-shadowing, which forces that call to
