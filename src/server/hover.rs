@@ -1315,6 +1315,38 @@ mod tests {
         .expect("typedb fixtures must load")
     }
 
+    /// B158 (end to end): the dump's member note reaches the rendered hover.
+    /// The loader test proves the join; this proves the render path, which is
+    /// a separate mechanism and the one a user actually sees.
+    #[test]
+    fn hover_shows_a_nadeo_migration_note_on_a_member() {
+        let idx = fixture_typedb();
+        let src = "void main(CGameManialinkEntry@ e) { auto v = e.TextSize; }";
+        let md = hover_checked_with(src, "TextSize", 1, &idx);
+        assert!(
+            md.contains("Use TextSizeReal instead"),
+            "the dump's migration note must reach hover: {md:?}"
+        );
+        assert!(
+            md.contains("Deprecated"),
+            "and it must be marked as migration advice: {md:?}"
+        );
+    }
+
+    /// The other half of the pair, through the same render path: a member
+    /// with no note renders as it always did, with no empty doc block.
+    #[test]
+    fn hover_on_an_undocumented_nadeo_member_is_unchanged() {
+        let idx = fixture_typedb();
+        let src = "void main(CGameManialinkEntry@ e) { auto v = e.Value; }";
+        let md = hover_checked_with(src, "Value", 1, &idx);
+        assert!(md.contains("Value"), "still renders the member: {md:?}");
+        assert!(
+            !md.contains("Deprecated"),
+            "nothing may leak from a sibling's note: {md:?}"
+        );
+    }
+
     #[test]
     fn hover_rejects_nadeo_class_storage_key() {
         let idx = fixture_typedb();
