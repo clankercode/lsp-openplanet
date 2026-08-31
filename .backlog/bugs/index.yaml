@@ -98,3 +98,4 @@ bugs:
     - file: B097-remotebuild-payloads-can-be-sp.todo
     - file: B098-external-enum-by-short-name-re.todo
     - file: B099-complete-namespace-members-lab.todo
+    - file: B100-a-workspace-free-function-over.todo
