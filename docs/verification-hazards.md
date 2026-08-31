@@ -3907,9 +3907,9 @@ and the next lane will waste time blaming its own checker diff.
 The live `tm-ghosts-plus-plus` acceptance baseline is:
 
 - **Measured:** 2026-09-01 AEST.
-- **Plugin source:** a clean detached checkout at
-  `850c83560c0730109c300984318414ae022cf952` (`git diff --quiet HEAD --` and
-  `git diff --cached --quiet HEAD --` both succeed); the
+- **Plugin source:** a clean `git archive` export of
+  `850c83560c0730109c300984318414ae022cf952`, containing only the tracked bytes
+  committed at that revision; the
   disappearance is attributed exactly to plugin commit
   `ae3484fe254d1a554cbd58bc383fef8fd9c858d1` (`fix type conversion warning`),
   which changed only `src/Scrubber.as:299` from one outer `int64(...)` cast to
@@ -3918,20 +3918,24 @@ The live `tm-ghosts-plus-plus` acceptance baseline is:
 - **Instrument:** `openplanet-lsp 0.6.0`, binary md5
   `a7c20ccb51a4d73181714111b14a2778`, with typedb/game Openplanet **1.29.14**
   build `6fd4200f`.
-- **Command:** `openplanet-lsp check
-  ~/src/openplanet/my-plugins/tm-ghosts-plus-plus --format plain
-  --unused=info`.
+- **Command:** create a fresh directory with `probe_dir=$(mktemp -d)`, export
+  that exact tree into it with `git -C
+  ~/src/openplanet/my-plugins/tm-ghosts-plus-plus archive
+  850c83560c0730109c300984318414ae022cf952 | tar -x -C "$probe_dir"`, then run
+  `openplanet-lsp check "$probe_dir" --format plain --unused=info`. The fresh
+  archive is part of the command: checking the ordinary working copy is not an
+  equivalent reproduction.
 - **Expected result:** **0 errors, 1 warning, 118 hidden info**. The sole warning
   is `src/HookHelper.as:49:31: Signed/Unsigned mismatch`; that is the positive
   witness that warning collection still ran.
 
-Before using this as an A/B acceptance check, verify the plugin commit, clean
-tracked-tree assertions, and instrument still match. An ordinary working tree
-at that commit is not the same source if it carries tracked edits; use a clean
-detached worktree or record an exact patch identity. If any input moved,
-re-measure and update the whole record, not just the count. Line numbers alone
-are not diagnostic identity, but the remaining file/column/message triple is
-stable enough to name the witness here.
+Before using this as an A/B acceptance check, verify the archived plugin commit
+and instrument still match. An ordinary working tree at that commit is not the
+same source if it carries tracked edits, untracked AngelScript, or nested
+content; reproduce from a fresh archive (or record an exact full-tree identity).
+If any input moved, re-measure and update the whole record, not just the count.
+Line numbers alone are not diagnostic identity, but the remaining
+file/column/message triple is stable enough to name the witness here.
 
 **Prediction beats reconciliation even when reconciliation is exact.** The
 misplaced-`#[test]` incident recorded above is the proof: the suite total
