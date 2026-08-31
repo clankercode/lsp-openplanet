@@ -16,15 +16,17 @@
 //! Waits are bounded polls with a deadline.
 
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use openplanet_lsp::server::binary_watch::{ReplacedMode, ServerBinaryReplaced};
 use openplanet_lsp::server::Backend;
 use openplanet_lsp::testing::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::{Service, ServiceExt};
 use tower_lsp::lsp_types::notification::Notification;
 use tower_lsp::LspService;
@@ -38,11 +40,7 @@ const TICK: Duration = Duration::from_millis(10);
 const DEADLINE: Duration = Duration::from_secs(2);
 
 fn temp_dir(label: &str) -> TempDir {
-    static SEQ: AtomicUsize = AtomicUsize::new(0);
-    TempDir::new(&format!(
-        "openplanet-lsp-b105-{label}-{}",
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ))
+    TempDir::new(&format!("openplanet-lsp-b105-{label}"))
 }
 
 /// A stand-in for the installed executable. Never actually executed; the
@@ -58,6 +56,19 @@ fn fake_exe(dir: &Path, contents: &[u8]) -> PathBuf {
 fn rename_swap(target: &Path, contents: &[u8]) {
     let staging = target.with_extension(format!("new.{}", std::process::id()));
     fs::write(&staging, contents).unwrap();
+
+    #[cfg(windows)]
+    {
+        let old = target.with_extension(format!("old.{}", std::process::id()));
+        let _ = fs::remove_file(&old);
+        fs::rename(target, &old).unwrap();
+        assert!(
+            !target.exists(),
+            "the Windows updater exposes a transient target-away window"
+        );
+        let _ = fs::remove_file(old);
+    }
+
     fs::rename(&staging, target).unwrap();
 }
 
@@ -108,7 +119,10 @@ async fn binary_replaced_within(
         loop {
             let request = socket.next().await.expect("client socket remains open");
             if request.method() == <ServerBinaryReplaced as Notification>::METHOD {
-                return request.params().expect("notification carries params").clone();
+                return request
+                    .params()
+                    .expect("notification carries params")
+                    .clone();
             }
         }
     })
@@ -116,9 +130,7 @@ async fn binary_replaced_within(
     .ok()
 }
 
-async fn next_binary_replaced(
-    socket: &mut tower_lsp::ClientSocket,
-) -> Option<serde_json::Value> {
+async fn next_binary_replaced(socket: &mut tower_lsp::ClientSocket) -> Option<serde_json::Value> {
     binary_replaced_within(socket, DEADLINE).await
 }
 
@@ -189,40 +201,29 @@ async fn an_unchanged_binary_notifies_nothing() {
 
 #[tokio::test]
 async fn a_client_that_did_not_opt_in_gets_the_clean_exit_fallback() {
-    // The fallback ends the process, so the process-ending call is injected;
-    // everything up to it is the production path.
     let dir = temp_dir("fallback");
     let exe = fake_exe(&dir, b"the original binary");
 
-    let exits = Arc::new(AtomicUsize::new(0));
-    let counter = exits.clone();
-
     let (service, mut socket) = initialized_service(None).await;
-    service.inner().spawn_binary_watch_with_exit(
-        exe.clone(),
-        ReplacedMode::Exit,
-        TICK,
-        move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-        },
-    );
+    let in_flight = service.inner().in_flight();
+    service
+        .inner()
+        .spawn_binary_watch_at(exe.clone(), ReplacedMode::Exit, TICK);
 
     tokio::time::sleep(TICK * 5).await;
-    assert_eq!(
-        exits.load(Ordering::SeqCst),
-        0,
+    assert!(
+        !in_flight.is_draining(),
         "an unchanged binary must not end the process"
     );
 
     rename_swap(&exe, b"a considerably newer binary");
 
     let deadline = tokio::time::Instant::now() + DEADLINE;
-    while exits.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
+    while !in_flight.is_draining() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(TICK).await;
     }
-    assert_eq!(
-        exits.load(Ordering::SeqCst),
-        1,
+    assert!(
+        in_flight.is_draining(),
         "a client that did not opt in gets a clean exit once idle"
     );
 
@@ -238,9 +239,8 @@ async fn a_client_that_did_not_opt_in_gets_the_clean_exit_fallback() {
         rename_swap(&exe, &[b'y'; 64].map(|b| b + generation));
         tokio::time::sleep(TICK * 4).await;
     }
-    assert_eq!(
-        exits.load(Ordering::SeqCst),
-        1,
+    assert!(
+        in_flight.is_draining(),
         "the fallback must end the process once, not once per poll"
     );
 }
@@ -270,7 +270,9 @@ async fn an_in_flight_request_defers_the_restart_until_the_server_is_idle() {
     // busy: nothing may be sent.
     tokio::time::sleep(TICK * 25).await;
     assert!(
-        binary_replaced_within(&mut socket, TICK * 20).await.is_none(),
+        binary_replaced_within(&mut socket, TICK * 20)
+            .await
+            .is_none(),
         "a busy server must not be restarted out from under a pending request"
     );
 
@@ -288,18 +290,11 @@ async fn an_off_client_is_never_restarted() {
     let dir = temp_dir("off");
     let exe = fake_exe(&dir, b"the original binary");
 
-    let exits = Arc::new(AtomicUsize::new(0));
-    let counter = exits.clone();
-
     let (service, mut socket) = initialized_service(None).await;
-    service.inner().spawn_binary_watch_with_exit(
-        exe.clone(),
-        ReplacedMode::Off,
-        TICK,
-        move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-        },
-    );
+    let in_flight = service.inner().in_flight();
+    service
+        .inner()
+        .spawn_binary_watch_at(exe.clone(), ReplacedMode::Off, TICK);
 
     tokio::time::sleep(TICK * 3).await;
     rename_swap(&exe, b"a considerably newer binary");
@@ -308,9 +303,8 @@ async fn an_off_client_is_never_restarted() {
         next_binary_replaced(&mut socket).await.is_none(),
         "an opted-out client is never notified"
     );
-    assert_eq!(
-        exits.load(Ordering::SeqCst),
-        0,
+    assert!(
+        !in_flight.is_draining(),
         "an opted-out client is never exited"
     );
 }
@@ -322,38 +316,29 @@ async fn a_binary_that_disappears_is_not_a_replacement() {
     let dir = temp_dir("deleted");
     let exe = fake_exe(&dir, b"the original binary");
 
-    let exits = Arc::new(AtomicUsize::new(0));
-    let counter = exits.clone();
-
     let (service, _socket) = initialized_service(None).await;
-    service.inner().spawn_binary_watch_with_exit(
-        exe.clone(),
-        ReplacedMode::Exit,
-        TICK,
-        move || {
-            counter.fetch_add(1, Ordering::SeqCst);
-        },
-    );
+    let in_flight = service.inner().in_flight();
+    service
+        .inner()
+        .spawn_binary_watch_at(exe.clone(), ReplacedMode::Exit, TICK);
 
     tokio::time::sleep(TICK * 3).await;
     fs::remove_file(&exe).unwrap();
     tokio::time::sleep(TICK * 25).await;
 
-    assert_eq!(
-        exits.load(Ordering::SeqCst),
-        0,
+    assert!(
+        !in_flight.is_draining(),
         "a missing binary must never end the process"
     );
 
     // ...but its replacement arriving still counts.
     fs::write(&exe, b"the new binary, finally installed").unwrap();
     let deadline = tokio::time::Instant::now() + DEADLINE;
-    while exits.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
+    while !in_flight.is_draining() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(TICK).await;
     }
-    assert_eq!(
-        exits.load(Ordering::SeqCst),
-        1,
+    assert!(
+        in_flight.is_draining(),
         "the reappearance of a new binary is the signal"
     );
 }
@@ -365,12 +350,27 @@ async fn the_client_opt_in_survives_the_initialize_round_trip() {
     // to survive `initialize`, land in the cached initializationOptions, and
     // be read back by the same accessor `initialized` uses.
     for (sent, want) in [
-        (Some(serde_json::json!({"on_binary_replaced": "notify"})), ReplacedMode::Notify),
-        (Some(serde_json::json!({"on_binary_replaced": "exit"})), ReplacedMode::Exit),
-        (Some(serde_json::json!({"on_binary_replaced": "off"})), ReplacedMode::Off),
+        (
+            Some(serde_json::json!({"on_binary_replaced": "notify"})),
+            ReplacedMode::Notify,
+        ),
+        (
+            Some(serde_json::json!({"on_binary_replaced": "exit"})),
+            ReplacedMode::Exit,
+        ),
+        (
+            Some(serde_json::json!({"on_binary_replaced": "off"})),
+            ReplacedMode::Off,
+        ),
         // A client that says nothing gets the fallback, never the notification.
-        (Some(serde_json::json!({"game_target": "TMNEXT"})), ReplacedMode::Exit),
-        (Some(serde_json::json!({"on_binary_replaced": "nonsense"})), ReplacedMode::Exit),
+        (
+            Some(serde_json::json!({"game_target": "TMNEXT"})),
+            ReplacedMode::Exit,
+        ),
+        (
+            Some(serde_json::json!({"on_binary_replaced": "nonsense"})),
+            ReplacedMode::Exit,
+        ),
         (None, ReplacedMode::Exit),
     ] {
         let (service, _socket) = initialized_service(sent.clone()).await;
@@ -419,5 +419,144 @@ async fn the_in_flight_wrapper_is_transparent_to_the_protocol() {
     assert!(
         in_flight.is_idle(),
         "a completed request releases its in-flight slot"
+    );
+}
+
+#[tokio::test]
+async fn production_builder_captures_baseline_before_initialized_and_activates_the_watch() {
+    let dir = temp_dir("construction-baseline");
+    let exe = fake_exe(&dir, b"the original binary");
+
+    // This is the production builder seam: it captures the executable stamp
+    // and installs the same counted wrapper run_stdio serves.
+    let (mut service, mut socket) =
+        openplanet_lsp::server::build_restartable_service_with_binary_watch_at(exe.clone(), TICK);
+
+    // Replacement happens after construction but before the LSP client sends
+    // `initialized`. Taking the baseline in the initialized hook would miss it.
+    rename_swap(&exe, b"the replacement installed during initialize");
+
+    let initialize = tower_lsp::jsonrpc::Request::build("initialize")
+        .id(1)
+        .params(serde_json::json!({
+            "capabilities": {},
+            "initializationOptions": {"on_binary_replaced": "notify"}
+        }))
+        .finish();
+    service
+        .ready()
+        .await
+        .unwrap()
+        .call(initialize)
+        .await
+        .unwrap()
+        .expect("initialize responds");
+
+    let initialized = tower_lsp::jsonrpc::Request::build("initialized")
+        .params(serde_json::json!({}))
+        .finish();
+    assert!(
+        service
+            .ready()
+            .await
+            .unwrap()
+            .call(initialized)
+            .await
+            .unwrap()
+            .is_none(),
+        "initialized is a notification"
+    );
+
+    let params = next_binary_replaced(&mut socket)
+        .await
+        .expect("the production initialized hook activates the construction-time watch");
+    assert_ne!(params["previous"], params["current"]);
+}
+
+#[tokio::test]
+async fn fallback_drains_the_real_transport_after_its_final_response() {
+    use std::convert::Infallible;
+    use tokio::sync::oneshot;
+
+    struct DelayedResponse {
+        started: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<()>>,
+    }
+
+    impl Service<tower_lsp::jsonrpc::Request> for DelayedResponse {
+        type Response = Option<tower_lsp::jsonrpc::Response>;
+        type Error = Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: tower_lsp::jsonrpc::Request) -> Self::Future {
+            self.started.take().unwrap().send(()).unwrap();
+            let release = self.release.take().unwrap();
+            Box::pin(async move {
+                release.await.unwrap();
+                let response = serde_json::from_value(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "result": {"final": true}
+                }))
+                .unwrap();
+                Ok(Some(response))
+            })
+        }
+    }
+
+    let in_flight = openplanet_lsp::server::inflight::InFlight::new();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let service = DelayedResponse {
+        started: Some(started_tx),
+        release: Some(release_rx),
+    };
+
+    // ClientSocket is only the server-to-client loopback half; this test's
+    // custom service does not use it. The byte transport is real tower-lsp.
+    let (_unused, socket) = LspService::new(Backend::new);
+    let (mut client_input, server_input) = tokio::io::duplex(4096);
+    let (server_output, mut client_output) = tokio::io::duplex(4096);
+    let served_in_flight = in_flight.clone();
+    let server = tokio::spawn(async move {
+        openplanet_lsp::server::serve_restartable(
+            server_input,
+            server_output,
+            socket,
+            service,
+            served_in_flight,
+        )
+        .await;
+    });
+
+    let body = r#"{"jsonrpc":"2.0","id":7,"method":"openplanet/final"}"#;
+    client_input
+        .write_all(format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes())
+        .await
+        .unwrap();
+    started_rx.await.unwrap();
+    assert_eq!(in_flight.count(), 1, "the request is genuinely in flight");
+
+    release_tx.send(()).unwrap();
+    while !in_flight.begin_draining_if_idle() {
+        tokio::task::yield_now().await;
+    }
+
+    tokio::time::timeout(DEADLINE, server)
+        .await
+        .expect("coordinated EOF lets tower-lsp finish")
+        .expect("server task does not panic");
+    drop(client_input);
+
+    let mut bytes = Vec::new();
+    client_output.read_to_end(&mut bytes).await.unwrap();
+    let output = String::from_utf8(bytes).unwrap();
+    assert!(
+        output.contains(r#""id":7"#) && output.contains(r#""final":true"#),
+        "the response completed before the fallback and was flushed before exit: {output:?}"
     );
 }

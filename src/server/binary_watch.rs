@@ -110,7 +110,9 @@ impl ExeStamp {
     /// `None` covers both "deleted" and "we lack permission to look", and
     /// [`BinaryWatch::poll`] treats both the same way: not a replacement.
     pub fn of_path(path: &Path) -> Option<Self> {
-        std::fs::metadata(path).ok().map(|md| Self::from_metadata(&md))
+        std::fs::metadata(path)
+            .ok()
+            .map(|md| Self::from_metadata(&md))
     }
 
     /// The stamp of already-fetched metadata. Split out so the adapter can
@@ -274,6 +276,11 @@ impl BinaryWatch {
         self.signalled
     }
 
+    /// True when a replacement is waiting for an idle/drain decision.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Feed one observation.
     ///
     /// `current` is the stamp at [`Self::path`] right now (`None` if it could
@@ -304,7 +311,10 @@ impl BinaryWatch {
             // running, not evidence that it changed.
             None => self.baseline = Some(current),
             Some(baseline) if *baseline != current => self.pending = Some(current),
-            Some(_) => {}
+            // A deferred observation describes what was at the path then,
+            // not what is there now. If an installer rolls back to the image
+            // we actually started from, cancel that stale pending stamp.
+            Some(_) => self.pending = None,
         }
 
         let pending = self.pending.clone()?;
@@ -338,7 +348,6 @@ impl BinaryWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     const VERSION: &str = "0.6.0";
 
@@ -365,11 +374,38 @@ mod tests {
     }
 
     fn temp_dir(label: &str) -> crate::testing::TempDir {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        crate::testing::TempDir::new(&format!(
-            "openplanet-lsp-binwatch-{label}-{}",
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ))
+        crate::testing::TempDir::new(&format!("openplanet-lsp-binwatch-{label}"))
+    }
+
+    /// Install a staged replacement with the same platform split as
+    /// `update::replace_executable`. On Windows the running target is moved
+    /// away first; the callback observes that real transient absence.
+    fn rename_swap(target: &Path, contents: &[u8], on_target_away: impl FnOnce()) {
+        let parent = target.parent().unwrap();
+        let staging = parent.join(format!(
+            "{}.new.{}",
+            target.file_name().unwrap().to_string_lossy(),
+            std::process::id()
+        ));
+        std::fs::write(&staging, contents).unwrap();
+
+        #[cfg(windows)]
+        {
+            let old = parent.join(format!(
+                "{}.old.{}",
+                target.file_name().unwrap().to_string_lossy(),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&old);
+            std::fs::rename(target, &old).unwrap();
+            on_target_away();
+            let _ = std::fs::remove_file(old);
+        }
+
+        #[cfg(not(windows))]
+        let _ = on_target_away;
+
+        std::fs::rename(staging, target).unwrap();
     }
 
     // ---- negative control -------------------------------------------------
@@ -531,17 +567,22 @@ mod tests {
     }
 
     #[test]
-    fn returning_to_the_original_stamp_while_deferred_cancels_nothing() {
-        // Whether this "should" cancel is a real question; pinning it. Once we
-        // have observed a different binary we have no way to know the current
-        // one is byte-identical to what we loaded, so we restart rather than
-        // guess. Cheap when wrong, correct when right.
+    fn returning_to_the_original_stamp_while_deferred_cancels_the_stale_replacement() {
         let mut watch = watch(ReplacedMode::Exit);
         assert_eq!(watch.poll(Some(stamp(2_000, 900, 43)), false), None);
-        assert!(
-            watch.poll(Some(baseline()), true).is_some(),
-            "a replacement already seen still restarts"
+        assert_eq!(
+            watch.poll(Some(baseline()), true),
+            None,
+            "the file currently at the path is the original again, so the stale replacement must not restart it"
         );
+        assert!(!watch.has_signalled());
+
+        let newest = stamp(3_000, 1_100, 44);
+        let Some(RestartSignal::ExitForRespawn(replaced)) = watch.poll(Some(newest.clone()), true)
+        else {
+            panic!("a later real replacement must still signal");
+        };
+        assert_eq!(replaced.current, newest);
     }
 
     // ---- absence ----------------------------------------------------------
@@ -671,9 +712,18 @@ mod tests {
     #[test]
     fn mode_is_read_from_init_options() {
         let cases = [
-            (serde_json::json!({"on_binary_replaced": "notify"}), ReplacedMode::Notify),
-            (serde_json::json!({"on_binary_replaced": "exit"}), ReplacedMode::Exit),
-            (serde_json::json!({"on_binary_replaced": "off"}), ReplacedMode::Off),
+            (
+                serde_json::json!({"on_binary_replaced": "notify"}),
+                ReplacedMode::Notify,
+            ),
+            (
+                serde_json::json!({"on_binary_replaced": "exit"}),
+                ReplacedMode::Exit,
+            ),
+            (
+                serde_json::json!({"on_binary_replaced": "off"}),
+                ReplacedMode::Off,
+            ),
         ];
         for (opts, want) in cases {
             assert_eq!(
@@ -786,9 +836,13 @@ mod tests {
         let held_stamp = ExeStamp::from_metadata(&held.metadata().unwrap());
         assert_eq!(held_stamp, before);
 
-        let staging = dir.join(format!("openplanet-lsp.new.{}", std::process::id()));
-        std::fs::write(&staging, b"a considerably newer binary").unwrap();
-        std::fs::rename(&staging, &target).unwrap();
+        rename_swap(&target, b"a considerably newer binary", || {
+            assert_eq!(
+                ExeStamp::of_path(&target),
+                None,
+                "the Windows target-away phase is absence, never a replacement"
+            );
+        });
 
         let after = ExeStamp::of_path(&target).expect("target still exists");
         assert_ne!(
@@ -829,9 +883,9 @@ mod tests {
 
         // Re-create via rename so the inode definitely changes, the way an
         // installer's atomic write does.
-        let staging = dir.join("staging");
-        std::fs::write(&staging, b"same-length-bytes").unwrap();
-        std::fs::rename(&staging, &target).unwrap();
+        rename_swap(&target, b"same-length-bytes", || {
+            assert_eq!(ExeStamp::of_path(&target), None);
+        });
 
         let after = ExeStamp::of_path(&target).unwrap();
         assert_eq!(after.len, before.len, "same size, by construction");

@@ -33,7 +33,9 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use self::binary_watch::{BinaryWatch, ExeStamp, ReplacedMode, RestartSignal, ServerBinaryReplaced};
+use self::binary_watch::{
+    BinaryWatch, ExeStamp, ReplacedMode, RestartSignal, ServerBinaryReplaced,
+};
 use self::inflight::InFlight;
 use crate::analysis_snapshot::AnalysisSnapshot;
 use crate::cli::TypeDbVersions;
@@ -187,9 +189,20 @@ pub struct Backend {
     code_action_resolve_support: Arc<std::sync::atomic::AtomicBool>,
     /// B105: how many protocol messages the server is currently handling.
     /// Maintained by [`inflight::CountedService`], which wraps the whole
-    /// service in [`run_stdio`], and read by the binary watcher to decide
-    /// whether restarting would drop an answer the editor is waiting for.
+    /// service in [`serve_restartable`], and read by the binary watcher to
+    /// decide whether restarting would interrupt a handler.
     in_flight: InFlight,
+    /// Executable identity captured when the server is constructed. Watching
+    /// starts only after `initialized`, but the baseline must predate the
+    /// initialize handshake or an upgrade during that handshake is invisible.
+    binary_watch: Option<BinaryWatchConfig>,
+}
+
+#[derive(Clone)]
+struct BinaryWatchConfig {
+    path: PathBuf,
+    baseline: Option<ExeStamp>,
+    interval: Duration,
 }
 
 /// B035: may we hand back a code action with no `edit` and wait for
@@ -551,6 +564,21 @@ impl Backend {
     }
 
     pub fn new(client: Client) -> Self {
+        let binary_watch = match update::resolve_exe_path() {
+            Ok(path) => Some(BinaryWatchConfig {
+                baseline: ExeStamp::of_path(&path),
+                path,
+                interval: binary_watch::POLL_INTERVAL,
+            }),
+            Err(err) => {
+                tracing::warn!("binary-replacement watch disabled: {err}");
+                None
+            }
+        };
+        Self::with_binary_watch(client, binary_watch)
+    }
+
+    fn with_binary_watch(client: Client, binary_watch: Option<BinaryWatchConfig>) -> Self {
         Self {
             client,
             config: Arc::new(tokio::sync::RwLock::new(LspConfig::load(None, None))),
@@ -570,6 +598,7 @@ impl Backend {
             )),
             code_action_resolve_support: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             in_flight: InFlight::new(),
+            binary_watch,
         }
     }
 
@@ -2150,12 +2179,10 @@ impl Backend {
             tracing::debug!("binary-replacement watch disabled by initializationOptions");
             return;
         }
-        match update::resolve_exe_path() {
-            Ok(path) => self.spawn_binary_watch_at(path, mode, binary_watch::POLL_INTERVAL),
-            // Not fatal: the server works fine, it just cannot notice its own
-            // replacement. Say so rather than watching a guessed path.
-            Err(err) => tracing::warn!("binary-replacement watch disabled: {err}"),
-        }
+        let Some(config) = self.binary_watch.clone() else {
+            return;
+        };
+        self.spawn_binary_watch_config(config, mode);
     }
 
     /// The watcher over an explicit path and tick interval.
@@ -2163,30 +2190,24 @@ impl Backend {
     /// Public for tests, which cannot wait [`binary_watch::POLL_INTERVAL`] and
     /// must not be handed the real executable.
     pub fn spawn_binary_watch_at(&self, path: PathBuf, mode: ReplacedMode, interval: Duration) {
-        self.spawn_binary_watch_with_exit(path, mode, interval, || std::process::exit(0));
+        let config = BinaryWatchConfig {
+            baseline: ExeStamp::of_path(&path),
+            path,
+            interval,
+        };
+        self.spawn_binary_watch_config(config, mode);
     }
 
-    /// As [`Self::spawn_binary_watch_at`], with the process-ending half of the
-    /// fallback injected.
-    ///
-    /// The fallback's whole job is to end the process, which a test in this
-    /// process cannot observe by surviving it. Injecting it is what lets the
-    /// fallback path be *watched* rather than assumed — the alternative is a
-    /// branch that ships untested because testing it would kill the suite.
-    pub fn spawn_binary_watch_with_exit(
-        &self,
-        path: PathBuf,
-        mode: ReplacedMode,
-        interval: Duration,
-        on_exit: impl Fn() + Send + Sync + 'static,
-    ) {
+    fn spawn_binary_watch_config(&self, config: BinaryWatchConfig, mode: ReplacedMode) {
         let client = self.client.clone();
         let in_flight = self.in_flight.clone();
+        let path = config.path;
+        let interval = config.interval;
         let mut watch = BinaryWatch::new(
             path.clone(),
             update::current_version(),
             mode,
-            ExeStamp::of_path(&path),
+            config.baseline,
         );
 
         tokio::spawn(async move {
@@ -2203,19 +2224,32 @@ impl Backend {
                 // block for a long time, and a stalled worker thread would be
                 // a far worse bug than a late upgrade notice.
                 let probe = path.clone();
-                let stamp = match tokio::task::spawn_blocking(move || ExeStamp::of_path(&probe))
-                    .await
-                {
-                    Ok(stamp) => stamp,
-                    // No observation this tick, which the watch treats as "no
-                    // information" rather than "the file is gone".
-                    Err(err) => {
-                        tracing::debug!("binary stamp task failed: {err}");
+                let stamp =
+                    match tokio::task::spawn_blocking(move || ExeStamp::of_path(&probe)).await {
+                        Ok(stamp) => stamp,
+                        // No observation this tick, which the watch treats as "no
+                        // information" rather than "the file is gone".
+                        Err(err) => {
+                            tracing::debug!("binary stamp task failed: {err}");
+                            continue;
+                        }
+                    };
+
+                let signal = if matches!(mode, ReplacedMode::Exit) {
+                    // Record/update/cancel the observation without signalling.
+                    watch.poll(stamp.clone(), false);
+                    if !watch.has_pending() || !in_flight.begin_draining_if_idle() {
                         continue;
                     }
+                    // Admission is now closed under the same mutex used by
+                    // CountedService::poll_ready, so no request can appear in
+                    // the gap between the idle decision and transport EOF.
+                    watch.poll(stamp, true)
+                } else {
+                    watch.poll(stamp, in_flight.is_idle())
                 };
 
-                let Some(signal) = watch.poll(stamp, in_flight.is_idle()) else {
+                let Some(signal) = signal else {
                     continue;
                 };
 
@@ -2243,7 +2277,9 @@ impl Backend {
                             replaced.previous,
                             replaced.current,
                         );
-                        on_exit();
+                        // `begin_draining_if_idle` already signalled the
+                        // shutdown-aware input wrapper. Tower-lsp now follows
+                        // its ordinary EOF path and drains and flushes output.
                     }
                 }
                 // The watch has latched: it can never signal again, so there
@@ -2392,21 +2428,73 @@ impl Backend {
 /// through here, so a handler cannot be implemented on `Backend`, unit-tested
 /// green, and left off the router — the failure mode B040 was filed for.
 pub fn build_service() -> (LspService<Backend>, tower_lsp::ClientSocket) {
-    LspService::build(Backend::new)
+    build_service_with(Backend::new)
+}
+
+fn build_service_with(
+    backend: impl Fn(Client) -> Backend + Send + Sync + 'static,
+) -> (LspService<Backend>, tower_lsp::ClientSocket) {
+    LspService::build(backend)
         .custom_method(RESOLVED_DEFINES, Backend::resolved_defines)
         .finish()
+}
+
+fn counted_service(service: LspService<Backend>) -> inflight::CountedService<LspService<Backend>> {
+    let in_flight = service.inner().in_flight();
+    inflight::CountedService::new(in_flight, service)
+}
+
+/// Testable production builder with an explicit executable path and interval.
+/// The stamp is captured synchronously here, before any initialize message.
+#[doc(hidden)]
+pub fn build_restartable_service_with_binary_watch_at(
+    path: PathBuf,
+    interval: Duration,
+) -> (
+    inflight::CountedService<LspService<Backend>>,
+    tower_lsp::ClientSocket,
+) {
+    let config = BinaryWatchConfig {
+        baseline: ExeStamp::of_path(&path),
+        path,
+        interval,
+    };
+    let (service, socket) =
+        build_service_with(move |client| Backend::with_binary_watch(client, Some(config.clone())));
+    (counted_service(service), socket)
+}
+
+/// Serve a protocol service with the coordinated B105 admission/drain path.
+///
+/// Kept as a narrow public seam so a byte-level transport test can prove the
+/// exact production wrapper used by `run_stdio` flushes its final response.
+#[doc(hidden)]
+pub async fn serve_restartable<I, O, S>(
+    stdin: I,
+    stdout: O,
+    socket: tower_lsp::ClientSocket,
+    service: S,
+    in_flight: InFlight,
+) where
+    I: tokio::io::AsyncRead + Unpin,
+    O: tokio::io::AsyncWrite,
+    S: tower::Service<tower_lsp::jsonrpc::Request, Response = Option<tower_lsp::jsonrpc::Response>>
+        + Send
+        + 'static,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>> + Send + 'static,
+    S::Future: Send + 'static,
+{
+    let stdin = in_flight.shutdown_reader(stdin);
+    let service = inflight::CountedService::new(in_flight, service);
+    Server::new(stdin, stdout, socket).serve(service).await;
 }
 
 pub async fn run_stdio() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let (service, socket) = build_service();
-    // B105: count every message the server is handed, so the binary watcher
-    // can tell whether the editor is waiting on an answer. Wrapping the whole
-    // service is the one place that cannot miss a handler.
     let in_flight = service.inner().in_flight();
-    let service = inflight::CountedService::new(in_flight, service);
-    Server::new(stdin, stdout, socket).serve(service).await;
+    serve_restartable(stdin, stdout, socket, service, in_flight).await;
 }
 
 #[cfg(test)]

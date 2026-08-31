@@ -15,16 +15,18 @@
 //! `LspService` is a `tower::Service`, and `Server::serve` accepts any
 //! `Service<Request, Response = Option<Response>>`, so one wrapper around the
 //! whole service counts *every* message with no per-handler code and no way to
-//! miss one. The count is taken when the service is handed a message and
-//! released when that message's future finishes **or is dropped** — a
-//! cancelled request must not leave the server permanently "busy".
+//! miss one. The count is reserved in `poll_ready`, before the transport can
+//! yield between its idle decision and `call`, and released when that message's
+//! future finishes **or is dropped** — a cancelled request must not leave the
+//! server permanently "busy".
 //!
 //! # What "idle" does and does not cover
 //!
 //! This is deliberately a count of protocol messages, not of internal work:
-//! "idle" here means the editor is not waiting on us for an answer, which is
-//! the condition under which dropping the process costs nothing it cannot get
-//! back.
+//! "idle" here means no handler still owes the editor an answer. A completed
+//! response may still be buffered in tower-lsp's output pipeline, so the
+//! fallback never drops the process: [`ShutdownReader`] produces clean EOF and
+//! tower-lsp drains and flushes that pipeline before returning.
 //!
 //! It does **not** cover work in tasks the server spawned for itself — the
 //! background update check, the config-file reload loop and the diagnostics it
@@ -38,18 +40,32 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use tokio::io::{AsyncRead, ReadBuf};
 use tower::Service;
 use tower_lsp::jsonrpc::{Request, Response};
 
 /// A shared count of messages handed to the server and not yet finished.
 ///
 /// Cheap to clone; every clone observes the same count.
+#[derive(Debug, Default)]
+struct GateState {
+    count: usize,
+    draining: bool,
+}
+
+#[derive(Debug, Default)]
+struct Shared {
+    gate: Mutex<GateState>,
+    shutdown: AtomicBool,
+    shutdown_notify: Arc<tokio::sync::Notify>,
+}
+
 #[derive(Clone, Debug, Default)]
-pub struct InFlight(Arc<AtomicUsize>);
+pub struct InFlight(Arc<Shared>);
 
 impl InFlight {
     pub fn new() -> Self {
@@ -58,31 +74,107 @@ impl InFlight {
 
     /// Count one message as in flight until the returned guard is dropped.
     pub fn enter(&self) -> InFlightGuard {
-        self.0.fetch_add(1, Ordering::AcqRel);
+        self.try_enter()
+            .expect("cannot admit protocol work after draining begins")
+    }
+
+    fn try_enter(&self) -> Option<InFlightGuard> {
+        let mut gate = self.0.gate.lock().expect("in-flight gate poisoned");
+        if gate.draining {
+            return None;
+        }
+        gate.count += 1;
+        Some(InFlightGuard(Some(self.0.clone())))
+    }
+
+    fn enter_decoded_during_drain(&self) -> InFlightGuard {
+        let mut gate = self.0.gate.lock().expect("in-flight gate poisoned");
+        debug_assert!(gate.draining);
+        gate.count += 1;
         InFlightGuard(Some(self.0.clone()))
     }
 
     /// How many messages are currently being handled.
     pub fn count(&self) -> usize {
-        self.0.load(Ordering::Acquire)
+        self.0.gate.lock().expect("in-flight gate poisoned").count
     }
 
-    /// True when the editor is not waiting on us for anything.
+    /// True when no protocol handler is still running.
     pub fn is_idle(&self) -> bool {
         self.count() == 0
+    }
+
+    /// Atomically close admission if no request has reserved readiness.
+    ///
+    /// The same mutex protects this transition and `try_enter`, so exactly
+    /// one side wins: either a request owns a guard and drain waits, or drain
+    /// closes input before another frame can be read. A frame the transport
+    /// decoded just before EOF is admitted and drained; see `poll_ready`.
+    pub fn begin_draining_if_idle(&self) -> bool {
+        let mut gate = self.0.gate.lock().expect("in-flight gate poisoned");
+        if gate.draining || gate.count != 0 {
+            return false;
+        }
+        gate.draining = true;
+        self.0.shutdown.store(true, Ordering::Release);
+        drop(gate);
+        self.0.shutdown_notify.notify_waiters();
+        true
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.0
+            .gate
+            .lock()
+            .expect("in-flight gate poisoned")
+            .draining
+    }
+
+    /// Wrap transport input so beginning a drain appears as clean EOF.
+    pub fn shutdown_reader<R>(&self, inner: R) -> ShutdownReader<R> {
+        let shutdown = self.0.shutdown_notify.clone();
+        ShutdownReader {
+            inner,
+            shutdown_flag: self.0.clone(),
+            shutdown: Box::pin(shutdown.notified_owned()),
+        }
     }
 }
 
 /// Releases its slot on drop — including when the future it lives in is
 /// cancelled rather than completed.
 #[derive(Debug)]
-pub struct InFlightGuard(Option<Arc<AtomicUsize>>);
+pub struct InFlightGuard(Option<Arc<Shared>>);
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         if let Some(count) = self.0.take() {
-            count.fetch_sub(1, Ordering::AcqRel);
+            let mut gate = count.gate.lock().expect("in-flight gate poisoned");
+            gate.count = gate.count.checked_sub(1).expect("in-flight underflow");
         }
+    }
+}
+
+/// Input that turns the coordinated fallback into EOF. Tower-lsp's normal EOF
+/// path then stops admission and drains its task/output pipelines.
+pub struct ShutdownReader<R> {
+    inner: R,
+    shutdown_flag: Arc<Shared>,
+    shutdown: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ShutdownReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.shutdown_flag.shutdown.load(Ordering::Acquire)
+            || self.shutdown.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
 
@@ -92,11 +184,16 @@ impl Drop for InFlightGuard {
 pub struct CountedService<S> {
     inner: S,
     in_flight: InFlight,
+    ready_guard: Option<InFlightGuard>,
 }
 
 impl<S> CountedService<S> {
     pub fn new(in_flight: InFlight, inner: S) -> Self {
-        Self { inner, in_flight }
+        Self {
+            inner,
+            in_flight,
+            ready_guard: None,
+        }
     }
 }
 
@@ -111,14 +208,35 @@ where
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
+        if self.ready_guard.is_none() {
+            let guard = self.in_flight.try_enter().unwrap_or_else(|| {
+                // The transport may have decoded one frame just before the
+                // shutdown reader was woken. Parking readiness here would
+                // deadlock its input task, so admit that already-read frame;
+                // clean EOF prevents it from reading another and tower-lsp's
+                // join drains this response before returning.
+                self.in_flight.enter_decoded_during_drain()
+            });
+            self.ready_guard = Some(guard);
+        }
+
+        match self.inner.poll_ready(cx) {
+            Poll::Ready(Err(err)) => {
+                self.ready_guard.take();
+                Poll::Ready(Err(err))
+            }
+            other => other,
+        }
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
-        // Taken BEFORE the inner call so a message is counted for the whole
-        // time the server owns it, and moved into the future so it is released
-        // by completion or cancellation alike.
-        let guard = self.in_flight.enter();
+        // Normally reserved by `poll_ready`, before the transport can yield.
+        // Keep direct Service callers working too, provided drain has not
+        // already closed admission.
+        let guard = self
+            .ready_guard
+            .take()
+            .unwrap_or_else(|| self.in_flight.enter());
         let call = self.inner.call(req);
         Box::pin(async move {
             let _guard = guard;
@@ -242,8 +360,7 @@ mod tests {
         impl Service<Request> for ReadyService {
             type Response = Option<Response>;
             type Error = Infallible;
-            type Future =
-                Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+            type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
             fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
                 Poll::Ready(Ok(()))
             }
@@ -258,5 +375,78 @@ mod tests {
             assert_eq!(service.call(a_request()).await.unwrap(), None);
             assert!(in_flight.is_idle());
         }
+    }
+
+    #[tokio::test]
+    async fn readiness_reserves_admission_before_call_so_drain_cannot_overtake_it() {
+        #[derive(Clone)]
+        struct ReadyService;
+        impl Service<Request> for ReadyService {
+            type Response = Option<Response>;
+            type Error = Infallible;
+            type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, _req: Request) -> Self::Future {
+                Box::pin(async { Ok(None) })
+            }
+        }
+
+        use tower::ServiceExt;
+
+        let in_flight = InFlight::new();
+        let mut service = CountedService::new(in_flight.clone(), ReadyService);
+
+        service.ready().await.unwrap();
+        assert_eq!(
+            in_flight.count(),
+            1,
+            "poll_ready reserves the request before the transport can yield"
+        );
+        assert!(
+            !in_flight.begin_draining_if_idle(),
+            "drain must lose to a request whose readiness was already accepted"
+        );
+
+        service.call(a_request()).await.unwrap();
+        assert!(in_flight.is_idle());
+        assert!(in_flight.begin_draining_if_idle());
+        assert!(in_flight.is_draining());
+    }
+
+    #[tokio::test]
+    async fn a_frame_decoded_just_before_drain_is_not_parked_in_poll_ready() {
+        #[derive(Clone)]
+        struct ReadyService;
+        impl Service<Request> for ReadyService {
+            type Response = Option<Response>;
+            type Error = Infallible;
+            type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, _req: Request) -> Self::Future {
+                Box::pin(async { Ok(None) })
+            }
+        }
+
+        use tower::ServiceExt;
+
+        let in_flight = InFlight::new();
+        let mut service = CountedService::new(in_flight.clone(), ReadyService);
+        assert!(in_flight.begin_draining_if_idle());
+
+        tokio::time::timeout(std::time::Duration::from_millis(20), service.ready())
+            .await
+            .expect("an already-decoded frame must not deadlock the transport")
+            .unwrap();
+        assert_eq!(in_flight.count(), 1);
+        service.call(a_request()).await.unwrap();
+        assert!(in_flight.is_idle());
     }
 }
