@@ -1,0 +1,40 @@
+id	question	expect	verdict	build_status	reason	stands_for
+ctl-public-unrelated	control	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a public member from an unrelated function
+ctl-bogus	control	REJECT	REJECT	REJECTED	lsp-issue-repro-b117mv-ctl-bogus/Main.as(5,50): No matching symbol 'nopeB117MVctlbogus'	a member that does not exist; proves the oracle sees errors
+own-private-field	site:own	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a private field used inside its own class
+own-protected-field	site:own	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a protected field used inside its own class
+own-private-method	site:own	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a private method used inside its own class
+own-protected-method	site:own	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a protected method used inside its own class
+own-private-property	site:own	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a private property used inside its own class
+own-protected-property	site:own	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a protected property used inside its own class
+derived-private-field	site:derived	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	an inherited private field from a subclass
+derived-protected-field	site:derived	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	an inherited protected field from a subclass
+derived-public-field	site:derived	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	an inherited public field from a subclass
+derived-private-method	site:derived	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-derived-private-method/Main.as(8,46): Illegal call to private method 'void BaseB117MVderivedprivatemethod::memB117MVderivedprivatemethod()'	an inherited private method from a subclass
+derived-protected-method	site:derived	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	an inherited protected method from a subclass
+derived-public-method	site:derived	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	an inherited public method from a subclass
+derived-private-property	site:derived	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-derived-private-property/Main.as(8,60): Illegal call to private method 'int BaseB117MVderivedprivateproperty::get_memB117MVderivedprivateproperty()'	an inherited private property from a subclass
+derived-protected-property	site:derived	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	an inherited protected property from a subclass
+derived-public-property	site:derived	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	an inherited public property from a subclass
+unrelated-private-field	site:unrelated	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-unrelated-private-field/Main.as(7,75): Illegal access to private property 'memB117MVunrelatedprivatefield'	a private field from an unrelated function
+unrelated-protected-field	site:unrelated	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-unrelated-protected-field/Main.as(7,79): Illegal access to protected property 'memB117MVunrelatedprotectedfield'	a protected field from an unrelated function
+unrelated-public-field	site:unrelated	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a public field from an unrelated function
+unrelated-private-method	site:unrelated	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-unrelated-private-method/Main.as(7,76): Illegal call to private method 'void OwnB117MVunrelatedprivatemethod::memB117MVunrelatedprivatemethod()'	a private method from an unrelated function
+unrelated-protected-method	site:unrelated	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-unrelated-protected-method/Main.as(7,80): Illegal call to protected method 'void OwnB117MVunrelatedprotectedmethod::memB117MVunrelatedprotectedmethod()'	a protected method from an unrelated function
+unrelated-public-method	site:unrelated	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a public method from an unrelated function
+unrelated-private-property	site:unrelated	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-unrelated-private-property/Main.as(7,89): Illegal call to private method 'int OwnB117MVunrelatedprivateproperty::get_memB117MVunrelatedprivateproperty()'	a private property from an unrelated function
+unrelated-protected-property	site:unrelated	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-unrelated-protected-property/Main.as(7,93): Illegal call to protected method 'int OwnB117MVunrelatedprotectedproperty::get_memB117MVunrelatedprotectedproperty()'	a protected property from an unrelated function
+unrelated-public-property	site:unrelated	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a public property from an unrelated function
+sibling-instance-private-field	site:sibling-instance	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a private field of ANOTHER instance, from inside the class
+derivedx-private-field-read	site:derived-confirm	UNKNOWN	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	READING an inherited private field, not writing it
+derivedx-private-field-bare	site:derived-confirm	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-derivedx-private-field-bare/Main.as(8,56): Illegal access to inherited private property 'memB117MVderivedxprivatefieldbare'	the bare-name spelling, without `this.`
+derivedx-private-field-via-base-handle	site:derived-confirm	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-derivedx-private-field-via-base-handle/Main.as(8,112): Illegal access to private property 'memB117MVderivedxprivatefieldviabasehandle'	through an explicit Base@ handle, from inside the subclass
+derivedx-protected-method-bare	site:derived-confirm	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	the protected-method control for the bare spelling
+crossfile-private-field	site:cross-file	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-crossfile-private-field/Main.as(4,75): Illegal access to private property 'memB117MVcrossfileprivatefield'	a private field declared in ANOTHER file of the same plugin
+crossfile-protected-field	site:cross-file	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-crossfile-protected-field/Main.as(4,79): Illegal access to protected property 'memB117MVcrossfileprotectedfield'	a protected field declared in ANOTHER file of the same plugin
+crossfile-public-field	site:cross-file	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a public field declared in ANOTHER file of the same plugin
+crossfile-private-method	site:cross-file	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-crossfile-private-method/Main.as(4,76): Illegal call to private method 'void OwnB117MVcrossfileprivatemethod::memB117MVcrossfileprivatemethod()'	a private method declared in ANOTHER file of the same plugin
+crossfile-protected-method	site:cross-file	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-crossfile-protected-method/Main.as(4,80): Illegal call to protected method 'void OwnB117MVcrossfileprotectedmethod::memB117MVcrossfileprotectedmethod()'	a protected method declared in ANOTHER file of the same plugin
+crossfile-public-method	site:cross-file	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	a public method declared in ANOTHER file of the same plugin
+ctor-private-from-unrelated	site:unrelated	UNKNOWN	REJECT	REJECTED	lsp-issue-repro-b117mv-ctor-private-from-unrelated/Main.as(7,83): Illegal call to private method 'OwnB117MVctorprivatefromunrelated@ OwnB117MVctorprivatefromunrelated()'	a private constructor called from an unrelated function
+ctor-public-from-unrelated	site:unrelated	ACCEPT	ACCEPT	CLEAN	compiled and loaded, no error attributed to this folder	the public-constructor control for the row above

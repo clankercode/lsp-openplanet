@@ -320,16 +320,29 @@ fn complete_dot_members(
         }
     }
 
+    // B117: the ACCESS SITE. Which class the cursor sits in decides whether a
+    // `private` or `protected` member of the receiver may be offered, so it has
+    // to travel with the lookup rather than be re-derived inside it.
+    let enclosing_class = scope_query::find_enclosing_class(file, offset)
+        .map(|cls| cls.name.text(source).to_string());
+    let enclosing_class = enclosing_class.as_deref();
+
     let mut items = Vec::new();
 
     if let Some(tt) = type_text {
         if let Some(base) = scope_query::strip_to_base_type(&tt) {
-            add_type_members(&base, type_index, workspace, &mut items);
+            add_type_members(&base, type_index, workspace, enclosing_class, &mut items);
         }
     } else {
         // The receiver might itself be a type name (e.g., `MyClass.` for
         // static lookups — not strictly valid AngelScript, but harmless).
-        add_type_members(&receiver, type_index, workspace, &mut items);
+        add_type_members(
+            &receiver,
+            type_index,
+            workspace,
+            enclosing_class,
+            &mut items,
+        );
     }
 
     items
@@ -341,6 +354,7 @@ fn add_type_members(
     type_name: &str,
     type_index: Option<&TypeIndex>,
     workspace: Option<&SymbolTable>,
+    enclosing_class: Option<&str>,
     items: &mut Vec<CompletionItem>,
 ) {
     // Try external: walk the type and its parent chain.
@@ -414,6 +428,18 @@ fn add_type_members(
                 if rest.contains("::") {
                     continue;
                 }
+                // B117: the visibility filter. Only the WORKSPACE half is
+                // filtered, and that is a measured bound rather than a
+                // simplification: B131 found the typedb carries no visibility
+                // data at all — `is_protected` was populated by 0 of 1002
+                // methods in the 1.29.5 fixture and 0 of 975 in 1.29.14, and
+                // the strings "private" and "protected" appear nowhere in
+                // either dump. Engine members are offered because there is no
+                // signal that would justify hiding one. Do not go looking for
+                // engine visibility data; it is not there.
+                if !member_is_visible_from(ws, type_name, &sym.modifiers, enclosing_class) {
+                    continue;
+                }
                 let kind = match &sym.kind {
                     SymbolKind::Function { .. } => CompletionItemKind::METHOD,
                     SymbolKind::Variable { .. } => CompletionItemKind::FIELD,
@@ -423,6 +449,119 @@ fn add_type_members(
             }
         }
     }
+}
+
+/// The simple tail of a possibly-namespace-qualified class name.
+///
+/// The receiver type reaches [`add_type_members`] in whatever spelling the
+/// pooled symbol names use, while the enclosing class comes off the AST
+/// unqualified, so the two are compared on their tails. That is deliberately
+/// LENIENT — two same-named classes in different namespaces compare equal —
+/// and the direction is chosen: a spurious match OFFERS a member, a spurious
+/// mismatch HIDES one. See [`member_is_visible_from`] for why that asymmetry
+/// is the safe one.
+fn class_tail(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
+/// Does `child` derive, transitively, from `ancestor`?
+///
+/// Walks the pooled `SymbolKind::Class { parents }` graph breadth-first, with a
+/// visited set so a malformed cyclic hierarchy terminates rather than hangs.
+fn workspace_derives_from(ws: &SymbolTable, child: &str, ancestor: &str) -> bool {
+    let target = class_tail(ancestor);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<String> =
+        std::collections::VecDeque::from([child.to_string()]);
+    while let Some(name) = queue.pop_front() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if seen.len() > 64 {
+            break;
+        }
+        for sym in ws.all_symbols() {
+            if class_tail(&sym.name) != class_tail(&name) || sym.name.contains("::") {
+                continue;
+            }
+            if let SymbolKind::Class { parents, .. } = &sym.kind {
+                for p in parents {
+                    if class_tail(p) == target {
+                        return true;
+                    }
+                    queue.push_back(p.clone());
+                }
+            }
+        }
+    }
+    false
+}
+
+/// May a member of `owner` with these modifiers be offered at a site enclosed
+/// by `enclosing_class`?
+///
+/// # The rule, measured against the engine
+///
+/// `scripts/probe_member_visibility.py`, corpus in
+/// `docs/probes/b117-member-visibility.tsv`. 39 variants, 12 controls:
+///
+/// | access site | private | protected | public |
+/// |---|---|---|---|
+/// | inside the declaring class | offer | offer | offer |
+/// | inside a DERIVED class | HIDE | offer | offer |
+/// | an unrelated function | HIDE | HIDE | offer |
+///
+/// The engine's own words: `Illegal access to private property 'x'`,
+/// `Illegal call to protected method 'C::M'`, and — for the derived site —
+/// `Illegal access to inherited private property 'x'`.
+///
+/// Three findings behind the table that are not guessable from it:
+///
+/// * The FILE BOUNDARY is irrelevant. An AngelScript class is module-scoped, so
+///   the cross-file rows match the unrelated rows exactly. This is the repo's
+///   recurring same-file-only shape (B116, B120) NOT applying, measured rather
+///   than assumed.
+/// * Privacy is CLASS-scoped, not object-scoped: a method may touch a private
+///   field of ANOTHER instance of its own class
+///   (`sibling-instance-private-field` accepts). So the check is on the
+///   enclosing CLASS, never on the receiver expression.
+/// * `this.<inherited private field>` is ACCEPTED by the engine while both the
+///   bare name and a `Base@` handle are REJECTED with a dedicated
+///   `Illegal access to inherited private property` diagnostic. That is an
+///   engine HOLE in one spelling, not a rule, and the filter follows the rule.
+///   The first pass of the probe used only the `this.` spelling and read
+///   "inherited private fields are accessible"; three confirming rows caught
+///   it. Had it not been caught, this filter would have been too permissive at
+///   exactly the derived site the ticket says is the whole point.
+///
+/// # The asymmetry, chosen deliberately
+///
+/// Every uncertain case OFFERS. A completion that hides a member the user is
+/// allowed to write is a false negative they cannot diagnose — worse than
+/// today's uniform over-offering, which is at least predictable. So an unknown
+/// enclosing class, an unresolvable hierarchy and an ambiguous name all fall
+/// through to offering.
+fn member_is_visible_from(
+    ws: &SymbolTable,
+    owner: &str,
+    modifiers: &crate::symbols::scope::DeclModifiers,
+    enclosing_class: Option<&str>,
+) -> bool {
+    if !modifiers.is_private && !modifiers.is_protected {
+        return true;
+    }
+    let Some(site) = enclosing_class else {
+        // Not inside any class: only public members are reachable.
+        return false;
+    };
+    if class_tail(site) == class_tail(owner) {
+        // The declaring class itself sees everything it declares.
+        return true;
+    }
+    // A subclass sees `protected` and not `private`. This is the ONLY site
+    // where the two keywords differ, which is why the pool keeps them as
+    // separate flags rather than one "not public" bit.
+    modifiers.is_protected && workspace_derives_from(ws, site, owner)
 }
 
 fn complete_identifier(
@@ -2799,5 +2938,314 @@ mod b107_workspace_namespace_members {
             checker_names.contains(&"A".to_string()),
             "test premise: the enumeration is non-empty, got {checker_names:?}"
         );
+    }
+}
+
+// ── B117: member completion respects visibility ─────────────────────────────
+//
+// B115 gave the parser `is_private`/`is_protected`, B114 pooled them, and
+// nothing read them: member completion offered private and protected members
+// at every access site. This is the consumer.
+//
+// The rule is MEASURED, not inferred from C++. `scripts/probe_member_visibility.py`,
+// 39 variants and 12 controls against the live game, corpus in
+// `docs/probes/b117-member-visibility.tsv`:
+//
+//   | access site                | private | protected | public |
+//   |----------------------------|---------|-----------|--------|
+//   | inside the declaring class | offer   | offer     | offer  |
+//   | inside a DERIVED class     | HIDE    | offer     | offer  |
+//   | an unrelated function      | HIDE    | HIDE      | offer  |
+//
+// Three things the table does not show, each of which changed the design:
+//
+//   * The FILE BOUNDARY is irrelevant — cross-file rows match the unrelated
+//     rows exactly, because an AngelScript class is module-scoped. This
+//     repo's recurring same-file-only shape (B116, B120) does not apply here,
+//     and that is measured rather than assumed.
+//   * Privacy is CLASS-scoped, not object-scoped: a method may touch a
+//     private field of another INSTANCE of its own class. So the filter keys
+//     on the enclosing class, never on the receiver expression.
+//   * `this.<inherited private field>` is accepted by the engine while the
+//     bare name and a `Base@` handle are both rejected with a dedicated
+//     `Illegal access to inherited private property`. The first probe pass
+//     used only the `this.` spelling and read "inherited private fields are
+//     accessible"; three confirming rows caught it. That is an engine hole in
+//     one spelling, not a rule, and had it not been caught this filter would
+//     have been too permissive at exactly the derived site.
+//
+// ENGINE members are never filtered, and that is a bound rather than a
+// shortcut: B131 measured that the typedb carries no visibility data at all.
+#[cfg(test)]
+mod b117_member_visibility_tests {
+    use super::*;
+    use crate::server::test_support::TestWorkspace;
+
+    fn pos_after(source: &str, marker: &str) -> Position {
+        let byte = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("marker {:?} not found", marker))
+            + marker.len();
+        let prefix = &source[..byte];
+        let line = prefix.matches('\n').count() as u32;
+        let col = prefix.rfind('\n').map_or(byte, |nl| byte - nl - 1) as u32;
+        Position::new(line, col)
+    }
+
+    /// Labels offered at `marker` in file 0 of a multi-file workspace.
+    fn labels_ws(files: &[(&str, &str)], marker: &str) -> Vec<String> {
+        let ws = TestWorkspace::files(files);
+        let main = files[0].1;
+        let pos = pos_after(main, marker);
+        let analysis = crate::analysis::DocumentAnalysis::analyze_plain(main);
+        complete(
+            &analysis,
+            None,
+            pos,
+            None,
+            Some(ws.snapshot.symbols()),
+            &[],
+            false,
+        )
+        .iter()
+        .map(|i| i.label.clone())
+        .collect()
+    }
+
+    fn one(src: &str, marker: &str) -> Vec<String> {
+        labels_ws(&[("compl", src)], marker)
+    }
+
+    fn offers(labels: &[String], name: &str) -> bool {
+        labels.iter().any(|l| l == name)
+    }
+
+    /// The class every same-file case reaches for: one member of each
+    /// visibility, in each of the three member kinds the parser records
+    /// visibility on.
+    const OWNER: &str = "class C { \
+        private int privF; protected int protF; int pubF; \
+        private void privM() {} protected void protM() {} void pubM() {} \
+        private int privP { get { return 1; } } \
+        protected int protP { get { return 1; } } \
+        int pubP { get { return 1; } } }";
+
+    // ── site 1: inside the declaring class ───────────────────────────────
+    //
+    // THE NEGATIVE CONTROL THE TICKET NAMES. A filter that hides a private
+    // member here is worse than no filter at all, and it would pass any
+    // suite that only checks that things disappear.
+
+    #[test]
+    fn the_declaring_class_is_offered_every_member_it_declares() {
+        let src = format!("{OWNER} class Unused {{}}");
+        let src = src.replace(
+            "int pubP { get { return 1; } } }",
+            "int pubP { get { return 1; } } void Touch(C@ o) { o. } }",
+        );
+        let labels = one(&src, "o.");
+        for name in [
+            "privF", "protF", "pubF", "privM", "protM", "pubM", "privP", "protP", "pubP",
+        ] {
+            assert!(
+                offers(&labels, name),
+                "`{name}` must be offered inside its own class, got {labels:?}"
+            );
+        }
+    }
+
+    /// Privacy is CLASS-scoped, not object-scoped — measured
+    /// (`sibling-instance-private-field` compiles). The receiver above is a
+    /// separate `C@`, not `this`, and that is the point of this row.
+    #[test]
+    fn a_sibling_instance_of_the_same_class_is_not_treated_as_foreign() {
+        let src = "class C { private int privF; void Touch(C@ other) { other. } }";
+        assert!(
+            offers(&one(src, "other."), "privF"),
+            "a private field of another instance of the same class is reachable"
+        );
+    }
+
+    // ── site 2: inside a DERIVED class ───────────────────────────────────
+    //
+    // The ONLY site where `private` and `protected` differ. Without it a
+    // filter that conflates the two keywords passes everything else.
+
+    #[test]
+    fn a_derived_class_is_offered_protected_but_not_private() {
+        let src = format!("{OWNER} class D : C {{ void Touch(C@ o) {{ o. }} }}");
+        let labels = one(&src, "o.");
+        for name in ["protF", "protM", "protP", "pubF", "pubM", "pubP"] {
+            assert!(
+                offers(&labels, name),
+                "`{name}` is reachable from a subclass, got {labels:?}"
+            );
+        }
+        for name in ["privF", "privM", "privP"] {
+            assert!(
+                !offers(&labels, name),
+                "`{name}` is NOT reachable from a subclass — the engine says \
+                 `Illegal access to inherited private property` — got {labels:?}"
+            );
+        }
+    }
+
+    /// The keywords must be distinguishable, stated as a difference rather
+    /// than as two independent facts: a fix that collapses them into one
+    /// "not public" bit makes these two sets equal and fails here.
+    #[test]
+    fn private_and_protected_are_distinguishable_at_the_derived_site() {
+        let src = format!("{OWNER} class D : C {{ void Touch(C@ o) {{ o. }} }}");
+        let labels = one(&src, "o.");
+        assert_ne!(
+            offers(&labels, "privM"),
+            offers(&labels, "protM"),
+            "private and protected must not be treated alike at a derived site"
+        );
+    }
+
+    /// Depth is not special-cased: a grandchild sees `protected` too.
+    #[test]
+    fn an_indirect_subclass_still_sees_protected() {
+        let src =
+            format!("{OWNER} class Mid : C {{}} class D : Mid {{ void Touch(C@ o) {{ o. }} }}");
+        let labels = one(&src, "o.");
+        assert!(offers(&labels, "protM"), "two levels down, got {labels:?}");
+        assert!(
+            !offers(&labels, "privM"),
+            "still not private, got {labels:?}"
+        );
+    }
+
+    // ── site 3: an unrelated scope ───────────────────────────────────────
+
+    #[test]
+    fn an_unrelated_function_is_offered_only_public_members() {
+        let src = format!("{OWNER} void f(C@ o) {{ o. }}");
+        let labels = one(&src, "o.");
+        for name in ["pubF", "pubM", "pubP"] {
+            assert!(offers(&labels, name), "`{name}` is public, got {labels:?}");
+        }
+        for name in ["privF", "protF", "privM", "protM", "privP", "protP"] {
+            assert!(
+                !offers(&labels, name),
+                "`{name}` is not reachable from an unrelated function, got {labels:?}"
+            );
+        }
+    }
+
+    /// An unrelated CLASS is not a subclass, so it gets the same answer as a
+    /// free function. Without this row, "has an enclosing class" could be
+    /// mistaken for "is related to the receiver".
+    #[test]
+    fn an_unrelated_class_is_offered_only_public_members() {
+        let src = format!("{OWNER} class Other {{ void Touch(C@ o) {{ o. }} }}");
+        let labels = one(&src, "o.");
+        assert!(offers(&labels, "pubM"), "public, got {labels:?}");
+        assert!(!offers(&labels, "protM"), "not a subclass, got {labels:?}");
+        assert!(!offers(&labels, "privM"), "not a subclass, got {labels:?}");
+    }
+
+    // ── the file boundary is irrelevant ──────────────────────────────────
+
+    /// Measured, not assumed: the cross-file probe rows match the unrelated
+    /// rows exactly, because an AngelScript class is module-scoped. Stated as
+    /// a test because this repo's recurring bug shape is a rule that silently
+    /// stops at the file boundary (B116, B120).
+    #[test]
+    fn the_file_boundary_does_not_change_any_verdict() {
+        let files = [("compl", "void f(C@ o) { o. }"), ("other", OWNER)];
+        let labels = labels_ws(&files, "o.");
+        assert!(
+            offers(&labels, "pubM"),
+            "public, cross-file, got {labels:?}"
+        );
+        assert!(
+            !offers(&labels, "privM"),
+            "private, cross-file, got {labels:?}"
+        );
+        assert!(
+            !offers(&labels, "protM"),
+            "protected, cross-file, got {labels:?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_class_in_another_file_still_sees_protected() {
+        let files = [
+            ("compl", "class D : C { void Touch(C@ o) { o. } }"),
+            ("other", OWNER),
+        ];
+        let labels = labels_ws(&files, "o.");
+        assert!(
+            offers(&labels, "protM"),
+            "protected, cross-file, got {labels:?}"
+        );
+        assert!(
+            !offers(&labels, "privM"),
+            "private, cross-file, got {labels:?}"
+        );
+    }
+
+    // ── the safe direction, and the shapes that must not hide anything ───
+
+    /// Every uncertain case OFFERS. A hierarchy the pool cannot resolve must
+    /// not silently hide a `protected` member — the user would have no way to
+    /// tell completion from reality.
+    #[test]
+    fn an_unresolvable_hierarchy_still_offers_public_members() {
+        let src = format!("{OWNER} class D : NoSuchBase {{ void Touch(C@ o) {{ o. }} }}");
+        let labels = one(&src, "o.");
+        assert!(offers(&labels, "pubM"), "public survives, got {labels:?}");
+    }
+
+    /// A cyclic hierarchy is invalid AngelScript; the walk must terminate on
+    /// it rather than hang, and must still answer.
+    #[test]
+    fn a_cyclic_hierarchy_terminates() {
+        let src = format!("{OWNER} class A : B {{ void Touch(C@ o) {{ o. }} }} class B : A {{}}");
+        let labels = one(&src, "o.");
+        assert!(
+            offers(&labels, "pubM"),
+            "public survives a cycle, got {labels:?}"
+        );
+    }
+
+    /// The public row at EVERY site, in one test, so a filter that gets
+    /// gradually stricter cannot pass by degrees.
+    #[test]
+    fn a_public_member_is_offered_from_every_site() {
+        let sites = [
+            format!("{OWNER} void f(C@ o) {{ o. }}"),
+            format!("{OWNER} class D : C {{ void Touch(C@ o) {{ o. }} }}"),
+            format!("{OWNER} class Other {{ void Touch(C@ o) {{ o. }} }}"),
+            OWNER.replace(
+                "int pubP { get { return 1; } } }",
+                "int pubP { get { return 1; } } void Touch(C@ o) { o. } }",
+            ),
+        ];
+        for src in sites {
+            let labels = one(&src, "o.");
+            for name in ["pubF", "pubM", "pubP"] {
+                assert!(
+                    offers(&labels, name),
+                    "`{name}` must survive at every site; source `{src}` gave {labels:?}"
+                );
+            }
+        }
+    }
+
+    /// A class with no visibility keywords anywhere is completely unaffected:
+    /// the default is public and is pinned rather than assumed.
+    #[test]
+    fn a_class_with_no_keywords_is_entirely_unfiltered() {
+        let src = "class P { int a; void b() {} int c { get { return 1; } } } void f(P@ o) { o. }";
+        let labels = one(src, "o.");
+        for name in ["a", "b", "c"] {
+            assert!(
+                offers(&labels, name),
+                "`{name}` defaults public, got {labels:?}"
+            );
+        }
     }
 }
