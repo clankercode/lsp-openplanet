@@ -161,3 +161,4 @@ bugs:
     - file: B160-adopt-the-engine-spelling-in-n.todo
     - file: B161-b102-array-sort-correct-callba.todo
     - file: B162-just-rtest-with-a-name-filter.todo
+    - file: B163-the-gate-has-no-test-set-diff.todo
