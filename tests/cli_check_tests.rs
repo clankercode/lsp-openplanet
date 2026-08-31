@@ -5585,3 +5585,130 @@ fn b091_a_delegate_of_the_wrong_family_was_already_reported() {
          rejected: {errors:#?}"
     );
 }
+
+/// B108: a CALLABLE argument must print as its SIGNATURE, not as its return
+/// type.
+///
+/// `startnew(this.Tick)` read `No matching signatures to 'startnew(void)'`.
+/// `void` is the method's RETURN TYPE, printed where a callable belongs, so
+/// the message named something that was not the argument and gave the author
+/// nothing to act on.
+///
+/// WHICH RENDERER IS "THE GOOD ONE" — measured, because the ticket named the
+/// other one. B108 says to reuse `render_func_or_type`, but that emits
+/// `"{} ({})"` WITH a space (`void ()`), and the message the ticket itself
+/// holds up as the target quality is `Can't implicitly convert from 'void()'`
+/// — no space. That text comes from `funcdef_binding_source_display`, which
+/// is also the stricter of the two: it renders a signature only when the
+/// argument resolves to EXACTLY ONE, where `render_func_or_type` takes
+/// `sigs.first()` and would silently pick one of several overloads. Reusing
+/// the literally-named renderer would have produced `startnew(void ())` and
+/// introduced a second spelling of the same idea. Every assertion-level pin
+/// in this file uses the no-space form; the only `void ()` in the tree is a
+/// comment in the b025 fixture.
+///
+/// THE BOUNDARY OF B108, pinned from the other side — and it is NARROWER
+/// than the ticket's title suggests.
+///
+/// B108 is not "a callable prints badly". It is a callable flattened to its
+/// RETURN type, and that happens to exactly one shape. Measured across both
+/// fixtures:
+///
+///   * `this.Tick` (METHOD REFERENCE) types as `void` — the return type.
+///     The callable's identity is already gone, so the signature is strictly
+///     more information. THIS is B108, and this is what changed.
+///   * `WrongArityOne` (bare function name) types as `Funcdef("WrongArityOne")`
+///     and already rendered as that NAME. Untouched.
+///   * `StringLess@ badHandle` types as `StringLess@`, a name the author
+///     wrote and can look up. Untouched.
+///
+/// The first cut did not make this distinction and rewrote all three, trading
+/// names for shapes. `b102_a_funcdef_handle_of_the_wrong_shape_is_reported`
+/// caught it — a pin B102 records as load-bearing, because it is what makes
+/// the sibling fixture's correct-handle row falsifiable. The suite refused an
+/// over-reach; it was not a fixture needing an update.
+///
+/// My own first version of THIS test then asserted that a bare function name
+/// should render as a signature, which was the same over-reach restated as an
+/// expectation. It was wrong for the same reason: that argument never lost
+/// its name.
+#[test]
+fn check_b108_only_a_method_reference_is_rewritten() {
+    // Names are KEPT wherever the type still carries one.
+    let b102 = repro_errors("b102-array-sort-mismatched-callbacks");
+    let b102_joined = b102.join("\n");
+    for (line, expected, what) in [
+        (32, "array::Sort(WrongArityOne)", "a bare function name"),
+        (48, "array::Sort(StringLess@)", "a funcdef-typed value"),
+    ] {
+        assert!(
+            b102.iter()
+                .any(|l| l.contains(&format!("Main.as:{line}:")) && l.contains(expected)),
+            "{what} must keep its name as `{expected}`:\n{b102_joined}"
+        );
+    }
+    // THE POSITIVE CONTROL, and it has to come from the other fixture: only a
+    // method reference is rewritten, so without this the assertions above are
+    // satisfied by reverting B108 entirely.
+    let b091 = repro_errors("b091-coroutine-method-unwrapped");
+    assert!(
+        b091.iter()
+            .any(|l| l.contains("Main.as:44:") && l.contains("startnew(void())")),
+        "a method reference must still render as its signature:\n{}",
+        b091.join("\n")
+    );
+}
+
+/// EXPECTATIONS ARE MEASURED, NOT INVENTED. Two of these were written from my
+/// reading of the fixture and were WRONG, and the renderer was right both
+/// times: `OnInt` is declared `int64` (not `int`), and `OnString`'s parameter
+/// is spelled `const string &in`, with the space the declaration uses. Both
+/// corrections came from the red/green output rather than from reshaping the
+/// code to match a guess — which is the point of pinning exact text. It
+/// reproduces the DECLARED signature, so a wrong expectation is a wrong
+/// expectation, not a licence to change the renderer.
+///
+/// The declaration-position pins in
+/// `check_b091_declaration_and_assignment_name_the_signature` are the other
+/// half of this: same fixture, same argument shape, already correct. This
+/// brings the CALL position to the message the declaration position gives.
+#[test]
+fn check_b108_a_callable_argument_prints_as_its_signature() {
+    let errors = repro_errors("b091-coroutine-method-unwrapped");
+    let joined = errors.join("\n");
+    for (line, expected, what) in [
+        (44, "startnew(void())", "no-userdata coroutine slot"),
+        (46, "startnew(void(bool), const bool)", "bool userdata family"),
+        // `int64`, not `int`: `OnInt` is declared `void OnInt(int64 i)`. The
+        // first expectation here said `void(int)` and the RENDERER was
+        // right — it reproduces the DECLARED parameter type, which is the
+        // whole point of the fix.
+        (47, "startnew(void(int64), const int)", "int64 userdata family"),
+        (48, "startnew(void(uint64), uint)", "uint64 userdata family"),
+        (49, "startnew(void(double), const float)", "double userdata family"),
+        // Spelled WITH the space, exactly as the declaration writes it
+        // (`const string &in s`). Measured; the first guess omitted it.
+        (
+            50,
+            "startnew(void(const string &in), const string)",
+            "string userdata family",
+        ),
+        // A handle parameter, and a NON-literal second argument (`this`),
+        // which stays unqualified where the literals take `const`.
+        (45, "startnew(void(ref@), Worker)", "handle param, receiver userdata"),
+    ] {
+        assert!(
+            errors
+                .iter()
+                .any(|l| l.contains(&format!("Main.as:{line}:")) && l.contains(expected)),
+            "line {line} ({what}) must name the signature `{expected}`:\n{joined}"
+        );
+    }
+    // The defect itself, stated as an absence so a partial fix cannot pass:
+    // no diagnostic anywhere in this fixture may print a bare `(void)` or
+    // `(void,` where a callable was supplied.
+    assert!(
+        !joined.contains("startnew(void)"),
+        "a callable must never render as its return type:\n{joined}"
+    );
+}

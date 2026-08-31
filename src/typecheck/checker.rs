@@ -3430,6 +3430,59 @@ impl<'a> Checker<'a> {
         out
     }
 
+    /// B108: each argument resolved for the `No matching signatures`
+    /// message, so a callable names its SIGNATURE rather than its return
+    /// type.
+    ///
+    /// Reuses [`Self::funcdef_binding_source_display`], which is what already
+    /// produces `Can't implicitly convert from 'void()' to 'CoroutineFunc@'`
+    /// at the DECLARATION position — the same argument shape, one message
+    /// away. Deliberately not `render_func_or_type`, which B108 names:
+    /// that one emits `"{} ({})"` with a space and takes `sigs.first()`,
+    /// silently choosing among overloads. Every assertion-level pin in the
+    /// tree spells this `void()`, so reusing the other renderer would have
+    /// introduced a second spelling of one idea.
+    ///
+    /// Called only on the ERROR path. Resolving every argument of every call
+    /// eagerly would put a scope lookup per argument on the hot path to buy
+    /// nothing — the text is needed only when a diagnostic is actually
+    /// emitted.
+    fn rendered_args(&self, args: &[CallArg], arg_tys: &[TypeRepr]) -> Vec<RenderedArg> {
+        args.iter()
+            .zip(arg_tys)
+            .map(|(arg, ty)| RenderedArg {
+                text: if Self::type_already_names_the_callable(ty) {
+                    ty.display()
+                } else {
+                    self.funcdef_binding_source_display(&arg.value, ty)
+                },
+                is_literal: arg_is_const_literal(&arg.value),
+            })
+            .collect()
+    }
+
+    /// True when the argument's TYPE already denotes the callable, so
+    /// rendering its signature instead would DISCARD information.
+    ///
+    /// The B108 defect is narrower than "a callable prints badly": it is a
+    /// callable flattened to its RETURN type. That happens to a method
+    /// reference or a bare function name, whose `expr_type` is the return
+    /// type — `this.Tick` types as `void`. It does NOT happen to a
+    /// funcdef-typed VALUE: `StringLess@ badHandle` types as `StringLess@`,
+    /// which is a real name the author wrote and can look up, and is the
+    /// more useful half of the message. Substituting
+    /// `bool(const string &in, const string &in)` there would trade a name
+    /// for a shape the reader can already see in the declaration.
+    ///
+    /// Measured, not reasoned: widening to every argument turned B102's
+    /// `array::Sort(StringLess@)` into the signature form and its test
+    /// caught it. That pin is load-bearing — B102 records that it is what
+    /// makes the sibling fixture's correct-handle row falsifiable — so this
+    /// is the suite refusing an over-reach, not a fixture needing an update.
+    fn type_already_names_the_callable(ty: &TypeRepr) -> bool {
+        matches!(Self::peel_const_handle(ty), TypeRepr::Funcdef(_))
+    }
+
     /// B025: the overload signatures a MEMBER ACCESS denotes when read as a
     /// method reference (`this.M`, `c.M`, `g.M`, `arr[i].M`, `box.inner.M`).
     ///
@@ -3670,14 +3723,7 @@ impl<'a> Checker<'a> {
         let mut arg_bool_literals = Vec::with_capacity(args.len());
         for a in args {
             arg_tys.push(self.expr_type(&a.value));
-            arg_literals.push(matches!(
-                a.value.kind,
-                ExprKind::BoolLit(_)
-                    | ExprKind::IntLit(_)
-                    | ExprKind::HexLit(_)
-                    | ExprKind::FloatLit(_)
-                    | ExprKind::StringLit
-            ));
+            arg_literals.push(arg_is_const_literal(&a.value));
             arg_bool_literals.push(matches!(a.value.kind, ExprKind::BoolLit(_)));
         }
         let mut next_positional = 0usize;
@@ -3707,15 +3753,11 @@ impl<'a> Checker<'a> {
                         .unwrap_or(false)
                         && arg_bool_literals[i]
                     {
+                        let text =
+                            render_no_matching_sig(qualified_name, &self.rendered_args(args, &arg_tys));
                         self.diagnostics.push(TypeDiagnostic {
                             span: arg.value.span,
-                            kind: TypeDiagnosticKind::NoMatchingSignatures {
-                                text: render_no_matching_sig(
-                                    qualified_name,
-                                    &arg_tys,
-                                    &arg_literals,
-                                ),
-                            },
+                            kind: TypeDiagnosticKind::NoMatchingSignatures { text },
                         });
                         continue;
                     }
@@ -3738,15 +3780,13 @@ impl<'a> Checker<'a> {
                     // (GH #47 style).
                     if let Some(fd) = self.slot_funcdef_templated(param_text, elem) {
                         if self.arg_fails_funcdef_slot(&fd, &arg.value, arg_ty) {
+                            let text = render_no_matching_sig(
+                                qualified_name,
+                                &self.rendered_args(args, &arg_tys),
+                            );
                             self.diagnostics.push(TypeDiagnostic {
                                 span: arg.value.span,
-                                kind: TypeDiagnosticKind::NoMatchingSignatures {
-                                    text: render_no_matching_sig(
-                                        qualified_name,
-                                        &arg_tys,
-                                        &arg_literals,
-                                    ),
-                                },
+                                kind: TypeDiagnosticKind::NoMatchingSignatures { text },
                             });
                             continue;
                         }
@@ -3879,14 +3919,7 @@ impl<'a> Checker<'a> {
         let mut arg_bool_literals: Vec<bool> = Vec::with_capacity(args.len());
         for a in args {
             arg_tys.push(self.expr_type(&a.value));
-            arg_literals.push(matches!(
-                a.value.kind,
-                ExprKind::BoolLit(_)
-                    | ExprKind::IntLit(_)
-                    | ExprKind::HexLit(_)
-                    | ExprKind::FloatLit(_)
-                    | ExprKind::StringLit
-            ));
+            arg_literals.push(arg_is_const_literal(&a.value));
             arg_bool_literals.push(matches!(a.value.kind, ExprKind::BoolLit(_)));
         }
         let mut any_compatible = false;
@@ -3987,11 +4020,11 @@ impl<'a> Checker<'a> {
         }
         if !any_compatible {
             if let Some(span) = evidence_span {
+                let text =
+                    render_no_matching_sig(qualified_name, &self.rendered_args(args, &arg_tys));
                 self.diagnostics.push(TypeDiagnostic {
                     span,
-                    kind: TypeDiagnosticKind::NoMatchingSignatures {
-                        text: render_no_matching_sig(qualified_name, &arg_tys, &arg_literals),
-                    },
+                    kind: TypeDiagnosticKind::NoMatchingSignatures { text },
                 });
             }
         }
@@ -4009,14 +4042,7 @@ impl<'a> Checker<'a> {
         let mut arg_literals = Vec::with_capacity(args.len());
         for a in args {
             arg_tys.push(self.expr_type(&a.value));
-            arg_literals.push(matches!(
-                a.value.kind,
-                ExprKind::BoolLit(_)
-                    | ExprKind::IntLit(_)
-                    | ExprKind::HexLit(_)
-                    | ExprKind::FloatLit(_)
-                    | ExprKind::StringLit
-            ));
+            arg_literals.push(arg_is_const_literal(&a.value));
         }
         (arg_tys, arg_literals)
     }
@@ -4102,11 +4128,10 @@ impl<'a> Checker<'a> {
             return;
         }
         if let Some(span) = evidence {
+            let text = render_no_matching_sig(qualified_name, &self.rendered_args(args, arg_tys));
             self.diagnostics.push(TypeDiagnostic {
                 span,
-                kind: TypeDiagnosticKind::NoMatchingSignatures {
-                    text: render_no_matching_sig(qualified_name, arg_tys, arg_literals),
-                },
+                kind: TypeDiagnosticKind::NoMatchingSignatures { text },
             });
         }
     }
@@ -5525,24 +5550,55 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// 'Ns::Fn(const string, string, const bool)'` — qualified callee plus one
 /// display type per argument; literals render const-qualified (the game
 /// derives constness from the expression form).
-fn render_no_matching_sig(
-    qualified_name: &str,
-    arg_tys: &[TypeRepr],
-    arg_literals: &[bool],
-) -> String {
-    let rendered = arg_tys
+fn render_no_matching_sig(qualified_name: &str, args: &[RenderedArg]) -> String {
+    let rendered = args
         .iter()
-        .zip(arg_literals)
-        .map(|(ty, lit)| {
-            if *lit {
-                format!("const {}", ty.display())
-            } else {
-                ty.display()
-            }
-        })
+        .map(RenderedArg::render)
         .collect::<Vec<_>>()
         .join(", ");
     format!("{qualified_name}({rendered})")
+}
+
+/// One argument, already resolved into the only two facts the
+/// `No matching signatures` renderer needs (B108).
+///
+/// It used to be handed `arg_tys` and `arg_literals` — two parallel slices —
+/// and nothing else. That is why a CALLABLE printed as `void`: an argument's
+/// TYPE is its return type, and by the time the renderer ran the callable had
+/// already been flattened to it. The fix is not a third parallel slice; it is
+/// to resolve each argument where its EXPRESSION is still in scope and hand
+/// the renderer one value per argument.
+struct RenderedArg {
+    /// The argument's display text: its SIGNATURE when it resolves to
+    /// exactly one function, otherwise its type.
+    text: String,
+    /// Literals render const-qualified — the game derives constness from the
+    /// expression form (GH #47).
+    is_literal: bool,
+}
+
+impl RenderedArg {
+    fn render(&self) -> String {
+        if self.is_literal {
+            format!("const {}", self.text)
+        } else {
+            self.text.clone()
+        }
+    }
+}
+
+/// True when the argument expression is a literal, which the game renders
+/// const-qualified. One definition: this test was copy-pasted at each site
+/// that built an `arg_literals` slice.
+fn arg_is_const_literal(expr: &Expr) -> bool {
+    matches!(
+        expr.kind,
+        ExprKind::BoolLit(_)
+            | ExprKind::IntLit(_)
+            | ExprKind::HexLit(_)
+            | ExprKind::FloatLit(_)
+            | ExprKind::StringLit
+    )
 }
 
 /// True when the subtree contains an explicit type conversion
