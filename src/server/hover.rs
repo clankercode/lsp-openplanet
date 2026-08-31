@@ -196,7 +196,9 @@ pub fn hover(
             // the deleted `source_reference_key` used to reach them through
             // its own walk. Ten of them regressed when this said `if let
             // Some(key)`, and the corpus sweep caught it.
-            let canonical = scope.canonical_enum_key(&qualified);
+            let canonical = scope
+                .accepts_enum(&qualified)
+                .and_then(|proof| scope.canonical_enum_key(&qualified, proof));
             let key = canonical.as_deref().unwrap_or(qualified.as_str());
             if let Some(md) = lookup_external(&qualified, index, Some(key)) {
                 return Some(markdown_hover(md));
