@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T13:31:28Z"
 depends_on: []
 estimate_hours: 1
 id: B117
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Member visibility is set by the parser and read by nothing: no layer above consumes is_private/is_protected, so completion offers private and protected members everywhere'
@@ -12,3 +14,65 @@ updated_at: "2026-08-31T13:31:28Z"
 ---
 
 Member visibility is set by the parser and read by nothing: no layer above consumes is_private/is_protected, so completion offers private and protected members everywhere
+
+
+## Found by lane-unused while closing B115, 2026-08-31
+
+## B115's ticket understated this, and the correction is the point
+
+B115 said completion filtering was "half-blind" — able to filter private
+*methods* but not *fields*. **That was wrong. It is totally blind.**
+
+A grep for `is_private` / `is_protected` across `src/symbols`, `src/typecheck`
+and `src/server/completion.rs` returns **zero hits**. Nothing above the parser
+has ever consumed member visibility, for fields *or* methods.
+`FunctionDecl::is_private` has been set since it was written and read by nobody.
+
+So the method half was never working either. There was no asymmetry to fix.
+
+## Consequence
+
+Member completion offers `private` and `protected` members at every access site,
+including from unrelated scopes where the engine would reject the access. Hover
+and navigation are in the same position.
+
+## State after B115
+
+B115 supplied the **input** and changed **no user-visible behaviour**, which is
+why its tests are parser-level and say so in their module docs. The flags now
+exist and are correct on `FunctionDecl`, `VarDeclStmt` and `PropertyDecl`. This
+ticket is the missing **consumer**.
+
+Do them together — fields and methods — rather than wiring fields alone. The
+method path only looks done.
+
+## Test axes
+
+The access site is the whole problem, so the cases are a cross product of member
+visibility against where the completion is requested:
+
+- **Access sites:** inside the declaring class; inside a DERIVED class; an
+  unrelated function; another file. The derived-class site is the only one that
+  distinguishes `protected` from `private` — without it a fix that conflates
+  them passes green, which is the same trap B115 defended against and must be
+  defended against again here.
+- **Members:** field, method, property, constructor. Each in all three
+  visibilities, with the no-keyword default pinned explicitly rather than
+  assumed.
+- **Cross-file**, because a same-file-only filter is this repo's recurring
+  shape — see B116, whose emit site is gated on `file_classes` for exactly this
+  reason. Check whether the visibility flags survive pooling before assuming
+  they are available cross-file; if they do not, that dependency belongs in
+  B114's territory and should be stated here rather than discovered late.
+- **Negative controls:** a public member must still be offered from every site,
+  and a private member must still be offered INSIDE its own class. A filter that
+  hides too much passes a test that only checks things disappear.
+
+## Before writing the fix
+
+Establish what the ENGINE actually does at each of these sites. This repo has
+been burned by fixtures that did not match the shipped code they generalised to.
+`private` in AngelScript is not necessarily C++'s `private`, and a filter that
+is stricter than the engine turns completion into a source of false negatives —
+worse than the current permissiveness, because the current behaviour is at least
+predictable.
