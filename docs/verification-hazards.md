@@ -211,6 +211,39 @@ indistinguishable from "I am structurally incapable of seeing it".
   python for anything whose failure would be silent. Four instances is enough
   to stop treating each as a surprise.
 
+- **`2>/dev/null` converts the loud failure mode into the silent one.** This
+  document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
+  relative timestamps that bfs rejects — and explicitly credited it as the
+  *milder* hazard, because "bfs **errored**, so its traversal visibly never
+  ran". Hours later I wrote the same probe again to check whether six lanes
+  were still working, and this time I appended `2>/dev/null`. Every lane came
+  back **"0 files touched"**, including two that had committed 80 seconds and 2
+  minutes earlier.
+
+  So the redirect did not merely hide an error. It **moved the failure from the
+  documented-mild class into the documented-severe one**, and produced the
+  answer that stops you looking — six idle lanes — about work that was visibly
+  in progress. The contradiction is what saved it: a commit 80 seconds old is
+  proof that files were written, so "0 files touched" could not be true.
+  Without an independent signal in the same output, it would have read as six
+  stalled lanes and I would have started killing and restarting them.
+
+  **The rule this yields is narrow and worth obeying literally: never suppress
+  stderr on a probe whose output you intend to believe.** Suppress it on
+  something whose *success* you will verify by other means; never on the check
+  that is itself the evidence. A probe's error text is not noise around the
+  result — for a probe that cannot run, it **is** the result, and it is the only
+  part that distinguishes "I looked and found nothing" from "I never looked".
+
+  Note also how thin the protection was to begin with. The earlier entry's
+  reassurance ("at least it errored") was true, but it was one redirect away
+  from being gone, and the person who removed it was the one who had written
+  the sentence. **A hazard that is only survivable because a tool happens to be
+  loud is not mitigated; it is merely lucky.** The real mitigation is the
+  positive control — point the probe at a file you just touched and require it
+  to come back 1 — which is what finally produced the true answer (13, 23 and 2
+  files across three live lanes).
+
 - **A flag that was accepted, documented, and ignored.** B068's fix added a
   `--batch` knob so a corpus could be re-measured one name per compilation
   unit. The flag parsed, was documented as a speed control — and **both corpus
