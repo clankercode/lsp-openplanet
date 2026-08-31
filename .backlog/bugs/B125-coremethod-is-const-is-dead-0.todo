@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T14:13:31Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T14:25:51Z"
 complexity: medium
 created_at: "2026-08-31T14:11:35Z"
 depends_on: []
+duration_minutes: 12.337405290783334
 estimate_hours: 1
 id: B125
 priority: high
 started_at: "2026-08-31T14:13:31Z"
-status: in_progress
+status: done
 tags: []
 title: 'CoreMethod.is_const is dead: 0 of 1002 typedb dumps populate it and serde(default) makes it silently answer false'
-updated_at: "2026-08-31T14:13:31Z"
+updated_at: "2026-08-31T14:25:51Z"
 ---
 
 CoreMethod.is_const is dead: 0 of 1002 typedb dumps populate it and serde(default) makes it silently answer false
