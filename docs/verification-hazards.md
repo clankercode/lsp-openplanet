@@ -1415,6 +1415,26 @@ The test passes, and would have passed either way.
   level inside its members and one level outside its membership rule.** Both
   are invisible to it by construction, and both fail toward looking clean.
 
+- **A gate that correctly refuses to answer still has to say why.** `just test`
+  went INCOMPLETE on one merge and clean on an immediate re-run of the same
+  tree. Refusing to report a total was right; rendering all three possible
+  causes as the same line was not. A binary that produced no summary might have
+  crashed on a real defect, been killed under machine load, or hit something
+  else entirely, and **the failure mode of making a human guess is dismissing a
+  real crash as "just load"** — which is how B078 nearly went.
+
+  So the verdict now carries the post-mortem: the signal or exit status cargo
+  reported, classified into "a fault inside the process" (SIGSEGV, SIGABRT,
+  SIGILL) versus "something outside ended it" (SIGKILL, SIGTERM); how many of
+  its declared tests it managed to print before stopping; and the machine's
+  load, sampled DURING the run because a spike that starved a process has
+  usually decayed by the time it ends. A SIGSEGV on an idle box and a SIGKILL
+  at 41 on 16 cores must not render identically, and the selftest asserts they
+  do not.
+
+  **And it does not retry.** A gate that retries until green converts an
+  intermittent into silence, which is strictly worse than a red run.
+
 - **`-D warnings` makes clippy report FEWER lints, not more.** It turns the
   first warning into an error, so compilation stops early and the diagnostic
   set is truncated. Measured on this tree, rustc 1.97.0:

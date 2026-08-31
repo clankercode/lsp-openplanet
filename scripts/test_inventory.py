@@ -514,6 +514,8 @@ def enumerate_artifacts(cargo_args: list[str] | None = None) -> list[dict]:
             "--locked",
             "--no-run",
             "--message-format=json",
+            # Shared machine: never more than two build jobs (repo CLAUDE.md).
+            *([] if any(a.startswith(("-j", "--jobs")) for a in (cargo_args or [])) else ["-j2"]),
             *(cargo_args or []),
         ],
         cwd=REPO_ROOT,
@@ -707,20 +709,35 @@ def _n(value: int | None) -> str:
     return "?" if value is None else str(value)
 
 
-def check(cargo_args: list[str] | None = None, verbose: bool = False) -> tuple[int, str]:
-    """Run the whole check. Returns ``(status, report)``; 0 means trustworthy."""
+def check(
+    cargo_args: list[str] | None = None, verbose: bool = False
+) -> tuple[int, str, dict[str, int]]:
+    """Run the whole check.
+
+    Returns ``(status, report, declared)``; 0 means trustworthy. ``declared``
+    maps each test binary's path to the number of tests its SOURCE declares —
+    handed to the suite gate so that a binary which dies mid-run can report
+    "printed 37 of its 118" instead of only "produced no summary".
+    """
     problems = verify_stripper()
     if problems:
         detail = "\n".join(f"  - {p}" for p in problems)
         return 1, (
             "FAIL: the source scanner is broken, so no count it produces means "
             f"anything.\n{detail}"
-        )
+        ), {}
 
     artifacts = enumerate_artifacts(cargo_args)
     harnesses, spawned, exact = measure(artifacts)
     problems, total = evaluate(harnesses, spawned, lib_sources_are_exact=exact)
-    return (1 if problems else 0), report(harnesses, spawned, problems, total, verbose)
+    declared = {
+        str(h.exe): h.declared for h in harnesses if h.declared is not None
+    }
+    return (
+        (1 if problems else 0),
+        report(harnesses, spawned, problems, total, verbose),
+        declared,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -933,7 +950,7 @@ def main() -> int:
         return run_selftest()
     verbose = "-v" in argv
     argv = [a for a in argv if a != "-v"]
-    status, text = check(argv, verbose=verbose)
+    status, text, _declared = check(argv, verbose=verbose)
     print(text, file=sys.stderr if status else sys.stdout)
     return status
 
