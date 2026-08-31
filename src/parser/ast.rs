@@ -387,6 +387,9 @@ pub struct FunctionDecl {
     pub return_type: TypeExpr,
     pub name: Ident,
     pub params: Vec<Param>,
+    /// B087: the `shared` modifier — a cross-plugin export root. Only ever
+    /// true for a file-scope function; `shared` is not a member modifier.
+    pub is_shared: bool,
     pub is_const: bool,
     pub is_override: bool,
     pub is_final: bool,
@@ -401,6 +404,8 @@ pub struct FuncdefDecl {
     pub return_type: TypeExpr,
     pub name: Ident,
     pub params: Vec<Param>,
+    /// B087: the `shared` modifier — a cross-plugin export root.
+    pub is_shared: bool,
 }
 
 /// A type alias declaration: `typedef ExistingType Alias;`.
@@ -447,6 +452,8 @@ pub struct InterfaceDecl {
     pub name: Ident,
     pub bases: Vec<TypeExpr>,
     pub methods: Vec<FunctionDecl>,
+    /// B087: the `shared` modifier — a cross-plugin export root.
+    pub is_shared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -461,6 +468,8 @@ pub struct EnumDecl {
     pub span: Span,
     pub name: Ident,
     pub values: Vec<EnumValue>,
+    /// B087: the `shared` modifier — a cross-plugin export root.
+    pub is_shared: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,0 +1,9 @@
+[meta]
+name    = "Issue Repro B087 - Shared And Exported Declarations Are Roots"
+author  = "clankercode"
+version = "0.1.0"
+
+[script]
+module         = "T"
+exports        = ["Exports_Decls.as"]
+shared_exports = ["Shared_File.as"]
