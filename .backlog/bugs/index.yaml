@@ -159,3 +159,4 @@ bugs:
     - file: B158-nadeotype-d-carries-829-member.todo
     - file: B159-cargo-fmt-drift-recurs-on-ever.todo
     - file: B160-adopt-the-engine-spelling-in-n.todo
+    - file: B161-b102-array-sort-correct-callba.todo
