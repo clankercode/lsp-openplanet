@@ -85,3 +85,40 @@ B079 (the parent: two failure modes, duplication and selection — this is pure
 selection), B063 (where the defect was introduced and caught),
 `docs/verification-hazards.md` (a private predicate behind a public wrapper is
 not private — the sibling finding from the same design pass).
+
+## DEFERRED, and the design ruling owed to lane-b057 (coordinator, 2026-08-31)
+
+**Deferred out of the current round, deliberately.** This is a pure refactor of
+a predicate in `checker.rs`, and four lanes are editing that file. A rename plus
+a newtype touching all 8 call sites conflicts with every one of them for no
+behavioural gain. Pick it up when the typecheck lanes have merged. The claim is
+left in place so it is not re-picked meanwhile.
+
+## Ruling on the design question lane-b057 raised
+
+The question was whether a newtype on both parameters of
+`is_external_derived_from(type_name, base)` prevents transposition. **It does
+not, and that observation is correct** — both parameters are the same kind of
+thing (a type name), so one newtype applied to both leaves the two arguments
+mutually substitutable. A newtype only closes an axis when the two positions
+have *different* types.
+
+**Do both, because they close different holes:**
+
+- **Rename** closes argument order. `is_external_derived_from(a, b)` does not
+  say which of `a` and `b` is the ancestor; a name that does (`derives_from` /
+  `_is_subtype_of_`, or naming the parameters at the call site) makes a
+  transposed call read wrong.
+- **Newtype** closes shadow-blindness — the actual defect on this ticket. The
+  predicate cannot distinguish a workspace type shadowing an engine one from
+  the engine type itself, and is indistinguishable from `is_external_type` at
+  the call site. That is a *witness* problem of the same shape B079 solved with
+  `Accepted`: make the shadow-resolved form a distinct type that only the
+  resolution step can construct.
+
+Neither subsumes the other, so shipping one and calling the ticket closed
+leaves the other axis open. Say in the commit which hole each half closes.
+
+**Note for the implementer:** there are **8 invocations**, not 7. Line 2279
+calls it **twice on one line**. A sweep that counts call sites by grepping
+lines will miss one — verified during B076.
