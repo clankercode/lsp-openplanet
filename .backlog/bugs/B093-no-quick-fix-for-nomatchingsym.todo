@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T10:09:45Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T11:25:54Z"
 complexity: medium
 created_at: "2026-08-31T08:48:33Z"
 depends_on: []
+duration_minutes: 76.15137054253333
 estimate_hours: 1
 id: B093
 priority: medium
 started_at: "2026-08-31T10:09:45Z"
-status: in_progress
+status: done
 tags: []
 title: No quick fix for NoMatchingSymbol relocation hints (string::Join->Text::Join, Draw::*->Display::*)
-updated_at: "2026-08-31T10:09:45Z"
+updated_at: "2026-08-31T11:25:54Z"
 ---
 ## Expected Behavior
 
