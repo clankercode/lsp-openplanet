@@ -55,6 +55,17 @@ MUTATIONS = [
      "refuses a workflow that cannot produce conflict markers",
      '\n    ("REVERT_HEAD", "revert"),\n)',
      '\n    ("REVERT_HEAD", "revert"),\n    ("BISECT_LOG", "bisect"),\n)'),
+    # B169: the defect that shipped. `REBASE_HEAD` is written during a rebase
+    # and NOT removed when it succeeds, so as a sentinel it refuses the clean
+    # post-rebase tree that every lane has -- and rebase-then-re-gate is the
+    # mandated workflow, so this over-condemns exactly the lane doing the right
+    # thing. It is the same shape as the bisect mutation above, and it is here
+    # rather than only in remote-build's selftest because this file is where a
+    # future "the sentinel list looks incomplete" edit gets its answer.
+    ("B169 OVER-CONDEMN: REBASE_HEAD treated as an unresolved-rebase sentinel, "
+     "which refuses a tree whose rebase already SUCCEEDED",
+     '\n    ("REVERT_HEAD", "revert"),\n)',
+     '\n    ("REVERT_HEAD", "revert"),\n    ("REBASE_HEAD", "rebase"),\n)'),
     ("B132 OVER-CONDEMN: operation_in_progress always reports a merge",
      "    if gitdir is None:\n        return None",
      '    if gitdir is None:\n        return "merge"\n    return "merge"'),
