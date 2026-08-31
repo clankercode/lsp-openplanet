@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T03:51:25Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T03:53:46Z"
 complexity: medium
 created_at: "2026-08-31T03:42:04Z"
 depends_on: []
+duration_minutes: 2.35704196095
 estimate_hours: 1
 id: B082
 priority: high
 started_at: "2026-08-31T03:51:25Z"
-status: in_progress
+status: done
 tags: []
 title: 'A crashed test binary silently lowers the suite total: gates that sum test-result lines report fewer tests and stay green'
-updated_at: "2026-08-31T03:51:25Z"
+updated_at: "2026-08-31T03:53:46Z"
 ---
 Split from B078 (2026-08-31). B078's SIGSEGV half is closed as not-a-defect;
 this is the half that is a real defect, and it outlives the crash that revealed
