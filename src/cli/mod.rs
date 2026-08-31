@@ -141,8 +141,17 @@ OPTIONS:
     --plugins-dir DIR   Directory to search for plugin dependencies
                         (may be specified multiple times)
     --plugin-files-search-path DIR
-                        Additional relative search root for plugin export files
-                        (may be specified multiple times; defaults to: src)
+                        Root-relative search root for info.toml export files
+                        (may be specified multiple times; default: src).
+                        An entry resolves as written, then under each search
+                        root, then with a leading search root STRIPPED — so
+                        `Export.as` finds src/Export.as, and `src/Export.as`
+                        still finds Export.as after the file moves up. Any
+                        deeper path in the entry is preserved.
+                        Same key as `plugin_files_search_paths` in
+                        .openplanet-lsp.toml or the user config; workspace
+                        wins over user, and these flags win over both
+                        (they REPLACE the list, they do not add to it).
 
 EXAMPLES:
     openplanet-lsp check ~/plugins/tm-agent
@@ -386,7 +395,12 @@ fn take_value_arg<'a>(
 
 pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
     let mut options = CheckOptions::default();
-    options.plugin_files_search_paths = vec![PathBuf::from("src")];
+    // B143: left EMPTY on purpose. Empty means "no --plugin-files-search-path
+    // was given", which is what lets a config `plugin_files_search_paths` be
+    // seen at all; the built-in `["src"]` is applied downstream by
+    // `DependencySearch::finalize_with_config`. Seeding `["src"]` here would
+    // make the flag's default indistinguishable from an explicit flag and
+    // silently shadow the config key.
     let mut positional = Vec::new();
     let mut i = 0;
 
@@ -650,9 +664,6 @@ pub fn parse_check_args(args: &[String]) -> Result<CheckOptions, CliError> {
                     "--plugin-files-search-path requires a directory argument",
                     true,
                 )?;
-                if options.plugin_files_search_paths == [PathBuf::from("src")] {
-                    options.plugin_files_search_paths.clear();
-                }
                 options.plugin_files_search_paths.push(PathBuf::from(value));
                 i += used;
             }
@@ -881,8 +892,9 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
 
     let mut search = DependencySearch {
         plugins_dirs: options.plugins_dirs.clone(),
-        plugin_files_search_paths: options.plugin_files_search_paths.clone(),
-        // Filled from config by finalize_with_config below.
+        // Filled from config (or the built-in default) by
+        // finalize_with_config below, then overridden by the flag.
+        plugin_files_search_paths: Vec::new(),
         source_paths: None,
         ignore_paths: None,
         honor_gitignore: None,
@@ -892,6 +904,12 @@ pub fn run_check(options: &CheckOptions) -> Result<CheckReport, CliError> {
     // user-global `honor_gitignore = true`.
     if options.no_gitignore {
         search.honor_gitignore = Some(false);
+    }
+    // B143: same ladder for the export-file search roots. A non-empty list
+    // here means `--plugin-files-search-path` was passed at least once, and
+    // the flag REPLACES the config / default list rather than appending to it.
+    if !options.plugin_files_search_paths.is_empty() {
+        search.plugin_files_search_paths = options.plugin_files_search_paths.clone();
     }
 
     // Define-independent: file discovery + source read. Shared by every
@@ -2332,6 +2350,45 @@ mod tests {
         assert!(
             !msg.contains("unknown --format"),
             "must not take the unknown-format path: {msg}"
+        );
+    }
+
+    /// B143: with no flag the list is EMPTY, not `["src"]` — empty is how the
+    /// config ladder learns no flag was given. The built-in default is applied
+    /// downstream by `DependencySearch::finalize_with_config`. Repeated flags
+    /// accumulate in order and REPLACE the default rather than adding to it.
+    #[test]
+    fn parse_check_args_plugin_files_search_paths_default_to_empty() {
+        let opts = parse_check_args(&[".".into()]).unwrap();
+        assert!(
+            opts.plugin_files_search_paths.is_empty(),
+            "no flag must leave the list empty so config can be seen, got {:?}",
+            opts.plugin_files_search_paths
+        );
+
+        let opts = parse_check_args(&[
+            "--plugin-files-search-path".into(),
+            "Source".into(),
+            ".".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            opts.plugin_files_search_paths,
+            vec![PathBuf::from("Source")],
+            "one flag must REPLACE the default, not append to `src`"
+        );
+
+        let opts = parse_check_args(&[
+            "--plugin-files-search-path".into(),
+            "first".into(),
+            "--plugin-files-search-path=second".into(),
+            ".".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            opts.plugin_files_search_paths,
+            vec![PathBuf::from("first"), PathBuf::from("second")],
+            "repeated flags accumulate in the order given"
         );
     }
 

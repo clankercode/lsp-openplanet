@@ -13,6 +13,35 @@ GitHub Release body to match this section (gh release edit).
 
 ## [Unreleased]
 
+### Added
+- **`plugin_files_search_paths` is now a config key, with config-TUI
+  support** (B143) — the search roots that `info.toml` `exports` /
+  `shared_exports` entries resolve through were previously settable only
+  by the CLI flag `check --plugin-files-search-path`, with a hardcoded
+  `["src"]` everywhere else. They now ride the standard ladder:
+  `plugin_files_search_paths = ["src"]` in `.openplanet-lsp.toml` or the
+  user config (workspace wins over user), with the flag beating both and
+  REPLACING the list rather than adding to it. The key appears in
+  `openplanet-lsp config` like every other list setting. The LSP's
+  info.toml diagnostics honour it too — they previously hardcoded the
+  default, so a configured search root could move the loader but not the
+  squiggle.
+
+### Fixed
+- **Export entries survive a `src/` -> root move in BOTH directions**
+  (B143) — resolution already fell back from `Export.as` to
+  `src/Export.as`, but not the reverse: an entry that still read
+  `src/Export.as` after the file was moved up to the plugin root
+  reported `Export file not found`, AND lost the export exemption, so
+  the plugin's whole public API was additionally reported as unused. An
+  entry that carries a configured search root as its leading component
+  is now also tried with that component stripped, preserving any deeper
+  path (`src/Ex/Shared.as` -> `Ex/Shared.as`). Applies to `exports` and
+  `shared_exports` alike, and to any configured search root, not just
+  `src`. Every layout that already resolved resolves to the same file:
+  the direct join is still tried first, then the search roots, and the
+  new rule runs last.
+
 ### Changed
 - **Go-to-definition offers every implementation, not one location**
   (B104) — a method reached through an interface- or base-typed receiver

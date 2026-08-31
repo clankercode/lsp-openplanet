@@ -48,7 +48,10 @@ pub fn watch_options_for_path(path: PathBuf) -> CheckOptions {
     let mut opts = CheckOptions::default();
     opts.path = path;
     opts.watch = true;
-    opts.plugin_files_search_paths = vec![PathBuf::from("src")];
+    // B143: deliberately NOT seeded with `["src"]`. Empty means "no CLI flag",
+    // so the watch TUI picks up a config `plugin_files_search_paths` on the
+    // same ladder as `check`; the built-in default is applied downstream by
+    // `DependencySearch::finalize_with_config`.
     opts
 }
 

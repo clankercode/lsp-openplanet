@@ -174,6 +174,14 @@ impl DependencySearch {
                 self.plugins_dirs.push(extra.clone());
             }
         }
+        // B143: `plugin_files_search_paths` rides the same config ladder as
+        // the lists above. Config REPLACES whatever the caller started with
+        // (`with_defaults`' built-in `["src"]`); a CLI
+        // `--plugin-files-search-path` is re-applied by the caller AFTER this,
+        // the way `--no-gitignore` is (GH #60).
+        if let Some(paths) = &config.plugin_files_search_paths {
+            self.plugin_files_search_paths = paths.clone();
+        }
         if self.plugin_files_search_paths.is_empty() {
             self.plugin_files_search_paths.push(PathBuf::from("src"));
         }
@@ -676,6 +684,138 @@ mod tests {
                 "config honor_gitignore = {honor:?} must reach DependencySearch"
             );
         }
+    }
+
+    /// B143: `plugin_files_search_paths` rides the same ladder into the
+    /// shared search struct. Unset config keeps the built-in `["src"]`; a set
+    /// config REPLACES it (so a user can drop `src` entirely); an empty list
+    /// falls back to the default rather than disabling resolution outright.
+    #[test]
+    fn finalize_with_config_carries_plugin_files_search_paths() {
+        let mut config = LspConfig::default();
+        assert_eq!(config.plugin_files_search_paths, None, "default is unset");
+        assert_eq!(
+            DependencySearch::with_defaults()
+                .finalize_with_config(&config)
+                .plugin_files_search_paths,
+            vec![PathBuf::from("src")],
+            "unset config must leave the built-in default in place"
+        );
+
+        config.plugin_files_search_paths = Some(vec![PathBuf::from("Source")]);
+        assert_eq!(
+            DependencySearch::with_defaults()
+                .finalize_with_config(&config)
+                .plugin_files_search_paths,
+            vec![PathBuf::from("Source")],
+            "config must REPLACE the default, not extend it"
+        );
+
+        config.plugin_files_search_paths =
+            Some(vec![PathBuf::from("first"), PathBuf::from("second")]);
+        assert_eq!(
+            DependencySearch::with_defaults()
+                .finalize_with_config(&config)
+                .plugin_files_search_paths,
+            vec![PathBuf::from("first"), PathBuf::from("second")],
+            "order must be preserved"
+        );
+
+        config.plugin_files_search_paths = Some(Vec::new());
+        assert_eq!(
+            DependencySearch::with_defaults()
+                .finalize_with_config(&config)
+                .plugin_files_search_paths,
+            vec![PathBuf::from("src")],
+            "an empty list must fall back to the default, not disable resolution"
+        );
+
+        // A caller that starts EMPTY (the CLI, which leaves the list empty
+        // unless the flag was passed) gets exactly the same answers.
+        let empty = || DependencySearch {
+            plugin_files_search_paths: Vec::new(),
+            ..DependencySearch::with_defaults()
+        };
+        config.plugin_files_search_paths = None;
+        assert_eq!(
+            empty()
+                .finalize_with_config(&config)
+                .plugin_files_search_paths,
+            vec![PathBuf::from("src")]
+        );
+        config.plugin_files_search_paths = Some(vec![PathBuf::from("Source")]);
+        assert_eq!(
+            empty()
+                .finalize_with_config(&config)
+                .plugin_files_search_paths,
+            vec![PathBuf::from("Source")]
+        );
+    }
+
+    /// B143 end-to-end at the loader seam: a config-configured search root
+    /// resolves a moved export in BOTH directions, for `exports` and
+    /// `shared_exports`, and the resolved path keeps any nested component.
+    #[test]
+    fn own_export_paths_resolve_across_a_configured_search_root() {
+        for (tag, kind) in [("b143-exp", "exports"), ("b143-shared", "shared_exports")] {
+            let base = temp_tree(tag);
+            let root = base.join("plugin");
+            // Entry keeps the `Source/` prefix; the file moved up to the root.
+            fs::create_dir_all(root.join("Ex")).unwrap();
+            fs::write(
+                root.join("info.toml"),
+                format!(
+                    "[meta]\nname = \"B143\"\nversion = \"0.1.0\"\n\
+                     [script]\n{kind} = [\"Source/Ex/Api.as\"]\n"
+                ),
+            )
+            .unwrap();
+            fs::write(root.join("Ex/Api.as"), "void Api() {}\n").unwrap();
+            fs::write(root.join("Main.as"), "void Main() {}\n").unwrap();
+
+            let search = DependencySearch {
+                plugin_files_search_paths: vec![PathBuf::from("Source")],
+                ..DependencySearch::with_defaults()
+            };
+            let load = load_plugin_workspace(&root, &search).unwrap();
+            let expected = root.join("Ex/Api.as").canonicalize().unwrap();
+            assert!(
+                load.export_paths.contains(&expected),
+                "{kind}: export_paths={:?} expected {expected:?}",
+                load.export_paths
+            );
+            // The flattened path was never written, so a path-losing bug
+            // could not have passed by accident.
+            assert!(!root.join("Api.as").exists());
+        }
+    }
+
+    /// A listed export that exists NOWHERE still contributes its root-joined
+    /// path (best-effort), so creating the file later does not silently lose
+    /// the unused-declaration exemption. B143 does not change this.
+    #[test]
+    fn an_export_missing_everywhere_keeps_its_root_joined_path() {
+        let base = temp_tree("b143-missing");
+        let root = base.join("plugin");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("info.toml"),
+            "[meta]\nname = \"B143\"\nversion = \"0.1.0\"\n\
+             [script]\nexports = [\"src/Gone.as\"]\n",
+        )
+        .unwrap();
+        fs::write(root.join("Main.as"), "void Main() {}\n").unwrap();
+
+        let load = load_plugin_workspace(&root, &DependencySearch::with_defaults()).unwrap();
+        assert!(
+            !root.join("src/Gone.as").exists() && !root.join("Gone.as").exists(),
+            "premise: the export exists in neither place"
+        );
+        assert!(
+            load.export_paths.contains(&root.join("src/Gone.as")),
+            "a missing export must keep its root-joined path; export_paths={:?}",
+            load.export_paths
+        );
     }
 
     /// The tri-state resolves to the product default when unset, and the

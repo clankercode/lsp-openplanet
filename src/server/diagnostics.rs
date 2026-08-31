@@ -97,7 +97,7 @@ pub fn compute_diagnostics_from_analysis(
 pub fn compute_diagnostics_with_versions(
     uri: &Url,
     analysis: &DocumentAnalysis,
-    _config: &LspConfig,
+    config: &LspConfig,
     type_index: Option<&TypeIndex>,
     workspace_symbols: &SymbolTable,
     version: Option<(&crate::typedb::catalog::VersionNotes, &str)>,
@@ -106,7 +106,7 @@ pub fn compute_diagnostics_with_versions(
     let source = analysis.source.as_str();
 
     if uri.path().ends_with("info.toml") {
-        diagnostics.extend(manifest_diagnostics_for_uri(uri, source));
+        diagnostics.extend(manifest_diagnostics_for_uri(uri, source, config));
         return diagnostics;
     }
 
@@ -221,16 +221,23 @@ fn manifest_workspace_root(uri: &Url) -> Option<PathBuf> {
     path.parent().map(Path::to_path_buf)
 }
 
-/// Manifest rules for a document addressed by URI: the plugin root and the
-/// loader's default file search paths are derived from the URI itself.
+/// Manifest rules for a document addressed by URI: the plugin root comes from
+/// the URI, the export-file search paths from `config`.
 ///
-/// The LSP never overrides those search paths; the CLI can
-/// (`--plugin-files-search-path`) and calls [`manifest_rule_diagnostics`]
-/// directly with its own.
-pub fn manifest_diagnostics_for_uri(uri: &Url, source: &str) -> Vec<Diagnostic> {
+/// B143: these MUST be the same list the loader resolves with. Before B143
+/// this hardcoded `with_defaults()`, so a workspace or user-global
+/// `plugin_files_search_paths` moved the loader but not this check — and the
+/// LSP would squiggle "Export file not found" on an info.toml entry whose file
+/// the very same session had loaded and pooled.
+pub fn manifest_diagnostics_for_uri(
+    uri: &Url,
+    source: &str,
+    config: &LspConfig,
+) -> Vec<Diagnostic> {
     let root = manifest_workspace_root(uri);
-    let search_paths =
-        crate::workspace::load::DependencySearch::with_defaults().plugin_files_search_paths;
+    let search_paths = crate::workspace::load::DependencySearch::with_defaults()
+        .finalize_with_config(config)
+        .plugin_files_search_paths;
     let workspace = root.as_deref().map(|root| ManifestWorkspace {
         root,
         plugin_files_search_paths: &search_paths,
