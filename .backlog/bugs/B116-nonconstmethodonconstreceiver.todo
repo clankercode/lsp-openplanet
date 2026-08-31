@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T13:18:58Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T13:38:55Z"
 complexity: medium
 created_at: "2026-08-31T13:18:13Z"
 depends_on: []
+duration_minutes: 19.954656340983334
 estimate_hours: 1
 id: B116
 priority: high
 started_at: "2026-08-31T13:18:58Z"
-status: in_progress
+status: done
 tags: []
 title: 'NonConstMethodOnConstReceiver is single-file by construction: the emit site is gated on file_classes, so a const receiver whose class lives in another file is silently unchecked'
-updated_at: "2026-08-31T13:18:58Z"
+updated_at: "2026-08-31T13:38:55Z"
 ---
 
 NonConstMethodOnConstReceiver is single-file by construction: the emit site is gated on file_classes, so a const receiver whose class lives in another file is silently unchecked
