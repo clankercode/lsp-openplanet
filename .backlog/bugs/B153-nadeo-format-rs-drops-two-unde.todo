@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T16:18:42Z"
+depends_on: []
+estimate_hours: 1
+id: B153
+priority: high
+status: pending
+tags: []
+title: 'nadeo_format.rs drops two undeclared dump keys: member m (5036 occurrences) and class s (2585, every class) are silently discarded — B131''s audit never covered this file'
+updated_at: "2026-08-31T16:18:42Z"
+---
+
+nadeo_format.rs drops two undeclared dump keys: member m (5036 occurrences) and class s (2585, every class) are silently discarded — B131's audit never covered this file

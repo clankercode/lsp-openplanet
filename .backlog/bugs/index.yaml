@@ -151,3 +151,4 @@ bugs:
     - file: B150-no-matching-signatures-renders.todo
     - file: B151-the-gold-manifest-treats-all-e.todo
     - file: B152-tighten-funcdef-signature-matc.todo
+    - file: B153-nadeo-format-rs-drops-two-unde.todo
