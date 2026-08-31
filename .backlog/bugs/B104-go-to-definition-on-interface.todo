@@ -67,3 +67,6 @@ implementations after it" and the test updates with it.
   control — do not regress precise navigation).
 - accessor pair from the get_/set_ ticket, once both land: interface
   declares `get_ID`, classes implement it.
+
+## Lane decision (2026-08-31, bl-fix-many batch B103-105)
+Serialized AFTER B103 in the same worktree (.worktrees/nav) — same file (src/server/navigation.rs definition path), and this ticket's accessor-pair test case depends on B103 landing first. Implement B104 only once B103 is committed in the lane.
