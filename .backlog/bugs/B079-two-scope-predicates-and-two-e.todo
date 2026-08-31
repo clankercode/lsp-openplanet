@@ -199,3 +199,83 @@ information a hurried caller does not read.
 Whoever takes this: the deliverable is not "merge the predicates". It is to
 make the wrong choice fail to compile, or to reduce the set so there is no
 choice left to get wrong. Say which, and why, before writing code.
+
+## Design decision (coordinator, 2026-08-31) — ACCEPTED, supersedes the Work and Test-plan sections
+
+lane-b057's design call is accepted essentially as proposed. Recorded here
+because the reasoning matters more than the conclusion.
+
+### Accepted: reduce first, then encode one precondition
+
+**Move 1 — reduction.** Demote `TypeIndex::scope_exists` and
+`TypeIndex::source_reference_key` to `pub(crate)`; publish the type triple
+(`has_type` / `has_enum` / `workspace_declares_type`) as a single composed
+entry point and demote members where callers allow. Measured, production
+callers only: one external caller each. Reduction is primary because four of
+the five instances were selection among *reachable* predicates — if the wrong
+member is not reachable, selection cannot happen — and privacy is a strictly
+smaller change than type-encoding for the same guarantee.
+
+**Compose, never merely add.** A consolidation that only introduces a new
+composed name leaves four plausible names where there were three, which makes
+selection worse. Every composition must be paired with demoting what it
+composes.
+
+**Move 2 — a witness type**, for the one pair where both members must stay
+public:
+
+```rust
+pub struct Accepted(());  // constructible only by the acceptance check
+pub fn accepts_enum(&self, q: &str) -> Option<Accepted>;
+pub fn canonical_enum_key(&self, q: &str, _: Accepted) -> Option<String>;
+```
+
+Authorised because it is **zero behavioural change**: both external production
+callers already perform the acceptance test (`resolver.rs:165` under
+`scope.resolves(...)`, `hover.rs:188` under `has_enum(...)`). It converts
+existing discipline into a compile error rather than imposing new discipline,
+and the diff is a signature plus two call sites. Type-encoding earns its place
+exactly where privacy cannot — both members publicly callable, and the
+distinction is a *precondition*. That is one pair, not seven predicates.
+
+### The finding that corrects the obvious fix
+
+**Privatising `scope_exists` alone would NOT have prevented B070.** Hover never
+called it; it reached the index-only scope test *through* `source_reference_key`,
+which is separately public and embeds it. A private predicate behind a public
+wrapper that embeds it is not private — the boundary was drawn around the name
+rather than the capability. Both must be demoted; either alone accomplishes
+nothing.
+
+Generalised into `docs/verification-hazards.md`: when restricting access to a
+function, enumerate what else *exposes its behaviour*, not just what else calls
+it by name.
+
+### Accepted: the test-plan correction
+
+The ticket's original test plan said to generalise B070's one-way sweep. That
+is right for the **duplication** mode and useless for **selection**, because
+both predicates behave exactly as specified and no agreement test can see the
+difference. Keep the sweep only where duplication actually exists (the B063
+checker/builtins pair, until this ticket removes it), and do **not** present it
+as coverage for selection. Shipping it as such would be a test that looks like
+a guard and is not one.
+
+### Split out
+
+The fifth instance (`is_external_derived_from` vs `is_external_type`) is now
+**B081**. Neither move reaches it — no visibility boundary to draw, no
+precondition to encode; they simply answer different questions. It needs an
+argument newtype, which is a different mechanism and 7 call sites in the
+batch's most-contended file.
+
+### Sequencing
+
+Move 1's `typedb/index.rs` half is self-contained and is the authorised first
+cut: two `pub(crate)` demotions plus one line in `global_scope.rs`, removing
+the exact path B070 took. The rest of Move 1 and all of Move 2 wait on
+lane-b060-b062's merge.
+
+**Nothing here is urgent.** There is no outstanding live defect; the argument
+for acting is the rate, not any instance. Do not let that licence a wider
+refactor of predicate handling.
