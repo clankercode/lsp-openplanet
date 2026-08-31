@@ -271,6 +271,73 @@ indistinguishable from "I am structurally incapable of seeing it".
   call sites instead of reasoning about them — the same move that killed three
   wrong diagnoses in B078.
 
+- **The tool written to prevent contamination contaminated the live directory,
+  while being written.** B077's fix exists because an interrupted probe run
+  strands a `.as` fixture in the game's `Plugins` directory, where it silently
+  contaminates every later ACCEPT. The lane's first selftest passed a
+  `plugins_dir` to the staging class — but the staging call always wrote to
+  `fleet.OPN_PLUGINS`, so the test staged into the **real**
+  `~/OpenplanetNext/Plugins` and left three fixtures there, two of them
+  declaring `namespace ZZZProbeOwnedNamespace`.
+
+  A stranded, namespace-declaring fixture in the live plugins directory,
+  created by the tooling written to prevent exactly that, during the writing of
+  it. **The strongest possible evidence that a ticket was worth filing is the
+  ticket's own defect reproducing itself in the hands of the person fixing it.**
+
+  **What caught it is the part to copy.** The selftest asserted the staged file
+  existed *at the path it had asked for* — an assertion about **location**, not
+  merely existence — and the file was not there. The lane had written that
+  assertion for tidiness, not as a trap. Had it asserted only "the file exists
+  somewhere" or "the context manager returned without raising", the test would
+  have **passed while contaminating the game**, and the fix would have shipped
+  with a live-directory leak inside its own test suite.
+
+  Generalise it: **assert the value, not the presence.** "A file was created"
+  and "a file was created *where I asked*" cost the same to write and differ
+  completely in what they can catch. The same holds for "a config was loaded"
+  vs "loaded from the path I specified", and "the probe returned a verdict" vs
+  "returned a verdict for the name I asked about". Every vacuity in this
+  document is some form of a presence check standing in for a value check.
+
+- **`try/finally` is not cleanup, and four separate holes prove it.** The
+  obvious shape for the same fix — wrap the staging in `try/finally` — leaves
+  all of these open, each demonstrated by a test that fails without its
+  specific remedy:
+
+  - `dest = stage(...)` **binds only on success**, so a stage that dies partway
+    leaves a half-populated directory the `finally` never learns the name of.
+    That is precisely the case that strands a file.
+  - `__exit__` is **not called when `__enter__` raises**, so moving the lifetime
+    into a context manager does not by itself close that hole; `__enter__` must
+    clean up after itself.
+  - `try/finally` does **not** run on SIGTERM — the process terminates without
+    unwinding, so a `kill`, a session teardown, or an OOM leaves the fixture
+    installed. Not hypothetical: this session died twice in one day.
+  - Nothing **refused to measure beside contamination**. Cleanup is not enough
+    on its own; a probe that finds foreign state must decline to produce a
+    verdict rather than emit one it cannot stand behind.
+
+  The layering that follows is worth stating as a rule: **the lifetime is the
+  mechanism, the sweep is only the backstop.** The sweep exists for SIGKILL and
+  power loss, which nothing in-process can catch — and a later run tidying up
+  is not protection, because *the later run is the one being contaminated*. The
+  lane put that reasoning in the sweep's own docstring so the next reader
+  cannot mistake the backstop for the mechanism.
+
+- **A guard that survives every mutation is not strong; it is unmeasured.** In
+  the same work, an `atexit` hook survived every mutation the lane applied,
+  which meant it was either unreachable or untested. The lane's response —
+  *"I don't ship a guard no test can make fire"* — is the right one, and note
+  that both available conclusions are actionable: if unreachable, delete it; if
+  untested, construct the case. It found the hook reachable (an `__enter__`
+  without a `with`, then a normal exit), built the selftest to produce that
+  path, and thereby also established that the hook and the signal handlers are
+  **not** redundant, since that path is the one the handlers cannot see.
+
+  A mutation that nothing detects is usually read as "that code is fine". It
+  means the opposite: **no test is looking at it.**
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
