@@ -1,14 +1,18 @@
 ---
+claimed_at: "2026-08-31T16:42:23Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T16:41:46Z"
 depends_on: []
 estimate_hours: 1
 id: B157
 priority: high
-status: pending
+started_at: "2026-08-31T16:42:23Z"
+status: in_progress
 tags: []
 title: 'NadeoMember.r discards 1618 method return types: the loader writes String::new() behind a comment claiming the Nadeo format uses type IDs, which is measurably false'
-updated_at: "2026-08-31T16:41:46Z"
+updated_at: "2026-08-31T16:42:23Z"
 ---
 
 NadeoMember.r discards 1618 method return types: the loader writes String::new() behind a comment claiming the Nadeo format uses type IDs, which is measurably false
