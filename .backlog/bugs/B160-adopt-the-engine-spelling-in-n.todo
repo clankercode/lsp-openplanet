@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T16:58:32Z"
+depends_on: []
+estimate_hours: 1
+id: B160
+priority: high
+status: pending
+tags: []
+title: 'Adopt the engine spelling in NoImplicitConversion: 22 of 22 measured engine messages name the target as a reference and end with a full stop, our text does neither'
+updated_at: "2026-08-31T16:58:32Z"
+---
+
+Adopt the engine spelling in NoImplicitConversion: 22 of 22 measured engine messages name the target as a reference and end with a full stop, our text does neither
