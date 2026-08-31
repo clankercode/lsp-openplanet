@@ -113,15 +113,54 @@ class Section:
         self.summaries: list[re.Match[str]] = []
 
 
-def enumerate_expected_binaries() -> dict[str, str]:
+# Cargo flags that narrow WHICH test binaries run. A libtest name filter
+# (`just test -- some_test`) is not one of these: every binary still runs and
+# filters internally, so the expected set is unchanged.
+TARGET_SELECTORS = (
+    "--lib",
+    "--bin",
+    "--bins",
+    "--test",
+    "--tests",
+    "--example",
+    "--examples",
+    "--bench",
+    "--benches",
+    "--doc",
+)
+
+
+def split_cargo_args(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Args before the first bare ``--`` are cargo's; the rest are libtest's."""
+    if "--" in argv:
+        cut = argv.index("--")
+        return argv[:cut], argv[cut:]
+    return argv, []
+
+
+def names_a_target(cargo_args: list[str]) -> bool:
+    """True when the caller deliberately narrowed the set of binaries."""
+    return any(
+        arg == sel or arg.startswith(f"{sel}=")
+        for arg in cargo_args
+        for sel in TARGET_SELECTORS
+    )
+
+
+def enumerate_expected_binaries(cargo_args: list[str] | None = None) -> dict[str, str]:
     """Build the test binaries; return ``{executable path: target name}``.
 
     Deliberately a SECOND cargo invocation rather than a parse of the gate
     run's own output. See the module docstring: an expectation derived from
     the thing it is checking cannot detect a truncated run.
+
+    ``cargo_args`` are forwarded so a deliberately narrowed run
+    (``--test foo``) enumerates exactly the binaries it selected. Without
+    that, every unselected binary reads as "never ran" and the gate cries
+    truncation at a caller who asked for one target.
     """
     proc = subprocess.run(
-        ["cargo", "test", "--locked", "--no-run", "--message-format=json"],
+        ["cargo", "test", "--locked", "--no-run", "--message-format=json", *(cargo_args or [])],
         cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
         text=True,
@@ -193,7 +232,12 @@ def split_sections(lines: list[str]) -> list[Section]:
     return sections
 
 
-def reconcile(exit_code: int, lines: list[str], expected: dict[str, str]) -> tuple[int, str]:
+def reconcile(
+    exit_code: int,
+    lines: list[str],
+    expected: dict[str, str],
+    filtered: bool = False,
+) -> tuple[int, str]:
     """The gate's verdict. Pure, so the selftest exercises this exact code.
 
     Returns ``(status, report)`` where status is 0 for a trustworthy green.
@@ -226,6 +270,29 @@ def reconcile(exit_code: int, lines: list[str], expected: dict[str, str]) -> tup
     report: list[str] = []
     report.append("")
     if not problems:
+        # A deliberately narrowed run is not a broken one. Reporting it as a
+        # failure is the same mislabelling the COMPLETE/INCOMPLETE split just
+        # fixed one level up: it puts the word FAIL in front of a caller who
+        # asked for exactly what they got, and teaches them to read past it.
+        #
+        # It still withholds the marker, because a subset is not a suite
+        # total — and that is the whole guarantee `SUITE-VERIFIED` carries.
+        if filtered:
+            report.append(
+                f"==> FILTERED RUN: {len(reported_paths)}/{len(expected)} selected "
+                f"binaries reported, {len(sections)} sections"
+            )
+            report.append(
+                f"    {passed} pass / {failed} fail / {ignored} ignored — a subset, "
+                "not a suite total."
+            )
+            # Deliberately does NOT name the marker: a gate greps for that
+            # exact token, and printing it inside an explanation would match.
+            report.append(
+                "    a verified suite total is withheld — run `just test` with no "
+                "target filter for a number you can report."
+            )
+            return 0, "\n".join(report)
         report.append(
             f"==> {len(reported_paths)}/{len(expected)} binaries reported, "
             f"{len(sections)} sections"
@@ -280,10 +347,13 @@ def reconcile(exit_code: int, lines: list[str], expected: dict[str, str]) -> tup
 
 
 def run_gate(extra: list[str]) -> int:
-    expected = enumerate_expected_binaries()
-    print(f"==> {len(expected)} test binaries expected\n", flush=True)
+    cargo_args, _libtest_args = split_cargo_args(extra)
+    filtered = names_a_target(cargo_args)
+    expected = enumerate_expected_binaries(cargo_args)
+    scope = "selected" if filtered else "expected"
+    print(f"==> {len(expected)} test binaries {scope}\n", flush=True)
     exit_code, lines = run_and_capture(["cargo", "test", "--locked", *extra])
-    status, report = reconcile(exit_code, lines, expected)
+    status, report = reconcile(exit_code, lines, expected, filtered=filtered)
     print(report, file=sys.stderr if status else sys.stdout)
     return status
 
@@ -342,6 +412,31 @@ def run_selftest() -> int:
     # it teaches people to ignore the word. It must still withhold the marker.
     # Synthetic input, because producing it for real would mean committing a
     # failing test.
+    # A deliberately filtered run must succeed WITHOUT the marker. Both
+    # halves matter: failing it is the friction this branch removes, and
+    # emitting the marker would let a subset be reported as a suite total.
+    one = "/deps/one-0000000000000000"
+    filtered_ok = [
+        f"     Running tests/one.rs ({one})",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; "
+        "0 filtered out; finished in 0.01s",
+    ]
+    filt_status, filt_report = reconcile(0, filtered_ok, {one: "one"}, filtered=True)
+    if filt_status != 0:
+        problems.append("a clean filtered run was reported as a failure")
+    if VERIFIED_MARKER in filt_report:
+        problems.append(
+            f"a filtered run printed `{VERIFIED_MARKER}` — a subset would be "
+            "reportable as a suite total"
+        )
+    if not names_a_target(["--test", "foo"]) or names_a_target(["-j2"]):
+        problems.append("target-selector detection is wrong")
+    if split_cargo_args(["-j2", "--", "--test-threads=2"]) != (
+        ["-j2"],
+        ["--", "--test-threads=2"],
+    ):
+        problems.append("cargo/libtest argument split is wrong")
+
     example = "/deps/example-0000000000000000"
     complete_red = [
         f"     Running tests/example.rs ({example})",
