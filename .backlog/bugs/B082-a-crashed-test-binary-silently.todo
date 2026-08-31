@@ -27,9 +27,21 @@ direction nobody investigates.
 
 ## Not hypothetical
 
-This produced a reported **2190/2218** against a true **2223** in
-lane-b060-b062's gate. Every lane in this batch — and the coordinator accepting
-their numbers — was reporting totals on that basis for a full day.
+This produced observed totals of **2190 and 2218 against a true 2223** during
+the B078 investigation, on `multi_root_tests`.
+
+**Attribution correction (coordinator):** I originally wrote that these were
+lane-b060-b062's gate figures. They were not. That lane reported 2330/2331 and
+did report binary counts; it checked and told me so. The numbers come from the
+B078 crash investigation itself, and the original record — `28d63ac`, and B078
+above — names no lane at all. I relayed one lane's attribution about another
+without checking a record sitting in the same file. Corrected in place rather
+than forward, because it named a specific lane for an undercount it did not
+make.
+
+The general point stands and is worse than the attribution suggested: every
+lane in this batch, and the coordinator accepting their numbers, was reporting
+totals on the vulnerable basis for a full day.
 
 ## Fix
 
