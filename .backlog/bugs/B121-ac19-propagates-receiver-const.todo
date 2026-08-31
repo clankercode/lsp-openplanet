@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T13:55:40Z"
 depends_on: []
 estimate_hours: 1
 id: B121
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'AC19 propagates receiver constness through any non-const method''s return value, including one returning a fresh value rather than a view into this: measured at 10 false positives across 7 plugins in the engine population'
@@ -12,3 +14,74 @@ updated_at: "2026-08-31T13:55:40Z"
 ---
 
 AC19 propagates receiver constness through any non-const method's return value, including one returning a fresh value rather than a view into this: measured at 10 false positives across 7 plugins in the engine population
+
+
+## Found by lane-enum while measuring B120, 2026-08-31
+
+## The defect
+
+AC19 treats a method's return value as a **view into the receiver**, so receiver
+constness travels through it. That is right for a method returning a reference
+or handle into `this`. It is **wrong** for a method returning a FRESH value, and
+nothing in the model distinguishes the two.
+
+## The cost, measured rather than asserted
+
+lane-enum's variant-C sweep widened propagation to the external/engine
+population and produced **10 false positives across 7 plugins on shipped,
+compiling code**, every one the same root cause:
+
+- `tm-cotd-hud/Color.as:356` — `EscapeRawToOpenPlanet(const string &in raw)`,
+  `auto ret = raw.Replace(...)`, then `ret = ret.Replace(...)`. `Replace`
+  returns a **new** string; the propagation const-poisons it and flags the
+  reassignment.
+- `tm-match-recorder/Main.as:162-163` — identical shape on
+  `const string &in filename`.
+- `tm-birds/Filter.as:65` — `term.Split(" ")` then `parts[i] = parts[i].ToLower()`.
+- `tm-archivist/HttpServer.as:313`, `tm-ghosts-plus-plus/HttpServer.as:333`,
+  `tm-bosslike`, `tm-editor-plus-plus/ItemBrowser.as:1989-1990` — same class.
+
+This is `lookup_method_return`'s "External types: no const-qualifier metadata
+yet" comment **priced**. It is now a number in the code rather than a caution.
+
+## Status after B120: symmetric, not correct
+
+B120 shipped variant A only — propagation where we already emit — and
+deliberately excluded C for exactly the above. So both halves of the rule now
+behave the SAME way, which closed the parity break B120 was about. But both
+halves share this defect, and the workspace half has no more "returns a view"
+metadata than the typedb does.
+
+**It is latent, not live: 0 fleet sites.** It only lands on calls the game
+already rejects, so no shipped plugin can exhibit it. That is the same
+structural zero as B116 and B120 — read the exposure hazard entry before
+concluding the instrument is broken.
+
+**Settle this before anyone widens propagation again.** The next person to look
+at C will re-derive these 10 from scratch.
+
+## What a fix needs
+
+A way to know whether a method returns a view into the receiver. Candidates, in
+increasing order of honesty:
+
+- A per-method annotation in the typedb, if the dumps carry anything usable —
+  check before assuming; B018's finding was that they carry no deprecation
+  metadata, and this may be the same shape.
+- Return-type shape as a proxy: a returned `T@` or `T&` MAY alias, a returned
+  value type cannot. That is sound in the safe direction (never propagates
+  through a by-value return) and would have killed all 10 above, since `Replace`,
+  `Split` and `ToLower` all return fresh values. Cheap, partial, defensible.
+- A deny-list, which is the wrong answer and is recorded here only so nobody
+  proposes it as if it were new.
+
+## Test axes
+
+- A method returning a view into `this` (`T@` into a member, `T&` to a field)
+  against one returning a fresh value (`string::Replace`, `array::Split`) —
+  the pair is the whole point and either alone proves nothing.
+- Value return, handle return, reference return, array return.
+- Workspace receiver and engine receiver for each, since the two halves reach
+  their return type through different lookups (`file_classes` members vs the
+  pooled table) and B120 pinned that divergence but did not remove it.
+- The 10 sites above as a regression corpus: any fix must leave all 10 silent.
