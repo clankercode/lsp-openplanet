@@ -4335,6 +4335,7 @@ mod anon_member_enum_tests {
 #[cfg(test)]
 mod module_level_enum_tests {
     use super::*;
+    use crate::testing::TempDir;
     use crate::typedb::header_format::{HeaderDatabase, HeaderEnum};
     use std::path::PathBuf;
 
@@ -4352,15 +4353,108 @@ mod module_level_enum_tests {
     }
 
     /// A private ignored directory to assemble a DB pair in. Keeping it below
-    /// the repository makes these tests independent of a home or `/tmp`.
-    /// The pid keeps concurrent test binaries apart.
-    fn scratch_dir(tag: &str) -> PathBuf {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join(format!("test-typedb-b046-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// the repository makes these tests independent of a home or `/tmp`, and
+    /// that placement is deliberate — [`TempDir::in_dir`] exists to preserve
+    /// it rather than move these tests into `/tmp`.
+    ///
+    /// Returns a [`TempDir`], not a [`PathBuf`], so the directory is removed
+    /// when the test ends — including when an assertion unwinds past the end
+    /// of it (B075). Bind the guard for as long as the directory is needed:
+    /// `let dir = scratch_dir(..)` keeps it alive, `let _ = scratch_dir(..)`
+    /// deletes it immediately.
+    ///
+    /// The pid-and-counter suffix keeps concurrent test binaries apart. The
+    /// `remove_dir_all` this replaces ran on the way IN, which did the
+    /// opposite: two runs sharing a pid — or one whose pid had been recycled
+    /// — deleted a live run's fixtures out from under it.
+    fn scratch_dir(tag: &str) -> TempDir {
+        TempDir::in_dir(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"),
+            &format!("test-typedb-b046-{tag}"),
+        )
+    }
+
+    /// The placement is the part of this helper that was deliberate, so it is
+    /// the part a later tidy-up is most likely to undo. Pin it: below the
+    /// repository, not in `/tmp` and not under a home directory.
+    #[test]
+    fn scratch_dir_stays_below_the_repository() {
+        let dir = scratch_dir("placement");
+        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+
+        assert_eq!(dir.path().parent(), Some(target.as_path()));
+        assert!(
+            !dir.path().starts_with(std::env::temp_dir()),
+            "these tests must not depend on a writable /tmp: {}",
+            dir.path().display()
+        );
+    }
+
+    /// The leak B075 closed: four of these were created per run and none were
+    /// ever removed, so `target/` grew by four directories every time the
+    /// suite ran.
+    #[test]
+    fn scratch_dir_is_removed_when_the_test_ends() {
+        let path;
+        {
+            let dir = scratch_dir("cleanup");
+            std::fs::write(dir.join("OpenplanetCore.json"), "{}").unwrap();
+            path = dir.to_path_buf();
+            assert!(path.is_dir());
+        }
+        assert!(
+            !path.exists(),
+            "scratch_dir must clean up after itself: {}",
+            path.display()
+        );
+    }
+
+    /// A trailing `remove_dir_all` would have covered the test above and NOT
+    /// this one — a failed assertion unwinds straight past it. This is the
+    /// case that makes `Drop` the right mechanism.
+    #[test]
+    fn scratch_dir_is_removed_when_a_test_unwinds() {
+        let path = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&path);
+
+        let result = std::panic::catch_unwind(move || {
+            let dir = scratch_dir("cleanup-unwind");
+            std::fs::write(dir.join("OpenplanetCore.json"), "{}").unwrap();
+            *sink.lock().unwrap() = Some(dir.to_path_buf());
+            panic!("deliberate: stands in for a failed assertion");
+        });
+
+        assert!(result.is_err(), "the closure must have panicked");
+        let leaked = path.lock().unwrap().clone().expect("dir was created");
+        assert!(
+            !leaked.exists(),
+            "a panicking test must not leave {} behind",
+            leaked.display()
+        );
+    }
+
+    /// The other half of the old defect. `scratch_dir` used to `remove_dir_all`
+    /// its path on the way IN and key it on the pid alone, so a concurrent
+    /// test binary that shared a pid — or inherited a recycled one — deleted a
+    /// live run's database pair mid-test.
+    #[test]
+    fn scratch_dir_does_not_disturb_a_concurrent_runs_directory() {
+        let other_run = scratch_dir("concurrent");
+        std::fs::write(other_run.join("OpenplanetCore.json"), "{}").unwrap();
+
+        let mine = scratch_dir("concurrent");
+        assert_ne!(mine.path(), other_run.path());
+        assert!(
+            other_run.join("OpenplanetCore.json").exists(),
+            "constructing a scratch dir must not disturb {}",
+            other_run.display()
+        );
+
+        drop(mine);
+        assert!(
+            other_run.join("OpenplanetCore.json").exists(),
+            "dropping ours must be just as narrow"
+        );
     }
 
     fn load_without_header() -> TypeIndex {
