@@ -3563,3 +3563,25 @@ Caught because the output had fewer lines than there were files — a count chec
 which is the cheapest available defence and the one that has worked repeatedly in
 this batch. Add `${(f)files}` or an explicit array; and never let `|| continue`
 swallow a command whose failure means the loop body never ran.
+
+## A recursion that stops one level early passes for the same reason it is wrong
+
+B156's first mutation of a version-scoping guard **passed**. The walk recursed one
+level and landed on `versions/1.29.5/` — a DIRECTORY — and never reached the
+`.tsv` files inside it. The guard found nothing to complain about because it
+never looked at anything that could complain.
+
+Exactly the shape the neighbouring entry names: **a check that keeps passing
+while you loosen it is measuring something else.** Rewritten as a full recursive
+walk, the guard fired immediately and named the offending file.
+
+**Why that guard matters is the part worth carrying:** B151's retention policy
+files older-version corpora under `versions/<v>/`, and an older snapshot records
+the engine's OLDER wording. Today's retained snapshots (b052/b053) happen to
+carry no conversion messages — **so the uniformity test would not have caught a
+version mix.** The version guard is currently the only thing standing between
+that file and silently blending two engine generations.
+
+That is the general risk introduced by any per-version archive: **a test that
+reads "all the corpora" starts reading across time the moment retention is
+switched on**, and it will not announce that it has done so.
