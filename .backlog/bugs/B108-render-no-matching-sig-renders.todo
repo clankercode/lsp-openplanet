@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T11:39:49Z"
 depends_on: []
 estimate_hours: 1
 id: B108
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'render_no_matching_sig renders each argument by its TYPE, so a callable argument prints as its return type: startnew(void)'
@@ -24,3 +26,62 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Found by lane-enum during B091, 2026-08-31, and deliberately NOT folded in --
+the right call, because fixing it properly touches ~6 call sites and belongs to
+every argument shape rather than to B091's rule.
+
+## What it renders today
+
+B091's fixture, line 44, an unwrapped method reference at an engine call:
+
+    No matching signatures to 'startnew(void)'
+
+`void` is the method's RETURN TYPE. It is printed where a callable belongs, so
+the message names something that is not the argument and gives the author
+nothing to act on -- the one thing they need is which callable shape was
+expected and which they supplied.
+
+## The same repo already does this correctly elsewhere
+
+Declaration positions go through `render_func_or_type`, which renders the
+SIGNATURE when the argument resolves to one:
+
+    Can't implicitly convert from 'void()' to 'CoroutineFunc@'
+
+That is the target quality. So this is not a design question -- it is one
+renderer lagging another, and the good one is already written.
+
+## Why it happens
+
+`render_no_matching_sig` is given argument TYPES, not the argument expressions
+or their resolved signatures, so by the time it renders there is nothing left
+that could print `void()`. A callable has already been flattened to its return
+type.
+
+## The work
+
+Thread the argument expressions (or their resolved `FuncdefSig`/function
+signatures) into `render_no_matching_sig` at its ~6 call sites, and render a
+callable argument as its signature -- reusing `render_func_or_type` rather than
+writing a second renderer. A rule living at one of N sites is the recurring
+defect shape in this repo (B073, B076, B098 were all instances).
+
+Do it once for every argument shape, not bolted onto the funcdef-slot path:
+the same flattening will mis-render any argument whose interesting property is
+not its type.
+
+## It is already pinned
+
+B091's per-line tests assert the CURRENT text, so a later improvement shows up
+as a deliberate test change rather than a silent one. Expect to update those
+fixtures' expected output as part of this ticket; that is the design, not a
+regression.
+
+## Related
+
+B091 (the fixtures and the pin), B025 (`this.Method` at funcdef ctor sites --
+the declaration-position path that already renders well), B023 (the probe data
+behind funcdef-slot rejection), B060 (a property READ is a value, not a
+function -- another case where an argument's type is not the interesting fact
+about it).
