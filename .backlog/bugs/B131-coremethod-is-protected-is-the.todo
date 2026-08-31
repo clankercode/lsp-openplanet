@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T14:26:10Z"
+depends_on: []
+estimate_hours: 1
+id: B131
+priority: high
+status: pending
+tags: []
+title: CoreMethod::is_protected is the same dead-field shape as is_const was, and nobody has checked whether any typedb dump populates it
+updated_at: "2026-08-31T14:26:10Z"
+---
+
+CoreMethod::is_protected is the same dead-field shape as is_const was, and nobody has checked whether any typedb dump populates it
