@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-31T03:15:17Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T03:15:17Z"
 complexity: low
 created_at: "2026-08-30T17:27:56Z"
 depends_on: []
+duration_minutes: 0.015629646966666667
 estimate_hours: 1
 id: B069
 priority: medium
 started_at: "2026-08-31T03:15:17Z"
-status: in_progress
+status: done
 tags: []
 title: Namespace-shortcut completion offers raw storage keys for a configured Nadeo module
 updated_at: "2026-08-31T03:15:17Z"
