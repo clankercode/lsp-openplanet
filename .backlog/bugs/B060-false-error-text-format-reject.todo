@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-30T07:31:20Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T03:33:22Z"
 complexity: medium
 created_at: "2026-08-30T05:12:54Z"
 depends_on: []
+duration_minutes: 1202.0452382417166
 estimate_hours: 1
 id: B060
 priority: medium
 started_at: "2026-08-30T07:31:20Z"
-status: in_progress
+status: done
 tags: []
 title: 'False error: Text::Format rejects virtual-property getters as function-shaped (uint/float)'
-updated_at: "2026-08-30T07:31:20Z"
+updated_at: "2026-08-31T03:33:22Z"
 ---
 
 # False error: Text::Format rejects virtual-property getters as function-shaped (uint/float)
