@@ -114,3 +114,40 @@ constraint, not a detail.
 
 None of this weakens the `--list` design -- 2 and 3 are both fixable at the
 source rather than by hardening a parser, which is the argument for it.
+
+CONTROLS: TWO DISABLE MECHANISMS, TWO FIXTURES. A single control does not prove
+this check, because the two ways of disabling a test have different signatures:
+
+  - attribute swallowed (the B158 incident) -> the name DISAPPEARS from `--list`
+  - `#[ignore]` added                       -> the name STAYS in `--list` and
+                                               appears in `--list --ignored`
+
+A control built only from the B158 incident exercises the first path and leaves
+the second entirely unproven -- and the second is the one the two-set design was
+added for. Concretely: with only the disappearance control, DELETING the
+`--list --ignored` comparison would leave the control suite green. That is
+docs/verification-hazards.md, "It is not enough for a check to REACH a guard --
+the input must land elsewhere without it", applied to this ticket's own controls.
+
+So: two known-disabled fixtures, one per mechanism, and the second-set
+comparison must have kill evidence of its own.
+
+CORRECTION TO THE COUNT ABOVE: the "12 ignored" figure is the suite-wide ignored
+count from the SUITE-VERIFIED line. Measured directly, the LIB harness holds
+exactly 1 ignored test; the other 11 are in integration binaries that were not
+built in that `deps/` at the time and cannot be attributed from there. One live
+instance is enough to make the `#[ignore]` path real, so the conclusion stands --
+but a control needing an `#[ignore]` fixture must LOCATE one rather than assume
+the lib harness has spares.
+
+METHOD NOTE, worth more than the ticket. All three instrument self-catches in
+this batch (B162's original, the `deps/` glob above, lane-enum's interleaved
+anchor) were found while BUILDING OR MEASURING an instrument, never while
+reviewing output. That fits the polarity recorded in the hazards entry: a defect
+that empties a set suppresses the error explaining why, so it produces nothing
+for a reviewer to notice. It surfaces only when someone holds an expected
+denominator and the number contradicts it.
+
+Which argues for writing the expected count down BEFORE the run rather than
+reconciling after. A number predicted in advance can be contradicted; a number
+explained afterwards almost never is.
