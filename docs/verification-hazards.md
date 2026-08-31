@@ -727,6 +727,51 @@ indistinguishable from "I am structurally incapable of seeing it".
   **one script, in one run**, or the comparison is unverified regardless of how
   careful the diff is.
 
+- **An acceptance criterion derived with the method the ticket exists to
+  replace.** B061's defect is that a **property-syntax read** (`Off`) does not
+  credit its accessor (`get_Off`), so accessors are reported unused. Its
+  acceptance criterion — "24 warnings must become 18" — was assembled by
+  searching the tree for `get_X(` **call syntax**.
+
+  That search cannot see a property-syntax read. By construction. It is the
+  exact blindness the ticket was filed to fix. So the expected survivor count
+  was **guaranteed to be too high by precisely the number of property-syntax
+  reads** — which is the population under test. The criterion could not have
+  been right, and it disagreed with the correct fix by 2.
+
+  **The fix looked like an over-fix.** A lane implementing it correctly landed
+  on 24 → 16 and had to argue against its own ticket, with the tempting
+  alternative being to *stop crediting two real production reads in order to
+  satisfy the arithmetic* — failing the ticket's purpose to pass its own test.
+
+  Three rows were misclassified this way, not one. **That is not three
+  mistakes; it is one broken method with three outputs**, and it is why finding
+  the second should have prompted re-deriving the whole population rather than
+  patching the row. The first correction was made and the method behind it was
+  never questioned.
+
+  **Transferable, and it generalises past this codebase: when you write the
+  expected result for a bug fix, check that the method producing your
+  expectation is not the method the bug is about.** Any measurement blind to
+  the phenomenon under test will produce a confident number in the direction of
+  "the bug is smaller than it is" — and unlike a wrong fix, a wrong criterion
+  is *enforced*, so it actively pushes the implementer toward reproducing the
+  defect.
+
+  What settled it was reading the two disputed rows at source — `RenderMark`,
+  `IsSafeToInterrupt`, `IsSafeForDirective`, all production functions — and
+  the crossed pair, which no over-broad fix could pass by luck: every
+  production read of `Showing` is `Directives::Showing` and every production
+  read of `PendingCount` is `Messages::PendingCount`, so one of each pair must
+  be credited and the other must survive, **in opposite directions**. Same
+  short name, opposite outcome, both ways.
+
+  A coordinator near-miss while checking that, worth its own line: an initial
+  `grep … | head -6` on the `Showing` reads returned only test files, which
+  reads exactly like "no production read exists". It was a truncation limit,
+  not a finding — the full listing has three. **`head` is not a filter, and a
+  truncated list is not evidence of absence.**
+
 - **`2>/dev/null` converts the loud failure mode into the silent one.** This
   document already recorded the bfs case — `find -newermt '-45 minutes'`, GNU
   relative timestamps that bfs rejects — and explicitly credited it as the
