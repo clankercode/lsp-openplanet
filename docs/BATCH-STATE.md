@@ -1,17 +1,38 @@
 # bl-fix-many batch state — 2026-08-31, updated 21:50 AEST
 
-## Now
+## Now — 22:30 AEST
 
-Master **42c6544**, **SUITE-VERIFIED 2653 passed; 0 failed; 12 ignored; 30/30
-binaries**, gated on **x-tuf** (see the ENOSPC note below — do not gate on
-x-alpha until B106 lands).
+Master **b580565**, **SUITE-VERIFIED 2720 passed; 0 failed; 12 ignored; 32/32
+binaries**, gated on **x-tuf** from the main checkout.
 
-Closed since the 21:05 restart: **B091, B093, B099, B101**. Suite 2601 -> 2653.
+Closed since the 21:05 restart: **B091, B093, B099, B101, B106, B107, B108**,
+plus **B105** from the peer session. **B109 rejected as invalid** — it was filed
+on a misread comment and no code needed changing. Suite 2601 -> 2720.
 
-Lanes running: enum (B100), tooling (B106 -> B097 -> B096), unused (B107
-rebasing, then B108). Two tickets were FILED from lane findings tonight —
-B107 and B108 — both found while doing something else and deliberately not
-folded in.
+Lanes running: enum (B110), resolver (B111 committed, gating), tooling (B097
+in-repo half), unused (B112). Five tickets were FILED from lane findings
+tonight — B107, B108, B110, B111, B112 — all found while doing something else
+and deliberately not folded in.
+
+### B097 needs Max
+
+Its fix lives in Max's game-plugin fork, and the ticket records that
+authorisation for a lane to edit it was WITHDRAWN ("two agents editing Max's
+game plugin is worse than neither"). I have NOT lifted that — it protects his
+game environment, it was his call, and there are now four lanes plus a peer
+session rather than the two when it was written. lane-tooling has the
+unambiguously in-repo half instead (`fleet_dogfood.py`'s reader, hoisting the
+correct implementation that already exists in `probe_export_binding.py`). That
+will not close B097. **Game probing stays blocked until Max rules.**
+
+### B111 is the one to look at first in the morning
+
+A live false ERROR on shipped code: B094 flags `mixin class X : I` for not
+implementing `I`, and 8 of 11 corpus findings were that, in two plugins that
+ship and compile. A mixin's members are copied into including classes; the
+mixin never owes the interface. It is the exact outcome B094's four fail-silent
+bails exist to prevent, arriving by a route none cover — the bails guard the
+COMPARISON, nothing guarded the APPLICABILITY.
 
 ## Gate discipline, hard-won today
 
