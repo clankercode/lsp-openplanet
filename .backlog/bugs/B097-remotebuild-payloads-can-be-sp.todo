@@ -270,3 +270,107 @@ game port" statement predated the grant reaching it (messages between sessions
 are asynchronous, and it had composed that line before the grant landed); it
 then probed with permission and documented the run. Nothing about the harness's
 staging behaviour is unaccounted for.
+
+## SECOND CORRECTION — the cap is 64, it PREDATES today's update, and load_plugin has NEVER worked
+
+Measured by the tm-tournament-station session, single client, from
+RemoteBuild's own logging of `Available()` alongside the payload it read:
+
+    Bytes to read: 65  -> payload 64b
+    Bytes to read: 70  -> payload 64b
+    Bytes to read: 80  -> payload 64b
+    Bytes to read: 58  -> payload 58b
+
+`Available()` reports the true size; **`ReadRaw(n)` returns at most 64.**
+Bisected exactly: <=64 fine, >=65 splits. `Main.as` hands each read straight to
+`Router::Update`, which treats it as a whole message, so a split request gives
+`Json::Parse` a truncated string -> Null -> route `""` ->
+`{"error":"Not implemented: "}`. The remainder arrives next tick and fails the
+same way.
+
+**Two things I asserted on this ticket that are WRONG:**
+
+1. **The threshold is 64, not "~64-66".** The earlier 66/67 boundary was
+   measured with a padded `get_status` and is off by the framing bytes.
+2. **This does NOT date from the 15:10 Openplanet update.** I attributed it to
+   that and it was wrong — **`Openplanet-Old.log` caps at 64 as well.** So the
+   fault predates today entirely, and **`load_plugin` has NEVER worked**: its
+   minimum payload is 72 bytes with an EMPTY id. Anything anyone has ever seen
+   loaded was loaded at game start, not by the call.
+
+## THE CONTROL COULD NOT HAVE CAUGHT IT — the transferable part
+
+At 18:54:52 nine routes were probed — `get_status`, `unload_plugin`, `unload`,
+`reload_plugin`, `load_plugin`, `list_plugins`, `get_plugin`, and
+`zzz_no_such_route` — every one carrying a long `lsp-issue-repro-lsp-b089-...`
+id. **Every one logged exactly 64b and every one returned "Not implemented".**
+
+`zzz_no_such_route` was the negative control, and **it failed through the same
+mechanism as the positives.** A control that fails the way the test fails is not
+a control; it is a second test. It cannot discriminate, which is the one job it
+had.
+
+**Consequence: any conclusion of the form "route X is unimplemented" drawn from
+a payload over 64 bytes is manufactured evidence.** Retract any such finding.
+
+The general form, for the hazards doc: **a negative control must fail for a
+DIFFERENT reason than the positive case would.** A control sharing the failure
+channel with the thing under test is indistinguishable from it, and its passing
+"correctly" is what convinces you the instrument works.
+
+## THE SHIPPED CORPORA ARE VALID — and B068 is why we can know it
+
+This needed checking rather than assuming, because "load_plugin never worked"
+initially looks like it invalidates every corpus in the repo. It does not.
+
+`probe_enum_corpus.py:run_batch` stages the folder, calls `load_plugin`, and
+**IGNORES the result**, sleeps 3s, then parses the game's log window. It is
+**Openplanet's own file watcher**, not the route call, that compiles a staged
+plugin folder. The route call has always been decoration.
+
+And a non-compile CANNOT masquerade as success, because of B068's sentinel:
+`attribute()` sets `analysis_reached_the_end = sentinel_line in by_line`, and
+without it every name with no diagnostic is `None` / UNDETERMINED rather than
+`''` / ACCEPTED. It also requires `d.get("file") == source_file`, so another
+plugin's errors cannot be misattributed.
+
+**Today's re-probe returned 742 verdicts with ZERO undetermined**, which is only
+possible if the probe plugin genuinely compiled. So b052, b053 and the B068
+re-probe all stand.
+
+Worth stating for the record: B068 was filed as a batching-attribution defect,
+and its sentinel turns out to be the thing that lets us answer a completely
+different question — "did this plugin compile at all?" — six weeks of assumption
+later. A guard that distinguishes *analysed and silent* from *never analysed*
+is more general than the defect that motivated it.
+
+`issue_repro_game.py` is the path that genuinely breaks: its teardown goes
+through the B077 holder, the unload fails, the fixture is preserved, and the run
+is marked SKIP.
+
+## WORKING ALTERNATIVE — no restart needed
+
+`tm-control-mcp` is loaded and its socket reassembles correctly. RemoteBuild
+parity (enable / disable / setEnabled / reload / unload / load / openSettings /
+getLogs) plus ListPlugins / GetPlugin:
+
+    cd ~/src/openplanet/my-plugins/tm-control-mcp
+    python3 tools/call.py ControlPlugin '{"id":"<plugin>","action":"load"}'
+    python3 tools/call.py ControlPlugin '{"id":"<plugin>","action":"reload"}'
+
+It returns the compile log **inline**, with lines attributed to the build you
+triggered. That second property independently fixes a different hazard this repo
+has hit: collecting diagnostics from the shared log by severity and picking up a
+foreign plugin's errors.
+
+**Probe tooling should migrate to this rather than wait on a RemoteBuild fix.**
+
+## Ownership of the fix
+
+The tm-tournament-station session is fixing `Main.as`'s read loop on a branch in
+`src/openplanet/`; it needs a game restart to take effect. My earlier
+authorisation for one of our lanes to do it is WITHDRAWN — two agents editing
+Max's game plugin is worse than neither.
+
+**`~/src/tm-remote-build`'s Python side has UNCOMMITTED WORK OF MAX'S. Do not
+touch that path.**
