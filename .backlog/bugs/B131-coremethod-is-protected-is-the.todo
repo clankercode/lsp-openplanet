@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T14:26:10Z"
 depends_on: []
 estimate_hours: 1
 id: B131
 priority: high
+started_at: null
 status: pending
 tags: []
 title: CoreMethod::is_protected is the same dead-field shape as is_const was, and nobody has checked whether any typedb dump populates it
@@ -12,3 +14,40 @@ updated_at: "2026-08-31T14:26:10Z"
 ---
 
 CoreMethod::is_protected is the same dead-field shape as is_const was, and nobody has checked whether any typedb dump populates it
+
+
+## Flagged by lane-enum while fixing B125, 2026-09-01, deliberately not widened into that ticket
+
+`CoreMethod::is_protected` is **the same shape as the field B125 just fixed**: it
+exists, greps cleanly, type-checks, and nobody has checked whether a single
+typedb dump populates it. If it does not, `#[serde(default)]` makes it silently
+answer `false` to every caller.
+
+The lane did not check, and said so rather than guessing — the right call, since
+widening a ticket on a hunch is how measured work turns into assumed work.
+
+## This is a one-line measurement
+
+Count how many of the 1002 Core class methods carry a `protected` key in the
+dumps. Then:
+
+- **If populated:** confirm the loader reads it and something consumes it. A
+  populated field with no reader is B125's other half.
+- **If not populated:** either populate it (check whether the `decl` string
+  carries the information, the way ` const` turned out to) or delete it, and pin
+  the decision with a test either way. **Do not leave it answering `false`
+  silently** — that is the trap B116 named and B125 confirmed.
+
+## Do not assume it mirrors is_const
+
+`is_const` turned out to be recoverable from the `decl` suffix. Access
+specifiers may not appear in `decl` at all. **Measure before deciding**, and
+report what the dumps actually contain rather than what would be convenient.
+
+## While you are there
+
+Audit the rest of the struct the same way. Two dead fields found by accident in
+one night suggests the question "is this field ever populated?" has never been
+asked systematically of `CoreMethod`. One pass over every field, with the counts
+recorded in a test the way B125's 1002/301/352/26/0 counts now are, closes the
+whole class of defect instead of the next instance of it.
