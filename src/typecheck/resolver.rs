@@ -808,6 +808,17 @@ mod tests {
         (out, clean)
     }
 
+    /// One row of the shadowing sweep: `(what this cell is, the workspace's
+    /// symbols, the active namespace stack, the spelling under test, the
+    /// qualified name it must resolve to)`.
+    type ShadowCell<'a> = (
+        &'a str,
+        Vec<(&'a str, SymbolKind)>,
+        Vec<&'a str>,
+        &'a str,
+        String,
+    );
+
     /// Every shape a workspace can declare a TYPE in. `typedef` is in the
     /// list deliberately: it reuses `SymbolKind::Funcdef` and is the shape
     /// `lookup_funcdef` skips, so an enumeration that forgets it leaves the
@@ -855,7 +866,7 @@ mod tests {
         for engine in ["CoroutineFunc", "CoroutineFuncUserdataString"] {
             for (shape, kind) in type_shapes() {
                 let namespaced = format!("Nz::{engine}");
-                let cells: Vec<(&str, Vec<(&str, SymbolKind)>, Vec<&str>, &str, String)> = vec![
+                let cells: Vec<ShadowCell> = vec![
                     (
                         "declared at the top level, spelled bare",
                         vec![(engine, kind.clone())],
