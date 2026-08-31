@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T08:45:07Z"
 depends_on: []
 estimate_hours: 1
 id: B092
 priority: high
+started_at: null
 status: pending
 tags: []
 title: just test reported INCOMPLETE RUN once and passed on an immediate re-run of the identical tree
@@ -24,3 +26,83 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Observed by the coordinator on 2026-08-31 while gating the B073 merge.
+Filed rather than dismissed, because the whole point of the counting gate is
+that its verdict is trustworthy, and this one was not reproducible.
+
+## What happened
+
+Merged B073 to master, ran `just test`. It exited 1 and printed the
+INCOMPLETE-RUN explanation ("... at the first failure, so everything after it
+never runs either. Both shrink the total without producing a single failed
+test. Do not report the number above. See B078.").
+
+An IMMEDIATE re-run of the **identical tree**, no rebuild in between, printed:
+
+    ==> 26/26 binaries reported, 27 sections
+    SUITE-VERIFIED: 2397 passed; 0 failed; 14 ignored; 26/26 binaries reported
+
+A third run, throttled with `-- --test-threads=2`, gave the same clean 2397.
+So master at that commit is good, verified twice. **What is not established is
+why the first run refused.**
+
+## Conditions — likely relevant, NOT proven causal
+
+Machine load average was **32-41 on a 16-core box** at the time, from four
+concurrent lanes plus the gate.
+
+The cause is a thread-count trap worth writing down: `cargo test -j2` caps
+cargo's BUILD jobs but does NOT cap the test harness, which defaults to one
+thread per CPU (16 here). `just test` does not set `--test-threads` — it is
+opt-in via `just test -- --test-threads=2`. So five concurrent suites were up
+to 80 test threads, not the 10 the `-j2` convention implies.
+
+**No OOM occurred.** An initial `grep -i oom` over the journal appeared to
+match, but it was matching "r-oom-s" in an unrelated service's log line. There
+were no kills.
+
+## Why this matters beyond one flake
+
+**An INCOMPLETE RUN verdict is currently indistinguishable between:**
+
+1. a test binary crashed from a real defect — the case the gate exists for;
+2. a binary was starved, killed or timed out under machine load — environmental,
+   and the gate says nothing about it;
+3. the `--no-run` enumeration and the run disagreed for some other reason.
+
+The gate did the right thing by refusing to print a total. The problem is that
+its refusal is **not diagnostic**, so a human must guess — and the failure mode
+of guessing is dismissing a real crash as "just load". That is very close to how
+B078 nearly went, and it is the same shape as this batch's standing hazard that
+a green result is not evidence until you know what made it green. An
+unexplained RED is the same hazard wearing the other colour.
+
+## Work
+
+Routed to **B085**, which already owns making the gate see more than
+binary-level liveness. When a binary does not report, capture and print what can
+be known about WHY: process exit status or signal, whether it produced partial
+output, and the machine load at the time. A SIGKILL under load average 40 and a
+SIGSEGV on an idle box are different findings and must not render as the same
+line.
+
+**Do NOT fix this by retrying until green.** A gate that retries converts an
+intermittent into silence, which is strictly worse than the current behaviour.
+
+Also consider whether `just test` should default to a bounded `--test-threads`
+rather than one-per-CPU. The repo's own etiquette rule is 2 threads for builds
+and tests; the recipe currently honours that only for builds, and only if the
+caller remembers.
+
+## If it recurs
+
+Capture the FULL output to a file, not a tail — the first occurrence's detail
+was lost to `| tail -6` and that is why this ticket cannot name the binary. The
+verdict line names the failing binary; the tail did not include it.
+
+## Related
+
+B082 (the counting gate this is about), B085 (where the fix belongs), B078 (a
+flaky crash that was correctly NOT dismissed), B032 (a real env-var race in this
+repo that high thread counts made far more likely).
