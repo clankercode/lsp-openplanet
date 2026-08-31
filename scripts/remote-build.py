@@ -306,7 +306,11 @@ def main() -> int:
             sync_up(a.host, root, rsync_dest, a.with_git, a.verbose)
 
         if a.action == "test":
-            inner = ["just", "test", "--", f"--test-threads={tthreads}", *rest]
+            # `just test` self-throttles to -j2 for the sake of THIS desktop
+            # (B085). On a 48-core build box that throttle is exactly wrong, so
+            # pass an explicit -j, which the recipe honours over its default.
+            inner = ["just", "test", f"-j{jobs}", "--",
+                     f"--test-threads={tthreads}", *rest]
         elif a.action == "check":
             inner = ["cargo", "check", f"-j{jobs}", "--all-targets", *rest]
         elif a.action == "clippy":
