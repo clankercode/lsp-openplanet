@@ -2112,9 +2112,25 @@ impl<'a> Checker<'a> {
     /// compilation unit per fixture — never batched, B068):
     ///
     /// * enum -> a DIFFERENT enum is rejected:
-    ///   `Can't implicitly convert from 'LocalOne' to 'LocalTwo'.`
+    ///   `Can't implicitly convert from 'LocalOne' to 'LocalTwo&'.`
     /// * `int` -> enum is rejected:
-    ///   `Can't implicitly convert from 'int' to 'LocalOne'.`
+    ///   `Can't implicitly convert from 'int' to 'VirtualKey&'.`
+    ///
+    /// # The engine's wording moved, the rule did not (B148)
+    ///
+    /// Both messages above gained a trailing `&` on the TARGET type between
+    /// the 1.29.5-era measurement and 1.29.14: the engine names the assignment
+    /// target as a reference. `docs/probes/b071-enum-conversion.tsv` records
+    /// three rows as WORDING-CHANGED and ZERO as behaviour-changed, so the two
+    /// rules are unaltered and nothing about this function's logic follows
+    /// from the difference.
+    ///
+    /// **Our own diagnostic deliberately keeps the unsuffixed spelling.** The
+    /// `&` is an artifact of how the engine models assignment, not part of the
+    /// type the user wrote, and `to 'LocalTwo'` is what a reader is looking
+    /// for. That is a deliberate divergence from b071's "match the engine's
+    /// own text" guidance, recorded here rather than left for someone to
+    /// rediscover by diffing the corpus against `TypeDiagnostic::message`.
     ///
     /// The converse of the second is LEGAL — `int i = LocalOne::X;` compiles,
     /// because an enum value decays to `int`. That asymmetry is the trap: a
