@@ -2298,6 +2298,32 @@ impl<'a> Checker<'a> {
     /// `Handle(Const(T))` so that the const sticks to the pointee
     /// (matching AC20 semantics). Errors and already-const types pass
     /// through unchanged.
+    /// B121: can a METHOD's return value alias the receiver it was called
+    /// on? Only an aliasing return may inherit the receiver's constness.
+    ///
+    /// A by-value return is a fresh object — `const string &in s` then
+    /// `s.Replace(..)` hands back a NEW string that is perfectly
+    /// assignable — so constness must not travel through it. A handle
+    /// return MAY hand back a view into the receiver (`@member`), and
+    /// nothing available says whether it does, so it is treated as
+    /// aliasing: that is the conservative direction for a rule whose
+    /// whole job is to notice writes through a const view.
+    ///
+    /// This is a SHAPE proxy and it is deliberately partial. It is sound
+    /// in one direction only: a by-value return provably cannot alias, a
+    /// handle return merely might. `string::Split` returns `string[]@` —
+    /// a fresh array behind a handle — and no metadata in the dumps
+    /// distinguishes it from `Json::Value::opIndex`, which returns a
+    /// genuine view. See B121 for the measurement.
+    ///
+    /// NOT used for FIELD access, which is a different question with a
+    /// different answer: a field read genuinely IS a view into the
+    /// receiver whatever its shape, so `member_access_type` keeps
+    /// propagating unconditionally.
+    fn method_return_may_alias_receiver(t: &TypeRepr) -> bool {
+        matches!(t, TypeRepr::Handle(_))
+    }
+
     fn apply_receiver_const(t: TypeRepr, receiver_const: bool) -> TypeRepr {
         if !receiver_const {
             return t;
@@ -4651,7 +4677,15 @@ impl<'a> Checker<'a> {
                                         },
                                     });
                                 }
-                                return Self::apply_receiver_const(ret, true);
+                                // B121: only an ALIASING return inherits the
+                                // receiver's constness. A by-value return is a
+                                // fresh object and writing to it is legal, so
+                                // const-wrapping it invents a second, false
+                                // diagnostic on top of the true one above.
+                                if Self::method_return_may_alias_receiver(&ret) {
+                                    return Self::apply_receiver_const(ret, true);
+                                }
+                                return ret;
                             }
                             return ret;
                         }
@@ -4723,7 +4757,11 @@ impl<'a> Checker<'a> {
                     // typedb cannot tell those apart, which is what "no
                     // const-qualifier metadata yet" costs in practice.
                     if let Some(t) = self.scope.workspace_class_member(&type_name, &member_name) {
-                        return Self::apply_receiver_const(t, true);
+                        // B121: same aliasing gate as the same-file arm.
+                        if Self::method_return_may_alias_receiver(&t) {
+                            return Self::apply_receiver_const(t, true);
+                        }
+                        return t;
                     }
                 }
                 if let Some(t) = self.scope.lookup_method_return(&type_name, &member_name) {
@@ -14159,5 +14197,323 @@ mod b120_cross_file_const_propagation_tests {
             })
             .collect();
         assert!(bad.is_empty(), "unknown class, got {:?}", diags);
+    }
+}
+
+// ── B121: constness travels only through a return that can ALIAS ────────────
+//
+// AC19 treated every method return as a view into the receiver, so a const
+// receiver made the result const whatever its shape. That is right for a
+// returned handle into `this` and wrong for a returned VALUE, which is a fresh
+// object: `const string &in s` then `s.Replace(..)` hands back a new string
+// that is perfectly assignable.
+//
+// The gate is a SHAPE proxy and it is partial by construction. Measured on the
+// 151-plugin fleet by re-running B120's variant C (propagation widened to
+// engine receivers) with and without it: it removes 7 of the 10 false
+// positives. The 3 survivors are all `string::Split`, which returns
+// `string[]@` — a FRESH array behind a handle, indistinguishable by shape from
+// `Json::Value::Get`, which returns a genuine view. No metadata in the dumps
+// separates them. `residual_fresh_handles_are_documented_not_fixed` pins that
+// so the limit is a test rather than a claim in a comment.
+#[cfg(test)]
+mod b121_return_aliasing_tests {
+    use super::*;
+    use crate::lexer::tokenize_filtered;
+    use crate::parser::Parser;
+    use crate::symbols::SymbolTable;
+
+    fn check_ws(
+        main: &str,
+        siblings: &[&str],
+        typedb: Option<&crate::typedb::TypeIndex>,
+    ) -> Vec<TypeDiagnostic> {
+        let mut ws = SymbolTable::new();
+        for sib in siblings {
+            let tokens = tokenize_filtered(sib);
+            let mut parser = Parser::new(&tokens, sib);
+            let file = parser.parse_file();
+            let fid = ws.allocate_file_id();
+            let syms = SymbolTable::extract_symbols(fid, sib, &file);
+            ws.set_file_symbols(fid, syms);
+        }
+        let tokens = tokenize_filtered(main);
+        let mut parser = Parser::new(&tokens, main);
+        let file = parser.parse_file();
+        let fid = ws.allocate_file_id();
+        let syms = SymbolTable::extract_symbols(fid, main, &file);
+        ws.set_file_symbols(fid, syms);
+        let scope = GlobalScope::new(&ws, typedb);
+        let mut checker = Checker::new(main, &scope);
+        checker.check_file(&file);
+        checker.diagnostics
+    }
+
+    /// Diagnostics that mean "you wrote through a const view". The
+    /// propagation surfaces as either kind depending on the write's shape —
+    /// `ConstViolation` for an indexed/field write, `ReadOnlyReference` for
+    /// a direct reassignment — and this rule is about WHETHER const
+    /// travelled, not which downstream check noticed. Counting only one
+    /// kind would read a real propagation as an absence.
+    fn violations(diags: &[TypeDiagnostic]) -> usize {
+        diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::ConstViolation { .. }
+                        | TypeDiagnosticKind::ReadOnlyReference
+                )
+            })
+            .count()
+    }
+
+    fn nonconst(diags: &[TypeDiagnostic]) -> usize {
+        diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    &d.kind,
+                    TypeDiagnosticKind::NonConstMethodOnConstReceiver { .. }
+                )
+            })
+            .count()
+    }
+
+    fn typedb() -> crate::typedb::TypeIndex {
+        let base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typedb");
+        crate::typedb::TypeIndex::load(
+            &base.join("OpenplanetCore.json"),
+            &base.join("OpenplanetNext.json"),
+        )
+        .expect("typedb fixtures must load")
+    }
+
+    /// `(label, class_body, use_body, expect_violation)`. Every row is a
+    /// non-const method on a const receiver, so `NonConstMethodOnConstReceiver`
+    /// always fires; what varies is whether the RESULT also inherits const.
+    ///
+    /// The pair that is the whole point: a returned handle may be a view into
+    /// `this`, a returned value cannot be. Either row alone proves nothing.
+    const CASES: &[(&str, &str, &str, bool)] = &[
+        (
+            "returns array HANDLE — may alias, propagates",
+            "class C { array<int>@ Get() { return null; } }",
+            "void f(const C@ c) { c.Get()[0] = 5; }",
+            true,
+        ),
+        (
+            "returns array BY VALUE — fresh, must not propagate",
+            "class C { array<int> Get() { array<int> a; return a; } }",
+            "void f(const C@ c) { c.Get()[0] = 5; }",
+            false,
+        ),
+        (
+            "returns class HANDLE, field written — may alias",
+            "class P { int x; } class C { P@ Get() { return null; } }",
+            "void f(const C@ c) { c.Get().x = 1; }",
+            true,
+        ),
+        (
+            "returns class BY VALUE, field written — fresh",
+            "class P { int x; } class C { P Get() { P p; return p; } }",
+            "void f(const C@ c) { c.Get().x = 1; }",
+            false,
+        ),
+        (
+            "returns string BY VALUE into auto, reassigned — the FP shape",
+            "class C { string Name() { return \"\"; } }",
+            "void f(const C@ c) { auto s = c.Name(); s = \"x\"; }",
+            false,
+        ),
+        (
+            "returns string HANDLE into auto, reassigned",
+            "class C { string@ Name() { return null; } }",
+            "void f(const C@ c) { auto s = c.Name(); s = \"x\"; }",
+            true,
+        ),
+        (
+            "returns a primitive by value",
+            "class C { int N() { return 0; } }",
+            "void f(const C@ c) { auto n = c.N(); n = 1; }",
+            false,
+        ),
+    ];
+
+    /// The rule, on the same-file half.
+    #[test]
+    fn only_aliasing_returns_inherit_receiver_const_same_file() {
+        for (label, class_body, use_body, want) in CASES {
+            let d = check_ws(&format!("{class_body} {use_body}"), &[], None);
+            // `>= 1`, not `== 1`. A write THROUGH a call (`c.Get().x = 1`)
+            // walks the callee twice — once to type the assignment target,
+            // once for the value — so the call diagnostic is emitted twice
+            // at the same span. Pre-existing and unrelated to B121: that row
+            // takes the identical path to master, which only differs in what
+            // is returned AFTER the emit. The CLI dedups by span+kind, which
+            // is why the fleet output shows one. Filed separately; asserting
+            // `== 1` here would be asserting a bug is absent when it is not.
+            assert!(
+                nonconst(&d) >= 1,
+                "`{label}`: the call itself must still be diagnosed, got {:?}",
+                d
+            );
+            assert_eq!(
+                violations(&d) > 0,
+                *want,
+                "`{label}`: expected propagation={want}, got {:?}",
+                d
+            );
+        }
+    }
+
+    /// The same rule must hold on the CROSS-FILE half. B120 pinned the two
+    /// halves together; B121 changes both, so the pairing is re-asserted here
+    /// rather than assumed to have survived.
+    #[test]
+    fn aliasing_rule_agrees_across_the_file_boundary() {
+        for (label, class_body, use_body, _) in CASES {
+            let same = check_ws(&format!("{class_body} {use_body}"), &[], None);
+            let split = check_ws(use_body, &[class_body], None);
+            assert_eq!(
+                (nonconst(&same), violations(&same)),
+                (nonconst(&split), violations(&split)),
+                "`{label}` must not depend on the file boundary:\n  same {:?}\n  split {:?}",
+                same,
+                split
+            );
+        }
+    }
+
+    /// NON-VACUITY. The pair test above is satisfied by two identical empty
+    /// sets, and the table test would pass with the gate hardcoded to `false`
+    /// if no row expected propagation. This pins one row of each polarity to
+    /// exact counts, so both tests are known to be discriminating.
+    #[test]
+    fn the_two_polarities_produce_exactly_the_expected_counts() {
+        let handle = check_ws(
+            "class C { array<int>@ Get() { return null; } } void f(const C@ c) { c.Get()[0] = 5; }",
+            &[],
+            None,
+        );
+        assert_eq!(
+            (nonconst(&handle), violations(&handle)),
+            (1, 1),
+            "{:?}",
+            handle
+        );
+
+        let value = check_ws(
+            "class C { string Name() { return \"\"; } } void f(const C@ c) { auto s = c.Name(); s = \"x\"; }",
+            &[],
+            None,
+        );
+        assert_eq!(
+            (nonconst(&value), violations(&value)),
+            (1, 0),
+            "{:?}",
+            value
+        );
+    }
+
+    /// FIELD access is a different question with a different answer and must
+    /// be untouched. A field of a const object genuinely IS a view into it,
+    /// whatever its shape — so a by-value field still propagates where a
+    /// by-value method return no longer does. Getting this wrong would trade
+    /// a false positive for a real false negative.
+    #[test]
+    fn field_access_still_propagates_regardless_of_shape() {
+        for (label, src) in [
+            (
+                "array field by value",
+                "class F { array<int> arr; } void k(const F@ f) { f.arr[0] = 5; }",
+            ),
+            (
+                "class field by value",
+                "class P { int x; } class F { P p; } void k(const F@ f) { f.p.x = 1; }",
+            ),
+        ] {
+            let d = check_ws(src, &[], None);
+            assert!(
+                violations(&d) > 0,
+                "`{label}`: a field of a const object is a const view, got {:?}",
+                d
+            );
+        }
+    }
+
+    /// THE DISCRIMINATING TEST, against the real typedb rather than a
+    /// hand-written stand-in. These are the exact engine methods behind
+    /// B120's variant-C false positives. `Replace` / `ToLower` / `SubStr`
+    /// return by value and the shape gate kills them; `Split` returns
+    /// `string[]@` and it does not.
+    #[test]
+    fn the_fleet_false_positive_methods_are_classified_from_the_real_typedb() {
+        let idx = typedb();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+        for (ty, method, may_alias) in [
+            ("string", "Replace", false),
+            ("string", "ToLower", false),
+            ("string", "ToUpper", false),
+            ("string", "SubStr", false),
+            ("string", "Trim", false),
+            // The residual: a FRESH array behind a handle. Shape says "may
+            // alias" and shape is all we have.
+            ("string", "Split", true),
+        ] {
+            let t = scope
+                .lookup_method_return(ty, method)
+                .unwrap_or_else(|| panic!("typedb must know {ty}::{method}"));
+            assert_eq!(
+                Checker::method_return_may_alias_receiver(&t),
+                may_alias,
+                "{ty}::{method} resolved to {:?}",
+                t
+            );
+        }
+    }
+
+    /// The limit of the proxy, stated as a test so it cannot quietly become
+    /// folklore. `string::Split` returns a fresh array and `Json::Value::Get`
+    /// returns a view; both are handles, so the gate treats them alike. This
+    /// is the 3 of 10 the fleet sweep left standing. If a future change can
+    /// tell them apart, this test is the one that should fail.
+    #[test]
+    fn residual_fresh_handles_are_documented_not_fixed() {
+        let idx = typedb();
+        let ws = SymbolTable::new();
+        let scope = GlobalScope::new(&ws, Some(&idx));
+        let fresh = scope.lookup_method_return("string", "Split").unwrap();
+        let view = scope.lookup_method_return("Json::Value", "Get").unwrap();
+        assert!(
+            Checker::method_return_may_alias_receiver(&fresh)
+                && Checker::method_return_may_alias_receiver(&view),
+            "the proxy cannot separate a fresh handle from an aliasing one: \
+             Split -> {:?}, Json::Value::Get -> {:?}",
+            fresh,
+            view
+        );
+    }
+
+    /// An ENGINE receiver still propagates nothing at all — B116/B120 excluded
+    /// that population by provenance and B121 does not change it. The shape
+    /// gate narrows what MAY propagate; it does not widen who can.
+    #[test]
+    fn engine_receivers_still_propagate_nothing() {
+        let idx = typedb();
+        for src in [
+            "string f(const string &in raw) { auto r = raw.Replace(\"a\", \"b\"); r = r.Replace(\"c\", \"d\"); return r; }",
+            "void f(const string &in term) { auto parts = term.Split(\" \"); parts[0] = \"x\"; }",
+        ] {
+            let d = check_ws(src, &[], Some(&idx));
+            assert_eq!(
+                violations(&d),
+                0,
+                "engine receiver must propagate nothing: {src} -> {:?}",
+                d
+            );
+        }
     }
 }
