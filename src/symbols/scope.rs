@@ -25,6 +25,20 @@ pub enum SymbolKind {
         /// True when declared by an `import ... from` statement (an alias for
         /// a function defined elsewhere), false for real definitions.
         imported: bool,
+        /// B101: the trailing `const` qualifier on a class or interface
+        /// METHOD (`void M() const`). The engine treats `void M() const`
+        /// and `void M()` as different signatures — measured, B094's
+        /// 18-fixture probe against OP 1.29.14 answered a non-const method
+        /// offered against a const requirement with `Missing
+        /// implementation of 'void I::M() const'`. Without this field the
+        /// two are indistinguishable to every consumer of the pool.
+        ///
+        /// Threaded verbatim from `FunctionDecl::is_const`, so it says
+        /// what the source said. A constructor and a destructor are
+        /// synthesized without the qualifier and are always `false`; a
+        /// free function cannot carry it in valid AngelScript, and the
+        /// parser records whatever was written.
+        is_const: bool,
     },
     Class {
         parents: Vec<String>,

@@ -367,6 +367,10 @@ impl SymbolTable {
                                     params,
                                     min_args,
                                     imported: false,
+                                    // B101: the trailing `const`. The engine
+                                    // treats `void M() const` and `void M()`
+                                    // as different signatures.
+                                    is_const: func.is_const,
                                 },
                                 span: func.span,
                                 file_id,
@@ -390,6 +394,8 @@ impl SymbolTable {
                                     params,
                                     min_args,
                                     imported: false,
+                                    // A constructor cannot be const.
+                                    is_const: false,
                                 },
                                 span: func.span,
                                 file_id,
@@ -409,6 +415,8 @@ impl SymbolTable {
                                     params,
                                     min_args,
                                     imported: false,
+                                    // A destructor cannot be const.
+                                    is_const: false,
                                 },
                                 span: func.span,
                                 file_id,
@@ -459,6 +467,9 @@ impl SymbolTable {
                             params,
                             min_args,
                             imported: false,
+                            // B101: `void M() const;` in an interface is a
+                            // const REQUIREMENT, not decoration.
+                            is_const: method.is_const,
                         },
                         span: method.span,
                         file_id,
@@ -554,6 +565,7 @@ impl SymbolTable {
                         params,
                         min_args,
                         imported: false,
+                        is_const: func.is_const,
                     },
                     span: func.span,
                     file_id,
@@ -578,6 +590,8 @@ impl SymbolTable {
                             // defined elsewhere — navigation should prefer the
                             // real definition when one exists in the workspace.
                             imported: true,
+                            // `import` declares a free function.
+                            is_const: false,
                         },
                         span: import.span,
                         file_id,
@@ -724,6 +738,7 @@ mod tests {
                 params,
                 min_args,
                 imported,
+                is_const,
             } => {
                 assert_eq!(return_type, "int");
                 assert_eq!(
@@ -735,9 +750,156 @@ mod tests {
                 );
                 assert_eq!(*min_args, 1, "the defaulted parameter is optional");
                 assert!(!imported);
+                assert!(!is_const, "no trailing `const` was written");
             }
             other => panic!("I::Count must be a Function symbol, got {:?}", other),
         }
+    }
+
+    // ── B101: the trailing `const` on a pooled method ────────────────
+
+    /// `is_const` of the pooled symbol named `name`.
+    fn pooled_is_const(src: &str, name: &str) -> bool {
+        let symbols = extract(src);
+        let sym = symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} must be pooled in `{src}`"));
+        match &sym.kind {
+            SymbolKind::Function { is_const, .. } => *is_const,
+            other => panic!("{name} must be a Function symbol, got {other:?}"),
+        }
+    }
+
+    /// A class method's trailing `const` survives into the pool, and its
+    /// absence does too — the two must be TELLABLE APART, which is the
+    /// whole of B101.
+    #[test]
+    fn a_class_methods_trailing_const_is_pooled() {
+        assert!(pooled_is_const("class C { void M() const {} }", "C::M"));
+        assert!(!pooled_is_const("class C { void M() {} }", "C::M"));
+    }
+
+    /// An interface method's `const` is a REQUIREMENT and must be pooled
+    /// the same way.
+    #[test]
+    fn an_interface_methods_trailing_const_is_pooled() {
+        assert!(pooled_is_const("interface I { void M() const; }", "I::M"));
+        assert!(!pooled_is_const("interface I { void M(); }", "I::M"));
+    }
+
+    /// Constness travels with every parameter shape, per CLAUDE.md — it is
+    /// parsed after the parameter list, so a `&out` or a defaulted
+    /// argument is exactly the kind of thing that could eat it.
+    #[test]
+    fn constness_survives_every_parameter_shape() {
+        for params in [
+            "",
+            "int a",
+            "const string &in s",
+            "int &out a",
+            "int &inout a",
+            "string &s",
+            "C@ h",
+            "const C@ h",
+            "int a = 1",
+            "const string &in s, int &out b, C@ h",
+        ] {
+            let with = format!("class C {{ void M({params}) const {{}} }}");
+            let without = format!("class C {{ void M({params}) {{}} }}");
+            assert!(pooled_is_const(&with, "C::M"), "const lost for `{params}`");
+            assert!(
+                !pooled_is_const(&without, "C::M"),
+                "const invented for `{params}`"
+            );
+        }
+    }
+
+    /// `const` may be written in any order beside `override` and `final`,
+    /// and the parser accepts any sequence — the pool must not care either.
+    #[test]
+    fn constness_survives_beside_override_and_final() {
+        for tail in [
+            "const",
+            "const override",
+            "override const",
+            "const final",
+            "final const",
+            "const override final",
+        ] {
+            let src = format!("class C {{ void M() {tail} {{}} }}");
+            assert!(pooled_is_const(&src, "C::M"), "const lost for `{tail}`");
+        }
+        for tail in ["", "override", "final", "override final"] {
+            let src = format!("class C {{ void M() {tail} {{}} }}");
+            assert!(!pooled_is_const(&src, "C::M"), "const invented for `{tail}`");
+        }
+    }
+
+    /// A LEADING `const` is part of the RETURN TYPE, not the method
+    /// qualifier — the two must not be confused.
+    #[test]
+    fn a_const_return_type_is_not_a_const_method() {
+        assert!(
+            !pooled_is_const("class C { const string M() { return \"\"; } }", "C::M"),
+            "`const string M()` is a const RETURN, not a const method"
+        );
+        assert!(
+            pooled_is_const("class C { const string M() const { return \"\"; } }", "C::M"),
+            "both at once: the trailing one is the qualifier"
+        );
+    }
+
+    /// A private or protected method keeps its constness.
+    #[test]
+    fn access_modifiers_do_not_lose_constness() {
+        assert!(pooled_is_const("class C { private void M() const {} }", "C::M"));
+        assert!(pooled_is_const(
+            "class C { protected void M() const {} }",
+            "C::M"
+        ));
+    }
+
+    /// Constructors and destructors cannot be const and are pooled false.
+    ///
+    /// Both pool under `C::C` — the parser eats the `~` before taking the
+    /// destructor's name Ident, so the two are indistinguishable by name
+    /// in the pool (pre-existing, noted while writing this test). Assert
+    /// over EVERY symbol of that name so neither is skipped.
+    #[test]
+    fn constructors_and_destructors_are_never_const() {
+        let symbols = extract("class C { C() {} ~C() {} }");
+        let ctor_dtor: Vec<&Symbol> = symbols.iter().filter(|s| s.name == "C::C").collect();
+        assert_eq!(ctor_dtor.len(), 2, "constructor and destructor both pooled");
+        for sym in ctor_dtor {
+            match &sym.kind {
+                SymbolKind::Function { is_const, .. } => {
+                    assert!(!is_const, "a ctor/dtor can never be const")
+                }
+                other => panic!("expected a Function symbol, got {other:?}"),
+            }
+        }
+    }
+
+    /// A const getter and a non-const setter under the same class are
+    /// pooled independently — one method's qualifier must not leak onto a
+    /// sibling.
+    #[test]
+    fn sibling_methods_do_not_share_constness() {
+        let src = "class C { int get_X() const { return 0; } void set_X(int v) {} }";
+        assert!(pooled_is_const(src, "C::get_X"));
+        assert!(!pooled_is_const(src, "C::set_X"));
+    }
+
+    /// A free function carries no qualifier, and an `import` alias is a
+    /// free function too.
+    #[test]
+    fn free_functions_and_import_aliases_are_not_const() {
+        assert!(!pooled_is_const("void F() {}", "F"));
+        assert!(!pooled_is_const(
+            "import void F() from \"Plugin\";",
+            "F"
+        ));
     }
 
     /// Parameter-mode variants, per CLAUDE.md: `&in` / `&out` / `&inout`,
@@ -829,6 +991,7 @@ mod tests {
                     params: vec![],
                     min_args: 0,
                     imported: false,
+                    is_const: false,
                 },
                 span: Span::new(0, 4),
                 file_id: fid,

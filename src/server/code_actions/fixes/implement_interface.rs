@@ -16,7 +16,9 @@
 //! stub worth accepting rather than retyping.
 //!
 //! The signature is still what SELECTS the overload, so a class missing two
-//! same-named methods gets two actions offering different stubs.
+//! same-named methods gets two actions offering different stubs — and since
+//! B101 that selection includes the trailing `const`, so an interface
+//! declaring both `M()` and `M() const` yields the right stub for each.
 //!
 //! # Refusals
 //!
@@ -150,10 +152,11 @@ fn plan(diag: &TypeDiagnostic, ctx: &FixContext<'_>) -> Option<Plan> {
         "\n"
     };
     let stub = format!(
-        "{lead}{inner}{} {}({}) {{\n{body}{inner}}}\n{indent}",
+        "{lead}{inner}{} {}({}){} {{\n{body}{inner}}}\n{indent}",
         parsed.return_type,
         parsed.method,
-        params.join(", ")
+        params.join(", "),
+        if parsed.is_const { " const" } else { "" }
     );
     Some(Plan {
         signature: signature.clone(),
@@ -173,9 +176,19 @@ struct ParsedSignature {
     method: String,
     /// Canonical (whitespace-free) parameter types, as B094 renders them.
     param_types: Vec<String>,
+    /// B101: the trailing `const`. B094 now renders `void I::M() const` for
+    /// a const requirement, so this parser has to consume it — otherwise
+    /// `strip_suffix(')')` fails and the whole action silently disappears
+    /// for every const method — and the stub has to WRITE it back, or the
+    /// generated method does not satisfy the interface it was offered for.
+    is_const: bool,
 }
 
 fn parse_signature(signature: &str) -> Option<ParsedSignature> {
+    let (signature, is_const) = match signature.strip_suffix(" const") {
+        Some(head) => (head, true),
+        None => (signature, false),
+    };
     let (head, rest) = signature.split_once('(')?;
     let params = rest.strip_suffix(')')?;
     let (return_type, qualified) = head.trim().rsplit_once(' ')?;
@@ -190,6 +203,7 @@ fn parse_signature(signature: &str) -> Option<ParsedSignature> {
         } else {
             params.split(',').map(|p| p.trim().to_string()).collect()
         },
+        is_const,
     })
 }
 
@@ -200,9 +214,17 @@ fn interface_params(ctx: &FixContext<'_>, parsed: &ParsedSignature) -> Option<Ve
     let key = format!("{}::{}", parsed.interface, parsed.method);
     let mut hit = None;
     for sym in ctx.workspace.lookup(&key) {
-        let SymbolKind::Function { params, .. } = &sym.kind else {
+        let SymbolKind::Function {
+            params, is_const, ..
+        } = &sym.kind
+        else {
             continue;
         };
+        // B101: constness is part of what selects the overload — an
+        // interface may declare both `M()` and `M() const`.
+        if *is_const != parsed.is_const {
+            continue;
+        }
         let canonical: Vec<String> = params
             .iter()
             .map(|(_, t)| t.chars().filter(|c| !c.is_whitespace()).collect())
@@ -376,6 +398,12 @@ mod tests {
             "interface I { void M(); }\ninterface J : I { void N(); }\nclass C : J {}\n",
             "interface I { void M(); }\nabstract class C : I {}\n",
             "interface I { void A(); void B(); void C(); }\nclass K : I {}\n",
+            // B101: const requirements must round-trip too — the stub has
+            // to carry the trailing `const` or it never satisfies.
+            "interface I { void M() const; }\nclass C : I {}\n",
+            "interface I { int M(const string &in s) const; }\nclass C : I {}\n",
+            "interface I { void M() const; void M(); }\nclass C : I {}\n",
+            "namespace N {\n    interface I { void M() const; }\n    class C : I {}\n}\n",
         ] {
             let mut text = src.to_string();
             let mut applied = 0;
@@ -392,6 +420,67 @@ mod tests {
                  does not satisfy the interface: {still:?}\n--- result ---\n{text}"
             );
         }
+    }
+
+    // ── B101: constness ──────────────────────────────────────────────
+
+    /// The title quotes the engine-shaped signature, `const` included.
+    #[test]
+    fn a_const_requirement_is_offered_with_its_constness() {
+        assert_eq!(
+            titles("interface I { void M() const; }\nclass C : I {}\n"),
+            vec!["Implement `void I::M() const`"]
+        );
+    }
+
+    /// REGRESSION GUARD for the way B101 could have broken this family
+    /// silently: `parse_signature` used to `strip_suffix(')')`, which fails
+    /// on `void I::M() const`, and a `None` there means NO ACTION AT ALL
+    /// rather than a visible error.
+    #[test]
+    fn a_const_requirement_still_produces_an_action() {
+        assert!(
+            !titles("interface I { void M() const; }\nclass C : I {}\n").is_empty(),
+            "the trailing `const` must not make the action disappear"
+        );
+    }
+
+    /// The stub WRITES the `const` back, with the interface's own
+    /// parameter names, across the parameter shapes.
+    #[test]
+    fn the_stub_carries_the_const_qualifier() {
+        for (iface, want) in [
+            ("void M() const;", "void M() const {"),
+            (
+                "void Log(const string &in message) const;",
+                "void Log(const string &in message) const {",
+            ),
+            ("void M(int &out a) const;", "void M(int &out a) const {"),
+            ("void M(int &inout a) const;", "void M(int &inout a) const {"),
+            ("int M(int a) const;", "int M(int a) const {"),
+        ] {
+            let out = fixed(&format!("interface I {{ {iface} }}\nclass C : I {{}}\n"));
+            assert!(out.contains(want), "for `{iface}` expected `{want}` in:\n{out}");
+        }
+    }
+
+    /// A non-const requirement must NOT gain a `const`.
+    #[test]
+    fn a_non_const_stub_gains_no_const_qualifier() {
+        let out = fixed("interface I { void M(int a); }\nclass C : I {}\n");
+        assert!(out.contains("void M(int a) {"), "{out}");
+        assert!(!out.contains("const"), "{out}");
+    }
+
+    /// An interface declaring BOTH `M()` and `M() const` offers two
+    /// actions, and constness is what picks each stub apart.
+    #[test]
+    fn a_const_and_non_const_overload_pair_offers_both_stubs() {
+        assert_eq!(
+            titles("interface I { void M(); void M() const; }\nclass C : I {}\n"),
+            // sorted: `M() const` precedes `M()` because ' ' < '`'
+            vec!["Implement `void I::M() const`", "Implement `void I::M()`"]
+        );
     }
 
     /// The first edit this family offers for `source`, if any.

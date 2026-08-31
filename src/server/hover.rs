@@ -1559,6 +1559,7 @@ mod tests {
                 params: vec![("a".to_string(), "int".to_string())],
                 min_args: 1,
                 imported: false,
+                is_const: false,
             },
             span: crate::lexer::Span::new(0, 1),
             file_id: 0,
@@ -1587,6 +1588,7 @@ mod tests {
                 params: vec![("a".to_string(), "int".to_string())],
                 min_args: 1,
                 imported,
+                is_const: false,
             },
             span: crate::lexer::Span::new(0, 1),
             file_id: 0,
@@ -1608,6 +1610,7 @@ mod tests {
                 params: vec![("b".to_string(), "float".to_string())],
                 min_args: 1,
                 imported: true,
+                is_const: false,
             },
             ..sig(true)
         };

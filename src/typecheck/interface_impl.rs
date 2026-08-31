@@ -44,6 +44,26 @@
 //!
 //! So every uncertainty resolves to SILENCE. The bail conditions are
 //! enumerated in [`missing_interface_methods`] and each has its own test.
+//!
+//! # Constness (B101)
+//!
+//! This module shipped unable to compare the trailing `const`, because the
+//! pooled symbol did not carry it. B101 added `SymbolKind::Function`'s
+//! `is_const`, and [`signatures_match`] now decides the one direction that
+//! was MEASURED:
+//!
+//! ```text
+//! class C : I { void M() {} }   where I declares `void M() const`
+//!   -> Missing implementation of 'void I::M() const'
+//! ```
+//!
+//! The OPPOSITE direction — a const method offered against a NON-const
+//! requirement — is **not measured**, and game probing is blocked (B097).
+//! It is therefore neutral BY CONSTRUCTION: `None`, hence silent, in
+//! keeping with the polarity above. That is a deliberate missed error, not
+//! an oversight, and `a_const_method_against_a_non_const_requirement_is_silent`
+//! is the test that pins it (mutation-checked: flipping it to `Some(false)`
+//! kills that test and only that test).
 
 use std::collections::{HashSet, VecDeque};
 
@@ -80,7 +100,9 @@ pub struct MissingImpl {
 ///
 /// 4. A method of the right name exists but its signature cannot be
 ///    compared confidently — see [`signatures_match`], which returns `None`
-///    for "unsure" rather than guessing.
+///    for "unsure" rather than guessing. Since B101 that also covers a
+///    const method offered against a non-const requirement, a direction
+///    the engine has never been asked about.
 pub fn missing_interface_methods(class_qname: &str, scope: &GlobalScope) -> Vec<MissingImpl> {
     let Some(bases) = class_bases(class_qname, scope) else {
         return Vec::new();
@@ -158,6 +180,9 @@ pub struct MethodSig {
     pub return_type: String,
     pub param_types: Vec<String>,
     pub min_args: usize,
+    /// B101: the trailing `const` qualifier. Part of the signature to the
+    /// engine, so part of it here.
+    pub is_const: bool,
 }
 
 /// Base list of a workspace CLASS. `None` when `class_qname` names no
@@ -258,6 +283,7 @@ fn methods_of(owner: &str, scope: &GlobalScope) -> Vec<MethodSig> {
             params,
             min_args,
             imported: false,
+            is_const,
         } = &sym.kind
         else {
             continue;
@@ -273,6 +299,7 @@ fn methods_of(owner: &str, scope: &GlobalScope) -> Vec<MethodSig> {
             return_type: return_type.clone(),
             param_types: params.iter().map(|(_, t)| t.clone()).collect(),
             min_args: *min_args,
+            is_const: *is_const,
         });
     }
     out
@@ -305,7 +332,22 @@ fn signatures_match(
     {
         all_equal &= types_equal(r, c, scope)?;
     }
-    Some(all_equal)
+    if !all_equal {
+        return Some(false);
+    }
+    // B101: the types agree, so constness is what is left to decide.
+    match (required.is_const, candidate.is_const) {
+        (true, true) | (false, false) => Some(true),
+        // MEASURED (OP 1.29.14, B094's probe): a non-const method offered
+        // against a const requirement is rejected, and the engine names the
+        // constness in the signature it wanted back.
+        (true, false) => Some(false),
+        // NOT MEASURED: a const method offered against a NON-const
+        // requirement. Game probing is blocked (B097), so this direction is
+        // neutral BY CONSTRUCTION rather than guessed — unsure, hence
+        // silent, which is this module's chosen polarity everywhere else.
+        (false, true) => None,
+    }
 }
 
 /// `None` when either spelling cannot be compared with confidence.
@@ -364,15 +406,18 @@ fn type_is_comparable(canonical: &str, scope: &GlobalScope) -> bool {
     })
 }
 
-/// Render the engine's message payload: `void I::M(const string&in)`.
+/// Render the engine's message payload: `void I::M(const string&in)`, and
+/// `void I::M() const` for a const requirement — B101, the trailing `const`
+/// is exactly how the engine spelled it in the measured message.
 fn render_signature(interface: &str, m: &MethodSig) -> String {
     let params: Vec<String> = m.param_types.iter().map(|t| canonical_type(t)).collect();
     format!(
-        "{} {}::{}({})",
+        "{} {}::{}({}){}",
         m.return_type.trim(),
         interface,
         m.name,
-        params.join(",")
+        params.join(","),
+        if m.is_const { " const" } else { "" }
     )
 }
 
@@ -548,6 +593,176 @@ mod tests {
         assert_eq!(
             missing("namespace N { interface I { void M(); } class C : I {} }\n"),
             vec!["void N::I::M()"]
+        );
+    }
+
+    // ── B101: METHOD CONSTNESS ──────────────────────────────────────────
+    //
+    // MEASURED (OP 1.29.14, B094's 18-fixture probe): a non-const method
+    // does NOT satisfy a const requirement, and the engine names the
+    // constness in the signature it wanted back:
+    //
+    //     class C : I { void M() {} }   where I declares `void M() const`
+    //       -> Missing implementation of 'void I::M() const'
+
+    #[test]
+    fn a_non_const_method_does_not_satisfy_a_const_requirement() {
+        assert_eq!(
+            missing("interface I { void M() const; }\nclass C : I { void M() {} }\n"),
+            vec!["void I::M() const"],
+            "measured: the engine rejects it and quotes the trailing `const`"
+        );
+    }
+
+    /// A const requirement not provided AT ALL still renders the `const`.
+    #[test]
+    fn a_missing_const_method_renders_its_constness() {
+        assert_eq!(
+            missing("interface I { void M() const; }\nclass C : I {}\n"),
+            vec!["void I::M() const"]
+        );
+    }
+
+    /// Constness is not orthogonal to the parameter shapes B086 measured:
+    /// the requirement must still render its parameters, and a const
+    /// requirement with MATCHING parameters is still unmet by a non-const
+    /// method.
+    #[test]
+    fn a_const_requirement_is_unmet_across_every_parameter_shape() {
+        for (iface, klass, want) in [
+            ("void M(int a) const;", "void M(int a) {}", "void I::M(int) const"),
+            (
+                "void M(const string &in s) const;",
+                "void M(const string &in s) {}",
+                "void I::M(conststring&in) const",
+            ),
+            (
+                "void M(int &out a) const;",
+                "void M(int &out a) {}",
+                "void I::M(int&out) const",
+            ),
+            (
+                "void M(int &inout a) const;",
+                "void M(int &inout a) {}",
+                "void I::M(int&inout) const",
+            ),
+            (
+                "void M(int &in a) const;",
+                "void M(int &in a) {}",
+                "void I::M(int&in) const",
+            ),
+            (
+                "void M(int a = 1) const;",
+                "void M(int a = 1) {}",
+                "void I::M(int) const",
+            ),
+            ("int M() const;", "int M() { return 1; }", "int I::M() const"),
+        ] {
+            let src = format!("interface I {{ {iface} }}\nclass C : I {{ {klass} }}\n");
+            assert_eq!(missing(&src), vec![want], "for `{iface}` vs `{klass}`");
+        }
+    }
+
+    /// …including a handle parameter, which needs a class in scope.
+    #[test]
+    fn a_const_requirement_with_a_handle_parameter_is_unmet() {
+        assert_eq!(
+            missing(
+                "class T {}\ninterface I { void M(T@ t) const; }\nclass C : I { void M(T@ t) {} }\n"
+            ),
+            vec!["void I::M(T@) const"]
+        );
+    }
+
+    /// A const requirement AND a parameter mismatch is still ONE
+    /// diagnostic, naming the signature the engine wanted.
+    #[test]
+    fn a_const_and_parameter_mismatch_together_report_once() {
+        assert_eq!(
+            missing("interface I { void M(int a) const; }\nclass C : I { void M(float a) {} }\n"),
+            vec!["void I::M(int) const"]
+        );
+    }
+
+    /// Namespaced, where the interface pools long.
+    #[test]
+    fn a_namespaced_const_requirement_is_checked() {
+        assert_eq!(
+            missing("namespace N { interface I { void M() const; } class C : I { void M() {} } }\n"),
+            vec!["void N::I::M() const"]
+        );
+    }
+
+    // ── B101 REQUIRED SILENCES ───────────────────────────────────────────
+    //
+    // Without these, "flag any const difference" would pass every test
+    // above.
+
+    #[test]
+    fn a_const_matched_pair_is_silent() {
+        assert!(
+            missing("interface I { void M() const; }\nclass C : I { void M() const {} }\n")
+                .is_empty(),
+            "const on BOTH sides is a correct implementation"
+        );
+    }
+
+    #[test]
+    fn a_non_const_matched_pair_is_silent() {
+        assert!(
+            missing("interface I { void M(); }\nclass C : I { void M() {} }\n").is_empty(),
+            "neither side const is a correct implementation"
+        );
+    }
+
+    /// The class offers `void M() const` against a requirement of
+    /// `void M()`. Whether the engine accepts that is **NOT MEASURED** —
+    /// game probing is blocked (B097) — so this direction is neutral BY
+    /// CONSTRUCTION: unsure, hence silent, per this module's polarity.
+    #[test]
+    fn a_const_method_against_a_non_const_requirement_is_silent() {
+        assert!(
+            missing("interface I { void M(); }\nclass C : I { void M() const {} }\n").is_empty(),
+            "unmeasured direction: stay silent rather than guess"
+        );
+    }
+
+    /// The const requirement is satisfied by the const member of an
+    /// overload pair; the non-const sibling must not un-satisfy it.
+    #[test]
+    fn a_const_overload_beside_a_non_const_one_satisfies() {
+        assert!(
+            missing(
+                "interface I { void M() const; }\n\
+                 class C : I { void M() {} void M() const {} }\n"
+            )
+            .is_empty()
+        );
+    }
+
+    /// An INHERITED const method satisfies a const requirement.
+    #[test]
+    fn an_inherited_const_method_satisfies_a_const_requirement() {
+        assert!(
+            missing(
+                "interface I { void M() const; }\nclass B { void M() const {} }\nclass C : B, I {}\n"
+            )
+            .is_empty()
+        );
+    }
+
+    /// Bail 4 outranks the const difference: when a parameter type cannot
+    /// be compared, the whole method stays silent even though the const
+    /// difference alone would be reportable.
+    #[test]
+    fn an_uncomparable_parameter_silences_a_const_difference_too() {
+        assert!(
+            missing(
+                "typedef int MyInt;\ninterface I { void M(MyInt a) const; }\n\
+                 class C : I { void M(int a) {} }\n"
+            )
+            .is_empty(),
+            "an uncomparable type is unsure regardless of constness"
         );
     }
 

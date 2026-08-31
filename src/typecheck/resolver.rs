@@ -960,6 +960,7 @@ mod tests {
                             params: vec![],
                             min_args: 0,
                             imported: false,
+                            is_const: false,
                         },
                     )],
                 ),

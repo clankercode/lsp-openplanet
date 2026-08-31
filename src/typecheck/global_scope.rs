@@ -3187,6 +3187,7 @@ mod tests {
                 params: Vec::new(),
                 min_args: 0,
                 imported: false,
+                is_const: false,
             },
         ] {
             let mut ws = SymbolTable::new();
@@ -3623,6 +3624,7 @@ mod tests {
             params: Vec::new(),
             min_args: 0,
             imported: false,
+            is_const: false,
         };
         for (name, symbols) in [
             // A global variable.
@@ -3653,6 +3655,7 @@ mod tests {
                         params: Vec::new(),
                         min_args: 0,
                         imported: false,
+                        is_const: false,
                     },
                 )],
             ),
@@ -3787,6 +3790,7 @@ mod tests {
                 params: Vec::new(),
                 min_args: 0,
                 imported: false,
+                is_const: false,
             },
             SymbolKind::EnumValue {
                 enum_name: "MyEnum".into(),
@@ -3815,6 +3819,7 @@ mod tests {
                     params: Vec::new(),
                     min_args: 0,
                     imported: false,
+                    is_const: false,
                 },
             )],
         );
@@ -3905,6 +3910,7 @@ mod tests {
                     params: vec![],
                     min_args: 0,
                     imported: false,
+                    is_const: false,
                 },
             )],
         );
@@ -3930,6 +3936,7 @@ mod tests {
                         params: vec![],
                         min_args: 0,
                         imported: false,
+                        is_const: false,
                     },
                 ),
             ],
@@ -3995,6 +4002,7 @@ mod tests {
                     params: vec![],
                     min_args: 0,
                     imported: false,
+                    is_const: false,
                 },
             )],
         );
@@ -4165,6 +4173,7 @@ mod tests {
                         params: vec![("v".into(), "int &out".into())],
                         min_args: 1,
                         imported: false,
+                        is_const: false,
                     },
                 ),
                 make_symbol(
@@ -4251,6 +4260,7 @@ mod tests {
                         params: vec![("buf".into(), "MemoryBuffer@".into())],
                         min_args: 1,
                         imported: false,
+                        is_const: false,
                     },
                 ),
                 make_symbol(
@@ -4286,6 +4296,7 @@ mod tests {
                         params: vec![("buf".into(), "MemoryBuffer@".into())],
                         min_args: 1,
                         imported: false,
+                        is_const: false,
                     },
                 ),
                 make_symbol(
