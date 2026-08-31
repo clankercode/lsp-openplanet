@@ -1,0 +1,67 @@
+---
+complexity: medium
+created_at: "2026-08-31T03:16:42Z"
+depends_on: []
+estimate_hours: 1
+id: B080
+priority: high
+status: pending
+tags: []
+title: Probe corpora do not record which rows are environment-dependent, so a stable-looking verdict can be a foreign plugin's
+updated_at: "2026-08-31T03:16:42Z"
+---
+Probe corpora record verdicts that depend on the probing machine's installed
+plugin set, but nothing in the artifact says which rows those are. A reader
+cannot tell an environment-dependent row from a stable one, and the writer
+cannot tell either at write time.
+
+## Why this is filed
+
+Measured, not speculated. Re-probing the b052 corpus on a differently
+configured machine flipped exactly 3 rows of 742, and all three were `Foo::*`
+spellings that resolved through a namespace belonging to an installed plugin
+that is no longer installed. 739 held. The b053 corpus re-probed 592 of 592
+unchanged. So the effect is small, real, and invisible in the artifact.
+
+The damage is not the flip itself. It is that a later reader cites such a row
+as evidence of something it never showed: lane-b057's B070 comment cited those
+`Foo::*` rows as workspace-declared witnesses, which they are not — they were a
+foreign plugin's namespace. The corpus was correct; the provenance was missing,
+so the reading went wrong.
+
+## The design question, which is the actual content of this ticket
+
+The weak form is cheap and nearly worthless on its own: one header line naming
+the probing machine's plugin set at generation time, about 5 lines in each
+writer.
+
+The useful form is marking WHICH ROWS are environment-dependent, and the writer
+**cannot compute that**. `Foo::VirtualKey` and `UI::VirtualKey` are
+indistinguishable to it — both are namespace-qualified names that resolved.
+Only re-probing on a differently configured machine separates them, which is
+how the three flips were found, by hand.
+
+So the knowledge has to live somewhere, and today it lives in
+`PLUGIN_NAMESPACE_ARTEFACTS` — a Rust test constant in
+`src/typecheck/resolver.rs:303`. That is the wrong home for a fact about a data
+file: the corpus can be regenerated on another machine without the constant
+changing, and nothing connects them.
+
+Decide where it belongs before writing code. Candidates worth weighing:
+
+- a per-row flag the writer sets from a declared environment manifest;
+- a separate provenance sidecar keyed by row, so the corpus stays a pure
+  measurement;
+- the re-probe driver (`--reprobe`) emitting the marking as a diff between two
+  machines, making environment-dependence a MEASURED property rather than a
+  declared one.
+
+The third is the only one that cannot go stale, because it derives the fact the
+same way the fact was actually discovered. It also costs a second machine.
+
+## Related
+
+B068 (batched probes fabricating ACCEPTED rows), B077 (stranded fixtures
+contaminating later probes — the same class: the probe environment is state
+nobody is tracking), `docs/probes/b071-enum-conversion.tsv`,
+`scripts/probe_enum_corpus.py`.
