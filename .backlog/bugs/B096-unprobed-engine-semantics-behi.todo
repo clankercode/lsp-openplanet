@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T08:55:50Z"
 depends_on: []
 estimate_hours: 1
 id: B096
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Unprobed engine semantics behind B087: does the engine bind an import to a namespaced body, and does it accept shared interface/enum/funcdef'
@@ -24,3 +26,76 @@ TODO: Describe expected behavior
 ## Actual Behavior
 
 TODO: Describe actual behavior
+
+Flagged by lane-unused while landing B087 (merged 2026-08-31, commit 258c822).
+**Not a known defect. This is an unverified assumption that four shipped
+plugins already depend on**, recorded so it is measured rather than inherited.
+
+## Claim 1 — does the engine bind an import to a NAMESPACED body?
+
+B087 closed a seam where an export stub failed to root its implementation when
+the implementation lived inside a `namespace`. Rooting matches a namespaced
+body to a namespaced stub **by SIMPLE name**, keeping B062's deliberate
+under-approximation.
+
+**Nobody has asked the game whether that binding is real.** The LSP now assumes
+`import void SendEvent() from "Mod";` binds to
+`namespace Editor { void SendEvent() {} }`.
+
+The failure direction is the SAFE one, and it is B062's own documented trade:
+if the engine does NOT bind them, those 51 exports are already broken and
+unreachable, so the cost is a missed warning rather than a false positive.
+That is why this did not block the merge.
+
+But **four shipped plugins are written as though it binds** — tm-editor-plus-plus
+uses `namespace Editor { ... }` around both the stubs and the implementations
+throughout. So one of two things is true and we do not know which:
+
+- the engine binds them, and the LSP is now correct; or
+- the engine does not, and four real plugins have 51 dead exports each thinking
+  they work — which is a much bigger finding than the ticket that surfaced it.
+
+Either answer is worth having. The second would be a genuine discovery about
+shipped code, not about this repo.
+
+## Claim 2 — does the engine accept `shared interface` / `shared enum` / `shared funcdef`?
+
+B087 added `is_shared` to InterfaceDecl, EnumDecl, FuncdefDecl and FunctionDecl.
+**Nothing about what PARSES changed** — the parser was already consuming the
+modifier and throwing it away; B087 only stopped discarding it. So no behaviour
+regresses whichever way the engine answers.
+
+What is unverified is whether those forms are legal AngelScript-under-Openplanet
+at all. If some are not, the LSP is now recording a flag for a form the game
+rejects — harmless today, but exactly the kind of artefact that gets cited later
+as evidence that the form is valid. **B086 is open right now for precisely that
+failure**: a fixture documenting a stub shape the engine rejects, cited twice as
+evidence, once by the coordinator.
+
+## Test plan
+
+Six or so fixtures, **each its own compilation unit** (B068 — a batched parse
+abort silently marks every other name in the unit ACCEPTED). Needs the game
+port; coordinate for an exclusive slot, since a concurrent probe's staged
+fixture is an installed plugin declaring the names under test.
+
+1. `shared interface I {}` — accept or reject?
+2. `shared enum E { A }` — accept or reject?
+3. `shared funcdef void F();` — accept or reject?
+4. `shared void F() {}` — accept or reject?
+5. A two-plugin pair: one exporting `namespace Editor { void SendEvent() {} }`
+   with a matching `import ... from` stub, the other importing it, proving the
+   binding resolves or does not. **This is the one that matters** and it is the
+   awkward one, because it needs two coordinated plugins rather than one unit.
+6. `ZZZNoSuch` negative control.
+
+REJECT verdicts are the trustworthy direction on this machine; an ACCEPT can
+leak from another installed plugin. For case 5 specifically, be careful that a
+successful bind is not being supplied by an already-installed plugin exporting
+the same simple name — use a name no shipped plugin could plausibly export.
+
+## Related
+
+B087 (merged; the fix resting on claim 1), B062 (whose under-approximation is
+being kept), B086 (the same failure mode already realised — an unmeasured
+fixture cited as evidence), B068 (why each fixture is its own unit).
