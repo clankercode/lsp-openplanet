@@ -1,14 +1,18 @@
 ---
+claimed_at: "2026-08-31T13:01:03Z"
+claimed_by: cli-user
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T12:37:58Z"
 depends_on: []
 estimate_hours: 1
 id: B113
 priority: low
-status: pending
+started_at: "2026-08-31T13:01:03Z"
+status: in_progress
 tags: []
 title: Hover on a virtual property access (obj.ID) does not surface the get_/set_ accessors
-updated_at: "2026-08-31T12:37:58Z"
+updated_at: "2026-08-31T13:01:03Z"
 ---
 Deferred from B103 (which fixed definition): hover.rs shares the same member-lookup gap — hovering ID in obj.ID does not present the accessor pair. B103 built the shared seam (src/typecheck/access_position.rs + accessor lookups in global_scope.rs); this ticket is wiring hover to it plus a presentation decision (how to render a get/set pair in one hover).
 
