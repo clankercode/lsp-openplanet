@@ -1111,14 +1111,36 @@ mod tests {
     // that does. That split is the defect: the checker accepted a spelling
     // hover was silent on.
     //
-    // Every spelling below carries a live game verdict from
-    // `docs/probes/b052-qualified-enum-spellings.tsv` (Trackmania + Openplanet
-    // 1.29.5; rows 26 and 966-970). The ACCEPTED rows survive B068's batching
-    // hazard by their neighbours rather than by assumption: a wedged batch
-    // marks every LATER name in the unit ACCEPTED, so the REJECTED controls
-    // `Foo::ZZZNoSuch` (row 970) and `Foo::Bar::ZZZNoSuch` (row 967) landing
-    // interleaved with those ACCEPTs prove the probe was still discriminating
-    // across exactly this region of the corpus.
+    // WHAT GROUNDS THESE TESTS, corrected after the b052 re-probe.
+    //
+    // The MECHANISM — a real scope's qualifier reaching a globally visible
+    // enum through the ancestor walk — is witnessed by the Core-namespace rows
+    // of `docs/probes/b052-qualified-enum-spellings.tsv`: `Audio::VirtualKey`,
+    // `Crypto::VirtualKey`, `Dev::VirtualKey`, `Display::VirtualKey` and
+    // `Fids::VirtualKey` are all ACCEPTED and all survived the re-probe. A
+    // namespace declared in one's own compilation unit is that same mechanism.
+    //
+    // The `Foo::*` rows are NOT evidence for the workspace case and must not
+    // be cited as such. The re-probe flipped all three to `Namespace 'Foo'
+    // doesn't exist.` and attributed them to the plugin-namespace effect: a
+    // plugin declaring `namespace Foo` was installed on the probing machine
+    // when the corpus was measured and is not now. They witness "a namespace
+    // some OTHER installed plugin declares appears as a scope", which is an
+    // environment fact this crate deliberately does not implement — see
+    // `PLUGIN_NAMESPACE_ARTEFACTS` in `resolver.rs`, which forces exactly
+    // those spellings to not resolve in a bare context.
+    //
+    // The `Bogus::` row (26) is REJECTED and is a genuine control: nothing
+    // declares it. Note the re-probe result AGREES with it — by not declaring
+    // `Foo`, the re-probe turned `Foo` into `Bogus` and got the same message.
+    //
+    // Recorded because an earlier version of this comment made the wrong
+    // claim: it argued these ACCEPTs survived B068 because REJECTED controls
+    // were interleaved with them. That argument was correct, and the re-probe
+    // confirmed B068 never fired here — but it defended the rows against
+    // BATCHING while they were compromised by ENVIRONMENT. Defending a claim
+    // against the failure mode you have in mind, and treating that as a
+    // general defence, is the error; see `docs/verification-hazards.md`.
 
     /// The ticket's own repro: the checker accepts this and hover was silent.
     #[test]
