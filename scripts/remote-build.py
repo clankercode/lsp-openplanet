@@ -61,7 +61,11 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_HOST = os.environ.get("LSP_REMOTE_HOST", "x-alpha")
+# `.get(name, default)` returns "" for a SET-BUT-EMPTY variable, which is a
+# routine shell accident (`LSP_REMOTE_HOST= just ...`, an unset-looking export,
+# a CI variable with no value). An empty host is not a host: ssh would be given
+# `:path` and the failure names the wrong dimension. Treat empty as unset.
+DEFAULT_HOST = os.environ.get("LSP_REMOTE_HOST") or "x-alpha"
 REMOTE_ROOT = ".remote-builds"
 
 # B106. x-alpha reached 0 bytes free during a batch and every lane building
@@ -516,6 +520,12 @@ def run_selftest() -> int:
             f"cargo build -v`, so it cannot be trusted to mean anything"
         )
 
+    # A set-but-empty $LSP_REMOTE_HOST must not become the host. Checked on the
+    # helper that consumes it, so the assertion is about a decision rather than
+    # about an environment this process happens to have.
+    if _other_host("") == "":
+        problems.append("an empty host was echoed back as an alternative")
+
     # Signal deaths. A negative returncode taken mod 256 is nonzero by luck,
     # not by design, and names nothing.
     if exit_status(0) != (0, None) or exit_status(101) != (101, None):
@@ -605,6 +615,10 @@ def main() -> int:
     ap.add_argument("--allow-low-disk", action="store_true",
                     help="skip the free-space pre-flight (B106)")
     a = ap.parse_args()
+    if not (a.host or "").strip():
+        die("--host / $LSP_REMOTE_HOST is empty. An empty host is not a host: "
+            "ssh would be handed `:path` and fail in a dimension that has "
+            "nothing to do with the empty variable.")
 
     if a.action == "selftest":
         return run_selftest()

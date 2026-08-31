@@ -232,15 +232,21 @@ tui-showcase-shots:
 clippy:
     cargo clippy --all-targets -- -D warnings
 
-# B083 on the remote host — THE DEFAULT PATH. The baseline is pinned to the
-# remote toolchain (rustc 1.97.1; local is 1.97.0) because that is where the
-# expensive runs live now, and `just clippy-delta` run locally will correctly
-# REFUSE against it rather than report a toolchain difference as a code change.
-# Runs the whole gate over there: the baseline is part of the synced tree.
+# B083 on the remote host — THE DEFAULT PATH.
+#
+# PINNED TO x-tuf, and for a reason that is not about capacity. The clippy gate
+# refuses to compare across toolchains, so the baseline and every run of it must
+# share one. x-tuf is rustc 1.97.0, BYTE-IDENTICAL to this desktop's, so a
+# baseline recorded there is comparable BOTH remotely and locally. x-alpha is
+# 1.97.1 and a baseline from it is comparable to neither — which is exactly the
+# refusal a lane hit and correctly did not work around.
+#
+# The suite gate has no such constraint and defaults to x-alpha (48 cores).
+# Override here with LSP_REMOTE_HOST if you re-record somewhere else.
 #
 # The clippy gate, on the remote build host. Use this one.
 rclippy-delta *ARGS:
-    python3 scripts/remote-build.py run -- python3 scripts/clippy_delta.py {{ARGS}}
+    LSP_REMOTE_HOST="${LSP_REMOTE_HOST:-x-tuf}" python3 scripts/remote-build.py run -- python3 scripts/clippy_delta.py {{ARGS}}
 
 # Re-record docs/clippy-baseline.json from the remote. Run ON MASTER. Writes
 # into the remote CARGO_TARGET_DIR (`@target` is resolved over there, since a
@@ -254,9 +260,9 @@ rclippy-delta *ARGS:
 #
 # Re-record the clippy baseline from the remote (master only).
 rclippy-delta-record:
-    python3 scripts/remote-build.py --sync-back clippy-baseline.json run -- python3 scripts/clippy_delta.py --record --baseline @target --commit "$(git rev-parse HEAD)"
+    LSP_REMOTE_HOST="${LSP_REMOTE_HOST:-x-tuf}" python3 scripts/remote-build.py --sync-back clippy-baseline.json run -- python3 scripts/clippy_delta.py --record --baseline @target --commit "$(git rev-parse HEAD)"
     cp target/clippy-baseline.json docs/clippy-baseline.json
-    @echo "docs/clippy-baseline.json updated from the remote toolchain"
+    @echo "docs/clippy-baseline.json updated from x-tuf (rustc 1.97.0, same as local)"
 
 # The non-vacuity harness, on the remote. It mutates the tree, so it runs
 # WHOLLY over there against one synced copy — never split across machines.
@@ -270,12 +276,15 @@ rclippy-delta-mutants:
 # line numbers normalised out and NEVER `-D warnings`. Answers the question a
 # lane actually has, on a tree that is red for everyone.
 #
-# LOCAL run. Expect it to REFUSE: the committed baseline is recorded on the
-# remote toolchain (1.97.1) and local rustc is 1.97.0, which is a method
-# mismatch by design. Kept for a machine with no remote access, where you would
-# record your own baseline first.
+# LOCAL run. This now WORKS: the committed baseline is recorded on x-tuf, whose
+# rustc/cargo/clippy strings are byte-identical to this desktop's, so the method
+# check passes and a real comparison happens. It used to refuse, correctly,
+# against an x-alpha baseline at 1.97.1 — fixed by recording on a matching
+# toolchain rather than by loosening the check or passing
+# --allow-toolchain-drift. Expect a full local clippy build; `just rclippy-delta`
+# is cheaper.
 #
-# The clippy gate, locally — refuses against the remote-recorded baseline.
+# The clippy gate, locally — comparable against the x-tuf baseline.
 clippy-delta *ARGS:
     python3 scripts/clippy_delta.py {{ARGS}}
 
