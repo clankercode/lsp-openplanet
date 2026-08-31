@@ -175,6 +175,20 @@ GitHub Release body to match this section (gh release edit).
   and keeps the previous setting.
 
 ### Fixed
+- **A plugin type that shares a name with an engine funcdef now shadows it**
+  (B073, GH #38) — a plugin declaring `class CoroutineFunc` resolved to the
+  *engine* funcdef of that name, so constructing its own class reported
+  `ArgCountMismatch expects 1, got 0` — a false error on the plugin's own
+  declaration. The general shadowing rule was applied everywhere except this
+  collision. It now applies for a class, interface, enum or typedef, whether
+  spelled bare, from inside its namespace, or from outside, and the reported
+  type is the declaration's qualified name (`Nz::CoroutineFunc`) rather than
+  the spelling. A workspace *variable* or *function* of the name still shadows
+  nothing, and an unshadowed engine funcdef still constructs, still binds a
+  matching function, and still rejects a mismatched one.
+
+  The same hole existed in a second place: `awaitable` is not a typedb funcdef
+  but a hardcoded builtin, and it took the same fix.
 - **Functions a plugin exports to other plugins are no longer reported unused**
   (B062) — a plugin whose `info.toml` names `[script] exports` implements that
   surface in ordinary source files, and nothing inside the plugin calls them:
