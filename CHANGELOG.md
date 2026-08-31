@@ -28,6 +28,27 @@ GitHub Release body to match this section (gh release edit).
   target, while one that cannot be narrowed lists every overload.
 
 ### Fixed
+- **Hover on a virtual property shows the accessors** (B113) — hovering
+  `ID` in `obj.ID`, where the type declares only `get_ID` / `set_ID`,
+  used to report the inferred type (or, at a `Ns::Thing` site, nothing at
+  all). It now presents the accessor the position calls for, in one code
+  block labelled `(property get)` / `(property set)`: a read shows the
+  getter, a write the setter, and a compound assign (`obj.ID += 1`) both,
+  getter first. Covers accessors inherited from a base class, declared on
+  an interface, reached through `this`, and namespace-level or global
+  properties. A real field or method named `ID` still wins over any
+  same-named accessor pair. Hovering a class field now reads
+  `(field) int C::Speed` instead of mislabelling it `(local)`.
+- **Const-correctness is checked across files** (B114) — calling a
+  non-const method on a `const` receiver is a game compile error, and the
+  LSP reported it only when the class happened to be declared in the same
+  file as the call. The class's declaration modifiers now reach the
+  cross-file symbol pool, so the diagnostic fires wherever the class was
+  declared, and for methods inherited from a base class (previously
+  missed even within one file). Unchanged: a `const` method on a const
+  receiver stays silent, a field read is not a method call, and engine or
+  type-database types still carry no const metadata, so calls on them
+  remain silent rather than guessing.
 - **Go-to-definition on a virtual property** (B103) — `obj.ID`, where the
   type declares only the accessor pair `get_ID` / `set_ID`, used to
   resolve nothing. It now jumps to the accessor the position calls for:

@@ -25,7 +25,7 @@ use crate::parser::ast::SourceFile;
 use crate::server::diagnostics::position_to_offset;
 use crate::server::navigation;
 use crate::server::scope_query;
-use crate::symbols::scope::{DeclModifiers, Symbol, SymbolKind};
+use crate::symbols::scope::{Symbol, SymbolKind};
 use crate::typecheck::access_position::access_position_at;
 use crate::typecheck::repr::TypeRepr;
 use crate::typecheck::GlobalScope;
@@ -912,6 +912,9 @@ fn lookup_external(qualified: &str, index: &TypeIndex, source_key: Option<&str>)
 mod tests {
     use super::*;
     use crate::server::test_support::TestWorkspace;
+    // Only the hand-built `Symbol` fixtures below need this; production
+    // hover reads modifiers through the symbols it is handed.
+    use crate::symbols::scope::DeclModifiers;
 
     /// Find a 1-based column of the first occurrence of `needle` starting at
     /// position `from` (byte offset). Returns the (line, character).
