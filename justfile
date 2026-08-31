@@ -103,6 +103,24 @@ probe-selftest:
 repro-selftest:
     python3 scripts/issue_repro_game.py --selftest
 
+# B086: does the engine bind a `[script] exports` stub to its body, and by
+# what rule? Stages an exporter plus one consumer per (stub, body) shape and
+# CALLS the import — an unmatched stub compiles fine and dies at runtime with
+# `Unbound function called`. Needs the game; see docs/probes/README.md, which
+# records why it is currently blocked.
+#
+# Game probe: how the engine binds an export stub to its body.
+probe-export-binding *ARGS:
+    python3 scripts/probe_export_binding.py {{ARGS}}
+
+# Offline half: proves the probe's oracle can tell BOUND from UNBOUND from
+# did-not-measure, and that the variant set discriminates. B086 exists because
+# a probe ran whose two variants failed identically and measured nothing.
+#
+# Proves the export-binding probe's oracle can discriminate (no game needed).
+probe-export-binding-selftest:
+    python3 scripts/probe_export_binding.py --selftest
+
 # Prove repro-selftest is non-vacuous: neuter each cleanup guard in a
 # throwaway copy and require the selftest to go red for every one. A green
 # suite with the protection removed would be worse than no suite (B077).

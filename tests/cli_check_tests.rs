@@ -2564,10 +2564,27 @@ fn check_command_issue_repro_59_exports_bodies_dont_resolve_internally() {
 
 /// The CORRECT pattern stays clean: strict export file carries only
 /// `import … from "T";` decls, bodies live in ordinary files,
-/// shared_exports stay visible internally. Error-severity diagnostics
-/// (undefined symbol / No matching symbol) must NOT appear; warnings
-/// (e.g. the pre-existing unused-decl quirk on import/decl pairs,
-/// verified identical on master 0f059f5) are out of scope.
+/// shared_exports stay visible internally.
+///
+/// B086: every stub in that fixture now matches its body EXACTLY — `const`,
+/// `&in`/`&out`, `@`, defaulted parameter and all. Before B086 the fixture
+/// paired a by-value stub with a `const string &in` body and its own comment
+/// called that the correct pattern. Game-probed against Openplanet 1.29.5
+/// (2026-08-31) that shape does NOT bind: a consumer calling it dies at
+/// runtime with `Unbound function called`, while an exactly matching stub
+/// binds and runs. The fixture had been cited as evidence twice before
+/// anyone measured it — see B086 and docs/verification-hazards.md.
+///
+/// The fixture deliberately spans the parameter shapes a real export uses —
+/// `&out`, a non-const `&in`, `T@`, `T@ &in`, a defaulted parameter and a
+/// `uint`/`uint32` spelling — because the binding rule is about the whole
+/// signature, and one `const string &in` row cannot show that.
+///
+/// This test's job is unchanged: error-severity diagnostics (undefined
+/// symbol / No matching symbol / unknown type) must NOT appear. Warnings stay
+/// out of scope; the fixture happens to sit at zero now that B062 roots the
+/// exported bodies, but pinning that here would make an unrelated analysis
+/// change look like an export regression.
 #[test]
 fn check_command_issue_repro_60_exports_correct_pattern_clean() {
     let (ok, stdout, stderr) = run_issue_repro("60-exports-correct-pattern");
@@ -2583,6 +2600,29 @@ fn check_command_issue_repro_60_exports_correct_pattern_clean() {
         !stdout.contains("unknown type"),
         "shared exports must resolve; stdout={stdout:?} stderr={stderr:?}"
     );
+    // The added shapes are load-bearing. Without this, the assertions above
+    // would go on passing against a fixture that had quietly shrunk back to
+    // the single `const string &in` row B086 found wrong.
+    let decls = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/issue-repros/60-exports-correct-pattern/src/Exports_Decls.as"),
+    )
+    .expect("fixture must be readable");
+    for shape in [
+        "const string &in a, const string &in b",
+        "string &out slot",
+        "string &in raw",
+        "Payload@ p",
+        "Payload@ &in p",
+        "int b = 2",
+        "uint n",
+    ] {
+        assert!(
+            decls.contains(shape),
+            "the fixture must keep covering `{shape}`: B086 is about the whole \
+             signature, not one row"
+        );
+    }
     assert!(ok, "warnings-only plugin must exit 0; stdout={stdout:?}");
 }
 

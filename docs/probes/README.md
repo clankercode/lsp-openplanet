@@ -14,6 +14,13 @@ dated 2026-02-03), via `scripts/probe_enum_corpus.py`.
 | `b052-qualified-enum-spellings.tsv` | 1901 | for a qualified *type* spelling (`Scene::ESceneCharVisNotice`, `UI::VirtualKey`, `CGameMenu::EMenuOrder`), does the game accept it, and if not, what does it say? |
 | `b053-bare-enum-values.tsv` | 2989 | for a bare *value* name of a named enum (`Turbo`, `GlassSmash`), does the game accept it, reject it as unknown, or reject it as ambiguous? |
 
+`scripts/probe_export_binding.py` (B086) answers a different question — given a
+`[script] exports` stub and a body, does the engine BIND them — and writes no
+corpus yet, because it is blocked (see below). Its offline
+`--selftest` runs without a game and is worth reading as the shape a probe's
+oracle should have: every way a run can fail to measure is a distinct
+`AMBIGUOUS`, never a verdict.
+
 Both are TSV with a `#`-comment header. The `game_message` column is the
 compiler's own text, unedited.
 
@@ -48,6 +55,40 @@ compiler's own text, unedited.
   file is load-bearing for `cargo test`: editing a verdict, a value name or the
   row count changes what the suite demands. Re-probe before you edit it, and
   say so in the commit.
+
+## BLOCKED as of 2026-08-31: RemoteBuild cannot receive a `load_plugin` request
+
+Everything on this page needs `load_plugin`, and **`load_plugin` currently
+cannot be delivered at all**. Measured against Openplanet 1.29.14 with
+`RemoteBuild.op` 1.1.0:
+
+- RemoteBuild's `HandleClient` calls `Json::Parse` on **each raw socket read**,
+  and `Net::Socket::ReadRaw` returns at most ~66 bytes per call. Every longer
+  request is split into fragments and each fragment fails to parse.
+- The threshold is exact and deterministic (padded `get_status`, three trials
+  each): **66 bytes pass, 67 fail**, and everything above fails.
+- A minimal `load_plugin` request is **72 bytes with an empty id**, so no
+  shorter plugin id fixes it.
+- The reply is `{"error":"Not implemented: ","data":""}` — the router's message
+  for an **unknown route**. That is the expensive part: it points the reader at
+  route spellings rather than at size.
+- `get_status` is 35 bytes and works, so `rb_alive()` returns True. Every probe
+  passes its liveness gate and then fails on the route that matters.
+
+Two consequences worth knowing before you spend an afternoon on it:
+
+1. `scripts/issue_repro_game.py` and `scripts/probe_enum_corpus.py` are blocked
+   by this, and their `--selftest`s are offline-only, so they stay green.
+2. The `unload_plugin` that follows a failed load is split the same way, so
+   `holder.preserve()` fires — correctly — and **leaves the fixture installed**.
+   That blocks every later probe from every lane until someone removes it by
+   hand. Two such strays appeared in one afternoon.
+
+`scripts/probe_export_binding.py` preflights this and names it in one line
+rather than reporting a route error. Copy that preflight into any new probe.
+
+A fix would be in the RemoteBuild plugin itself (`HandleClient` must accumulate
+reads until `Json::Parse` succeeds), not in any client here.
 
 ## Regenerating
 
