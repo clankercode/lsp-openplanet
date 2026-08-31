@@ -150,3 +150,42 @@ hypothesis is purely the frame size.
 **Operational note for whoever tests this:** a timing-sensitive result taken on
 this machine today is untrustworthy. Check `uptime` before believing any
 measurement whose meaning depends on duration.
+
+## Coordinator correction (2026-08-31): the title's stated cause is REFUTED
+
+This ticket's title and body say 'stack overflow at Backend::new to
+LspConfig::load'. That was my diagnosis and it is wrong. I read
+`si_code=SEGV_ACCERR` as a guard-page hit — its common cause — and never
+checked `si_addr` against `rsp`.
+
+lane-b064 measured the coredump directly:
+
+- `rsp` sits about 2016 KiB above the bottom of a 2052 KiB stack mapping, so
+  roughly **36 KiB of stack was in use**. Nothing was near a guard page.
+- `si_addr == rip` exactly. That is an **execute** fault at the instruction
+  pointer, not a data access that ran off the stack.
+- The faulting address is at an **identical module offset across five different
+  ASLR bases**, so it is deterministic in the module, not a function of where
+  the allocator or the stack happened to land.
+
+Three causes have now been proposed for this crash and all three are refuted —
+each by a measurement nobody had taken at the time. Do not propose a fourth
+without the measurement that distinguishes it.
+
+The shallow stack also refutes the recursion theory recorded earlier, so the
+`Backend::new` -> `LspConfig::load` path named in the title is not implicated
+at all beyond being where the thread happened to be.
+
+**Open question for whoever takes this**: identify what code lives at module
+offset `+0x11f7320`. A deterministic execute fault at a fixed offset points at
+something like a jump into unmapped or non-executable memory — a stale function
+pointer, a torn vtable, or an unloaded/remapped code region — rather than
+anything about stack depth.
+
+The second half of the title stands and is independent of the cause: **a
+crashed test binary silently lowers the suite total**, so the count must be
+reconciled rather than assumed. That is the part worth fixing first, because it
+makes every later run honest regardless of what the SIGSEGV turns out to be.
+
+`docs/verification-hazards.md` has been marked accordingly (master 0b47535)
+rather than rewritten to a fourth confident cause.
