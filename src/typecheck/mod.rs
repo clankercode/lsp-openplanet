@@ -23,7 +23,9 @@ pub mod resolver;
 pub mod workspace;
 
 pub use call_site::{bind_arg, unique_overload_for_argc, ArgBind};
-pub use checker::{Checker, TypeDiagnostic, TypeDiagnosticKind, TypeDiagnosticSeverity};
+pub use checker::{
+    Checker, SymbolHint, TypeDiagnostic, TypeDiagnosticKind, TypeDiagnosticSeverity,
+};
 pub use global_scope::{GlobalScope, OverloadSig};
 pub use repr::{PrimitiveType, TypeRepr};
 pub use resolver::{ResolveDiagnostic, TypeResolver};

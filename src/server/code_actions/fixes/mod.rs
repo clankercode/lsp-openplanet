@@ -24,6 +24,7 @@ use super::fix::{DiagnosticFixFamily, FixFamily};
 pub mod conversion;
 pub mod did_you_mean;
 pub mod implement_interface;
+pub mod relocate_symbol;
 pub mod removed_api;
 pub mod rename_and_const;
 pub mod string_by_value;
@@ -45,6 +46,7 @@ pub const FAMILIES: &[FixFamily] = &[
     rename_and_const::duplicate_function::FAMILY,
     rename_and_const::const_receiver::FAMILY,
     removed_api::FAMILY,
+    relocate_symbol::FAMILY,
     with_run_context::FAMILY,
     implement_interface::FAMILY,
 ];

@@ -24,6 +24,54 @@ pub enum TypeDiagnosticSeverity {
     Warning,
 }
 
+/// Where a [`TypeDiagnosticKind::NoMatchingSymbol`] hint came from.
+///
+/// Both variants carry a fully qualified name and both read identically in
+/// the message, but a consumer that turns the hint into an EDIT must be able
+/// to tell them apart, and parsing the rendered prose to do it is forbidden
+/// (see `code_actions::fixes::removed_api` for why). The distinction is
+/// therefore structural.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolHint {
+    /// The curated relocation table ([`removed_api_hint`]): a successor name
+    /// verified against the live game, with the call shape unchanged. Exact.
+    ///
+    /// CURATED, NOT COMPUTED, and it cannot become computed. Half its rows
+    /// (`Draw::*`) name a namespace that is absent from EVERY typedb
+    /// snapshot the repo holds — 1.29.5 already lacks it — so there is no
+    /// pair of dumps whose diff could produce them. The rows that a diff
+    /// could reach are also not safe to derive: on 1.29.5 `Join` resolves in
+    /// two namespaces (`Path::Join`, `string::Join`), so a same-simple-name
+    /// search across the new dump is a coin flip between `Path::Join` and
+    /// `Text::Join`, and only the much stronger "added in exactly this
+    /// adjacent delta" filter disambiguates — which needs both neighbouring
+    /// snapshots, precisely what the `Draw` rows do not have. And the dumps
+    /// carry no deprecation metadata at all: a removed symbol simply
+    /// vanishes. `Net::SecureSocket` settles it from the third side — its
+    /// real migration is `Net::Socket` plus a `Connect(secure: true)`
+    /// argument, a shape change no name map can express, and it is knowable
+    /// only from prose in the install's `Scripts/Compatibility.as`.
+    Relocation(String),
+    /// The nearest name under the namespace by edit distance (<= 2). A
+    /// GUESS, offered to catch typos; it may name the wrong symbol.
+    NearName(String),
+}
+
+impl SymbolHint {
+    /// The qualified name being suggested, whichever producer suggested it.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Relocation(name) | Self::NearName(name) => name,
+        }
+    }
+
+    /// True for the curated table: an exact successor, safe to apply
+    /// without the user reading it. A near-name guess is not.
+    pub fn is_exact(&self) -> bool {
+        matches!(self, Self::Relocation(_))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeDiagnosticKind {
     UnknownType(String),
@@ -191,7 +239,7 @@ pub enum TypeDiagnosticKind {
     /// candidate name under the namespace.
     NoMatchingSymbol {
         qualified: String,
-        hint: Option<String>,
+        hint: Option<SymbolHint>,
     },
     /// Get-only virtual property write (todo-cover-cases-next.txt,
     /// spike-live-add-kinematic-ao): `iso4.tx` has `get_tx()` but no
@@ -390,6 +438,7 @@ impl TypeDiagnostic {
                 // 1.29.5). The hint appends the known relocation (GH #27).
                 let mut m = format!("No matching symbol '{qualified}'");
                 if let Some(h) = hint {
+                    let h = h.name();
                     m.push_str(&format!(" — use `{h}` instead"));
                 }
                 m
@@ -1964,7 +2013,7 @@ impl<'a> Checker<'a> {
                 .iter()
                 .filter(|m| edit_distance(m, member) <= 2)
                 .min_by_key(|m| edit_distance(m, member))
-                .map(|m| format!("{spelling}::{m}"));
+                .map(|m| SymbolHint::NearName(format!("{spelling}::{m}")));
             self.diagnostics.push(TypeDiagnostic {
                 span,
                 kind: TypeDiagnosticKind::NoMatchingSymbol {
@@ -4561,7 +4610,7 @@ impl<'a> Checker<'a> {
                 let hint = if near.is_empty() {
                     None
                 } else {
-                    Some(format!("{}::{}", ns, near[0]))
+                    Some(SymbolHint::NearName(format!("{}::{}", ns, near[0])))
                 };
                 return Some(TypeDiagnostic {
                     span,
@@ -4577,7 +4626,7 @@ impl<'a> Checker<'a> {
                         span,
                         kind: TypeDiagnosticKind::NoMatchingSymbol {
                             qualified: qual.to_string(),
-                            hint: Some(hint.to_string()),
+                            hint: Some(SymbolHint::Relocation(hint.to_string())),
                         },
                     });
                 }
@@ -4661,7 +4710,7 @@ impl<'a> Checker<'a> {
             .into_iter()
             .filter(|m| edit_distance(m, member) <= 2)
             .min_by_key(|m| edit_distance(m, member))
-            .map(|m| format!("{ns}::{m}"));
+            .map(|m| SymbolHint::NearName(format!("{ns}::{m}")));
         Some(TypeDiagnostic {
             span,
             kind: TypeDiagnosticKind::NoMatchingSymbol {
@@ -5730,9 +5779,10 @@ mod tests {
         diags
             .iter()
             .filter_map(|d| match &d.kind {
-                TypeDiagnosticKind::NoMatchingSymbol { qualified, hint } => {
-                    Some((qualified.clone(), hint.clone()))
-                }
+                TypeDiagnosticKind::NoMatchingSymbol { qualified, hint } => Some((
+                    qualified.clone(),
+                    hint.as_ref().map(|h| h.name().to_string()),
+                )),
                 _ => None,
             })
             .collect()
@@ -5798,9 +5848,10 @@ mod tests {
         ] {
             let diags = check_with_versioned_typedb(call, "1.29.14");
             let hit = diags.iter().find_map(|d| match &d.kind {
-                TypeDiagnosticKind::NoMatchingSymbol { qualified, hint } => {
-                    Some((qualified.clone(), hint.clone()))
-                }
+                TypeDiagnosticKind::NoMatchingSymbol { qualified, hint } => Some((
+                    qualified.clone(),
+                    hint.as_ref().map(|h| h.name().to_string()),
+                )),
                 _ => None,
             });
             let (qualified, hint) = hit
