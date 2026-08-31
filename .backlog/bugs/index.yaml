@@ -114,3 +114,4 @@ bugs:
     - file: B113-hover-on-a-virtual-property-ac.todo
     - file: B114-symbolkind-records-what-a-symb.todo
     - file: B115-class-field-visibility-is-drop.todo
+    - file: B116-nonconstmethodonconstreceiver.todo

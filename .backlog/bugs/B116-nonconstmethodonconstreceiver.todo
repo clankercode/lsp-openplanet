@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T13:18:13Z"
+depends_on: []
+estimate_hours: 1
+id: B116
+priority: high
+status: pending
+tags: []
+title: 'NonConstMethodOnConstReceiver is single-file by construction: the emit site is gated on file_classes, so a const receiver whose class lives in another file is silently unchecked'
+updated_at: "2026-08-31T13:18:13Z"
+---
+
+NonConstMethodOnConstReceiver is single-file by construction: the emit site is gated on file_classes, so a const receiver whose class lives in another file is silently unchecked
