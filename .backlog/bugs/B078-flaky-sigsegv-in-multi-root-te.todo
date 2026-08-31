@@ -1,15 +1,16 @@
 ---
 claimed_at: "2026-08-31T03:49:03Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T03:49:03Z"
 complexity: medium
 created_at: "2026-08-30T22:24:33Z"
 depends_on: []
+duration_minutes: 0.0016183135166666666
 estimate_hours: 1
 id: B078
 priority: medium
 started_at: "2026-08-31T03:49:03Z"
-status: in_progress
+status: done
 tags: []
 title: 'Flaky SIGSEGV in multi_root_tests: NOT A DEFECT — an external instruction-fetch fault on a present executable page (counting hazard split to B082)'
 updated_at: "2026-08-31T03:49:03Z"
