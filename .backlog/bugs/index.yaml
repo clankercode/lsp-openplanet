@@ -113,3 +113,4 @@ bugs:
     - file: B112-render-signature-strips-all-wh.todo
     - file: B113-hover-on-a-virtual-property-ac.todo
     - file: B114-symbolkind-records-what-a-symb.todo
+    - file: B115-class-field-visibility-is-drop.todo
