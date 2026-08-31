@@ -56,16 +56,21 @@ def rb_route(route: str, data: dict, timeout=8) -> dict:
     `Extra data: line 1 column 40`. Loud, so it never produced a wrong verdict
     — but it masked the far more important defect behind a parse error.
 
-    Note what this does NOT fix. RemoteBuild's own read loop calls `Json::Parse`
-    on each raw socket read and `Net::Socket::ReadRaw` returns at most 64 bytes,
-    so any REQUEST over 64 bytes is unreachable and `load_plugin` (72 bytes with
-    an empty id) has never worked. That is a plugin-side fix; see B097 and
-    docs/probes/README.md. Drive the game through `tm-control-mcp` instead.
+    Note what this does NOT fix, and do not read a working reader as a working
+    transport. RemoteBuild's own read loop calls `Json::Parse` on each raw
+    socket read and `Net::Socket::ReadRaw` returns at most READ_CAP (64) bytes,
+    so any REQUEST over that is unreachable and `load_plugin` (72 bytes with an
+    EMPTY id) has never worked. That is a plugin-side fix, in Max's game plugin,
+    and it is not ours to make; see B097 and docs/probes/README.md.
+
+    This is the LOW-LEVEL client. Callers that want a plugin loaded or unloaded
+    want `game_route`, which picks a transport that can actually carry the
+    request.
     """
     sock = None
     try:
         sock = socket.create_connection((RB_HOST, RB_PORT), timeout=timeout)
-        sock.sendall(json.dumps({"route": route, "data": data}).encode())
+        sock.sendall(rb_encode(route, data))
 
         def recv_exactly(n: int) -> bytes:
             buf = b""
@@ -93,6 +98,199 @@ def rb_route(route: str, data: dict, timeout=8) -> dict:
 
 def rb_alive() -> bool:
     return rb_route("get_status", {}).get("data") == "Alive"
+
+def rb_encode(route: str, data: dict) -> bytes:
+    """THE request encoding. One function, because the size test below has to
+    measure the bytes that actually go out.
+
+    Compact separators are not cosmetic here: they are free bytes against a
+    64-byte ceiling, and Python's default `", "` / `": "` spends 9 of them on a
+    minimal `load_plugin`. It is not enough to rescue that call -- the compact
+    minimum is 72 with an EMPTY id, so no plugin id is short enough and it has
+    never been reachable -- but it is enough to keep shorter routes on the
+    working transport instead of detouring.
+    """
+    return json.dumps({"route": route, "data": data},
+                      separators=(",", ":")).encode()
+
+
+# ---- the wire's own limit, and the transport that gets past it -------------
+#
+# HOISTED from probe_export_binding.py (B097). There were two readers of one
+# wire format in this repo and only one of them was right -- the same "a rule
+# living at one of N call sites" shape this batch keeps finding. There is now
+# one, here, and the probes import it.
+
+# `Net::Socket::ReadRaw` returns at most this many bytes per call. MEASURED off
+# the game's own `Read payload:` trace rather than inferred from whether a
+# request parsed -- an instrument that reports the thing asked about beats one
+# that reports a consequence of it. An earlier "pad until it stops parsing"
+# method produced 66, which was the framing bytes, not the cap.
+READ_CAP = 64
+
+CONTROL_MCP = HOME / "src/openplanet/my-plugins/tm-control-mcp"
+
+# RemoteBuild routes that `tm-control-mcp` implements, and its name for each.
+# Only routes with real parity: a route absent here is NOT silently dropped,
+# it falls through to RemoteBuild and fails honestly if it is too long.
+CONTROL_MCP_ACTIONS = {
+    "load_plugin": "load",
+    "unload_plugin": "unload",
+    "reload_plugin": "reload",
+}
+
+
+def rb_request_size(route: str, data: dict) -> int:
+    """Bytes RemoteBuild would have to read for this request, in one call.
+
+    Measured through `rb_encode`, the same function that does the sending, so
+    the size test and the wire can never disagree. A size predicate that
+    serialises the request its OWN way is a check on a request nobody sends.
+    """
+    return len(rb_encode(route, data))
+
+
+def rb_can_carry(route: str, data: dict) -> bool:
+    """Can RemoteBuild receive this request AT ALL?
+
+    Not "will it succeed" -- whether the bytes can reach the router in one
+    `ReadRaw`. A `False` here is why `{"error":"Not implemented: "}` comes back
+    with an EMPTY route name: neither fragment parsed, so the router was asked
+    about route `""`. That message sends readers off to check route SPELLINGS,
+    which is how two sessions lost a day to it.
+
+    Corollary worth stating where it can be read: a >READ_CAP probe of ANY
+    route answers `Not implemented`, including a deliberately bogus one. So a
+    bogus-route negative control fails through the SAME channel as the
+    positives and discriminates nothing. No route may be called unimplemented
+    on that evidence.
+    """
+    return rb_request_size(route, data) <= READ_CAP
+
+
+def measure_read_cap(trials: int = 1) -> int | None:
+    """Measure ReadRaw's per-call cap from the game log. Returns None if unclear.
+
+    This is deliberately NOT "pad a request until it stops parsing", which is
+    how an earlier version of this file got the wrong number. That method
+    measures whether a particular payload survives being cut, not where the cut
+    falls: padding `{"route":"get_status","data":{"p":"AAA..."}}` to 65 and 66
+    bytes leaves the first 64 ending in `"}` and `"` respectively, still
+    lenient-parseable with `route` intact, so both answered `Alive` and the
+    boundary read as 66/67. The cut was at 64 the whole time.
+
+    The game traces `Read payload:` verbatim per read, so the length of the
+    FIRST read is the cap, directly. An instrument that reports the thing
+    asked about beats one that reports a consequence of it.
+    """
+    log = Path(OP_LOG)
+    try:
+        mark = log.stat().st_size
+    except OSError:
+        return None
+    payload = '{"route":"get_status","data":{"p":"' + "A" * 100 + '"}}'
+    try:
+        sock = socket.create_connection((RB_HOST, RB_PORT), timeout=8)
+    except OSError:
+        return None
+    try:
+        sock.sendall(payload.encode())
+        time.sleep(3.0)
+    finally:
+        sock.close()
+    try:
+        with open(log, "rb") as handle:
+            handle.seek(mark)
+            window = handle.read().decode(errors="replace")
+    except OSError:
+        return None
+    reads = [
+        line.split("Read payload: ", 1)[1]
+        for line in window.splitlines()
+        if "Read payload: " in line
+    ]
+    return len(reads[0]) if reads else None
+
+
+def control_mcp(action: str, timeout: float = 120.0, **fields) -> dict:
+    """Drive the plugin through `tm-control-mcp`, which reassembles its socket.
+
+    It has RemoteBuild parity (load/unload/reload/enable/disable/getLogs/
+    ListPlugins/GetPlugin) plus one property that matters more here than
+    convenience: it returns the compile log INLINE, attributed to the build
+    THIS call triggered. Collecting diagnostics by severity out of the shared
+    `Openplanet.log` picks up whatever another session happened to load in the
+    same second, which is a contamination channel in its own right.
+    """
+    payload = json.dumps({"action": action, **fields}, separators=(",", ":"))
+    try:
+        proc = subprocess.run(
+            [sys.executable, "tools/call.py", "ControlPlugin", payload],
+            cwd=CONTROL_MCP, capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"error": f"tm-control-mcp could not be run: {exc}", "data": ""}
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            envelope = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        result = envelope.get("data", {}).get("result", {})
+        if result.get("success") is False:
+            return {"error": result.get("error") or result.get("code") or "failed",
+                    "data": "", "result": result}
+        return {"error": "", "data": result, "result": result}
+    return {"error": f"no JSON reply from tm-control-mcp: "
+                     f"{proc.stdout[-300:]}{proc.stderr[-300:]}", "data": ""}
+
+
+def game_route(route: str, data: dict, timeout: float = 20.0) -> dict:
+    """One game control call, over whichever transport can carry it.
+
+    Deliberately the SAME signature and reply shape as `rb_route`, so it drops
+    into every existing call site and into the `rb_route_fn` seam the probes
+    already inject through.
+
+    The choice is made on a MEASURED property of the request -- its size against
+    READ_CAP -- not on a flag or a preference. RemoteBuild stays the transport
+    for everything it can actually receive, so the day its read loop is fixed
+    this function starts using it again with no edit. And when RemoteBuild
+    cannot carry the request and `tm-control-mcp` has no parity action for the
+    route, this does NOT quietly succeed: it returns the error naming the size,
+    because a silent fallback to a transport that cannot deliver is how a probe
+    reports on a plugin the game never compiled.
+    """
+    if rb_can_carry(route, data):
+        return rb_route(route, data, timeout=timeout)
+    action = CONTROL_MCP_ACTIONS.get(route)
+    if action is None:
+        return {
+            "error": (
+                f"`{route}` is {rb_request_size(route, data)} bytes and "
+                f"RemoteBuild reads at most {READ_CAP} per call, so the request "
+                f"cannot reach the router; tm-control-mcp has no parity action "
+                f"for it either. B097."
+            ),
+            "data": "",
+        }
+    fields = {k: v for k, v in data.items() if k == "id"}
+    return control_mcp(action, timeout=timeout, **fields)
+
+
+def game_alive() -> bool:
+    """Is SOME transport able to drive the game?
+
+    `rb_alive` cannot answer this. `get_status` is ~32 bytes, so it fits inside
+    READ_CAP and returns `Alive` on an install where every route that matters is
+    unreachable -- a liveness check that does not exercise the failing path.
+    """
+    if rb_alive():
+        return True
+    return not control_mcp("getLogs", id="tm-control-mcp", maxLines=1)["error"]
+
 
 # ---- plugin discovery / id resolution --------------------------------------
 def plugin_dirs() -> list[Path]:

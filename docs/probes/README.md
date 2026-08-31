@@ -344,6 +344,71 @@ rather than reporting a route error. Copy that preflight into any new probe.
 A fix would be in the RemoteBuild plugin itself (`HandleClient` must accumulate
 reads until `Json::Parse` succeeds), not in any client here.
 
+### Status update, 2026-08-31 evening: the CLIENT half is fixed. The server is not.
+
+**B097 is NOT closed and this does not close it.** RemoteBuild still truncates
+at 64 bytes, `load_plugin` is still unreachable over it, and the fix for that
+lives in Max's game plugin, which no lane may touch. What changed is our half.
+
+- **One wire client, not two.** `probe_export_binding.py` carried its own
+  length-prefixed reader and its own `tm-control-mcp` client, with a docstring
+  asserting `fleet.rb_route` was the broken one — which stopped being true when
+  fleet's was fixed. Two readers of one wire format, one right, one stale, is
+  the "a rule at one of N sites" shape this batch keeps hitting. Both now live
+  in `fleet_dogfood.py` and `probe_export_binding.py` names them.
+- **`fleet.game_route(route, data, timeout=)`** picks the transport from a
+  MEASURED property of the request — its encoded size against `READ_CAP` —
+  rather than from a flag. RemoteBuild carries what it can; `load_plugin`,
+  `unload_plugin` and `reload_plugin` go over `tm-control-mcp` when they cannot
+  fit. Same signature and reply shape as `rb_route`, so every call site and
+  every `rb_route_fn` injection seam is unchanged. **The day RemoteBuild's read
+  loop is fixed, this starts using it again with no edit.**
+- **A request that fits no transport now returns an error naming its size**,
+  rather than falling back to something that cannot deliver it. A silent
+  fallback is how a probe reports on a plugin the game never compiled.
+- **`fleet.rb_encode` is the single request encoder**, and `rb_request_size`
+  measures through it — a size predicate that serialises its own way is a check
+  on a request nobody sends. It also switched to compact separators, which is
+  not cosmetic against a 64-byte ceiling: `unload_plugin` for a short id is 56
+  bytes compact and 65 with Python's defaults, i.e. over the cap. It does not
+  rescue `load_plugin` (73 bytes compact with a one-character id, 72 with an
+  empty one), and nothing will.
+- **`probe_enum_corpus.run_batch` no longer discards the load result.** The
+  paragraph above explains why it did; the watcher theory it rested on is
+  refuted, so a failed load now stops the batch loudly instead of returning
+  UNDETERMINED for every name and reading as merely inconclusive.
+- **`fleet.game_alive`** replaces `rb_alive` at the probes' liveness gate.
+  `get_status` is 32 bytes, fits inside `READ_CAP`, and answers `Alive` on an
+  install where every route that matters is unreachable — a positive control
+  that does not exercise the failing path.
+
+**The guard that had to be fixed inside this fix.**
+`issue_repro_game._forbid_game_access` — the revocation that makes that
+selftest offline BY CONSTRUCTION — listed `fleet.rb_alive` and `fleet.rb_route`
+by hand. Adding `game_route` as the default path would have left the selftest
+reaching a live game through the new door: the exact one-of-N-call-sites
+failure that function exists because of, recurring inside its own repair. It
+now DERIVES the door set from a name pattern (`rb_*`, `game_*`, `control_mcp`,
+`measure_read_cap`), refuses to run if the pattern matches too few, and the
+selftest plants a synthetic `game_zzz_future_transport` to prove a door added
+later is closed with no edit there. A hand-written list passes every other
+check and fails that one.
+
+**What is unblocked, and what is not.**
+
+| | before | now |
+|---|---|---|
+| `probe_enum_corpus.py` | silently produced UNDETERMINED for every name | drives the game through `tm-control-mcp`; a failed load is loud |
+| `issue_repro_game.py` | unload split, `holder.preserve()` fired, fixture stranded | unload routes over `tm-control-mcp`, so teardown can complete |
+| `probe_export_binding.py` | already routed via `tm-control-mcp` | unchanged behaviour, one fewer copy of the client |
+| RemoteBuild `load_plugin` | unreachable | **still unreachable** — B097 stays open |
+
+Unverified against a live game as of this writing: the routing is exercised by
+stubs and the three offline selftests, not by a game run. The first real probe
+should confirm from the game's own log that the plugin compiled, not merely
+that the call returned — that is the check the `load_plugin` history says to
+make.
+
 
 **Working alternative, no game restart needed:** `tm-control-mcp` is loaded and
 its socket reassembles correctly, with RemoteBuild parity plus `ListPlugins` /
