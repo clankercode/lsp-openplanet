@@ -1,0 +1,64 @@
+---
+complexity: medium
+created_at: "2026-08-31T03:42:04Z"
+depends_on: []
+estimate_hours: 1
+id: B082
+priority: high
+status: pending
+tags: []
+title: 'A crashed test binary silently lowers the suite total: gates that sum test-result lines report fewer tests and stay green'
+updated_at: "2026-08-31T03:42:04Z"
+---
+Split from B078 (2026-08-31). B078's SIGSEGV half is closed as not-a-defect;
+this is the half that is a real defect, and it outlives the crash that revealed
+it.
+
+## Measured
+
+When a test binary crashes, `cargo test` exits **101** and emits **ZERO**
+`test result` lines for that binary. Cargo does not conceal the crash — the
+exit code is right there — but any gate that computes its total by summing
+`grep "^test result:"` silently drops every test in that binary and reports no
+failure at all.
+
+The error always points the same way: **fewer tests, still green.** That is the
+direction nobody investigates.
+
+## Not hypothetical
+
+This produced a reported **2190/2218** against a true **2223** in
+lane-b060-b062's gate. Every lane in this batch — and the coordinator accepting
+their numbers — was reporting totals on that basis for a full day.
+
+## Fix
+
+Two checks, both cheap:
+
+1. **Check the exit code.** Never infer success from a parsed total.
+2. **Assert the expected binary count.** Count `Running` lines plus the
+   `Doc-tests` line and compare against the number of `test result:` lines.
+   They must be equal. lane-b065-b066 has already demonstrated the shape by
+   hand: `result-lines=25  binaries-run=24  doctest-lines=1  expected=25  MATCH`.
+
+A total is only trustworthy alongside proof that every binary reported one.
+
+## Requirements on the implementation
+
+**Put it where every lane's gate passes through it, not in one lane's script.**
+An optional check is omitted by exactly the lane that most needs it. The
+justfile recipe is the natural home.
+
+**Give it a positive control.** Prove it FAILS on a deliberately crashed
+binary before trusting it to pass. A gate that has never been observed failing
+is indistinguishable from a gate that cannot fail — and this batch has three
+separate instances of that exact vacuity, including an `atexit` hook in B077
+that survived every mutation because nothing could make it fire.
+
+## Related
+
+B078 (where this was measured; its SIGSEGV half is closed as an external
+instruction-fetch fault, not a project defect), B074 (the sibling idea:
+converting a property a reviewer can only spot-check into a scan that decides
+it mechanically), `docs/verification-hazards.md` — "silence can mean 'cannot
+tell', not 'yes'".
