@@ -133,3 +133,49 @@ re-derive it from scratch.
 
 B073 should be taken AFTER B060 merges, so the predicate is available in
 master rather than needing to be copied off a branch.
+
+## Located (coordinator, 2026-08-31) — the ticket's "upstream in type resolution" is `resolver.rs`
+
+Measured, not inferred. The path that lets an engine funcdef win over a
+workspace declaration of the same name is:
+
+    src/typecheck/resolver.rs:139   if self.scope.lookup_funcdef(&qualified).is_some()
+    src/typecheck/resolver.rs:177   if self.scope.lookup_funcdef(&candidate).is_some()
+    src/typecheck/resolver.rs:191   if self.scope.lookup_funcdef(&resolved).is_some()
+    src/typecheck/resolver.rs:197   if self.scope.lookup_funcdef(&resolved).is_some()
+
+All four ask `lookup_funcdef` directly. That helper walks workspace symbols but
+only RETURNS on a real funcdef, then falls through to the typedb — so a
+workspace class, interface, enum or typedef named after a Core funcdef resolves
+to the ENGINE funcdef. That is the same fall-through B060 documented; B060
+fixed only the argument-position half, in `checker.rs`, via
+`GlobalScope::workspace_shadows_funcdef`.
+
+**The fix is very likely to reuse `workspace_shadows_funcdef` at these four
+sites** rather than to introduce a new predicate — but read B079 first. That
+ticket's whole subject is callers reaching for the wrong member of a set of
+near-identical predicates, and adding a fifth caller of one is exactly the
+move that needs a moment's thought rather than a reflex.
+
+## Sequencing
+
+**Blocked on lane-b057's B079 Move 2, not on the checker lane.** I previously
+recorded this as a `checker.rs` conflict; that was assumed rather than
+measured, and it is wrong. B073 is a `resolver.rs` change, and Move 2 touches
+`resolver.rs:165` — adjacent to this ticket's 139-197. B071 and B076 are the
+`checker.rs` ones.
+
+## Still valid from the original filing
+
+Not fixed by B060, and the ticket says so explicitly: B060's
+`workspace_shadows_funcdef` covers a VALUE of such a type reaching a call slot;
+the LOCAL DECLARATION path (`CoroutineFunc@ local;`) is untouched. Verified
+still present.
+
+Severity unchanged: a false positive, the damaging direction — the LSP rejects
+a declaration the game accepts. Bounded in practice because it needs a plugin
+to name a type exactly after a Core funcdef, and no fixture does, **which is
+precisely why no gate in this batch could see the related regressions.** That
+last point is the reason this is worth fixing rather than shrugging at: the
+absence of a fixture is not evidence of absence in the wild, it is the reason
+the wild goes unmeasured.
