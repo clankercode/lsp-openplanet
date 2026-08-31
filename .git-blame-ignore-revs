@@ -1,0 +1,12 @@
+# Revisions to skip when running `git blame`.
+#
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only whitespace/formatting-only commits belong here. A commit that changes
+# behaviour must never be listed, or blame will silently attribute its lines to
+# whoever touched them last.
+
+# B122 — repo-wide `cargo fmt`. Formatting only; suite 2920/0 and the clippy
+# delta 130 raw / 39 fingerprints were both identical either side of it.
+b4ce1d2cfb12370b28593fa3d8992512232c9c35
