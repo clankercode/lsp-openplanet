@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T08:49:39Z"
+depends_on: []
+estimate_hours: 1
+id: B094
+priority: high
+status: pending
+tags: []
+title: 'When a class C implements an interface I with method M, we should have an errors like: M being unimplemented, M type signature not matching if same name but different type (unless openplanet compile error is just unimplemented), etc. We need full tests around classes and interfaces, and these need to work in the extension too'
+updated_at: "2026-08-31T08:49:39Z"
+---
+
+When a class C implements an interface I with method M, we should have an errors like: M being unimplemented, M type signature not matching if same name but different type (unless openplanet compile error is just unimplemented), etc. We need full tests around classes and interfaces, and these need to work in the extension too
