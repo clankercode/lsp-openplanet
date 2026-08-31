@@ -8,7 +8,7 @@
 
 use super::access_position::AccessPosition;
 use super::repr::{param_mode_from_text, ParamMode, TypeRepr};
-use crate::symbols::scope::{DeclModifiers, Symbol, SymbolKind};
+use crate::symbols::scope::{Symbol, SymbolKind};
 use crate::symbols::SymbolTable;
 use crate::typedb::index::ParamInfo;
 use crate::typedb::TypeIndex;
@@ -2435,7 +2435,7 @@ pub(crate) fn qualified_virtual_name(name: &str, prefix: &str) -> String {
 mod tests {
     use super::*;
     use crate::lexer::Span;
-    use crate::symbols::scope::Symbol;
+    use crate::symbols::scope::{DeclModifiers, Symbol};
 
     fn empty_span() -> Span {
         Span::new(0, 0)
