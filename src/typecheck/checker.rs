@@ -3674,7 +3674,36 @@ impl<'a> Checker<'a> {
                     self.walk_args(args);
                     return TypeRepr::Named(enum_name);
                 }
+                // B084: the top-level twin of the namespaced arm above,
+                // which has always done `record_value_use_variants`. This
+                // one silenced the undefined-identifier diagnostic and
+                // recorded NOTHING, so every callee that reached it was
+                // reported "never used" however many times it was called.
+                //
+                // What reaches it is mostly OVERLOAD-shaped. Step 4 credits
+                // a call through `lookup_function_return`, whose workspace
+                // fallback `lookup_workspace_function_property` returns
+                // `None` as soon as TWO function symbols share the name —
+                // the deliberate "ambiguous, say nothing" arm. So a single
+                // global function was credited and an overload set never
+                // was. Measured on the tm-editor-plus-plus fixture: the
+                // 10-way overloaded `LabeledValue`, called from dozens of
+                // sites, produced 10 false warnings. The equally overloaded
+                // `CoordToPos` did not, only because it also has an export
+                // stub and B062 roots it — which is why the defect stayed
+                // invisible.
+                //
+                // A global funcdef HANDLE invoked as a call (`g_cb()`)
+                // lands here too, via `has_global_ident`'s Variable arm.
+                //
+                // `record_value_use_variants`, not `record_use`, for exact
+                // parity with the namespaced arm; the extra `get_`/`set_`
+                // and namespace-ladder spellings over-mark, which is this
+                // module's stated preference, and they cannot mask a real
+                // finding here: reaching this arm means the ladder already
+                // failed to find `Ns::name` at every enclosing depth.
                 if self.scope.has_global_ident(&name) {
+                    self.record_value_use_variants(&name);
                     self.walk_args(args);
                     return TypeRepr::Error(String::new());
                 }

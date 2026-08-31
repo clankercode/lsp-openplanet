@@ -380,10 +380,33 @@ fn exported_signature_roots(snapshot: &AnalysisSnapshot) -> HashSet<(String, usi
         .collect()
 }
 
-/// True when `sym` is a plain global function body that a strict export
-/// stub binds to. Class members are excluded: an `import` stub names a
-/// global function, never a method.
-fn matches_an_exported_signature(sym: &Symbol, roots: &HashSet<(String, usize, usize)>) -> bool {
+/// True when `sym` is a function body that a strict export stub binds to.
+///
+/// Members are excluded — an `import` stub names a function, never a method
+/// — and `member_owner_spans` (every class and interface declared in the
+/// same file) is how that is decided. B062 tested `sym.name.contains("::")`
+/// instead, which cannot tell a class method from a function declared
+/// inside a `namespace`, and threw both away.
+///
+/// B087: that cost 37 live false positives in tm-editor-plus-plus alone,
+/// which wraps BOTH the stubs and the implementations in `namespace Editor`
+/// — `Editor/MacroblockManip_TrackChanges.as`, `Editor/Cursor.as`,
+/// `Editor/MapCache.as` and others. Span containment is also strictly more
+/// accurate than the name test for the case B062 was actually guarding:
+/// `namespace Holder { void SendEvent() {} }` beside a
+/// `class Holder { void SendEvent() {} }` pools both as `Holder::SendEvent`,
+/// and only the span separates them.
+///
+/// The tail-name match is unchanged, so a namespaced body is rooted by a
+/// stub of the same SIMPLE name regardless of which namespace either sits
+/// in. That over-roots — B062 chose the same trade deliberately, for the
+/// same reason: a missed warning is the acceptable failure and a false
+/// "never used" on a live export is not.
+fn matches_an_exported_signature(
+    sym: &Symbol,
+    roots: &HashSet<(String, usize, usize)>,
+    member_owner_spans: &[crate::lexer::Span],
+) -> bool {
     let SymbolKind::Function {
         params,
         min_args,
@@ -393,11 +416,93 @@ fn matches_an_exported_signature(sym: &Symbol, roots: &HashSet<(String, usize, u
     else {
         return false;
     };
-    if sym.name.contains("::") {
+    let is_member = member_owner_spans
+        .iter()
+        .any(|owner| owner.start <= sym.span.start && sym.span.end <= owner.end);
+    if is_member {
         return false;
     }
+    let simple = tail_name(&sym.name);
     roots.iter().any(|(name, stub_min, stub_max)| {
-        name == &sym.name && *stub_min <= params.len() && *min_args <= *stub_max
+        name == simple && *stub_min <= params.len() && *min_args <= *stub_max
+    })
+}
+
+/// B087: the qualified names + declaration spans of every `shared`
+/// declaration in one file.
+///
+/// `shared` is the AngelScript cross-plugin entity mechanism: a dependent
+/// plugin consumes a `shared class` / `interface` / `enum` / `funcdef` /
+/// function by declaring the identical entity, with NO textual reference
+/// anywhere in this workspace. So an unreferenced `shared` declaration is
+/// reachable by definition, exactly as a manifest-exported body is (B062),
+/// and reporting it unused is the same category of error.
+///
+/// Read off the AST rather than the symbol table because the modifier is a
+/// property of the DECLARATION and the pooled `Symbol` does not carry it.
+/// Until now the parser ate `shared` in `parse_item` and threw it away for
+/// everything but `ClassDecl`, so the flag could not be consulted even in
+/// principle — that was half of this bug.
+///
+/// Returns the span as well as the name because a name alone is not enough
+/// to decide membership: `namespace Foo { void Dead() {} }` beside a
+/// `shared class Foo` pools `Foo::Dead` under the same owner spelling, and
+/// exempting by prefix alone would silently drop that finding. This is the
+/// same owner-name-AND-span discipline B054 established for interface
+/// methods; the namespace member's span lies outside the class's.
+fn shared_declaration_roots(
+    source: &str,
+    file: &crate::parser::ast::SourceFile,
+) -> Vec<(String, crate::lexer::Span)> {
+    use crate::parser::ast::Item;
+    fn walk(
+        source: &str,
+        items: &[Item],
+        namespace: Option<&str>,
+        out: &mut Vec<(String, crate::lexer::Span)>,
+    ) {
+        let qualify = |name: &str| match namespace {
+            Some(ns) => format!("{}::{}", ns, name),
+            None => name.to_string(),
+        };
+        for item in items {
+            match item {
+                Item::Class(d) if d.is_shared => out.push((qualify(d.name.text(source)), d.span)),
+                Item::Interface(d) if d.is_shared => {
+                    out.push((qualify(d.name.text(source)), d.span))
+                }
+                Item::Enum(d) if d.is_shared => out.push((qualify(d.name.text(source)), d.span)),
+                Item::Funcdef(d) if d.is_shared => out.push((qualify(d.name.text(source)), d.span)),
+                Item::Function(d) if d.is_shared => {
+                    out.push((qualify(d.name.text(source)), d.span))
+                }
+                Item::Namespace(ns) => {
+                    let inner = qualify(ns.name.text(source));
+                    walk(source, &ns.items, Some(&inner), out);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(source, &file.items, None, &mut out);
+    out
+}
+
+/// True when `sym` IS a `shared` declaration, or a member declared inside
+/// one — a shared class's fields and methods are the surface a dependent
+/// plugin consumes through the type, so the argument that roots the class
+/// roots them too.
+///
+/// Both halves are required. The name test alone would exempt a namespace
+/// that happens to share a shared class's spelling; the span test alone
+/// would exempt anything that merely sits inside the declaration's source
+/// range, which for a top-level `shared` function is only itself but for a
+/// class is every nested declaration regardless of owner.
+fn is_shared_or_inside_shared(sym: &Symbol, roots: &[(String, crate::lexer::Span)]) -> bool {
+    roots.iter().any(|(name, span)| {
+        let name_matches = sym.name == *name || sym.name.starts_with(&format!("{}::", name));
+        name_matches && span.start <= sym.span.start && sym.span.end <= span.end
     })
 }
 
@@ -456,6 +561,20 @@ fn unused_declarations_filtered(
                 .filter(|s| matches!(s.kind, SymbolKind::Interface { .. }))
                 .map(|s| (s.name.as_str(), s.span))
                 .collect();
+            // B087: every class and interface declared here, as the "is this
+            // a MEMBER?" test for export-signature rooting. A method's span
+            // lies inside its owner's; a namespaced function's does not.
+            let member_owner_spans: Vec<crate::lexer::Span> = symbols
+                .file_symbols(file_id)
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s.kind,
+                        SymbolKind::Class { .. } | SymbolKind::Interface { .. }
+                    )
+                })
+                .map(|s| s.span)
+                .collect();
             let declared_by_an_interface = |sym: &Symbol| {
                 let Some((owner, _)) = sym.name.rsplit_once("::") else {
                     return false;
@@ -464,13 +583,19 @@ fn unused_declarations_filtered(
                     *name == owner && span.start <= sym.span.start && sym.span.end <= span.end
                 })
             };
+            // B087: `shared` declarations are the cross-plugin surface.
+            let shared_roots = shared_declaration_roots(source, &file.analysis.file);
             for sym in symbols.file_symbols(file_id) {
                 if declared_by_an_interface(sym) {
                     continue;
                 }
+                // B087: a `shared` declaration, or a member inside one.
+                if is_shared_or_inside_shared(sym, &shared_roots) {
+                    continue;
+                }
                 // B062: a body the plugin exports to consumers is reachable
                 // by definition, even though nothing in this plugin calls it.
-                if matches_an_exported_signature(sym, &exported_roots) {
+                if matches_an_exported_signature(sym, &exported_roots, &member_owner_spans) {
                     continue;
                 }
                 if let Some(unused) = evaluate_symbol(sym, usage, source, &exempt) {
@@ -1391,6 +1516,557 @@ mod omitted_own_module_usage {
         assert!(
             out.contains(&"Helper::p".to_string()),
             "a parameter must stay reported: {out:?}"
+        );
+    }
+}
+
+/// B084: a global function that is CALLED must be credited by the ordinary
+/// "referenced anywhere" pass, entirely independently of any export surface.
+///
+/// The defect these tests pin is OVERLOAD-SHAPED. `Checker::call_type`
+/// credits a bare call through `GlobalScope::lookup_function_return`, whose
+/// workspace fallback (`lookup_workspace_function_property`) returns `None`
+/// the moment TWO function symbols share the name — the "ambiguous, say
+/// nothing" arm. With no return type the call fell through the ladder to
+/// `has_global_ident`, which SILENCES the undefined-identifier diagnostic
+/// without recording anything, so every overload was reported unused.
+///
+/// That is why the symptom was invisible on master: `CoordToPos` in
+/// tm-editor-plus-plus is overloaded three ways AND has an export stub, so
+/// B062's export rooting hid it. Nothing here is exported.
+#[cfg(test)]
+mod called_global_functions_are_credited {
+    use super::test_support::{names, snap_of};
+    use super::*;
+    use std::collections::HashSet as StdHashSet;
+
+    fn report(files: &[(&str, &str)]) -> Vec<String> {
+        names(&unused_declarations(
+            &snap_of(files),
+            None,
+            &StdHashSet::new(),
+        ))
+    }
+
+    /// Baseline control: a single, NON-overloaded global function called
+    /// from file scope has always been credited. If this ever goes red the
+    /// whole family below is measuring something else.
+    #[test]
+    fn single_global_function_called_from_file_scope_is_credited() {
+        assert_eq!(
+            report(&[("a.as", "void Ping(int a) {}\nvoid Main() { Ping(1); }\n")]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// The red case. Two overloads, both called, nothing exported.
+    #[test]
+    fn overloaded_global_function_called_from_file_scope_is_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping(int a) {}\nvoid Ping(float a) {}\nvoid Main() { Ping(1); Ping(1.0f); }\n",
+            )]),
+            Vec::<String>::new(),
+            "both overloads are called; neither may be reported unused"
+        );
+    }
+
+    /// Three overloads — the tm-editor-plus-plus `CoordToPos` arity.
+    #[test]
+    fn three_overloads_called_from_file_scope_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "int Conv(int a) { return a; }\nint Conv(float a) { return int(a); }\nint Conv(bool a) { return a ? 1 : 0; }\nvoid Main() { print(\"\" + Conv(1) + Conv(1.0f) + Conv(true)); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloads that differ only by ARITY, not by parameter type — the
+    /// other way a name gets two symbols.
+    #[test]
+    fn arity_overloads_called_from_file_scope_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping() {}\nvoid Ping(int a) {}\nvoid Main() { Ping(); Ping(1); }\n"
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Cross-file: declarations in one file, the only calls in another.
+    #[test]
+    fn overloads_called_from_another_file_are_credited() {
+        assert_eq!(
+            report(&[
+                ("a.as", "void Ping(int a) {}\nvoid Ping(float a) {}\n"),
+                ("b.as", "void Main() { Ping(1); Ping(1.0f); }\n"),
+            ]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Called from inside a class method rather than a free function.
+    #[test]
+    fn overloads_called_from_a_class_method_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping(int a) {}\nvoid Ping(float a) {}\nclass C { void Go() { Ping(1); Ping(1.0f); } }\nvoid Main() { C c; c.Go(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Called from inside a namespace block, as a BARE name. The bare
+    /// spelling reaches the global through the namespace ladder's
+    /// fall-through, which is the arm that never recorded.
+    #[test]
+    fn overloads_called_bare_from_inside_a_namespace_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping(int a) {}\nvoid Ping(float a) {}\nnamespace N { void Go() { Ping(1); Ping(1.0f); } }\nvoid Main() { N::Go(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloads DECLARED inside a namespace and called under their
+    /// qualified spelling from file scope.
+    #[test]
+    fn namespaced_overloads_called_qualified_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "namespace N { void Ping(int a) {} void Ping(float a) {} }\nvoid Main() { N::Ping(1); N::Ping(1.0f); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloads declared inside a namespace and called BARE from a
+    /// sibling function in the same namespace.
+    #[test]
+    fn namespaced_overloads_called_bare_from_same_namespace_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "namespace N { void Ping(int a) {} void Ping(float a) {} void Go() { Ping(1); Ping(1.0f); } }\nvoid Main() { N::Go(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloads called from a DIFFERENT namespace, qualified.
+    #[test]
+    fn namespaced_overloads_called_from_another_namespace_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "namespace N { void Ping(int a) {} void Ping(float a) {} }\nnamespace M { void Go() { N::Ping(1); N::Ping(1.0f); } }\nvoid Main() { M::Go(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Overloaded CLASS METHODS called on a typed receiver — the same
+    /// two-symbols-one-name shape, on the member path.
+    #[test]
+    fn overloaded_class_methods_called_on_a_receiver_are_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "class C { void Ping(int a) {} void Ping(float a) {} }\nvoid Main() { C c; c.Ping(1); c.Ping(1.0f); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A global funcdef HANDLE invoked as a call (`g_cb()`) reaches the
+    /// same fall-through: `has_global_ident` is true via the Variable arm,
+    /// the diagnostic is silenced, and nothing was recorded. The
+    /// namespaced twin of this arm already credits it.
+    #[test]
+    fn an_invoked_global_funcdef_handle_is_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "funcdef void CB();\nvoid Impl() {}\nCB@ g_cb = CB(Impl);\nvoid Main() { g_cb(); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A workspace CLASS constructed by a bare constructor call at global
+    /// scope. `has_type` returns `Named(name)` there without recording,
+    /// while the namespaced twin one screen up does `record_use`.
+    #[test]
+    fn a_class_constructed_by_a_bare_ctor_call_is_credited() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "class Thing { Thing(int a) {} int Val() { return 1; } }\nvoid Main() { auto t = Thing(1); print(\"\" + t.Val()); }\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// THE OVER-ROOTING GATE. A genuinely uncalled overload pair must
+    /// STILL be reported — a fix that credits every name it cannot
+    /// resolve passes every assertion above and this one catches it.
+    #[test]
+    fn uncalled_overloads_are_still_reported() {
+        let out = report(&[(
+            "a.as",
+            "void Dead(int a) {}\nvoid Dead(float a) {}\nvoid Main() {}\n",
+        )]);
+        assert_eq!(
+            out,
+            vec!["Dead", "Dead"],
+            "two uncalled overloads, two findings: {out:?}"
+        );
+    }
+
+    /// The truly-dead control living BESIDE a credited overload pair, so
+    /// silence and reporting are measured in one fixture.
+    #[test]
+    fn a_dead_overload_pair_beside_a_called_one_is_still_reported() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "void Ping(int a) {}\nvoid Ping(float a) {}\nvoid Dead(int a) {}\nvoid Dead(float a) {}\nvoid Main() { Ping(1); Ping(1.0f); }\n",
+            )]),
+            vec!["Dead", "Dead"]
+        );
+    }
+
+    // ── DELIBERATE SCOPE ADDITIONS (B084) ────────────────────────────
+    //
+    // Crediting a call REMOVES false positives, which is the safe
+    // direction. It also ADDS diagnostics, which is not: two findings that
+    // the false positives were themselves masking now surface. Both were
+    // measured on tm-dips-plus-plus (271 -> 251 was 25 removed and 5
+    // added) and both were verified by hand against the source.
+    //
+    // They are pinned here, in labelled tests, precisely so a later lane
+    // cannot read them as regressions introduced by this change and
+    // "fix" them back into silence. Removing either assertion means
+    // re-suppressing a TRUE positive.
+
+    /// ADDITION 1. A genuinely unused PARAMETER of a function that was
+    /// itself being wrongly reported unused. `locals` will not warn on a
+    /// binding inside a declaration it has already reported (the
+    /// no-double-warn gate), so the false positive on the function was
+    /// suppressing a real finding underneath it.
+    ///
+    /// Witness: tm-dips-plus-plus `src/Main.as:431`,
+    /// `vec2 SmoothLerp(vec2 from, vec2 to, float t)` — the body reads the
+    /// global `g_DT` and never touches `t`. `SmoothLerp` is overloaded two
+    /// ways and called from `src/Minimap.as`.
+    #[test]
+    fn crediting_an_overload_reveals_its_genuinely_unused_parameter() {
+        let out = report(&[(
+            "a.as",
+            "int Pick(int a, int unusedArg) { return a; }
+             int Pick(float a) { return int(a); }
+             void Main() { print(\"\" + Pick(1, 2) + Pick(1.0f)); }
+",
+        )]);
+        assert_eq!(
+            out,
+            vec!["Pick::unusedArg"],
+            "the overloads are credited, and the parameter neither of them \
+             reads is a TRUE positive that the false warning was hiding: {out:?}"
+        );
+    }
+
+    /// ADDITION 2. The VALUES of an enum that is used only as a cast-call.
+    /// `evaluate_symbol` skips a value whose enum is unused, because the
+    /// type-level warning already covers the whole declaration — so while
+    /// the enum was wrongly reported, its values were silent for a reason
+    /// that stopped applying the moment the enum was credited.
+    ///
+    /// Witness: tm-dips-plus-plus `src/PlayerState.as:869-872`,
+    /// `enum WheelOrder { FL, FR, RR, RL }`, reached only through
+    /// `tostring(WheelOrder(w))` at `:578`. No value is ever named.
+    #[test]
+    fn crediting_a_cast_called_enum_reveals_its_unreferenced_values() {
+        let out = report(&[(
+            "a.as",
+            "enum Wheel { FL, FR }
+void Main(int w) { print(tostring(Wheel(w))); }
+",
+        )]);
+        assert_eq!(
+            out,
+            vec!["Wheel::FL", "Wheel::FR"],
+            "the enum is credited by the cast-call, so its never-named \
+             values become individual findings — the documented policy: {out:?}"
+        );
+    }
+
+    /// The counterpart that must NOT move: while the enum is genuinely
+    /// unused, its values stay silent under the same policy. One finding,
+    /// not three.
+    #[test]
+    fn an_unused_enums_values_are_still_not_reported_separately() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "enum Wheel { FL, FR }
+void Main() {}
+"
+            )]),
+            vec!["Wheel"]
+        );
+    }
+
+    /// THE MASKING ASSERTION, per the ticket. `CoordToPos` was silent on
+    /// master for two independent reasons — it is called, and it has an
+    /// export stub. Removing the export must not resurrect the warning.
+    /// The pair below is the closest in-module analogue: the identical
+    /// source, once with the calls and once without, must differ.
+    #[test]
+    fn calling_alone_silences_an_overload_without_any_export_surface() {
+        let called =
+            "void Ping(int a) {}\nvoid Ping(float a) {}\nvoid Main() { Ping(1); Ping(1.0f); }\n";
+        let uncalled = "void Ping(int a) {}\nvoid Ping(float a) {}\nvoid Main() {}\n";
+        assert_eq!(report(&[("a.as", called)]), Vec::<String>::new());
+        assert_eq!(report(&[("a.as", uncalled)]), vec!["Ping", "Ping"]);
+    }
+}
+
+/// B087: the `shared` modifier is a cross-plugin usage root.
+///
+/// A `shared` declaration is consumed by DEPENDENT plugins through the
+/// AngelScript shared-entity mechanism, with no textual reference anywhere
+/// in this workspace. Reporting it unused is the same category of error as
+/// reporting an exported body unused (B062) — the analysis is correct
+/// within the plugin and wrong about intent.
+///
+/// The parser ATE `shared` and dropped it everywhere but `ClassDecl`, so
+/// the modifier could not be consulted even in principle.
+#[cfg(test)]
+mod shared_declarations_are_roots {
+    use super::test_support::{names, snap_of};
+    use super::*;
+    use std::collections::HashSet as StdHashSet;
+
+    fn report(files: &[(&str, &str)]) -> Vec<String> {
+        names(&unused_declarations(
+            &snap_of(files),
+            None,
+            &StdHashSet::new(),
+        ))
+    }
+
+    /// Every declaration kind the ticket names, `shared` and unreferenced,
+    /// beside its NON-shared twin. One fixture, so silence and reporting
+    /// are measured against the same run — a fix that roots everything
+    /// passes the positives and fails here.
+    #[test]
+    fn shared_declarations_are_exempt_and_their_plain_twins_are_not() {
+        let out = report(&[(
+            "a.as",
+            "shared class SharedClass { int Field; void Method() {} }\n\
+             class PlainClass { int Field; void Method() {} }\n\
+             shared interface ISharedFace { void Go(); }\n\
+             interface IPlainFace { void Go(); }\n\
+             shared enum SharedEnum { SA, SB }\n\
+             enum PlainEnum { PA, PB }\n\
+             shared funcdef void SharedCb();\n\
+             funcdef void PlainCb();\n\
+             shared void SharedFn() {}\n\
+             void PlainFn() {}\n\
+             void Main() {}\n",
+        )]);
+        for rooted in [
+            "SharedClass",
+            "SharedClass::Field",
+            "SharedClass::Method",
+            "ISharedFace",
+            "SharedEnum",
+            "SharedEnum::SA",
+            "SharedEnum::SB",
+            "SharedCb",
+            "SharedFn",
+        ] {
+            assert!(
+                !out.contains(&rooted.to_string()),
+                "`{rooted}` is shared — it must not be reported: {out:?}"
+            );
+        }
+        for dead in [
+            "PlainClass",
+            "IPlainFace",
+            "PlainEnum",
+            "PlainCb",
+            "PlainFn",
+        ] {
+            assert!(
+                out.contains(&dead.to_string()),
+                "`{dead}` is NOT shared and nothing references it — it must \
+                 still be reported: {out:?}"
+            );
+        }
+    }
+
+    /// A `shared class`, on its own. Its members go with it: a dependent
+    /// plugin reaches them through the type, which this workspace cannot
+    /// see, so the same argument that roots the class roots its surface.
+    #[test]
+    fn a_shared_class_and_its_members_are_exempt() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "shared class Foo { int Bar; void Baz() {} }\nvoid Main() {}\n"
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_shared_interface_is_exempt() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "shared interface IFoo { void Go(); }\nvoid Main() {}\n"
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A shared enum roots its VALUES too — a dependent plugin names them
+    /// without any mention here, and the values are the whole point of
+    /// exporting an enum.
+    #[test]
+    fn a_shared_enum_and_its_values_are_exempt() {
+        assert_eq!(
+            report(&[("a.as", "shared enum EFoo { A, B }\nvoid Main() {}\n")]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_shared_funcdef_is_exempt() {
+        assert_eq!(
+            report(&[("a.as", "shared funcdef void Cb(int a);\nvoid Main() {}\n")]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_shared_global_function_is_exempt() {
+        assert_eq!(
+            report(&[("a.as", "shared void Go() {}\nvoid Main() {}\n")]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// `shared` composes with the other class modifiers, in either order
+    /// the grammar accepts.
+    #[test]
+    fn shared_abstract_and_shared_mixin_classes_are_exempt() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "shared abstract class A { void Go() {} }\nshared mixin class M { void Mo() {} }\nvoid Main() {}\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Inside a namespace: the exemption must key on the DECLARATION, and
+    /// the pooled name is `Ns::Foo`.
+    #[test]
+    fn shared_declarations_inside_a_namespace_are_exempt() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "namespace Ns { shared class Foo { void Go() {} } shared enum E { A } shared void Fn() {} }\nvoid Main() {}\n",
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// …and a NON-shared sibling in the same namespace still warns.
+    #[test]
+    fn a_plain_sibling_of_a_shared_namespace_member_still_warns() {
+        let out = report(&[(
+            "a.as",
+            "namespace Ns { shared class Foo {} class Bar {} }\nvoid Main() {}\n",
+        )]);
+        assert_eq!(out, vec!["Ns::Bar"]);
+    }
+
+    /// A nested class inside a `shared` class rides along; a same-named
+    /// class OUTSIDE it does not. Guards against exempting by bare name.
+    #[test]
+    fn the_exemption_does_not_leak_to_a_same_named_declaration_elsewhere() {
+        let out = report(&[(
+            "a.as",
+            "shared class Foo { void Go() {} }\nnamespace Other { class Foo { void Go() {} } }\nvoid Main() {}\n",
+        )]);
+        assert!(
+            out.contains(&"Other::Foo".to_string()),
+            "a different `Foo` must still warn: {out:?}"
+        );
+        assert!(
+            !out.contains(&"Foo".to_string()),
+            "the shared `Foo` must not warn: {out:?}"
+        );
+    }
+
+    /// A shared declaration that IS referenced in-plugin stays silent for
+    /// the ordinary reason. Pinned so the root cannot be the only thing
+    /// keeping it quiet.
+    #[test]
+    fn a_referenced_shared_declaration_is_still_silent() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "shared class Foo { void Go() {} }\nvoid Main() { Foo f; f.Go(); }\n"
+            )]),
+            Vec::<String>::new()
+        );
+    }
+
+    /// THE WHOLE-FILE GATE. `shared` roots the DECLARATION, never the file
+    /// it lives in: a plain dead declaration sitting beside a shared one
+    /// must still be reported.
+    #[test]
+    fn a_dead_declaration_beside_a_shared_one_is_still_reported() {
+        let out = report(&[(
+            "a.as",
+            "shared class Alive { void Go() {} }\nvoid TrulyDead() {}\nclass DeadClass {}\nvoid Main() {}\n",
+        )]);
+        assert_eq!(out, vec!["DeadClass", "TrulyDead"]);
+    }
+
+    /// …including in a SEPARATE file from the shared declaration, so the
+    /// exemption cannot be leaking through the snapshot.
+    #[test]
+    fn a_dead_declaration_in_another_file_is_still_reported() {
+        let out = report(&[
+            ("a.as", "shared class Alive { void Go() {} }\n"),
+            ("b.as", "void TrulyDead() {}\nvoid Main() {}\n"),
+        ]);
+        assert_eq!(out, vec!["TrulyDead"]);
+    }
+
+    /// A file with no `shared` anywhere behaves exactly as before.
+    #[test]
+    fn a_plugin_with_no_shared_declarations_is_unchanged() {
+        assert_eq!(
+            report(&[(
+                "a.as",
+                "class C { void Go() {} }\nvoid Dead() {}\nvoid Main() {}\n"
+            )]),
+            vec!["C", "C::Go", "Dead"]
         );
     }
 }

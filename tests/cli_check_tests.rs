@@ -4933,6 +4933,122 @@ fn check_command_issue_repro_b061_property_read_credits_accessor() {
     }
 }
 
+/// B087: the plugin's CROSS-PLUGIN SURFACE must never be reported unused —
+/// both halves of it.
+///
+/// Half one, the `shared` modifier. A dependent plugin consumes a
+/// `shared class` / `interface` / `enum` / `funcdef` / function through the
+/// AngelScript shared-entity mechanism by declaring the identical entity, with
+/// no textual reference anywhere in the declaring workspace. The parser ATE
+/// `shared` in `parse_item` and dropped it for everything but `ClassDecl`, so
+/// the modifier could not be consulted even in principle; it is now recorded
+/// on `InterfaceDecl`, `EnumDecl`, `FuncdefDecl` and `FunctionDecl` too, and
+/// `shared_declaration_roots` reads it off the AST.
+///
+/// Half two, the seam with B062. That change rooted a strict-export stub's
+/// body only when the body's pooled name contained no `::`, meaning to exclude
+/// class METHODS ("an `import` stub names a global function, never a method").
+/// A function declared inside a `namespace` has the same name shape and was
+/// thrown away with them — and that is the shape tm-editor-plus-plus uses
+/// throughout, wrapping both the stubs and the implementations in
+/// `namespace Editor`. 51 live exports across four shipped fixtures were being
+/// reported unused. The test is now SPAN CONTAINMENT against the file's
+/// classes and interfaces, which separates a method from a namespaced function
+/// and is strictly more accurate than the name test for the case B062 was
+/// actually guarding.
+///
+/// Every gate lives in the SAME FILE as the declarations it guards, so
+/// "exempt the file" cannot pass this fixture. `shared` roots a DECLARATION,
+/// never a file.
+///
+/// 22 warnings before the shared rule, 16 with it, 14 with the export seam
+/// closed as well.
+#[test]
+fn check_command_issue_repro_b087_shared_and_exported_roots() {
+    let (_, stdout, stderr) = run_issue_repro_typedb("b087-shared-and-exported-roots");
+    let warnings: Vec<&str> = stdout.lines().filter(|l| l.contains("warning:")).collect();
+
+    // Every survivor is a deliberate control.
+    let expected = [
+        // The export half.
+        ("Exported_Bodies.as:7", "DeadBesideAnExport — no stub names it"),
+        (
+            "Exported_Namespaced.as:8",
+            "NsDeadBesideAnExport — dead inside the namespace that holds an export",
+        ),
+        (
+            "Exported_Namespaced.as:24",
+            "class MethodHolder — unused",
+        ),
+        (
+            "Exported_Namespaced.as:25",
+            "MethodHolder::NsExported — a METHOD sharing an exported stub's              name; the span test must keep telling it from the namespaced body",
+        ),
+        (
+            "Exported_Namespaced.as:33",
+            "interface IMethodHolder — unused (its method is exempt under B054)",
+        ),
+        // The shared half: the non-shared twin of every rooted kind.
+        ("Shared_Decls.as:32", "class PlainClass"),
+        ("Shared_Decls.as:33", "PlainClass::PlainField"),
+        ("Shared_Decls.as:34", "PlainClass::PlainMethod"),
+        ("Shared_Decls.as:37", "interface IPlainFace"),
+        ("Shared_Decls.as:41", "enum PlainEnum"),
+        ("Shared_Decls.as:46", "funcdef PlainCallback"),
+        ("Shared_Decls.as:48", "function PlainFunction"),
+        ("Shared_Namespaced.as:11", "Surface::NsPlainClass"),
+        ("Shared_Namespaced.as:12", "Surface::NsPlainClass::NsPlainMethod"),
+    ];
+    assert_eq!(
+        warnings.len(),
+        expected.len(),
+        "expected exactly {} warnings; stdout={stdout:?} stderr={stderr:?}",
+        expected.len()
+    );
+    for (line, why) in expected {
+        assert!(
+            warnings.iter().any(|w| w.contains(line)),
+            "`{line}` must still warn ({why}) — silencing it is over-rooting; \
+             stdout={stdout:?}"
+        );
+    }
+
+    let rooted = [
+        ("Shared_Decls.as:6", "shared class SharedClass"),
+        ("Shared_Decls.as:7", "SharedClass::SharedField — a member of a shared class"),
+        ("Shared_Decls.as:8", "SharedClass::SharedMethod"),
+        ("Shared_Decls.as:11", "shared interface ISharedFace"),
+        ("Shared_Decls.as:15", "shared enum SharedEnum"),
+        ("Shared_Decls.as:20", "shared funcdef SharedCallback"),
+        ("Shared_Decls.as:22", "shared void SharedFunction"),
+        ("Shared_Decls.as:24", "shared abstract class SharedAbstract"),
+        ("Shared_Decls.as:25", "SharedAbstract::AbstractMethod"),
+        ("Shared_Namespaced.as:4", "Surface::NsSharedClass"),
+        ("Shared_Namespaced.as:5", "Surface::NsSharedClass::NsMethod"),
+        ("Shared_Namespaced.as:8", "Surface::NsSharedFunction"),
+        ("Exported_Bodies.as:3", "IsConnected — B062 signature rooting, unchanged"),
+        (
+            "Exported_Namespaced.as:4",
+            "Surface::NsExported — a namespaced body a namespaced stub binds to",
+        ),
+        (
+            "Exported_Namespaced.as:15",
+            "Outer::Inner::DeepNsExported — two namespaces deep; roots match by              simple name, so depth must not matter",
+        ),
+        (
+            "Shared_File.as:5",
+            "FileExemptClass — shared_exports whole-FILE exemption, pre-existing",
+        ),
+        ("Shared_File.as:8", "FileExemptFunction — same file exemption"),
+    ];
+    for (line, why) in rooted {
+        assert!(
+            !warnings.iter().any(|w| w.contains(line)),
+            "`{line}` must not warn ({why}); stdout={stdout:?}"
+        );
+    }
+}
+
 /// B062: a body the plugin exports to consumers is reachable by definition,
 /// even though nothing inside the plugin calls it.
 ///

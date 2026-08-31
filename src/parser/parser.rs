@@ -513,11 +513,13 @@ impl<'a> Parser<'a> {
                 Ok(Item::Class(decl))
             }
             TokenKind::KwInterface => {
-                let decl = self.parse_interface_decl()?;
+                let mut decl = self.parse_interface_decl()?;
+                decl.is_shared = is_shared;
                 Ok(Item::Interface(decl))
             }
             TokenKind::KwEnum => {
-                let decl = self.parse_enum_decl()?;
+                let mut decl = self.parse_enum_decl()?;
+                decl.is_shared = is_shared;
                 Ok(Item::Enum(decl))
             }
             TokenKind::KwNamespace => {
@@ -525,7 +527,8 @@ impl<'a> Parser<'a> {
                 Ok(Item::Namespace(decl))
             }
             TokenKind::KwFuncdef => {
-                let decl = self.parse_funcdef_decl()?;
+                let mut decl = self.parse_funcdef_decl()?;
+                decl.is_shared = is_shared;
                 Ok(Item::Funcdef(decl))
             }
             TokenKind::KwTypedef => {
@@ -635,6 +638,7 @@ impl<'a> Parser<'a> {
                 },
                 name: dtor_name,
                 params,
+                is_shared: false,
                 is_const: false,
                 is_override: false,
                 is_final: false,
@@ -670,6 +674,7 @@ impl<'a> Parser<'a> {
                 },
                 name: ctor_name,
                 params,
+                is_shared: false,
                 is_const: false,
                 is_override: false,
                 is_final: false,
@@ -745,6 +750,7 @@ impl<'a> Parser<'a> {
             name,
             bases,
             methods,
+            is_shared: false,
         })
     }
 
@@ -767,6 +773,7 @@ impl<'a> Parser<'a> {
             return_type,
             name,
             params,
+            is_shared: false,
             is_const,
             is_override: false,
             is_final: false,
@@ -806,7 +813,12 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::RBrace)?;
         let span = self.span_from(start);
 
-        Ok(EnumDecl { span, name, values })
+        Ok(EnumDecl {
+            span,
+            name,
+            values,
+            is_shared: false,
+        })
     }
 
     /// Parse a namespace declaration: `namespace Name { items }`
@@ -876,6 +888,7 @@ impl<'a> Parser<'a> {
             return_type,
             name,
             params,
+            is_shared: false,
         })
     }
 
@@ -1148,8 +1161,13 @@ impl<'a> Parser<'a> {
                 let decl = self.parse_var_decl_rest(attrs, type_expr, name)?;
                 return Ok(Item::VarDecl(decl));
             }
-            // Function declaration — `shared` is legal here.
-            let decl = self.parse_function_rest(attrs, type_expr, name, false, false)?;
+            // Function declaration — `shared` is legal here. B087: record
+            // it. The modifier is the cross-plugin export mechanism, so the
+            // unused analysis has to be able to see it; it used to be eaten
+            // in `parse_item` and dropped on the floor for everything but a
+            // class.
+            let mut decl = self.parse_function_rest(attrs, type_expr, name, false, false)?;
+            decl.is_shared = is_shared;
             Ok(Item::Function(decl))
         } else if self.at(TokenKind::LBrace) {
             // Top-level property accessor: `[const] Type name { get { ... } }`
@@ -1279,6 +1297,7 @@ impl<'a> Parser<'a> {
                 return_type,
                 name,
                 params,
+                is_shared: false,
                 is_const,
                 is_override,
                 is_final,
@@ -1304,6 +1323,7 @@ impl<'a> Parser<'a> {
             return_type,
             name,
             params,
+            is_shared: false,
             is_const,
             is_override,
             is_final,
