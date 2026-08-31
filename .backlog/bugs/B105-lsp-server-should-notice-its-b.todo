@@ -69,3 +69,17 @@ older than what was on disk.)
 - Restart mechanism: option (b) custom notification to the extension as primary, (a) clean-exit-when-idle as fallback when the client did not advertise the capability — per the ticket rec. Server side is this ticket's bar.
 - Detection: poll current_exe() PATH metadata (mtime/len/inode) on ~30s timer behind a testable seam; no fs watcher.
 - Extension-side handling (../lsp-openplanet-ext) is a follow-up in that repo — separate repo, not covered by this batch's automerge; server must behave sanely (exit-when-idle fallback) without it.
+
+## Landed (2026-08-31, merge to master + gate SUITE-VERIFIED 2696/0, 31/31)
+
+### Extension-side follow-up (repo ../lsp-openplanet-ext, NOT done here)
+1. packages/vscode-ext/src/settings.ts buildInitializationOptions: add opts.on_binary_replaced = 'notify'.
+2. packages/vscode-ext/src/extension.ts: client.onNotification('openplanet/serverBinaryReplaced', ...) -> restart the LanguageClient with its own backoff.
+Payload (camelCase): { path, runningVersion, previous: {len, mtimeNs, inode}, current: {...} }. runningVersion is the STALE version still serving; the new binary's version is deliberately absent (reading it would mean executing an unrequested file). Sent at most once per process; backoff is entirely the extension's job.
+Until the extension opts in, the default 'exit' is live: after an upgrade the server drains and exits when idle and VS Code respawns it — working behaviour, not a broken state. Unrecognised opt-in values fall back to 'exit', never 'notify'.
+
+### Open concerns recorded at close
+- The lane's Codex review orchestrator was killed before returning its report; its commit c02d119 (drain-before-exit fix) was accepted on the lane's own verification plus coordinator re-review plus the re-run gate.
+- InFlight::enter() panics if called during drain — unreachable via tower-lsp's read->poll_ready->call ordering, but not statically prevented.
+- Symlink-swap installs (e.g. Nix) are undetected — documented in module/README/CHANGELOG.
+- Backend::new performs two syscalls per construction (exe resolve + stamp).
