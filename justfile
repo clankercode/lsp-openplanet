@@ -63,6 +63,12 @@ test-hermetic-selftest:
 probe-selftest:
     python3 scripts/probe_enum_corpus.py --selftest
 
+# Offline checks that no exit path leaves a probe fixture installed in the
+# game's Plugins dir (B077). A stranded fixture is an installed plugin nobody
+# knows about, declaring the names the next probe asks about. No game needed.
+repro-selftest:
+    python3 scripts/issue_repro_game.py --selftest
+
 # Fast unit tests only
 test-lib:
     cargo test --lib

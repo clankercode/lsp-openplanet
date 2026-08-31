@@ -175,8 +175,8 @@ def parse_lsp_count(output: str) -> int | None:
     return int(m.group(1)) if m else None
 
 # ---- staging / restore ------------------------------------------------------
-def stage(pdir: Path, fid: str) -> Path:
-    dest = OPN_PLUGINS / fid
+def stage(pdir: Path, fid: str, root: Path | None = None) -> Path:
+    dest = (root if root is not None else OPN_PLUGINS) / fid
     dest.mkdir(parents=True, exist_ok=True)
     src = pdir / "src"
     if src.is_dir():
