@@ -273,7 +273,11 @@ lines. Cargo does not hide the crash — but any gate that sums
 `grep "^test result"` drops those tests while showing no failure at all.
 
 That is not hypothetical: it is what produced lane-b060-b062's reported
-2190/2218 against a true 2223.
+observed totals of 2190 and 2218 against a true 2223 during this
+investigation. (Coordinator correction: I earlier attributed these to
+lane-b060-b062's gate. They are not its figures — it reported 2330/2331 with
+binary counts. They come from this ticket's own crash investigation, as the
+original record above states without naming any lane.)
 
 Fix: **check the exit code, and assert the expected binary count.** A total is
 only trustworthy alongside proof that every binary reported one. This is worth
