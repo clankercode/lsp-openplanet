@@ -1456,6 +1456,31 @@ The test passes, and would have passed either way.
   case is the parameter type. **A negative control alone proves nothing: it
   cannot distinguish "the thing is false" from "the probe cannot see".**
 
+  The same trap sprang again the same afternoon, one layer down, and this time
+  it caught a control rather than a test. Nine RemoteBuild routes were probed
+  with a long plugin id — eight real ones and `zzz_no_such_route` as the
+  control — and all nine answered `Not implemented`. The conclusion on offer
+  was "these routes are unimplemented". They are not: every request over 64
+  bytes is truncated before it parses, so **the control failed through the
+  same mechanism as the positives**. A control that shares a failure mode with
+  the test is not a control, it is a second test. The discriminator was a size
+  sweep, which no amount of re-reading the route names would have suggested.
+
+- **Measure the thing, not a consequence of it.** The read cap above was first
+  put at 66 bytes by padding a request until it stopped parsing. That measures
+  whether a *particular payload* survives being cut, not where the cut falls:
+  padded to 65 and 66 the first 64 bytes still ended in `"}` and `"`, parsed
+  leniently with `route` intact, and answered normally. The cap was 64
+  throughout. The game traces every socket read verbatim, so the length of the
+  first read was available directly the whole time — the wrong number came
+  from choosing an indirect instrument when a direct one existed.
+
+  Both readings were self-consistent, both were reproducible over repeated
+  trials, and the wrong one was off by exactly the amount that made a
+  structural boundary look like a fencepost. **Reproducibility is not
+  accuracy.** When a measured constant lands near a suspicious number, check
+  whether the instrument is reporting the quantity or a proxy for it.
+
 ---
 
 ## The scoping hazard: a narrowing chosen for one failure mode blinds you to another

@@ -2569,11 +2569,13 @@ fn check_command_issue_repro_59_exports_bodies_dont_resolve_internally() {
 /// B086: every stub in that fixture now matches its body EXACTLY — `const`,
 /// `&in`/`&out`, `@`, defaulted parameter and all. Before B086 the fixture
 /// paired a by-value stub with a `const string &in` body and its own comment
-/// called that the correct pattern. Game-probed against Openplanet 1.29.5
-/// (2026-08-31) that shape does NOT bind: a consumer calling it dies at
-/// runtime with `Unbound function called`, while an exactly matching stub
-/// binds and runs. The fixture had been cited as evidence twice before
-/// anyone measured it — see B086 and docs/verification-hazards.md.
+/// called that the correct pattern. Game-probed against Openplanet 1.29.14
+/// (2026-08-31, 18 variants, 0 ambiguous, verdicts committed at
+/// `docs/probes/b086-export-stub-binding.tsv`) that shape does NOT bind: a
+/// consumer calling it dies at runtime with `Unbound function called`, while
+/// an exactly matching stub binds and runs. The fixture had been cited as
+/// evidence twice before anyone measured it — see B086 and
+/// docs/verification-hazards.md.
 ///
 /// The fixture deliberately spans the parameter shapes a real export uses —
 /// `&out`, a non-const `&in`, `T@`, `T@ &in`, a defaulted parameter and a
