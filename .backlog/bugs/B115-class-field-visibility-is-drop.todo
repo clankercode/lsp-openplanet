@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T13:18:12Z"
 depends_on: []
 estimate_hours: 1
 id: B115
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'Class field visibility is dropped in the parser: ClassMember::Field holds a VarDecl with no is_private, so no layer above can filter private fields'
@@ -12,3 +14,45 @@ updated_at: "2026-08-31T13:18:12Z"
 ---
 
 Class field visibility is dropped in the parser: ClassMember::Field holds a VarDecl with no is_private, so no layer above can filter private fields
+
+
+## Reported by lane-resolver, 2026-08-31, while auditing B114
+
+## The defect
+
+`ClassMember::Field` holds a `VarDecl`, and `VarDecl` has **no `is_private`
+field at all**. The visibility keyword is parsed and then dropped on the floor.
+
+This is **one layer earlier than B114**. B114 is about modifiers being lost at
+*pooling* — the parser had them and the symbol table did not keep them. Here the
+parser never records it, so there is nothing for pooling to lose. **B114 cannot
+fix this and landing B114 will not.** Fixing it needs an AST change.
+
+## Consequence
+
+Completion filtering is half-blind: it cannot exclude private fields from
+member-completion outside the declaring class, at any layer above the parser,
+because the information does not exist above the parser. Methods are unaffected
+(their visibility survives); it is specifically fields.
+
+## Generalise the tests, per repo policy
+
+A fix here should not stop at `private`. Cover, and write a case for each:
+
+- `private` field, `protected` field, and a field with no keyword (default
+  public) — all three, so the default is pinned rather than assumed.
+- The same three on a `class`, and on any other member-bearing declaration the
+  parser accepts them on.
+- Access from inside the declaring class, from a derived class, and from an
+  unrelated scope — `protected` is only distinguishable from `private` at the
+  derived-class site, so without that row the two keywords are indistinguishable
+  and a fix that conflates them passes.
+- A field and a method with the SAME visibility keyword in one class, since the
+  method path already works and makes a natural in-file control.
+
+## Watch for
+
+Whether the parser currently *rejects*, *silently accepts*, or *errors* on the
+keyword before deciding what "add the field" means. Establish that first — the
+red test differs in each case, and this batch has already been bitten by writing
+a red against an assumed baseline.
