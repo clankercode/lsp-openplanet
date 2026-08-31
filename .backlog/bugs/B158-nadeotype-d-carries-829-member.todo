@@ -1,10 +1,12 @@
 ---
+completed_at: null
 complexity: medium
 created_at: "2026-08-31T16:41:46Z"
 depends_on: []
 estimate_hours: 1
 id: B158
 priority: high
+started_at: null
 status: pending
 tags: []
 title: 'NadeoType.d carries 829 member notes including 259 migration hints joined by NadeoMember.i, and the loader parses none of it: the Nadeo dump does have deprecation metadata'
@@ -12,3 +14,84 @@ updated_at: "2026-08-31T16:41:46Z"
 ---
 
 NadeoType.d carries 829 member notes including 259 migration hints joined by NadeoMember.i, and the loader parses none of it: the Nadeo dump does have deprecation metadata
+
+
+## Measured by lane-enum during B153, 2026-09-01. This OVERTURNS a standing repo belief.
+
+## The structure
+
+`NadeoType.d` is `{d: <class description>, o: [[member_i, message, kind, _]]}`:
+
+- **190 classes carry it, 143 with descriptions**
+- **829 member notes**, of which **259 are migration advice** — *"Use TextSizeReal
+  instead"*, *"Use RelativeOffset property instead."*
+- **All 829 join to a member's `i`, and NONE dangle.**
+
+**`NadeoMember.i` is the join key and it is NOT the positional index** — 16145 of
+16321 match, **176 diverge**. So the notes can only be resolved through `i`.
+Anyone who assumes position will silently mis-attribute 176 notes, which is worse
+than dropping them.
+
+The loader parses none of it.
+
+## What this overturns
+
+The standing claim — *"the dumps carry no deprecation metadata, so version rules
+must live in an overlay"* — was derived from the **Core** delta and
+**over-generalised to both dumps.** It is:
+
+- **TRUE for Core.** Deprecated symbols simply vanish from the JSON; an overlay
+  is still required there.
+- **FALSE for Nadeo.** There is a structured, on-disk source with **named
+  replacements**, sitting unread.
+
+This is the fifth stale claim about the Nadeo dump corrected in this batch, and
+the pattern is now strong enough to state as a rule: **no unmeasured claim about
+the Nadeo dump should be trusted.**
+
+The GH #18 project memory note has been corrected accordingly.
+
+## Relationship to B134 and B133
+
+**B134 is likely superseded in part.** It records that some Core ENUM VALUE doc
+strings read as migration prose, and explicitly says matching on them would be a
+heuristic because they are unstructured English. That reasoning stands for Core.
+
+**But `NadeoType.d`'s `o` array is not prose — it is structured**, with a `kind`
+field and a join key. So for Nadeo the answer is a lookup, not a matcher. Read
+B134 before starting and record which half it retires.
+
+B133 (enum value doc strings) may also partly overlap: both are "documentation
+the dump carries and we discard". Decide the relationship deliberately rather
+than doing them independently and discovering it later.
+
+## Deliverable
+
+Per B125's rule, **the field and its consumer land together.** Parse `d`/`o` and
+ship the consumer in the same change, or do neither — a populated field nobody
+reads is the other half of the defect this batch has fixed four times.
+
+Candidate consumers, in increasing order of blast radius:
+
+1. **Hover**, showing the class description and any member note. Additive,
+   低-risk, and immediately useful.
+2. **A deprecation diagnostic** driven by the 259 migration notes. **This one
+   needs care**: it adds diagnostics to shipped code, so it is B152's risk
+   polarity, and it wants its own fleet sweep with exposure reported.
+
+**Do not skip straight to the diagnostic because the data is structured.** Same
+caution as B130: measurement licenses the work, it does not shorten it.
+
+## Test axes
+
+- A member WITH a note and one WITHOUT, in the same class — the pair is the
+  point.
+- A class with a description and no member notes; a class with notes and no
+  description.
+- **A member whose `i` DIVERGES from its position** — one of the 176. Without
+  this row a positional implementation passes.
+- All three member kinds, since `m`/`c` combinations were shown independent.
+- The `kind` field's distinct values enumerated and pinned, so a new kind in a
+  future dump is a visible change rather than a silent default.
+- **Negative control:** a class carrying no `d` at all must render exactly as it
+  does today.
