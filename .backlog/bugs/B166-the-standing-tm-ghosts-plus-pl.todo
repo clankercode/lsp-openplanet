@@ -1,0 +1,14 @@
+---
+complexity: medium
+created_at: "2026-08-31T17:17:42Z"
+depends_on: []
+estimate_hours: 1
+id: B166
+priority: high
+status: pending
+tags: []
+title: 'the standing tm-ghosts-plus-plus acceptance check is stale: the plugin is down to 1 warning, not 2, and the next lane to run it will get a red on a plugin nobody broke'
+updated_at: "2026-08-31T17:17:42Z"
+---
+
+the standing tm-ghosts-plus-plus acceptance check is stale: the plugin is down to 1 warning, not 2, and the next lane to run it will get a red on a plugin nobody broke

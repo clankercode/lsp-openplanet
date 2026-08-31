@@ -164,3 +164,4 @@ bugs:
     - file: B163-the-gate-has-no-test-set-diff.todo
     - file: B164-remote-build-py-can-silently-p.todo
     - file: B165-b110-s-primitive-funcdef-axis.todo
+    - file: B166-the-standing-tm-ghosts-plus-pl.todo
