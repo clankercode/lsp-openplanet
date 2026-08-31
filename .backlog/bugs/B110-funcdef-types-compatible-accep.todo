@@ -1,18 +1,19 @@
 ---
 claimed_at: "2026-08-31T12:13:09Z"
 claimed_by: cli-user
-completed_at: null
+completed_at: "2026-08-31T12:43:52Z"
 complexity: medium
 created_at: "2026-08-31T12:02:06Z"
 depends_on: []
+duration_minutes: 30.728748817783334
 estimate_hours: 1
 id: B110
 priority: high
 started_at: "2026-08-31T12:13:09Z"
-status: in_progress
+status: done
 tags: []
 title: funcdef_types_compatible accepts numerically convertible signatures, so double() binds an int() slot at every funcdef position
-updated_at: "2026-08-31T12:13:09Z"
+updated_at: "2026-08-31T12:43:52Z"
 ---
 
 # funcdef_types_compatible accepts numerically convertible signatures, so double() binds an int() slot at every funcdef position
